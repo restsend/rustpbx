@@ -2652,6 +2652,19 @@
                         this.resetSipSessionState();
                     },
                     bindSipSession(session, direction) {
+                        // Clean up any previous session state to prevent audio bleeding
+                        if (this.sipRemoteStream) {
+                            try {
+                                this.sipRemoteStream.getTracks().forEach((track) => track.stop());
+                            } catch (err) {
+                                // ignore
+                            }
+                            this.sipRemoteStream = null;
+                        }
+                        if (this.$refs.sipRemoteAudio) {
+                            this.$refs.sipRemoteAudio.srcObject = null;
+                        }
+
                         sipSession = session;
                         this.hasSipSession = true;
                         this.sipCallDirection = direction;
@@ -2705,9 +2718,23 @@
                         if (!pc) {
                             return;
                         }
-                        // Check if we've already attached listeners to this PC to avoid duplicates
+
+                        // For quick reconnects, clean up old receivers if PC is being reused
                         if (pc.__rustpbxAttached) {
-                            return;
+                            // PC is being reused - stop old receiver tracks and return
+                            // (event listener already attached)
+                            try {
+                                if (pc.getReceivers) {
+                                    pc.getReceivers().forEach((receiver) => {
+                                        if (receiver.track) {
+                                            receiver.track.stop();
+                                        }
+                                    });
+                                }
+                            } catch (err) {
+                                // ignore
+                            }
+                            return; // Don't re-attach event listener
                         }
                         pc.__rustpbxAttached = true;
 
@@ -2763,6 +2790,26 @@
                         });
                     },
                     resetSipSessionState() {
+                        // Clean up PeerConnection to prevent audio bleeding in quick reconnects
+                        if (sipSession && sipSession.connection) {
+                            const pc = sipSession.connection;
+                            try {
+                                // Stop all receiver tracks
+                                if (pc.getReceivers) {
+                                    pc.getReceivers().forEach((receiver) => {
+                                        if (receiver.track) {
+                                            receiver.track.stop();
+                                        }
+                                    });
+                                }
+                                // Close the PeerConnection
+                                if (pc.close && pc.connectionState !== 'closed') {
+                                    pc.close();
+                                }
+                            } catch (err) {
+                                // ignore cleanup errors
+                            }
+                        }
                         sipSession = null;
                         this.hasSipSession = false;
                         this.sipCallDirection = null;

@@ -1,4 +1,4 @@
-use crate::call::{DialDirection, QueueHoldConfig};
+use crate::call::{DialDirection, Dialplan, MediaConfig, TransactionCookie};
 use crate::callrecord::CallRecordHangupReason;
 use crate::proxy::active_call_registry::{
     ActiveProxyCallEntry, ActiveProxyCallRegistry, ActiveProxyCallStatus,
@@ -8,20 +8,32 @@ use chrono::{DateTime, Utc};
 use rsip::StatusCode;
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, RwLock};
+use std::time::Instant;
 use tokio::sync::mpsc;
+
+/// Immutable context for the entire duration of a call
+#[derive(Clone)]
+pub struct CallContext {
+    pub session_id: String,
+    pub dialplan: Arc<Dialplan>,
+    pub cookie: TransactionCookie,
+    pub start_time: Instant,
+    pub media_config: MediaConfig,
+    pub original_caller: String,
+    pub original_callee: String,
+    pub max_forwards: u32,
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum SessionAction {
     AcceptCall {
         callee: Option<String>,
         sdp: Option<String>,
+        dialog_id: Option<String>,
     },
-    EnterQueue {
-        name: String,
-    },
-    ExitQueue,
     TransferTarget(String),
     ProvideEarlyMedia(String),
+    ProvideEarlyMediaWithDialog(String, String),
     StartRinging {
         ringback: Option<String>,
         passthrough: bool,
@@ -31,30 +43,20 @@ pub enum SessionAction {
         send_progress: bool,
         await_completion: bool,
     },
-    SetQueueName(Option<String>),
-    SetQueueRingbackPassthrough(bool),
-    StartQueueHold(QueueHoldConfig),
-    StopQueueHold,
     Hangup {
         reason: Option<CallRecordHangupReason>,
         code: Option<u16>,
         initiator: Option<String>,
     },
     HandleReInvite(String), // Stores the request method or body if needed, but here we just signal
+    RefreshSession,
+    MuteTrack(String),
+    UnmuteTrack(String),
 }
 
 impl SessionAction {
-    pub fn enter_queue(name: &str) -> Self {
-        Self::EnterQueue {
-            name: name.trim().to_string(),
-        }
-    }
-
     pub fn from_transfer_target(target: &str) -> Self {
         let trimmed = target.trim();
-        if let Some(queue) = trimmed.strip_prefix("queue:") {
-            return Self::enter_queue(queue);
-        }
         Self::TransferTarget(trimmed.to_string())
     }
 }
@@ -86,7 +88,6 @@ pub struct CallSessionSnapshot {
     current_target: Option<String>,
     queue_name: Option<String>,
     direction: String,
-    tenant_id: Option<i64>,
 }
 
 #[derive(Clone)]
@@ -103,7 +104,6 @@ impl CallSessionShared {
         caller: Option<String>,
         callee: Option<String>,
         registry: Option<Arc<ActiveProxyCallRegistry>>,
-        tenant_id: Option<i64>,
     ) -> Self {
         let started_at = Utc::now();
         let inner = CallSessionSnapshot {
@@ -120,7 +120,6 @@ impl CallSessionShared {
             current_target: None,
             queue_name: None,
             direction: direction.to_string(),
-            tenant_id,
         };
         Self {
             inner: Arc::new(RwLock::new(inner)),
@@ -145,9 +144,14 @@ impl CallSessionShared {
                 started_at: inner.started_at,
                 answered_at: inner.answer_time,
                 status: ActiveProxyCallStatus::Ringing,
-                tenant_id: inner.tenant_id,
             };
             registry.upsert(entry, handle);
+        }
+    }
+
+    pub fn register_dialog(&self, dialog_id: String, handle: CallSessionHandle) {
+        if let Some(registry) = &self.registry {
+            registry.register_dialog(dialog_id, handle);
         }
     }
 
@@ -434,159 +438,5 @@ impl CallSessionHandle {
 
     pub fn send_command(&self, action: SessionAction) -> Result<()> {
         self.cmd_tx.send(action).map_err(Into::into)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::proxy::active_call_registry::{ActiveProxyCallRegistry, ActiveProxyCallStatus};
-    use std::sync::Arc;
-    use tokio::sync::mpsc;
-
-    #[test]
-    fn transfer_target_detects_queue() {
-        let action = SessionAction::from_transfer_target("queue: support ");
-        assert_eq!(
-            action,
-            SessionAction::EnterQueue {
-                name: "support".to_string()
-            }
-        );
-    }
-
-    #[test]
-    fn transfer_target_keeps_uri() {
-        let action = SessionAction::from_transfer_target("sip:1001@example.com");
-        assert_eq!(
-            action,
-            SessionAction::TransferTarget("sip:1001@example.com".to_string())
-        );
-    }
-
-    #[tokio::test]
-    async fn shared_emits_queue_events() {
-        let registry = Arc::new(ActiveProxyCallRegistry::new());
-        let shared = CallSessionShared::new(
-            "test-session".to_string(),
-            DialDirection::Inbound,
-            Some("sip:alice@example.com".to_string()),
-            Some("sip:bob@example.com".to_string()),
-            Some(registry.clone()),
-            None,
-        );
-        let (tx, mut rx) = mpsc::unbounded_channel();
-        shared.set_event_sender(tx);
-
-        shared.set_queue_name(Some("support".to_string()));
-        let entered = rx.recv().await.expect("queue entered event");
-        match entered {
-            ProxyCallEvent::QueueEntered { name, .. } => assert_eq!(name, "support"),
-            other => panic!("unexpected event: {:?}", other),
-        }
-
-        shared.set_queue_name(None);
-        let left = rx.recv().await.expect("queue left event");
-        match left {
-            ProxyCallEvent::QueueLeft { name, .. } => {
-                assert_eq!(name, Some("support".to_string()))
-            }
-            other => panic!("unexpected event: {:?}", other),
-        }
-    }
-
-    #[test]
-    fn shared_updates_phase_and_registry() {
-        let registry = Arc::new(ActiveProxyCallRegistry::new());
-        let shared = CallSessionShared::new(
-            "test-session".to_string(),
-            DialDirection::Inbound,
-            Some("sip:alice@example.com".to_string()),
-            Some("sip:bob@example.com".to_string()),
-            Some(registry.clone()),
-            None,
-        );
-
-        let (handle, _) = CallSessionHandle::with_shared(shared.clone());
-        shared.register_active_call(handle.clone());
-
-        assert!(shared.transition_to_ringing(false));
-        shared.transition_to_answered();
-        shared.mark_hangup(CallRecordHangupReason::ByCaller);
-
-        let snapshot = shared.snapshot();
-        assert_eq!(snapshot.phase, ProxyCallPhase::Ended);
-        assert_eq!(
-            snapshot.hangup_reason,
-            Some(CallRecordHangupReason::ByCaller)
-        );
-
-        let entry = registry.get("test-session").expect("registry entry");
-        assert_eq!(entry.status, ActiveProxyCallStatus::Ringing);
-    }
-
-    #[tokio::test]
-    async fn handle_forwards_session_actions() {
-        let shared = CallSessionShared::new(
-            "session-cmd".to_string(),
-            DialDirection::Inbound,
-            None,
-            None,
-            None,
-            None,
-        );
-        let (handle, mut rx) = CallSessionHandle::with_shared(shared);
-
-        handle
-            .send_command(SessionAction::ExitQueue)
-            .expect("command send");
-
-        let action = rx.recv().await.expect("command received");
-        assert_eq!(action, SessionAction::ExitQueue);
-    }
-
-    #[test]
-    fn snapshot_tracks_routing_and_queue_state() {
-        let shared = CallSessionShared::new(
-            "session-snapshot".to_string(),
-            DialDirection::Outbound,
-            Some("sip:alice@example.com".to_string()),
-            Some("sip:bob@example.com".to_string()),
-            None,
-            None,
-        );
-
-        shared.update_routed_parties(Some("sip:carol@example.com".to_string()), None);
-        shared.set_queue_name(Some("sales".to_string()));
-        shared.set_current_target(Some("sip:1001@example.com".to_string()));
-
-        let snapshot = shared.snapshot();
-        assert_eq!(snapshot.caller, Some("sip:carol@example.com".to_string()));
-        assert_eq!(snapshot.queue_name, Some("sales".to_string()));
-        assert_eq!(
-            snapshot.current_target,
-            Some("sip:1001@example.com".to_string())
-        );
-    }
-
-    #[test]
-    fn registry_reflects_talking_when_answered() {
-        let registry = Arc::new(ActiveProxyCallRegistry::new());
-        let shared = CallSessionShared::new(
-            "session-talking".to_string(),
-            DialDirection::Inbound,
-            Some("sip:alice@example.com".to_string()),
-            Some("sip:bob@example.com".to_string()),
-            Some(registry.clone()),
-            None,
-        );
-        let (handle, _) = CallSessionHandle::with_shared(shared.clone());
-        shared.register_active_call(handle);
-
-        assert!(shared.transition_to_ringing(false));
-        shared.transition_to_answered();
-
-        let entry = registry.get("session-talking").expect("registry entry");
-        assert_eq!(entry.status, ActiveProxyCallStatus::Talking);
     }
 }

@@ -1,17 +1,12 @@
 use super::{ProxyAction, ProxyModule, server::SipServerRef};
 use crate::call::{
-    CallForwardingConfig, DialDirection, DialStrategy, Dialplan, Location, MediaConfig,
-    RouteInvite, RoutingState, SipUser, TransactionCookie,
-};
-use crate::callrecord::{
-    CallRecord, CallRecordHangupMessage, CallRecordHangupReason, CallRecordPersistArgs,
-    apply_record_file_extras, extract_sip_username, extras_map_to_metadata, extras_map_to_option,
-    sipflow::SipMessageItem,
+    CallForwardingConfig, CalleeDisplayName, DialDirection, DialStrategy, Dialplan, Location,
+    MediaConfig, RouteInvite, RoutingState, SipUser, TransactionCookie,
 };
 use crate::config::{ProxyConfig, RouteResult};
+use crate::media::recorder::RecorderOption;
 use crate::proxy::data::ProxyDataContext;
-use crate::proxy::proxy_call::ProxyCall;
-use crate::proxy::proxy_call::ProxyCallBuilder;
+use crate::proxy::proxy_call::CallSessionBuilder;
 use crate::proxy::routing::{
     RouteRule, SourceTrunk, TrunkConfig, build_source_trunk,
     matcher::{RouteResourceLookup, inspect_invite, match_invite},
@@ -21,17 +16,16 @@ use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use chrono::Utc;
 use glob::Pattern;
+use rsip::headers::UntypedHeader;
 use rsip::prelude::HeadersExt;
 use rsipstack::dialog::DialogId;
 use rsipstack::dialog::dialog_layer::DialogLayer;
 use rsipstack::dialog::invitation::InviteOption;
 use rsipstack::transaction::transaction::Transaction;
 use rsipstack::transport::SipConnection;
-use serde_json::{Number as JsonNumber, Value};
 use std::{collections::HashMap, net::IpAddr, path::PathBuf, sync::Arc};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
-use voice_engine::media::recorder::RecorderOption;
 
 #[async_trait]
 pub trait CallRouter: Send + Sync {
@@ -42,25 +36,6 @@ pub trait CallRouter: Send + Sync {
         caller: &SipUser,
         cookie: &TransactionCookie,
     ) -> Result<Dialplan, (anyhow::Error, Option<rsip::StatusCode>)>;
-}
-
-fn dialog_call_id(dialog_id: &DialogId) -> Option<String> {
-    let candidate = dialog_id.call_id.trim();
-    if !candidate.is_empty() {
-        return Some(candidate.to_string());
-    }
-
-    let raw = dialog_id.to_string();
-    let trimmed = raw
-        .split(|c| matches!(c, ';' | ':' | ' ' | '\t'))
-        .next()
-        .map(|s| s.trim())
-        .unwrap_or_default();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed.to_string())
-    }
 }
 
 fn q850_cause_from_status(code: &rsip::StatusCode) -> u16 {
@@ -107,12 +82,6 @@ pub trait DialplanInspector: Send + Sync {
         cookie: &TransactionCookie,
         original: &rsip::Request,
     ) -> Result<Dialplan, (anyhow::Error, Option<rsip::StatusCode>)>;
-}
-
-#[async_trait]
-pub trait ProxyCallInspector: Send + Sync {
-    async fn on_start(&self, call: ProxyCall) -> Result<ProxyCall, (rsip::StatusCode, String)>;
-    async fn on_end(&self, call: &ProxyCall);
 }
 
 pub struct DefaultRouteInvite {
@@ -356,7 +325,7 @@ impl CallModule {
             .map_err(|e| (anyhow::anyhow!(e), None))?;
         let callee_realm = callee_uri.host().to_string();
         let dialog_id = DialogId::try_from(original).map_err(|e| (anyhow!(e), None))?;
-        let session_id: String = format!("{}-{}", rand::random::<u32>(), dialog_id);
+        let session_id = dialog_id.to_string();
 
         let media_config = MediaConfig::new()
             .with_proxy_mode(self.inner.config.media_proxy)
@@ -386,7 +355,9 @@ impl CallModule {
                         res.ok()
                             .flatten()
                             .and_then(|user| user.display_name)
-                            .map(|display_name| cookie.set("callee_display_name", &display_name));
+                            .map(|display_name| {
+                                cookie.insert_extension(CalleeDisplayName(display_name))
+                            });
                         DialDirection::Internal
                     }
                 }
@@ -471,7 +442,7 @@ impl CallModule {
             .with_route_invite(route_invite)
             .with_targets(targets);
 
-        if let Some(hints) = dialplan_hints {
+        if let Some(mut hints) = dialplan_hints {
             if let Some(enabled) = hints.enable_recording {
                 dialplan.recording.enabled = enabled;
             }
@@ -483,6 +454,10 @@ impl CallModule {
             if let Some(max_duration) = hints.max_duration {
                 dialplan.max_call_duration = Some(max_duration);
             }
+            if let Some(enable_sipflow) = hints.enable_sipflow {
+                dialplan.enable_sipflow = enable_sipflow;
+            }
+            dialplan.extensions = std::mem::take(&mut hints.extensions);
         }
 
         if let Some(queue_plan) = pending_queue {
@@ -792,9 +767,32 @@ impl CallModule {
         Ok(dialplan)
     }
 
+    fn report_failure(
+        &self,
+        tx: &mut Transaction,
+        cookie: &TransactionCookie,
+        code: rsip::StatusCode,
+        reason: Option<String>,
+    ) {
+        let direction = if cookie.is_from_trunk() {
+            DialDirection::Inbound
+        } else {
+            DialDirection::Internal
+        };
+        let session_id = format!(
+            "{}",
+            DialogId::try_from(&tx.original)
+                .map(|d| d.to_string())
+                .unwrap_or_default()
+        );
+        let dialplan = Dialplan::new(session_id, tx.original.clone(), direction);
+        let proxy_call = CallSessionBuilder::new(cookie.clone(), dialplan, 70)
+            .with_call_record_sender(self.inner.server.callrecord_sender.clone());
+        let _ = proxy_call.report_failure(self.inner.server.clone(), code, reason);
+    }
     pub(crate) async fn handle_invite(
         &self,
-        cancel_token: CancellationToken,
+        _cancel_token: CancellationToken,
         tx: &mut Transaction,
         cookie: TransactionCookie,
     ) -> Result<()> {
@@ -809,9 +807,7 @@ impl CallModule {
                 let reason_text = e.to_string();
                 let reason_value = q850_reason_value(&code, Some(reason_text.as_str()));
                 warn!(%code, key = %tx.key, reason = %reason_value, "failed to build dialplan");
-                self.record_failed_call(tx, &cookie, code.clone(), Some(reason_text.clone()))
-                    .await
-                    .ok();
+                self.report_failure(tx, &cookie, code.clone(), Some(reason_text));
                 tx.reply_with(
                     code.clone(),
                     vec![rsip::Header::Other("Reason".into(), reason_value)],
@@ -824,49 +820,24 @@ impl CallModule {
         };
 
         // Create event sender for media stream events
-        let builder = ProxyCallBuilder::new(cookie.clone(), dialplan)
-            .with_call_record_sender(self.inner.server.callrecord_sender.clone())
-            .with_cancel_token(cancel_token);
-
-        let proxy_call = builder.build(self.inner.server.clone());
-        let proxy_call = if let Some(inspector) = self.inner.server.proxycall_inspector.as_ref() {
-            match inspector.on_start(proxy_call).await {
-                Ok(call) => call,
-                Err((code, reason_phrase)) => {
-                    warn!(%code, key = %tx.key,"failed to proxy call {}", reason_phrase);
-                    self.record_failed_call(tx, &cookie, code.clone(), Some(reason_phrase.clone()))
-                        .await
-                        .ok();
-                    let reason_value = q850_reason_value(&code, Some(reason_phrase.as_str()));
-                    tx.reply_with(
-                        code.clone(),
-                        vec![rsip::Header::Other("Reason".into(), reason_value)],
-                        None,
-                    )
-                    .await
-                    .map_err(|e| anyhow!("failed to proxy call: {}", e))?;
-                    return Err(anyhow::anyhow!("failed toproxy call"));
-                }
-            }
+        let max_forwards = if let Ok(header) = tx.original.max_forwards_header() {
+            header.value().parse::<u32>().unwrap_or(70)
         } else {
-            proxy_call
+            70
         };
 
-        let r = proxy_call.process(tx).await;
-        if let Some(inspector) = self.inner.server.proxycall_inspector.as_ref() {
-            inspector.on_end(&proxy_call).await;
+        if max_forwards == 0 {
+            info!(key = %tx.key, "Max-Forwards exceeded");
+            self.report_failure(tx, &cookie, rsip::StatusCode::TooManyHops, None);
+            tx.reply(rsip::StatusCode::TooManyHops).await?;
+            return Ok(());
         }
 
-        match r {
-            Ok(()) => {
-                info!(session_id=proxy_call.id(), elapsed = ?proxy_call.elapsed(), "session successfully");
-                Ok(())
-            }
-            Err(e) => {
-                warn!(session_id=proxy_call.id(), elapsed = ?proxy_call.elapsed(), "error establishing session: {}", e);
-                Err(e)
-            }
-        }
+        let builder = CallSessionBuilder::new(cookie.clone(), dialplan, max_forwards - 1)
+            .with_call_record_sender(self.inner.server.callrecord_sender.clone())
+            .with_cancel_token(self.inner.server.cancel_token.child_token());
+
+        builder.spawn(self.inner.server.clone(), tx).await
     }
 
     async fn process_message(&self, tx: &mut Transaction) -> Result<()> {
@@ -879,102 +850,6 @@ impl CallModule {
             }
         };
         dialog.handle(tx).await.map_err(|e| anyhow!(e))
-    }
-
-    async fn record_failed_call(
-        &self,
-        tx: &Transaction,
-        cookie: &TransactionCookie,
-        status_code: rsip::StatusCode,
-        reason_phrase: Option<String>,
-    ) -> Result<()> {
-        let dialog_id = DialogId::try_from(&tx.original)?;
-        let now = Utc::now();
-        let caller = tx.original.from_header()?.uri()?.to_string();
-        let callee = tx.original.to_header()?.uri()?.to_string();
-
-        let mut extras_map: HashMap<String, Value> = HashMap::new();
-        extras_map.insert(
-            "status_code".to_string(),
-            Value::Number(JsonNumber::from(u16::from(status_code.clone()))),
-        );
-
-        let mut hangup_messages: Vec<CallRecordHangupMessage> = Vec::new();
-        hangup_messages.push(CallRecordHangupMessage {
-            code: u16::from(status_code.clone()),
-            reason: reason_phrase.clone(),
-            target: None,
-        });
-        if let Ok(value) = serde_json::to_value(&hangup_messages) {
-            extras_map.insert("hangup_messages".to_string(), value);
-        }
-
-        let mut sip_flows: HashMap<String, Vec<SipMessageItem>> = HashMap::new();
-        let leg_call_id = dialog_call_id(&dialog_id).unwrap_or_else(|| dialog_id.to_string());
-        if let Some(items) = self.inner.server.drain_sip_flow(&leg_call_id) {
-            if !items.is_empty() {
-                sip_flows.insert(leg_call_id.clone(), items);
-            }
-        }
-
-        let mut sip_leg_roles: HashMap<String, String> = HashMap::new();
-        sip_leg_roles.insert(leg_call_id.clone(), "primary".to_string());
-
-        let direction = if cookie.is_from_trunk() {
-            "inbound".to_string()
-        } else {
-            "internal".to_string()
-        };
-
-        let trunk_name = cookie.get_source_trunk();
-        let (sip_gateway, sip_trunk_id) = if let Some(ref name) = trunk_name {
-            let trunks = self.inner.server.data_context.trunks_snapshot();
-            let trunk_id = trunks.get(name).and_then(|config| config.id);
-            (Some(name.clone()), trunk_id)
-        } else {
-            (None, None)
-        };
-
-        let metadata_value = extras_map_to_metadata(&extras_map);
-
-        let mut persist_args = CallRecordPersistArgs::default();
-        persist_args.direction = direction;
-        persist_args.status = "failed".to_string();
-        persist_args.from_number = extract_sip_username(&caller);
-        persist_args.to_number = extract_sip_username(&callee);
-        persist_args.sip_trunk_id = sip_trunk_id;
-        persist_args.sip_gateway = sip_gateway;
-        persist_args.metadata = metadata_value;
-
-        let mut record = CallRecord {
-            call_id: dialog_id.to_string(),
-            start_time: now.clone(),
-            ring_time: None,
-            answer_time: None,
-            end_time: now,
-            caller: caller.clone(),
-            callee: callee.clone(),
-            status_code: status_code.into(),
-            hangup_reason: Some(CallRecordHangupReason::BySystem),
-            hangup_messages,
-            recorder: Vec::new(),
-            extras: None,
-            dump_event_file: None,
-            refer_callrecord: None,
-            sip_flows,
-            sip_leg_roles,
-            persist_args: Some(persist_args),
-        };
-
-        apply_record_file_extras(&record, &mut extras_map);
-        record.extras = extras_map_to_option(&extras_map);
-
-        if let Some(ref sender) = self.inner.server.callrecord_sender {
-            sender
-                .send(record)
-                .map_err(|e| anyhow!("failed to send call record: {}", e))?;
-        }
-        Ok(())
     }
 }
 
@@ -1024,6 +899,15 @@ impl ProxyModule for CallModule {
         );
         match tx.original.method {
             rsip::Method::Invite => {
+                // Check for Re-invite (INVITE within an existing dialog)
+                if !dialog_id.to_tag.is_empty() {
+                    debug!(%dialog_id, "Detected Re-invite, processing via dialog layer");
+                    if let Err(e) = self.process_message(tx).await {
+                        warn!(%dialog_id, "Failed to process Re-invite message: {}", e);
+                    }
+                    return Ok(ProxyAction::Abort);
+                }
+
                 if let Err(e) = self.handle_invite(token, tx, cookie).await {
                     if tx.last_response.is_none() {
                         let code = rsip::StatusCode::ServerInternalError;

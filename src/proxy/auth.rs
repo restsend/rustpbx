@@ -1,7 +1,7 @@
 use super::{ProxyAction, ProxyModule, server::SipServerRef};
-use crate::call::TransactionCookie;
 use crate::call::cookie::SpamResult;
 use crate::call::user::SipUser;
+use crate::call::{CalleeDisplayName, TransactionCookie};
 use crate::config::ProxyConfig;
 use anyhow::Result;
 use async_trait::async_trait;
@@ -233,7 +233,7 @@ impl ProxyModule for AuthModule {
                             );
                             cookie.set_user(tx_user.clone());
                             if let Some(display_name) = callee_profile.display_name {
-                                cookie.set("callee_display_name", &display_name);
+                                cookie.insert_extension(CalleeDisplayName(display_name));
                             }
                             return Ok(ProxyAction::Continue);
                         }

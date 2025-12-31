@@ -597,6 +597,7 @@ impl RouteQueueFallbackConfig {
             let action = if let Some(prompt) = &self.failure_prompt {
                 crate::call::FailureAction::PlayThenHangup {
                     audio_file: prompt.clone(),
+                    use_early_media: false, // Use 200 OK for routing failures
                     status_code: status.clone(),
                     reason: self.failure_reason.clone(),
                 }

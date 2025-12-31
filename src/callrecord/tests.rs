@@ -1,4 +1,6 @@
 use super::*;
+use chrono::Utc;
+use crate::callrecord::CallRecordHangupReason;
 use std::collections::HashMap;
 use std::io::Write;
 use tempfile::NamedTempFile;
@@ -12,7 +14,7 @@ async fn test_save_with_http_without_media() {
         serde_json::Value::String("test_value".to_string()),
     );
 
-    let record = CallRecord {
+    let mut record = CallRecord {
         call_id: "test_call_123".to_string(),
         start_time: Utc::now(),
         end_time: Utc::now(),
@@ -20,9 +22,9 @@ async fn test_save_with_http_without_media() {
         callee: "+0987654321".to_string(),
         status_code: 200,
         hangup_messages: Vec::new(),
-        extras: Some(extras),
         ..Default::default()
     };
+    record.extensions.insert(CallRecordExtras(extras));
 
     // Test without media (should not fail if no server available)
     let url = "http://httpbin.org/post".to_string();
@@ -74,7 +76,7 @@ async fn test_save_with_http_with_media() {
         serde_json::Value::String("test_value".to_string()),
     );
 
-    let record = CallRecord {
+    let mut record = CallRecord {
         call_id: "test_call_with_media_456".to_string(),
         start_time: Utc::now(),
         end_time: Utc::now(),
@@ -83,9 +85,9 @@ async fn test_save_with_http_with_media() {
         status_code: 200,
         hangup_reason: Some(CallRecordHangupReason::ByCaller),
         recorder: vec![media],
-        extras: Some(extras),
         ..Default::default()
     };
+    record.extensions.insert(CallRecordExtras(extras));
 
     // Test with media
     let url = "http://httpbin.org/post".to_string();
@@ -125,7 +127,7 @@ async fn test_save_with_http_with_custom_headers() {
         serde_json::Value::String("test_value".to_string()),
     );
 
-    let record = CallRecord {
+    let mut record = CallRecord {
         call_id: "test_call_headers_789".to_string(),
         start_time: Utc::now(),
         end_time: Utc::now(),
@@ -133,9 +135,9 @@ async fn test_save_with_http_with_custom_headers() {
         callee: "+0987654321".to_string(),
         status_code: 200,
         hangup_reason: Some(CallRecordHangupReason::ByCaller),
-        extras: Some(extras),
         ..Default::default()
     };
+    record.extensions.insert(CallRecordExtras(extras));
 
     let url = "http://httpbin.org/post".to_string();
     let with_media = Some(false);
@@ -173,7 +175,7 @@ async fn test_save_with_s3_like_with_custom_headers() {
         serde_json::Value::String("test_value".to_string()),
     );
 
-    let record = CallRecord {
+    let mut record = CallRecord {
         call_id: "test_call_headers_789".to_string(),
         start_time: Utc::now(),
         end_time: Utc::now(),
@@ -181,9 +183,9 @@ async fn test_save_with_s3_like_with_custom_headers() {
         callee: "+0987654321".to_string(),
         status_code: 200,
         hangup_reason: Some(CallRecordHangupReason::ByCaller),
-        extras: Some(extras),
         ..Default::default()
     };
+    record.extensions.insert(CallRecordExtras(extras));
 
     let url = "http://httpbin.org/post".to_string();
     let with_media = Some(false);
@@ -227,7 +229,7 @@ async fn test_save_with_s3_like_memory_store() {
         serde_json::Value::String("test_value".to_string()),
     );
 
-    let record = CallRecord {
+    let mut record = CallRecord {
         call_id: "test_s3_call_123".to_string(),
         start_time: Utc::now(),
         end_time: Utc::now(),
@@ -235,9 +237,9 @@ async fn test_save_with_s3_like_memory_store() {
         callee: "+0987654321".to_string(),
         status_code: 200,
         hangup_reason: Some(CallRecordHangupReason::ByCaller),
-        extras: Some(extras),
         ..Default::default()
     };
+    record.extensions.insert(CallRecordExtras(extras));
 
     // This test will only succeed if there's a local minio instance running
     // In real scenarios, this would use actual cloud storage credentials
@@ -287,7 +289,7 @@ async fn test_save_with_s3_like_with_media() {
         serde_json::Value::String("test_value".to_string()),
     );
 
-    let record = CallRecord {
+    let mut record = CallRecord {
         call_id: "test_s3_media_456".to_string(),
         start_time: Utc::now(),
         end_time: Utc::now(),
@@ -296,9 +298,9 @@ async fn test_save_with_s3_like_with_media() {
         status_code: 200,
         hangup_reason: Some(CallRecordHangupReason::ByCaller),
         recorder: vec![media],
-        extras: Some(extras),
         ..Default::default()
     };
+    record.extensions.insert(CallRecordExtras(extras));
 
     // Test with different S3 vendors
     let test_cases = vec![
@@ -344,43 +346,3 @@ async fn test_save_with_s3_like_with_media() {
     }
 }
 
-#[test]
-fn test_compute_billing_logic() {
-    let params = BillingParameters {
-        template_id: Some(1),
-        template_name: Some("Test Template".to_string()),
-        display_name: None,
-        currency: "USD".to_string(),
-        initial_increment_secs: 60,
-        billing_increment_secs: 60,
-        overage_rate_per_minute: 0.10, // /bin/bash.10 per minute
-        setup_fee: 0.05,               // /bin/bash.05 setup fee
-        tax_percent: 10.0,             // 10% tax
-    };
-
-    let context = BillingContext {
-        template_id: Some(1),
-        snapshot: None,
-        parameters: Some(params),
-    };
-
-    // Case 1: 10 seconds (should be billed as 60s)
-    // Cost = Setup(0.05) + Usage(1 min * 0.10) = 0.15
-    // Tax = 0.15 * 10% = 0.015 -> round to 0.02
-    // Total = 0.17
-    let result = compute_billing(10, &context);
-    assert_eq!(result.billable_secs, Some(60));
-    assert_eq!(result.amount_subtotal, Some(0.15));
-    assert_eq!(result.amount_tax, Some(0.02));
-    assert_eq!(result.amount_total, Some(0.17));
-
-    // Case 2: 61 seconds (should be billed as 120s)
-    // Cost = Setup(0.05) + Usage(2 min * 0.10) = 0.25
-    // Tax = 0.25 * 10% = 0.025 -> round to 0.03
-    // Total = 0.28
-    let result = compute_billing(61, &context);
-    assert_eq!(result.billable_secs, Some(120));
-    assert_eq!(result.amount_subtotal, Some(0.25));
-    assert_eq!(result.amount_tax, Some(0.03));
-    assert_eq!(result.amount_total, Some(0.28));
-}

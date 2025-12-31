@@ -1,8 +1,8 @@
 #[cfg(test)]
 mod tests {
+    use crate::proxy::proxy_call::session_timer::{SessionRefresher, SessionTimerState};
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
-    use crate::proxy::proxy_call::session_timer::{SessionTimerState, SessionRefresher};
 
     #[test]
     fn test_session_timer_state_memory() {
@@ -72,5 +72,19 @@ mod tests {
 
         // Should be refreshed now
         assert!(Instant::now() < timer.last_refresh + Duration::from_secs(1));
+    }
+
+    #[test]
+    fn test_session_timer_methods() {
+        let mut timer = SessionTimerState::default();
+        timer.active = true;
+        timer.session_interval = Duration::from_secs(100);
+        timer.last_refresh = Instant::now() - Duration::from_secs(51);
+
+        assert!(timer.should_refresh());
+        assert!(!timer.is_expired());
+
+        timer.last_refresh = Instant::now() - Duration::from_secs(101);
+        assert!(timer.is_expired());
     }
 }

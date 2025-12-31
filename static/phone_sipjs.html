@@ -538,16 +538,28 @@
 
                 const peerConnection = session.sessionDescriptionHandler.peerConnection;
 
+                // Listen for track events (the proper WebRTC way)
+                peerConnection.ontrack = (event) => {
+                    log(`Received remote track: kind=${event.track.kind} id=${event.track.id} readyState=${event.track.readyState}`);
+                    if (event.track.kind === 'audio') {
+                        const remoteStream = new MediaStream([event.track]);
+                        remoteAudio.srcObject = remoteStream;
+                        log('Remote audio stream attached via ontrack event');
+                    }
+                };
+
+                // Also check existing tracks (for backwards compatibility)
                 const remoteStream = new MediaStream();
                 peerConnection.getReceivers().forEach(receiver => {
                     if (receiver.track && receiver.track.kind === 'audio') {
                         remoteStream.addTrack(receiver.track);
+                        log(`Found existing receiver track: id=${receiver.track.id} readyState=${receiver.track.readyState}`);
                     }
                 });
 
                 if (remoteStream.getTracks().length > 0) {
                     remoteAudio.srcObject = remoteStream;
-                    log('Remote audio stream attached');
+                    log('Remote audio stream attached from existing receivers');
                 }
 
                 const senders = peerConnection.getSenders();
@@ -727,6 +739,10 @@
             inviter._timing = { inviteSent: Date.now() };
 
             inviter.delegate = {
+                onUpdate: (request) => {
+                    log('Received in-dialog UPDATE (outgoing call)');
+                    request.accept();
+                },
                 onBye: (bye) => {
                     log('Call ended by remote party');
                     endCall();

@@ -44,7 +44,7 @@ fn create_queue_proxy_config(port: u16) -> ProxyConfig {
             }],
             ..Default::default()
         },
-        accept_immediately: true, // Accept immediately upon entering queue (200 OK)
+        accept_immediately: false, // Don't accept immediately - test basic queue flow first
         ..Default::default()
     };
     config.queues.insert("support".to_string(), queue_config);
@@ -182,7 +182,26 @@ async fn test_call_queue_routing() {
     // 4. Caller dials "support" (triggers routing to queue)
     let call_task = tokio::spawn(async move {
         info!("Caller dialing support...");
-        let dialog_id = caller.make_call("support", None).await?;
+
+        // Generate a minimal SDP offer from caller
+        let sdp_offer = format!(
+            "v=0\r\n\
+             o=caller {} 0 IN IP4 127.0.0.1\r\n\
+             s=caller\r\n\
+             c=IN IP4 127.0.0.1\r\n\
+             t=0 0\r\n\
+             m=audio {} RTP/AVP 0 101\r\n\
+             a=rtpmap:0 PCMU/8000\r\n\
+             a=rtpmap:101 telephone-event/8000\r\n\
+             a=sendrecv\r\n",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs(),
+            caller_port + 100  // Use a different port for RTP
+        );
+
+        let dialog_id = caller.make_call("support", Some(sdp_offer)).await?;
         info!("Caller connected, dialog_id: {}", dialog_id);
 
         // Hold the call for a short duration
@@ -201,7 +220,26 @@ async fn test_call_queue_routing() {
             for event in events {
                 if let TestUaEvent::IncomingCall(dialog_id) = event {
                     info!("Agent received call: {}", dialog_id);
-                    agent.answer_call(&dialog_id, None).await.unwrap();
+
+                    // Generate a minimal SDP answer
+                    let sdp_answer = format!(
+                        "v=0\r\n\
+                         o=agent {} 0 IN IP4 127.0.0.1\r\n\
+                         s=agent\r\n\
+                         c=IN IP4 127.0.0.1\r\n\
+                         t=0 0\r\n\
+                         m=audio {} RTP/AVP 0 101\r\n\
+                         a=rtpmap:0 PCMU/8000\r\n\
+                         a=rtpmap:101 telephone-event/8000\r\n\
+                         a=sendrecv\r\n",
+                        std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap()
+                            .as_secs(),
+                        agent_port + 100  // Use a different port for RTP
+                    );
+
+                    agent.answer_call(&dialog_id, Some(sdp_answer)).await.unwrap();
 
                     // Keep agent alive to receive BYE
                     sleep(Duration::from_millis(1000)).await;
@@ -224,3 +262,6 @@ async fn test_call_queue_routing() {
 
     // Cleanup happens automatically via Drop
 }
+
+// TODO: Add test for accept_immediately=true mode
+// This requires creating a custom TestQueueServer variant or parameterizing the existing one

@@ -4,6 +4,7 @@ use crate::{
     },
     config::{Config, UserBackendConfig},
     handler::middleware::clientaddr::ClientAddr,
+    models::call_record::DatabaseHook,
     proxy::{
         acl::AclModule,
         auth::AuthModule,
@@ -40,13 +41,11 @@ use tower_http::{
     services::ServeDir,
 };
 use tracing::{debug, info, warn};
-use voice_engine::media::engine::StreamEngine;
 
 pub struct CoreContext {
     pub config: Arc<Config>,
     pub db: DatabaseConnection,
     pub token: CancellationToken,
-    pub stream_engine: Arc<StreamEngine>,
     pub callrecord_sender: Option<CallRecordSender>,
     pub callrecord_stats: Option<Arc<crate::callrecord::CallRecordStats>>,
 }
@@ -69,7 +68,6 @@ pub type AppState = Arc<AppStateInner>;
 
 pub struct AppStateBuilder {
     pub config: Option<Config>,
-    pub stream_engine: Option<Arc<StreamEngine>>,
     pub callrecord_sender: Option<CallRecordSender>,
     pub callrecord_formatter: Option<Arc<dyn CallRecordFormatter>>,
     pub cancel_token: Option<CancellationToken>,
@@ -89,10 +87,6 @@ impl AppStateInner {
 
     pub fn token(&self) -> &CancellationToken {
         &self.core.token
-    }
-
-    pub fn stream_engine(&self) -> &Arc<StreamEngine> {
-        &self.core.stream_engine
     }
 
     pub fn sip_server(&self) -> &SipServer {
@@ -159,7 +153,6 @@ impl AppStateBuilder {
     pub fn new() -> Self {
         Self {
             config: None,
-            stream_engine: None,
             callrecord_sender: None,
             callrecord_formatter: None,
             cancel_token: None,
@@ -179,11 +172,6 @@ impl AppStateBuilder {
         if self.config_loaded_at.is_none() {
             self.config_loaded_at = Some(Utc::now());
         }
-        self
-    }
-
-    pub fn with_stream_engine(mut self, stream_engine: Arc<StreamEngine>) -> Self {
-        self.stream_engine = Some(stream_engine);
         self
     }
 
@@ -218,10 +206,6 @@ impl AppStateBuilder {
         let db_conn = crate::models::create_db(&config.database_url).await?;
 
         let addon_registry = Arc::new(crate::addons::registry::AddonRegistry::new());
-        let stream_engine = self
-            .stream_engine
-            .unwrap_or_else(|| Arc::new(StreamEngine::new()));
-
         let callrecord_formatter = if let Some(formatter) = self.callrecord_formatter {
             formatter
         } else {
@@ -241,9 +225,11 @@ impl AppStateBuilder {
                 .with_cancel_token(token.child_token())
                 .with_config(callrecord.clone())
                 .with_formatter(callrecord_formatter.clone())
-                .with_database(db_conn.clone());
+                .with_hook(Box::new(DatabaseHook {
+                    db: db_conn.clone(),
+                }));
 
-            for hook in addon_registry.get_call_record_hooks(&config) {
+            for hook in addon_registry.get_call_record_hooks(&config, &db_conn) {
                 builder = builder.with_hook(hook);
             }
 
@@ -275,7 +261,6 @@ impl AppStateBuilder {
             config: config.clone(),
             db: db_conn.clone(),
             token: token.clone(),
-            stream_engine,
             callrecord_sender: callrecord_sender.clone(),
             callrecord_stats: callrecord_stats.clone(),
         });
@@ -297,7 +282,7 @@ impl AppStateBuilder {
 
                 proxy_config.ensure_recording_defaults();
                 let proxy_config = Arc::new(proxy_config);
-                let call_record_hooks = addon_registry.get_call_record_hooks(&config);
+                let call_record_hooks = addon_registry.get_call_record_hooks(&config, &db_conn);
 
                 #[allow(unused_mut)]
                 let mut builder = SipServerBuilder::new(proxy_config.clone())

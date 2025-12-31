@@ -1,11 +1,14 @@
 use crate::{
-    call::{Dialplan, TransactionCookie},
+    call::{CalleeDisplayName, TransactionCookie},
     callrecord::{
-        CallRecord, CallRecordHangupMessage, CallRecordHangupReason, CallRecordMedia,
-        CallRecordPersistArgs, CallRecordSender, apply_record_file_extras, extract_sip_username,
-        extras_map_to_metadata, extras_map_to_option, sipflow::SipMessageItem,
+        CallRecord, CallRecordExtras, CallRecordHangupMessage, CallRecordHangupReason,
+        CallRecordMedia, CallRecordSender, sipflow::SipMessageItem,
     },
-    proxy::{proxy_call::session::CallSessionRecordSnapshot, server::SipServerRef},
+    models::call_record::{CallRecordPersistArgs, extract_sip_username},
+    proxy::{
+        proxy_call::{session::CallSessionRecordSnapshot, state::CallContext},
+        server::SipServerRef,
+    },
 };
 use chrono::{Duration, Utc};
 use rsip::prelude::HeadersExt;
@@ -13,30 +16,28 @@ use serde_json::{Map as JsonMap, Number as JsonNumber, Value};
 use std::{
     collections::{HashMap, HashSet},
     fs,
-    sync::Arc,
-    time::Instant,
 };
 
 pub struct CallReporter {
     pub server: SipServerRef,
-    pub start_time: Instant,
-    pub session_id: String,
-    pub dialplan: Arc<Dialplan>,
-    pub cookie: TransactionCookie,
+    pub context: CallContext,
     pub call_record_sender: Option<CallRecordSender>,
 }
 
 impl CallReporter {
     pub(super) fn report(&self, snapshot: CallSessionRecordSnapshot) {
         let now = Utc::now();
-        let start_time = now - Duration::from_std(self.start_time.elapsed()).unwrap_or_default();
+        let start_time =
+            now - Duration::from_std(self.context.start_time.elapsed()).unwrap_or_default();
 
         let ring_time = snapshot.ring_time.map(|rt| {
-            start_time + Duration::from_std(rt.duration_since(self.start_time)).unwrap_or_default()
+            start_time
+                + Duration::from_std(rt.duration_since(self.context.start_time)).unwrap_or_default()
         });
 
         let answer_time = snapshot.answer_time.map(|at| {
-            start_time + Duration::from_std(at.duration_since(self.start_time)).unwrap_or_default()
+            start_time
+                + Duration::from_std(at.duration_since(self.context.start_time)).unwrap_or_default()
         });
 
         let status_code = snapshot
@@ -58,21 +59,23 @@ impl CallReporter {
         let original_caller = snapshot
             .original_caller
             .clone()
-            .or_else(|| self.dialplan.caller.as_ref().map(|c| c.to_string()))
+            .or_else(|| self.context.dialplan.caller.as_ref().map(|c| c.to_string()))
             .unwrap_or_default();
 
         let original_callee = snapshot
             .original_callee
             .clone()
             .or_else(|| {
-                self.dialplan
+                self.context
+                    .dialplan
                     .original
                     .to_header()
                     .ok()
                     .and_then(|to_header| to_header.uri().ok().map(|uri| uri.to_string()))
             })
             .or_else(|| {
-                self.dialplan
+                self.context
+                    .dialplan
                     .first_target()
                     .map(|location| location.aor.to_string())
             })
@@ -172,19 +175,18 @@ impl CallReporter {
                 .or_insert_with(|| "b2bua".to_string());
         }
 
-        for call_id in call_ids.iter() {
-            if let Some(items) = self.server.drain_sip_flow(call_id) {
-                if !items.is_empty() {
-                    sip_flows_map.insert(call_id.clone(), items);
+        // Only collect SIP flows if enabled in dialplan
+        if self.context.dialplan.enable_sipflow {
+            for call_id in call_ids.iter() {
+                if let Some(items) = self.server.drain_sip_flow(call_id) {
+                    if !items.is_empty() {
+                        sip_flows_map.insert(call_id.clone(), items);
+                    }
                 }
             }
         }
 
-        let direction = match self.dialplan.direction {
-            crate::call::DialDirection::Inbound => "inbound".to_string(),
-            crate::call::DialDirection::Outbound => "outbound".to_string(),
-            crate::call::DialDirection::Internal => "internal".to_string(),
-        };
+        let direction = self.context.dialplan.direction.to_string();
 
         // Helper to resolve call status (copied from proxy_call.rs logic)
         let status = if snapshot.answer_time.is_some() {
@@ -196,21 +198,25 @@ impl CallReporter {
         };
 
         let (from_number, from_name, department_id, extension_id) =
-            resolve_user_info(&self.cookie, &caller);
+            resolve_user_info(&self.context.cookie, &caller);
         let to_number = extract_sip_username(&callee);
-        let to_name = self.cookie.get("callee_display_name");
-        let trunk_name = self.cookie.get_source_trunk();
+        let to_name = self
+            .context
+            .cookie
+            .get_extension::<CalleeDisplayName>()
+            .map(|e| e.0);
+        let trunk_name = self.context.cookie.get_source_trunk();
         let (sip_gateway, sip_trunk_id) = if let Some(ref name) = trunk_name {
             let trunks = self.server.data_context.trunks_snapshot();
-            let trunk_id = trunks.get(name).and_then(|config| config.id);
+            let trunk_id = trunks.get(name.as_str()).and_then(|config| config.id);
             (Some(name.clone()), trunk_id)
         } else {
             (None, None)
         };
 
         let mut recorder = Vec::new();
-        if self.dialplan.recording.enabled {
-            if let Some(recorder_config) = self.dialplan.recording.option.as_ref() {
+        if self.context.dialplan.recording.enabled {
+            if let Some(recorder_config) = self.context.dialplan.recording.option.as_ref() {
                 if !recorder_config.recorder_file.is_empty() {
                     let size = fs::metadata(&recorder_config.recorder_file)
                         .map(|meta| meta.len())
@@ -226,11 +232,13 @@ impl CallReporter {
         }
 
         // Copy values from cookie to extras_map
-        for (k, v) in self.cookie.get_values() {
-            extras_map.insert(k, Value::String(v));
-        }
+        // (Removed as TransactionCookie no longer has values)
 
-        let metadata_value = extras_map_to_metadata(&extras_map);
+        let metadata_value = if extras_map.is_empty() {
+            None
+        } else {
+            Some(serde_json::to_value(&extras_map).unwrap_or_default())
+        };
         let recording_path_for_db = recorder.first().map(|media| media.path.clone());
 
         let mut persist_args = CallRecordPersistArgs::default();
@@ -249,7 +257,7 @@ impl CallReporter {
         persist_args.recording_url = recording_path_for_db;
 
         let mut record = CallRecord {
-            call_id: self.session_id.clone(),
+            call_id: self.context.session_id.clone(),
             start_time,
             ring_time,
             answer_time,
@@ -260,16 +268,13 @@ impl CallReporter {
             hangup_reason: hangup_reason.clone(),
             hangup_messages: hangup_messages.clone(),
             recorder,
-            extras: None,
-            dump_event_file: None,
-            refer_callrecord: None,
             sip_flows: sip_flows_map,
             sip_leg_roles,
-            persist_args: Some(persist_args),
+            extensions: snapshot.extensions,
         };
 
-        apply_record_file_extras(&record, &mut extras_map);
-        record.extras = extras_map_to_option(&extras_map);
+        record.extensions.insert(persist_args);
+        record.extensions.insert(CallRecordExtras(extras_map));
 
         if let Some(ref sender) = self.call_record_sender {
             let _ = sender.send(record);

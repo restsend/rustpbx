@@ -28,13 +28,14 @@ pub struct ActiveProxyCallEntry {
     pub started_at: DateTime<Utc>,
     pub answered_at: Option<DateTime<Utc>>,
     pub status: ActiveProxyCallStatus,
-    pub tenant_id: Option<i64>,
 }
 
 #[derive(Default)]
 struct RegistryState {
     entries: HashMap<String, ActiveProxyCallEntry>,
     handles: HashMap<String, CallSessionHandle>,
+    handles_by_dialog: HashMap<String, CallSessionHandle>,
+    dialog_by_session: HashMap<String, String>,
 }
 
 pub struct ActiveProxyCallRegistry {
@@ -56,6 +57,26 @@ impl ActiveProxyCallRegistry {
             .insert(handle.session_id().to_string(), handle);
     }
 
+    pub fn register_dialog(&self, dialog_id: String, handle: CallSessionHandle) {
+        let mut guard = self.inner.lock().unwrap();
+        guard
+            .dialog_by_session
+            .insert(handle.session_id().to_string(), dialog_id.clone());
+        guard.handles_by_dialog.insert(dialog_id, handle);
+    }
+
+    pub fn unregister_dialog(&self, dialog_id: &str) {
+        let mut guard = self.inner.lock().unwrap();
+        if let Some(handle) = guard.handles_by_dialog.remove(dialog_id) {
+            guard.dialog_by_session.remove(handle.session_id());
+        }
+    }
+
+    pub fn get_handle_by_dialog(&self, dialog_id: &str) -> Option<CallSessionHandle> {
+        let guard = self.inner.lock().unwrap();
+        guard.handles_by_dialog.get(dialog_id).cloned()
+    }
+
     pub fn update<F>(&self, session_id: &str, updater: F)
     where
         F: FnOnce(&mut ActiveProxyCallEntry),
@@ -69,6 +90,9 @@ impl ActiveProxyCallRegistry {
         let mut guard = self.inner.lock().unwrap();
         guard.entries.remove(session_id);
         guard.handles.remove(session_id);
+        if let Some(dialog_id) = guard.dialog_by_session.remove(session_id) {
+            guard.handles_by_dialog.remove(&dialog_id);
+        }
     }
 
     pub fn count(&self) -> usize {
@@ -97,15 +121,5 @@ impl ActiveProxyCallRegistry {
 
     pub fn get_handle(&self, session_id: &str) -> Option<CallSessionHandle> {
         self.inner.lock().unwrap().handles.get(session_id).cloned()
-    }
-
-    pub fn count_by_tenant(&self, tenant_id: i64) -> usize {
-        self.inner
-            .lock()
-            .unwrap()
-            .entries
-            .values()
-            .filter(|e| e.tenant_id == Some(tenant_id))
-            .count()
     }
 }

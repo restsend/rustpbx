@@ -598,10 +598,14 @@ impl ProxyModule for RegistrarModule {
                 expires,
                 destination: Some(destination.clone()),
                 last_modified: Some(Instant::now()),
-                supports_webrtc: entry
-                    .transport()
-                    .map(|t| matches!(t, Transport::Ws | Transport::Wss))
-                    .unwrap_or(user.is_support_webrtc),
+                supports_webrtc: {
+                    let is_ws = entry
+                        .transport()
+                        .map(|t| matches!(t, Transport::Ws | Transport::Wss))
+                        .unwrap_or(false);
+                    let is_invalid = entry.uri().host().to_string().contains(".invalid");
+                    (is_ws && is_invalid) || user.is_support_webrtc
+                },
                 credential: None,
                 headers: None,
                 registered_aor: Some(registered_aor.clone()),
