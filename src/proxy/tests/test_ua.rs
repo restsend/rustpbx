@@ -1,4 +1,3 @@
-use crate::call::user::SipUser;
 use anyhow::{Result, anyhow};
 use rsip::prelude::HeadersExt;
 use rsip::typed::MediaType;
@@ -13,10 +12,8 @@ use rsipstack::transport::TransportLayer;
 use rsipstack::transport::udp::UdpConnection;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Duration;
 use tokio::select;
 use tokio::sync::mpsc::unbounded_channel;
-use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 use tracing::debug;
 
@@ -378,17 +375,30 @@ impl TestUa {
             while let Ok(state) = state_receiver.try_recv() {
                 match state {
                     DialogState::Calling(id) => {
+                        debug!("TestUa: Received Calling state for {}", id);
                         events.push(TestUaEvent::IncomingCall(id));
                     }
-                    DialogState::Early(id, resp) => match resp.status_code {
-                        rsip::StatusCode::Ringing => {
-                            events.push(TestUaEvent::CallRinging(id.clone()));
-                            if !resp.body().is_empty() {
-                                events.push(TestUaEvent::EarlyMedia(id));
+                    DialogState::Trying(id) => {
+                        debug!("TestUa: Received Trying state for {}", id);
+                        events.push(TestUaEvent::IncomingCall(id));
+                    }
+                    DialogState::Early(id, resp) => {
+                        debug!(
+                            "TestUa: Received Early state ({}) for {}",
+                            resp.status_code, id
+                        );
+                        match resp.status_code {
+                            rsip::StatusCode::Ringing => {
+                                events.push(TestUaEvent::CallRinging(id.clone()));
+                                if !resp.body().is_empty() {
+                                    events.push(TestUaEvent::EarlyMedia(id));
+                                }
+                            }
+                            _ => {
+                                events.push(TestUaEvent::IncomingCall(id));
                             }
                         }
-                        _ => {}
-                    },
+                    }
                     DialogState::Confirmed(id, _) => {
                         events.push(TestUaEvent::CallEstablished(id));
                     }
@@ -526,9 +536,12 @@ a=sendrecv\r\n",
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::time::Duration;
+    use tokio::time::sleep;
     use tracing::Level;
 
     use super::*;
+    use crate::call::SipUser;
     use crate::config::{MediaProxyMode, ProxyConfig};
     use crate::proxy::{
         auth::AuthModule, call::CallModule, locator::MemoryLocator, registrar::RegistrarModule,

@@ -459,7 +459,6 @@ async fn test_guest_call_allowed_extension() {
         dialog_layer,
         dialplan_inspectors: Vec::new(),
         create_route_invite: None,
-        proxycall_inspector: None,
         ignore_out_of_dialog_request: true,
         locator_events: None,
         sip_flow: None,

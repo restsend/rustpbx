@@ -503,6 +503,7 @@ fn test_queue_fallback_play_then_hangup_action() {
             audio_file,
             status_code,
             reason,
+            ..
         }) => {
             assert_eq!(audio_file, "prompts/busy.wav");
             assert_eq!(status_code, StatusCode::BusyHere);

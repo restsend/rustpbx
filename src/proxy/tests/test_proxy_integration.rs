@@ -107,7 +107,7 @@ impl TestProxyServer {
             .register_module("call", |inner, config| {
                 Ok(Box::new(CallModule::new(config, inner)))
             });
-        let server = builder.build().await?;
+        let server = Arc::new(builder.build().await?);
 
         // Start server
         tokio::spawn(async move {

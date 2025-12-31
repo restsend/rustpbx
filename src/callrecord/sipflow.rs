@@ -57,10 +57,19 @@ impl SipFlow {
 
     fn record(&self, direction: SipFlowDirection, msg: &SipMessage) {
         if let Ok(mut messages) = self.inner.messages.lock() {
-            let call_id = match msg {
-                rsip::SipMessage::Request(req) => req.call_id_header(),
-                rsip::SipMessage::Response(resp) => resp.call_id_header(),
+            let (call_id, method) = match msg {
+                rsip::SipMessage::Request(req) => (req.call_id_header(), Some(req.method.clone())),
+                rsip::SipMessage::Response(resp) => (
+                    resp.call_id_header(),
+                    resp.cseq_header().ok().map(|c| c.method().ok()).flatten(),
+                ),
             };
+
+            if matches!(method, Some(rsip::Method::Register)) {
+                // register use same call-id for multiple messages, skip recording
+                return;
+            }
+
             if let Ok(id) = call_id {
                 if let Some(items_mut) = messages.get_mut(&id.value().to_string()) {
                     let item = SipMessageItem {

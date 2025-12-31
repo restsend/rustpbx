@@ -17,7 +17,7 @@ use crate::{
         FnCreateRouteInvite,
         active_call_registry::ActiveProxyCallRegistry,
         auth::AuthBackend,
-        call::{CallRouter, DialplanInspector, ProxyCallInspector},
+        call::{CallRouter, DialplanInspector},
     },
 };
 use anyhow::{Result, anyhow};
@@ -60,7 +60,6 @@ pub struct SipServerInner {
     pub auth_backend: Vec<Box<dyn AuthBackend>>,
     pub call_router: Option<Box<dyn CallRouter>>,
     pub dialplan_inspectors: Vec<Box<dyn DialplanInspector>>,
-    pub proxycall_inspector: Option<Box<dyn ProxyCallInspector>>,
     pub locator: Arc<Box<dyn Locator>>,
     pub callrecord_sender: Option<CallRecordSender>,
     pub endpoint: Endpoint,
@@ -95,7 +94,6 @@ pub struct SipServerBuilder {
     callrecord_sender: Option<CallRecordSender>,
     message_inspector: Option<Box<dyn MessageInspector>>,
     dialplan_inspectors: Vec<Box<dyn DialplanInspector>>,
-    proxycall_inspector: Option<Box<dyn ProxyCallInspector>>,
     create_route_invite: Option<FnCreateRouteInvite>,
     database: Option<DatabaseConnection>,
     data_context: Option<Arc<ProxyDataContext>>,
@@ -114,7 +112,6 @@ impl SipServerBuilder {
             user_backend: None,
             auth_backend: Vec::new(),
             call_router: None,
-            proxycall_inspector: None,
             module_fns: HashMap::new(),
             locator: None,
             callrecord_sender: None,
@@ -188,10 +185,6 @@ impl SipServerBuilder {
         self
     }
 
-    pub fn with_proxycall_inspector(mut self, inspector: Box<dyn ProxyCallInspector>) -> Self {
-        self.proxycall_inspector = Some(inspector);
-        self
-    }
     pub fn with_rtp_config(mut self, config: RtpConfig) -> Self {
         self.rtp_config = Some(config);
         self
@@ -437,7 +430,6 @@ impl SipServerBuilder {
         let endpoint = endpoint_builder.build();
 
         let call_router = self.call_router;
-        let proxycall_inspector = self.proxycall_inspector;
         let dialog_layer = Arc::new(DialogLayer::new(endpoint.inner.clone()));
 
         let database = self.database.clone();
@@ -463,7 +455,6 @@ impl SipServerBuilder {
             user_backend: user_backend,
             auth_backend: auth_backend,
             call_router: call_router,
-            proxycall_inspector: proxycall_inspector,
             locator: locator.clone(),
             callrecord_sender: self.callrecord_sender,
             endpoint,
@@ -658,6 +649,7 @@ impl SipServer {
                 runnings_tx.fetch_add(1, Ordering::Relaxed);
                 let start_time = Instant::now();
                 let cookie = TransactionCookie::from(&tx.key);
+                let guard = token.clone().drop_guard();
                 select! {
                     r = Self::process_transaction(token.clone(), modules, cookie.clone(),  &mut tx) => {
                         let final_status = tx.last_response.as_ref().map(|r| r.status_code());
@@ -683,6 +675,7 @@ impl SipServer {
                 {
                     tx.reply(rsip::StatusCode::NotImplemented).await.ok();
                 }
+                let _ = guard;
                 Ok::<(), anyhow::Error>(())
             });
         }

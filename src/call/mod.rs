@@ -1,23 +1,28 @@
-use crate::config::{MediaProxyMode, RouteResult};
+use crate::{
+    config::{MediaProxyMode, RouteResult},
+    media::recorder::RecorderOption,
+};
 use anyhow::Result;
+use audio_codec::CodecType;
 use rsip::{StatusCode, Transport};
 use rsipstack::{
     dialog::{authenticate::Credential, invitation::InviteOption},
     transport::SipAddr,
 };
+use rustrtc::IceServer;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
-use voice_engine::{IceServer, media::recorder::RecorderOption};
 
 pub mod cookie;
 pub mod policy;
+pub mod queue_config;
 pub mod sip;
 pub mod user;
-pub use cookie::TransactionCookie;
+pub use cookie::{CalleeDisplayName, TenantId, TransactionCookie};
 pub use user::SipUser;
 
 /// Default hold audio that ships with config/sounds.
@@ -227,9 +232,20 @@ impl std::fmt::Display for DialStrategy {
 
 #[derive(Debug, Clone)]
 pub struct RingbackConfig {
+    /// Audio file to play as local ringback
     pub audio_file: Option<String>,
+
     /// Whether to wait for ringtone playback completion before starting call dialing (default: false)
     pub wait_for_completion: Option<bool>,
+
+    /// Whether to play local ringback tone (183 + local audio file)
+    pub play_local_ringback: bool,
+
+    /// Local ringback audio file path (alternative to audio_file)
+    pub local_ringback_file: Option<String>,
+
+    /// Whether to passthrough callee's early media (183 from callee)
+    pub passthrough_early_media: Option<bool>,
 }
 
 impl Default for RingbackConfig {
@@ -243,11 +259,25 @@ impl RingbackConfig {
         Self {
             audio_file: None,
             wait_for_completion: Some(false),
+            play_local_ringback: false,
+            local_ringback_file: None,
+            passthrough_early_media: None,
         }
     }
 
     pub fn with_audio_file(mut self, file: String) -> Self {
         self.audio_file = Some(file);
+        self
+    }
+
+    pub fn with_local_ringback(mut self, file: String) -> Self {
+        self.play_local_ringback = true;
+        self.local_ringback_file = Some(file);
+        self
+    }
+
+    pub fn with_passthrough_early_media(mut self, enable: bool) -> Self {
+        self.passthrough_early_media = Some(enable);
         self
     }
 }
@@ -311,6 +341,7 @@ impl Default for QueuePlan {
             fallback: Some(QueueFallbackAction::Failure(
                 FailureAction::PlayThenHangup {
                     audio_file: DEFAULT_QUEUE_FAILURE_AUDIO.to_string(),
+                    use_early_media: false,
                     status_code: StatusCode::TemporarilyUnavailable,
                     reason: Some("All agents are currently unavailable".to_string()),
                 },
@@ -455,12 +486,22 @@ pub enum FailureAction {
         code: Option<StatusCode>,
         reason: Option<String>,
     },
+
     /// Play audio file and then hangup
     PlayThenHangup {
+        /// Audio file to play
         audio_file: String,
+
+        /// Whether to use 183 early media (true) or 200 OK (false) for playback
+        use_early_media: bool,
+
+        /// Final status code to send after playback
         status_code: StatusCode,
+
+        /// Optional reason phrase
         reason: Option<String>,
     },
+
     /// Transfer to another destination
     Transfer(TransferEndpoint),
 }
@@ -547,7 +588,7 @@ pub struct Dialplan {
     pub caller: Option<rsip::Uri>,
     pub flow: DialplanFlow,
     pub max_ring_time: u32,
-    pub original: rsip::Request,
+    pub original: Arc<rsip::Request>,
     // Enhanced call control options
     /// Recording configuration
     pub recording: CallRecordingConfig,
@@ -561,11 +602,15 @@ pub struct Dialplan {
     pub call_timeout: Duration,
     /// What to do when a call fails
     pub failure_action: FailureAction,
+    /// Enable SIP flow recording (SIP message logging)
+    pub enable_sipflow: bool,
 
     pub call_forwarding: Option<CallForwardingConfig>,
 
     pub route_invite: Option<Box<dyn RouteInvite>>,
     pub with_original_headers: bool,
+    pub extensions: http::Extensions,
+    pub allow_codecs: Vec<CodecType>,
 }
 
 impl Dialplan {
@@ -582,7 +627,7 @@ impl Dialplan {
             direction,
             session_id: Some(session_id),
             call_id: None,
-            original,
+            original: Arc::new(original),
             caller_display_name: None,
             caller: None,
             caller_contact: None,
@@ -594,9 +639,20 @@ impl Dialplan {
             max_call_duration: Some(Duration::from_secs(3600)), // 1 hour
             call_timeout: Duration::from_secs(60),              // 60 seconds
             failure_action: FailureAction::default(),
+            enable_sipflow: true, // Enable SIP flow recording by default
             call_forwarding: None,
             route_invite: None,
             with_original_headers: true,
+            extensions: http::Extensions::new(),
+            allow_codecs: vec![
+                #[cfg(feature = "opus")]
+                CodecType::Opus,
+                CodecType::G729,
+                CodecType::G722,
+                CodecType::PCMU,
+                CodecType::PCMA,
+                CodecType::TelephoneEvent,
+            ],
         }
     }
 
@@ -659,6 +715,11 @@ impl Dialplan {
 
     pub fn with_caller_contact(mut self, contact: rsip::typed::Contact) -> Self {
         self.caller_contact = Some(contact);
+        self
+    }
+
+    pub fn with_extension<T: Clone + Send + Sync + 'static>(mut self, val: T) -> Self {
+        self.extensions.insert(val);
         self
     }
 

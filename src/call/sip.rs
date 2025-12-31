@@ -6,7 +6,7 @@ use tracing::{info, warn};
 
 pub struct DialogStateReceiverGuard {
     pub(super) dialog_layer: Arc<DialogLayer>,
-    pub(super) receiver: DialogStateReceiver,
+    pub(super) receiver: Option<DialogStateReceiver>,
     pub(super) dialog_id: Option<DialogId>,
 }
 
@@ -14,16 +14,25 @@ impl DialogStateReceiverGuard {
     pub fn new(dialog_layer: Arc<DialogLayer>, receiver: DialogStateReceiver) -> Self {
         Self {
             dialog_layer,
-            receiver,
+            receiver: Some(receiver),
             dialog_id: None,
         }
     }
     pub async fn recv(&mut self) -> Option<DialogState> {
-        let state = self.receiver.recv().await;
+        let receiver = self.receiver.as_mut()?;
+        let state = receiver.recv().await;
         if let Some(ref s) = state {
             self.dialog_id = Some(s.id().clone());
         }
         state
+    }
+
+    pub fn take_receiver(&mut self) -> Option<DialogStateReceiver> {
+        self.receiver.take()
+    }
+
+    pub fn disarm(&mut self) {
+        self.dialog_id = None;
     }
 
     fn take_dialog(&mut self) -> Option<Dialog> {

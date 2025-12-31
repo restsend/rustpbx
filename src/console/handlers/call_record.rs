@@ -1,7 +1,7 @@
-use crate::callrecord::CallRecord;
 use crate::callrecord::sipflow::{SipFlowDirection, SipMessageItem};
 use crate::callrecord::storage;
 use crate::callrecord::storage::CdrStorage;
+use crate::callrecord::{CallRecord, CallRecordExtras};
 use crate::console::{ConsoleState, handlers::forms, middleware::AuthRequired};
 use axum::{
     Json, Router,
@@ -63,8 +63,6 @@ struct QueryCallRecordFilters {
     sip_trunk_ids: Option<Vec<i64>>,
     #[serde(default)]
     tags: Option<Vec<String>>,
-    #[serde(default)]
-    billing_status: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -1067,13 +1065,6 @@ fn build_condition(filters: &Option<QueryCallRecordFilters>) -> Condition {
             }
             condition = condition.add(any_tag);
         }
-
-        if let Some(billing_status_raw) = filters.billing_status.as_ref() {
-            let trimmed = billing_status_raw.trim();
-            if !trimmed.is_empty() && !equals_ignore_ascii_case(trimmed, "any") {
-                condition = condition.add(CallRecordColumn::BillingStatus.eq(trimmed));
-            }
-        }
     }
 
     condition
@@ -1250,10 +1241,6 @@ fn collect_leg_roles_from_cdr(
             .entry(call_id.to_string())
             .or_insert_with(|| role.to_string());
     }
-
-    if let Some(refer) = record.refer_callrecord.as_ref() {
-        collect_leg_roles_from_cdr(refer, "b2bua", target);
-    }
 }
 
 fn collect_leg_roles_from_value(value: &Value, target: &mut HashMap<String, String>) {
@@ -1426,21 +1413,6 @@ fn build_record_payload(
         .clone()
         .or_else(|| sip_trunk_name.clone());
 
-    let quality = if record.quality_mos.is_some()
-        || record.quality_latency_ms.is_some()
-        || record.quality_jitter_ms.is_some()
-        || record.quality_packet_loss_percent.is_some()
-    {
-        Some(json!({
-            "mos": record.quality_mos,
-            "latency_ms": record.quality_latency_ms,
-            "jitter_ms": record.quality_jitter_ms,
-            "packet_loss": record.quality_packet_loss_percent,
-        }))
-    } else {
-        None
-    };
-
     let caller_uri = record.caller_uri.clone();
     let callee_uri = record.callee_uri.clone();
 
@@ -1458,7 +1430,6 @@ fn build_record_payload(
             .or_else(|| callee_uri.clone());
     let rewrite_contact = json_lookup_nested_str(&record.metadata, &["rewrite", "contact"]);
     let rewrite_destination = json_lookup_nested_str(&record.metadata, &["rewrite", "destination"]);
-    let billing = build_billing_payload(record);
     let status_code = json_lookup_u16(&record.metadata, "status_code");
     let ring_time = json_lookup_str(&record.metadata, "ring_time");
     let answer_time = json_lookup_str(&record.metadata, "answer_time");
@@ -1488,13 +1459,11 @@ fn build_record_payload(
         "transcript_language": record.transcript_language,
         "duration_secs": record.duration_secs,
         "recording": recording,
-        "quality": quality,
         "started_at": record.started_at.to_rfc3339(),
         "ring_time": ring_time,
         "answer_time": answer_time,
         "ended_at": record.ended_at.map(|dt| dt.to_rfc3339()),
         "detail_url": state.url_for(&format!("/call-records/{}", record.id)),
-        "billing": billing,
         "status_code": status_code,
         "hangup_reason": hangup_reason,
         "hangup_messages": hangup_messages,
@@ -1600,8 +1569,8 @@ pub async fn load_cdr_data(state: &ConsoleState, record: &CallRecordModel) -> Op
 
 fn extract_sip_flow_paths_from_cdr(record: &CallRecord) -> Vec<SipFlowFileRef> {
     let mut paths = Vec::new();
-    if let Some(extras) = record.extras.as_ref() {
-        if let Some(value) = extras.get("sip_flow_files") {
+    if let Some(extras) = record.extensions.get::<CallRecordExtras>() {
+        if let Some(value) = extras.0.get("sip_flow_files") {
             if let Some(entries) = value.as_array() {
                 for entry in entries {
                     if let Some(path) = entry.get("path").and_then(|v| v.as_str()) {
@@ -1692,31 +1661,6 @@ async fn load_sip_flow_from_files(
     all_items
 }
 
-fn build_billing_payload(record: &CallRecordModel) -> Value {
-    let billable_secs = record.billing_billable_secs.unwrap_or(0);
-    let billable_minutes = if billable_secs > 0 {
-        Some((billable_secs as f64 / 60.0 * 100.0).round() / 100.0)
-    } else {
-        None
-    };
-
-    json!({
-        "status": record.billing_status.clone(),
-        "method": record.billing_method.clone(),
-        "currency": record.billing_currency.clone(),
-        "billable_secs": record.billing_billable_secs,
-        "billable_minutes": billable_minutes,
-        "rate_per_minute": record.billing_rate_per_minute,
-        "amount": {
-            "subtotal": record.billing_amount_subtotal,
-            "tax": record.billing_amount_tax,
-            "total": record.billing_amount_total,
-        },
-        "result": record.billing_result.clone().unwrap_or(Value::Null),
-        "snapshot_available": record.billing_snapshot.is_some(),
-    })
-}
-
 fn build_detail_payload(
     record: &CallRecordModel,
     related: &RelatedContext,
@@ -1729,17 +1673,10 @@ fn build_detail_payload(
     let record_payload =
         build_record_payload(record, related, state, inline_recording_url.as_deref());
     let participants = build_participants(record, related);
-    let billing_summary = record_payload
-        .get("billing")
-        .cloned()
-        .unwrap_or_else(|| build_billing_payload(record));
 
     let media_metrics = json!({
         "audio_codec": json_lookup_str(&record.metadata, "audio_codec"),
         "rtp_packets": json_lookup_number(&record.analytics, "rtp_packets"),
-        "avg_jitter_ms": record.quality_jitter_ms,
-        "packet_loss_percent": record.quality_packet_loss_percent,
-        "mos": record.quality_mos,
         "rtcp_observations": Value::Array(vec![]),
     });
 
@@ -1823,11 +1760,6 @@ fn build_detail_payload(
         "participants": participants,
         "signaling": signaling,
         "rewrite": rewrite,
-        "billing": json!({
-            "summary": billing_summary,
-            "snapshot": record.billing_snapshot.clone().unwrap_or(Value::Null),
-            "result": record.billing_result.clone().unwrap_or(Value::Null),
-        }),
         "actions": json!({
             "download_recording": download_recording,
             "download_metadata": metadata_download,
@@ -1845,16 +1777,13 @@ fn build_signaling_from_cdr(cdr: &CdrData) -> Value {
         return Value::Null;
     }
     json!({
-        "is_b2bua": cdr.record.refer_callrecord.is_some(),
+        "is_b2bua": false,
         "legs": legs,
     })
 }
 
 fn append_cdr_leg(legs: &mut Vec<Value>, role: &str, record: &CallRecord) {
     legs.push(signaling_leg_payload(role, record));
-    if let Some(refer) = record.refer_callrecord.as_ref() {
-        append_cdr_leg(legs, "b2bua", refer);
-    }
 }
 
 fn signaling_leg_payload(role: &str, record: &CallRecord) -> Value {
@@ -1919,12 +1848,26 @@ fn extract_sip_flow_paths(record: &CallRecordModel) -> Vec<SipFlowFileRef> {
 }
 
 async fn read_sip_flow_file(storage: Option<&CdrStorage>, path: &str) -> Vec<SipMessageItem> {
+    let mut bytes: Option<Vec<u8>> = None;
+
     if let Some(storage_ref) = storage {
-        if let Ok(bytes) = storage_ref.read_bytes(path).await {
-            return parse_sip_flow_bytes(path, &bytes);
+        if let Ok(data) = storage_ref.read_bytes(path).await {
+            bytes = Some(data);
         }
     }
-    vec![]
+
+    // Fallback to local filesystem if storage read failed or storage is None
+    if bytes.is_none() {
+        match tokio::fs::read(path).await {
+            Ok(data) => bytes = Some(data),
+            Err(err) => {
+                warn!(path = %path, "failed to read sip flow file: {}", err);
+                return vec![];
+            }
+        }
+    }
+
+    parse_sip_flow_bytes(path, &bytes.unwrap_or_default())
 }
 
 fn parse_sip_flow_bytes(path: &str, bytes: &[u8]) -> Vec<SipMessageItem> {
@@ -2358,7 +2301,6 @@ mod tests {
         let filters = load_filters(&db).await.expect("filters");
         assert!(filters.get("status").is_some());
         assert!(filters.get("direction").is_some());
-        assert!(filters.get("billing_status").is_some());
     }
 
     #[tokio::test]
@@ -2387,6 +2329,5 @@ mod tests {
             .expect("related context");
         let payload = build_record_payload(&record, &related, &state, None);
         assert_eq!(payload["id"], 1);
-        assert!(payload.get("billing").is_some());
     }
 }

@@ -62,6 +62,28 @@ impl Default for SessionTimerState {
     }
 }
 
+impl SessionTimerState {
+    pub fn should_refresh(&self) -> bool {
+        if !self.active {
+            return false;
+        }
+        // RFC 4028: Refresher should send refresh at half the interval
+        self.last_refresh.elapsed() >= self.session_interval / 2
+    }
+
+    pub fn is_expired(&self) -> bool {
+        if !self.active {
+            return false;
+        }
+        // RFC 4028: If no refresh received within interval, session is expired
+        self.last_refresh.elapsed() >= self.session_interval
+    }
+
+    pub fn update_refresh(&mut self) {
+        self.last_refresh = Instant::now();
+    }
+}
+
 pub fn get_header_value(headers: &rsip::Headers, name: &str) -> Option<String> {
     headers.iter().find_map(|h| match h {
         rsip::Header::Other(n, v) if n.eq_ignore_ascii_case(name) => Some(v.clone()),

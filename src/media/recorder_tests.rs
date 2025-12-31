@@ -1,0 +1,463 @@
+#[cfg(test)]
+mod recorder_advanced_tests {
+    use super::super::recorder::{DtmfGenerator, Leg, Recorder};
+    use audio_codec::CodecType;
+    use rustrtc::media::{AudioFrame, MediaSample};
+
+    // ==================== DTMF Generator Tests ====================
+
+    #[test]
+    fn test_dtmf_generator_all_digits() {
+        let generator = DtmfGenerator::new(8000);
+
+        // Test all standard DTMF digits
+        let digits = ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '*', '#'];
+        for digit in digits.iter() {
+            let samples = generator.generate(*digit, 100); // 100ms duration
+            assert!(
+                !samples.is_empty(),
+                "DTMF for {} should generate samples",
+                digit
+            );
+
+            // At 8000 Hz, 100ms should be 800 samples
+            let expected_samples = 800;
+            assert_eq!(
+                samples.len(),
+                expected_samples,
+                "DTMF {} should generate {} samples",
+                digit,
+                expected_samples
+            );
+        }
+    }
+
+    #[test]
+    fn test_dtmf_generator_extended_digits() {
+        let generator = DtmfGenerator::new(8000);
+
+        // Test extended DTMF digits (A, B, C, D)
+        let digits = ['A', 'B', 'C', 'D'];
+        for digit in digits.iter() {
+            let samples = generator.generate(*digit, 100);
+            assert!(
+                !samples.is_empty(),
+                "Extended DTMF {} should generate samples",
+                digit
+            );
+        }
+    }
+
+    #[test]
+    fn test_dtmf_generator_invalid_digit() {
+        let generator = DtmfGenerator::new(8000);
+
+        // Invalid digit should return empty vec
+        let samples = generator.generate('X', 100);
+        assert!(
+            samples.is_empty(),
+            "Invalid digit should return empty samples"
+        );
+    }
+
+    #[test]
+    fn test_dtmf_generator_different_sample_rates() {
+        // Test at 8000 Hz
+        let generator_8k = DtmfGenerator::new(8000);
+        let samples_8k = generator_8k.generate('5', 100);
+        assert_eq!(samples_8k.len(), 800);
+
+        // Test at 16000 Hz
+        let generator_16k = DtmfGenerator::new(16000);
+        let samples_16k = generator_16k.generate('5', 100);
+        assert_eq!(samples_16k.len(), 1600);
+
+        // Test at 48000 Hz
+        let generator_48k = DtmfGenerator::new(48000);
+        let samples_48k = generator_48k.generate('5', 100);
+        assert_eq!(samples_48k.len(), 4800);
+    }
+
+    #[test]
+    fn test_dtmf_generator_duration_scaling() {
+        let generator = DtmfGenerator::new(8000);
+
+        // 50ms should generate 400 samples at 8000 Hz
+        let samples_50ms = generator.generate('1', 50);
+        assert_eq!(samples_50ms.len(), 400);
+
+        // 200ms should generate 1600 samples at 8000 Hz
+        let samples_200ms = generator.generate('1', 200);
+        assert_eq!(samples_200ms.len(), 1600);
+    }
+
+    // ==================== Recorder Format Tests ====================
+
+    #[test]
+    fn test_recorder_wav_header_pcmu() {
+        let temp_path = std::env::temp_dir().join("test_pcmu.wav");
+        let path_str = temp_path.to_str().unwrap();
+
+        // Create recorder with PCMU
+        let recorder = Recorder::new(
+            path_str,
+            CodecType::PCMU,
+            CodecType::PCMU,
+            CodecType::PCMU,
+            8000,
+            2,
+        );
+        assert!(recorder.is_ok(), "Should create PCMU recorder");
+
+        // File should exist
+        assert!(temp_path.exists(), "WAV file should be created");
+
+        // Read first 44 bytes (WAV header)
+        let file_content = std::fs::read(&temp_path).unwrap();
+        assert!(
+            file_content.len() >= 44,
+            "WAV file should have at least 44 bytes header"
+        );
+
+        // Check RIFF signature
+        assert_eq!(&file_content[0..4], b"RIFF", "Should have RIFF signature");
+        assert_eq!(&file_content[8..12], b"WAVE", "Should have WAVE signature");
+        assert_eq!(&file_content[12..16], b"fmt ", "Should have fmt chunk");
+
+        // Cleanup
+        let _ = std::fs::remove_file(&temp_path);
+    }
+
+    #[test]
+    fn test_recorder_wav_header_pcma() {
+        let temp_path = std::env::temp_dir().join("test_pcma.wav");
+        let path_str = temp_path.to_str().unwrap();
+
+        let recorder = Recorder::new(
+            path_str,
+            CodecType::PCMA,
+            CodecType::PCMA,
+            CodecType::PCMA,
+            8000,
+            2,
+        );
+        assert!(recorder.is_ok(), "Should create PCMA recorder");
+
+        assert!(temp_path.exists(), "WAV file should be created");
+
+        // Cleanup
+        let _ = std::fs::remove_file(&temp_path);
+    }
+
+    #[test]
+    fn test_recorder_wav_header_g722() {
+        let temp_path = std::env::temp_dir().join("test_g722.wav");
+        let path_str = temp_path.to_str().unwrap();
+
+        let recorder = Recorder::new(
+            path_str,
+            CodecType::G722,
+            CodecType::G722,
+            CodecType::G722,
+            8000,
+            2,
+        );
+        assert!(recorder.is_ok(), "Should create G722 recorder");
+
+        assert!(temp_path.exists(), "WAV file should be created");
+
+        // Cleanup
+        let _ = std::fs::remove_file(&temp_path);
+    }
+
+    // ==================== Recorder Dual-Leg Tests ====================
+
+    #[test]
+    fn test_recorder_dual_leg_recording() {
+        let temp_path = std::env::temp_dir().join("test_dual_leg.wav");
+        let path_str = temp_path.to_str().unwrap();
+
+        let mut recorder = Recorder::new(
+            path_str,
+            CodecType::PCMU,
+            CodecType::PCMU,
+            CodecType::PCMU,
+            8000,
+            2, // 2 channels for dual leg
+        )
+        .unwrap();
+
+        // Create mock audio frames for both legs
+        let frame_a = AudioFrame {
+            data: vec![0xFF; 160].into(), // 20ms @ 8kHz PCMU
+            rtp_timestamp: 0,
+            sequence_number: Some(1),
+            payload_type: Some(0),
+            sample_rate: 8000,
+            channels: 1,
+            samples: 160,
+        };
+
+        let frame_b = AudioFrame {
+            data: vec![0x00; 160].into(),
+            rtp_timestamp: 0,
+            sequence_number: Some(1),
+            payload_type: Some(0),
+            sample_rate: 8000,
+            channels: 1,
+            samples: 160,
+        };
+
+        // Write samples from both legs
+        recorder
+            .write_sample(Leg::A, &MediaSample::Audio(frame_a), None)
+            .expect("Should write Leg A sample");
+
+        recorder
+            .write_sample(Leg::B, &MediaSample::Audio(frame_b), None)
+            .expect("Should write Leg B sample");
+
+        // Force flush
+        recorder.finalize().expect("Should finalize recorder");
+
+        // File should have data
+        let metadata = std::fs::metadata(&temp_path).unwrap();
+        assert!(
+            metadata.len() > 44,
+            "WAV file should have audio data beyond header"
+        );
+
+        // Cleanup
+        let _ = std::fs::remove_file(&temp_path);
+    }
+
+    #[test]
+    fn test_recorder_single_channel_recording() {
+        let temp_path = std::env::temp_dir().join("test_single_channel.wav");
+        let path_str = temp_path.to_str().unwrap();
+
+        let mut recorder = Recorder::new(
+            path_str,
+            CodecType::PCMU,
+            CodecType::PCMU,
+            CodecType::PCMU,
+            8000,
+            1, // 1 channel (mono, mixed)
+        )
+        .unwrap();
+
+        let frame = AudioFrame {
+            data: vec![0xFF; 160].into(),
+            rtp_timestamp: 0,
+            sequence_number: Some(1),
+            payload_type: Some(0),
+            sample_rate: 8000,
+            channels: 1,
+            samples: 160,
+        };
+
+        recorder
+            .write_sample(Leg::A, &MediaSample::Audio(frame), None)
+            .expect("Should write sample");
+
+        recorder.finalize().expect("Should finalize recorder");
+
+        let metadata = std::fs::metadata(&temp_path).unwrap();
+        assert!(metadata.len() > 44, "WAV file should have audio data");
+
+        // Cleanup
+        let _ = std::fs::remove_file(&temp_path);
+    }
+
+    // ==================== DTMF Recording Tests ====================
+
+    #[test]
+    fn test_recorder_dtmf_event_payload() {
+        let temp_path = std::env::temp_dir().join("test_dtmf.wav");
+        let path_str = temp_path.to_str().unwrap();
+
+        let mut recorder = Recorder::new(
+            path_str,
+            CodecType::PCMU,
+            CodecType::PCMU,
+            CodecType::PCMU,
+            8000,
+            2,
+        )
+        .unwrap();
+
+        // DTMF payload: digit '5' (code 5), end bit set, duration 800 samples
+        let dtmf_payload = vec![
+            5,    // digit code for '5'
+            0x80, // end bit set
+            0x03, // duration high byte
+            0x20, // duration low byte (800 in big-endian)
+        ];
+
+        recorder
+            .write_dtmf_payload(Leg::A, &dtmf_payload)
+            .expect("Should write DTMF payload");
+
+        recorder.finalize().expect("Should finalize");
+
+        let metadata = std::fs::metadata(&temp_path).unwrap();
+        assert!(metadata.len() > 44, "Should have recorded DTMF tone");
+
+        // Cleanup
+        let _ = std::fs::remove_file(&temp_path);
+    }
+
+    #[test]
+    fn test_recorder_dtmf_all_digits() {
+        let temp_path = std::env::temp_dir().join("test_dtmf_all.wav");
+        let path_str = temp_path.to_str().unwrap();
+
+        let mut recorder = Recorder::new(
+            path_str,
+            CodecType::PCMU,
+            CodecType::PCMU,
+            CodecType::PCMU,
+            8000,
+            2,
+        )
+        .unwrap();
+
+        // Test digits 0-9
+        for digit in 0u8..=9u8 {
+            let payload = vec![digit, 0x80, 0x03, 0x20];
+            recorder
+                .write_dtmf_payload(Leg::A, &payload)
+                .expect(&format!("Should write DTMF {}", digit));
+        }
+
+        // Test * (code 10)
+        let payload_star = vec![10, 0x80, 0x03, 0x20];
+        recorder.write_dtmf_payload(Leg::A, &payload_star).unwrap();
+
+        // Test # (code 11)
+        let payload_hash = vec![11, 0x80, 0x03, 0x20];
+        recorder.write_dtmf_payload(Leg::A, &payload_hash).unwrap();
+
+        recorder.finalize().expect("Should finalize");
+
+        // Cleanup
+        let _ = std::fs::remove_file(&temp_path);
+    }
+
+    #[test]
+    fn test_recorder_dtmf_invalid_payload() {
+        let temp_path = std::env::temp_dir().join("test_dtmf_invalid.wav");
+        let path_str = temp_path.to_str().unwrap();
+
+        let mut recorder = Recorder::new(
+            path_str,
+            CodecType::PCMU,
+            CodecType::PCMU,
+            CodecType::PCMU,
+            8000,
+            2,
+        )
+        .unwrap();
+
+        // Too short payload (should be ignored)
+        let short_payload = vec![5, 0x80];
+        let result = recorder.write_dtmf_payload(Leg::A, &short_payload);
+        assert!(result.is_ok(), "Short payload should be ignored gracefully");
+
+        // Invalid digit code (>15)
+        let invalid_payload = vec![99, 0x80, 0x03, 0x20];
+        let result = recorder.write_dtmf_payload(Leg::A, &invalid_payload);
+        assert!(result.is_ok(), "Invalid digit should be ignored gracefully");
+
+        recorder.finalize().expect("Should finalize");
+
+        // Cleanup
+        let _ = std::fs::remove_file(&temp_path);
+    }
+
+    // ==================== Codec Format Detection Tests ====================
+
+    #[test]
+    fn test_is_wav_format_comprehensive() {
+        // WAV-compatible codecs
+        assert!(Recorder::is_wav_format(CodecType::PCMU));
+        assert!(Recorder::is_wav_format(CodecType::PCMA));
+        assert!(Recorder::is_wav_format(CodecType::G722));
+
+        // Non-WAV codecs (would need different container)
+        assert!(!Recorder::is_wav_format(CodecType::Opus));
+        assert!(!Recorder::is_wav_format(CodecType::G729));
+    }
+
+    // ==================== Edge Cases ====================
+
+    #[test]
+    fn test_recorder_empty_finalize() {
+        let temp_path = std::env::temp_dir().join("test_empty.wav");
+        let path_str = temp_path.to_str().unwrap();
+
+        let mut recorder = Recorder::new(
+            path_str,
+            CodecType::PCMU,
+            CodecType::PCMU,
+            CodecType::PCMU,
+            8000,
+            2,
+        )
+        .unwrap();
+
+        // Finalize without writing any samples
+        recorder.finalize().expect("Should finalize empty recorder");
+
+        // Should still have valid WAV header
+        let metadata = std::fs::metadata(&temp_path).unwrap();
+        assert_eq!(metadata.len(), 44, "Empty WAV should have just the header");
+
+        // Cleanup
+        let _ = std::fs::remove_file(&temp_path);
+    }
+
+    #[test]
+    fn test_recorder_multiple_finalize() {
+        let temp_path = std::env::temp_dir().join("test_multi_finalize.wav");
+        let path_str = temp_path.to_str().unwrap();
+
+        let mut recorder = Recorder::new(
+            path_str,
+            CodecType::PCMU,
+            CodecType::PCMU,
+            CodecType::PCMU,
+            8000,
+            2,
+        )
+        .unwrap();
+
+        // Multiple finalize calls should be safe
+        recorder.finalize().expect("First finalize should succeed");
+        recorder.finalize().expect("Second finalize should succeed");
+        recorder.finalize().expect("Third finalize should succeed");
+
+        // Cleanup
+        let _ = std::fs::remove_file(&temp_path);
+    }
+
+    #[test]
+    fn test_recorder_high_sample_rate() {
+        let temp_path = std::env::temp_dir().join("test_high_rate.wav");
+        let path_str = temp_path.to_str().unwrap();
+
+        // Test with 48kHz (Opus sample rate)
+        let recorder = Recorder::new(
+            path_str,
+            CodecType::PCMU,
+            CodecType::PCMU,
+            CodecType::PCMU,
+            48000,
+            2,
+        );
+        assert!(recorder.is_ok(), "Should support 48kHz sample rate");
+
+        // Cleanup
+        let _ = std::fs::remove_file(&temp_path);
+    }
+}

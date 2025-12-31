@@ -1,14 +1,15 @@
 use crate::{
     call::{CallRecordingConfig, DialDirection, QueuePlan, user::SipUser},
+    media::recorder::RecorderFormat,
     proxy::routing::{RouteQueueConfig, RouteRule, TrunkConfig},
 };
 use anyhow::{Error, Result};
 use clap::Parser;
 use rsip::StatusCode;
 use rsipstack::dialog::invitation::InviteOption;
+use rustrtc::IceServer;
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, path::PathBuf};
-use voice_engine::{IceServer, media::recorder::RecorderFormat};
 
 #[derive(Parser, Debug)]
 #[command(version)]
@@ -353,6 +354,7 @@ pub struct ProxyConfig {
     pub locator: LocatorConfig,
     #[serde(default)]
     pub media_proxy: MediaProxyMode,
+    pub codecs: Option<Vec<String>>,
     #[serde(default)]
     pub frequency_limiter: Option<String>,
     #[serde(default)]
@@ -383,11 +385,24 @@ pub struct ProxyConfig {
     pub addons: Option<Vec<String>>,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Default)]
 pub struct DialplanHints {
     pub enable_recording: Option<bool>,
     pub bypass_media: Option<bool>,
     pub max_duration: Option<std::time::Duration>,
+    pub enable_sipflow: Option<bool>,
+    pub extensions: http::Extensions,
+}
+
+impl std::fmt::Debug for DialplanHints {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DialplanHints")
+            .field("enable_recording", &self.enable_recording)
+            .field("bypass_media", &self.bypass_media)
+            .field("max_duration", &self.max_duration)
+            .field("enable_sipflow", &self.enable_sipflow)
+            .finish()
+    }
 }
 
 pub enum RouteResult {
@@ -536,6 +551,7 @@ impl Default for ProxyConfig {
             user_backends: default_user_backends(),
             locator: LocatorConfig::default(),
             media_proxy: MediaProxyMode::default(),
+            codecs: None,
             frequency_limiter: None,
             realms: Some(vec![]),
             ws_handler: None,

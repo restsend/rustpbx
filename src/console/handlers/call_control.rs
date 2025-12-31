@@ -33,15 +33,27 @@ pub struct ActiveCallListQuery {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct CallCommandPayload {
-    action: String,
-    callee: Option<String>,
-    sdp: Option<String>,
-    reason: Option<String>,
-    code: Option<u16>,
-    initiator: Option<String>,
-    queue: Option<String>,
-    target: Option<String>,
+#[serde(tag = "action", rename_all = "snake_case")]
+pub enum CallCommandPayload {
+    Hangup {
+        reason: Option<String>,
+        code: Option<u16>,
+        initiator: Option<String>,
+    },
+    #[serde(alias = "accept")]
+    Accept {
+        callee: Option<String>,
+        sdp: Option<String>,
+    },
+    Transfer {
+        target: String,
+    },
+    Mute {
+        track_id: String,
+    },
+    Unmute {
+        track_id: String,
+    },
 }
 
 pub async fn list_active_calls(
@@ -117,10 +129,13 @@ pub async fn dispatch_call_command(
             .into_response();
     };
 
-    let action_label = payload.action.trim().to_ascii_lowercase();
-    let action = match action_label.as_str() {
-        "hangup" => {
-            let reason = match payload.reason.as_ref() {
+    let action = match payload {
+        CallCommandPayload::Hangup {
+            reason,
+            code,
+            initiator,
+        } => {
+            let reason = match reason {
                 Some(text) if !text.trim().is_empty() => {
                     match CallRecordHangupReason::from_str(text.trim()) {
                         Ok(reason) => Some(reason),
@@ -131,40 +146,18 @@ pub async fn dispatch_call_command(
             };
             SessionAction::Hangup {
                 reason,
-                code: payload.code,
-                initiator: payload.initiator.clone(),
+                code,
+                initiator,
             }
         }
-        "answer" => SessionAction::AcceptCall {
-            callee: payload.callee.clone(),
-            sdp: payload.sdp.clone(),
+        CallCommandPayload::Accept { callee, sdp } => SessionAction::AcceptCall {
+            callee,
+            sdp,
+            dialog_id: None,
         },
-        "transfer" => {
-            let target = payload
-                .target
-                .as_ref()
-                .map(|value| value.trim())
-                .filter(|value| !value.is_empty())
-                .ok_or_else(|| bad_request("target is required for transfer"));
-            match target {
-                Ok(value) => SessionAction::from_transfer_target(value),
-                Err(response) => return response,
-            }
-        }
-        "enter_queue" | "queue_enter" => {
-            let queue = payload
-                .queue
-                .as_ref()
-                .map(|value| value.trim())
-                .filter(|value| !value.is_empty())
-                .ok_or_else(|| bad_request("queue is required"));
-            match queue {
-                Ok(value) => SessionAction::enter_queue(value),
-                Err(response) => return response,
-            }
-        }
-        "exit_queue" | "queue_exit" => SessionAction::ExitQueue,
-        other => return bad_request(format!("unsupported action: {}", other)),
+        CallCommandPayload::Transfer { target } => SessionAction::from_transfer_target(&target),
+        CallCommandPayload::Mute { track_id } => SessionAction::MuteTrack(track_id),
+        CallCommandPayload::Unmute { track_id } => SessionAction::UnmuteTrack(track_id),
     };
 
     match handle.send_command(action) {

@@ -9,9 +9,7 @@ impl MigrationTrait for Migration {
         let table = crate::models::call_record::Entity;
         let col_started_at = crate::models::call_record::Column::StartedAt;
         let col_id = crate::models::call_record::Column::Id;
-        let col_currency = crate::models::call_record::Column::BillingCurrency;
         let col_status = crate::models::call_record::Column::Status;
-        let col_billing_amount_total = crate::models::call_record::Column::BillingAmountTotal;
         let col_to_number = crate::models::call_record::Column::ToNumber;
 
         // Composite index on started_at + id + status (for pagination and stats)
@@ -30,45 +28,6 @@ impl MigrationTrait for Migration {
                         .col(col_started_at)
                         .col(col_id)
                         .col(col_status)
-                        .to_owned(),
-                )
-                .await?;
-        }
-
-        // Index on billing_currency
-        if !manager
-            .has_index(
-                "rustpbx_call_records",
-                "idx_rustpbx_call_records_billing_currency",
-            )
-            .await?
-        {
-            manager
-                .create_index(
-                    Index::create()
-                        .name("idx_rustpbx_call_records_billing_currency")
-                        .table(table)
-                        .col(col_currency)
-                        .to_owned(),
-                )
-                .await?;
-        }
-
-        // Composite index on billing_currency + billing_amount_total
-        if !manager
-            .has_index(
-                "rustpbx_call_records",
-                "idx_rustpbx_call_records_billing_currency_amount",
-            )
-            .await?
-        {
-            manager
-                .create_index(
-                    Index::create()
-                        .name("idx_rustpbx_call_records_billing_currency_amount")
-                        .table(table)
-                        .col(col_currency)
-                        .col(col_billing_amount_total)
                         .to_owned(),
                 )
                 .await?;
@@ -107,15 +66,6 @@ impl MigrationTrait for Migration {
         manager
             .drop_index(
                 Index::drop()
-                    .name("idx_rustpbx_call_records_billing_currency_amount")
-                    .table(table)
-                    .to_owned(),
-            )
-            .await?;
-
-        manager
-            .drop_index(
-                Index::drop()
                     .if_exists()
                     .name("idx_rustpbx_call_records_tags")
                     .table(table)
@@ -123,15 +73,6 @@ impl MigrationTrait for Migration {
             )
             .await
             .ok();
-
-        manager
-            .drop_index(
-                Index::drop()
-                    .name("idx_rustpbx_call_records_billing_currency")
-                    .table(table)
-                    .to_owned(),
-            )
-            .await?;
 
         manager
             .drop_index(

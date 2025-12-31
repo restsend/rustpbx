@@ -9,7 +9,6 @@ impl MigrationTrait for Migration {
         let table = crate::models::call_record::Entity;
         let col_dept = crate::models::call_record::Column::DepartmentId;
         let col_trunk = crate::models::call_record::Column::SipTrunkId;
-        let col_billing = crate::models::call_record::Column::BillingStatus;
         let col_started_at = crate::models::call_record::Column::StartedAt;
 
         if !manager
@@ -63,38 +62,11 @@ impl MigrationTrait for Migration {
                 )
                 .await?;
         }
-
-        if !manager
-            .has_index(
-                "rustpbx_call_records",
-                "idx_rustpbx_call_records_billing_status",
-            )
-            .await?
-        {
-            manager
-                .create_index(
-                    Index::create()
-                        .name("idx_rustpbx_call_records_billing_status")
-                        .table(table)
-                        .col(col_billing)
-                        .to_owned(),
-                )
-                .await?;
-        }
         Ok(())
     }
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
         let table = crate::models::call_record::Entity;
-
-        manager
-            .drop_index(
-                Index::drop()
-                    .name("idx_rustpbx_call_records_billing_status")
-                    .table(table)
-                    .to_owned(),
-            )
-            .await?;
 
         manager
             .drop_index(

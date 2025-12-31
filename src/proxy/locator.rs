@@ -453,13 +453,19 @@ pub fn uri_matches(a: &rsip::Uri, b: &rsip::Uri) -> bool {
         return true;
     }
 
-    let a_host = a.host().to_string();
-    let b_host = b.host().to_string();
+    if a.user() == b.user() {
+        let a_host = a.host().to_string();
+        let b_host = b.host().to_string();
 
-    // Special handling for .invalid domains often used in WebRTC
-    if a_host.ends_with(".invalid") || b_host.ends_with(".invalid") {
-        if a.user() == b.user() && a_host.eq_ignore_ascii_case(&b_host) {
+        if is_local_realm(&a_host) && is_local_realm(&b_host) {
             return true;
+        }
+
+        // Special handling for .invalid domains often used in WebRTC
+        if a_host.ends_with(".invalid") || b_host.ends_with(".invalid") {
+            if a_host.eq_ignore_ascii_case(&b_host) {
+                return true;
+            }
         }
     }
 

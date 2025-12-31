@@ -2,7 +2,8 @@ use crate::addons::transcript::models::{
     SenseVoiceCliChannel, StoredTranscript, StoredTranscriptAnalysis, StoredTranscriptSegment,
     TranscriptRequest, TranscriptSettingsUpdate,
 };
-use crate::callrecord::{CallRecord, storage::CdrStorage};
+use crate::callrecord::CallRecord;
+use crate::callrecord::storage::CdrStorage;
 use crate::console::ConsoleState;
 use crate::console::handlers::call_record::{CdrData, load_cdr_data, select_recording_path};
 use crate::console::handlers::utils::{
@@ -604,9 +605,9 @@ async fn read_transcript_file(
 
 fn transcript_file_from_cdr(record: &CallRecord) -> Option<String> {
     record
-        .extras
-        .as_ref()
-        .and_then(|extras| extras.get("transcript_file"))
+        .extensions
+        .get::<crate::callrecord::CallRecordExtras>()
+        .and_then(|extras| extras.0.get("transcript_file"))
         .and_then(|value| value.as_str())
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())

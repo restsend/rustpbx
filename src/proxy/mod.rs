@@ -19,7 +19,6 @@ pub mod proxy_call;
 pub mod registrar;
 pub mod routing;
 pub mod server;
-#[cfg(test)]
 pub mod tests;
 pub mod user;
 pub mod user_db;

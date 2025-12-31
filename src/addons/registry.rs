@@ -132,11 +132,12 @@ impl AddonRegistry {
     pub fn get_call_record_hooks(
         &self,
         config: &crate::config::Config,
+        db: &sea_orm::DatabaseConnection,
     ) -> Vec<Box<dyn crate::callrecord::CallRecordHook>> {
         self.addons
             .iter()
             .filter(|a| self.is_enabled(a.id(), &config))
-            .filter_map(|a| a.call_record_hook())
+            .filter_map(|a| a.call_record_hook(db))
             .collect()
     }
 

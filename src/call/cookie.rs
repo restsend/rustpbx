@@ -1,7 +1,6 @@
 use crate::call::SipUser;
 use rsipstack::transaction::key::TransactionKey;
 use std::{
-    collections::HashMap,
     sync::{Arc, RwLock},
     time::Duration,
 };
@@ -24,11 +23,11 @@ impl SpamResult {
 #[derive(Default)]
 struct TransactionCookieInner {
     user: Option<SipUser>,
-    values: HashMap<String, String>,
     spam_result: SpamResult,
     source_trunk: Option<String>,
+    source_trunk_id: Option<i64>,
     max_duration: Option<Duration>,
-    tenant_id: Option<i64>,
+    extensions: http::Extensions,
 }
 #[derive(Clone, Default)]
 pub struct TransactionCookie {
@@ -40,11 +39,11 @@ impl From<&TransactionKey> for TransactionCookie {
         Self {
             inner: Arc::new(RwLock::new(TransactionCookieInner {
                 user: None,
-                values: HashMap::new(),
                 spam_result: SpamResult::Nice,
                 source_trunk: None,
+                source_trunk_id: None,
                 max_duration: None,
-                tenant_id: None,
+                extensions: http::Extensions::new(),
             })),
         }
     }
@@ -62,31 +61,6 @@ impl TransactionCookie {
             .map(|inner| inner.user.clone())
             .ok()
             .flatten()
-    }
-    pub fn set(&self, key: &str, value: &str) {
-        if let Ok(mut inner) = self.inner.write() {
-            inner.values.insert(key.to_string(), value.to_string());
-        }
-    }
-    pub fn get(&self, key: &str) -> Option<String> {
-        self.inner
-            .read()
-            .ok()
-            .and_then(|inner| inner.values.get(key).cloned())
-    }
-
-    pub fn get_values(&self) -> HashMap<String, String> {
-        self.inner
-            .read()
-            .ok()
-            .map(|inner| inner.values.clone())
-            .unwrap_or_default()
-    }
-
-    pub fn remove(&self, key: &str) {
-        if let Ok(mut inner) = self.inner.write() {
-            inner.values.remove(key);
-        }
     }
 
     pub fn mark_as_spam(&self, r: SpamResult) {
@@ -148,35 +122,52 @@ impl TransactionCookie {
             .flatten()
     }
 
-    pub fn set_tenant_id(&self, tenant_id: i64) {
+    pub fn set_source_trunk_id(&self, trunk_id: i64) {
         self.inner
             .try_write()
             .map(|mut inner| {
-                inner.tenant_id = Some(tenant_id);
+                inner.source_trunk_id = Some(trunk_id);
             })
             .ok();
     }
 
-    pub fn get_tenant_id(&self) -> Option<i64> {
+    pub fn get_source_trunk_id(&self) -> Option<i64> {
         self.inner
             .try_read()
-            .map(|inner| inner.tenant_id)
+            .map(|inner| inner.source_trunk_id)
             .ok()
             .flatten()
     }
 
-    pub fn get_values_prefix(&self, prefix: &str) -> HashMap<String, String> {
+    pub fn with_extensions<F, R>(&self, f: F) -> Option<R>
+    where
+        F: FnOnce(&http::Extensions) -> R,
+    {
+        self.inner.read().ok().map(|inner| f(&inner.extensions))
+    }
+
+    pub fn with_extensions_mut<F, R>(&self, f: F) -> Option<R>
+    where
+        F: FnOnce(&mut http::Extensions) -> R,
+    {
         self.inner
-            .try_read()
+            .write()
             .ok()
-            .map(|inner| {
-                inner
-                    .values
-                    .iter()
-                    .filter(|(k, _)| k.starts_with(prefix))
-                    .map(|(k, v)| (k.clone(), v.clone()))
-                    .collect()
-            })
-            .unwrap_or_default()
+            .map(|mut inner| f(&mut inner.extensions))
+    }
+
+    pub fn insert_extension<T: Clone + Send + Sync + 'static>(&self, val: T) {
+        self.with_extensions_mut(|ext| ext.insert(val));
+    }
+
+    pub fn get_extension<T: Clone + Send + Sync + 'static>(&self) -> Option<T> {
+        self.with_extensions(|ext| ext.get::<T>().cloned())
+            .flatten()
     }
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CalleeDisplayName(pub String);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TenantId(pub i64);

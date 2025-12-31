@@ -1,8 +1,8 @@
 use crate::app::AppState;
-use std::sync::Arc;
 use async_trait::async_trait;
 use axum::Router;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SidebarItem {
@@ -103,7 +103,10 @@ pub trait Addon: Send + Sync {
     }
 
     /// Return a hook for call record processing
-    fn call_record_hook(&self) -> Option<Box<dyn crate::callrecord::CallRecordHook>> {
+    fn call_record_hook(
+        &self,
+        _db: &sea_orm::DatabaseConnection,
+    ) -> Option<Box<dyn crate::callrecord::CallRecordHook>> {
         None
     }
 
