@@ -16,8 +16,8 @@ use crate::{
 
 use anyhow::Result;
 use axum::{
-    Router,
-    extract::WebSocketUpgrade,
+    Json, Router,
+    extract::{State, WebSocketUpgrade},
     middleware,
     response::{Html, IntoResponse, Response},
     routing::get,
@@ -512,6 +512,12 @@ async fn index_handler(client_ip: ClientAddr) -> impl IntoResponse {
     }
 }
 
+// ICE servers handler
+async fn iceservers_handler(State(state): State<AppState>) -> impl IntoResponse {
+    let ice_servers = state.config().ice_servers.clone().unwrap_or_default();
+    Json(ice_servers).into_response()
+}
+
 pub fn create_router(state: AppState) -> Router {
     let router = Router::new();
     // check if static/index.html exists
@@ -543,6 +549,10 @@ pub fn create_router(state: AppState) -> Router {
     #[allow(unused_mut)]
     let mut router = router
         .route("/", get(index_handler))
+        .route(
+            "/iceservers",
+            get(iceservers_handler).with_state(state.clone()),
+        )
         .merge(state.addon_registry.get_routers(state.clone()))
         .nest_service("/static", static_files_service)
         .merge(call_routes)
