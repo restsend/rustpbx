@@ -445,7 +445,7 @@ impl ProxyCall {
 
     fn sync_server_dialog_remote_target(&self, server_dialog: &ServerInviteDialog) {
         let request = server_dialog.initial_request();
-        if let Some((uri, remote_contact)) = compute_remote_target_from_request(request) {
+        if let Some((uri, remote_contact)) = compute_remote_target_from_request(&request) {
             if let Some(dialog) = self.dialog_layer.get_dialog(&server_dialog.id()) {
                 dialog.set_remote_target(uri, Some(remote_contact));
             }
@@ -1552,7 +1552,11 @@ impl ProxyCall {
             invite_option
         };
 
-        if let Some(duration) = self.dialplan.max_call_duration.or_else(|| self.cookie.get_max_duration()) {
+        if let Some(duration) = self
+            .dialplan
+            .max_call_duration
+            .or_else(|| self.cookie.get_max_duration())
+        {
             let cancel_token = self.cancel_token.clone();
             let session_id = self.session_id.clone();
             info!(session_id = %session_id, ?duration, "Setting max duration timer");
