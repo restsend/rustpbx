@@ -89,6 +89,7 @@ brew install cmake
 ### Install & Build
 
 ```bash
+git clone https://github.com/restsend/rustrtc
 git clone https://github.com/restsend/rustpbx
 cd rustpbx
 cargo build --release
