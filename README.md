@@ -109,6 +109,7 @@ log_level = "debug"
 media_cache_path = "/tmp/mediacache"
 database_url = "sqlite://rustpbx.sqlite3"
 
+[proxy]
 modules = ["acl", "auth", "registrar", "call"]
 addr = "0.0.0.0"
 udp_port = 15060
