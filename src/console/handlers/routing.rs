@@ -1,14 +1,16 @@
+use crate::addons::queue::models::{
+    Column as QueueColumn, Entity as QueueEntity, Model as QueueModel,
+};
+use crate::addons::queue::services::utils as queue_utils;
 use crate::console::handlers::{bad_request, forms};
 use crate::console::{ConsoleState, middleware::AuthRequired};
 use crate::models::{
-    queue::{Column as QueueColumn, Entity as QueueEntity, Model as QueueModel},
     routing::{
         ActiveModel as RoutingActiveModel, Column as RoutingColumn, Entity as RoutingEntity,
         Model as RoutingModel, RoutingDirection, RoutingSelectionStrategy,
     },
     sip_trunk::{Column as SipTrunkColumn, Entity as SipTrunkEntity, Model as SipTrunkModel},
 };
-use crate::services::queue_utils;
 use axum::{
     Router,
     extract::{Json, Path as AxumPath, State},
@@ -671,6 +673,16 @@ fn render_route_form(
         "Create routing rule".to_string()
     };
 
+    let script_path = if mode == "edit" {
+        if let Some(id) = doc.id {
+            format!("/console/routing/{}", id)
+        } else {
+            "/console/routing/edit".to_string()
+        }
+    } else {
+        "/console/routing/new".to_string()
+    };
+
     state.render(
         "console/routing_form.html",
         json!({
@@ -687,6 +699,7 @@ fn render_route_form(
             "form_action": form_action,
             "back_url": state.url_for("/routing"),
             "error_message": error_message,
+            "addon_scripts": state.get_injected_scripts(&script_path),
         }),
     )
 }

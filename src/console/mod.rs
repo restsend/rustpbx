@@ -17,10 +17,8 @@ pub use handlers::router;
 #[derive(Clone)]
 pub struct ConsoleState {
     db: DatabaseConnection,
-    session_key: Arc<Vec<u8>>,
-    base_path: String,
-    allow_registration: bool,
-    secure_cookie: bool,
+    config: ConsoleConfig,
+    session_key: Vec<u8>,
     sip_server: Arc<RwLock<Option<SipServerRef>>>,
     app_state: Arc<RwLock<Option<Weak<AppStateInner>>>>,
     callrecord_formatter: Arc<dyn CallRecordFormatter>,
@@ -32,23 +30,14 @@ impl ConsoleState {
         db: DatabaseConnection,
         config: ConsoleConfig,
     ) -> Result<Arc<Self>> {
-        let ConsoleConfig {
-            session_secret,
-            base_path,
-            allow_registration,
-            secure_cookie,
-        } = config;
-
-        let key_material: [u8; 32] = Sha256::digest(session_secret.as_bytes()).into();
-        let session_key = Arc::new(key_material.to_vec());
-
-        let base_path = normalize_base_path(&base_path);
+        let key_material: [u8; 32] = Sha256::digest(config.session_secret.as_bytes()).into();
+        let session_key = key_material.to_vec();
+        let mut config = config;
+        config.base_path = normalize_base_path(&config.base_path);
         Ok(Arc::new(Self {
             db,
+            config,
             session_key,
-            base_path,
-            allow_registration,
-            secure_cookie,
             sip_server: Arc::new(RwLock::new(None)),
             app_state: Arc::new(RwLock::new(None)),
             callrecord_formatter,
@@ -113,8 +102,18 @@ impl ConsoleState {
                 map.entry("favicon_url").or_insert_with(|| {
                     serde_json::Value::String("/static/images/favicon.png".to_string())
                 });
-                map.entry("registration_enabled")
-                    .or_insert_with(|| serde_json::Value::Bool(self.allow_registration));
+                if let Some(ref alpine_js) = self.config.alpine_js {
+                    map.entry("alpine_js")
+                        .or_insert_with(|| serde_json::Value::String(alpine_js.clone()));
+                }
+                if let Some(ref tailwind_js) = self.config.tailwind_js {
+                    map.entry("tailwind_js")
+                        .or_insert_with(|| serde_json::Value::String(tailwind_js.clone()));
+                }
+                if let Some(ref chart_js) = self.config.chart_js {
+                    map.entry("chart_js")
+                        .or_insert_with(|| serde_json::Value::String(chart_js.clone()));
+                }
             }
         }
 
@@ -223,27 +222,27 @@ impl ConsoleState {
     pub fn url_for(&self, suffix: &str) -> String {
         let trimmed = suffix.trim();
         if trimmed.is_empty() || trimmed == "/" {
-            return format!("{}/", self.base_path);
+            return format!("{}/", self.base_path());
         }
         if trimmed.starts_with('/') {
-            if self.base_path == "/" {
+            if self.base_path() == "/" {
                 trimmed.to_string()
             } else {
-                format!("{}{}", self.base_path, trimmed)
+                format!("{}{}", self.base_path(), trimmed)
             }
-        } else if self.base_path == "/" {
+        } else if self.base_path() == "/" {
             format!("/{}", trimmed)
         } else {
-            format!("{}/{}", self.base_path, trimmed)
+            format!("{}/{}", self.base_path(), trimmed)
         }
     }
 
     pub fn base_path(&self) -> &str {
-        &self.base_path
+        &self.config.base_path
     }
 
     pub fn registration_allowed_by_config(&self) -> bool {
-        self.allow_registration
+        self.config.allow_registration
     }
 
     pub fn login_url(&self, next: Option<String>) -> String {

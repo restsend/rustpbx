@@ -15,7 +15,6 @@ pub mod extension_department;
 pub mod frequency_limit;
 pub mod migration;
 pub mod policy;
-pub mod queue;
 pub mod routing;
 pub mod sip_trunk;
 pub mod user;

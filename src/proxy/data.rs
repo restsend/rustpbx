@@ -22,12 +22,13 @@ use crate::{
         ConfigOrigin, DestConfig, MatchConditions, RewriteRules, RouteAction, RouteDirection,
         RouteQueueConfig, RouteRule, TrunkConfig,
     },
-    services::queue_utils::{self},
+    addons::queue::services::utils as queue_utils,
 };
 
 pub struct ProxyDataContext {
     config: RwLock<Arc<ProxyConfig>>,
     trunks: RwLock<HashMap<String, TrunkConfig>>,
+    queues: RwLock<HashMap<String, RouteQueueConfig>>,
     routes: RwLock<Vec<RouteRule>>,
     acl_rules: RwLock<Vec<String>>,
     db: Option<DatabaseConnection>,
@@ -62,11 +63,13 @@ impl ProxyDataContext {
         let ctx = Self {
             config: RwLock::new(config.clone()),
             trunks: RwLock::new(HashMap::new()),
+            queues: RwLock::new(HashMap::new()),
             routes: RwLock::new(Vec::new()),
             acl_rules: RwLock::new(Vec::new()),
             db,
         };
         let _ = ctx.reload_trunks(false, None).await?;
+        let _ = ctx.reload_queues(false, None).await?;
         let _ = ctx.reload_routes(false, None).await?;
         let _ = ctx.reload_acl_rules(false, None)?;
         Ok(ctx)
@@ -101,6 +104,20 @@ impl ProxyDataContext {
             return Ok(None);
         }
 
+        // Try to resolve by ID first (db-<id>)
+        if let Some(id_str) = reference.strip_prefix("db-") {
+            if let Ok(_) = id_str.parse::<i64>() {
+                let queues = self.queues.read().unwrap();
+                // We need to store the ID in the map key or value to look it up efficiently.
+                // Currently keys are canonical names or "db-<id>" from queue_entry_key.
+                // Let's check if the key exists directly.
+                if let Some(queue) = queues.get(reference) {
+                    return Ok(Some(queue.clone()));
+                }
+            }
+        }
+
+        // Try to resolve by file path
         if let Some(config) = self.load_queue_file(reference)? {
             return Ok(Some(config));
         }
@@ -109,11 +126,19 @@ impl ProxyDataContext {
             return Ok(None);
         };
 
-        let config = self.config.read().unwrap();
-        for (name, queue) in &config.queues {
+        let queues = self.queues.read().unwrap();
+        for (name, queue) in queues.iter() {
             if let Some(existing) = queue_utils::canonical_queue_key(name) {
                 if existing == key {
                     return Ok(Some(queue.clone()));
+                }
+            }
+            // Also check the queue name inside the config, in case the key is an ID
+            if let Some(queue_name) = &queue.name {
+                if let Some(existing) = queue_utils::canonical_queue_key(queue_name) {
+                    if existing == key {
+                        return Ok(Some(queue.clone()));
+                    }
                 }
             }
         }
@@ -241,6 +266,74 @@ impl ProxyDataContext {
             generated,
             files,
             patterns,
+            started_at,
+            finished_at,
+            duration_ms,
+        })
+    }
+
+    pub async fn reload_queues(
+        &self,
+        _generated_toml: bool,
+        config_override: Option<Arc<ProxyConfig>>,
+    ) -> Result<ReloadMetrics> {
+        if let Some(config) = config_override {
+            *self.config.write().unwrap() = config;
+        }
+
+        let config = self.config.read().unwrap().clone();
+        let started_at = Utc::now();
+        
+        let mut queues: HashMap<String, RouteQueueConfig> = HashMap::new();
+        let mut config_count = 0usize;
+        let mut file_count = 0usize;
+        let mut files: Vec<String> = Vec::new();
+        
+        if !config.queues.is_empty() {
+            config_count = config.queues.len();
+            info!(count = config_count, "loading queues from embedded config");
+            for (name, queue) in config.queues.iter() {
+                queues.insert(name.clone(), queue.clone());
+            }
+        }
+
+        let generated_file = config.generated_queue_dir().join("queues.generated.toml");
+        if generated_file.exists() {
+             match fs::read_to_string(&generated_file) {
+                Ok(content) => {
+                    match toml::from_str::<HashMap<String, RouteQueueConfig>>(&content) {
+                        Ok(loaded) => {
+                            file_count = loaded.len();
+                            files.push(generated_file.display().to_string());
+                            queues.extend(loaded);
+                        }
+                        Err(e) => {
+                            tracing::error!("failed to parse queues.generated.toml: {}", e);
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::error!("failed to read queues.generated.toml: {}", e);
+                }
+             }
+        }
+
+        let len = queues.len();
+        *self.queues.write().unwrap() = queues;
+        let finished_at = Utc::now();
+        let duration_ms = (finished_at - started_at).num_milliseconds();
+        info!(
+            total = len,
+            config_count, file_count, duration_ms, "queues reloaded"
+        );
+        
+        Ok(ReloadMetrics {
+            total: len,
+            config_count,
+            file_count,
+            generated: None,
+            files,
+            patterns: vec![],
             started_at,
             finished_at,
             duration_ms,
@@ -896,6 +989,7 @@ fn convert_route(
         disabled: Some(!model.is_active),
         policy: None,
         origin: ConfigOrigin::embedded(),
+        codecs: Vec::new(),
     };
     Ok(Some(route))
 }

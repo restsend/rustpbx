@@ -280,7 +280,7 @@
                                                 @change="setForwardingTargetType('uri')">
                                             <span>Standard URI</span>
                                         </label>
-                                        <label
+                                        <label x-show="queueEnabled"
                                             class="inline-flex items-center gap-2 rounded-lg border px-3 py-1.5 text-slate-600 transition"
                                             :class="forwardingTargetType === 'queue' ? 'border-sky-200 bg-sky-50 text-sky-700 shadow-sm' : 'border-slate-200 hover:border-slate-300'">
                                             <input type="radio" class="h-4 w-4 border-slate-300 text-sky-600"
@@ -304,30 +304,27 @@
                                     </label>
                                 </div>
                                 <div x-show="forwardingTargetType === 'queue'" x-cloak class="space-y-3">
-                                    <label class="flex flex-col gap-2">
-                                        Queue file path
-                                        <input type="text" maxlength="160" x-model.trim="forwardingTargetValue"
-                                            @input="syncForwardingDestination()"
-                                            :disabled="form.call_forwarding_mode === 'none'"
-                                            :class="form.call_forwarding_mode === 'none' ? 'border-slate-200 bg-slate-50 text-slate-400 cursor-not-allowed' : 'border-slate-200 focus:border-sky-300 focus:ring-2 focus:ring-sky-200'"
-                                            class="rounded-lg border px-3 py-2 text-sm text-slate-700"
-                                            placeholder="3-support.generated.toml">
-                                        <span class="text-xs font-normal text-slate-400">Saved as<br><code
-                                                class="font-mono text-[11px]">queue:&lt;file&gt;</code>.</span>
-                                    </label>
                                     <template x-if="queueTargets.length">
-                                        <label class="flex flex-col gap-1 text-xs font-medium text-slate-600">
-                                            Choose existing queue
+                                        <label class="flex flex-col gap-1 text-sm font-medium text-slate-700">
+                                            Select Queue
                                             <select
-                                                class="rounded-lg border border-slate-200 bg-white px-2 py-1 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                                class="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                                                 :disabled="form.call_forwarding_mode === 'none'"
-                                                @change="onCatalogSelect($event, 'queue')">
+                                                x-model="forwardingTargetValue" @change="syncForwardingDestination()">
                                                 <option value="">Select queue…</option>
                                                 <template x-for="queue in queueTargets" :key="queue.reference">
                                                     <option :value="queue.reference" x-text="queue.name"></option>
                                                 </template>
                                             </select>
+                                            <span class="text-xs font-normal text-slate-400">Saved as <code
+                                                    class="font-mono text-[11px]">queue:&lt;id&gt;</code>.</span>
                                         </label>
+                                    </template>
+                                    <template x-if="!queueTargets.length">
+                                        <div
+                                            class="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-500">
+                                            No queues available. Please create a queue first.
+                                        </div>
                                     </template>
                                 </div>
                             </div>
@@ -557,6 +554,7 @@
                 saving: false,
                 activeTab: 'profile',
                 forwardingCatalog: normalizeForwardingCatalog(options.forwardingCatalog || {}),
+                queueEnabled: window.queueAddonEnabled || false,
                 tabs: [
                     { id: 'profile', label: 'Profile', description: 'Extension details' },
                     { id: 'access', label: 'Access & Departments', description: 'Departments and access permissions' },

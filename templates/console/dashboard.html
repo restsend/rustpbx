@@ -132,6 +132,7 @@
                             <th scope="col" class="px-3 py-2 text-left font-medium text-slate-500">Status</th>
                             <th scope="col" class="px-3 py-2 text-left font-medium text-slate-500">Started</th>
                             <th scope="col" class="px-3 py-2 text-left font-medium text-slate-500">Duration</th>
+                            <th scope="col" class="px-3 py-2 text-left font-medium text-slate-500">Action</th>
                         </tr>
                     </thead>
                     <tbody id="active-calls-body" class="divide-y divide-slate-100">
@@ -148,10 +149,16 @@
                             </td>
                             <td class="px-3 py-2 text-slate-500">{{ call.started_at }}</td>
                             <td class="px-3 py-2 text-slate-500">{{ call.duration }}</td>
+                            <td class="px-3 py-2 text-slate-500">
+                                <button onclick="hangupCall('{{ call.session_id }}')"
+                                    class="rounded bg-red-50 px-2 py-1 text-xs font-medium text-red-600 hover:bg-red-100">
+                                    Hangup
+                                </button>
+                            </td>
                         </tr>
                         {% else %}
                         <tr>
-                            <td colspan="5" class="px-3 py-6 text-center text-sm text-slate-400">No active calls at the
+                            <td colspan="6" class="px-3 py-6 text-center text-sm text-slate-400">No active calls at the
                                 moment.</td>
                         </tr>
                         {% endfor %}
@@ -167,7 +174,8 @@
 <div id="dashboard-bootstrap" class="hidden"
     data-payload='{{ {"range": range, "metrics": metrics, "call_direction": call_direction, "active_calls": active_calls_preview} | tojson | safe }}'
     data-endpoint="{{ base_path }}/dashboard/data"></div>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.5.0/chart.umd.min.js"></script>
+<script defer
+    src="{{chart_js|default('https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.5.0/chart.umd.min.js')|safe}}"></script>
 <script>
     (function () {
         const bootstrapNode = document.getElementById('dashboard-bootstrap');
@@ -382,13 +390,49 @@
             }
         }
 
+        window.hangupCall = async function (sessionId) {
+            if (!confirm('Are you sure you want to hangup this call?')) {
+                return;
+            }
+            try {
+                const basePath = bootstrap.endpoint ? bootstrap.endpoint.replace('/dashboard/data', '') : '/console';
+                const resp = await fetch(`${basePath}/calls/active/${sessionId}/commands`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        action: 'hangup',
+                        reason: 'admin_dashboard'
+                    })
+                });
+                if (resp.ok) {
+                    window.dispatchEvent(new CustomEvent('toast', {
+                        detail: { title: 'Success', message: 'Hangup command sent' }
+                    }));
+                    // Refresh dashboard data
+                    if (rangeSelect) {
+                        rangeSelect.dispatchEvent(new Event('change'));
+                    }
+                } else {
+                    const err = await resp.json();
+                    throw new Error(err.message || 'Failed to hangup call');
+                }
+            } catch (err) {
+                console.error(err);
+                window.dispatchEvent(new CustomEvent('toast', {
+                    detail: { title: 'Error', message: err.message }
+                }));
+            }
+        };
+
         function renderActiveCalls(calls) {
             if (!elements.activeBody) {
                 return;
             }
             const rows = Array.isArray(calls) ? calls : [];
             if (!rows.length) {
-                elements.activeBody.innerHTML = '<tr><td colspan="5" class="px-3 py-6 text-center text-sm text-slate-400">No active calls at the moment.</td></tr>';
+                elements.activeBody.innerHTML = '<tr><td colspan="6" class="px-3 py-6 text-center text-sm text-slate-400">No active calls at the moment.</td></tr>';
                 return;
             }
             const fragments = rows.map((call) => {
@@ -398,6 +442,11 @@
                     <td class="px-3 py-2"><span class="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2 py-1 text-xs font-medium text-slate-600"><span class="h-1.5 w-1.5 rounded-full bg-emerald-500"></span>${call.status}</span></td>
                     <td class="px-3 py-2 text-slate-500">${call.started_at}</td>
                     <td class="px-3 py-2 text-slate-500">${call.duration}</td>
+                    <td class="px-3 py-2 text-slate-500">
+                        <button onclick="hangupCall('${call.session_id}')" class="rounded bg-red-50 px-2 py-1 text-xs font-medium text-red-600 hover:bg-red-100">
+                            Hangup
+                        </button>
+                    </td>
                 </tr>`;
             });
             elements.activeBody.innerHTML = fragments.join('');

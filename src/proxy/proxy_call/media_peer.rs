@@ -1,4 +1,4 @@
-use crate::media::{MediaStream, Track, recorder::RecorderOption};
+use crate::media::{MediaStream, Track};
 use anyhow::Result;
 use async_trait::async_trait;
 use std::sync::Arc;
@@ -16,7 +16,6 @@ pub trait MediaPeer: Send + Sync {
     async fn remove_track(&self, track_id: &str, stop: bool);
     async fn serve(&self) -> Result<()>;
     fn stop(&self);
-    fn get_recorder_option(&self) -> Option<RecorderOption>;
 }
 
 pub struct VoiceEnginePeer {
@@ -67,9 +66,5 @@ impl MediaPeer for VoiceEnginePeer {
 
     fn stop(&self) {
         self.stream.cancel_token.cancel();
-    }
-
-    fn get_recorder_option(&self) -> Option<RecorderOption> {
-        self.stream.recorder_option.clone()
     }
 }

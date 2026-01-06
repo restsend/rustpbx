@@ -101,6 +101,10 @@ pub fn urls() -> Router<Arc<ConsoleState>> {
         .route("/settings", get(page_settings))
         .route("/settings/config/platform", patch(update_platform_settings))
         .route("/settings/config/storage", patch(update_storage_settings))
+        .route(
+            "/settings/config/storage/test",
+            post(test_storage_connection),
+        )
         .route("/settings/config/security", patch(update_security_settings))
         .route(
             "/settings/departments",
@@ -198,7 +202,6 @@ async fn build_settings_payload(state: &ConsoleState) -> JsonValue {
         });
 
         let recorder_path = config.recorder_path();
-        let recorder_format = config.recorder_format();
 
         let mut key_items: Vec<JsonValue> = Vec::new();
         key_items.push(json!({ "label": "HTTP address", "value": config.http_addr.clone() }));
@@ -209,7 +212,7 @@ async fn build_settings_payload(state: &ConsoleState) -> JsonValue {
             key_items.push(json!({ "label": "RTP ports", "value": format!("{}-{}", start, end) }));
         }
         key_items.push(json!({ "label": "Recorder path", "value": recorder_path.clone() }));
-        key_items.push(json!({ "label": "Recorder format", "value": recorder_format.extension() }));
+
         if let Some(ref console_cfg) = config.console {
             key_items.push(
                 json!({ "label": "Console base path", "value": console_cfg.base_path.clone() }),
@@ -440,7 +443,6 @@ fn build_storage_profiles(config: &crate::config::Config) -> (JsonValue, Vec<Jso
     }
 
     let recorder_path = config.recorder_path();
-    let recorder_format = config.recorder_format();
 
     let (mode, callrecord_profile) = match config.callrecord.as_ref() {
         Some(CallRecordConfig::Local { root }) => {
@@ -531,7 +533,7 @@ fn build_storage_profiles(config: &crate::config::Config) -> (JsonValue, Vec<Jso
         "Server-side spool paths for recordings and media cache.",
     );
     spool_profile.insert("recorder_path", json!(&recorder_path));
-    spool_profile.insert("recorder_format", json!(recorder_format.extension()));
+
     if let Some(policy) = config.recording.as_ref() {
         if let Ok(policy_value) = serde_json::to_value(policy) {
             spool_profile.insert("recording", policy_value);
@@ -547,10 +549,6 @@ fn build_storage_profiles(config: &crate::config::Config) -> (JsonValue, Vec<Jso
     storage_meta.insert("active_profile".to_string(), json!(active_profile_id));
     storage_meta.insert("description".to_string(), json!(active_description));
     storage_meta.insert("recorder_path".to_string(), json!(&recorder_path));
-    storage_meta.insert(
-        "recorder_format".to_string(),
-        json!(recorder_format.extension()),
-    );
     storage_meta.insert(
         "recording".to_string(),
         config
@@ -1245,6 +1243,17 @@ pub(crate) struct PlatformSettingsPayload {
 }
 
 #[derive(Debug, Deserialize)]
+pub(crate) struct TestStoragePayload {
+    pub vendor: crate::storage::S3Vendor,
+    pub bucket: String,
+    pub region: String,
+    pub access_key: String,
+    pub secret_key: String,
+    pub endpoint: Option<String>,
+    pub root: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 pub(crate) struct StorageSettingsPayload {
     #[serde(default)]
     recorder_path: Option<Option<String>>,
@@ -1696,11 +1705,11 @@ pub(crate) async fn update_security_settings(
 
     let acl_rules = config.proxy.acl_rules.clone().unwrap_or_default();
     if let Some(app_state) = state.app_state() {
-        app_state
+        let _ = app_state
             .sip_server()
             .inner
             .data_context
-            .set_acl_rules(acl_rules.clone());
+            .reload_acl_rules(false, Some(Arc::new(config.proxy.clone())));
     }
 
     Json(json!({
@@ -1794,6 +1803,58 @@ fn set_string_array(table: &mut Table, key: &str, values: Vec<String>) {
         array.push(value.as_str());
     }
     table[key] = Item::Value(Value::Array(array));
+}
+
+pub(crate) async fn test_storage_connection(
+    AuthRequired(_): AuthRequired,
+    Json(payload): Json<TestStoragePayload>,
+) -> Response {
+    use crate::storage::{Storage, StorageConfig};
+    use uuid::Uuid;
+
+    let config = StorageConfig::S3 {
+        vendor: payload.vendor,
+        bucket: payload.bucket,
+        region: payload.region,
+        access_key: payload.access_key,
+        secret_key: payload.secret_key,
+        endpoint: payload.endpoint,
+        prefix: payload.root,
+    };
+
+    let storage = match Storage::new(&config) {
+        Ok(s) => s,
+        Err(err) => {
+            return json_error(
+                StatusCode::BAD_REQUEST,
+                format!("Failed to initialize storage: {}", err),
+            );
+        }
+    };
+
+    let filename = format!("test-connection-{}.txt", Uuid::new_v4());
+    let content = b"RustPBX storage connection test";
+
+    if let Err(err) = storage
+        .write(&filename, bytes::Bytes::from_static(content))
+        .await
+    {
+        return json_error(
+            StatusCode::BAD_REQUEST,
+            format!("Failed to write test file: {}", err),
+        );
+    }
+
+    if let Err(err) = storage.delete(&filename).await {
+        // Try to delete but don't fail the test if delete fails, just warn
+        warn!("Failed to delete test file {}: {}", filename, err);
+    }
+
+    Json(json!({
+        "status": "ok",
+        "message": "Connection successful. Test file created and deleted.",
+    }))
+    .into_response()
 }
 
 fn json_error(status: StatusCode, message: impl Into<String>) -> Response {

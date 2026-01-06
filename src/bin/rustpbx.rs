@@ -85,8 +85,10 @@ async fn main() -> Result<()> {
 
     let config_path = cli.conf.clone();
     let config = if let Some(ref path) = config_path {
+        println!("Loading config from: {}", path);
         Config::load(path).expect("Failed to load config")
     } else {
+        println!("Loading default config");
         Config::default()
     };
 

@@ -92,6 +92,11 @@ pub trait Addon: Send + Sync {
         vec![]
     }
 
+    /// Return the configuration URL for the addon
+    fn config_url(&self) -> Option<String> {
+        self.sidebar_items().first().map(|s| s.url.clone())
+    }
+
     /// Return Settings page injection items (HTML fragments or config definitions)
     fn settings_items(&self) -> Option<String> {
         None
@@ -124,7 +129,11 @@ pub mod registry;
 
 #[cfg(feature = "addon-acme")]
 pub mod acme;
+#[cfg(feature = "addon-archive")]
+pub mod archive;
 #[cfg(feature = "addon-transcript")]
 pub mod transcript;
 #[cfg(feature = "addon-wholesale")]
 pub mod wholesale;
+
+pub mod queue;

@@ -476,10 +476,11 @@ async fn download_call_record_sip_flow(
     let mut bytes: Option<Vec<u8>> = None;
 
     if let Some(storage_ref) = cdr_data.storage.as_ref() {
-        match storage_ref.read_bytes(&selected_path).await {
+        let path_to_read = strip_storage_root(&state, &selected_path);
+        match storage_ref.read_bytes(&path_to_read).await {
             Ok(data) => bytes = Some(data),
             Err(err) => {
-                warn!(path = %selected_path, "failed to download sip flow from storage: {}", err);
+                warn!(path = %path_to_read, "failed to download sip flow from storage: {}", err);
             }
         }
     }
@@ -1525,6 +1526,42 @@ fn derive_recording_download_url(state: &ConsoleState, record: &CallRecordModel)
     }
 }
 
+fn strip_storage_root(state: &ConsoleState, path: &str) -> String {
+    if let Some(app) = state.app_state() {
+        if let Some(config) = &app.config().callrecord {
+            match config {
+                crate::config::CallRecordConfig::Local { root } => {
+                    let root_path = Path::new(root);
+                    let candidate_path = Path::new(path);
+                    if let Ok(stripped) = candidate_path.strip_prefix(root_path) {
+                        stripped.to_string_lossy().to_string()
+                    } else {
+                        let root_str = root.trim_end_matches('/');
+                        if path.starts_with(root_str) {
+                            path[root_str.len()..].trim_start_matches('/').to_string()
+                        } else {
+                            path.to_string()
+                        }
+                    }
+                }
+                crate::config::CallRecordConfig::S3 { root, .. } => {
+                    let root_str = root.trim_end_matches('/');
+                    if path.starts_with(root_str) {
+                        path[root_str.len()..].trim_start_matches('/').to_string()
+                    } else {
+                        path.to_string()
+                    }
+                }
+                _ => path.to_string(),
+            }
+        } else {
+            path.to_string()
+        }
+    } else {
+        path.to_string()
+    }
+}
+
 pub async fn load_cdr_data(state: &ConsoleState, record: &CallRecordModel) -> Option<CdrData> {
     let storage = resolve_cdr_storage(state);
     let callrecord: CallRecord = record.clone().into();
@@ -1532,10 +1569,12 @@ pub async fn load_cdr_data(state: &ConsoleState, record: &CallRecordModel) -> Op
     let mut content: Option<String> = None;
 
     if let Some(ref storage_ref) = storage {
-        match storage_ref.read_to_string(&candidate).await {
+        let path_to_read = strip_storage_root(state, &candidate);
+
+        match storage_ref.read_to_string(&path_to_read).await {
             Ok(value) => content = Some(value),
             Err(err) => {
-                warn!(call_id = %record.call_id, path = %candidate, "failed to load CDR from storage: {}", err);
+                warn!(call_id = %record.call_id, path = %path_to_read, "failed to load CDR from storage: {}", err);
             }
         }
     }
@@ -2289,6 +2328,9 @@ mod tests {
                 base_path: "/console".into(),
                 allow_registration: false,
                 secure_cookie: false,
+                alpine_js: None,
+                tailwind_js: None,
+                chart_js: None,
             },
         )
         .await

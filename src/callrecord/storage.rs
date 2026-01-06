@@ -1,103 +1,47 @@
-use super::build_object_store_from_s3;
 use crate::config::CallRecordConfig;
+use crate::storage::{Storage, StorageConfig};
 use anyhow::{Context, Result};
 use bytes::Bytes;
-use object_store::{ObjectStore, path::Path as ObjectPath};
-use std::{path::PathBuf, sync::Arc};
+use std::path::PathBuf;
 
 #[derive(Clone)]
-pub enum CdrStorage {
-    Local {
-        root: PathBuf,
-    },
-    S3 {
-        store: Arc<dyn ObjectStore>,
-        root: String,
-    },
+pub struct CdrStorage {
+    inner: Storage,
 }
 
 impl CdrStorage {
-    fn resolve_local_path(&self, path: &str) -> PathBuf {
-        PathBuf::from(path)
-    }
-
-    fn normalize_s3_key(&self, path: &str) -> String {
-        path.to_string()
-    }
-
-    fn object_path(&self, path: &str) -> ObjectPath {
-        ObjectPath::from(self.normalize_s3_key(path))
+    pub fn new(storage: Storage) -> Self {
+        Self { inner: storage }
     }
 
     pub fn is_local(&self) -> bool {
-        matches!(self, CdrStorage::Local { .. })
+        self.inner.is_local()
     }
 
     pub fn local_full_path(&self, path: &str) -> Option<PathBuf> {
-        match self {
-            CdrStorage::Local { .. } => Some(self.resolve_local_path(path)),
-            _ => None,
-        }
+        self.inner.local_path(path)
     }
 
     pub fn path_for_metadata(&self, path: &str) -> String {
-        match self {
-            CdrStorage::Local { .. } => {
-                self.resolve_local_path(path).to_string_lossy().into_owned()
-            }
-            CdrStorage::S3 { .. } => self.normalize_s3_key(path),
+        if self.is_local() {
+            self.inner
+                .local_path(path)
+                .unwrap()
+                .to_string_lossy()
+                .into_owned()
+        } else {
+            path.to_string()
         }
     }
 
     pub async fn write_bytes(&self, path: &str, bytes: &[u8]) -> Result<String> {
-        match self {
-            CdrStorage::Local { .. } => {
-                let full_path = self.resolve_local_path(path);
-                if let Some(parent) = full_path.parent() {
-                    tokio::fs::create_dir_all(parent).await.with_context(|| {
-                        format!("create transcript directory {}", parent.display())
-                    })?;
-                }
-                tokio::fs::write(&full_path, bytes)
-                    .await
-                    .with_context(|| format!("write call record asset {}", full_path.display()))?;
-                Ok(full_path.to_string_lossy().into_owned())
-            }
-            CdrStorage::S3 { store, .. } => {
-                let key = self.normalize_s3_key(path);
-                store
-                    .put(
-                        &self.object_path(path),
-                        Bytes::copy_from_slice(bytes).into(),
-                    )
-                    .await
-                    .with_context(|| format!("upload call record asset {}", key))?;
-                Ok(key)
-            }
-        }
+        self.inner.write(path, Bytes::copy_from_slice(bytes)).await?;
+        Ok(path.to_string())
     }
 
     pub async fn read_bytes(&self, path: &str) -> Result<Vec<u8>> {
-        match self {
-            CdrStorage::Local { .. } => {
-                let data = tokio::fs::read(path)
-                    .await
-                    .with_context(|| format!("read call record asset {}", path))?;
-                Ok(data)
-            }
-            CdrStorage::S3 { store, .. } => {
-                let key = self.normalize_s3_key(path);
-                let result = store
-                    .get(&self.object_path(path))
-                    .await
-                    .with_context(|| format!("download call record asset {}", key))?;
-                let bytes = result
-                    .bytes()
-                    .await
-                    .with_context(|| format!("buffer call record asset {}", key))?;
-                Ok(bytes.to_vec())
-            }
-        }
+        let bytes = self.inner.read(path).await?;
+        Ok(bytes.to_vec())
     }
 
     pub async fn read_to_string(&self, path: &str) -> Result<String> {
@@ -108,9 +52,11 @@ impl CdrStorage {
 
 pub fn resolve_storage(config: Option<&CallRecordConfig>) -> Result<Option<CdrStorage>> {
     match config {
-        Some(CallRecordConfig::Local { root }) => Ok(Some(CdrStorage::Local {
-            root: PathBuf::from(root),
-        })),
+        Some(CallRecordConfig::Local { root }) => {
+            let storage_config = StorageConfig::Local { path: root.clone() };
+            let storage = Storage::new(&storage_config)?;
+            Ok(Some(CdrStorage::new(storage)))
+        }
         Some(CallRecordConfig::S3 {
             vendor,
             bucket,
@@ -121,14 +67,17 @@ pub fn resolve_storage(config: Option<&CallRecordConfig>) -> Result<Option<CdrSt
             root,
             ..
         }) => {
-            let store = build_object_store_from_s3(
-                vendor, bucket, region, access_key, secret_key, endpoint,
-            )?;
-            let normalized_root = root.trim_matches('/').to_string();
-            Ok(Some(CdrStorage::S3 {
-                store,
-                root: normalized_root,
-            }))
+            let storage_config = StorageConfig::S3 {
+                vendor: vendor.clone(),
+                bucket: bucket.clone(),
+                region: region.clone(),
+                access_key: access_key.clone(),
+                secret_key: secret_key.clone(),
+                endpoint: Some(endpoint.clone()),
+                prefix: Some(root.clone()),
+            };
+            let storage = Storage::new(&storage_config)?;
+            Ok(Some(CdrStorage::new(storage)))
         }
         Some(CallRecordConfig::Http { .. }) => Ok(None),
         None => Ok(None),

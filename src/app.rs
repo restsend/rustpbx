@@ -48,6 +48,7 @@ pub struct CoreContext {
     pub token: CancellationToken,
     pub callrecord_sender: Option<CallRecordSender>,
     pub callrecord_stats: Option<Arc<crate::callrecord::CallRecordStats>>,
+    pub storage: crate::storage::Storage,
 }
 
 pub struct AppStateInner {
@@ -133,18 +134,7 @@ impl AppStateInner {
             }
         }
         let mut recorder_file = root.join(session_id);
-        let desired_ext = self.config().recorder_format().extension();
-        let has_desired_ext = recorder_file
-            .extension()
-            .and_then(|ext| ext.to_str())
-            .map(|ext| ext.eq_ignore_ascii_case(desired_ext))
-            .unwrap_or(false);
-
-        if !has_desired_ext {
-            // Ensure the on-disk filename matches the configured recorder format extension.
-            recorder_file.set_extension(desired_ext);
-        }
-
+        recorder_file.set_extension("wav");
         recorder_file.to_string_lossy().to_string()
     }
 }
@@ -198,6 +188,9 @@ impl AppStateBuilder {
 
     pub async fn build(self) -> Result<AppState> {
         let config: Arc<Config> = Arc::new(self.config.unwrap_or_default());
+        let storage_config = config.storage.clone().unwrap_or_default();
+        let storage = crate::storage::Storage::new(&storage_config)?;
+
         let token = self
             .cancel_token
             .unwrap_or_else(|| CancellationToken::new());
@@ -263,6 +256,7 @@ impl AppStateBuilder {
             token: token.clone(),
             callrecord_sender: callrecord_sender.clone(),
             callrecord_stats: callrecord_stats.clone(),
+            storage: storage.clone(),
         });
 
         let sip_server = match self.proxy_builder {
@@ -291,6 +285,7 @@ impl AppStateBuilder {
                     .with_rtp_config(config.rtp_config())
                     .with_database_connection(core.db.clone())
                     .with_call_record_hooks(call_record_hooks)
+                    .with_storage(core.storage.clone())
                     .register_module("acl", AclModule::create)
                     .register_module("auth", AuthModule::create)
                     .register_module("registrar", RegistrarModule::create)

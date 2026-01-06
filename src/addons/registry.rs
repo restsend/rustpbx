@@ -14,6 +14,10 @@ impl AddonRegistry {
         #[cfg(feature = "addon-acme")]
         addons.push(Box::new(super::acme::AcmeAddon::new()));
 
+        // Archive Addon
+        #[cfg(feature = "addon-archive")]
+        addons.push(Box::new(super::archive::ArchiveAddon::new()));
+
         // Wholesale Addon
         #[cfg(feature = "addon-wholesale")]
         addons.push(Box::new(super::wholesale::WholesaleAddon::new()));
@@ -21,6 +25,9 @@ impl AddonRegistry {
         // Transcript Addon
         #[cfg(feature = "addon-transcript")]
         addons.push(Box::new(super::transcript::TranscriptAddon::new()));
+
+        // Queue Addon
+        addons.push(Box::new(super::queue::QueueAddon::new()));
 
         Self { addons }
     }
@@ -99,8 +106,7 @@ impl AddonRegistry {
         self.addons
             .iter()
             .map(|a| {
-                let sidebar = a.sidebar_items();
-                let config_url = sidebar.first().map(|s| s.url.clone());
+                let config_url = a.config_url();
 
                 super::AddonInfo {
                     id: a.id().to_string(),

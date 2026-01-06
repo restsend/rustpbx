@@ -61,7 +61,7 @@ impl ConsoleState {
     }
 
     pub fn clear_session_cookie(&self, request_secure: bool) -> Option<HeaderValue> {
-        let _is_secure = self.secure_cookie || request_secure;
+        let _is_secure = self.config.secure_cookie || request_secure;
         // let secure_attr = if is_secure { "; Secure" } else { "" };
         let secure_attr = "";
         let cookie = format!(
@@ -94,7 +94,7 @@ impl ConsoleState {
 
     pub fn session_cookie_header(&self, user_id: i64, request_secure: bool) -> Option<HeaderValue> {
         let value = self.generate_session_token(user_id)?;
-        let _is_secure = self.secure_cookie || request_secure;
+        let _is_secure = self.config.secure_cookie || request_secure;
         let secure_attr = "";
         let cookie = format!(
             "{}={}; Path={}; HttpOnly; Max-Age={}{}",
@@ -132,7 +132,7 @@ impl ConsoleState {
             })
         } else {
             Ok(RegistrationPolicy {
-                allowed: self.registration_allowed_by_config(),
+                allowed: self.config.allow_registration,
                 first_user: false,
             })
         }
@@ -344,6 +344,9 @@ mod tests {
                 base_path: "/console".into(),
                 allow_registration,
                 secure_cookie: false,
+                alpine_js: None,
+                tailwind_js: None,
+                chart_js: None,
             },
         )
         .await

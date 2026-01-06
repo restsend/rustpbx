@@ -14,7 +14,7 @@ use tracing::info;
 
 use crate::{
     call::{DialDirection, RoutingState, policy::PolicyCheckStatus},
-    config::RouteResult,
+    config::{DialplanHints, RouteResult},
     proxy::routing::{ActionType, RouteQueueConfig, RouteRule, SourceTrunk, TrunkConfig},
 };
 
@@ -264,6 +264,14 @@ async fn match_invite_impl(
             }
         }
 
+        let hints = if !rule.codecs.is_empty() {
+            let mut hints = DialplanHints::default();
+            hints.allow_codecs = Some(rule.codecs.clone());
+            Some(hints)
+        } else {
+            None
+        };
+
         // Handle based on action type
         match rule.action.get_action_type() {
             ActionType::Reject => {
@@ -362,33 +370,46 @@ async fn match_invite_impl(
                         }
                     }
                 }
-                return Ok(RouteResult::Forward(option, None));
+                return Ok(RouteResult::Forward(option, hints));
             }
             ActionType::Queue => {
-                let queue_path = rule
+                let queue_ref = rule
                     .action
                     .queue
                     .as_ref()
                     .map(|value| value.trim().to_string())
                     .filter(|value| !value.is_empty())
-                    .ok_or_else(|| anyhow!("queue action requires a 'queue' file reference"))?;
+                    .ok_or_else(|| anyhow!("queue action requires a 'queue' reference"))?;
 
                 let lookup = resource_lookup.ok_or_else(|| {
                     anyhow!(
                         "queue action cannot resolve '{}' without resource lookup",
-                        queue_path
+                        queue_ref
                     )
                 })?;
 
+                // Try to resolve as ID if it looks like one (e.g. "123")
+                // Or if it is prefixed with "queue:" which is stripped before calling this?
+                // Actually, `rule.action.queue` comes from the route rule config.
+                // If it's a file path, `load_queue` handles it.
+                // If it's an ID, we need to handle it.
+                
+                // If the reference is just digits, treat it as a DB ID reference "db-<id>"
+                let lookup_ref = if queue_ref.chars().all(|c| c.is_ascii_digit()) {
+                    format!("db-{}", queue_ref)
+                } else {
+                    queue_ref.clone()
+                };
+
                 let queue_cfg = lookup
-                    .load_queue(queue_path.as_str())
+                    .load_queue(lookup_ref.as_str())
                     .await?
                     .ok_or_else(|| {
-                        anyhow!("queue file '{}' not found or unreadable", queue_path)
+                        anyhow!("queue '{}' not found", queue_ref)
                     })?;
                 let mut queue_plan = queue_cfg.to_queue_plan()?;
                 if queue_plan.label.is_none() {
-                    queue_plan.label = Some(queue_path.clone());
+                    queue_plan.label = Some(queue_ref.clone());
                 }
                 let needs_trunk = queue_plan.dial_strategy.is_none();
                 if needs_trunk {
@@ -454,7 +475,7 @@ async fn match_invite_impl(
                 return Ok(RouteResult::Queue {
                     option,
                     queue: queue_plan,
-                    hints: None,
+                    hints,
                 });
             }
         }

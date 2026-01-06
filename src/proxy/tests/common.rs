@@ -77,6 +77,7 @@ pub async fn create_test_server_with_config(
         frequency_limiter: None,
         call_record_hooks: Arc::new(Vec::new()),
         runnings_tx: Arc::new(AtomicUsize::new(0)),
+        storage: None,
     });
 
     // Add test users

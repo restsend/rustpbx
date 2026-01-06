@@ -143,6 +143,7 @@ impl TransferEndpoint {
             if name.is_empty() {
                 return None;
             }
+            // If name is numeric, it's likely an ID, but we store it as string in TransferEndpoint::Queue
             return Some(TransferEndpoint::Queue(name.to_string()));
         }
         Some(TransferEndpoint::Uri(trimmed.to_string()))
@@ -645,10 +646,10 @@ impl Dialplan {
             with_original_headers: true,
             extensions: http::Extensions::new(),
             allow_codecs: vec![
-                #[cfg(feature = "opus")]
-                CodecType::Opus,
-                CodecType::G729,
-                CodecType::G722,
+                // #[cfg(feature = "opus")]
+                // CodecType::Opus,
+                // CodecType::G729,
+                // CodecType::G722,
                 CodecType::PCMU,
                 CodecType::PCMA,
                 CodecType::TelephoneEvent,

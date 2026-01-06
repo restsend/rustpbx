@@ -68,6 +68,9 @@ mod callsession_b2bua_tests {
             None,
             CodecType::PCMU,
             CodecType::PCMU,
+            None,
+            None,
+            None,
         );
 
         // Should NOT require transcoding
@@ -102,6 +105,9 @@ mod callsession_b2bua_tests {
             None,
             CodecType::Opus,
             CodecType::PCMU,
+            None,
+            None,
+            None,
         );
 
         // Should require transcoding
@@ -137,6 +143,9 @@ mod callsession_b2bua_tests {
             None,
             CodecType::PCMA,
             CodecType::PCMU,
+            None,
+            None,
+            None,
         );
 
         // Should require transcoding
@@ -333,6 +342,9 @@ mod callsession_b2bua_tests {
             None,
             CodecType::PCMU,
             CodecType::PCMU,
+            None,
+            None,
+            None,
         );
 
         bridge.start().await.expect("Bridge should start");
@@ -364,6 +376,9 @@ mod callsession_b2bua_tests {
             None,
             CodecType::PCMU,
             CodecType::PCMU,
+            None,
+            None,
+            None,
         );
 
         // Starting multiple times should be safe
@@ -413,6 +428,9 @@ mod callsession_b2bua_tests {
             Some(101), // DTMF for leg B
             CodecType::PCMU,
             CodecType::PCMU,
+            None,
+            None,
+            None,
         );
 
         assert_eq!(bridge.dtmf_pt_a, Some(101));
@@ -453,23 +471,6 @@ mod callsession_b2bua_tests {
         assert_eq!(g722_params.clock_rate, 8000);
     }
 
-    // ==================== Test 9: Recorder Integration ====================
-
-    #[test]
-    fn test_recorder_formats_supported() {
-        use crate::media::recorder::Recorder;
-
-        // Test WAV format detection
-        assert!(Recorder::is_wav_format(CodecType::PCMU));
-        assert!(Recorder::is_wav_format(CodecType::PCMA));
-        assert!(Recorder::is_wav_format(CodecType::G722));
-
-        // Opus is not WAV format (would need container)
-        assert!(!Recorder::is_wav_format(CodecType::Opus));
-    }
-
-    // ==================== Test 10: MediaBridge with Recorder ====================
-
     #[tokio::test]
     async fn test_bridge_without_recorder() {
         // Test that bridge works when recorder is disabled
@@ -485,6 +486,9 @@ mod callsession_b2bua_tests {
             None,
             CodecType::PCMU,
             CodecType::PCMU,
+            None,
+            None,
+            None,
         );
 
         // Should work fine without recorder
@@ -494,8 +498,6 @@ mod callsession_b2bua_tests {
             .expect("Bridge should start without recorder");
         bridge.stop();
     }
-
-    // ==================== Test 11: Queue Integration ====================
 
     #[test]
     fn test_queue_plan_creation() {
