@@ -575,6 +575,17 @@ impl SipServer {
     pub async fn serve(&self) -> Result<()> {
         let incoming = self.inner.endpoint.incoming_transactions()?;
         let cancel_token = self.inner.cancel_token.clone();
+
+        if let Some(webhook_config) = &self.inner.proxy_config.locator_webhook {
+            if let Some(events) = &self.inner.locator_events {
+                let rx = events.subscribe();
+                tokio::spawn(super::locator_webhook::handle_locator_webhook(
+                    webhook_config.clone(),
+                    rx,
+                ));
+            }
+        }
+
         tokio::select! {
             _ = cancel_token.cancelled() => {
                 info!("cancelled");

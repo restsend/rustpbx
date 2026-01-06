@@ -336,6 +336,15 @@ pub struct HttpRouterConfig {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct LocatorWebhookConfig {
+    pub url: String,
+    #[serde(default)]
+    pub events: Vec<String>,
+    pub headers: Option<HashMap<String, String>>,
+    pub timeout_ms: Option<u64>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ProxyConfig {
     pub modules: Option<Vec<String>>,
     pub addr: String,
@@ -361,6 +370,7 @@ pub struct ProxyConfig {
     pub user_backends: Vec<UserBackendConfig>,
     #[serde(default)]
     pub locator: LocatorConfig,
+    pub locator_webhook: Option<LocatorWebhookConfig>,
     #[serde(default)]
     pub media_proxy: MediaProxyMode,
     pub codecs: Option<Vec<String>>,
@@ -561,6 +571,7 @@ impl Default for ProxyConfig {
             ensure_user: Some(true),
             user_backends: default_user_backends(),
             locator: LocatorConfig::default(),
+            locator_webhook: None,
             media_proxy: MediaProxyMode::default(),
             codecs: None,
             frequency_limiter: None,

@@ -409,6 +409,298 @@
 
         </section>
 
+        <section x-show="activeTab === 'proxy'" x-cloak x-transition.opacity class="space-y-6" id="settings-tab-proxy"
+            role="tabpanel" tabindex="0">
+            <div class="grid gap-6 lg:grid-cols-1">
+                <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+                    <div class="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+                        <div>
+                            <h2 class="text-base font-semibold text-slate-900">Proxy configuration</h2>
+                            <p class="text-xs text-slate-500">Configure realms, user backends, and external routing
+                                integrations.</p>
+                        </div>
+                    </div>
+                    <form class="mt-6 space-y-8" @submit.prevent="saveProxySettings">
+                        <!-- Realms Section -->
+                        <div class="space-y-4">
+                            <div>
+                                <label class="block text-sm font-semibold text-slate-900">Realms</label>
+                                <p class="mt-1 text-xs text-slate-500">Realms are used to partition the SIP namespace.
+                                    They determine which domain names the proxy will accept and how users are challenged
+                                    for authentication. Each line is a realm (e.g., example.com).</p>
+                                <textarea x-model="proxyDraft.realms" :disabled="proxyProcessing" rows="3"
+                                    class="mt-2 block w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                    placeholder="localhost&#10;example.com"></textarea>
+                            </div>
+                        </div>
+
+                        <hr class="border-slate-100">
+
+                        <!-- Locator Webhook -->
+                        <div class="space-y-4">
+                            <div>
+                                <h3 class="text-sm font-semibold text-slate-900">Locator webhook</h3>
+                                <p class="text-xs text-slate-500">Receive real-time notifications when users register,
+                                    unregister, or go offline.</p>
+                            </div>
+                            <div class="grid gap-4 md:grid-cols-2">
+                                <div class="md:col-span-1">
+                                    <label
+                                        class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Webhook
+                                        URL</label>
+                                    <input type="url" x-model="proxyDraft.locator_webhook.url"
+                                        :disabled="proxyProcessing"
+                                        class="mt-1 block w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                        placeholder="https://api.example.com/sip-events">
+                                </div>
+                                <div class="md:col-span-1">
+                                    <label
+                                        class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Timeout
+                                        (ms)</label>
+                                    <input type="number" x-model="proxyDraft.locator_webhook.timeout_ms"
+                                        :disabled="proxyProcessing"
+                                        class="mt-1 block w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                        placeholder="5000">
+                                </div>
+                                <div class="md:col-span-2">
+                                    <label
+                                        class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Custom
+                                        Headers</label>
+                                    <textarea x-model="proxyDraft.locator_webhook.headers" :disabled="proxyProcessing"
+                                        rows="2"
+                                        class="mt-1 block w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                        placeholder="X-API-Key: secret-key"></textarea>
+                                </div>
+                            </div>
+                            <div class="flex justify-start">
+                                <button type="button" @click="testLocatorWebhook"
+                                    :disabled="proxyProcessing || !proxyDraft.locator_webhook.url"
+                                    class="inline-flex items-center gap-2 rounded-md border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-600 transition hover:bg-slate-50 disabled:opacity-50">
+                                    <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="none" stroke="currentColor"
+                                        stroke-width="1.6">
+                                        <path stroke-linecap="round" stroke-linejoin="round"
+                                            d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" />
+                                        <path stroke-linecap="round" stroke-linejoin="round"
+                                            d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                                    </svg>
+                                    Test webhook
+                                </button>
+                            </div>
+                        </div>
+
+                        <hr class="border-slate-100">
+
+                        <!-- User Backends -->
+                        <div class="space-y-4">
+                            <div class="flex items-center justify-between">
+                                <div>
+                                    <h3 class="text-sm font-semibold text-slate-900">User backends</h3>
+                                    <p class="text-xs text-slate-500">Configure how users are authenticated and
+                                        retrieved.</p>
+                                </div>
+                                <div class="relative" x-data="{ open: false }" @click.away="open = false">
+                                    <button type="button" @click="open = !open"
+                                        class="inline-flex items-center gap-2 rounded-md bg-white px-3 py-1.5 text-xs font-semibold text-sky-600 shadow-sm ring-1 ring-inset ring-sky-200 hover:bg-sky-50">
+                                        Add backend
+                                        <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor">
+                                            <path fill-rule="evenodd"
+                                                d="M5.23 7.21a.75.75 0 011.06.02L10 11.168l3.71-3.938a.75.75 0 111.08 1.04l-4.25 4.5a.75.75 0 01-1.08 0l-4.25-4.5a.75.75 0 01.02-1.06z"
+                                                clip-rule="evenodd" />
+                                        </svg>
+                                    </button>
+                                    <div x-show="open" x-cloak
+                                        class="absolute right-0 z-10 mt-2 w-48 origin-top-right rounded-md bg-white shadow-lg ring-1 ring-black ring-opacity-5 focus:outline-none">
+                                        <div class="py-1" role="menu">
+                                            <button type="button" @click="addUserBackend('memory'); open = false"
+                                                class="block w-full px-4 py-2 text-left text-xs text-slate-700 hover:bg-slate-100"
+                                                role="menuitem">Memory (Config file)</button>
+                                            <button type="button" @click="addUserBackend('http'); open = false"
+                                                class="block w-full px-4 py-2 text-left text-xs text-slate-700 hover:bg-slate-100"
+                                                role="menuitem">HTTP Webhook</button>
+                                            <button type="button" @click="addUserBackend('database'); open = false"
+                                                class="block w-full px-4 py-2 text-left text-xs text-slate-700 hover:bg-slate-100"
+                                                role="menuitem">Database</button>
+                                            <button type="button" @click="addUserBackend('plain'); open = false"
+                                                class="block w-full px-4 py-2 text-left text-xs text-slate-700 hover:bg-slate-100"
+                                                role="menuitem">Plain file</button>
+                                            <button type="button" @click="addUserBackend('extension'); open = false"
+                                                class="block w-full px-4 py-2 text-left text-xs text-slate-700 hover:bg-slate-100"
+                                                role="menuitem">Extension (Internal DB)</button>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div class="space-y-4">
+                                <template x-for="(backend, index) in proxyDraft.user_backends" :key="index">
+                                    <div class="rounded-lg border border-slate-200 bg-slate-50 p-4">
+                                        <div class="mb-4 flex items-center justify-between">
+                                            <div class="flex items-center gap-2">
+                                                <span
+                                                    class="rounded bg-sky-100 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider text-sky-700"
+                                                    x-text="backend.type"></span>
+                                                <span class="text-xs font-semibold text-slate-700"
+                                                    x-text="`Backend #${index + 1}`"></span>
+                                            </div>
+                                            <button type="button" @click="removeUserBackend(index)"
+                                                class="text-slate-400 hover:text-rose-600">
+                                                <svg class="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke-width="2"
+                                                    stroke="currentColor">
+                                                    <path stroke-linecap="round" stroke-linejoin="round"
+                                                        d="M6 18L18 6M6 6l12 12" />
+                                                </svg>
+                                            </button>
+                                        </div>
+
+                                        <div class="grid gap-4 md:grid-cols-2">
+                                            <template x-if="backend.type === 'http'">
+                                                <div class="md:col-span-2 space-y-4">
+                                                    <div>
+                                                        <label
+                                                            class="block text-[10px] font-bold uppercase tracking-wider text-slate-400">URL</label>
+                                                        <input type="url" x-model="backend.url"
+                                                            class="mt-1 block w-full rounded border border-slate-200 px-2 py-1.5 text-xs text-slate-700 focus:ring-1 focus:ring-sky-300">
+                                                    </div>
+                                                    <div class="grid gap-4 md:grid-cols-3">
+                                                        <div>
+                                                            <label
+                                                                class="block text-[10px] font-bold uppercase tracking-wider text-slate-400">Method</label>
+                                                            <select x-model="backend.method"
+                                                                class="mt-1 block w-full rounded border border-slate-200 px-2 py-1.5 text-xs text-slate-700">
+                                                                <option value="GET">GET</option>
+                                                                <option value="POST">POST</option>
+                                                            </select>
+                                                        </div>
+                                                        <div>
+                                                            <label
+                                                                class="block text-[10px] font-bold uppercase tracking-wider text-slate-400">Username
+                                                                Field</label>
+                                                            <input type="text" x-model="backend.username_field"
+                                                                placeholder="username"
+                                                                class="mt-1 block w-full rounded border border-slate-200 px-2 py-1.5 text-xs text-slate-700">
+                                                        </div>
+                                                        <div>
+                                                            <label
+                                                                class="block text-[10px] font-bold uppercase tracking-wider text-slate-400">Realm
+                                                                Field</label>
+                                                            <input type="text" x-model="backend.realm_field"
+                                                                placeholder="realm"
+                                                                class="mt-1 block w-full rounded border border-slate-200 px-2 py-1.5 text-xs text-slate-700">
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            </template>
+                                            <template x-if="backend.type === 'database'">
+                                                <div class="md:col-span-2">
+                                                    <label
+                                                        class="block text-[10px] font-bold uppercase tracking-wider text-slate-400">Database
+                                                        URL</label>
+                                                    <input type="text" x-model="backend.url"
+                                                        placeholder="mysql://user:pass@host/db"
+                                                        class="mt-1 block w-full rounded border border-slate-200 px-2 py-1.5 text-xs text-slate-700">
+                                                </div>
+                                            </template>
+                                            <template x-if="backend.type === 'plain'">
+                                                <div class="md:col-span-2">
+                                                    <label
+                                                        class="block text-[10px] font-bold uppercase tracking-wider text-slate-400">File
+                                                        Path</label>
+                                                    <input type="text" x-model="backend.path" placeholder="./users.txt"
+                                                        class="mt-1 block w-full rounded border border-slate-200 px-2 py-1.5 text-xs text-slate-700">
+                                                </div>
+                                            </template>
+                                            <template x-if="backend.type === 'memory'">
+                                                <div class="md:col-span-2">
+                                                    <p class="text-xs text-slate-500 italic">Static users defined in the
+                                                        configuration file.</p>
+                                                </div>
+                                            </template>
+                                            <template x-if="backend.type === 'extension'">
+                                                <div class="md:col-span-2">
+                                                    <p class="text-xs text-slate-500 italic">Users managed through the
+                                                        internal extension database.</p>
+                                                </div>
+                                            </template>
+                                        </div>
+
+                                        <div class="mt-4 flex justify-end">
+                                            <button type="button" @click="testUserBackend(index)"
+                                                class="text-[11px] font-semibold text-sky-600 hover:text-sky-700">Test
+                                                backend</button>
+                                        </div>
+                                    </div>
+                                </template>
+                            </div>
+                        </div>
+
+                        <hr class="border-slate-100">
+
+                        <!-- HTTP Call Router -->
+                        <div class="space-y-4">
+                            <div>
+                                <h3 class="text-sm font-semibold text-slate-900">HTTP call router</h3>
+                                <p class="text-xs text-slate-500">Determine call destinations dynamically by querying an
+                                    external HTTP service.</p>
+                            </div>
+                            <div class="grid gap-4 md:grid-cols-2">
+                                <div class="md:col-span-1">
+                                    <label
+                                        class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Router
+                                        URL</label>
+                                    <input type="url" x-model="proxyDraft.http_router.url" :disabled="proxyProcessing"
+                                        class="mt-1 block w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                        placeholder="https://api.example.com/route-call">
+                                </div>
+                                <div class="md:col-span-1">
+                                    <label
+                                        class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Timeout
+                                        (ms)</label>
+                                    <input type="number" x-model="proxyDraft.http_router.timeout_ms"
+                                        :disabled="proxyProcessing"
+                                        class="mt-1 block w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                        placeholder="5000">
+                                </div>
+                                <div class="md:col-span-2">
+                                    <label
+                                        class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Custom
+                                        Headers</label>
+                                    <textarea x-model="proxyDraft.http_router.headers" :disabled="proxyProcessing"
+                                        rows="2"
+                                        class="mt-1 block w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                        placeholder="Authorization: Bearer ..."></textarea>
+                                </div>
+                            </div>
+                            <div class="flex justify-start">
+                                <button type="button" @click="testHttpRouter"
+                                    :disabled="proxyProcessing || !proxyDraft.http_router.url"
+                                    class="inline-flex items-center gap-2 rounded-md border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-600 transition hover:bg-slate-50 disabled:opacity-50">
+                                    <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="none" stroke="currentColor"
+                                        stroke-width="1.6">
+                                        <path stroke-linecap="round" stroke-linejoin="round"
+                                            d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" />
+                                        <path stroke-linecap="round" stroke-linejoin="round"
+                                            d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                                    </svg>
+                                    Test router
+                                </button>
+                            </div>
+                        </div>
+
+                        <div class="flex items-center justify-end gap-2 border-t border-slate-200 pt-6">
+                            <button type="button" @click="resetProxyDraft" :disabled="proxyProcessing"
+                                class="rounded-md border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-600 hover:bg-slate-50">
+                                Reset
+                            </button>
+                            <button type="submit" :disabled="proxyProcessing"
+                                class="rounded-md bg-sky-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-offset-2">
+                                <span x-text="proxyProcessing ? 'Saving…' : 'Save proxy settings'"></span>
+                            </button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+        </section>
+
         <section x-show="activeTab === 'storage'" x-cloak x-transition.opacity class="space-y-6"
             id="settings-tab-storage" role="tabpanel" tabindex="0">
             <div class="space-y-6">
@@ -1483,6 +1775,7 @@
             currentUser: options?.currentUser || null,
             tabs: [
                 { id: 'platform', label: 'Platform overview' },
+                { id: 'proxy', label: 'Proxy settings' },
                 { id: 'storage', label: 'Storage & retention' },
                 { id: 'recording', label: 'Recording policy' },
                 { id: 'security', label: 'Security posture' },
@@ -1504,6 +1797,21 @@
                 rtp_end_port: '',
             },
             platformProcessing: false,
+            proxyDraft: {
+                realms: '',
+                locator_webhook: {
+                    url: '',
+                    timeout_ms: '',
+                    headers: '',
+                },
+                http_router: {
+                    url: '',
+                    timeout_ms: '',
+                    headers: '',
+                },
+                user_backends: [],
+            },
+            proxyProcessing: false,
             storageDraft: {
                 recorder_path: '',
                 recorder_format: 'wav',
@@ -1667,6 +1975,7 @@
                     }
                 }
                 this.initPlatformDraft();
+                this.initProxyDraft();
                 this.initStorageDraft();
                 this.initSecurityDraft();
                 this.directory = { departments: [], users: [], pending_invites: [] };
@@ -3043,6 +3352,155 @@
                     rtp_start_port: toStringOrEmpty(rtp?.start_port),
                     rtp_end_port: toStringOrEmpty(rtp?.end_port),
                 };
+            },
+            initProxyDraft() {
+                const proxy = this.proxyConfig || {};
+                this.proxyDraft = {
+                    realms: (proxy.realms || []).join('\n'),
+                    locator_webhook: {
+                        url: proxy.locator_webhook?.url || '',
+                        timeout_ms: proxy.locator_webhook?.timeout_ms || '',
+                        headers: this.formatHeaders(proxy.locator_webhook?.headers),
+                    },
+                    http_router: {
+                        url: proxy.http_router?.url || '',
+                        timeout_ms: proxy.http_router?.timeout_ms || '',
+                        headers: this.formatHeaders(proxy.http_router?.headers),
+                    },
+                    user_backends: JSON.parse(JSON.stringify(proxy.user_backends || [])),
+                };
+            },
+            resetProxyDraft() {
+                this.initProxyDraft();
+            },
+            addUserBackend(type) {
+                const backend = { type };
+                if (type === 'memory') backend.users = [];
+                else if (type === 'http') { backend.url = ''; backend.method = 'GET'; }
+                else if (type === 'database') { backend.url = ''; }
+                else if (type === 'plain') { backend.path = ''; }
+                else if (type === 'extension') { backend.database_url = ''; }
+                this.proxyDraft.user_backends.push(backend);
+            },
+            removeUserBackend(index) {
+                this.proxyDraft.user_backends.splice(index, 1);
+            },
+            async saveProxySettings() {
+                if (this.proxyProcessing) return;
+                const body = {
+                    realms: this.listFromTextarea(this.proxyDraft.realms),
+                    user_backends: this.proxyDraft.user_backends,
+                };
+
+                if (this.proxyDraft.locator_webhook.url) {
+                    body.locator_webhook = {
+                        url: this.proxyDraft.locator_webhook.url,
+                        timeout_ms: this.normalizeOptionalNumber(this.proxyDraft.locator_webhook.timeout_ms),
+                        headers: this.parseHeaders(this.proxyDraft.locator_webhook.headers),
+                    };
+                }
+
+                if (this.proxyDraft.http_router.url) {
+                    body.http_router = {
+                        url: this.proxyDraft.http_router.url,
+                        timeout_ms: this.normalizeOptionalNumber(this.proxyDraft.http_router.timeout_ms),
+                        headers: this.parseHeaders(this.proxyDraft.http_router.headers),
+                    };
+                }
+
+                this.proxyProcessing = true;
+                try {
+                    const response = await fetch(`${this.basePath}/settings/config/proxy`, {
+                        method: 'PATCH',
+                        headers: {
+                            Accept: 'application/json',
+                            'Content-Type': 'application/json',
+                        },
+                        body: JSON.stringify(body),
+                    });
+                    const data = await response.json();
+                    if (!response.ok) throw new Error(data?.message || 'Failed to update proxy settings');
+                    this.$dispatch('toast', { title: 'Settings saved', message: data.message });
+                    this.proxyConfig.realms = body.realms;
+                    this.proxyConfig.user_backends = body.user_backends;
+                    this.proxyConfig.locator_webhook = body.locator_webhook;
+                    this.proxyConfig.http_router = body.http_router;
+                    this.initProxyDraft();
+                } catch (err) {
+                    console.error(err);
+                    this.$dispatch('toast', { title: 'Update failed', message: err.message });
+                } finally {
+                    this.proxyProcessing = false;
+                }
+            },
+            async testLocatorWebhook() {
+                const draft = this.proxyDraft.locator_webhook;
+                if (!draft.url) return;
+                this.proxyProcessing = true;
+                try {
+                    const response = await fetch(`${this.basePath}/settings/config/proxy/locator-webhook/test`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ url: draft.url, headers: this.parseHeaders(draft.headers) }),
+                    });
+                    const data = await response.json();
+                    this.$dispatch('toast', { title: response.ok ? 'Success' : 'Failed', message: data.message });
+                } catch (err) {
+                    this.$dispatch('toast', { title: 'Test failed', message: err.message });
+                } finally {
+                    this.proxyProcessing = false;
+                }
+            },
+            async testHttpRouter() {
+                const draft = this.proxyDraft.http_router;
+                if (!draft.url) return;
+                this.proxyProcessing = true;
+                try {
+                    const response = await fetch(`${this.basePath}/settings/config/proxy/http-router/test`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ url: draft.url, headers: this.parseHeaders(draft.headers) }),
+                    });
+                    const data = await response.json();
+                    this.$dispatch('toast', { title: response.ok ? 'Success' : 'Failed', message: data.message });
+                } catch (err) {
+                    this.$dispatch('toast', { title: 'Test failed', message: err.message });
+                } finally {
+                    this.proxyProcessing = false;
+                }
+            },
+            async testUserBackend(index) {
+                const backend = this.proxyDraft.user_backends[index];
+                this.proxyProcessing = true;
+                try {
+                    const response = await fetch(`${this.basePath}/settings/config/proxy/user-backend/test`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ backend }),
+                    });
+                    const data = await response.json();
+                    this.$dispatch('toast', { title: response.ok ? 'Success' : 'Failed', message: data.message });
+                } catch (err) {
+                    this.$dispatch('toast', { title: 'Test failed', message: err.message });
+                } finally {
+                    this.proxyProcessing = false;
+                }
+            },
+            parseHeaders(text) {
+                const headers = {};
+                (text || '').split('\n').forEach(line => {
+                    const idx = line.indexOf(':');
+                    if (idx > 0) {
+                        const key = line.substring(0, idx).trim();
+                        const val = line.substring(idx + 1).trim();
+                        if (key && val) headers[key] = val;
+                    }
+                });
+                return Object.keys(headers).length ? headers : null;
+            },
+            formatHeaders(headers) {
+                if (!headers || typeof headers !== 'object') return '';
+                return Object.entries(headers).map(([k, v]) => `${k}: ${v}`).join('\n');
             },
             resetPlatformDraft() {
                 this.initPlatformDraft();

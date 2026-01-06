@@ -207,4 +207,95 @@ mod tests {
             _ => panic!("Expected rejection"),
         }
     }
+
+    #[tokio::test]
+    async fn test_http_router_enhanced() {
+        let app = Router::new().route(
+            "/route",
+            post(|| async {
+                Json(json!({
+                    "action": "forward",
+                    "targets": ["sip:1001@127.0.0.1"],
+                    "media_proxy": "none",
+                    "headers": {
+                        "X-Custom-Header": "test-value"
+                    },
+                    "extensions": {
+                        "custom_id": "123456"
+                    },
+                    "with_original_headers": true
+                }))
+            }),
+        );
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let config = HttpRouterConfig {
+            url: format!("http://{}/route", addr),
+            headers: None,
+            fallback_to_static: false,
+            timeout_ms: Some(1000),
+        };
+
+        let router = HttpCallRouter::new(config);
+
+        let request = rsip::Request {
+            method: rsip::Method::Invite,
+            uri: "sip:target@example.com".try_into().unwrap(),
+            headers: vec![
+                rsip::Header::From("sip:caller@example.com".try_into().unwrap()),
+                rsip::Header::To("sip:target@example.com".try_into().unwrap()),
+                rsip::Header::CallId("test-id".into()),
+            ]
+            .into(),
+            version: rsip::Version::V2,
+            body: vec![],
+        };
+
+        let caller = SipUser::default();
+        let cookie = TransactionCookie::default();
+
+        struct DummyRouteInvite;
+        #[async_trait::async_trait]
+        impl crate::call::RouteInvite for DummyRouteInvite {
+            async fn route_invite(
+                &self,
+                _: rsipstack::dialog::invitation::InviteOption,
+                _: &rsip::Request,
+                _: &crate::call::DialDirection,
+                _: &TransactionCookie,
+            ) -> anyhow::Result<crate::config::RouteResult> {
+                Ok(crate::config::RouteResult::NotHandled(
+                    rsipstack::dialog::invitation::InviteOption::default(),
+                    None,
+                ))
+            }
+        }
+
+        let dialplan = router
+            .resolve(&request, Box::new(DummyRouteInvite), &caller, &cookie)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            dialplan.media.proxy_mode,
+            crate::config::MediaProxyMode::None
+        );
+        assert_eq!(dialplan.with_original_headers, true);
+
+        let target = dialplan.first_target().unwrap();
+        let header = target.headers.as_ref().unwrap().get(0).unwrap();
+        assert_eq!(header.to_string(), "X-Custom-Header: test-value");
+
+        let exts = dialplan
+            .extensions
+            .get::<std::collections::HashMap<String, String>>()
+            .unwrap();
+        assert_eq!(exts.get("custom_id").unwrap(), "123456");
+    }
 }

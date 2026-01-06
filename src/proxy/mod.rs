@@ -14,6 +14,7 @@ pub mod call;
 pub mod data;
 pub mod locator;
 pub mod locator_db;
+pub mod locator_webhook;
 pub mod presence;
 pub mod proxy_call;
 pub mod registrar;

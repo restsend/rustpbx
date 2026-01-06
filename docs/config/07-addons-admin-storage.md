@@ -1,7 +1,13 @@
 # Addons, Console & Admin
 
 ## Admin Console
-Built-in web management interface.
+Built-in web management interface. 
+
+The console allows administrators to monitor system health and manage core platform settings without editing TOML files manually. Key management features include:
+- **Platform**: Logging, External IP, and RTP port ranges.
+- **Proxy Settings**: Realms, User Authentication Backends, Locator Webhooks, and HTTP Routers with built-in testing tools.
+- **Storage**: Media recording paths and S3 bucket integrations.
+- **Security**: ACL rule management.
 
 ```toml
 [console]

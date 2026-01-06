@@ -38,6 +38,14 @@ callid_suffix = "rustpbx.com"
 realms = ["example.com", "sip.process-one.net"]
 ```
 
+### The Role of Realms
+Realms are used to partition the SIP namespace and provide context for authentication.
+- **Security**: Challenges are issued against a specific realm. Users must provide credentials valid for that realm.
+- **Domain Routing**: When multiple domains are hosted on the same IP, realms allow the proxy to distinguish which settings or user database to use.
+- **Identity**: Often used as the domain part of a SIP URI (e.g., `user@realm`).
+
+You can manage Realms in the **Web Console** under **Settings > Proxy Settings**. Changes require a service restart to take full effect.
+
 ## Concurrency & Protection
 
 ```toml

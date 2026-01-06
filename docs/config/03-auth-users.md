@@ -1,6 +1,10 @@
 # Authentication & Users
 
-RustPBX supports multiple backend types for user authentication and retrieval. You can chain multiple backends in `proxy.user_backends`.
+RustPBX supports multiple backend types for user authentication and retrieval. You can chain multiple backends in `proxy.user_backends`. 
+
+The backends are queried in the order they are defined. If a user is not found in the first backend, the next one is checked.
+
+> **Management**: You can add, remove, and configure these backends in the **Web Console** under **Settings > Proxy Settings**. The console also provides a **Test** feature to verify backend connectivity and response logic before applying changes.
 
 ## 1. Memory Backend (Static)
 Best for small, static deployments or testing.
@@ -35,16 +39,46 @@ enabled_column = "is_active"
 ```
 
 ## 3. HTTP Backend (Remote)
-Offloads auth to an external web service.
+Offloads authentication to an external web service.
 
 ```toml
 [[proxy.user_backends]]
 type = "http"
 url = "http://auth-service/verify"
-method = "POST"
+method = "POST"           # Optional: "GET" (default) or "POST"
+# username_field = "user"   # Optional: default "username"
+# realm_field = "domain"    # Optional: default "realm"
 # headers = { "X-Api-Key" = "secret" }
 ```
-*Note: The HTTP service must return a JSON structure matching the accepted User model.*
+
+### Protocol Details
+- **Request (GET)**: `?username=1001&realm=example.com`
+- **Request (POST)**: Form-encoded body with `username` and `realm`.
+- **Response**: Must return a JSON object representing the `SipUser`.
+
+### Python Example (FastAPI)
+```python
+from fastapi import FastAPI, Form, HTTPException
+from typing import Optional, List
+
+app = FastAPI()
+
+@app.post("/verify")
+def verify_user(username: str = Form(...), realm: str = Form(...)):
+    # Database lookup or logic here
+    if username == "1001":
+        return {
+            "id": 1,
+            "enabled": True,
+            "username": "1001",
+            "password": "secret-password",
+            "realm": realm,
+            "display_name": "Alice Cooper",
+            "allow_guest_calls": False
+        }
+    
+    raise HTTPException(status_code=404, detail="User not found")
+```
 
 ## 4. Plain Text Backend
 Loads users from a simple text file.
@@ -91,3 +125,39 @@ Query external registry.
 type = "http"
 url = "http://registry-service/lookup"
 ```
+
+## Locator Webhook
+Trigger notifications when user registration status changes.
+
+You can configure and test this webhook directly in the **Web Console** (**Settings > Proxy Settings**). The "Test webhook" feature sends a mock registration event to your endpoint to verify connectivity and custom headers.
+
+```toml
+[proxy.locator_webhook]
+url = "http://your-app/sip-events"
+events = ["registered", "unregistered", "offline"]
+timeout_ms = 5000
+headers = { "X-API-Key" = "my-secret-key", "Authorization" = "Bearer token123" }
+```
+
+### Event Payload
+The webhook sends a POST request with a JSON body:
+
+```json
+{
+  "event": "registered",
+  "location": {
+    "aor": "sip:1001@example.com",
+    "expires": 3600,
+    "destination": "udp:192.168.1.100:5060",
+    "supports_webrtc": false,
+    "transport": "Udp",
+    "user_agent": "Zoiper 5"
+  },
+  "timestamp": 1704537600
+}
+```
+
+- `event`: "registered", "unregistered", or "offline".
+- `location`: Sip location details (only for `registered` and `unregistered`).
+- `locations`: Array of locations (only for `offline`).
+- `timestamp`: Unix timestamp in seconds.

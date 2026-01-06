@@ -1,7 +1,7 @@
 use crate::call::{
     DialDirection, DialStrategy, Dialplan, Location, RouteInvite, SipUser, TransactionCookie,
 };
-use crate::config::HttpRouterConfig;
+use crate::config::{HttpRouterConfig, MediaProxyMode};
 use crate::proxy::call::CallRouter;
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
@@ -69,6 +69,10 @@ struct HttpResponsePayload {
     pub reason: Option<String>,
     pub record: Option<bool>,
     pub timeout: Option<u32>,
+    pub media_proxy: Option<MediaProxyMode>,
+    pub headers: Option<HashMap<String, String>>,
+    pub with_original_headers: Option<bool>,
+    pub extensions: Option<HashMap<String, String>>,
 }
 
 #[async_trait]
@@ -208,11 +212,18 @@ impl CallRouter for HttpCallRouter {
             }
             HttpRouteAction::Forward => {
                 let mut locs = Vec::new();
+                let custom_headers = result.headers.map(|h| {
+                    h.iter()
+                        .map(|(k, v)| rsip::Header::Other(k.clone(), v.clone()))
+                        .collect::<Vec<_>>()
+                });
+
                 if let Some(targets) = result.targets {
                     for target in targets {
                         if let Ok(uri) = rsip::Uri::try_from(target.clone()) {
                             locs.push(Location {
                                 aor: uri,
+                                headers: custom_headers.clone(),
                                 ..Default::default()
                             });
                         }
@@ -234,6 +245,18 @@ impl CallRouter for HttpCallRouter {
 
                 if let Some(record) = result.record {
                     dialplan.recording.enabled = record;
+                }
+
+                if let Some(mode) = result.media_proxy {
+                    dialplan.media.proxy_mode = mode;
+                }
+
+                if let Some(with_orig) = result.with_original_headers {
+                    dialplan.with_original_headers = with_orig;
+                }
+
+                if let Some(exts) = result.extensions {
+                    dialplan = dialplan.with_extension(exts);
                 }
 
                 if let Some(timeout) = result.timeout {
