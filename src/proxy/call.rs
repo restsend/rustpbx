@@ -14,6 +14,7 @@ use crate::proxy::routing::{
 use anyhow::Error;
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
+use audio_codec::CodecType;
 use chrono::Utc;
 use glob::Pattern;
 use rsip::headers::UntypedHeader;
@@ -460,9 +461,7 @@ impl CallModule {
             if let Some(codecs) = hints.allow_codecs {
                 let mut allow_codecs = Vec::new();
                 for codec_name in codecs {
-                    if let Some(codec) =
-                        crate::media::negotiate::MediaNegotiator::parse_codec(&codec_name)
-                    {
+                    if let Ok(codec) = CodecType::try_from(codec_name.as_str()) {
                         allow_codecs.push(codec);
                     }
                 }
@@ -472,9 +471,7 @@ impl CallModule {
             } else if let Some(codecs) = &self.inner.config.codecs {
                 let mut allow_codecs = Vec::new();
                 for codec_name in codecs {
-                    if let Some(codec) =
-                        crate::media::negotiate::MediaNegotiator::parse_codec(codec_name)
-                    {
+                    if let Ok(codec) = CodecType::try_from(codec_name.as_str()) {
                         allow_codecs.push(codec);
                     }
                 }
@@ -486,9 +483,7 @@ impl CallModule {
         } else if let Some(codecs) = &self.inner.config.codecs {
             let mut allow_codecs = Vec::new();
             for codec_name in codecs {
-                if let Some(codec) =
-                    crate::media::negotiate::MediaNegotiator::parse_codec(codec_name)
-                {
+                if let Ok(codec) = CodecType::try_from(codec_name.as_str()) {
                     allow_codecs.push(codec);
                 }
             }

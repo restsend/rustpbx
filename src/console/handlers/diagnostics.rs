@@ -2166,6 +2166,7 @@ fn summarize_dialog(dialog: &Dialog) -> Option<DialogSummary> {
         Dialog::ClientInvite(client) => {
             summarize_client_dialog(client, id, from_display, to_display, remote_contact)
         }
+        _ => None,
     }
 }
 
@@ -2249,22 +2250,32 @@ fn summarize_state(state: &DialogState) -> Option<DialogStateSnapshot> {
             detail: Some(resp.status_code.to_string()),
             answer: decode_body(resp.body()),
         }),
-        DialogState::Updated(_, req) => Some(DialogStateSnapshot {
+        DialogState::Updated(_, req, _) => Some(DialogStateSnapshot {
             label: "Updated".to_string(),
             detail: Some(req.method.to_string()),
             answer: decode_body(&req.body),
         }),
-        DialogState::Notify(_, req) => Some(DialogStateSnapshot {
+        DialogState::Notify(_, req, _) => Some(DialogStateSnapshot {
             label: "Notify".to_string(),
             detail: Some(req.method.to_string()),
             answer: decode_body(&req.body),
         }),
-        DialogState::Info(_, req) => Some(DialogStateSnapshot {
+        DialogState::Refer(_, req, _) => Some(DialogStateSnapshot {
+            label: "Refer".to_string(),
+            detail: Some(req.method.to_string()),
+            answer: decode_body(&req.body),
+        }),
+        DialogState::Message(_, req, _) => Some(DialogStateSnapshot {
+            label: "Message".to_string(),
+            detail: Some(req.method.to_string()),
+            answer: decode_body(&req.body),
+        }),
+        DialogState::Info(_, req, _) => Some(DialogStateSnapshot {
             label: "Info".to_string(),
             detail: Some(req.method.to_string()),
             answer: decode_body(&req.body),
         }),
-        DialogState::Options(_, req) => Some(DialogStateSnapshot {
+        DialogState::Options(_, req, _) => Some(DialogStateSnapshot {
             label: "Options".to_string(),
             detail: Some(req.method.to_string()),
             answer: decode_body(&req.body),

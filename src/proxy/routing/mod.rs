@@ -14,6 +14,9 @@ use std::{
 };
 use tokio::net::lookup_host;
 
+pub mod http;
+#[cfg(test)]
+mod http_tests;
 pub mod matcher;
 #[cfg(test)]
 mod tests;

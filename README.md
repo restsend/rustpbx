@@ -16,7 +16,13 @@ RustPBX is a high-performance, secure software-defined PBX (Private Branch Excha
 - **Call Recording**: Built-in call recording with multiple storage backends
 - **User Management**: Flexible user authentication and registration system
 
-## 🐳 Docker Deployment
+## � Documentation
+
+For detailed configuration and usage instructions, please refer to:
+
+- [**Configuration Guide**](docs/configuration.md): Complete reference for platform settings, SIP proxy, auth, routing, and more.
+
+## �🐳 Docker Deployment
 
 ### Quick Start with Docker
 
@@ -36,7 +42,27 @@ RustPBX is a high-performance, secure software-defined PBX (Private Branch Excha
 
 2. **Create config.toml:**
 
-    > copy from config.toml.example
+    > Minimal configuration example (save as `config.toml`):
+
+    ```toml
+    http_addr = "0.0.0.0:8080"
+    database_url = "sqlite://rustpbx.sqlite3"
+
+    [proxy]
+    addr = "0.0.0.0"
+    udp_port = 5060
+    # Basic modules: Authentication, Registration, Call handling
+    modules = ["auth", "registrar", "call"]
+
+    # Add a test user in memory
+    [[proxy.user_backends]]
+    type = "memory"
+    users = [
+        { username = "1001", password = "password" }
+    ]
+    ```
+
+    > See the [Configuration Guide](docs/configuration.md) for all available options.
 
 3. **Run with Docker:**
 

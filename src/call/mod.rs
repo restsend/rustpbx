@@ -614,6 +614,22 @@ pub struct Dialplan {
     pub allow_codecs: Vec<CodecType>,
 }
 
+impl std::fmt::Debug for Dialplan {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Dialplan")
+            .field("direction", &self.direction)
+            .field("session_id", &self.session_id)
+            .field("caller", &self.caller)
+            .field("flow", &self.flow)
+            .field("max_ring_time", &self.max_ring_time)
+            .field("recording", &self.recording)
+            .field("media", &self.media)
+            .field("call_timeout", &self.call_timeout)
+            .field("enable_sipflow", &self.enable_sipflow)
+            .finish()
+    }
+}
+
 impl Dialplan {
     pub fn is_empty(&self) -> bool {
         self.flow.is_empty()
