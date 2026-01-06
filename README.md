@@ -251,6 +251,17 @@ cargo build --release
 - Support for multiple codecs
 - Real-time media relay
 
+## 🛠 Troubleshooting
+
+### SIP Registration 401 Unauthorized (Docker/NAT)
+
+If you are running RustPBX in a Docker container or behind NAT and encounter a `401 Unauthorized` error during SIP registration, it may be caused by a mismatch in the SIP realm. You may need to explicitly set `proxy.realms` to the correct IP address and port that your SIP clients are connecting to.
+
+```toml
+[proxy]
+realms = ["your-server-ip:15060"]
+```
+
 ## 🤝 Contributing
 
 This project is currently in active development. We welcome contributions and feedback from the community.
