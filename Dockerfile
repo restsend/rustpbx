@@ -22,9 +22,10 @@ COPY --from=rust-builder /build/src/addons/queue/static /app/static/queue
 
 COPY --from=rust-builder /build/target/release/rustpbx /app/rustpbx
 COPY --from=rust-builder /build/templates /app/templates
-COPY --from=rust-builder /build/src/addons/acme/templates /app/templates/acme/templates
-COPY --from=rust-builder /build/src/addons/archive/templates /app/templates/archive/templates
-COPY --from=rust-builder /build/src/addons/queue/templates /app/templates/queue/templates
+COPY --from=rust-builder /build/src/addons/acme/templates /app/templates/acme
+COPY --from=rust-builder /build/src/addons/archive/templates /app/templates/archive
+COPY --from=rust-builder /build/src/addons/queue/templates /app/templates/queue
+COPY --from=rust-builder /build/src/addons/transcript/templates /app/templates/transcript
 COPY --from=rust-builder /build/config/sounds /app/sounds
 
 ENTRYPOINT ["/app/rustpbx"]
