@@ -1,5 +1,8 @@
 use crate::app::AppStateInner;
-use crate::config::{CallRecordConfig, Config, ProxyConfig, UserBackendConfig};
+use crate::config::{
+    CallRecordConfig, Config, HttpRouterConfig, LocatorWebhookConfig, ProxyConfig,
+    UserBackendConfig,
+};
 use crate::console::handlers::forms;
 use crate::console::{ConsoleState, middleware::AuthRequired};
 use crate::models::department::{
@@ -65,6 +68,31 @@ struct UserPayload {
     pub is_superuser: Option<bool>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct ProxySettingsPayload {
+    pub realms: Option<Vec<String>>,
+    pub locator_webhook: Option<LocatorWebhookConfig>,
+    pub user_backends: Option<Vec<UserBackendConfig>>,
+    pub http_router: Option<HttpRouterConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct TestLocatorWebhookPayload {
+    pub url: String,
+    pub headers: Option<std::collections::HashMap<String, String>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct TestHttpRouterPayload {
+    pub url: String,
+    pub headers: Option<std::collections::HashMap<String, String>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct TestUserBackendPayload {
+    pub backend: UserBackendConfig,
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct UserView {
     pub id: i64,
@@ -100,10 +128,23 @@ pub fn urls() -> Router<Arc<ConsoleState>> {
     Router::new()
         .route("/settings", get(page_settings))
         .route("/settings/config/platform", patch(update_platform_settings))
+        .route("/settings/config/proxy", patch(update_proxy_settings))
         .route("/settings/config/storage", patch(update_storage_settings))
         .route(
             "/settings/config/storage/test",
             post(test_storage_connection),
+        )
+        .route(
+            "/settings/config/proxy/locator-webhook/test",
+            post(test_locator_webhook),
+        )
+        .route(
+            "/settings/config/proxy/http-router/test",
+            post(test_http_router),
+        )
+        .route(
+            "/settings/config/proxy/user-backend/test",
+            post(test_user_backend),
         )
         .route("/settings/config/security", patch(update_security_settings))
         .route(
@@ -263,11 +304,9 @@ async fn build_settings_payload(state: &ConsoleState) -> JsonValue {
                 "trunks": "toml",
             }),
             "rtp": config.rtp_config(),
-            "user_backends": config.proxy
-                .user_backends
-                .iter()
-                .map(backend_kind)
-                .collect::<Vec<_>>(),
+            "user_backends": config.proxy.user_backends.clone(),
+            "locator_webhook": config.proxy.locator_webhook.clone(),
+            "http_router": config.proxy.http_router.clone(),
             "realms": config.proxy.realms.clone().unwrap_or_default(),
             "stats": proxy_stats_value.clone(),
         });
@@ -1218,16 +1257,6 @@ fn build_port_list(proxy_cfg: &ProxyConfig) -> Vec<JsonValue> {
     ports
 }
 
-fn backend_kind(backend: &UserBackendConfig) -> String {
-    match backend {
-        UserBackendConfig::Memory { .. } => "memory".to_string(),
-        UserBackendConfig::Http { .. } => "http".to_string(),
-        UserBackendConfig::Plain { .. } => "plain".to_string(),
-        UserBackendConfig::Database { .. } => "database".to_string(),
-        UserBackendConfig::Extension { .. } => "extension".to_string(),
-    }
-}
-
 #[derive(Debug, Deserialize)]
 pub(crate) struct PlatformSettingsPayload {
     #[serde(default)]
@@ -1419,6 +1448,70 @@ pub(crate) async fn update_platform_settings(
             "start_port": config.rtp_start_port,
             "end_port": config.rtp_end_port,
         }
+    }))
+    .into_response()
+}
+
+pub(crate) async fn update_proxy_settings(
+    State(state): State<Arc<ConsoleState>>,
+    AuthRequired(_): AuthRequired,
+    Json(payload): Json<ProxySettingsPayload>,
+) -> Response {
+    let config_path = match get_config_path(&state) {
+        Ok(path) => path,
+        Err(resp) => return resp,
+    };
+
+    let mut doc = match load_document(&config_path) {
+        Ok(doc) => doc,
+        Err(resp) => return resp,
+    };
+
+    let mut modified = false;
+    let table = ensure_table_mut(&mut doc, "proxy");
+
+    if let Some(realms) = payload.realms {
+        set_string_array(table, "realms", realms);
+        modified = true;
+    }
+
+    if let Some(webhook) = payload.locator_webhook {
+        let toml_s = toml::to_string(&webhook).unwrap_or_default();
+        if let Ok(new_doc) = toml_s.parse::<DocumentMut>() {
+            table["locator_webhook"] = new_doc.as_item().clone();
+            modified = true;
+        }
+    }
+
+    if let Some(backends) = payload.user_backends {
+        let toml_s = toml::to_string(&json!({ "b": backends })).unwrap_or_default();
+        if let Ok(new_doc) = toml_s.parse::<DocumentMut>() {
+            table["user_backends"] = new_doc["b"].clone();
+            modified = true;
+        }
+    }
+
+    if let Some(router) = payload.http_router {
+        let toml_s = toml::to_string(&router).unwrap_or_default();
+        if let Ok(new_doc) = toml_s.parse::<DocumentMut>() {
+            table["http_router"] = new_doc.as_item().clone();
+            modified = true;
+        }
+    }
+
+    if modified {
+        let doc_text = doc.to_string();
+        if let Err(resp) = parse_config_from_str(&doc_text) {
+            return resp;
+        }
+        if let Err(resp) = persist_document(&config_path, doc_text) {
+            return resp;
+        }
+    }
+
+    Json(json!({
+        "status": "ok",
+        "message": "Proxy settings saved. Restart required to apply.",
     }))
     .into_response()
 }
@@ -1855,6 +1948,158 @@ pub(crate) async fn test_storage_connection(
         "message": "Connection successful. Test file created and deleted.",
     }))
     .into_response()
+}
+
+pub(crate) async fn test_locator_webhook(
+    AuthRequired(_): AuthRequired,
+    Json(payload): Json<TestLocatorWebhookPayload>,
+) -> Response {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
+
+    let mut request = client.post(&payload.url);
+    if let Some(headers) = payload.headers {
+        for (k, v) in headers {
+            request = request.header(k, v);
+        }
+    }
+
+    let test_event = json!({
+        "event": "test",
+        "timestamp": Utc::now().timestamp(),
+        "message": "RustPBX locator webhook test"
+    });
+
+    match request.json(&test_event).send().await {
+        Ok(resp) => {
+            if resp.status().is_success() {
+                Json(json!({
+                    "status": "ok",
+                    "message": format!("Webhook test successful: HTTP {}", resp.status()),
+                }))
+                .into_response()
+            } else {
+                json_error(
+                    StatusCode::BAD_REQUEST,
+                    format!("Webhook returned error: HTTP {}", resp.status()),
+                )
+            }
+        }
+        Err(err) => json_error(
+            StatusCode::BAD_REQUEST,
+            format!("Webhook request failed: {}", err),
+        ),
+    }
+}
+
+pub(crate) async fn test_http_router(
+    AuthRequired(_): AuthRequired,
+    Json(payload): Json<TestHttpRouterPayload>,
+) -> Response {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
+
+    let mut request = client.post(&payload.url);
+    if let Some(headers) = payload.headers {
+        for (k, v) in headers {
+            request = request.header(k, v);
+        }
+    }
+
+    let test_request = json!({
+        "call_id": "test-call-id",
+        "from": "sip:test@localhost",
+        "to": "sip:echo@localhost",
+        "method": "INVITE",
+        "uri": "sip:echo@localhost",
+        "direction": "internal"
+    });
+
+    match request.json(&test_request).send().await {
+        Ok(resp) => {
+            if resp.status().is_success() {
+                Json(json!({
+                    "status": "ok",
+                    "message": format!("HTTP Router test successful: HTTP {}", resp.status()),
+                }))
+                .into_response()
+            } else {
+                json_error(
+                    StatusCode::BAD_REQUEST,
+                    format!("HTTP Router returned error: HTTP {}", resp.status()),
+                )
+            }
+        }
+        Err(err) => json_error(
+            StatusCode::BAD_REQUEST,
+            format!("HTTP Router request failed: {}", err),
+        ),
+    }
+}
+
+pub(crate) async fn test_user_backend(
+    AuthRequired(_): AuthRequired,
+    Json(payload): Json<TestUserBackendPayload>,
+) -> Response {
+    match payload.backend {
+        UserBackendConfig::Memory { .. } => Json(json!({
+            "status": "ok",
+            "message": "Memory backend configuration is valid."
+        }))
+        .into_response(),
+        UserBackendConfig::Http { url, .. } => {
+            let client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(5))
+                .build()
+                .unwrap_or_else(|_| reqwest::Client::new());
+
+            match client.get(&url).send().await {
+                Ok(resp) => Json(json!({
+                    "status": "ok",
+                    "message": format!("HTTP backend reachable: HTTP {}", resp.status()),
+                }))
+                .into_response(),
+                Err(err) => json_error(
+                    StatusCode::BAD_REQUEST,
+                    format!("HTTP backend unreachable: {}", err),
+                ),
+            }
+        }
+        UserBackendConfig::Database { url, .. } => {
+            if let Some(db_url) = url {
+                Json(json!({
+                    "status": "ok",
+                    "message": format!("Database URL configured: {}", db_url)
+                }))
+                .into_response()
+            } else {
+                json_error(StatusCode::BAD_REQUEST, "Database URL is missing")
+            }
+        }
+        UserBackendConfig::Plain { path } => {
+            if std::path::Path::new(&path).exists() {
+                Json(json!({
+                    "status": "ok",
+                    "message": format!("Plain file exists: {}", path)
+                }))
+                .into_response()
+            } else {
+                json_error(
+                    StatusCode::BAD_REQUEST,
+                    format!("Plain file does not exist: {}", path),
+                )
+            }
+        }
+        UserBackendConfig::Extension { .. } => Json(json!({
+            "status": "ok",
+            "message": "Extension backend uses internal database."
+        }))
+        .into_response(),
+    }
 }
 
 fn json_error(status: StatusCode, message: impl Into<String>) -> Response {

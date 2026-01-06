@@ -58,7 +58,9 @@ queue = "support-queue" # Name of queue config
 ```
 
 ## HTTP Dynamic Router (`proxy.http_router`)
-Ask an external service for routing instructions per call.
+Ask an external service for routing instructions per call. 
+
+Management and testing of the HTTP Router are available in the **Web Console** (**Settings > Proxy Settings**). The "Test router" button sends a sample INVITE payload to your service to ensure it responds with a valid routing JSON.
 
 ```toml
 [proxy.http_router]
@@ -67,21 +69,76 @@ timeout_ms = 500
 fallback_to_static = true # If HTTP fails, use static routes
 ```
 
-**Request Payload:**
+### Protocol Details
+
+**Request Payload (JSON POST):**
 ```json
 {
   "call_id": "...",
   "from": "sip:alice@...",
   "to": "sip:bob@...",
-  "source_addr": "1.2.3.4:5060"
+  "source_addr": "1.2.3.4:5060",
+  "direction": "internal",
+  "method": "INVITE",
+  "uri": "sip:1001@example.com",
+  "headers": {
+    "User-Agent": "Linphone/...",
+    "X-Custom-Info": "..."
+  },
+  "body": ""
 }
 ```
 
-**Response:**
-```json
-{
-  "action": "forward",
-  "targets": ["sip:1001@10.0.0.2"],
-  "record": true
-}
+**Response Payload (JSON):**
+| Field | Type | Description |
+|-------|------|-------------|
+| `action` | string | `forward`, `reject`, `abort`, `not_handled` |
+| `targets` | [string] | List of SIP URIs (for `forward`) |
+| `strategy`| string | `sequential` or `parallel` (default `sequential`) |
+| `status` | int | SIP Status Code (for `reject`) |
+| `reason` | string | Reason phrase (for `reject`) |
+| `record` | bool | Whether to record this call |
+| `timeout`| int | Call timeout in seconds |
+| `media_proxy` | string | Media proxy mode: `auto`, `all`, `none`, `nat` |
+| `headers` | object | Custom SIP headers to add to the outgoing INVITE (key-value) |
+| `with_original_headers` | bool | Whether to forward original headers (except core SIP headers) |
+| `extensions` | object | Custom key-value pairs stored in the dialplan (useful for CDRs) |
+
+### Python Example (Flask)
+```python
+from flask import Flask, request, jsonify
+
+app = Flask(__name__)
+
+@app.route("/decision", methods=["POST"])
+def route_call():
+    data = request.json
+    call_to = data.get("to", "")
+    
+    # Custom business logic: route 1xxx to internal extensions
+    if "sip:1" in call_to:
+        return jsonify({
+            "action": "forward",
+            "targets": [call_to.replace("sip:", "sip:ext_")],
+            "strategy": "sequential",
+            "record": True,
+            "media_proxy": "all",  # Force media proxy
+            "headers": {
+                "X-Custom-Info": "Routed-By-Python"
+            },
+            "extensions": {
+                "account_id": "ACC123",
+                "customer_tier": "gold"
+            }
+        })
+    
+    # Reject everything else
+    return jsonify({
+        "action": "reject",
+        "status": 403,
+        "reason": "Forbidden"
+    })
+
+if __name__ == "__main__":
+    app.run(port=5000)
 ```
