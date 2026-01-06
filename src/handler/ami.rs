@@ -84,10 +84,7 @@ trait DialogInfo {
 
 impl DialogInfo for rsipstack::dialog::dialog::Dialog {
     fn to_json(&self) -> serde_json::Value {
-        let state = match &self {
-            rsipstack::dialog::dialog::Dialog::ClientInvite(dlg) => dlg.state(),
-            rsipstack::dialog::dialog::Dialog::ServerInvite(dlg) => dlg.state(),
-        };
+        let state = self.state();
         serde_json::json!({
             "state": state.to_string(),
             "from": self.from().to_string(),

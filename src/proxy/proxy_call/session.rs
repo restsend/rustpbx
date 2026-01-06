@@ -2465,10 +2465,11 @@ impl CallSession {
                                     ).ok();
                                     break;
                                 }
-                                DialogState::Info(dialog_id, _request) => {
+                                DialogState::Info(dialog_id, _request, tx_handle) => {
                                     debug!(session_id = %context.session_id, %dialog_id, "Received INFO on server dialog");
+                                    tx_handle.reply(rsip::StatusCode::OK).await.ok();
                                 }
-                                DialogState::Updated(dialog_id, request) => {
+                                DialogState::Updated(dialog_id, request, tx_handle) => {
                                     debug!(session_id = %context.session_id, %dialog_id, "Received UPDATE/INVITE on server dialog");
                                     if request.method == rsip::Method::Invite {
                                         let sdp = if !request.body.is_empty() {
@@ -2477,6 +2478,7 @@ impl CallSession {
                                             None
                                         };
                                         let _ = handle.send_command(SessionAction::HandleReInvite(sdp.unwrap_or_default()));
+
                                     }
                                     // Update server timer on incoming refresh
                                     if let Some(value) = get_header_value(&request.headers, HEADER_SESSION_EXPIRES) {
@@ -2494,9 +2496,11 @@ impl CallSession {
                                             debug!(session_id = %context.session_id, "Server session timer refreshed by incoming request (no Session-Expires)");
                                         }
                                     }
+                                    tx_handle.reply(rsip::StatusCode::OK).await.ok();
                                 }
-                                DialogState::Notify(dialog_id, _request) => {
+                                DialogState::Notify(dialog_id, _request, tx_handle) => {
                                     debug!(session_id = %context.session_id, %dialog_id, "Received NOTIFY on server dialog");
+                                    tx_handle.reply(rsip::StatusCode::OK).await.ok();
                                 }
                                 DialogState::Calling(dialog_id) => {
                                     debug!(session_id = %context.session_id, %dialog_id, "Server dialog in calling state");
@@ -2541,7 +2545,7 @@ impl CallSession {
                                     ).ok();
                                     break;
                                 }
-                                DialogState::Updated(dialog_id, _request) => {
+                                DialogState::Updated(dialog_id, _request, _) => {
                                     debug!(session_id = %context.session_id, %dialog_id, "Received UPDATE/INVITE on callee dialog");
                                     {
                                         let mut timer = client_timer.lock().unwrap();

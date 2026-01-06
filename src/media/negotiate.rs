@@ -44,15 +44,9 @@ impl MediaNegotiator {
                                     1
                                 };
 
-                                let codec_type = match codec_name.to_lowercase().as_str() {
-                                    "pcmu" => CodecType::PCMU,
-                                    "pcma" => CodecType::PCMA,
-                                    #[cfg(feature = "opus")]
-                                    "opus" => CodecType::Opus,
-                                    "g722" => CodecType::G722,
-                                    "g729" => CodecType::G729,
-                                    "telephone-event" => CodecType::TelephoneEvent,
-                                    _ => continue,
+                                let codec_type = match CodecType::try_from(codec_name) {
+                                    Ok(c) => c,
+                                    Err(_) => continue,
                                 };
 
                                 rtp_map.push((pt, (codec_type, clock_rate, channels)));
@@ -63,19 +57,6 @@ impl MediaNegotiator {
             }
         }
         rtp_map
-    }
-
-    pub fn parse_codec(name: &str) -> Option<CodecType> {
-        match name.to_lowercase().as_str() {
-            "pcmu" => Some(CodecType::PCMU),
-            "pcma" => Some(CodecType::PCMA),
-            #[cfg(feature = "opus")]
-            "opus" => Some(CodecType::Opus),
-            "g722" => Some(CodecType::G722),
-            "g729" => Some(CodecType::G729),
-            "telephone-event" => Some(CodecType::TelephoneEvent),
-            _ => None,
-        }
     }
 
     /// Extract codec parameters from SDP string

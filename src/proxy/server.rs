@@ -437,7 +437,14 @@ impl SipServerBuilder {
 
         let endpoint = endpoint_builder.build();
 
-        let call_router = self.call_router;
+        let mut call_router = self.call_router;
+        if call_router.is_none() {
+            if let Some(http_router_config) = &self.config.http_router {
+                call_router = Some(Box::new(crate::proxy::routing::http::HttpCallRouter::new(
+                    http_router_config.clone(),
+                )));
+            }
+        }
         let dialog_layer = Arc::new(DialogLayer::new(endpoint.inner.clone()));
 
         let database = self.database.clone();

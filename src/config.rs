@@ -326,6 +326,15 @@ pub struct RtpConfig {
     pub ice_servers: Option<Vec<IceServer>>,
 }
 
+#[derive(Debug, Deserialize, Clone, Serialize)]
+pub struct HttpRouterConfig {
+    pub url: String,
+    pub headers: Option<HashMap<String, String>>,
+    #[serde(default)]
+    pub fallback_to_static: bool,
+    pub timeout_ms: Option<u64>,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct ProxyConfig {
     pub modules: Option<Vec<String>>,
@@ -360,6 +369,7 @@ pub struct ProxyConfig {
     #[serde(default)]
     pub realms: Option<Vec<String>>,
     pub ws_handler: Option<String>,
+    pub http_router: Option<HttpRouterConfig>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub routes_files: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -556,6 +566,7 @@ impl Default for ProxyConfig {
             frequency_limiter: None,
             realms: Some(vec![]),
             ws_handler: None,
+            http_router: None,
             routes_files: Vec::new(),
             acl_files: Vec::new(),
             routes: None,

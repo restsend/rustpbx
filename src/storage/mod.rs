@@ -2,8 +2,8 @@ use anyhow::{Context, Result};
 use bytes::Bytes;
 use futures::StreamExt;
 use object_store::{
-    aws::AmazonS3Builder, azure::MicrosoftAzureBuilder, gcp::GoogleCloudStorageBuilder,
-    local::LocalFileSystem, path::Path as ObjectPath, ObjectMeta, ObjectStore,
+    ObjectMeta, ObjectStore, ObjectStoreExt, aws::AmazonS3Builder, azure::MicrosoftAzureBuilder,
+    gcp::GoogleCloudStorageBuilder, local::LocalFileSystem, path::Path as ObjectPath,
 };
 use serde::{Deserialize, Serialize};
 use std::{path::PathBuf, sync::Arc};
@@ -84,7 +84,11 @@ impl Storage {
                 prefix,
             } => {
                 let store: Arc<dyn ObjectStore> = match vendor {
-                    S3Vendor::AWS | S3Vendor::Aliyun | S3Vendor::Tencent | S3Vendor::Minio | S3Vendor::DigitalOcean => {
+                    S3Vendor::AWS
+                    | S3Vendor::Aliyun
+                    | S3Vendor::Tencent
+                    | S3Vendor::Minio
+                    | S3Vendor::DigitalOcean => {
                         let mut builder = AmazonS3Builder::new()
                             .with_bucket_name(bucket)
                             .with_region(region)
@@ -218,7 +222,7 @@ mod tests {
     async fn test_local_storage() -> Result<()> {
         let dir = tempdir()?;
         let path = dir.path().to_str().unwrap().to_string();
-        
+
         let config = StorageConfig::Local { path: path.clone() };
         let storage = Storage::new(&config)?;
 
@@ -250,7 +254,7 @@ mod tests {
     async fn test_upload_file_local() -> Result<()> {
         let dir = tempdir()?;
         let path = dir.path().to_str().unwrap().to_string();
-        
+
         let config = StorageConfig::Local { path: path.clone() };
         let storage = Storage::new(&config)?;
 
@@ -282,9 +286,9 @@ mod tests {
 
         let cdr_json = r#"{"call_id": "123", "duration": 60}"#;
         let filename = "cdr/2025/01/01/123.json";
-        
+
         storage.write(filename, Bytes::from(cdr_json)).await?;
-        
+
         let read_back = storage.read(filename).await?;
         assert_eq!(read_back, Bytes::from(cdr_json));
         Ok(())
@@ -299,9 +303,9 @@ mod tests {
 
         let sip_flow = "INVITE sip:...\n200 OK\nACK sip:...";
         let filename = "sipflow/123.txt";
-        
+
         storage.write(filename, Bytes::from(sip_flow)).await?;
-        
+
         let read_back = storage.read(filename).await?;
         assert_eq!(read_back, Bytes::from(sip_flow));
         Ok(())
@@ -316,9 +320,11 @@ mod tests {
 
         let audio_data = vec![0u8; 1024];
         let filename = "recordings/123.wav";
-        
-        storage.write(filename, Bytes::from(audio_data.clone())).await?;
-        
+
+        storage
+            .write(filename, Bytes::from(audio_data.clone()))
+            .await?;
+
         let read_back = storage.read(filename).await?;
         assert_eq!(read_back, Bytes::from(audio_data));
         Ok(())
@@ -333,9 +339,11 @@ mod tests {
 
         let compressed_data = vec![0x1f, 0x8b, 0x08, 0x00];
         let filename = "archive/2025-01-01-callrecords.gz";
-        
-        storage.write(filename, Bytes::from(compressed_data.clone())).await?;
-        
+
+        storage
+            .write(filename, Bytes::from(compressed_data.clone()))
+            .await?;
+
         let read_back = storage.read(filename).await?;
         assert_eq!(read_back, Bytes::from(compressed_data));
         Ok(())

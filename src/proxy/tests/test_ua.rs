@@ -352,10 +352,7 @@ impl TestUa {
             .ok_or_else(|| anyhow!("TestUa not started"))?;
 
         if let Some(dialog) = dialog_layer.get_dialog(dialog_id) {
-            match dialog {
-                Dialog::ClientInvite(d) => d.bye().await.map_err(|e| e.into_anyhow())?,
-                Dialog::ServerInvite(d) => d.bye().await.map_err(|e| e.into_anyhow())?,
-            }
+            dialog.hangup().await.map_err(|e| e.into_anyhow())?;
             Ok(())
         } else {
             Err(anyhow!("Dialog not found: {}", dialog_id))
