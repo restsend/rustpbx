@@ -26,8 +26,13 @@ pub enum Relation {}
 
 impl ActiveModelBehavior for ActiveModel {}
 
-#[derive(DeriveMigrationName)]
 pub struct Migration;
+
+impl MigrationName for Migration {
+    fn name(&self) -> &str {
+        "queue"
+    }
+}
 
 #[async_trait::async_trait]
 impl MigrationTrait for Migration {

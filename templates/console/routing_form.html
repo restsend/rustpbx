@@ -815,7 +815,7 @@
             algorithmOptions: [],
             destinationOptions: [
                 { value: 'sip_trunk', label: 'SIP trunks' },
-                { value: 'queue', label: 'Queue' },
+                ...(window.queueAddonEnabled ? [{ value: 'queue', label: 'Queue' }] : []),
             ],
             selectionOptionAliases: {
                 rr: 'rr',

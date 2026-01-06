@@ -2,6 +2,7 @@ use crate::call::sip::{DialogStateReceiverGuard, ServerDialogGuard};
 use crate::media::negotiate::MediaNegotiator;
 use crate::media::{FileTrack, RtpTrackBuilder, Track};
 use crate::proxy::proxy_call::reporter::CallReporter;
+use crate::proxy::routing::matcher::RouteResourceLookup;
 use crate::{
     call::{
         CallForwardingConfig, CallForwardingMode, DialStrategy, DialplanFlow, Location, QueuePlan,
@@ -187,6 +188,7 @@ pub(crate) struct CallSession {
     pub caller_peer: Arc<dyn MediaPeer>,
     pub callee_peer: Arc<dyn MediaPeer>,
     pub media_bridge: Option<MediaBridge>,
+    pub recorder_option: Option<crate::media::recorder::RecorderOption>,
     pub use_media_proxy: bool,
     pub routed_caller: Option<String>,
     pub routed_callee: Option<String>,
@@ -206,7 +208,10 @@ impl CallSession {
     pub const CALLEE_TRACK_ID: &'static str = "callee-track";
     pub const RINGBACK_TRACK_ID: &'static str = "ringback-track";
 
-    fn check_media_proxy(_context: &CallContext, offer_sdp: &str, mode: &MediaProxyMode) -> bool {
+    fn check_media_proxy(context: &CallContext, offer_sdp: &str, mode: &MediaProxyMode) -> bool {
+        if context.dialplan.recording.enabled {
+            return true;
+        }
         match mode {
             MediaProxyMode::All => true,
             MediaProxyMode::None => false,
@@ -229,6 +234,7 @@ impl CallSession {
         context: CallContext,
         server_dialog: ServerInviteDialog,
         use_media_proxy: bool,
+        recorder_option: Option<crate::media::recorder::RecorderOption>,
         caller_peer: Arc<dyn MediaPeer>,
         callee_peer: Arc<dyn MediaPeer>,
         shared: CallSessionShared,
@@ -264,6 +270,7 @@ impl CallSession {
             caller_peer,
             callee_peer,
             media_bridge: None,
+            recorder_option,
             use_media_proxy,
             routed_caller: None,
             routed_callee: None,
@@ -1023,6 +1030,14 @@ impl CallSession {
                         CodecType::PCMU,
                     ));
 
+                let ssrc_a = self
+                    .answer
+                    .as_ref()
+                    .and_then(|s| MediaNegotiator::extract_ssrc(s));
+                let ssrc_b = callee_answer
+                    .as_ref()
+                    .and_then(|s| MediaNegotiator::extract_ssrc(s));
+
                 let tracks_a = self.caller_peer.get_tracks().await;
                 if let Some(track) = tracks_a.first() {
                     if let Some(pc) = track.lock().await.get_peer_connection() {
@@ -1045,6 +1060,14 @@ impl CallSession {
                     }
                 }
 
+                debug!(
+                    ?codec_a,
+                    ?codec_b,
+                    ssrc_a,
+                    ssrc_b,
+                    "Media bridge for call session"
+                );
+
                 let bridge = MediaBridge::new(
                     self.caller_peer.clone(),
                     self.callee_peer.clone(),
@@ -1054,8 +1077,10 @@ impl CallSession {
                     dtmf_pt_b,
                     codec_a,
                     codec_b,
+                    ssrc_a,
+                    ssrc_b,
+                    self.recorder_option.clone(),
                 );
-
                 self.media_bridge = Some(bridge);
             }
 
@@ -1233,7 +1258,7 @@ impl CallSession {
     async fn process_pending_actions(&mut self, inbox: Option<&SessionActionInbox>) -> Result<()> {
         if let Some(inbox) = inbox {
             for action in inbox.drain() {
-                self.apply_session_action(action).await?;
+                self.apply_session_action(action, Some(inbox)).await?;
             }
         }
         Ok(())
@@ -1310,17 +1335,27 @@ impl CallSession {
     pub fn apply_session_action<'a>(
         &'a mut self,
         action: SessionAction,
+        inbox: Option<&'a SessionActionInbox>,
     ) -> BoxFuture<'a, Result<()>> {
         async move {
             match action {
-                SessionAction::Hangup { code, reason, .. } => {
+                SessionAction::Hangup {
+                    code,
+                    reason,
+                    initiator,
+                } => {
                     let status = code
                         .and_then(|c| StatusCode::try_from(c).ok())
                         .unwrap_or(StatusCode::RequestTerminated);
-                    let reason_str = reason.map(|r| format!("{:?}", r));
+                    let reason_str = reason.as_ref().map(|r| format!("{:?}", r));
                     self.set_error(status, reason_str, None);
-                    self.hangup_reason = Some(CallRecordHangupReason::Canceled);
-                    self.shared.mark_hangup(CallRecordHangupReason::Canceled);
+
+                    let actual_reason = reason.clone().unwrap_or(CallRecordHangupReason::Canceled);
+                    self.hangup_reason = Some(actual_reason.clone());
+                    self.shared.mark_hangup(actual_reason);
+
+                    Self::store_pending_hangup(&self.pending_hangup, reason, code, initiator).ok();
+
                     self.cancel_token.cancel();
                     Ok(())
                 }
@@ -1355,7 +1390,13 @@ impl CallSession {
                     }
                     Ok(())
                 }
-                SessionAction::TransferTarget(target) => self.transfer_to_uri(&target).await,
+                SessionAction::TransferTarget(target) => {
+                    if let Some(endpoint) = TransferEndpoint::parse(&target) {
+                        self.transfer_to_endpoint(&endpoint, inbox).await
+                    } else {
+                        self.transfer_to_uri(&target).await
+                    }
+                }
                 SessionAction::HandleReInvite(sdp) => {
                     let sdp_opt = if sdp.is_empty() { None } else { Some(sdp) };
                     self.handle_reinvite(sdp_opt).await;
@@ -1367,14 +1408,45 @@ impl CallSession {
         .boxed()
     }
 
-    async fn transfer_to_endpoint(&mut self, endpoint: &TransferEndpoint) -> Result<()> {
-        match endpoint {
-            TransferEndpoint::Uri(uri) => self.transfer_to_uri(uri).await,
-            TransferEndpoint::Queue(name) => {
-                warn!("Queue forwarding not supported: {}", name);
-                Err(anyhow!("Queue forwarding not supported"))
+    fn transfer_to_endpoint<'a>(
+        &'a mut self,
+        endpoint: &'a TransferEndpoint,
+        inbox: Option<&'a SessionActionInbox>,
+    ) -> BoxFuture<'a, Result<()>> {
+        async move {
+            match endpoint {
+                TransferEndpoint::Uri(uri) => self.transfer_to_uri(uri).await,
+                TransferEndpoint::Queue(name) => {
+                    if let Some(inbox) = inbox {
+                        info!(session_id = %self.context.session_id, queue = %name, "Transferring to queue");
+
+                        let lookup_ref = if name.chars().all(|c| c.is_ascii_digit()) {
+                            format!("db-{}", name)
+                        } else {
+                            name.clone()
+                        };
+
+                        let queue_config = self
+                            .server
+                            .data_context
+                            .load_queue(&lookup_ref)
+                            .await?
+                            .ok_or_else(|| anyhow!("Queue not found: {}", name))?;
+
+                        let mut plan = queue_config.to_queue_plan()?;
+                        if plan.label.is_none() {
+                            plan.label = Some(name.clone());
+                        }
+
+                        self.execute_queue_plan(&plan, None, Some(inbox)).await
+                    } else {
+                        warn!("Queue forwarding not supported without inbox: {}", name);
+                        Err(anyhow!("Queue forwarding not supported without inbox"))
+                    }
+                }
             }
         }
+        .boxed()
     }
 
     async fn transfer_to_uri(&mut self, uri: &str) -> Result<()> {
@@ -1435,7 +1507,7 @@ impl CallSession {
                         info!(session_id = %self.context.session_id, "Dialplan executed successfully");
                         Ok(())
                     }
-                    Err(_) => self.handle_failure().await,
+                    Err(_) => self.handle_failure(inbox).await,
                 },
                 Err(_) => {
                     self.set_error(
@@ -1452,7 +1524,7 @@ impl CallSession {
                     info!(session_id = %self.context.session_id, "Dialplan executed successfully");
                     Ok(())
                 }
-                Err(_) => self.handle_failure().await,
+                Err(_) => self.handle_failure(inbox).await,
             }
         }
     }
@@ -1614,7 +1686,7 @@ impl CallSession {
         }
 
         // Otherwise, handle failure normally
-        self.handle_failure().await
+        self.handle_failure(inbox).await
     }
 
     async fn run_targets(&mut self, strategy: &DialStrategy, inbox: ActionInbox<'_>) -> Result<()> {
@@ -1697,10 +1769,13 @@ impl CallSession {
 
         if !self.early_media_sent {
             let _ = self
-                .apply_session_action(SessionAction::StartRinging {
-                    ringback: None,
-                    passthrough: false,
-                })
+                .apply_session_action(
+                    SessionAction::StartRinging {
+                        ringback: None,
+                        passthrough: false,
+                    },
+                    None,
+                )
                 .await;
         }
         self.process_pending_actions(inbox).await?;
@@ -1895,17 +1970,23 @@ impl CallSession {
                 } => {
                     if let Some(answer) = sdp {
                         let _ = self
-                            .apply_session_action(SessionAction::ProvideEarlyMediaWithDialog(
-                                dialog_id.to_string(),
-                                answer,
-                            ))
+                            .apply_session_action(
+                                SessionAction::ProvideEarlyMediaWithDialog(
+                                    dialog_id.to_string(),
+                                    answer,
+                                ),
+                                None,
+                            )
                             .await;
                     } else if !self.early_media_sent {
                         let _ = self
-                            .apply_session_action(SessionAction::StartRinging {
-                                ringback: None,
-                                passthrough: false,
-                            })
+                            .apply_session_action(
+                                SessionAction::StartRinging {
+                                    ringback: None,
+                                    passthrough: false,
+                                },
+                                None,
+                            )
                             .await;
                     }
                 }
@@ -1925,11 +2006,14 @@ impl CallSession {
                     self.routed_destination = destination.clone();
                     if accepted_idx.is_none() {
                         if let Err(e) = self
-                            .apply_session_action(SessionAction::AcceptCall {
-                                callee: Some(aor),
-                                sdp: Some(answer),
-                                dialog_id: Some(dialog_id.to_string()),
-                            })
+                            .apply_session_action(
+                                SessionAction::AcceptCall {
+                                    callee: Some(aor),
+                                    sdp: Some(answer),
+                                    dialog_id: Some(dialog_id.to_string()),
+                                },
+                                None,
+                            )
                             .await
                         {
                             warn!(session_id = %self.context.session_id, error = %e, "Failed to accept call on parallel branch");
@@ -2262,11 +2346,14 @@ impl CallSession {
                     let dialog_id_val = dialog_id.id();
                     self.add_callee_dialog(dialog_id_val.clone());
                     let _ = self
-                        .apply_session_action(SessionAction::AcceptCall {
-                            callee: Some(target.aor.to_string()),
-                            sdp,
-                            dialog_id: Some(dialog_id_val.to_string()),
-                        })
+                        .apply_session_action(
+                            SessionAction::AcceptCall {
+                                callee: Some(target.aor.to_string()),
+                                sdp,
+                                dialog_id: Some(dialog_id_val.to_string()),
+                            },
+                            None,
+                        )
                         .await;
                 }
 
@@ -2278,7 +2365,7 @@ impl CallSession {
         }
     }
 
-    async fn handle_failure(&mut self) -> Result<()> {
+    async fn handle_failure(&mut self, inbox: Option<&SessionActionInbox>) -> Result<()> {
         if self.failure_is_busy() {
             if let Some(config) = self.forwarding_config().cloned() {
                 if matches!(config.mode, CallForwardingMode::WhenBusy) {
@@ -2287,7 +2374,7 @@ impl CallSession {
                         endpoint = ?config.endpoint,
                         "Call forwarding (busy) engaged"
                     );
-                    return self.transfer_to_endpoint(&config.endpoint).await;
+                    return self.transfer_to_endpoint(&config.endpoint, inbox).await;
                 }
             }
         } else if self.failure_is_no_answer() {
@@ -2298,7 +2385,7 @@ impl CallSession {
                         endpoint = ?config.endpoint,
                         "Call forwarding (no answer) engaged"
                     );
-                    return self.transfer_to_endpoint(&config.endpoint).await;
+                    return self.transfer_to_endpoint(&config.endpoint, inbox).await;
                 }
             }
         }
@@ -2324,14 +2411,17 @@ impl CallSession {
             );
             return Err(anyhow!("Dialplan has no targets"));
         }
-        if self.try_forwarding_before_dial().await? {
+        if self.try_forwarding_before_dial(inbox).await? {
             return Ok(());
         }
         self.execute_flow(&self.context.dialplan.flow.clone(), inbox)
             .await
     }
 
-    async fn try_forwarding_before_dial(&mut self) -> Result<bool> {
+    async fn try_forwarding_before_dial(
+        &mut self,
+        inbox: Option<&SessionActionInbox>,
+    ) -> Result<bool> {
         let Some(config) = self.immediate_forwarding_config().cloned() else {
             return Ok(false);
         };
@@ -2340,7 +2430,7 @@ impl CallSession {
             endpoint = ?config.endpoint,
             "Call forwarding (always) engaged"
         );
-        self.transfer_to_endpoint(&config.endpoint).await?;
+        self.transfer_to_endpoint(&config.endpoint, inbox).await?;
         Ok(true)
     }
 
@@ -2651,20 +2741,14 @@ impl CallSession {
             call_record_sender: call_record_sender.clone(),
         };
 
-        let mut caller_media_builder = crate::media::MediaStreamBuilder::new()
+        let caller_media_builder = crate::media::MediaStreamBuilder::new()
             .with_id(format!("{}-caller", context.session_id))
             .with_cancel_token(cancel_token.child_token());
-        if let Some(option) = recorder_option.clone() {
-            caller_media_builder = caller_media_builder.with_recorder_config(option);
-        }
         let caller_peer = Arc::new(VoiceEnginePeer::new(Arc::new(caller_media_builder.build())));
 
-        let mut callee_media_builder = crate::media::MediaStreamBuilder::new()
+        let callee_media_builder = crate::media::MediaStreamBuilder::new()
             .with_id(format!("{}-callee", context.session_id))
             .with_cancel_token(cancel_token.child_token());
-        if let Some(option) = recorder_option {
-            callee_media_builder = callee_media_builder.with_recorder_config(option);
-        }
         let callee_peer = Arc::new(VoiceEnginePeer::new(Arc::new(callee_media_builder.build())));
 
         let session_shared = CallSessionShared::new(
@@ -2686,6 +2770,7 @@ impl CallSession {
             context.clone(),
             server_dialog.clone(),
             use_media_proxy,
+            recorder_option,
             caller_peer,
             callee_peer,
             session_shared.clone(),
@@ -2809,12 +2894,12 @@ impl CallSession {
                     }
                 } => { Ok(()) },
                 r = async {
-                    let res = self.execute_dialplan(Some(&action_inbox_clone)).await;
-                    if res.is_err() {
-                        return res;
-                    }
+                    self.execute_dialplan(Some(&action_inbox_clone)).await?;
                     info!(session_id = %self.context.session_id, "Dialplan execution finished, waiting for call termination");
-                    std::future::pending::<Result<()>>().await
+                    loop {
+                        self.process_pending_actions(Some(&action_inbox_clone)).await?;
+                        tokio::time::sleep(Duration::from_millis(500)).await;
+                    }
                 } => r,
                 r = Self::run_server_events_loop(
                     context_clone.clone(),
@@ -2825,7 +2910,7 @@ impl CallSession {
                     server_timer,
                     client_timer,
                     callee_dialogs.clone(),
-                    server_dialog_clone,
+                    server_dialog_clone.clone(),
                     handle_for_events,
                     cancel_token_for_loop,
                     pending_hangup
@@ -2849,6 +2934,13 @@ impl CallSession {
                     }
                 }
             }
+
+            // Terminate server dialog
+            if let Some(dialog) = dialog_layer_clone.get_dialog(&self.server_dialog.id()) {
+                debug!(session_id = %context_clone.session_id, "Terminating server dialog");
+                dialog.hangup().await.ok();
+            }
+
             self.cancel_token.cancel();
         });
     }

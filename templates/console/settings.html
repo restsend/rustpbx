@@ -424,41 +424,137 @@
                                 x-text="selectedStorageProfileData?.label || storageModeLabel(server.storage?.mode)"></span>
                         </span>
                     </div>
-                    <div class="mt-4 grid gap-4 md:grid-cols-2">
-                        <template x-for="profile in storageProfiles" :key="profile.id">
-                            <button type="button" @click="selectStorageProfile(profile.id)"
-                                class="group flex flex-col gap-2 rounded-lg border px-4 py-3 text-left transition"
-                                :class="selectedStorageProfile === profile.id ? 'border-sky-300 bg-sky-50 shadow-sm' : 'border-slate-200 bg-white hover:border-slate-300'">
-                                <div class="flex items-center justify-between">
-                                    <span class="font-semibold text-slate-800" x-text="profile.label"></span>
-                                    <span class="text-[11px] font-semibold uppercase tracking-wide"
-                                        :class="selectedStorageProfile === profile.id ? 'text-sky-600' : 'text-slate-400'">
-                                        <span
-                                            x-text="selectedStorageProfile === profile.id ? 'Active' : 'Preview'"></span>
-                                    </span>
+                    <form class="mt-4 space-y-4" @submit.prevent="saveStorageSettings">
+                        <div>
+                            <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Storage
+                                Mode</label>
+                            <select x-model="storageDraft.callrecord_mode" :disabled="storageProcessing"
+                                class="mt-1 block w-full rounded-md border-slate-200 py-2 pl-3 pr-10 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                                <option value="disabled">Disabled</option>
+                                <option value="local">Local Filesystem</option>
+                                <option value="s3">S3 Compatible Object Store</option>
+                            </select>
+                        </div>
+
+                        <div x-show="storageDraft.callrecord_mode === 'local'" class="space-y-4">
+                            <div>
+                                <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Root
+                                    Path</label>
+                                <input type="text" x-model="storageDraft.callrecord_root" :disabled="storageProcessing"
+                                    class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                    placeholder="/var/lib/rustpbx/recordings">
+                            </div>
+                        </div>
+
+                        <div x-show="storageDraft.callrecord_mode === 's3'" class="space-y-4">
+                            <div class="grid gap-4 md:grid-cols-2">
+                                <div>
+                                    <label
+                                        class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Vendor</label>
+                                    <select x-model="storageDraft.callrecord_s3_vendor" :disabled="storageProcessing"
+                                        class="mt-1 block w-full rounded-md border-slate-200 py-2 pl-3 pr-10 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                                        <option value="aws">AWS S3</option>
+                                        <option value="gcp">Google Cloud Storage</option>
+                                        <option value="azure">Azure Blob Storage</option>
+                                        <option value="minio">MinIO</option>
+                                        <option value="digitalocean">DigitalOcean Spaces</option>
+                                        <option value="aliyun">Aliyun OSS</option>
+                                        <option value="tencent">Tencent COS</option>
+                                    </select>
                                 </div>
-                                <p class="text-xs text-slate-500" x-text="profile.description"></p>
-                                <dl class="mt-2 space-y-1 text-xs text-slate-500">
-                                    <template x-for="item in profileConfig(profile)" :key="profile.id + '-' + item.key">
-                                        <div class="flex items-center justify-between">
-                                            <dt class="text-slate-400" x-text="item.label"></dt>
-                                            <dd class="font-mono text-slate-600" x-text="item.value"></dd>
-                                        </div>
-                                    </template>
-                                </dl>
+                                <div>
+                                    <label
+                                        class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Region</label>
+                                    <input type="text" x-model="storageDraft.callrecord_s3_region"
+                                        :disabled="storageProcessing"
+                                        class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                        placeholder="us-east-1">
+                                </div>
+                                <div>
+                                    <label
+                                        class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Bucket</label>
+                                    <input type="text" x-model="storageDraft.callrecord_s3_bucket"
+                                        :disabled="storageProcessing"
+                                        class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                        placeholder="my-recordings-bucket">
+                                </div>
+                                <div>
+                                    <label
+                                        class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Endpoint
+                                        (Optional)</label>
+                                    <input type="text" x-model="storageDraft.callrecord_s3_endpoint"
+                                        :disabled="storageProcessing"
+                                        class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                        placeholder="https://s3.amazonaws.com">
+                                </div>
+                                <div>
+                                    <label
+                                        class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Access
+                                        Key</label>
+                                    <input type="password" x-model="storageDraft.callrecord_s3_access_key"
+                                        :disabled="storageProcessing"
+                                        class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                                </div>
+                                <div>
+                                    <label
+                                        class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Secret
+                                        Key</label>
+                                    <input type="password" x-model="storageDraft.callrecord_s3_secret_key"
+                                        :disabled="storageProcessing"
+                                        class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                                </div>
+                                <div>
+                                    <label
+                                        class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Root
+                                        Path (Prefix)</label>
+                                    <input type="text" x-model="storageDraft.callrecord_s3_root"
+                                        :disabled="storageProcessing"
+                                        class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                        placeholder="recordings/">
+                                </div>
+                                <div class="col-span-2 flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-6">
+                                    <label class="flex items-center gap-2 text-sm font-semibold text-slate-600">
+                                        <input type="checkbox"
+                                            class="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-500"
+                                            x-model="storageDraft.callrecord_s3_with_media"
+                                            :disabled="storageProcessing">
+                                        <span>Upload media files</span>
+                                    </label>
+                                    <label class="flex items-center gap-2 text-sm font-semibold text-slate-600">
+                                        <input type="checkbox"
+                                            class="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-500"
+                                            x-model="storageDraft.callrecord_s3_keep_media_copy"
+                                            :disabled="storageProcessing">
+                                        <span>Keep local copy</span>
+                                    </label>
+                                </div>
+                            </div>
+                            <div class="flex items-center justify-end gap-3 border-t border-slate-100 pt-4">
+                                <button type="button"
+                                    class="inline-flex items-center justify-center gap-2 rounded-lg border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-600 shadow-sm transition hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-slate-200 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60"
+                                    @click="testStorageConnection()" :disabled="storageProcessing">
+                                    <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor"
+                                        stroke-width="1.6">
+                                        <path stroke-linecap="round" stroke-linejoin="round"
+                                            d="M13 10V3L4 14h7v7l9-11h-7z" />
+                                    </svg>
+                                    <span>Test Connection</span>
+                                </button>
+                            </div>
+                        </div>
+                        <div class="flex items-center justify-end gap-3 border-t border-slate-100 pt-4">
+                            <button type="button"
+                                class="inline-flex items-center justify-center rounded-lg border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-600 transition hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-60"
+                                @click="resetStorageDraft()" :disabled="storageProcessing">
+                                Reset
                             </button>
-                        </template>
-                    </div>
-                    <div class="mt-4 rounded-lg border border-dashed border-slate-200 p-4 text-xs text-slate-500"
-                        x-show="selectedStorageProfileData">
-                        <div class="text-xs font-semibold uppercase tracking-wide text-slate-400">Profile notes
+                            <button type="submit"
+                                class="inline-flex items-center justify-center rounded-lg bg-sky-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60"
+                                :disabled="storageProcessing">
+                                Save Changes
+                            </button>
                         </div>
-                        <p class="mt-2" x-text="selectedStorageProfileData?.description"></p>
-                        <div class="mt-3 text-[11px] text-slate-400">
-                            Selected profile ID · <span class="font-mono text-slate-600"
-                                x-text="selectedStorageProfileData?.id"></span>
-                        </div>
-                    </div>
+                    </form>
                 </div>
             </div>
 
@@ -609,11 +705,20 @@
                             <div>
                                 <label
                                     class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Recorder
-                                    path</label>
+                                    root path</label>
                                 <input type="text" x-model="storageDraft.recorder_path" :disabled="storageProcessing"
                                     class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                                     placeholder="/tmp/recorder" />
                             </div>
+                            <div>
+                                <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Call
+                                    record root path</label>
+                                <input type="text" x-model="storageDraft.callrecord_root" :disabled="storageProcessing"
+                                    class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                    placeholder="/tmp/cdr" />
+                            </div>
+                        </div>
+                        <div class="grid gap-4 md:grid-cols-2">
                             <div>
                                 <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Media
                                     cache path</label>
@@ -621,8 +726,6 @@
                                     class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                                     placeholder="/tmp/mediacache" />
                             </div>
-                        </div>
-                        <div class="grid gap-4 md:grid-cols-2">
                             <div>
                                 <label
                                     class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Recorder
@@ -634,24 +737,6 @@
                                     <option value="ogg">OGG (Opus)</option>
                                 </select>
                             </div>
-                            <div>
-                                <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Call
-                                    record storage</label>
-                                <select x-model="storageDraft.callrecord_mode" :disabled="storageProcessing"
-                                    class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
-                                    <option value="local">Local disk</option>
-                                    <option value="disabled">Disabled</option>
-                                </select>
-                            </div>
-                        </div>
-                        <div x-show="storageDraft.callrecord_mode === 'local'" x-cloak>
-                            <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Call
-                                record root</label>
-                            <input type="text" x-model="storageDraft.callrecord_root" :disabled="storageProcessing"
-                                class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                placeholder="/tmp/cdr" />
-                            <p class="mt-1 text-xs text-slate-400">Recordings are written under this directory when
-                                local storage is enabled.</p>
                         </div>
                     </div>
                     <div
@@ -3055,15 +3140,13 @@
                 const recorderPath = meta?.recorder_path || '';
                 const recorderFormat = (meta?.recorder_format || 'wav').toString();
                 const mediaCache = meta?.media_cache_path || '';
-                let callrecordMode = (meta?.mode || '').toString().toLowerCase();
-                if (callrecordMode !== 'local') {
-                    callrecordMode = 'disabled';
-                }
+
                 let callrecordRoot = '';
                 const callrecordProfile = (this.storageProfiles || []).find((profile) => String(profile?.id || '').startsWith('callrecord'));
                 if (callrecordProfile && callrecordProfile.config && callrecordProfile.config.root) {
                     callrecordRoot = callrecordProfile.config.root;
                 }
+
                 const recording = meta?.recording || this.recordingPolicy || {};
                 const normalizeList = (list) => Array.isArray(list) ? list.join('\n') : '';
                 const directionList = Array.isArray(recording?.directions)
@@ -3077,7 +3160,6 @@
                     recorder_path: recorderPath,
                     recorder_format: recorderFormat || 'wav',
                     media_cache_path: mediaCache,
-                    callrecord_mode: callrecordMode || 'disabled',
                     callrecord_root: callrecordRoot || '',
                     recording_enabled: !!recording?.enabled,
                     recording_auto_start: recording?.auto_start !== undefined ? !!recording.auto_start : true,
@@ -3112,18 +3194,9 @@
                     }
                 }
                 let callrecordPayload = null;
-                if (this.storageDraft.callrecord_mode === 'local') {
-                    const root = this.normalizeOptionalString(this.storageDraft.callrecord_root);
-                    if (!root) {
-                        this.$dispatch('toast', {
-                            title: 'Missing information',
-                            message: 'Recording root path is required for local storage.',
-                        });
-                        return;
-                    }
+                const root = this.normalizeOptionalString(this.storageDraft.callrecord_root);
+                if (root) {
                     callrecordPayload = { mode: 'local', root };
-                } else if (this.storageDraft.callrecord_mode === 'disabled') {
-                    callrecordPayload = { mode: 'disabled' };
                 }
                 if (
                     this.storageDraft.recording_enabled &&
@@ -3204,6 +3277,64 @@
                     this.$dispatch('toast', {
                         title: 'Update failed',
                         message: err?.message || 'Unable to update storage settings.',
+                    });
+                } finally {
+                    this.storageProcessing = false;
+                }
+            },
+            async testStorageConnection() {
+                if (this.storageProcessing) {
+                    return;
+                }
+                const vendor = this.normalizeOptionalString(this.storageDraft.callrecord_s3_vendor);
+                const bucket = this.normalizeOptionalString(this.storageDraft.callrecord_s3_bucket);
+                const region = this.normalizeOptionalString(this.storageDraft.callrecord_s3_region);
+                const access_key = this.normalizeOptionalString(this.storageDraft.callrecord_s3_access_key);
+                const secret_key = this.normalizeOptionalString(this.storageDraft.callrecord_s3_secret_key);
+                const endpoint = this.normalizeOptionalString(this.storageDraft.callrecord_s3_endpoint);
+                const root = this.normalizeOptionalString(this.storageDraft.callrecord_s3_root);
+
+                if (!vendor || !bucket || !region || !access_key || !secret_key) {
+                    this.$dispatch('toast', {
+                        title: 'Missing information',
+                        message: 'Vendor, bucket, region, access key, and secret key are required for S3 test.',
+                    });
+                    return;
+                }
+
+                const body = {
+                    vendor,
+                    bucket,
+                    region,
+                    access_key,
+                    secret_key,
+                    endpoint,
+                    root,
+                };
+
+                this.storageProcessing = true;
+                try {
+                    const response = await fetch(`${this.basePath}/settings/config/storage/test`, {
+                        method: 'POST',
+                        headers: {
+                            Accept: 'application/json',
+                            'Content-Type': 'application/json',
+                        },
+                        body: JSON.stringify(body),
+                    });
+                    const data = await response.json().catch(() => ({}));
+                    if (!response.ok) {
+                        throw new Error(data?.message || 'Storage connection test failed');
+                    }
+                    this.$dispatch('toast', {
+                        title: 'Connection successful',
+                        message: data?.message || 'Successfully connected to storage, created and deleted a test file.',
+                    });
+                } catch (err) {
+                    console.error(err);
+                    this.$dispatch('toast', {
+                        title: 'Test failed',
+                        message: err?.message || 'Unable to connect to storage.',
                     });
                 } finally {
                     this.storageProcessing = false;

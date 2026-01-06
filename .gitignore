@@ -49,3 +49,5 @@ config/rate_decks/*.toml
 *.jsonl
 config.toml.dev
 *.log
+rustpbx.toml
+.DS_Store

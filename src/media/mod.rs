@@ -2,8 +2,8 @@ use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use audio_codec::CodecType;
 use rustrtc::{
-    Attribute, IceServer, MediaKind, PeerConnection, RtcConfiguration, SdpType, SessionDescription,
-    TransceiverDirection, TransportMode,
+    Attribute, IceServer, MediaKind, PeerConnection, RtcConfiguration, RtpCodecParameters, SdpType,
+    SessionDescription, TransceiverDirection, TransportMode,
 };
 use std::{
     collections::{HashMap, HashSet},
@@ -16,11 +16,17 @@ pub use transcoder::Transcoder;
 
 use crate::media::recorder::RecorderOption;
 
-pub mod negotiate;
-pub mod transcoder;
-
 #[cfg(test)]
 mod file_track_tests;
+pub mod negotiate;
+pub mod transcoder;
+pub mod wav_writer;
+
+pub trait StreamWriter: Send + Sync {
+    fn write_header(&mut self) -> Result<()>;
+    fn write_packet(&mut self, data: &[u8], samples: usize) -> Result<()>;
+    fn finalize(&mut self) -> Result<()>;
+}
 
 pub fn get_timestamp() -> u64 {
     let now = std::time::SystemTime::now();
@@ -148,7 +154,6 @@ impl MediaStream {
 
 pub struct MediaTrack {
     track_id: String,
-    cancel_token: CancellationToken,
     rtp_start_port: Option<u16>,
     rtp_end_port: Option<u16>,
     external_ip: Option<String>,
@@ -161,13 +166,12 @@ pub struct MediaTrack {
 
 impl MediaTrack {
     pub fn new(
-        cancel_token: CancellationToken,
+        _cancel_token: CancellationToken,
         track_id: String,
         ice_servers: Vec<IceServer>,
     ) -> Self {
         Self {
             track_id,
-            cancel_token,
             ice_servers,
             rtp_start_port: None,
             rtp_end_port: None,
@@ -235,26 +239,18 @@ impl MediaTrack {
         };
 
         let pc = PeerConnection::new(config);
-        pc.add_transceiver(MediaKind::Audio, TransceiverDirection::SendRecv);
 
-        if let Some(ref option) = self.recorder_option {
-            let track_id = self.track_id.clone();
-            let pc_clone = pc.clone();
-            let option_clone = option.clone();
-            let cancel_token = self.cancel_token.clone();
-            tokio::spawn(async move {
-                if let Err(e) = crate::media::recorder::record_pc_tracks(
-                    pc_clone,
-                    option_clone,
-                    track_id,
-                    cancel_token,
-                )
-                .await
-                {
-                    warn!("Failed to start recording for track: {:?}", e);
-                }
-            });
+        // Add a dummy track to ensure a sender is created and SSRC is signaled in SDP
+        let (_, track, _) =
+            rustrtc::media::track::sample_track(rustrtc::media::MediaKind::Audio, 100);
+        let mut params = RtpCodecParameters::default();
+        if let Some(codec) = self.rtp_map.first() {
+            params.payload_type = codec.payload_type();
+            params.clock_rate = codec.clock_rate();
+            params.channels = 1;
         }
+        pc.add_track(track, params)
+            .map_err(|e| anyhow!("failed to add track: {}", e))?;
 
         pc.wait_for_gathering_complete().await;
         self.pc = Some(pc.clone());
@@ -352,25 +348,6 @@ impl Track for MediaTrack {
 
     fn set_codec_preference(&mut self, codecs: Vec<CodecType>) {
         self.rtp_map = codecs;
-    }
-
-    async fn set_recorder_option(&mut self, option: RecorderOption) {
-        self.recorder_option = Some(option.clone());
-        if let Some(pc) = &self.pc {
-            // If PC already exists, we should start recording now.
-            // But usually this is called before PC is created or during creation.
-            let track_id = self.track_id.clone();
-            let pc = pc.clone();
-            let cancel_token = self.cancel_token.clone();
-            tokio::spawn(async move {
-                if let Err(e) =
-                    crate::media::recorder::record_pc_tracks(pc, option, track_id, cancel_token)
-                        .await
-                {
-                    warn!("Failed to start recording for track: {:?}", e);
-                }
-            });
-        }
     }
 }
 

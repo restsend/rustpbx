@@ -1,7 +1,7 @@
 use crate::{
     call::{CallRecordingConfig, DialDirection, QueuePlan, user::SipUser},
-    media::recorder::RecorderFormat,
     proxy::routing::{RouteQueueConfig, RouteRule, TrunkConfig},
+    storage::StorageConfig,
 };
 use anyhow::{Error, Result};
 use clap::Parser;
@@ -109,8 +109,6 @@ pub struct RecordingPolicy {
     pub ptime: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub format: Option<RecorderFormat>,
 }
 
 impl RecordingPolicy {
@@ -130,10 +128,6 @@ impl RecordingPolicy {
             .unwrap_or_else(default_config_recorder_path)
     }
 
-    pub fn recorder_format(&self) -> RecorderFormat {
-        self.format.unwrap_or_default()
-    }
-
     pub fn ensure_defaults(&mut self) -> bool {
         if self
             .path
@@ -142,12 +136,10 @@ impl RecordingPolicy {
             .unwrap_or(true)
         {
             self.path = Some(default_config_recorder_path());
+            true
+        } else {
+            false
         }
-
-        let original = self.format.unwrap_or_default();
-        let effective = original.effective();
-        self.format = Some(effective);
-        original != effective
     }
 }
 
@@ -182,7 +174,19 @@ pub struct Config {
     #[serde(default)]
     pub recording: Option<RecordingPolicy>,
     #[serde(default)]
+    pub archive: Option<ArchiveConfig>,
+    #[serde(default)]
     pub addons: HashMap<String, HashMap<String, String>>,
+    #[serde(default)]
+    pub storage: Option<StorageConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ArchiveConfig {
+    pub enabled: bool,
+    pub archive_time: String,
+    pub timezone: Option<String>,
+    pub retention_days: u32,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -195,6 +199,9 @@ pub struct ConsoleConfig {
     pub allow_registration: bool,
     #[serde(default)]
     pub secure_cookie: bool,
+    pub alpine_js: Option<String>,
+    pub tailwind_js: Option<String>,
+    pub chart_js: Option<String>,
 }
 
 impl Default for ConsoleConfig {
@@ -204,6 +211,9 @@ impl Default for ConsoleConfig {
             base_path: default_console_base_path(),
             allow_registration: false,
             secure_cookie: false,
+            alpine_js: None,
+            tailwind_js: None,
+            chart_js: None,
         }
     }
 }
@@ -260,17 +270,7 @@ pub enum LocatorConfig {
     },
 }
 
-#[derive(Debug, Deserialize, Clone, Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum S3Vendor {
-    Aliyun,
-    Tencent,
-    Minio,
-    AWS,
-    GCP,
-    Azure,
-    DigitalOcean,
-}
+pub use crate::storage::S3Vendor;
 
 #[derive(Debug, Deserialize, Clone, Serialize)]
 #[serde(tag = "type")]
@@ -391,6 +391,7 @@ pub struct DialplanHints {
     pub bypass_media: Option<bool>,
     pub max_duration: Option<std::time::Duration>,
     pub enable_sipflow: Option<bool>,
+    pub allow_codecs: Option<Vec<String>>,
     pub extensions: http::Extensions,
 }
 
@@ -617,6 +618,8 @@ impl Default for Config {
             console: None,
             database_url: default_database_url(),
             recording: None,
+            archive: None,
+            storage: None,
             addons: HashMap::new(),
         }
     }
@@ -658,13 +661,6 @@ impl Config {
             .as_ref()
             .map(|policy| policy.recorder_path())
             .unwrap_or_else(default_config_recorder_path)
-    }
-
-    pub fn recorder_format(&self) -> RecorderFormat {
-        self.recording
-            .as_ref()
-            .map(|policy| policy.recorder_format())
-            .unwrap_or_default()
     }
 
     pub fn ensure_recording_defaults(&mut self) -> bool {

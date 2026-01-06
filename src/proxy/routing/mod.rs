@@ -244,6 +244,9 @@ pub struct RouteRule {
     #[serde(flatten)]
     pub action: RouteAction,
 
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub codecs: Vec<String>,
+
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disabled: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -264,6 +267,7 @@ impl Default for RouteRule {
             match_conditions: MatchConditions::default(),
             rewrite: None,
             action: RouteAction::default(),
+            codecs: Vec::new(),
             disabled: None,
             policy: None,
             origin: ConfigOrigin::embedded(),
@@ -441,6 +445,8 @@ pub enum ActionType {
 
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
 pub struct RouteQueueConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     pub accept_immediately: bool,
     #[serde(default)]
     pub passthrough_ringback: bool,

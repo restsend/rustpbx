@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::{cmp::Ordering, collections::HashMap, fs, path::Path};
 use tracing::{info, warn};
 
-use crate::{models::queue, proxy::routing::RouteQueueConfig};
+use crate::{addons::queue::models as queue, proxy::routing::RouteQueueConfig};
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 #[serde(rename_all = "camelCase")]

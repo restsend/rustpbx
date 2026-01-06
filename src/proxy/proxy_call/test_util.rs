@@ -1,7 +1,6 @@
 #[cfg(test)]
 pub mod tests {
     use crate::media::Track;
-    use crate::media::recorder::RecorderOption;
     use crate::proxy::proxy_call::media_peer::MediaPeer;
     use anyhow::Result;
     use async_trait::async_trait;
@@ -44,9 +43,6 @@ pub mod tests {
             self.stop_called
                 .store(true, std::sync::atomic::Ordering::SeqCst);
             self.cancel_token.cancel();
-        }
-        fn get_recorder_option(&self) -> Option<RecorderOption> {
-            None
         }
     }
 }

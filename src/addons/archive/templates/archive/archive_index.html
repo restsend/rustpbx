@@ -1,0 +1,193 @@
+{% extends "console/layout.html" %}
+
+{% block title %}Archive · {{site_name|default('RustPBX')}}{% endblock %}
+
+{% block content %}
+<div class="p-6" x-data='archiveManager({{ archives | tojson | safe }}, {{ config | tojson | safe }})'>
+    <div class="mx-auto max-w-7xl space-y-6">
+        <!-- Header -->
+        <div class="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
+            <div>
+                <p class="text-[11px] font-semibold uppercase tracking-wide text-sky-600">Addon</p>
+                <h1 class="text-2xl font-semibold text-slate-900">Archive</h1>
+                <p class="text-sm text-slate-500">Manage call record archiving and retention.</p>
+            </div>
+        </div>
+
+        <!-- Main Content Grid -->
+        <div class="grid gap-6 lg:grid-cols-2">
+            <!-- Configuration Form -->
+            <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+                <div class="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+                    <div>
+                        <h2 class="text-base font-semibold text-slate-900">Configuration</h2>
+                        <p class="text-xs text-slate-500">Configure archiving schedule and retention.</p>
+                    </div>
+                </div>
+
+                <div class="mt-4 space-y-4">
+                    <div class="flex items-center gap-2">
+                        <label class="flex items-center gap-2 text-sm font-semibold text-slate-600">
+                            <input type="checkbox" x-model="config.enabled"
+                                class="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-500">
+                            <span>Enable Archiving</span>
+                        </label>
+                    </div>
+
+                    <div>
+                        <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Archive Time
+                            (HH:MM)</label>
+                        <input type="text" x-model="config.archive_time"
+                            class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                            placeholder="03:00">
+                    </div>
+
+                    <div>
+                        <label
+                            class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Timezone</label>
+                        <input type="text" x-model="config.timezone"
+                            class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                            placeholder="UTC">
+                    </div>
+
+                    <div>
+                        <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Retention
+                            Days</label>
+                        <input type="number" x-model.number="config.retention_days"
+                            class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                            placeholder="30">
+                    </div>
+
+                    <div class="border-t border-slate-200 pt-4">
+                        <button @click="saveConfig" :disabled="saving"
+                            class="inline-flex w-full items-center justify-center rounded-md bg-sky-600 px-3 py-2 text-xs font-semibold text-white shadow-sm transition hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60">
+                            <span x-show="!saving">Save Configuration</span>
+                            <span x-show="saving">Saving...</span>
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Archive Files -->
+            <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+                <div class="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+                    <div>
+                        <h2 class="text-base font-semibold text-slate-900">Archive Files</h2>
+                        <p class="text-xs text-slate-500">List of compressed call record archives.</p>
+                    </div>
+                    <button @click="refreshList()"
+                        class="text-sky-600 hover:text-sky-800 text-xs font-semibold">Refresh</button>
+                </div>
+                <div class="mt-4 overflow-x-auto">
+                    <table class="min-w-full divide-y divide-slate-200 text-sm">
+                        <thead
+                            class="bg-slate-50 text-left text-xs font-semibold uppercase tracking-wide text-slate-500">
+                            <tr>
+                                <th class="px-4 py-2">Filename</th>
+                                <th class="px-4 py-2">Date</th>
+                                <th class="px-4 py-2">Size</th>
+                                <th class="px-4 py-2 text-right">Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody class="divide-y divide-slate-100">
+                            <template x-for="file in archives" :key="file.name">
+                                <tr class="hover:bg-slate-50 transition-colors">
+                                    <td class="px-4 py-3 font-medium text-slate-700" x-text="file.name"></td>
+                                    <td class="px-4 py-3 text-slate-500" x-text="new Date(file.date).toLocaleString()">
+                                    </td>
+                                    <td class="px-4 py-3 text-slate-500" x-text="formatSize(file.size)"></td>
+                                    <td class="px-4 py-3 text-right">
+                                        <button @click="deleteArchive(file.name)"
+                                            class="text-red-600 hover:text-red-900 text-xs font-semibold">Delete</button>
+                                    </td>
+                                </tr>
+                            </template>
+                            <tr x-show="archives.length === 0">
+                                <td colspan="4" class="px-4 py-8 text-center text-slate-400 italic">No archives found
+                                </td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+    function archiveManager(archives, config) {
+        return {
+            archives: archives || [],
+            config: config || { enabled: false, archive_time: '03:00', timezone: 'UTC', retention_days: 30 },
+            saving: false,
+
+            formatSize(bytes) {
+                if (bytes === 0) return '0 B';
+                const k = 1024;
+                const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+                const i = Math.floor(Math.log(bytes) / Math.log(k));
+                return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+            },
+
+            async refreshList() {
+                try {
+                    const response = await fetch('/api/archive/list');
+                    if (response.ok) {
+                        this.archives = await response.json();
+                    }
+                } catch (error) {
+                    console.error('Failed to refresh list', error);
+                }
+            },
+
+            async saveConfig() {
+                this.saving = true;
+                try {
+                    const response = await fetch('/api/archive/config', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                        },
+                        body: JSON.stringify(this.config),
+                    });
+                    const result = await response.json();
+                    if (result.success) {
+                        alert('Configuration saved successfully. Restart may be required for some changes.');
+                    } else {
+                        alert('Failed to save configuration: ' + result.error);
+                    }
+                } catch (error) {
+                    console.error('Failed to save config', error);
+                    alert('Failed to save configuration');
+                } finally {
+                    this.saving = false;
+                }
+            },
+
+            async deleteArchive(filename) {
+                if (!confirm(`Are you sure you want to delete ${filename}?`)) return;
+
+                try {
+                    const response = await fetch('/api/archive/delete', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                        },
+                        body: JSON.stringify({ filename }),
+                    });
+
+                    const result = await response.json();
+                    if (result.success) {
+                        this.refreshList();
+                    } else {
+                        alert('Failed to delete: ' + result.error);
+                    }
+                } catch (error) {
+                    console.error('Failed to delete', error);
+                    alert('Failed to delete archive');
+                }
+            }
+        }
+    }
+</script>
+{% endblock %}

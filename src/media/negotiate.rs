@@ -65,6 +65,19 @@ impl MediaNegotiator {
         rtp_map
     }
 
+    pub fn parse_codec(name: &str) -> Option<CodecType> {
+        match name.to_lowercase().as_str() {
+            "pcmu" => Some(CodecType::PCMU),
+            "pcma" => Some(CodecType::PCMA),
+            #[cfg(feature = "opus")]
+            "opus" => Some(CodecType::Opus),
+            "g722" => Some(CodecType::G722),
+            "g729" => Some(CodecType::G729),
+            "telephone-event" => Some(CodecType::TelephoneEvent),
+            _ => None,
+        }
+    }
+
     /// Extract codec parameters from SDP string
     /// Returns: (RtpCodecParameters, dtmf_payload_type, CodecType)
     pub fn extract_codec_params(
@@ -73,7 +86,7 @@ impl MediaNegotiator {
         let mut params = rustrtc::RtpCodecParameters::default();
         let mut dtmf_pt = None;
         let mut codec_type = CodecType::PCMU;
-        let mut first_codec_found = false;
+        let mut _first_codec_found = false;
 
         if let Ok(desc) = SessionDescription::parse(SdpType::Answer, sdp_str) {
             if let Some(section) = desc
@@ -83,12 +96,26 @@ impl MediaNegotiator {
             {
                 let rtp_map = Self::parse_rtp_map_from_section(section);
 
-                // Find the first non-DTMF codec
+                // Find the best non-DTMF codec (prefer Opus > G722 > PCMU > PCMA)
+                let mut best_priority = -1;
+
                 for (pt, (codec, clock, channels)) in &rtp_map {
                     if *codec == CodecType::TelephoneEvent {
                         dtmf_pt = Some(*pt);
-                    } else if !first_codec_found {
-                        // First audio codec found
+                        continue;
+                    }
+
+                    let priority = match codec {
+                        CodecType::Opus => 100,
+                        CodecType::G722 => 90,
+                        CodecType::PCMU => 80,
+                        CodecType::PCMA => 70,
+                        CodecType::G729 => 60,
+                        _ => 0,
+                    };
+
+                    if priority > best_priority {
+                        best_priority = priority;
                         params.payload_type = *pt;
                         params.clock_rate = *clock;
                         params.channels = if *channels > 255 {
@@ -97,7 +124,6 @@ impl MediaNegotiator {
                             *channels as u8
                         };
                         codec_type = *codec;
-                        first_codec_found = true;
                     }
                 }
             }
@@ -207,6 +233,30 @@ impl MediaNegotiator {
             .iter()
             .find(|c| **c != CodecType::TelephoneEvent)
             .copied()
+    }
+
+    pub fn extract_ssrc(sdp: &str) -> Option<u32> {
+        // Try parsing as Answer first, then Offer if it fails (though usually it's Answer)
+        let session = SessionDescription::parse(SdpType::Answer, sdp)
+            .or_else(|_| SessionDescription::parse(SdpType::Offer, sdp))
+            .ok()?;
+
+        for section in session.media_sections {
+            if section.kind == MediaKind::Audio {
+                for attr in section.attributes {
+                    if attr.key == "ssrc" {
+                        if let Some(value) = attr.value {
+                            // value format: "12345 cname:..." or just "12345"
+                            let ssrc_str = value.split_whitespace().next()?;
+                            if let Ok(ssrc) = ssrc_str.parse::<u32>() {
+                                return Some(ssrc);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        None
     }
 }
 

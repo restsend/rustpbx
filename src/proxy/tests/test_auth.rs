@@ -466,6 +466,7 @@ async fn test_guest_call_allowed_extension() {
         frequency_limiter: None,
         call_record_hooks: Arc::new(Vec::new()),
         runnings_tx: Arc::new(AtomicUsize::new(0)),
+        storage: None,
     });
 
     let module = AuthModule::new(server_inner);

@@ -2,10 +2,6 @@ use self::sipflow::SipMessageItem;
 use crate::config::{CallRecordConfig, S3Vendor};
 use anyhow::{Error, Result};
 use futures::stream::{FuturesUnordered, StreamExt};
-use object_store::{
-    ObjectStore, aws::AmazonS3Builder, azure::MicrosoftAzureBuilder,
-    gcp::GoogleCloudStorageBuilder, path::Path as ObjectPath,
-};
 use reqwest;
 use sea_orm::prelude::DateTimeUtc;
 use serde::{Deserialize, Serialize};
@@ -365,59 +361,7 @@ impl CallRecordFormatter for DefaultCallRecordFormatter {
     }
 }
 
-pub fn build_object_store_from_s3(
-    vendor: &S3Vendor,
-    bucket: &str,
-    region: &str,
-    access_key: &str,
-    secret_key: &str,
-    endpoint: &str,
-) -> Result<Arc<dyn ObjectStore>> {
-    let store: Arc<dyn ObjectStore> = match vendor {
-        S3Vendor::AWS => {
-            let builder = AmazonS3Builder::new()
-                .with_bucket_name(bucket)
-                .with_region(region)
-                .with_access_key_id(access_key)
-                .with_secret_access_key(secret_key);
 
-            let instance = if !endpoint.is_empty() {
-                builder.with_endpoint(endpoint).build()?
-            } else {
-                builder.build()?
-            };
-            Arc::new(instance)
-        }
-        S3Vendor::GCP => {
-            let instance = GoogleCloudStorageBuilder::new()
-                .with_bucket_name(bucket)
-                .with_service_account_key(secret_key)
-                .build()?;
-            Arc::new(instance)
-        }
-        S3Vendor::Azure => {
-            let instance = MicrosoftAzureBuilder::new()
-                .with_container_name(bucket)
-                .with_account(access_key)
-                .with_access_key(secret_key)
-                .build()?;
-            Arc::new(instance)
-        }
-        S3Vendor::Aliyun | S3Vendor::Tencent | S3Vendor::Minio | S3Vendor::DigitalOcean => {
-            let instance = AmazonS3Builder::new()
-                .with_bucket_name(bucket)
-                .with_region(region)
-                .with_access_key_id(access_key)
-                .with_secret_access_key(secret_key)
-                .with_endpoint(endpoint)
-                .with_virtual_hosted_style_request(false)
-                .build()?;
-            Arc::new(instance)
-        }
-    };
-
-    Ok(store)
-}
 
 pub struct CallRecordManager {
     pub max_concurrent: usize,
@@ -791,28 +735,35 @@ impl CallRecordManager {
         sip_flows: HashMap<String, Vec<SipMessageItem>>,
     ) -> Result<String> {
         let start_time = Instant::now();
-        let object_store =
-            build_object_store_from_s3(vendor, bucket, region, access_key, secret_key, endpoint)?;
+        let storage_config = crate::storage::StorageConfig::S3 {
+            vendor: vendor.clone(),
+            bucket: bucket.clone(),
+            region: region.clone(),
+            access_key: access_key.clone(),
+            secret_key: secret_key.clone(),
+            endpoint: Some(endpoint.clone()),
+            prefix: None,
+        };
+        let storage = crate::storage::Storage::new(&storage_config)?;
 
         // Serialize call record to JSON
         let call_log_json = formatter.format(record)?;
         // Upload call log JSON
         let filename = formatter.format_file_name(record);
         let mut local_files = vec![filename.clone()];
-        let json_path = ObjectPath::from(filename);
         let buf_size = call_log_json.len();
-        match object_store.put(&json_path, call_log_json.into()).await {
+        match storage.write(&filename, call_log_json.into()).await {
             Ok(_) => {
                 info!(
                     elapsed = start_time.elapsed().as_secs_f64(),
-                    %json_path,
+                    filename,
                     buf_size,
                     "upload call record"
                 );
             }
             Err(e) => {
                 warn!(
-                   %json_path,
+                   filename,
                     "failed to upload call record: {}", e
                 );
             }
@@ -826,7 +777,6 @@ impl CallRecordManager {
                 let file_name = formatter.format_sip_flow_path(record, &leg);
                 local_files.push(file_name.clone());
 
-                let flow_path = ObjectPath::from(file_name);
                 let mut buffer = Vec::new();
                 for entry in entries {
                     let line = serde_json::to_vec(&entry)?;
@@ -834,18 +784,18 @@ impl CallRecordManager {
                     buffer.push(b'\n');
                 }
                 let buf_size = buffer.len();
-                match object_store.put(&flow_path, buffer.into()).await {
+                match storage.write(&file_name, buffer.into()).await {
                     Ok(_) => {
                         info!(
                             elapsed = start_time.elapsed().as_secs_f64(),
-                            %flow_path,
+                            file_name,
                             buf_size,
                             "upload sip flow file"
                         );
                     }
                     Err(e) => {
                         warn!(
-                            %flow_path,
+                            file_name,
                             "failed to upload sip flow file: {}", e
                         );
                     }
@@ -857,7 +807,7 @@ impl CallRecordManager {
             let mut media_files = vec![];
             for media in &record.recorder {
                 if Path::new(&media.path).exists() {
-                    let media_path = ObjectPath::from(formatter.format_media_path(record, media));
+                    let media_path = formatter.format_media_path(record, media);
                     media_files.push((media.path.clone(), media_path));
                 }
             }
@@ -871,17 +821,17 @@ impl CallRecordManager {
                     }
                 };
                 let buf_size = file_content.len();
-                match object_store.put(media_path, file_content.into()).await {
+                match storage.write(media_path, file_content.into()).await {
                     Ok(_) => {
                         info!(
                             elapsed = start_time.elapsed().as_secs_f64(),
-                            %media_path,
+                            media_path,
                             buf_size,
                             "upload media file"
                         );
                     }
                     Err(e) => {
-                        warn!(%media_path,"failed to upload media file: {}", e);
+                        warn!(media_path,"failed to upload media file: {}", e);
                     }
                 }
             }
@@ -905,7 +855,7 @@ impl CallRecordManager {
         Ok(format!(
             "{}/{}",
             endpoint.trim_end_matches('/'),
-            json_path.to_string().trim_start_matches('/')
+            filename.trim_start_matches('/')
         ))
     }
 

@@ -1,3 +1,5 @@
+use crate::addons::queue::models::{Column as QueueColumn, Entity as QueueEntity};
+use crate::addons::queue::services::utils as queue_utils;
 use crate::call::Location;
 use crate::console::handlers::forms::{self, ExtensionPayload, ListQuery};
 use crate::console::{ConsoleState, middleware::AuthRequired};
@@ -9,10 +11,8 @@ use crate::models::{
     extension_department::{
         Column as ExtensionDepartmentColumn, Entity as ExtensionDepartmentEntity,
     },
-    queue::{Column as QueueColumn, Entity as QueueEntity},
 };
 use crate::proxy::server::SipServerRef;
-use crate::services::queue_utils;
 use axum::routing::get;
 use axum::{Json, Router};
 use axum::{
@@ -318,7 +318,7 @@ async fn build_forwarding_catalog(state: Arc<ConsoleState>) -> ForwardingCatalog
                 };
                 Some(ForwardingQueue {
                     id,
-                    reference: entry.file_name(),
+                    reference: id.to_string(),
                     name: entry.name,
                     description: entry.description,
                 })
@@ -387,6 +387,7 @@ async fn page_extension_detail(
             "create_url": state.url_for("/extensions/new"),
             "registration_info": locator_info,
             "forwarding_catalog": forwarding_catalog,
+            "addon_scripts": state.get_injected_scripts(&format!("/console/extensions/{}", model.id)),
         }),
     )
 }
@@ -404,6 +405,7 @@ async fn page_extension_create(
             "create_url": state.url_for("/extensions/new"),
             "registration_info": ExtensionLocatorSummary::default(),
             "forwarding_catalog": forwarding_catalog,
+            "addon_scripts": state.get_injected_scripts("/console/extensions/new"),
         }),
     )
 }

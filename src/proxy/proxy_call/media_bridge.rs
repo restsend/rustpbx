@@ -1,4 +1,4 @@
-use crate::media::recorder::{Leg, Recorder};
+use crate::media::recorder::{Leg, Recorder, RecorderOption};
 use crate::proxy::proxy_call::media_peer::MediaPeer;
 use anyhow::Result;
 use audio_codec::CodecType;
@@ -7,7 +7,7 @@ use futures::stream::FuturesUnordered;
 use rustrtc::media::{AudioFrame, MediaKind, MediaSample, MediaStreamTrack};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 pub trait IsAudioPayload {
     fn is_audio(&self) -> bool;
@@ -16,9 +16,7 @@ pub trait IsAudioPayload {
 impl IsAudioPayload for AudioFrame {
     fn is_audio(&self) -> bool {
         match &self.payload_type {
-            Some(pt) => {
-                matches!(pt, 0 | 8 | 9 | 18 | 111) // Common audio payload types
-            }
+            Some(pt) => matches!(pt, 0 | 8 | 9 | 18 | 111) || (*pt >= 96 && *pt <= 127),
             _ => false,
         }
     }
@@ -32,6 +30,8 @@ pub struct MediaBridge {
     pub codec_b: CodecType,
     pub dtmf_pt_a: Option<u8>,
     pub dtmf_pt_b: Option<u8>,
+    pub ssrc_a: Option<u32>,
+    pub ssrc_b: Option<u32>,
     started: AtomicBool,
     recorder: Arc<Mutex<Option<Recorder>>>,
 }
@@ -46,22 +46,15 @@ impl MediaBridge {
         dtmf_pt_b: Option<u8>,
         codec_a: CodecType,
         codec_b: CodecType,
+        ssrc_a: Option<u32>,
+        ssrc_b: Option<u32>,
+        recorder_option: Option<RecorderOption>,
     ) -> Self {
-        let recorder_option = leg_a.get_recorder_option();
         let recorder = if let Some(option) = recorder_option {
-            let sample_rate = params_a.clock_rate;
-            let channels = 2; // Always 2 channels for call recording
-            match Recorder::new(
-                &option.recorder_file,
-                codec_a,
-                codec_a,
-                codec_b,
-                sample_rate,
-                channels,
-            ) {
+            match Recorder::new(&option.recorder_file, codec_a) {
                 Ok(r) => Some(r),
                 Err(e) => {
-                    error!("Failed to create recorder: {:?}", e);
+                    warn!("Failed to create recorder: {:?}", e);
                     None
                 }
             }
@@ -78,6 +71,8 @@ impl MediaBridge {
             codec_b,
             dtmf_pt_a,
             dtmf_pt_b,
+            ssrc_a,
+            ssrc_b,
             started: AtomicBool::new(false),
             recorder: Arc::new(Mutex::new(recorder)),
         }
@@ -117,6 +112,8 @@ impl MediaBridge {
             let codec_b = self.codec_b;
             let dtmf_pt_a = self.dtmf_pt_a;
             let dtmf_pt_b = self.dtmf_pt_b;
+            let ssrc_a = self.ssrc_a;
+            let ssrc_b = self.ssrc_b;
             let recorder = self.recorder.clone();
             let cancel_token = self.leg_a.cancel_token();
 
@@ -132,6 +129,8 @@ impl MediaBridge {
                         codec_b,
                         dtmf_pt_a,
                         dtmf_pt_b,
+                        ssrc_a,
+                        ssrc_b,
                         recorder,
                     ) => {}
                 }
@@ -149,8 +148,14 @@ impl MediaBridge {
         codec_b: CodecType,
         dtmf_pt_a: Option<u8>,
         dtmf_pt_b: Option<u8>,
+        ssrc_a: Option<u32>,
+        ssrc_b: Option<u32>,
         recorder: Arc<Mutex<Option<Recorder>>>,
     ) {
+        info!(
+            "bridge_pcs started: codec_a={:?} codec_b={:?} ssrc_a={:?} ssrc_b={:?}",
+            codec_a, codec_b, ssrc_a, ssrc_b
+        );
         let mut forwarders = FuturesUnordered::new();
         let mut started_track_ids = std::collections::HashSet::new();
 
@@ -164,9 +169,15 @@ impl MediaBridge {
                 let track = receiver.track();
                 let track_id = track.id().to_string();
                 let track_kind = track.kind();
-                debug!("Pre-existing transceiver Leg A: track_id={} kind={:?}", track_id, track_kind);
+                debug!(
+                    "Pre-existing transceiver Leg A: track_id={} kind={:?}",
+                    track_id, track_kind
+                );
                 if started_track_ids.insert(format!("A-{}", track_id)) {
-                    info!("Starting pre-existing track forwarder: Leg A track_id={}", track_id);
+                    info!(
+                        "Starting pre-existing track forwarder: Leg A track_id={}",
+                        track_id
+                    );
                     forwarders.push(Self::forward_track(
                         track,
                         pc_b.clone(),
@@ -175,6 +186,7 @@ impl MediaBridge {
                         codec_b,
                         Leg::A,
                         dtmf_pt_a,
+                        None, // Don't use remote SSRC for outgoing stream
                         recorder.clone(),
                     ));
                 } else {
@@ -188,9 +200,15 @@ impl MediaBridge {
                 let track = receiver.track();
                 let track_id = track.id().to_string();
                 let track_kind = track.kind();
-                debug!("Pre-existing transceiver Leg B: track_id={} kind={:?}", track_id, track_kind);
+                debug!(
+                    "Pre-existing transceiver Leg B: track_id={} kind={:?}",
+                    track_id, track_kind
+                );
                 if started_track_ids.insert(format!("B-{}", track_id)) {
-                    info!("Starting pre-existing track forwarder: Leg B track_id={}", track_id);
+                    info!(
+                        "Starting pre-existing track forwarder: Leg B track_id={}",
+                        track_id
+                    );
                     forwarders.push(Self::forward_track(
                         track,
                         pc_a.clone(),
@@ -199,6 +217,7 @@ impl MediaBridge {
                         codec_a,
                         Leg::B,
                         dtmf_pt_b,
+                        None, // Don't use remote SSRC for outgoing stream
                         recorder.clone(),
                     ));
                 } else {
@@ -231,6 +250,7 @@ impl MediaBridge {
                                             codec_b,
                                             Leg::A,
                                             dtmf_pt_a,
+                                            None,
                                             recorder.clone(),
                                         ));
                                     } else {
@@ -264,6 +284,7 @@ impl MediaBridge {
                                             codec_a,
                                             Leg::B,
                                             dtmf_pt_b,
+                                            None,
                                             recorder.clone(),
                                         ));
                                     } else {
@@ -291,6 +312,7 @@ impl MediaBridge {
         target_codec: CodecType,
         leg: Leg,
         dtmf_pt: Option<u8>,
+        target_ssrc: Option<u32>,
         recorder: Arc<Mutex<Option<Recorder>>>,
     ) {
         let needs_transcoding = source_codec != target_codec;
@@ -301,12 +323,79 @@ impl MediaBridge {
         );
         let (source_target, track_target, _) =
             rustrtc::media::track::sample_track(MediaKind::Audio, 100);
-        if let Err(e) = target_pc.add_track(track_target, target_params) {
-            error!(
-                "forward_track for {:?} exiting early due to add_track failure {}",
-                leg, e
+
+        // Try to reuse existing transceiver first to avoid renegotiation
+        let transceivers = target_pc.get_transceivers();
+        let existing_transceiver = transceivers
+            .iter()
+            .find(|t| t.mid().is_some() && t.kind() == rustrtc::MediaKind::Audio);
+
+        if let Some(transceiver) = existing_transceiver {
+            info!(
+                "forward_track {:?}: Reusing existing transceiver mid={:?}",
+                leg,
+                transceiver.mid()
             );
-            return;
+
+            if let Some(old_sender) = transceiver.sender() {
+                let ssrc = target_ssrc.unwrap_or(old_sender.ssrc());
+                let params = old_sender.params();
+                let track_arc: Arc<dyn MediaStreamTrack> = track_target.clone();
+
+                debug!(
+                    "forward_track {:?}: Transceiver direction: {:?}",
+                    leg,
+                    transceiver.direction()
+                );
+
+                let new_sender = rustrtc::RtpSender::builder(track_arc, ssrc)
+                    .params(params)
+                    .build();
+
+                transceiver.set_sender(Some(new_sender));
+                info!(
+                    "forward_track {:?}: Replaced sender on existing transceiver with ssrc={}",
+                    leg, ssrc
+                );
+            } else {
+                let ssrc = target_ssrc.unwrap_or_else(|| rand::random::<u32>());
+                let track_arc: Arc<dyn MediaStreamTrack> = track_target.clone();
+                // Use target_params but ensure SSRC is set correctly
+                let params = target_params.clone();
+                // If target_params has no SSRC, use the random one
+                // Note: RtpCodecParameters doesn't have ssrc field directly usually,
+                // but RtpSender builder takes ssrc.
+
+                debug!(
+                    "forward_track {:?}: Creating new sender with ssrc={} (target_ssrc={:?}) params={:?}",
+                    leg, ssrc, target_ssrc, params
+                );
+
+                let new_sender = rustrtc::RtpSender::builder(track_arc, ssrc)
+                    .params(params)
+                    .build();
+                transceiver.set_sender(Some(new_sender));
+                info!(
+                    "forward_track {:?}: Created and attached new sender to existing transceiver ssrc={}",
+                    leg, ssrc
+                );
+            }
+        } else {
+            match target_pc.add_track(track_target, target_params) {
+                Ok(_sender) => {
+                    info!(
+                        "forward_track {:?}: add_track success (new transceiver)",
+                        leg
+                    );
+                }
+                Err(e) => {
+                    error!(
+                        "forward_track for {:?} exiting early due to add_track failure {}",
+                        leg, e
+                    );
+                    return;
+                }
+            }
         }
         let mut transcoder = if needs_transcoding {
             Some(crate::media::Transcoder::new(source_codec, target_codec))
@@ -315,102 +404,27 @@ impl MediaBridge {
         };
 
         let mut last_seq: Option<u16> = None;
-        let mut last_timestamp: Option<u32> = None;
         let mut packet_count: u64 = 0;
-        let mut discontinuity_count: u64 = 0;
 
         while let Ok(mut sample) = track.recv().await {
             if let MediaSample::Audio(ref mut frame) = sample {
+                // println!(
+                //     "forward_track {:?}: track_id={} received audio frame: pt={:?} seq={:?} len={}",
+                //     leg,
+                //     track_id,
+                //     frame.payload_type,
+                //     frame.sequence_number,
+                //     frame.data.len()
+                // );
                 packet_count += 1;
-
-                // Log detailed packet info for debugging
-                if packet_count <= 10 || packet_count % 100 == 0 {
-                    debug!(
-                        "Leg {:?} track={} pkt#{}: seq={:?} ts={} pt={:?} size={}",
-                        leg, track_id, packet_count, frame.sequence_number,
-                        frame.rtp_timestamp, frame.payload_type, frame.data.len()
-                    );
-                }
-
-                // Validate timestamp continuity and rewrite if needed to fix interleaved streams
-                if let Some(last_ts) = last_timestamp {
-                    let expected_ts = last_ts.wrapping_add(frame.samples);
-                    let ts_diff = frame.rtp_timestamp.wrapping_sub(expected_ts);
-
-                    // Allow up to 10 seconds of jump to handle legitimate gaps
-                    let max_reasonable_jump: u32 = frame.sample_rate * 10;
-
-                    // Rewrite packets with large forward jumps (>10 seconds)
-                    if ts_diff > max_reasonable_jump && ts_diff < (u32::MAX / 2) {
-                        discontinuity_count += 1;
-                        debug!(
-                            "Leg {:?} track={} REWRITING timestamp #{}: seq={:?} original_ts={} -> expected_ts={} jump={} samples ({:.2}s)",
-                            leg, track_id, discontinuity_count, frame.sequence_number,
-                            frame.rtp_timestamp, expected_ts, ts_diff, ts_diff as f32 / frame.sample_rate as f32
-                        );
-                        // Rewrite the timestamp to maintain continuity
-                        frame.rtp_timestamp = expected_ts;
-                    }
-                    // Rewrite packets with large backward jumps (>10 seconds)
-                    else if ts_diff > (u32::MAX / 2) {
-                        let backward_jump = last_ts.wrapping_sub(frame.rtp_timestamp);
-                        if backward_jump > max_reasonable_jump {
-                            discontinuity_count += 1;
-                            debug!(
-                                "Leg {:?} track={} REWRITING timestamp (backward) #{}: seq={:?} original_ts={} -> expected_ts={} jump=-{} samples ({:.2}s)",
-                                leg, track_id, discontinuity_count, frame.sequence_number,
-                                frame.rtp_timestamp, expected_ts, backward_jump, backward_jump as f32 / frame.sample_rate as f32
-                            );
-                            // Rewrite the timestamp to maintain continuity
-                            frame.rtp_timestamp = expected_ts;
-                        }
-                    }
-                    // Log smaller discontinuities for debugging
-                    else if ts_diff > 8000 && ts_diff < max_reasonable_jump {
-                        debug!(
-                            "Leg {:?} track={} timestamp discontinuity (acceptable): last_ts={} expected={} actual={} jump={} samples ({:.2}s)",
-                            leg, track_id, last_ts, expected_ts,
-                            frame.rtp_timestamp, ts_diff, ts_diff as f32 / frame.sample_rate as f32
-                        );
-                    }
-                }
-
-                // Update last_timestamp with the potentially rewritten value
-                last_timestamp = Some(frame.rtp_timestamp);
-
-                // Deduplication: only skip exact duplicates (same sequence number)
-                // Don't try to handle out-of-order packets - let downstream jitter buffer handle it
                 if let Some(seq) = frame.sequence_number {
                     if let Some(last) = last_seq {
                         if seq == last {
-                            // Exact duplicate packet, skip it
-                            debug!("Skipping duplicate packet for {:?} track={} with seq={}", leg, track_id, seq);
                             continue;
-                        }
-
-                        // Detect sequence number discontinuities
-                        let expected_seq = last.wrapping_add(1);
-                        if seq != expected_seq {
-                            let seq_diff = seq.wrapping_sub(expected_seq);
-                            if seq_diff < 100 {
-                                // Forward jump (packet loss)
-                                debug!(
-                                    "Leg {:?} track={} SEQ JUMP: expected={} actual={} gap={} (possible packet loss)",
-                                    leg, track_id, expected_seq, seq, seq_diff
-                                );
-                            } else if seq_diff > 65435 {
-                                // Backward jump (out-of-order or very late)
-                                let backward = expected_seq.wrapping_sub(seq);
-                                debug!(
-                                    "Leg {:?} track={} SEQ BACKWARDS: expected={} actual={} (out-of-order by {})",
-                                    leg, track_id, expected_seq, seq, backward
-                                );
-                            }
                         }
                     }
                     last_seq = Some(seq);
                 }
-
                 if frame.is_audio() {
                     if let Some(ref mut t) = transcoder {
                         sample = MediaSample::Audio(t.transcode(frame))
@@ -422,14 +436,15 @@ impl MediaBridge {
                     let _ = r.write_sample(leg, &sample, dtmf_pt);
                 }
             }
-            if let Err(_) = source_target.send(sample).await {
+            if let Err(e) = source_target.send(sample).await {
+                error!("forward_track {:?}: source_target.send failed: {}", leg, e);
                 break;
             }
         }
 
         info!(
-            "forward_track {:?} track={} finished: total_packets={} discontinuities={}",
-            leg, track_id, packet_count, discontinuity_count
+            "forward_track {:?} track={} finished: total_packets={}",
+            leg, track_id, packet_count
         );
     }
 
@@ -476,6 +491,9 @@ mod tests {
             None,
             CodecType::PCMU,
             CodecType::PCMU,
+            None,
+            None,
+            None,
         );
 
         bridge.start().await.unwrap();
@@ -499,6 +517,9 @@ mod tests {
             None,
             CodecType::PCMU,
             CodecType::PCMA,
+            None,
+            None,
+            None,
         );
 
         assert_eq!(bridge.codec_a, CodecType::PCMU);

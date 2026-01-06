@@ -72,6 +72,7 @@ pub struct SipServerInner {
     pub frequency_limiter: Option<Arc<dyn FrequencyLimiter>>,
     pub call_record_hooks: Arc<Vec<Box<dyn crate::callrecord::CallRecordHook>>>,
     pub runnings_tx: Arc<AtomicUsize>,
+    pub storage: Option<crate::storage::Storage>,
 }
 
 pub type SipServerRef = Arc<SipServerInner>;
@@ -101,6 +102,7 @@ pub struct SipServerBuilder {
     locator_events: Option<LocatorEventSender>,
     frequency_limiter: Option<Arc<dyn FrequencyLimiter>>,
     call_record_hooks: Vec<Box<dyn crate::callrecord::CallRecordHook>>,
+    storage: Option<crate::storage::Storage>,
 }
 
 impl SipServerBuilder {
@@ -124,6 +126,7 @@ impl SipServerBuilder {
             locator_events: None,
             frequency_limiter: None,
             call_record_hooks: Vec::new(),
+            storage: None,
         }
     }
 
@@ -215,6 +218,11 @@ impl SipServerBuilder {
         hooks: Vec<Box<dyn crate::callrecord::CallRecordHook>>,
     ) -> Self {
         self.call_record_hooks = hooks;
+        self
+    }
+
+    pub fn with_storage(mut self, storage: crate::storage::Storage) -> Self {
+        self.storage = Some(storage);
         self
     }
 
@@ -468,6 +476,7 @@ impl SipServerBuilder {
             frequency_limiter: self.frequency_limiter,
             call_record_hooks: Arc::new(self.call_record_hooks),
             runnings_tx: Arc::new(AtomicUsize::new(0)),
+            storage: self.storage,
         });
 
         let inner_weak = Arc::downgrade(&inner);

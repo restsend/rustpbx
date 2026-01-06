@@ -1,12 +1,12 @@
 use crate::config::ProxyConfig;
 use crate::console::handlers::{bad_request, forms, normalize_optional_string, require_field};
 use crate::console::{ConsoleState, middleware::AuthRequired};
-use crate::models::queue::{
+use crate::addons::queue::models::{
     ActiveModel as QueueActiveModel, Column as QueueColumn, Entity as QueueEntity,
     Model as QueueModel,
 };
 use crate::proxy::routing::RouteQueueConfig;
-use crate::services::{queue_exporter::QueueExporter, queue_utils};
+use crate::addons::queue::services::{exporter::QueueExporter, utils as queue_utils};
 use axum::{
     Json, Router,
     extract::{Path as AxumPath, State},
@@ -54,7 +54,7 @@ pub async fn page_queues(
     AuthRequired(_): AuthRequired,
 ) -> Response {
     state.render(
-        "console/queue.html",
+        "queue.html",
         json!({
             "nav_active": "queues",
             "filters": {
@@ -164,7 +164,7 @@ pub async fn page_queue_create(
     AuthRequired(_): AuthRequired,
 ) -> Response {
     state.render(
-        "console/queue_detail.html",
+        "queue_detail.html",
         json!({
             "nav_active": "queue-detail",
             "mode": "create",
@@ -201,7 +201,7 @@ pub async fn page_queue_edit(
     let tags = queue_tags(model.metadata.as_ref());
 
     state.render(
-        "console/queue_detail.html",
+        "queue_detail.html",
         json!({
             "nav_active": "queue-detail",
             "mode": "edit",
@@ -412,7 +412,7 @@ pub async fn delete_queue(
                     .into_response()
             } else {
                 if let Some(entry) = export_entry {
-                    remove_queue_export(state.as_ref(), entry);
+                    remove_queue_export(state.as_ref(), entry).await;
                 }
                 Json(json!({"status": "ok", "rows_affected": result.rows_affected})).into_response()
             }
@@ -604,13 +604,13 @@ async fn export_queue_async(state: &ConsoleState, queue_id: i64) {
     }
 }
 
-fn remove_queue_export(state: &ConsoleState, entry: queue_utils::QueueExportEntry) {
+async fn remove_queue_export(state: &ConsoleState, entry: queue_utils::QueueExportEntry) {
     let Some(proxy_cfg) = proxy_config_optional(state) else {
         warn!(queue = %entry.name, "proxy config unavailable; skip queue export cleanup");
         return;
     };
     let exporter = QueueExporter::new(state.db().clone());
-    if let Err(err) = exporter.remove_entry_file(&entry, &proxy_cfg) {
+    if let Err(err) = exporter.remove_entry_file(&entry, &proxy_cfg).await {
         warn!(queue = %entry.name, error = %err, "failed to remove queue export file");
     }
 }

@@ -457,7 +457,44 @@ impl CallModule {
             if let Some(enable_sipflow) = hints.enable_sipflow {
                 dialplan.enable_sipflow = enable_sipflow;
             }
+            if let Some(codecs) = hints.allow_codecs {
+                let mut allow_codecs = Vec::new();
+                for codec_name in codecs {
+                    if let Some(codec) =
+                        crate::media::negotiate::MediaNegotiator::parse_codec(&codec_name)
+                    {
+                        allow_codecs.push(codec);
+                    }
+                }
+                if !allow_codecs.is_empty() {
+                    dialplan.allow_codecs = allow_codecs;
+                }
+            } else if let Some(codecs) = &self.inner.config.codecs {
+                let mut allow_codecs = Vec::new();
+                for codec_name in codecs {
+                    if let Some(codec) =
+                        crate::media::negotiate::MediaNegotiator::parse_codec(codec_name)
+                    {
+                        allow_codecs.push(codec);
+                    }
+                }
+                if !allow_codecs.is_empty() {
+                    dialplan.allow_codecs = allow_codecs;
+                }
+            }
             dialplan.extensions = std::mem::take(&mut hints.extensions);
+        } else if let Some(codecs) = &self.inner.config.codecs {
+            let mut allow_codecs = Vec::new();
+            for codec_name in codecs {
+                if let Some(codec) =
+                    crate::media::negotiate::MediaNegotiator::parse_codec(codec_name)
+                {
+                    allow_codecs.push(codec);
+                }
+            }
+            if !allow_codecs.is_empty() {
+                dialplan.allow_codecs = allow_codecs;
+            }
         }
 
         if let Some(queue_plan) = pending_queue {
@@ -515,7 +552,7 @@ impl CallModule {
             return dialplan;
         }
 
-        let mut recorder_option =
+        let recorder_option =
             match self.build_recorder_option(&dialplan, policy, &caller_identity, &callee_identity)
             {
                 Some(option) => option,
@@ -536,19 +573,13 @@ impl CallModule {
             if existing.recorder_file.is_empty() {
                 existing.recorder_file = recorder_option.recorder_file.clone();
             }
-            if existing.format.is_none() {
-                existing.format = recorder_option.format;
-            }
             if let Some(rate) = policy.samplerate {
                 existing.samplerate = rate;
             }
             if let Some(ptime) = policy.ptime {
                 existing.ptime = ptime;
             }
-            let fallback_format = existing.format.unwrap_or(policy.recorder_format());
-            existing.ensure_path_extension(fallback_format);
         } else {
-            recorder_option.ensure_path_extension(policy.recorder_format());
             dialplan.recording.option = Some(recorder_option);
         }
 
@@ -650,9 +681,8 @@ impl CallModule {
             return None;
         }
         path.push(sanitized);
-        if path.extension().is_none() {
-            path.set_extension(policy.recorder_format().extension());
-        }
+        path.set_extension("wav");
+
         let mut option = RecorderOption::new(path.to_string_lossy().to_string());
         if let Some(rate) = policy.samplerate {
             option.samplerate = rate;
@@ -660,9 +690,6 @@ impl CallModule {
         if let Some(ptime) = policy.ptime {
             option.ptime = ptime;
         }
-        let policy_format = policy.recorder_format();
-        option.format = Some(policy_format);
-        option.ensure_path_extension(policy_format);
         Some(option)
     }
 

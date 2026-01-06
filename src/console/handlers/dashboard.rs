@@ -145,6 +145,7 @@ pub struct TodayMetrics {
 
 #[derive(Clone, Serialize)]
 pub struct ActiveCallPreview {
+    session_id: String,
     caller: String,
     callee: String,
     status: String,
@@ -489,6 +490,7 @@ async fn active_call_stats(state: &ConsoleState, limit: usize) -> (usize, Vec<Ac
                 };
 
                 previews.push(ActiveCallPreview {
+                    session_id: call.session_id.clone(),
                     caller: call
                         .caller
                         .clone()
