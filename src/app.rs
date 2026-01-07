@@ -20,7 +20,7 @@ use axum::{
     Json, Router,
     extract::{State, WebSocketUpgrade},
     middleware,
-    response::{Html, IntoResponse, Response},
+    response::{IntoResponse, Response},
     routing::get,
 };
 use axum_server::tls_rustls::RustlsConfig;
@@ -40,7 +40,7 @@ use tower_http::{
     cors::{AllowOrigin, CorsLayer},
     services::ServeDir,
 };
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 pub struct CoreContext {
     pub config: Arc<Config>,
@@ -478,20 +478,6 @@ pub async fn run(state: AppState, mut router: Router) -> Result<()> {
     Ok(())
 }
 
-// Index page handler
-async fn index_handler(client_ip: ClientAddr) -> impl IntoResponse {
-    match std::fs::read_to_string("static/index.html") {
-        Ok(content) => Html(content).into_response(),
-        Err(e) => {
-            debug!(
-                client_ip = format!("{}", client_ip),
-                "Failed to read index.html: {}", e
-            );
-            Html("<html><body><h1>Error loading page</h1></body></html>").into_response()
-        }
-    }
-}
-
 // ICE servers handler
 async fn iceservers_handler(State(state): State<AppState>) -> impl IntoResponse {
     let ice_servers = state.config().ice_servers.clone().unwrap_or_default();
@@ -500,10 +486,6 @@ async fn iceservers_handler(State(state): State<AppState>) -> impl IntoResponse 
 
 pub fn create_router(state: AppState) -> Router {
     let router = Router::new();
-    // check if static/index.html exists
-    if !std::path::Path::new("static/index.html").exists() {
-        tracing::error!("static/index.html does not exist");
-    }
     // Serve static files
     let static_files_service = ServeDir::new("static");
 
@@ -528,7 +510,6 @@ pub fn create_router(state: AppState) -> Router {
     let call_routes = crate::handler::ami_router(state.clone()).with_state(state.clone());
     #[allow(unused_mut)]
     let mut router = router
-        .route("/", get(index_handler))
         .route(
             "/iceservers",
             get(iceservers_handler).with_state(state.clone()),
