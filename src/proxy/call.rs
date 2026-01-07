@@ -1,7 +1,7 @@
 use super::{ProxyAction, ProxyModule, server::SipServerRef};
 use crate::call::{
     CallForwardingConfig, CalleeDisplayName, DialDirection, DialStrategy, Dialplan, Location,
-    MediaConfig, RouteInvite, RoutingState, SipUser, TransactionCookie,
+    MediaConfig, RouteInvite, RoutingState, SipUser, TransactionCookie, TrunkContext,
 };
 use crate::config::{ProxyConfig, RouteResult};
 use crate::media::recorder::RecorderOption;
@@ -342,8 +342,10 @@ impl CallModule {
             .await;
         let callee_is_same_realm = self.inner.server.is_same_realm(&callee_realm).await;
 
+        let is_from_trunk = cookie.get_extension::<TrunkContext>().is_some();
+
         let direction = match (caller_is_same_realm, callee_is_same_realm) {
-            (true, true) => {
+            (true, true) if !is_from_trunk => {
                 match self
                     .inner
                     .server
@@ -363,6 +365,7 @@ impl CallModule {
                     }
                 }
             }
+            (true, true) => DialDirection::Outbound,
             (true, false) => DialDirection::Outbound,
             (false, true) => DialDirection::Inbound,
             (false, false) => {
@@ -739,7 +742,8 @@ impl CallModule {
         cookie: TransactionCookie,
         caller: &SipUser,
     ) -> Result<Dialplan, (Error, Option<rsip::StatusCode>)> {
-        let source_trunk_hint = cookie.get_source_trunk();
+        let trunk_context = cookie.get_extension::<TrunkContext>();
+        let source_trunk_hint = trunk_context.as_ref().map(|c| c.name.clone());
 
         let route_invite: Box<dyn RouteInvite> =
             if let Some(f) = self.inner.server.create_route_invite.as_ref() {
@@ -774,13 +778,21 @@ impl CallModule {
         }
 
         if dialplan.call_forwarding.is_none() {
-            match self.resolve_callee_forwarding(&tx.original).await {
-                Ok(Some(config)) => {
-                    dialplan = dialplan.with_call_forwarding(Some(config));
-                }
-                Ok(None) => {}
-                Err(err) => {
-                    warn!(error = %err, "failed to resolve call forwarding for callee");
+            // Optimization: Skip call forwarding check for wholesale calls (from trunks)
+            let is_wholesale = cookie
+                .get_extension::<TrunkContext>()
+                .map(|ctx| ctx.tenant_id.is_some())
+                .unwrap_or(false);
+
+            if !is_wholesale {
+                match self.resolve_callee_forwarding(&tx.original).await {
+                    Ok(Some(config)) => {
+                        dialplan = dialplan.with_call_forwarding(Some(config));
+                    }
+                    Ok(None) => {}
+                    Err(err) => {
+                        warn!(error = %err, "failed to resolve call forwarding for callee");
+                    }
                 }
             }
         }
@@ -796,7 +808,7 @@ impl CallModule {
         code: rsip::StatusCode,
         reason: Option<String>,
     ) {
-        let direction = if cookie.is_from_trunk() {
+        let direction = if cookie.get_extension::<TrunkContext>().is_some() {
             DialDirection::Inbound
         } else {
             DialDirection::Internal

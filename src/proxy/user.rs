@@ -218,7 +218,7 @@ pub async fn create_user_backend(config: &UserBackendConfig) -> Result<Box<dyn U
             let url = database_url
                 .clone()
                 .unwrap_or_else(|| Config::default().database_url);
-            let ttl_secs = ttl.unwrap_or(30);
+            let ttl_secs = ttl.unwrap_or(30); // Default to 30s as requested
             let backend = ExtensionUserBackend::connect(&url, ttl_secs).await?;
             Ok(Box::new(backend))
         }

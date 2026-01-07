@@ -1,5 +1,5 @@
 use crate::{
-    call::{CalleeDisplayName, TransactionCookie},
+    call::{CalleeDisplayName, TransactionCookie, TrunkContext},
     callrecord::{
         CallRecord, CallRecordExtras, CallRecordHangupMessage, CallRecordHangupReason,
         CallRecordMedia, CallRecordSender, sipflow::SipMessageItem,
@@ -205,11 +205,9 @@ impl CallReporter {
             .cookie
             .get_extension::<CalleeDisplayName>()
             .map(|e| e.0);
-        let trunk_name = self.context.cookie.get_source_trunk();
-        let (sip_gateway, sip_trunk_id) = if let Some(ref name) = trunk_name {
-            let trunks = self.server.data_context.trunks_snapshot();
-            let trunk_id = trunks.get(name.as_str()).and_then(|config| config.id);
-            (Some(name.clone()), trunk_id)
+        let trunk_context = self.context.cookie.get_extension::<TrunkContext>();
+        let (sip_gateway, sip_trunk_id) = if let Some(ctx) = trunk_context {
+            (Some(ctx.name.clone()), ctx.id)
         } else {
             (None, None)
         };

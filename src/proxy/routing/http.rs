@@ -1,5 +1,6 @@
 use crate::call::{
     DialDirection, DialStrategy, Dialplan, Location, RouteInvite, SipUser, TransactionCookie,
+    TrunkContext,
 };
 use crate::config::{HttpRouterConfig, MediaProxyMode};
 use crate::proxy::call::CallRouter;
@@ -84,7 +85,7 @@ impl CallRouter for HttpCallRouter {
         caller: &SipUser,
         cookie: &TransactionCookie,
     ) -> Result<Dialplan, (anyhow::Error, Option<rsip::StatusCode>)> {
-        let direction = if cookie.is_from_trunk() {
+        let direction = if cookie.get_extension::<TrunkContext>().is_some() {
             DialDirection::Inbound
         } else {
             DialDirection::Internal

@@ -1,7 +1,7 @@
 use super::{ProxyAction, ProxyModule, server::SipServerRef};
 use crate::call::cookie::SpamResult;
 use crate::call::user::SipUser;
-use crate::call::{CalleeDisplayName, TransactionCookie};
+use crate::call::{CalleeDisplayName, TransactionCookie, TrunkContext};
 use crate::config::ProxyConfig;
 use anyhow::Result;
 use async_trait::async_trait;
@@ -202,7 +202,7 @@ impl ProxyModule for AuthModule {
             }
         }
 
-        if cookie.is_from_trunk() {
+        if cookie.get_extension::<TrunkContext>().is_some() {
             cookie.set_user(tx_user.clone());
             return Ok(ProxyAction::Continue);
         }
