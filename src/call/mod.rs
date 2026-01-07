@@ -22,7 +22,7 @@ pub mod policy;
 pub mod queue_config;
 pub mod sip;
 pub mod user;
-pub use cookie::{CalleeDisplayName, TenantId, TransactionCookie};
+pub use cookie::{CalleeDisplayName, TenantId, TransactionCookie, TrunkContext};
 pub use user::SipUser;
 
 /// Default hold audio that ships with config/sounds.

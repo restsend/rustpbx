@@ -24,8 +24,6 @@ impl SpamResult {
 struct TransactionCookieInner {
     user: Option<SipUser>,
     spam_result: SpamResult,
-    source_trunk: Option<String>,
-    source_trunk_id: Option<i64>,
     max_duration: Option<Duration>,
     extensions: http::Extensions,
 }
@@ -40,8 +38,6 @@ impl From<&TransactionKey> for TransactionCookie {
             inner: Arc::new(RwLock::new(TransactionCookieInner {
                 user: None,
                 spam_result: SpamResult::Nice,
-                source_trunk: None,
-                source_trunk_id: None,
                 max_duration: None,
                 extensions: http::Extensions::new(),
             })),
@@ -80,31 +76,6 @@ impl TransactionCookie {
             .unwrap_or_default()
     }
 
-    pub fn set_source_trunk(&self, trunk: &str) {
-        self.inner
-            .try_write()
-            .map(|mut inner| {
-                inner.source_trunk = Some(trunk.to_string());
-            })
-            .ok();
-    }
-
-    pub fn is_from_trunk(&self) -> bool {
-        self.inner
-            .try_read()
-            .map(|inner| inner.source_trunk.is_some())
-            .ok()
-            .unwrap_or_default()
-    }
-
-    pub fn get_source_trunk(&self) -> Option<String> {
-        self.inner
-            .try_read()
-            .map(|inner| inner.source_trunk.clone())
-            .ok()
-            .flatten()
-    }
-
     pub fn set_max_duration(&self, duration: Duration) {
         self.inner
             .try_write()
@@ -118,23 +89,6 @@ impl TransactionCookie {
         self.inner
             .try_read()
             .map(|inner| inner.max_duration)
-            .ok()
-            .flatten()
-    }
-
-    pub fn set_source_trunk_id(&self, trunk_id: i64) {
-        self.inner
-            .try_write()
-            .map(|mut inner| {
-                inner.source_trunk_id = Some(trunk_id);
-            })
-            .ok();
-    }
-
-    pub fn get_source_trunk_id(&self) -> Option<i64> {
-        self.inner
-            .try_read()
-            .map(|inner| inner.source_trunk_id)
             .ok()
             .flatten()
     }
@@ -171,3 +125,10 @@ pub struct CalleeDisplayName(pub String);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TenantId(pub i64);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrunkContext {
+    pub id: Option<i64>,
+    pub name: String,
+    pub tenant_id: Option<i64>,
+}

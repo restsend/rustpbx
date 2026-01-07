@@ -247,6 +247,8 @@ impl CallSession {
             Some(String::from_utf8_lossy(initial.body()).to_string())
         };
 
+        let extensions = context.dialplan.extensions.clone();
+
         Self {
             server,
             dialog_layer,
@@ -283,7 +285,7 @@ impl CallSession {
             handle: None,
             callee_event_tx: None,
             callee_guards: Vec::new(),
-            extensions: http::Extensions::new(),
+            extensions,
         }
     }
 
@@ -437,7 +439,7 @@ impl CallSession {
                 .cloned()
                 .collect(),
             server_dialog_id: self.server_dialog.id(),
-            extensions: std::mem::take(&mut self.extensions),
+            extensions: self.extensions.clone(),
         }
     }
 

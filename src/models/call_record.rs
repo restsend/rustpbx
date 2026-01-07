@@ -9,10 +9,8 @@ use sea_orm_migration::sea_query::{ColumnDef, ForeignKeyAction as MigrationForei
 use sea_query::Expr;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map as JsonMap, Number as JsonNumber, Value, json};
-use tracing::warn;
 
 use crate::callrecord::{CallRecord, CallRecordExtras, CallRecordHook};
-use crate::models::{department, extension, routing, sip_trunk};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CallRecordPersistArgs {
@@ -95,72 +93,10 @@ pub async fn persist_call_record(
     let caller_name = args.caller_name.clone();
     let agent_name = args.agent_name.clone();
     let queue = args.queue.clone();
-    let department_id = if let Some(id) = args.department_id {
-        match department::Entity::find_by_id(id).one(db).await {
-            Ok(Some(_)) => Some(id),
-            Ok(None) => {
-                warn!("Department ID {} not found, setting to None", id);
-                None
-            }
-            Err(e) => {
-                warn!(
-                    "Failed to check department ID {}: {}, setting to None",
-                    id, e
-                );
-                None
-            }
-        }
-    } else {
-        None
-    };
-    let extension_id = if let Some(id) = args.extension_id {
-        match extension::Entity::find_by_id(id).one(db).await {
-            Ok(Some(_)) => Some(id),
-            Ok(None) => {
-                warn!("Extension ID {} not found, setting to None", id);
-                None
-            }
-            Err(e) => {
-                warn!(
-                    "Failed to check extension ID {}: {}, setting to None",
-                    id, e
-                );
-                None
-            }
-        }
-    } else {
-        None
-    };
-    let sip_trunk_id = if let Some(id) = args.sip_trunk_id {
-        match sip_trunk::Entity::find_by_id(id).one(db).await {
-            Ok(Some(_)) => Some(id),
-            Ok(None) => {
-                warn!("SipTrunk ID {} not found, setting to None", id);
-                None
-            }
-            Err(e) => {
-                warn!("Failed to check SipTrunk ID {}: {}, setting to None", id, e);
-                None
-            }
-        }
-    } else {
-        None
-    };
-    let route_id = if let Some(id) = args.route_id {
-        match routing::Entity::find_by_id(id).one(db).await {
-            Ok(Some(_)) => Some(id),
-            Ok(None) => {
-                warn!("Route ID {} not found, setting to None", id);
-                None
-            }
-            Err(e) => {
-                warn!("Failed to check Route ID {}: {}, setting to None", id, e);
-                None
-            }
-        }
-    } else {
-        None
-    };
+    let department_id = args.department_id;
+    let extension_id = args.extension_id;
+    let sip_trunk_id = args.sip_trunk_id;
+    let route_id = args.route_id;
     let sip_gateway = args.sip_gateway.clone();
     let recording_url = args
         .recording_url
@@ -216,7 +152,7 @@ pub async fn persist_call_record(
         active.metadata = Set(metadata_value.clone());
         active.signaling = Set(signaling_value.clone());
         active.updated_at = Set(record.end_time);
-        active.update(db).await?;
+        Entity::update(active).exec(db).await?;
         return Ok(());
     }
 
@@ -255,7 +191,7 @@ pub async fn persist_call_record(
         ..Default::default()
     };
 
-    active.insert(db).await?;
+    Entity::insert(active).exec(db).await?;
 
     Ok(())
 }

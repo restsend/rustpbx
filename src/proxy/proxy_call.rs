@@ -163,7 +163,7 @@ impl CallSessionBuilder {
                 from_tag: "".into(),
                 to_tag: "".into(),
             },
-            extensions: http::Extensions::new(),
+            extensions: dialplan.extensions.clone(),
         };
 
         reporter.report(snapshot);

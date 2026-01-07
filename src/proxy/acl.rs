@@ -1,5 +1,5 @@
 use super::{ProxyAction, ProxyModule, server::SipServerRef};
-use crate::call::TransactionCookie;
+use crate::call::{TransactionCookie, TrunkContext};
 use crate::{config::ProxyConfig, proxy::routing::TrunkConfig};
 use anyhow::Result;
 use async_trait::async_trait;
@@ -148,9 +148,18 @@ impl AclModule {
         Self::with_server(config, None)
     }
 
-    pub async fn is_from_trunk(&self, addr: &IpAddr) -> Option<String> {
+    pub async fn is_from_trunk_context(&self, addr: &IpAddr) -> Option<TrunkContext> {
         if let Some(server) = &self.inner.server {
-            return server.data_context.find_trunk_by_ip(addr).await;
+            let trunks = server.data_context.trunks_snapshot();
+            for (name, trunk) in trunks.iter() {
+                if trunk.matches_inbound_ip(addr).await {
+                    return Some(TrunkContext {
+                        id: trunk.id,
+                        name: name.clone(),
+                        tenant_id: None,
+                    });
+                }
+            }
         }
 
         let trunks: Vec<(String, TrunkConfig)> = self
@@ -163,7 +172,11 @@ impl AclModule {
 
         for (name, trunk) in trunks {
             if trunk.matches_inbound_ip(addr).await {
-                return Some(name);
+                return Some(TrunkContext {
+                    id: trunk.id,
+                    name,
+                    tenant_id: None,
+                });
             }
         }
         None
@@ -309,13 +322,13 @@ impl ProxyModule for AclModule {
             SipConnection::parse_target_from_via(via).map_err(|e| anyhow::anyhow!("{}", e))?;
 
         let from_addr = target.host.try_into()?;
-        if let Some(trunk_name) = self.is_from_trunk(&from_addr).await {
+        if let Some(ctx) = self.is_from_trunk_context(&from_addr).await {
             debug!(
                 method = tx.original.method().to_string(),
                 via = via.value(),
                 "IP is from trunk, bypassing acl check"
             );
-            cookie.set_source_trunk(&trunk_name);
+            cookie.insert_extension(ctx);
             return Ok(ProxyAction::Continue);
         }
 
