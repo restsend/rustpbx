@@ -16,13 +16,13 @@ RustPBX is a high-performance, secure software-defined PBX (Private Branch Excha
 - **Call Recording**: Built-in call recording with multiple storage backends
 - **User Management**: Flexible user authentication and registration system
 
-## � Documentation
+## 📖 Documentation
 
 For detailed configuration and usage instructions, please refer to:
 
 - [**Configuration Guide**](docs/configuration.md): Complete reference for platform settings, SIP proxy, auth, routing, and more.
 
-## �🐳 Docker Deployment
+## 🐳 Docker Deployment
 
 ### Quick Start with Docker
 
