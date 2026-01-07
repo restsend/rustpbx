@@ -2528,8 +2528,8 @@ impl CallSession {
                             }
                         }
                         None => {
-                            debug!(session_id = %context.session_id, "Server dialog state channel closed");
-                            std::future::pending::<()>().await;
+                            warn!(session_id = %context.session_id, "Server dialog state channel closed");
+                            break
                         }
                     }
                 }
