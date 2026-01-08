@@ -228,7 +228,7 @@ pub fn default_cdr_file_name(record: &CallRecord) -> String {
     format!(
         "{}_{}.json",
         record.start_time.format("%Y%m%d-%H%M%S"),
-        record.call_id
+        crate::utils::sanitize_id(&record.call_id)
     )
 }
 
@@ -236,7 +236,7 @@ pub fn default_sip_flow_file_name(record: &CallRecord, leg: &str) -> String {
     format!(
         "{}_{}_{}.sipflow.jsonl",
         record.start_time.format("%Y%m%d-%H%M%S"),
-        record.call_id,
+        crate::utils::sanitize_id(&record.call_id),
         sanitize_filename_component(leg)
     )
 }
@@ -245,7 +245,7 @@ pub fn default_transcript_file_name(record: &CallRecord) -> String {
     format!(
         "{}_{}.transcript.json",
         record.start_time.format("%Y%m%d-%H%M%S"),
-        record.call_id
+        crate::utils::sanitize_id(&record.call_id)
     )
 }
 
@@ -360,8 +360,6 @@ impl CallRecordFormatter for DefaultCallRecordFormatter {
         )
     }
 }
-
-
 
 pub struct CallRecordManager {
     pub max_concurrent: usize,
@@ -756,16 +754,11 @@ impl CallRecordManager {
             Ok(_) => {
                 info!(
                     elapsed = start_time.elapsed().as_secs_f64(),
-                    filename,
-                    buf_size,
-                    "upload call record"
+                    filename, buf_size, "upload call record"
                 );
             }
             Err(e) => {
-                warn!(
-                   filename,
-                    "failed to upload call record: {}", e
-                );
+                warn!(filename, "failed to upload call record: {}", e);
             }
         }
         if !sip_flows.is_empty() {
@@ -788,16 +781,11 @@ impl CallRecordManager {
                     Ok(_) => {
                         info!(
                             elapsed = start_time.elapsed().as_secs_f64(),
-                            file_name,
-                            buf_size,
-                            "upload sip flow file"
+                            file_name, buf_size, "upload sip flow file"
                         );
                     }
                     Err(e) => {
-                        warn!(
-                            file_name,
-                            "failed to upload sip flow file: {}", e
-                        );
+                        warn!(file_name, "failed to upload sip flow file: {}", e);
                     }
                 }
             }
@@ -825,13 +813,11 @@ impl CallRecordManager {
                     Ok(_) => {
                         info!(
                             elapsed = start_time.elapsed().as_secs_f64(),
-                            media_path,
-                            buf_size,
-                            "upload media file"
+                            media_path, buf_size, "upload media file"
                         );
                     }
                     Err(e) => {
-                        warn!(media_path,"failed to upload media file: {}", e);
+                        warn!(media_path, "failed to upload media file: {}", e);
                     }
                 }
             }
