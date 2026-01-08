@@ -79,6 +79,29 @@ pub async fn persist_call_record(
     db: &DatabaseConnection,
     record: &mut CallRecord,
 ) -> anyhow::Result<()> {
+    // Ensure call_id is sanitized before database persistence
+    record.call_id = crate::utils::sanitize_id(&record.call_id);
+
+    // Sanitize leg IDs in sip_leg_roles for database signaling column
+    if !record.sip_leg_roles.is_empty() {
+        let old_roles = std::mem::take(&mut record.sip_leg_roles);
+        for (id, role) in old_roles {
+            record
+                .sip_leg_roles
+                .insert(crate::utils::sanitize_id(&id), role);
+        }
+    }
+
+    // Sanitize leg IDs in sip_flows if present
+    if !record.sip_flows.is_empty() {
+        let old_flows = std::mem::take(&mut record.sip_flows);
+        for (id, flow) in old_flows {
+            record
+                .sip_flows
+                .insert(crate::utils::sanitize_id(&id), flow);
+        }
+    }
+
     let args = match record.extensions.get::<CallRecordPersistArgs>().cloned() {
         Some(args) => args,
         None => {

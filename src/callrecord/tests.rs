@@ -346,3 +346,19 @@ async fn test_save_with_s3_like_with_media() {
     }
 }
 
+#[test]
+fn test_call_record_filename_sanitization() {
+    let record = CallRecord {
+        call_id: "session~id/with..dots|and|pipes".to_string(),
+        start_time: Utc::now(),
+        ..Default::default()
+    };
+
+    let filename = default_cdr_file_name(&record);
+    // session_id_with__dots_and_pipes
+    assert!(filename.contains("session_id_with__dots_and_pipes"));
+    assert!(!filename.contains("~"));
+    assert!(!filename.contains("/"));
+    assert!(!filename.contains("|"));
+}
+
