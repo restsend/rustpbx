@@ -168,19 +168,22 @@ impl CallReporter {
         }
 
         let mut sip_leg_roles: HashMap<String, String> = HashMap::new();
-        sip_leg_roles.insert(server_dialog_id.call_id.clone(), "primary".to_string());
+        sip_leg_roles.insert(
+            crate::utils::sanitize_id(&server_dialog_id.call_id),
+            "primary".to_string(),
+        );
         for dialog_id in &snapshot.callee_dialogs {
             sip_leg_roles
-                .entry(dialog_id.call_id.clone())
+                .entry(crate::utils::sanitize_id(&dialog_id.call_id))
                 .or_insert_with(|| "b2bua".to_string());
         }
 
         // Only collect SIP flows if enabled in dialplan
         if self.context.dialplan.enable_sipflow {
-            for call_id in call_ids.iter() {
+            for call_id in &call_ids {
                 if let Some(items) = self.server.drain_sip_flow(call_id) {
                     if !items.is_empty() {
-                        sip_flows_map.insert(call_id.clone(), items);
+                        sip_flows_map.insert(crate::utils::sanitize_id(call_id), items);
                     }
                 }
             }

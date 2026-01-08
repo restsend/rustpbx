@@ -1,5 +1,6 @@
 use crate::call::user::SipUser;
 use crate::models::{department, extension};
+use crate::proxy::auth::AuthError;
 use anyhow::Result;
 use async_trait::async_trait;
 use lru::LruCache;
@@ -80,7 +81,11 @@ impl UserBackend for ExtensionUserBackend {
         realm.is_empty()
     }
 
-    async fn get_user(&self, username: &str, realm: Option<&str>) -> Result<Option<SipUser>> {
+    async fn get_user(
+        &self,
+        username: &str,
+        realm: Option<&str>,
+    ) -> Result<Option<SipUser>, AuthError> {
         if username.trim().is_empty() {
             return Ok(None);
         }
@@ -97,7 +102,10 @@ impl UserBackend for ExtensionUserBackend {
             }
         }
 
-        let result = self.fetch_extension(username).await?;
+        let result = self
+            .fetch_extension(username)
+            .await
+            .map_err(AuthError::from)?;
         let user = if let Some((model, departments)) = result {
             Some(Self::build_sip_user(model, departments, realm))
         } else {

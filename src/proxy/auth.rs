@@ -3,7 +3,7 @@ use crate::call::cookie::SpamResult;
 use crate::call::user::SipUser;
 use crate::call::{CalleeDisplayName, TransactionCookie, TrunkContext};
 use crate::config::ProxyConfig;
-use anyhow::Result;
+use anyhow::{Error, Result};
 use async_trait::async_trait;
 use rsip::Header;
 use rsip::Uri;
@@ -19,9 +19,51 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info};
 
+#[derive(Debug)]
+pub enum AuthError {
+    NotFound,
+    Disabled,
+    InvalidCredentials,
+    SpamDetected,
+    PaymentRequired,
+    Other(Error),
+}
+
+impl std::fmt::Display for AuthError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AuthError::NotFound => write!(f, "User not found"),
+            AuthError::InvalidCredentials => write!(f, "Invalid credentials"),
+            AuthError::SpamDetected => write!(f, "Spam detected"),
+            AuthError::PaymentRequired => write!(f, "Payment required"),
+            AuthError::Disabled => write!(f, "User is disabled"),
+            AuthError::Other(e) => write!(f, "{}", e),
+        }
+    }
+}
+
+impl std::error::Error for AuthError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            AuthError::Other(e) => Some(e.as_ref()),
+            _ => None,
+        }
+    }
+}
+
+impl From<Error> for AuthError {
+    fn from(e: Error) -> Self {
+        AuthError::Other(e)
+    }
+}
+
 #[async_trait]
 pub trait AuthBackend: Send + Sync {
-    async fn authenticate(&self, original: &rsip::Request) -> Result<Option<SipUser>>;
+    async fn authenticate(
+        &self,
+        original: &rsip::Request,
+        cookie: &TransactionCookie,
+    ) -> Result<Option<SipUser>, AuthError>;
 }
 
 #[derive(Clone)]
@@ -39,7 +81,10 @@ impl AuthModule {
         Self { server }
     }
 
-    pub async fn authenticate_request(&self, tx: &Transaction) -> Result<Option<SipUser>> {
+    pub async fn authenticate_request(
+        &self,
+        tx: &Transaction,
+    ) -> Result<Option<SipUser>, AuthError> {
         let mut auth_inner: Option<Authorization> = None;
         for header in tx.original.headers.iter() {
             match header {
@@ -60,7 +105,7 @@ impl AuthModule {
                 return Ok(None);
             }
         };
-        let user = SipUser::try_from(tx)?;
+        let user = SipUser::try_from(tx).map_err(|e| AuthError::Other(e))?;
         // Check if user exists and is enabled
         match self
             .server
@@ -189,17 +234,24 @@ impl ProxyModule for AuthModule {
             .unwrap_or_else(|| "unknown".to_string());
 
         for backend in self.server.auth_backend.iter() {
-            match backend.authenticate(&tx.original).await {
+            match backend.authenticate(&tx.original, &cookie).await {
                 Ok(Some(mut user)) => {
                     user.merge_with(&tx_user);
                     cookie.set_user(user);
                     return Ok(ProxyAction::Continue);
                 }
                 Err(e) => {
+                    if matches!(e, AuthError::SpamDetected) {
+                        cookie.mark_as_spam(SpamResult::Spam);
+                    }
                     info!(error=%e, key = %tx.key, %source, "auth_backend authenticate failed");
                 }
                 _ => {}
             }
+        }
+
+        if cookie.is_spam() {
+            return Ok(ProxyAction::Abort);
         }
 
         if cookie.get_extension::<TrunkContext>().is_some() {
@@ -213,6 +265,7 @@ impl ProxyModule for AuthModule {
                     cookie.set_user(user);
                     return Ok(ProxyAction::Continue);
                 }
+
                 let to_header = tx.original.to_header()?.uri()?;
                 let callee_user = to_header.user().unwrap_or_else(|| "");
                 let callee_realm = to_header.host().to_string();
@@ -289,7 +342,10 @@ impl ProxyModule for AuthModule {
             }
             Err(e) => {
                 info!(error=%e, key = %tx.key, %source, "Authentication error");
-                Err(e)
+                if matches!(e, AuthError::SpamDetected) {
+                    cookie.mark_as_spam(SpamResult::Spam);
+                }
+                Err(anyhow::anyhow!("Authentication error: {}", e))
             }
         }
     }

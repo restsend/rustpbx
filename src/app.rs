@@ -95,6 +95,7 @@ impl AppStateInner {
     }
 
     pub fn get_dump_events_file(&self, session_id: &String) -> String {
+        let sanitized_id = crate::utils::sanitize_id(session_id);
         let recorder_root = self.config().recorder_path();
         let root = Path::new(&recorder_root);
         if !root.exists() {
@@ -111,12 +112,13 @@ impl AppStateInner {
                 }
             }
         }
-        root.join(format!("{}.events.jsonl", session_id))
+        root.join(format!("{}.events.jsonl", sanitized_id))
             .to_string_lossy()
             .to_string()
     }
 
     pub fn get_recorder_file(&self, session_id: &String) -> String {
+        let sanitized_id = crate::utils::sanitize_id(session_id);
         let recorder_root = self.config().recorder_path();
         let root = Path::new(&recorder_root);
         if !root.exists() {
@@ -133,7 +135,7 @@ impl AppStateInner {
                 }
             }
         }
-        let mut recorder_file = root.join(session_id);
+        let mut recorder_file = root.join(sanitized_id);
         recorder_file.set_extension("wav");
         recorder_file.to_string_lossy().to_string()
     }

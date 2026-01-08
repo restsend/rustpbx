@@ -67,6 +67,7 @@ Management and testing of the HTTP Router are available in the **Web Console** (
 url = "http://route-engine/decision"
 timeout_ms = 500
 fallback_to_static = true # If HTTP fails, use static routes
+headers = { "X-Api-Key" = "secret" }
 ```
 
 ### Protocol Details
@@ -92,11 +93,11 @@ fallback_to_static = true # If HTTP fails, use static routes
 **Response Payload (JSON):**
 | Field | Type | Description |
 |-------|------|-------------|
-| `action` | string | `forward`, `reject`, `abort`, `not_handled` |
-| `targets` | [string] | List of SIP URIs (for `forward`) |
+| `action` | string | `forward`, `reject`, `abort`, `not_handled`, `spam` |
+| `targets` | [string] | List of SIP URIs (required for `forward`) |
 | `strategy`| string | `sequential` or `parallel` (default `sequential`) |
-| `status` | int | SIP Status Code (for `reject`) |
-| `reason` | string | Reason phrase (for `reject`) |
+| `status` | int | SIP Status Code (for `reject`, `abort`, default `403`) |
+| `reason` | string | Reason phrase (for `reject`, `abort`, `spam`) |
 | `record` | bool | Whether to record this call |
 | `timeout`| int | Call timeout in seconds |
 | `media_proxy` | string | Media proxy mode: `auto`, `all`, `none`, `nat` |

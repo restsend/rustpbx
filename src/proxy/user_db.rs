@@ -1,5 +1,5 @@
 use super::user::UserBackend;
-use crate::call::user::SipUser;
+use crate::{call::user::SipUser, proxy::auth::AuthError};
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use sqlx::{AnyPool, Row};
@@ -77,7 +77,11 @@ impl UserBackend for DbBackend {
         }
         false
     }
-    async fn get_user(&self, username: &str, realm: Option<&str>) -> Result<Option<SipUser>> {
+    async fn get_user(
+        &self,
+        username: &str,
+        realm: Option<&str>,
+    ) -> Result<Option<SipUser>, AuthError> {
         // Build SELECT clause with optional columns
         let mut select_columns = vec![
             self.config.username_column.clone(),
@@ -140,7 +144,7 @@ impl UserBackend for DbBackend {
                 if let sqlx::Error::RowNotFound = e {
                     return Ok(None);
                 }
-                return Err(anyhow!("Failed to fetch user: {}", e));
+                return Err(AuthError::Other(e.into()));
             }
         };
 

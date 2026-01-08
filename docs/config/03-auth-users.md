@@ -54,7 +54,35 @@ method = "POST"           # Optional: "GET" (default) or "POST"
 ### Protocol Details
 - **Request (GET)**: `?username=1001&realm=example.com`
 - **Request (POST)**: Form-encoded body with `username` and `realm`.
-- **Response**: Must return a JSON object representing the `SipUser`.
+- **Response (Success)**: Must return a HTTP 200 OK with a JSON object representing the `SipUser`.
+- **Response (Error)**: HTTP 4xx/5xx with a JSON error payload.
+
+#### Success Payload (`SipUser`)
+| Field | Type | Description |
+|-------|------|-------------|
+| `username` | string | SIP username |
+| `password` | string | SIP password |
+| `realm` | string | SIP realm (optional) |
+| `display_name` | string | Caller ID name (optional) |
+| `enabled` | bool | Whether the user is active |
+| `allow_guest_calls` | bool | Allow calls without registration |
+
+#### Error Payload
+If the authentication fails, the server should return a non-2xx status code with the following JSON:
+
+```json
+{
+  "reason": "invalid_credentials",
+  "message": "Optional detailed message"
+}
+```
+
+**Known Reasons:**
+- `not_found`, `not_user`: User doesn't exist.
+- `invalid_password`, `invalid_credentials`: Basic auth failure.
+- `disabled`, `blocked`: Account is locked or disabled.
+- `spam`, `spam_detected`: Account flagged for spamming.
+- `payment_required`: Insufficient balance.
 
 ### Python Example (FastAPI)
 ```python

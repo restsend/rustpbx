@@ -1,11 +1,18 @@
 use super::user::UserBackend;
-use crate::call::user::SipUser;
+use crate::{call::user::SipUser, proxy::auth::AuthError};
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use reqwest::{Client, Method};
+use serde::Deserialize;
 use std::{collections::HashMap, time::Instant};
 use tracing::info;
 use urlencoding;
+
+#[derive(Deserialize)]
+struct HttpAuthResponsePayload {
+    pub reason: String,
+    pub message: Option<String>,
+}
 
 pub struct HttpUserBackend {
     url: String,
@@ -57,7 +64,11 @@ impl UserBackend for HttpUserBackend {
     async fn is_same_realm(&self, realm: &str) -> bool {
         self.get_user("", Some(realm)).await.is_ok()
     }
-    async fn get_user(&self, username: &str, realm: Option<&str>) -> Result<Option<SipUser>> {
+    async fn get_user(
+        &self,
+        username: &str,
+        realm: Option<&str>,
+    ) -> Result<Option<SipUser>, AuthError> {
         let start_time = Instant::now();
         let mut request_builder = match self.method {
             Method::GET => {
@@ -85,7 +96,7 @@ impl UserBackend for HttpUserBackend {
 
                 self.client.post(&self.url).form(&form)
             }
-            _ => return Err(anyhow!("Unsupported HTTP method")),
+            _ => return Err(AuthError::Other(anyhow!("Unsupported HTTP method"))),
         };
 
         for (key, value) in &self.headers {
@@ -95,7 +106,7 @@ impl UserBackend for HttpUserBackend {
         let response = request_builder
             .send()
             .await
-            .map_err(|e| anyhow!("HTTP request error: {}", e))?;
+            .map_err(|e| AuthError::Other(anyhow!("HTTP request error: {}", e)))?;
 
         info!(
             username,
@@ -106,16 +117,35 @@ impl UserBackend for HttpUserBackend {
         );
 
         if !response.status().is_success() {
-            return Err(anyhow::anyhow!(
+            let status = response.status();
+            let result = response.json::<HttpAuthResponsePayload>().await;
+            if let Ok(payload) = result {
+                match payload.reason.as_str() {
+                    "not_found" | "not_user" => return Err(AuthError::NotFound),
+                    "invalid_password" | "invalid_credentials" => {
+                        return Err(AuthError::InvalidCredentials);
+                    }
+                    "disabled" | "blocked" => return Err(AuthError::Disabled),
+                    "spam" | "spam_detected" => return Err(AuthError::SpamDetected),
+                    "payment_required" => return Err(AuthError::PaymentRequired),
+                    _ => {
+                        return Err(AuthError::Other(anyhow!(
+                            "HTTP auth error: {}",
+                            payload.message.unwrap_or("Unknown error".to_string())
+                        )));
+                    }
+                }
+            }
+            return Err(AuthError::Other(anyhow::anyhow!(
                 "HTTP response error: {}",
-                response.status()
-            ));
+                status
+            )));
         }
 
         response
             .json::<SipUser>()
             .await
-            .map_err(|e| anyhow!("HTTP response error: {}", e))
+            .map_err(|e| AuthError::Other(anyhow!("HTTP response error: {}", e)))
             .map(|user| Some(user))
     }
 }
