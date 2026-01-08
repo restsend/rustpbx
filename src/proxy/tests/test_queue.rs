@@ -18,7 +18,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
-use tracing::{info, warn};
+use tracing::{Level, info, warn};
 
 // Helper function: Create ProxyConfig with queue configuration
 fn create_queue_proxy_config(port: u16) -> ProxyConfig {
@@ -34,9 +34,10 @@ fn create_queue_proxy_config(port: u16) -> ProxyConfig {
     };
 
     // 1. Define queue "support"
-    // Strategy: Sequential ringing, target is sip:agent@127.0.0.1:PORT
-    let target_uri = format!("sip:agent@127.0.0.1:{}", port);
+    // Strategy: Sequential ringing, target is sip:agent@127.0.0.1
+    let target_uri = "sip:agent@127.0.0.1".to_string();
     let queue_config = RouteQueueConfig {
+        name: Some("support".to_string()),
         strategy: RouteQueueStrategyConfig {
             targets: vec![RouteQueueTargetConfig {
                 uri: target_uri,
@@ -150,6 +151,12 @@ impl Drop for TestQueueServer {
 
 #[tokio::test]
 async fn test_call_queue_routing() {
+    tracing_subscriber::fmt()
+        .with_file(true)
+        .with_line_number(true)
+        .with_max_level(Level::DEBUG)
+        .try_init()
+        .ok();
     // 1. Start server
     let server = TestQueueServer::start().await.unwrap();
     let proxy_addr = server.get_addr();
@@ -198,7 +205,7 @@ async fn test_call_queue_routing() {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_secs(),
-            caller_port + 100  // Use a different port for RTP
+            caller_port + 100 // Use a different port for RTP
         );
 
         let dialog_id = caller.make_call("support", Some(sdp_offer)).await?;
@@ -236,10 +243,13 @@ async fn test_call_queue_routing() {
                             .duration_since(std::time::UNIX_EPOCH)
                             .unwrap()
                             .as_secs(),
-                        agent_port + 100  // Use a different port for RTP
+                        agent_port + 100 // Use a different port for RTP
                     );
 
-                    agent.answer_call(&dialog_id, Some(sdp_answer)).await.unwrap();
+                    agent
+                        .answer_call(&dialog_id, Some(sdp_answer))
+                        .await
+                        .unwrap();
 
                     // Keep agent alive to receive BYE
                     sleep(Duration::from_millis(1000)).await;
@@ -262,6 +272,3 @@ async fn test_call_queue_routing() {
 
     // Cleanup happens automatically via Drop
 }
-
-// TODO: Add test for accept_immediately=true mode
-// This requires creating a custom TestQueueServer variant or parameterizing the existing one

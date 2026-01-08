@@ -339,7 +339,7 @@ impl MediaBridge {
 
             if let Some(old_sender) = transceiver.sender() {
                 let ssrc = target_ssrc.unwrap_or(old_sender.ssrc());
-                let params = old_sender.params();
+                let params = target_params.clone();
                 let track_arc: Arc<dyn MediaStreamTrack> = track_target.clone();
 
                 debug!(

@@ -405,7 +405,7 @@ pub struct ProxyConfig {
     pub addons: Option<Vec<String>>,
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct DialplanHints {
     pub enable_recording: Option<bool>,
     pub bypass_media: Option<bool>,
