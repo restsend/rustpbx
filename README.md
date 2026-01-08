@@ -65,6 +65,7 @@ For detailed configuration and usage instructions, please refer to:
     > See the [Configuration Guide](docs/configuration.md) for all available options.
 
 3. **Run with Docker:**
+> Default time zone is UTC, run with your time zone with `-e TZ=Asia/Shanghai`.
 
     ```bash
     docker run -d \
