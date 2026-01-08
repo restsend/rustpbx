@@ -1,5 +1,5 @@
 use crate::call::sip::{DialogStateReceiverGuard, ServerDialogGuard};
-use crate::media::negotiate::MediaNegotiator;
+use crate::media::negotiate::{CodecInfo, MediaNegotiator};
 use crate::media::{FileTrack, RtpTrackBuilder, Track};
 use crate::proxy::proxy_call::reporter::CallReporter;
 use crate::proxy::routing::matcher::RouteResourceLookup;
@@ -289,6 +289,13 @@ impl CallSession {
         }
     }
 
+    fn get_retry_codes(&self) -> Option<&Vec<u16>> {
+        match &self.context.dialplan.flow {
+            crate::call::DialplanFlow::Queue { plan, .. } => plan.retry_codes.as_ref(),
+            _ => None,
+        }
+    }
+
     pub fn add_callee_guard(&mut self, mut guard: DialogStateReceiverGuard) {
         guard.disarm();
         if let Some(tx) = &self.callee_event_tx {
@@ -466,44 +473,39 @@ impl CallSession {
     }
 
     async fn optimize_caller_codec(&mut self, callee_answer: &str) -> Option<String> {
-        // Parse callee's chosen codec from their answer
-        let (_, _, callee_codec) = MediaNegotiator::extract_codec_params(callee_answer);
+        // Parse callee's codecs from their answer
+        let (callee_codecs, _) = MediaNegotiator::extract_codec_params(callee_answer);
+
+        // Select the best codec considering dialplan allow_codecs preference
+        let selected_callee_codec = MediaNegotiator::select_best_codec(
+            &callee_codecs,
+            &self.context.dialplan.allow_codecs,
+        )?;
+        let callee_codec = selected_callee_codec.codec;
 
         // Parse caller's offer to get their supported codecs
         let caller_offer = self.caller_offer.as_ref()?;
-        let caller_sdp =
-            rustrtc::SessionDescription::parse(rustrtc::SdpType::Offer, caller_offer).ok()?;
-        let caller_section = caller_sdp
-            .media_sections
-            .iter()
-            .find(|m| m.kind == rustrtc::MediaKind::Audio)?;
-        let caller_rtp_map = MediaNegotiator::parse_rtp_map_from_section(caller_section);
+        let (caller_codecs, _) = MediaNegotiator::extract_codec_params(caller_offer);
 
-        // Check if caller supports callee's chosen codec
-        let caller_supports_callee_codec = caller_rtp_map
-            .iter()
-            .any(|(_, (codec, _, _))| codec == &callee_codec);
-
-        if !caller_supports_callee_codec {
-            info!(
-                callee_codec = ?callee_codec,
-                "Caller doesn't support callee's chosen codec, transcoding required"
-            );
-            return None;
-        }
+        // Check if caller supports our chosen callee codec
+        let caller_codec_info = caller_codecs.iter().find(|c| c.codec == callee_codec)?;
 
         let mut optimized_rtp_map = Vec::new();
-        if let Some(codec_entry) = caller_rtp_map
-            .iter()
-            .find(|(_, (c, _, _))| c == &callee_codec)
-        {
-            optimized_rtp_map.push(*codec_entry);
-        }
+        // The first codec in optimized_rtp_map will be the one selected in the handshake
+        optimized_rtp_map.push((
+            caller_codec_info.payload_type,
+            (
+                caller_codec_info.codec,
+                caller_codec_info.clock_rate,
+                caller_codec_info.channels as u32,
+            ),
+        ));
 
-        for entry in caller_rtp_map {
-            let (_, (codec, _, _)) = entry;
-            if codec != callee_codec {
-                optimized_rtp_map.push(entry);
+        // Add remaining caller codecs
+        for c in caller_codecs {
+            if c.codec != callee_codec {
+                optimized_rtp_map
+                    .push((c.payload_type, (c.codec, c.clock_rate, c.channels as u32)));
             }
         }
 
@@ -758,13 +760,9 @@ impl CallSession {
     async fn setup_callee_track(
         &mut self,
         callee_answer_sdp: &String,
-        dialog_id: Option<&DialogId>,
+        _dialog_id: Option<&DialogId>,
     ) -> Result<()> {
-        let track_id = if let Some(id) = dialog_id {
-            format!("callee-track-{}", id)
-        } else {
-            Self::CALLEE_TRACK_ID.to_string()
-        };
+        let track_id = Self::CALLEE_TRACK_ID.to_string();
 
         // If track doesn't exist, we might need to create it first.
         // For now, we assume update_remote_description handles it or we create it if it fails.
@@ -1007,17 +1005,27 @@ impl CallSession {
         }
 
         if self.use_media_proxy {
-            let track_id = if let Some(ref id) = dialog_id {
-                format!("callee-track-{}", id)
-            } else {
-                Self::CALLEE_TRACK_ID.to_string()
-            };
+            let track_id = Self::CALLEE_TRACK_ID.to_string();
 
             if self.media_bridge.is_none() {
                 let (params_a, dtmf_pt_a, codec_a) = self
                     .answer
                     .as_ref()
-                    .map(|s| MediaNegotiator::extract_codec_params(s))
+                    .map(|s| {
+                        let (codecs, dtmf) = MediaNegotiator::extract_codec_params(s);
+                        let chosen = MediaNegotiator::select_best_codec(
+                            &codecs,
+                            &self.context.dialplan.allow_codecs,
+                        )
+                        .or_else(|| codecs.into_iter().next())
+                        .unwrap_or(CodecInfo {
+                            payload_type: 0,
+                            codec: CodecType::PCMU,
+                            clock_rate: 8000,
+                            channels: 1,
+                        });
+                        (chosen.to_params(), dtmf, chosen.codec)
+                    })
                     .unwrap_or((
                         rustrtc::RtpCodecParameters::default(),
                         None,
@@ -1025,7 +1033,21 @@ impl CallSession {
                     ));
                 let (params_b, dtmf_pt_b, codec_b) = callee_answer
                     .as_ref()
-                    .map(|s| MediaNegotiator::extract_codec_params(s))
+                    .map(|s| {
+                        let (codecs, dtmf) = MediaNegotiator::extract_codec_params(s);
+                        let chosen = MediaNegotiator::select_best_codec(
+                            &codecs,
+                            &self.context.dialplan.allow_codecs,
+                        )
+                        .or_else(|| codecs.into_iter().next())
+                        .unwrap_or(CodecInfo {
+                            payload_type: 0,
+                            codec: CodecType::PCMU,
+                            clock_rate: 8000,
+                            channels: 1,
+                        });
+                        (chosen.to_params(), dtmf, chosen.codec)
+                    })
                     .unwrap_or((
                         rustrtc::RtpCodecParameters::default(),
                         None,
@@ -1723,7 +1745,28 @@ impl CallSession {
                 session_id = %self.context.session_id, index, %target,
                 "trying sequential target"
             );
-            match self.try_single_target(target).await {
+
+            let result = if let Some(plan) = self.context.dialplan.flow.get_queue_plan_recursive() {
+                if let Some(timeout) = plan.no_trying_timeout {
+                    info!(session_id = %self.context.session_id, ?timeout, "Applying no-trying timeout");
+                    match tokio::time::timeout(timeout, self.try_single_target(target)).await {
+                        Ok(res) => res,
+                        Err(_) => {
+                            warn!(session_id = %self.context.session_id, "No-trying timeout triggered for target");
+                            Err((
+                                StatusCode::RequestTimeout,
+                                Some("No-trying timeout".to_string()),
+                            ))
+                        }
+                    }
+                } else {
+                    self.try_single_target(target).await
+                }
+            } else {
+                self.try_single_target(target).await
+            };
+
+            match result {
                 Ok(_) => {
                     info!(
                         session_id = %self.context.session_id,
@@ -1738,14 +1781,43 @@ impl CallSession {
                         target_index = index,
                         code = %code,
                         reason,
-                        "Sequential target failed, trying next"
+                        "Sequential target failed"
                     );
+
+                    // Check if we should retry based on codes if policy is active
+                    let should_retry = if let Some(retry_codes) = self.get_retry_codes() {
+                        let code_u16 = u16::from(code.clone());
+                        if retry_codes.contains(&code_u16) {
+                            info!(
+                                session_id = %self.context.session_id,
+                                code = %code,
+                                "Code is in retry list, proceeding to next target"
+                            );
+                            true
+                        } else {
+                            info!(
+                                session_id = %self.context.session_id,
+                                code = %code,
+                                "Code is NOT in retry list, stopping failover"
+                            );
+                            false
+                        }
+                    } else {
+                        // Default behavior: always retry on any error
+                        true
+                    };
+
                     self.note_attempt_failure(
                         code.clone(),
                         reason.clone(),
                         Some(target.aor.to_string()),
                     );
-                    continue;
+
+                    if should_retry {
+                        continue;
+                    } else {
+                        return Err(anyhow!("Target failed and retry policy stopped failover"));
+                    }
                 }
             }
         }
@@ -3030,11 +3102,12 @@ mod codec_negotiation_tests {
             m=audio 12005 UDP/TLS/RTP/SAVPF 111\r\n\
             a=rtpmap:111 opus/48000/2\r\n";
 
-        let (params, _, codec) = MediaNegotiator::extract_codec_params(answer);
-        assert_eq!(codec, CodecType::Opus);
-        assert_eq!(params.payload_type, 111);
-        assert_eq!(params.clock_rate, 48000);
-        assert_eq!(params.channels, 2);
+        let (codecs, _) = MediaNegotiator::extract_codec_params(answer);
+        let first = &codecs[0];
+        assert_eq!(first.codec, CodecType::Opus);
+        assert_eq!(first.payload_type, 111);
+        assert_eq!(first.clock_rate, 48000);
+        assert_eq!(first.channels, 2);
     }
 
     #[test]
@@ -3047,11 +3120,12 @@ mod codec_negotiation_tests {
             m=audio 65365 RTP/AVP 0\r\n\
             a=rtpmap:0 PCMU/8000/1\r\n";
 
-        let (params, _, codec) = MediaNegotiator::extract_codec_params(answer);
-        assert_eq!(codec, CodecType::PCMU);
-        assert_eq!(params.payload_type, 0);
-        assert_eq!(params.clock_rate, 8000);
-        assert_eq!(params.channels, 1);
+        let (codecs, _) = MediaNegotiator::extract_codec_params(answer);
+        let first = &codecs[0];
+        assert_eq!(first.codec, CodecType::PCMU);
+        assert_eq!(first.payload_type, 0);
+        assert_eq!(first.clock_rate, 8000);
+        assert_eq!(first.channels, 1);
     }
 
     #[test]
@@ -3067,13 +3141,7 @@ mod codec_negotiation_tests {
             a=rtpmap:0 PCMU/8000\r\n\
             a=rtpmap:8 PCMA/8000\r\n";
 
-        let sdp = rustrtc::SessionDescription::parse(rustrtc::SdpType::Offer, alice_offer).unwrap();
-        let section = sdp
-            .media_sections
-            .iter()
-            .find(|m| m.kind == rustrtc::MediaKind::Audio)
-            .unwrap();
-        let alice_codecs = MediaNegotiator::parse_rtp_map_from_section(section);
+        let (alice_codecs, _) = MediaNegotiator::extract_codec_params(alice_offer);
 
         // Bob's answer: PCMU only
         let bob_answer = "v=0\r\n\
@@ -3084,12 +3152,11 @@ mod codec_negotiation_tests {
             m=audio 65365 RTP/AVP 0\r\n\
             a=rtpmap:0 PCMU/8000/1\r\n";
 
-        let (_, _, bob_codec) = MediaNegotiator::extract_codec_params(bob_answer);
+        let (bob_codecs, _) = MediaNegotiator::extract_codec_params(bob_answer);
+        let bob_codec = bob_codecs[0].codec;
 
         // Verify Alice supports Bob's chosen codec
-        let alice_supports_pcmu = alice_codecs
-            .iter()
-            .any(|(_, (codec, _, _))| *codec == bob_codec);
+        let alice_supports_pcmu = alice_codecs.iter().any(|c| c.codec == bob_codec);
         assert!(alice_supports_pcmu, "Alice should support PCMU");
 
         // Verify the optimization should avoid transcoding
@@ -3123,7 +3190,8 @@ mod codec_negotiation_tests {
             m=audio 65365 RTP/AVP 0\r\n\
             a=rtpmap:0 PCMU/8000/1\r\n";
 
-        let (_, _, bob_codec) = MediaNegotiator::extract_codec_params(bob_answer);
+        let (bob_codecs, _) = MediaNegotiator::extract_codec_params(bob_answer);
+        let bob_codec = bob_codecs[0].codec;
 
         // Verify Alice does NOT support Bob's chosen codec
         let alice_supports_bob = alice_codecs

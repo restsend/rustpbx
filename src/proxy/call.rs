@@ -443,8 +443,13 @@ impl CallModule {
             .with_caller(caller_uri)
             .with_media(media_config)
             .with_recording(recording)
-            .with_route_invite(route_invite)
-            .with_targets(targets);
+            .with_route_invite(route_invite);
+
+        if let Some(queue) = pending_queue {
+            dialplan = dialplan.with_queue(queue);
+        } else {
+            dialplan = dialplan.with_targets(targets);
+        }
 
         if let Some(mut hints) = dialplan_hints {
             if let Some(enabled) = hints.enable_recording {
@@ -493,10 +498,6 @@ impl CallModule {
             if !allow_codecs.is_empty() {
                 dialplan.allow_codecs = allow_codecs;
             }
-        }
-
-        if let Some(queue_plan) = pending_queue {
-            dialplan = dialplan.with_queue(queue_plan);
         }
 
         if let Some(contact_uri) = self.inner.server.default_contact_uri() {

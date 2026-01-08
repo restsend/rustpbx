@@ -11,6 +11,21 @@ pub struct CodecInfo {
     pub channels: u16,
 }
 
+impl CodecInfo {
+    pub fn to_params(&self) -> rustrtc::RtpCodecParameters {
+        rustrtc::RtpCodecParameters {
+            payload_type: self.payload_type,
+            clock_rate: self.clock_rate,
+            channels: if self.channels > 255 {
+                255
+            } else {
+                self.channels as u8
+            },
+            ..Default::default()
+        }
+    }
+}
+
 /// Complete negotiation result
 #[derive(Debug, Clone)]
 pub struct NegotiationResult {
@@ -92,16 +107,15 @@ impl MediaNegotiator {
     }
 
     /// Extract codec parameters from SDP string
-    /// Returns: (RtpCodecParameters, dtmf_payload_type, CodecType)
-    pub fn extract_codec_params(
-        sdp_str: &str,
-    ) -> (rustrtc::RtpCodecParameters, Option<u8>, CodecType) {
-        let mut params = rustrtc::RtpCodecParameters::default();
+    /// Returns: (Vec<CodecInfo>, dtmf_payload_type)
+    pub fn extract_codec_params(sdp_str: &str) -> (Vec<CodecInfo>, Option<u8>) {
+        let mut codecs = Vec::new();
         let mut dtmf_pt = None;
-        let mut codec_type = CodecType::PCMU;
-        let mut _first_codec_found = false;
 
-        if let Ok(desc) = SessionDescription::parse(SdpType::Answer, sdp_str) {
+        let desc = SessionDescription::parse(SdpType::Answer, sdp_str)
+            .or_else(|_| SessionDescription::parse(SdpType::Offer, sdp_str));
+
+        if let Ok(desc) = desc {
             if let Some(section) = desc
                 .media_sections
                 .iter()
@@ -109,40 +123,54 @@ impl MediaNegotiator {
             {
                 let rtp_map = Self::parse_rtp_map_from_section(section);
 
-                // Find the best non-DTMF codec (prefer Opus > G722 > PCMU > PCMA)
-                let mut best_priority = -1;
-
-                for (pt, (codec, clock, channels)) in &rtp_map {
-                    if *codec == CodecType::TelephoneEvent {
-                        dtmf_pt = Some(*pt);
+                for (pt, (codec, clock, channels)) in rtp_map {
+                    if codec == CodecType::TelephoneEvent {
+                        dtmf_pt = Some(pt);
                         continue;
                     }
 
-                    let priority = match codec {
-                        CodecType::Opus => 100,
-                        CodecType::G722 => 90,
-                        CodecType::PCMU => 80,
-                        CodecType::PCMA => 70,
-                        CodecType::G729 => 60,
-                        _ => 0,
-                    };
-
-                    if priority > best_priority {
-                        best_priority = priority;
-                        params.payload_type = *pt;
-                        params.clock_rate = *clock;
-                        params.channels = if *channels > 255 {
-                            255
-                        } else {
-                            *channels as u8
-                        };
-                        codec_type = *codec;
-                    }
+                    codecs.push(CodecInfo {
+                        payload_type: pt,
+                        codec,
+                        clock_rate: clock,
+                        channels: channels as u16,
+                    });
                 }
             }
         }
 
-        (params, dtmf_pt, codec_type)
+        (codecs, dtmf_pt)
+    }
+
+    /// Select the best common codec based on preference
+    pub fn select_best_codec(
+        remote_codecs: &[CodecInfo],
+        allowed_codecs: &[CodecType],
+    ) -> Option<CodecInfo> {
+        if remote_codecs.is_empty() {
+            return None;
+        }
+
+        if allowed_codecs.is_empty() {
+            // No restriction: pick the first one from remote (respecting their preference)
+            return Some(remote_codecs[0].clone());
+        }
+
+        // Try to find the highest priority allowed codec that the remote also supports
+        for allowed in allowed_codecs {
+            if let Some(found) = remote_codecs.iter().find(|c| &c.codec == allowed) {
+                return Some(found.clone());
+            }
+        }
+
+        // Fallback: search for any remote codec that is allowed
+        for remote in remote_codecs {
+            if allowed_codecs.contains(&remote.codec) {
+                return Some(remote.clone());
+            }
+        }
+
+        None
     }
 
     /// Extract all codec information from SDP
@@ -325,9 +353,11 @@ mod tests {
             a=rtpmap:0 PCMU/8000\r\n\
             a=rtpmap:101 telephone-event/8000\r\n";
 
-        let (params, dtmf_pt, codec) = MediaNegotiator::extract_codec_params(sdp);
+        let (codecs, dtmf_pt) = MediaNegotiator::extract_codec_params(sdp);
+        let first = &codecs[0];
+        let params = first.to_params();
 
-        assert_eq!(codec, CodecType::PCMU);
+        assert_eq!(first.codec, CodecType::PCMU);
         assert_eq!(params.payload_type, 0);
         assert_eq!(params.clock_rate, 8000);
         assert_eq!(dtmf_pt, Some(101));
@@ -474,5 +504,51 @@ mod tests {
                 && *chans == 2),
             "Missing fallback for Opus (111)"
         );
+    }
+
+    #[test]
+    fn test_extract_codec_params_order_preference() {
+        // PCMU(0) is first, G722(9) is later.
+        // We should pick PCMU because it's first in the Answer.
+        let sdp = "v=0\r\no=- 123456 123456 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 4000 RTP/AVP 0 101 8 9\r\na=rtpmap:0 PCMU/8000\r\na=rtpmap:101 telephone-event/8000\r\na=rtpmap:8 PCMA/8000\r\na=rtpmap:9 G722/8000\r\n";
+        let (codecs, _) = MediaNegotiator::extract_codec_params(sdp);
+        assert_eq!(
+            codecs[0].codec,
+            CodecType::PCMU,
+            "Should have picked PCMU (the first codec)"
+        );
+    }
+
+    #[test]
+    fn test_select_best_codec_with_preference() {
+        let codecs = vec![
+            CodecInfo {
+                payload_type: 9,
+                codec: CodecType::G722,
+                clock_rate: 8000,
+                channels: 1,
+            },
+            CodecInfo {
+                payload_type: 0,
+                codec: CodecType::PCMU,
+                clock_rate: 8000,
+                channels: 1,
+            },
+        ];
+
+        // Preference: [PCMU, G722]
+        let allowed = vec![CodecType::PCMU, CodecType::G722];
+        let best = MediaNegotiator::select_best_codec(&codecs, &allowed).unwrap();
+        assert_eq!(best.codec, CodecType::PCMU);
+
+        // Preference: [G722, PCMU]
+        let allowed = vec![CodecType::G722, CodecType::PCMU];
+        let best = MediaNegotiator::select_best_codec(&codecs, &allowed).unwrap();
+        assert_eq!(best.codec, CodecType::G722);
+
+        // Preference: [] (empty) - should follow remote order
+        let allowed = vec![];
+        let best = MediaNegotiator::select_best_codec(&codecs, &allowed).unwrap();
+        assert_eq!(best.codec, CodecType::G722);
     }
 }

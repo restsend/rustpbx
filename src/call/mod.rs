@@ -329,6 +329,8 @@ pub struct QueuePlan {
     pub dial_strategy: Option<DialStrategy>,
     pub ring_timeout: Option<Duration>,
     pub label: Option<String>,
+    pub retry_codes: Option<Vec<u16>>,
+    pub no_trying_timeout: Option<Duration>,
 }
 
 impl Default for QueuePlan {
@@ -350,6 +352,8 @@ impl Default for QueuePlan {
             dial_strategy: None,
             ring_timeout: None,
             label: None,
+            retry_codes: None,
+            no_trying_timeout: None,
         }
     }
 }
@@ -396,7 +400,14 @@ impl DialplanFlow {
                     targets.is_empty()
                 }
             },
-            DialplanFlow::Queue { next, .. } => next.is_empty(),
+            DialplanFlow::Queue { .. } => false,
+        }
+    }
+
+    pub fn get_queue_plan_recursive(&self) -> Option<QueuePlan> {
+        match self {
+            DialplanFlow::Queue { plan, .. } => Some(plan.clone()),
+            _ => None,
         }
     }
 

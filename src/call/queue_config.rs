@@ -153,6 +153,8 @@ impl QueueConfig {
             dial_strategy: Some(self.strategy.to_dial_strategy()?),
             ring_timeout: self.ring_timeout_secs.map(|s| Duration::from_secs(s)),
             label: self.name.clone(),
+            retry_codes: None,
+            no_trying_timeout: None,
         };
 
         Ok(plan)

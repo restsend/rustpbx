@@ -210,9 +210,11 @@ mod callsession_b2bua_tests {
     #[test]
     fn test_extract_codec_params_pcmu() {
         let sdp = create_sdp_answer("PCMU/8000/1", 0);
-        let (params, dtmf_pt, codec) = MediaNegotiator::extract_codec_params(&sdp);
+        let (codecs, dtmf_pt) = MediaNegotiator::extract_codec_params(&sdp);
+        let first = &codecs[0];
+        let params = first.to_params();
 
-        assert_eq!(codec, CodecType::PCMU);
+        assert_eq!(first.codec, CodecType::PCMU);
         assert_eq!(params.payload_type, 0);
         assert_eq!(params.clock_rate, 8000);
         assert_eq!(params.channels, 1);
@@ -222,9 +224,11 @@ mod callsession_b2bua_tests {
     #[test]
     fn test_extract_codec_params_pcma() {
         let sdp = create_sdp_answer("PCMA/8000/1", 8);
-        let (params, _, codec) = MediaNegotiator::extract_codec_params(&sdp);
+        let (codecs, _) = MediaNegotiator::extract_codec_params(&sdp);
+        let first = &codecs[0];
+        let params = first.to_params();
 
-        assert_eq!(codec, CodecType::PCMA);
+        assert_eq!(first.codec, CodecType::PCMA);
         assert_eq!(params.payload_type, 8);
         assert_eq!(params.clock_rate, 8000);
         assert_eq!(params.channels, 1);
@@ -233,9 +237,11 @@ mod callsession_b2bua_tests {
     #[test]
     fn test_extract_codec_params_opus() {
         let sdp = create_sdp_answer("opus/48000/2", 111);
-        let (params, _, codec) = MediaNegotiator::extract_codec_params(&sdp);
+        let (codecs, _) = MediaNegotiator::extract_codec_params(&sdp);
+        let first = &codecs[0];
+        let params = first.to_params();
 
-        assert_eq!(codec, CodecType::Opus);
+        assert_eq!(first.codec, CodecType::Opus);
         assert_eq!(params.payload_type, 111);
         assert_eq!(params.clock_rate, 48000);
         assert_eq!(params.channels, 2);
@@ -244,9 +250,11 @@ mod callsession_b2bua_tests {
     #[test]
     fn test_extract_codec_params_g722() {
         let sdp = create_sdp_answer("G722/8000", 9);
-        let (params, _, codec) = MediaNegotiator::extract_codec_params(&sdp);
+        let (codecs, _) = MediaNegotiator::extract_codec_params(&sdp);
+        let first = &codecs[0];
+        let params = first.to_params();
 
-        assert_eq!(codec, CodecType::G722);
+        assert_eq!(first.codec, CodecType::G722);
         assert_eq!(params.payload_type, 9);
         assert_eq!(params.clock_rate, 8000);
     }
@@ -262,9 +270,11 @@ mod callsession_b2bua_tests {
             a=rtpmap:0 PCMU/8000/1\r\n\
             a=rtpmap:101 telephone-event/8000\r\n";
 
-        let (params, dtmf_pt, codec) = MediaNegotiator::extract_codec_params(sdp);
+        let (codecs, dtmf_pt) = MediaNegotiator::extract_codec_params(sdp);
+        let first = &codecs[0];
+        let params = first.to_params();
 
-        assert_eq!(codec, CodecType::PCMU);
+        assert_eq!(first.codec, CodecType::PCMU);
         assert_eq!(params.payload_type, 0);
         assert_eq!(dtmf_pt, Some(101));
     }
@@ -277,21 +287,12 @@ mod callsession_b2bua_tests {
         let alice_offer = create_sdp_offer("PCMU/8000/1", 0);
         let bob_answer = create_sdp_answer("PCMU/8000/1", 0);
 
-        let alice_sdp =
-            rustrtc::SessionDescription::parse(rustrtc::SdpType::Offer, &alice_offer).unwrap();
-        let alice_section = alice_sdp
-            .media_sections
-            .iter()
-            .find(|m| m.kind == rustrtc::MediaKind::Audio)
-            .unwrap();
-        let alice_codecs = MediaNegotiator::parse_rtp_map_from_section(alice_section);
-
-        let (_, _, bob_codec) = MediaNegotiator::extract_codec_params(&bob_answer);
+        let (alice_codecs, _) = MediaNegotiator::extract_codec_params(&alice_offer);
+        let (bob_codecs, _) = MediaNegotiator::extract_codec_params(&bob_answer);
+        let bob_codec = bob_codecs[0].codec;
 
         // Verify Alice supports Bob's chosen codec
-        let compatible = alice_codecs
-            .iter()
-            .any(|(_, (codec, _, _))| *codec == bob_codec);
+        let compatible = alice_codecs.iter().any(|c| c.codec == bob_codec);
 
         assert!(compatible, "Alice should support PCMU");
         assert_eq!(bob_codec, CodecType::PCMU);
@@ -312,7 +313,8 @@ mod callsession_b2bua_tests {
             .unwrap();
         let alice_codecs = MediaNegotiator::parse_rtp_map_from_section(alice_section);
 
-        let (_, _, bob_codec) = MediaNegotiator::extract_codec_params(&bob_answer);
+        let (bob_codecs, _) = MediaNegotiator::extract_codec_params(&bob_answer);
+        let bob_codec = bob_codecs[0].codec;
 
         // Verify Alice does NOT support Bob's codec
         let compatible = alice_codecs
@@ -661,6 +663,7 @@ mod callsession_b2bua_tests {
             dial_strategy: None, // No targets
             ring_timeout: None,
             label: Some("Empty Queue".to_string()),
+            ..Default::default()
         };
 
         // Should be valid to create, but execution will fail gracefully

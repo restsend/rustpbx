@@ -385,7 +385,7 @@ impl Recorder {
         match self.codec {
             CodecType::G729 => (80, 10),
             CodecType::PCMU | CodecType::PCMA => (1, 1),
-            CodecType::G722 => (1, 1),
+            CodecType::G722 => (2, 1),
             CodecType::Opus => (1, 2), // Buffering PCM
             _ => (1, 2),               // PCM
         }
