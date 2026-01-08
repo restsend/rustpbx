@@ -29,6 +29,8 @@ impl MediaNegotiator {
         section: &rustrtc::MediaSection,
     ) -> Vec<(u8, (CodecType, u32, u16))> {
         let mut rtp_map = Vec::new();
+        let mut seen_pts = std::collections::HashSet::new();
+
         for attr in &section.attributes {
             if attr.key == "rtpmap" {
                 if let Some(ref value) = attr.value {
@@ -50,12 +52,42 @@ impl MediaNegotiator {
                                 };
 
                                 rtp_map.push((pt, (codec_type, clock_rate, channels)));
+                                seen_pts.insert(pt);
                             }
                         }
                     }
                 }
             }
         }
+
+        // Handle static payload types
+        for format in &section.formats {
+            if let Ok(pt) = format.parse::<u8>() {
+                if seen_pts.contains(&pt) {
+                    continue;
+                }
+
+                let static_codec = match pt {
+                    0 => Some((CodecType::PCMU, 8000, 1)),
+                    8 => Some((CodecType::PCMA, 8000, 1)),
+                    9 => Some((CodecType::G722, 8000, 1)),
+                    18 => Some((CodecType::G729, 8000, 1)),
+                    // Non-standard fallback for common dynamic payload types when rtpmap is missing
+                    // Only apply this for Audio logic to implicit infer Opus
+                    #[cfg(feature = "opus")]
+                    96 | 111 if section.kind == MediaKind::Audio => {
+                        Some((CodecType::Opus, 48000, 2))
+                    }
+                    _ => None,
+                };
+
+                if let Some((codec, rate, chans)) = static_codec {
+                    rtp_map.push((pt, (codec, rate, chans)));
+                    seen_pts.insert(pt);
+                }
+            }
+        }
+
         rtp_map
     }
 
@@ -355,5 +387,92 @@ mod tests {
 
         let webrtc_codecs = MediaNegotiator::default_webrtc_codecs();
         assert!(webrtc_codecs.contains(&CodecType::PCMU));
+    }
+
+    #[test]
+    fn test_parse_static_payload_types() {
+        let sdp = "v=0\r\n\
+            o=- 1234 1234 IN IP4 127.0.0.1\r\n\
+            s=-\r\n\
+            t=0 0\r\n\
+            m=audio 10000 RTP/AVP 0 8 101\r\n\
+            a=rtpmap:101 telephone-event/8000\r\n";
+
+        let desc = SessionDescription::parse(SdpType::Offer, sdp).unwrap();
+        let section = desc
+            .media_sections
+            .iter()
+            .find(|m| m.kind == MediaKind::Audio)
+            .unwrap();
+        let rtp_map = MediaNegotiator::parse_rtp_map_from_section(section);
+
+        println!("RTP MAP: {:?}", rtp_map);
+
+        // Should find PCMU (0) and PCMA (8) even without rtpmap
+        assert!(
+            rtp_map
+                .iter()
+                .any(|(pt, (codec, _, _))| *pt == 0 && *codec == CodecType::PCMU),
+            "Missing PCMU (0)"
+        );
+        assert!(
+            rtp_map
+                .iter()
+                .any(|(pt, (codec, _, _))| *pt == 8 && *codec == CodecType::PCMA),
+            "Missing PCMA (8)"
+        );
+    }
+
+    #[test]
+    fn test_parse_dynamic_payload_type_fallback() {
+        // Test handling of common dynamic payload types when rtpmap is missing (e.g. Opus as 96)
+        let sdp = "v=0\r\n\
+            o=- 1234 1234 IN IP4 127.0.0.1\r\n\
+            s=-\r\n\
+            t=0 0\r\n\
+            m=audio 10000 RTP/AVP 96\r\n"; // 96 without rtpmap
+
+        let desc = SessionDescription::parse(SdpType::Offer, sdp).unwrap();
+        let section = desc
+            .media_sections
+            .iter()
+            .find(|m| m.kind == MediaKind::Audio)
+            .unwrap();
+        let rtp_map = MediaNegotiator::parse_rtp_map_from_section(section);
+
+        // This expects the permissive behavior we are about to implement
+        assert!(
+            rtp_map.iter().any(|(pt, (codec, rate, chans))| *pt == 96
+                && *codec == CodecType::Opus
+                && *rate == 48000
+                && *chans == 2),
+            "Missing fallback for Opus (96)"
+        );
+    }
+
+    #[test]
+    fn test_parse_dynamic_payload_type_fallback_111() {
+        // Test handling of dynamic payload type 111 for Opus fallback
+        let sdp = "v=0\r\n\
+            o=- 1234 1234 IN IP4 127.0.0.1\r\n\
+            s=-\r\n\
+            t=0 0\r\n\
+            m=audio 10000 RTP/AVP 111\r\n"; // 111 without rtpmap
+
+        let desc = SessionDescription::parse(SdpType::Offer, sdp).unwrap();
+        let section = desc
+            .media_sections
+            .iter()
+            .find(|m| m.kind == MediaKind::Audio)
+            .unwrap();
+        let rtp_map = MediaNegotiator::parse_rtp_map_from_section(section);
+
+        assert!(
+            rtp_map.iter().any(|(pt, (codec, rate, chans))| *pt == 111
+                && *codec == CodecType::Opus
+                && *rate == 48000
+                && *chans == 2),
+            "Missing fallback for Opus (111)"
+        );
     }
 }
