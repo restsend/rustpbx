@@ -5,7 +5,7 @@ use super::{
 use crate::{
     call::user::SipUser,
     config::{Config, ProxyConfig, UserBackendConfig},
-    proxy::user_db::DbBackendConfig,
+    proxy::{auth::AuthError, user_db::DbBackendConfig},
 };
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
@@ -23,7 +23,11 @@ pub trait UserBackend: Send + Sync {
         }
     }
     async fn is_same_realm(&self, realm: &str) -> bool;
-    async fn get_user(&self, username: &str, realm: Option<&str>) -> Result<Option<SipUser>>;
+    async fn get_user(
+        &self,
+        username: &str,
+        realm: Option<&str>,
+    ) -> Result<Option<SipUser>, AuthError>;
     async fn create_user(&self, _user: SipUser) -> Result<()> {
         Ok(())
     }
@@ -137,7 +141,11 @@ impl UserBackend for MemoryUserBackend {
         Self::get_identifier(user, realm)
     }
 
-    async fn get_user(&self, username: &str, realm: Option<&str>) -> Result<Option<SipUser>> {
+    async fn get_user(
+        &self,
+        username: &str,
+        realm: Option<&str>,
+    ) -> Result<Option<SipUser>, AuthError> {
         let users = self.users.lock().await;
         let identifier = self.get_identifier(username, realm);
         let mut user = match users.get(&identifier) {
@@ -145,7 +153,7 @@ impl UserBackend for MemoryUserBackend {
             None => {
                 if let Some(user) = users.get(username) {
                     if user.realm.as_ref().is_some_and(|r| !r.is_empty()) {
-                        return Err(anyhow::anyhow!("missing user: {}", identifier));
+                        return Err(AuthError::NotFound);
                     }
                     return Ok(Some(user.clone()));
                 }
@@ -173,13 +181,15 @@ pub async fn create_user_backend(config: &UserBackendConfig) -> Result<Box<dyn U
             headers,
         } => {
             let backend = HttpUserBackend::new(url, method, username_field, realm_field, headers);
-            Ok(Box::new(backend))
+            Ok(Box::new(backend) as Box<dyn UserBackend>)
         }
-        UserBackendConfig::Memory { users } => Ok(Box::new(MemoryUserBackend::new(users.clone()))),
+        UserBackendConfig::Memory { users } => {
+            Ok(Box::new(MemoryUserBackend::new(users.clone())) as Box<dyn UserBackend>)
+        }
         UserBackendConfig::Plain { path } => {
             let backend = PlainTextBackend::new(path);
             backend.load().await?;
-            Ok(Box::new(backend))
+            Ok(Box::new(backend) as Box<dyn UserBackend>)
         }
         UserBackendConfig::Database {
             url,
@@ -212,7 +222,7 @@ pub async fn create_user_backend(config: &UserBackendConfig) -> Result<Box<dyn U
                 db_config,
             )
             .await?;
-            Ok(Box::new(backend))
+            Ok(Box::new(backend) as Box<dyn UserBackend>)
         }
         UserBackendConfig::Extension { database_url, ttl } => {
             let url = database_url
@@ -220,7 +230,7 @@ pub async fn create_user_backend(config: &UserBackendConfig) -> Result<Box<dyn U
                 .unwrap_or_else(|| Config::default().database_url);
             let ttl_secs = ttl.unwrap_or(30); // Default to 30s as requested
             let backend = ExtensionUserBackend::connect(&url, ttl_secs).await?;
-            Ok(Box::new(backend))
+            Ok(Box::new(backend) as Box<dyn UserBackend>)
         }
     }
 }
@@ -246,8 +256,12 @@ impl UserBackend for ChainedUserBackend {
         false
     }
 
-    async fn get_user(&self, username: &str, realm: Option<&str>) -> Result<Option<SipUser>> {
-        let mut last_err: Option<anyhow::Error> = None;
+    async fn get_user(
+        &self,
+        username: &str,
+        realm: Option<&str>,
+    ) -> Result<Option<SipUser>, AuthError> {
+        let mut last_err: Option<AuthError> = None;
         for backend in &self.backends {
             match backend.get_user(username, realm).await {
                 Ok(Some(user)) => return Ok(Some(user)),

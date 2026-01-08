@@ -1,3 +1,4 @@
+use crate::call::cookie::SpamResult;
 use crate::call::{
     DialDirection, DialStrategy, Dialplan, Location, RouteInvite, SipUser, TransactionCookie,
     TrunkContext,
@@ -7,6 +8,7 @@ use crate::proxy::call::CallRouter;
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use rsip::prelude::*;
+use rsipstack::transport::SipConnection;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -52,6 +54,7 @@ enum HttpRouteAction {
     Reject,
     Abort,
     NotHandled,
+    Spam,
 }
 
 #[derive(Deserialize, Serialize, Debug, PartialEq)]
@@ -113,12 +116,21 @@ impl CallRouter for HttpCallRouter {
         }
 
         let body = String::from_utf8_lossy(&original.body).to_string();
+        let source_addr = if let Ok(via) = original.via_header() {
+            if let Ok((_, target)) = SipConnection::parse_target_from_via(via) {
+                Some(target.to_string())
+            } else {
+                None
+            }
+        } else {
+            None
+        };
 
         let payload = HttpRequestPayload {
             call_id: call_id.clone(),
             from,
             to,
-            source_addr: caller.destination.as_ref().map(|s| s.to_string()),
+            source_addr,
             direction: direction.to_string(),
             method: original.method.to_string(),
             uri: original.uri.to_string(),
@@ -194,6 +206,17 @@ impl CallRouter for HttpCallRouter {
         );
 
         match result.action {
+            HttpRouteAction::Spam => {
+                cookie.mark_as_spam(SpamResult::Spam);
+                return Err((
+                    anyhow!(
+                        result
+                            .reason
+                            .unwrap_or_else(|| "marked as spam by HTTP router".to_string())
+                    ),
+                    Some(rsip::StatusCode::Forbidden),
+                ));
+            }
             HttpRouteAction::Reject | HttpRouteAction::Abort => {
                 let status = result
                     .status

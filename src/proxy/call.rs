@@ -610,6 +610,7 @@ impl CallModule {
             .user_backend
             .get_user(username.as_str(), Some(&callee_realm))
             .await
+            .map_err(Into::into)
         {
             Ok(Some(user)) => Ok(user.forwarding_config()),
             Ok(None) => Ok(None),
@@ -824,6 +825,7 @@ impl CallModule {
             .with_call_record_sender(self.inner.server.callrecord_sender.clone());
         let _ = proxy_call.report_failure(self.inner.server.clone(), code, reason);
     }
+
     pub(crate) async fn handle_invite(
         &self,
         _cancel_token: CancellationToken,
@@ -837,6 +839,9 @@ impl CallModule {
         let dialplan = match self.build_dialplan(tx, cookie.clone(), &caller).await {
             Ok(d) => d,
             Err((e, code)) => {
+                if cookie.is_spam() {
+                    return Ok(());
+                }
                 let code = code.unwrap_or(rsip::StatusCode::ServerInternalError);
                 let reason_text = e.to_string();
                 let reason_value = q850_reason_value(&code, Some(reason_text.as_str()));

@@ -1,5 +1,6 @@
 use super::user::UserBackend;
 use crate::call::user::SipUser;
+use crate::proxy::auth::AuthError;
 use anyhow::Result;
 use async_trait::async_trait;
 use std::io::BufRead;
@@ -84,13 +85,17 @@ impl UserBackend for PlainTextBackend {
     async fn is_same_realm(&self, realm: &str) -> bool {
         return realm.is_empty();
     }
-    async fn get_user(&self, username: &str, realm: Option<&str>) -> Result<Option<SipUser>> {
+    async fn get_user(
+        &self,
+        username: &str,
+        realm: Option<&str>,
+    ) -> Result<Option<SipUser>, AuthError> {
         let mut user = match self.users.lock().unwrap().get(username) {
             Some(user) => user.clone(),
             None => return Ok(None),
         };
         if !user.enabled {
-            return Err(anyhow::anyhow!("User is disabled: {}", username));
+            return Err(AuthError::Disabled);
         }
         user.realm = realm.map(|r| r.to_string());
         Ok(Some(user))

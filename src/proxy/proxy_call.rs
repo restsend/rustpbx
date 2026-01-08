@@ -63,7 +63,7 @@ impl CallSessionBuilder {
         let session_id = dialplan
             .session_id
             .as_ref()
-            .cloned()
+            .map(|id| crate::utils::sanitize_id(id))
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
         let original_caller = dialplan
@@ -106,7 +106,7 @@ impl CallSessionBuilder {
         let session_id = dialplan
             .session_id
             .as_ref()
-            .cloned()
+            .map(|id| crate::utils::sanitize_id(id))
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
         let original_caller = dialplan
