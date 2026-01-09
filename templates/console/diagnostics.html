@@ -330,247 +330,6 @@
             </div>
         </section>
 
-        <section x-show="activeTab === 'trunks'" x-cloak x-transition.opacity class="space-y-6">
-            <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
-                <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                    <div>
-                        <h2 class="text-base font-semibold text-slate-900">Trunk ingress validation</h2>
-                        <p class="text-xs text-slate-500">Confirm whether hostnames or IPs resolve into configured
-                            inbound definitions and permitted directions.</p>
-                    </div>
-                    <div
-                        class="inline-flex items-center gap-2 rounded-full bg-emerald-50 px-3 py-1 text-[11px] font-semibold text-emerald-600 ring-1 ring-emerald-200">
-                        <span class="h-1.5 w-1.5 rounded-full bg-emerald-500"></span>
-                        Live evaluation
-                    </div>
-                </div>
-
-                <div class="mt-5 divide-y divide-slate-100">
-                    <template x-for="trunk in trunks" :key="trunk.id">
-                        <article class="py-4"
-                            :class="trunkTests[trunk.id]?.loading ? 'md:pl-3 md:border-l-2 md:border-sky-200 md:bg-sky-50/40 rounded-lg' : ''">
-                            <div class="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
-                                <div class="flex flex-col gap-2">
-                                    <div class="flex flex-wrap items-center gap-2">
-                                        <h3 class="text-sm font-semibold text-slate-900" x-text="trunk.label"></h3>
-                                        <span
-                                            class="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-medium text-slate-600"
-                                            x-text="trunk.id"></span>
-                                        <span
-                                            class="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-semibold"
-                                            :class="statusPill(trunk.status)">
-                                            <span class="h-1.5 w-1.5 rounded-full"
-                                                :class="statusDot(trunk.status)"></span>
-                                            <span x-text="statusLabel(trunk.status)"></span>
-                                        </span>
-                                    </div>
-                                    <div class="flex flex-wrap gap-4 text-xs text-slate-500">
-                                        <div>
-                                            <span class="font-semibold text-slate-700">Latency:</span>
-                                            <span x-text="trunk.latency_ms + ' ms'"></span>
-                                        </div>
-                                        <div>
-                                            <span class="font-semibold text-slate-700">Loss:</span>
-                                            <span x-text="trunk.packet_loss_percent + '%'"></span>
-                                        </div>
-                                        <div>
-                                            <span class="font-semibold text-slate-700">Concurrency:</span>
-                                            <span
-                                                x-text="trunk.concurrency.current + ' / ' + trunk.concurrency.limit"></span>
-                                        </div>
-                                        <div>
-                                            <span class="font-semibold text-slate-700">Last probe:</span>
-                                            <span x-text="formatDateTime(trunk.last_test_at)"></span>
-                                        </div>
-                                    </div>
-                                    <div class="flex flex-wrap items-center gap-2 text-[11px] text-slate-500">
-                                        <span class="rounded-full bg-slate-100 px-2 py-0.5 font-semibold text-slate-600"
-                                            x-text="trunk.direction.join(' / ') || 'Unknown'"></span>
-                                        <span x-text="trunk.egress"></span>
-                                    </div>
-                                    <p class="text-xs text-slate-500" x-text="trunk.notes"></p>
-                                </div>
-                                <div class="flex w-full flex-col gap-2 sm:flex-row sm:items-center">
-                                    <input type="text" x-model="trunkTests[trunk.id].address"
-                                        class="w-full rounded-lg border border-slate-200 px-3 py-2 text-xs text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                        placeholder="Hostname or IP to evaluate">
-                                    <button type="button" @click="runTrunkTest(trunk.id)"
-                                        :disabled="trunkTests[trunk.id].loading"
-                                        class="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-4 py-2 text-xs font-semibold text-slate-600 transition hover:border-sky-300 hover:text-sky-700 disabled:cursor-not-allowed disabled:opacity-60">
-                                        <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor"
-                                            stroke-width="1.8">
-                                            <path stroke-linecap="round" stroke-linejoin="round" d="M10 4v12m6-6H4" />
-                                        </svg>
-                                        <span
-                                            x-text="trunkTests[trunk.id].loading ? 'Evaluating…' : 'Run check'"></span>
-                                    </button>
-                                    <button type="button" @click="runTrunkOptions(trunk.id)"
-                                        :disabled="trunkTests[trunk.id].options.loading"
-                                        class="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-4 py-2 text-xs font-semibold text-slate-600 transition hover:border-emerald-300 hover:text-emerald-700 disabled:cursor-not-allowed disabled:opacity-60">
-                                        <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor"
-                                            stroke-width="1.8">
-                                            <path stroke-linecap="round" stroke-linejoin="round" d="M5 10h10M10 5v10" />
-                                        </svg>
-                                        <span
-                                            x-text="trunkTests[trunk.id].options.loading ? 'Probing…' : 'Send OPTIONS'"></span>
-                                    </button>
-                                </div>
-                            </div>
-                            <div class="mt-3 space-y-2 text-xs">
-                                <template x-if="trunkTests[trunk.id].loading">
-                                    <div class="rounded-lg border border-sky-200 bg-sky-50 px-4 py-3 text-sky-700">
-                                        Evaluating address…
-                                    </div>
-                                </template>
-                                <template x-if="trunkTests[trunk.id].error">
-                                    <div class="rounded-lg border border-rose-200 bg-rose-50 px-4 py-3 text-rose-700"
-                                        x-text="trunkTests[trunk.id].error"></div>
-                                </template>
-                                <template x-if="trunkTests[trunk.id].result">
-                                    <div class="space-y-2 rounded-lg border border-slate-200 bg-white px-4 py-3">
-                                        <div class="flex flex-wrap items-center justify-between gap-2">
-                                            <span class="font-semibold text-slate-700"
-                                                x-text="trunkTests[trunk.id].result.overall_match ? 'Address matches inbound definition' : 'No inbound definition matched'"></span>
-                                            <span
-                                                class="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-semibold"
-                                                :class="trunkTests[trunk.id].result.overall_match ? 'bg-emerald-50 text-emerald-600 ring-1 ring-emerald-200' : 'bg-rose-50 text-rose-600 ring-1 ring-rose-200'">
-                                                <span class="h-1.5 w-1.5 rounded-full"
-                                                    :class="trunkTests[trunk.id].result.overall_match ? 'bg-emerald-500' : 'bg-rose-500'"></span>
-                                                <span
-                                                    x-text="trunkTests[trunk.id].result.overall_match ? 'Match' : 'No match'"></span>
-                                            </span>
-                                        </div>
-                                        <div class="grid gap-2 text-[11px] text-slate-600">
-                                            <div>
-                                                <span class="font-semibold text-slate-700">Checked address:</span>
-                                                <span x-text="trunkTests[trunk.id].result.address"></span>
-                                            </div>
-                                            <div>
-                                                <span class="font-semibold text-slate-700">Resolved IPs:</span>
-                                                <span
-                                                    x-text="formatList(trunkTests[trunk.id].result.resolved_ips)"></span>
-                                            </div>
-                                            <div class="grid gap-2">
-                                                <template x-for="item in trunkTests[trunk.id].result.ip_results"
-                                                    :key="item.ip">
-                                                    <div class="rounded border border-slate-200 bg-slate-50 p-2">
-                                                        <div
-                                                            class="flex items-center justify-between font-semibold text-slate-700">
-                                                            <span x-text="item.ip"></span>
-                                                            <span
-                                                                x-text="item.matched ? 'Matched' : 'Not matched'"></span>
-                                                        </div>
-                                                        <div class="text-slate-500"
-                                                            x-text="item.matched_sources.length ? 'Sources: ' + item.matched_sources.join(', ') : 'No matching sources'">
-                                                        </div>
-                                                    </div>
-                                                </template>
-                                            </div>
-                                            <div class="flex flex-wrap gap-3">
-                                                <div><span class="font-semibold text-slate-700">Inbound allowed:</span>
-                                                    <span
-                                                        x-text="trunkTests[trunk.id].result.allows_inbound ? 'Yes' : 'No'"></span>
-                                                </div>
-                                                <div><span class="font-semibold text-slate-700">Outbound allowed:</span>
-                                                    <span
-                                                        x-text="trunkTests[trunk.id].result.allows_outbound ? 'Yes' : 'No'"></span>
-                                                </div>
-                                                <template x-if="trunkTests[trunk.id].result.direction">
-                                                    <div><span class="font-semibold text-slate-700">Direction:</span>
-                                                        <span
-                                                            x-text="formatDirection(trunkTests[trunk.id].result.direction)"></span>
-                                                    </div>
-                                                </template>
-                                            </div>
-                                            <div class="text-[11px] text-slate-400">
-                                                Evaluated
-                                                <span
-                                                    x-text="formatDateTime(trunkTests[trunk.id].result.evaluated_at)"></span>
-                                            </div>
-                                        </div>
-                                    </div>
-                                </template>
-                                <template x-if="trunkTests[trunk.id].options.loading">
-                                    <div
-                                        class="rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3 text-emerald-700">
-                                        Sending SIP OPTIONS probe…
-                                    </div>
-                                </template>
-                                <template x-if="trunkTests[trunk.id].options.error">
-                                    <div class="rounded-lg border border-rose-200 bg-rose-50 px-4 py-3 text-rose-700"
-                                        x-text="trunkTests[trunk.id].options.error"></div>
-                                </template>
-                                <template x-if="trunkTests[trunk.id].options.result">
-                                    <div class="space-y-2 rounded-lg border border-slate-200 bg-white px-4 py-3">
-                                        <div class="flex flex-wrap items-center justify-between gap-2">
-                                            <span class="font-semibold text-slate-700">SIP OPTIONS probe</span>
-                                            <span
-                                                class="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-semibold"
-                                                :class="trunkTests[trunk.id].options.result.success ? 'bg-emerald-50 text-emerald-600 ring-1 ring-emerald-200' : 'bg-rose-50 text-rose-600 ring-1 ring-rose-200'">
-                                                <span class="h-1.5 w-1.5 rounded-full"
-                                                    :class="trunkTests[trunk.id].options.result.success ? 'bg-emerald-500' : 'bg-rose-500'"></span>
-                                                <span
-                                                    x-text="trunkTests[trunk.id].options.result.success ? 'Reachable' : 'No response'"></span>
-                                            </span>
-                                        </div>
-                                        <div class="grid gap-2 text-[11px] text-slate-600">
-                                            <div><span class="font-semibold text-slate-700">Target:</span>
-                                                <span x-text="trunkTests[trunk.id].options.result.target_uri"></span>
-                                            </div>
-                                            <div><span class="font-semibold text-slate-700">Transport:</span>
-                                                <span x-text="trunkTests[trunk.id].options.result.transport"></span>
-                                            </div>
-                                            <div class="grid gap-2">
-                                                <template
-                                                    x-for="attempt in trunkTests[trunk.id].options.result.attempts"
-                                                    :key="attempt.destination">
-                                                    <div class="rounded border border-slate-200 bg-slate-50 p-2">
-                                                        <div
-                                                            class="flex items-center justify-between font-semibold text-slate-700">
-                                                            <span x-text="attempt.destination"></span>
-                                                            <span
-                                                                :class="attempt.success ? 'text-emerald-600' : 'text-rose-600'"
-                                                                x-text="renderOptionsStatus(attempt)"></span>
-                                                        </div>
-                                                        <div class="grid gap-1 text-slate-500">
-                                                            <div><span
-                                                                    class="font-semibold text-slate-600">Latency:</span>
-                                                                <span
-                                                                    x-text="attempt.latency_ms ? attempt.latency_ms + ' ms' : '—'"></span>
-                                                            </div>
-                                                            <template x-if="attempt.error">
-                                                                <div class="font-semibold text-rose-600"
-                                                                    x-text="attempt.error"></div>
-                                                            </template>
-                                                            <template x-if="attempt.server">
-                                                                <div><span
-                                                                        class="font-semibold text-slate-600">Server:</span>
-                                                                    <span x-text="attempt.server"></span>
-                                                                </div>
-                                                            </template>
-                                                            <template x-if="attempt.raw_response">
-                                                                <div class="text-slate-400"
-                                                                    x-text="attempt.raw_response"></div>
-                                                            </template>
-                                                        </div>
-                                                    </div>
-                                                </template>
-                                            </div>
-                                        </div>
-                                        <div class="text-[11px] text-slate-400">
-                                            Probed
-                                            <span
-                                                x-text="formatDateTime(trunkTests[trunk.id].options.result.evaluated_at)"></span>
-                                        </div>
-                                    </div>
-                                </template>
-                            </div>
-                        </article>
-                    </template>
-                </div>
-            </div>
-        </section>
-
         <section x-show="activeTab === 'routing'" x-cloak x-transition.opacity class="space-y-6">
             <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
                 <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -1525,7 +1284,6 @@
                             ? this.connection.accounts
                             : [];
                         this.connectionNotes = Array.isArray(this.connection.notes) ? this.connection.notes : [];
-                        this.initializeTrunkTests();
                         this.dialer = data.dialer || { source_options: [], destination_samples: [] };
                         this.initializeSipDefaults();
                         this.loadRecentTargets({ overwrite: true });
@@ -1544,9 +1302,6 @@
                             if (value === 'sip') {
                                 this.ensureDialogsLoaded();
                             }
-                        });
-                        this.$watch('trunks', () => {
-                            this.initializeTrunkTests();
                         });
                         this.$watch(() => this.connectionTransports, () => {
                             this.initializeSipDefaults();
@@ -1578,7 +1333,6 @@
                     connectionAccounts: [],
                     connectionNotes: [],
                     webrtcTest: { useServerIce: true, loading: false, error: null, result: null },
-                    trunkTests: {},
                     routingInput: '',
                     routingDirection: 'outbound',
                     routingAdvanced: false,
@@ -1624,7 +1378,6 @@
                     tabs: [
                         { id: 'dialer', label: 'Web Dialer' },
                         { id: 'connection', label: 'Connection' },
-                        { id: 'trunks', label: 'Trunks' },
                         { id: 'routing', label: 'Routing' },
                         { id: 'sip', label: 'SIP State' },
                     ],
@@ -1634,12 +1387,6 @@
                         if (id === 'sip') {
                             this.ensureDialogsLoaded();
                         }
-                    },
-                    get healthyTrunks() {
-                        return this.trunks.filter((item) => this.statusLabel(item.status) === 'Healthy').length;
-                    },
-                    get warningTrunks() {
-                        return this.trunks.filter((item) => this.statusLabel(item.status) !== 'Healthy').length;
                     },
                     get hasDialogFilter() {
                         return Boolean(this.dialogCallId);
@@ -1702,120 +1449,6 @@
                                 return 'bg-sky-500';
                             default:
                                 return 'bg-slate-400';
-                        }
-                    },
-                    initializeTrunkTests() {
-                        const state = {};
-                        if (Array.isArray(this.trunks)) {
-                            this.trunks.forEach((trunk) => {
-                                state[trunk.id] = {
-                                    address: trunk.ingress_ips?.[0] || trunk.egress || '',
-                                    loading: false,
-                                    error: null,
-                                    result: null,
-                                    options: {
-                                        loading: false,
-                                        error: null,
-                                        result: null,
-                                    },
-                                };
-                            });
-                        }
-                        this.trunkTests = state;
-                    },
-                    ensureTrunkTestState(trunkId) {
-                        if (this.trunkTests[trunkId]) {
-                            return;
-                        }
-                        this.trunkTests = {
-                            ...this.trunkTests,
-                            [trunkId]: {
-                                address: '',
-                                loading: false,
-                                error: null,
-                                result: null,
-                                options: {
-                                    loading: false,
-                                    error: null,
-                                    result: null,
-                                },
-                            },
-                        };
-                    },
-                    async runTrunkTest(trunkId) {
-                        this.ensureTrunkTestState(trunkId);
-                        const state = this.trunkTests[trunkId];
-                        if (!state) {
-                            return;
-                        }
-                        const address = (state.address || '').trim();
-                        if (!address) {
-                            state.error = 'Provide a hostname or IP to evaluate.';
-                            state.result = null;
-                            this.trunkTests = { ...this.trunkTests };
-                            return;
-                        }
-                        state.loading = true;
-                        state.error = null;
-                        state.result = null;
-                        this.trunkTests = { ...this.trunkTests };
-                        try {
-                            const response = await fetch(this.buildUrl('/diagnostics/trunks/test'), {
-                                method: 'POST',
-                                headers: { 'Content-Type': 'application/json' },
-                                credentials: 'same-origin',
-                                body: JSON.stringify({ trunk: trunkId, address }),
-                            });
-                            const data = await response.json().catch(() => null);
-                            if (!response.ok) {
-                                const message = data?.message || `Evaluation failed (${response.status})`;
-                                throw new Error(message);
-                            }
-                            state.result = data;
-                            state.error = null;
-                        } catch (err) {
-                            state.error = err?.message || 'Evaluation failed.';
-                            state.result = null;
-                        } finally {
-                            state.loading = false;
-                            this.trunkTests = { ...this.trunkTests };
-                        }
-                    },
-                    async runTrunkOptions(trunkId) {
-                        this.ensureTrunkTestState(trunkId);
-                        const state = this.trunkTests[trunkId];
-                        if (!state) {
-                            return;
-                        }
-                        const payload = { trunk: trunkId };
-                        const address = (state.address || '').trim();
-                        if (address) {
-                            payload.address = address;
-                        }
-                        state.options.loading = true;
-                        state.options.error = null;
-                        state.options.result = null;
-                        this.trunkTests = { ...this.trunkTests };
-                        try {
-                            const response = await fetch(this.buildUrl('/diagnostics/trunks/options'), {
-                                method: 'POST',
-                                headers: { 'Content-Type': 'application/json' },
-                                credentials: 'same-origin',
-                                body: JSON.stringify(payload),
-                            });
-                            const data = await response.json().catch(() => null);
-                            if (!response.ok) {
-                                const message = data?.message || `OPTIONS probe failed (${response.status})`;
-                                throw new Error(message);
-                            }
-                            state.options.result = data;
-                            state.options.error = null;
-                        } catch (err) {
-                            state.options.error = err?.message || 'OPTIONS probe failed.';
-                            state.options.result = null;
-                        } finally {
-                            state.options.loading = false;
-                            this.trunkTests = { ...this.trunkTests };
                         }
                     },
                     loadSampleRouting() {
@@ -3179,18 +2812,6 @@
                                 .join(', ');
                         }
                         return String(value);
-                    },
-                    renderOptionsStatus(attempt) {
-                        if (!attempt) {
-                            return '—';
-                        }
-                        const code = attempt.status_code ? String(attempt.status_code) : '';
-                        const reason = attempt.reason ? String(attempt.reason) : '';
-                        const base = code ? `${code}${reason ? ` ${reason}` : ''}` : '';
-                        if (attempt.success) {
-                            return base || 'Success';
-                        }
-                        return attempt.error || base || 'No response';
                     },
                     displayValue(value) {
                         if (!value && value !== 0) {
