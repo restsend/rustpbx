@@ -48,6 +48,13 @@ For detailed configuration and usage instructions, please refer to:
     http_addr = "0.0.0.0:8080"
     database_url = "sqlite://rustpbx.sqlite3"
 
+    [console]
+    base_path = "/console"
+    # allow self-service administrator signup after the first account
+    allow_registration = false
+    # set to true to force Secure cookie attribute, otherwise it is auto-detected based on request
+    secure_cookie = false
+
     [proxy]
     addr = "0.0.0.0"
     udp_port = 5060
