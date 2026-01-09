@@ -2311,132 +2311,135 @@ impl CallSession {
 
     async fn execute_invite(
         &mut self,
-        invite_option: InviteOption,
+        mut invite_option: InviteOption,
         target: &Location,
     ) -> Result<(), (StatusCode, Option<String>)> {
-        let (state_tx, state_rx) = mpsc::unbounded_channel();
+        let (state_tx, mut state_rx) = mpsc::unbounded_channel();
         let _state_tx_keepalive = state_tx.clone();
         let dialog_layer = self.dialog_layer.clone();
         self.note_invite_details(&invite_option);
 
-        let state_rx_guard = DialogStateReceiverGuard::new(dialog_layer.clone(), state_rx);
         let session_id = self.context.session_id.clone();
-
-        let invite_loop = async {
-            let mut current_invite_option = invite_option;
-            let mut retry_count = 0;
-            loop {
-                match dialog_layer
-                    .do_invite(current_invite_option.clone(), state_tx.clone())
-                    .await
-                {
-                    Ok((dialog_id, resp)) => {
-                        if let Some(resp) = resp {
-                            if resp.status_code == StatusCode::SessionIntervalTooSmall {
-                                if retry_count < 1 {
-                                    let min_se_value =
-                                        get_header_value(&resp.headers, HEADER_MIN_SE);
-                                    if let Some(value) = min_se_value {
-                                        if let Some(min_se) = parse_min_se(&value) {
-                                            info!(
-                                                session_id = %session_id,
-                                                min_se = ?min_se,
-                                                "Received 422, retrying with new Session-Expires"
-                                            );
-                                            if let Some(headers) =
-                                                &mut current_invite_option.headers
-                                            {
-                                                headers.retain(|h| match h {
-                                                    rsip::Header::Other(n, _) => !n
-                                                        .eq_ignore_ascii_case(
-                                                            HEADER_SESSION_EXPIRES,
-                                                        ),
-                                                    _ => true,
-                                                });
-                                                headers.push(rsip::Header::Other(
-                                                    HEADER_SESSION_EXPIRES.into(),
-                                                    min_se.as_secs().to_string(),
-                                                ));
+        let mut retry_count = 0;
+        let mut invitation = dialog_layer
+            .do_invite(invite_option.clone(), state_tx.clone())
+            .boxed();
+        let dialog;
+        let response;
+        loop {
+            tokio::select! {
+                res = &mut invitation => {
+                    match res {
+                        Ok((dialog_id, resp)) => {
+                            if let Some(resp) = resp {
+                                if resp.status_code == StatusCode::SessionIntervalTooSmall {
+                                    if retry_count < 1 {
+                                        let min_se_value =
+                                            get_header_value(&resp.headers, HEADER_MIN_SE);
+                                        if let Some(value) = min_se_value {
+                                            if let Some(min_se) = parse_min_se(&value) {
+                                                info!(
+                                                    session_id = %session_id,
+                                                    min_se = ?min_se,
+                                                    "Received 422, retrying with new Session-Expires"
+                                                );
+                                                if let Some(headers) =
+                                                    &mut invite_option.headers
+                                                {
+                                                    headers.retain(|h| match h {
+                                                        rsip::Header::Other(n, _) => !n
+                                                            .eq_ignore_ascii_case(
+                                                                HEADER_SESSION_EXPIRES,
+                                                            ),
+                                                        _ => true,
+                                                    });
+                                                    headers.push(rsip::Header::Other(
+                                                        HEADER_SESSION_EXPIRES.into(),
+                                                        min_se.as_secs().to_string(),
+                                                    ));
+                                                }
+                                                retry_count += 1;
+                                                invitation = dialog_layer.do_invite(invite_option.clone(), state_tx.clone()).boxed();
+                                                continue;
                                             }
-                                            retry_count += 1;
-                                            continue;
                                         }
                                     }
                                 }
-                            }
 
-                            if resp.status_code.kind() != rsip::StatusCodeKind::Successful {
-                                let reason = resp.reason_phrase().clone().map(Into::into);
-                                return Err((resp.status_code, reason));
+                                if resp.status_code.kind() != rsip::StatusCodeKind::Successful {
+                                    let reason = resp.reason_phrase().clone().map(Into::into);
+                                    return Err((resp.status_code, reason));
+                                } else {
+                                    dialog = dialog_id;
+                                    response = resp;
+                                    break;
+                                }
                             } else {
-                                return Ok(Some((dialog_id, resp)));
+                                return Err((
+                                    StatusCode::RequestTerminated,
+                                    Some("Cancelled by callee".to_string()),
+                                ));
                             }
-                        } else {
-                            return Err((
-                                StatusCode::RequestTerminated,
-                                Some("Cancelled by callee".to_string()),
-                            ));
+                        }
+                        Err(e) => {
+                            debug!(session_id = %session_id, "Invite failed: {:?}", e);
+                            return Err(match e {
+                                rsipstack::Error::DialogError(reason, _, code) => (code, Some(reason)),
+                                _ => (
+                                    StatusCode::ServerInternalError,
+                                    Some("Invite failed".to_string()),
+                                ),
+                            });
                         }
                     }
-                    Err(e) => {
-                        debug!(session_id = %session_id, "Invite failed: {:?}", e);
-                        return Err(match e {
-                            rsipstack::Error::DialogError(reason, _, code) => (code, Some(reason)),
-                            _ => (
-                                StatusCode::ServerInternalError,
-                                Some("Invite failed".to_string()),
-                            ),
-                        });
+                }
+                state = state_rx.recv() => {
+                    if let Some(DialogState::Early(_, response)) = state {
+                        let sdp = String::from_utf8_lossy(response.body()).to_string();
+                        let action = SessionAction::StartRinging{
+                            ringback: Some(sdp),
+                            passthrough: false
+                        };
+                        self.apply_session_action(action, None).await.ok();
                     }
                 }
             }
-        };
-        tokio::pin!(invite_loop);
-        let r = (&mut invite_loop).await;
-        info!(
-            session_id = %self.context.session_id,
-            target = %target,
-            "INVITE process completed"
-        );
-
-        match r {
-            Ok(Some((dialog_id, resp))) => {
-                if self.server.proxy_config.session_timer {
-                    let default_expires = self.server.proxy_config.session_expires.unwrap_or(1800);
-                    self.init_client_timer(&resp, default_expires);
-                }
-
-                if self.answer_time.is_none()
-                    && resp.status_code.kind() == rsip::StatusCodeKind::Successful
-                {
-                    // Extract SDP from response body, if present
-                    let answer_body = resp.body();
-                    let sdp = if !answer_body.is_empty() {
-                        Some(String::from_utf8_lossy(answer_body).to_string())
-                    } else {
-                        None
-                    };
-
-                    let dialog_id_val = dialog_id.id();
-                    self.add_callee_dialog(dialog_id_val.clone());
-                    let _ = self
-                        .apply_session_action(
-                            SessionAction::AcceptCall {
-                                callee: Some(target.aor.to_string()),
-                                sdp,
-                                dialog_id: Some(dialog_id_val.to_string()),
-                            },
-                            None,
-                        )
-                        .await;
-                }
-
-                self.add_callee_guard(state_rx_guard);
-                Ok(())
-            }
-            Ok(None) => Ok(()),
-            Err(e) => Err(e),
         }
+
+        let state_rx_guard = DialogStateReceiverGuard::new(dialog_layer.clone(), state_rx);
+
+        if self.server.proxy_config.session_timer {
+            let default_expires = self.server.proxy_config.session_expires.unwrap_or(1800);
+            self.init_client_timer(&response, default_expires);
+        }
+
+        if self.answer_time.is_none()
+            && response.status_code.kind() == rsip::StatusCodeKind::Successful
+        {
+            // Extract SDP from response body, if present
+            let answer_body = response.body();
+            let sdp = if !answer_body.is_empty() {
+                Some(String::from_utf8_lossy(answer_body).to_string())
+            } else {
+                None
+            };
+
+            let dialog_id_val = dialog.id();
+            self.add_callee_dialog(dialog_id_val.clone());
+            let _ = self
+                .apply_session_action(
+                    SessionAction::AcceptCall {
+                        callee: Some(target.aor.to_string()),
+                        sdp,
+                        dialog_id: Some(dialog_id_val.to_string()),
+                    },
+                    None,
+                )
+                .await;
+        }
+
+        self.add_callee_guard(state_rx_guard);
+        Ok(())
     }
 
     async fn handle_failure(&mut self, inbox: Option<&SessionActionInbox>) -> Result<()> {
