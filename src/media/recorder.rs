@@ -355,6 +355,13 @@ impl Recorder {
         }
 
         let mut flush_len = max_available_ts - self.next_flush_ts;
+
+        // Limit flush length to prevent huge memory allocation (e.g., 10 seconds max)
+        let max_flush_samples = self.sample_rate * 10;
+        if flush_len > max_flush_samples {
+            flush_len = max_flush_samples;
+        }
+
         let (samples_per_block, _) = self.block_info();
         flush_len = (flush_len / samples_per_block) * samples_per_block;
 
@@ -397,7 +404,15 @@ impl Recorder {
 
     fn get_silence_bytes(&mut self, _leg: Leg, blocks: usize) -> Result<Bytes> {
         let (samples_per_block, _) = self.block_info();
-        let silence_pcm = vec![0i16; (blocks as u32 * samples_per_block) as usize];
+        let mut num_samples = (blocks as u32 * samples_per_block) as usize;
+
+        // Safety cap: never allocate more than 10 seconds of silence in one go
+        let max_samples = (self.sample_rate * 10) as usize;
+        if num_samples > max_samples {
+            num_samples = max_samples;
+        }
+
+        let silence_pcm = vec![0i16; num_samples];
 
         if let Some(enc) = self.encoder.as_mut() {
             Ok(enc.encode(&silence_pcm).into())
@@ -424,7 +439,15 @@ impl Recorder {
                 if ts < flush_to {
                     // Check for gap
                     if ts > current_ts {
-                        let gap_samples = ts - current_ts;
+                        let mut gap_samples = ts - current_ts;
+                        let max_gap = self.sample_rate; // Max 1 second of silence
+                        if gap_samples > max_gap {
+                            debug!(
+                                "Recorder gap too large: {} samples, capping to {}",
+                                gap_samples, max_gap
+                            );
+                            gap_samples = max_gap;
+                        }
                         let gap_blocks = gap_samples / samples_per_block;
                         result.extend(self.get_silence_bytes(leg, gap_blocks as usize)?);
                         current_ts = ts;
