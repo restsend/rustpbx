@@ -360,11 +360,11 @@ default('RustPBX') }}{% endblock %}
             saving: false,
             activeTab: 'general',
             init() {
-                console.log('Model:', this.model);
                 this.loadOptions();
-                console.log('Tenant Options:', this.tenantOptions);
                 if (this.model) {
-                    this.populateFromModel();
+                    this.$nextTick(() => {
+                        this.populateFromModel();
+                    });
                 }
             },
             loadOptions() {
@@ -387,6 +387,10 @@ default('RustPBX') }}{% endblock %}
                 this.form.display_name = model.display_name || '';
                 this.form.carrier = model.carrier || '';
                 this.form.description = model.description || '';
+                // Reset to empty first to force reactivity (needed when value equals default)
+                this.form.status = '';
+                this.form.direction = '';
+                this.form.sip_transport = '';
                 this.form.status = (model.status || 'healthy').toLowerCase();
                 this.form.direction = (model.direction || 'bidirectional').toLowerCase();
                 this.form.sip_transport = (model.sip_transport || 'udp').toLowerCase();
