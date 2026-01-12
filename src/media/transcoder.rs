@@ -4,20 +4,19 @@ use rustrtc::media::AudioFrame;
 pub struct Transcoder {
     decoder: Box<dyn Decoder>,
     encoder: Box<dyn Encoder>,
-    payload_type: u8,
+    target: CodecType,
     resampler: Option<Resampler>,
     rtp_timestamp: u32,
     sequence_number: u16,
 }
 
 impl Transcoder {
-    pub fn new(from: CodecType, to: CodecType) -> Self {
+    pub fn new(from: CodecType, target: CodecType) -> Self {
         let decoder = create_decoder(from);
-        let encoder = create_encoder(to);
+        let encoder = create_encoder(target);
 
         let source_sample_rate = decoder.sample_rate();
         let target_sample_rate = encoder.sample_rate();
-        let payload_type = to.payload_type();
         let resampler = if source_sample_rate != target_sample_rate {
             Some(Resampler::new(
                 source_sample_rate as usize,
@@ -30,7 +29,7 @@ impl Transcoder {
             decoder,
             encoder,
             resampler,
-            payload_type,
+            target,
             rtp_timestamp: 0,
             sequence_number: 0,
         }
@@ -52,13 +51,11 @@ impl Transcoder {
         self.sequence_number = self.sequence_number.wrapping_add(1);
 
         AudioFrame {
-            rtp_timestamp: current_ts,  // Use timestamp before increment
-            sample_rate: self.encoder.sample_rate(),
-            channels: self.encoder.channels() as u8,
-            samples,
+            rtp_timestamp: current_ts, // Use timestamp before increment
+            clock_rate: self.target.clock_rate(),
             data: encoded_data.into(),
             sequence_number: Some(current_seq), // Set sequence number to signal app control
-            payload_type: Some(self.payload_type),
+            payload_type: Some(self.target.payload_type()),
         }
     }
 }

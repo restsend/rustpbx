@@ -164,9 +164,7 @@ mod recorder_advanced_tests {
             rtp_timestamp: 0,
             sequence_number: Some(1),
             payload_type: Some(0),
-            sample_rate: 8000,
-            channels: 1,
-            samples: 160,
+            clock_rate: 8000,
         };
 
         let frame_b = AudioFrame {
@@ -174,9 +172,7 @@ mod recorder_advanced_tests {
             rtp_timestamp: 0,
             sequence_number: Some(1),
             payload_type: Some(0),
-            sample_rate: 8000,
-            channels: 1,
-            samples: 160,
+            clock_rate: 8000,
         };
 
         // Write samples from both legs
@@ -214,9 +210,7 @@ mod recorder_advanced_tests {
             rtp_timestamp: 0,
             sequence_number: Some(1),
             payload_type: Some(0),
-            sample_rate: 8000,
-            channels: 1,
-            samples: 160,
+            clock_rate: 8000,
         };
 
         recorder
@@ -378,9 +372,7 @@ mod recorder_advanced_tests {
             rtp_timestamp: 0,
             sequence_number: Some(1),
             payload_type: Some(8), // PCMA
-            sample_rate: 8000,
-            channels: 1,
-            samples: 160,
+            clock_rate: 8000,
         };
 
         recorder
@@ -408,9 +400,7 @@ mod recorder_advanced_tests {
             rtp_timestamp: 1000,
             sequence_number: Some(1),
             payload_type: Some(0),
-            sample_rate: 8000,
-            channels: 1,
-            samples: 160,
+            clock_rate: 8000,
         };
 
         // Leg B starts at 40ms (320 samples later)
@@ -419,9 +409,7 @@ mod recorder_advanced_tests {
             rtp_timestamp: 1320, // 1000 + 320
             sequence_number: Some(1),
             payload_type: Some(0),
-            sample_rate: 8000,
-            channels: 1,
-            samples: 160,
+            clock_rate: 8000,
         };
 
         recorder
@@ -452,9 +440,7 @@ mod recorder_advanced_tests {
             rtp_timestamp: 0,
             sequence_number: Some(1),
             payload_type: Some(18),
-            sample_rate: 8000,
-            channels: 1,
-            samples: 80,
+            clock_rate: 8000,
         };
 
         let frame_b = AudioFrame {
@@ -462,9 +448,7 @@ mod recorder_advanced_tests {
             rtp_timestamp: 0,
             sequence_number: Some(1),
             payload_type: Some(18),
-            sample_rate: 8000,
-            channels: 1,
-            samples: 80,
+            clock_rate: 8000,
         };
 
         recorder
