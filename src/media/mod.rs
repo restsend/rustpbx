@@ -315,14 +315,14 @@ impl Track for MediaTrack {
     async fn handshake(&mut self, remote_offer: String) -> Result<String> {
         let pc = self.ensure_pc().await?;
         self.set_remote(&pc, &remote_offer, SdpType::Offer).await?;
-        let answer = pc.create_answer()?;
+        let answer = pc.create_answer().await?;
         let sdp = self.set_local(&pc, answer).await?;
         Ok(sdp)
     }
 
     async fn local_description(&mut self) -> Result<String> {
         let pc = self.ensure_pc().await?;
-        let offer = pc.create_offer()?;
+        let offer = pc.create_offer().await?;
         let sdp = self.set_local(&pc, offer).await?;
         Ok(sdp)
     }
@@ -604,7 +604,7 @@ impl Track for FileTrack {
         let offer = SessionDescription::parse(SdpType::Offer, &remote_offer)?;
 
         pc.set_remote_description(offer).await?;
-        let answer = pc.create_answer()?;
+        let answer = pc.create_answer().await?;
         pc.set_local_description(answer.clone())?;
 
         Ok(answer.to_sdp_string())
@@ -613,7 +613,7 @@ impl Track for FileTrack {
     async fn local_description(&mut self) -> Result<String> {
         let pc = self.ensure_pc().await?;
 
-        let mut offer = pc.create_offer()?;
+        let mut offer = pc.create_offer().await?;
 
         // Set codec preference
         if !self.codec_preference.is_empty() {
