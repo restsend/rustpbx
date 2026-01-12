@@ -20,7 +20,7 @@ use std::{
 use tokio::sync::Mutex;
 use tracing::debug;
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum LocatorEvent {
     Registered(Location),
     Unregistered(Location),

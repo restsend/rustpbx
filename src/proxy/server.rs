@@ -18,6 +18,7 @@ use crate::{
         active_call_registry::ActiveProxyCallRegistry,
         auth::AuthBackend,
         call::{CallRouter, DialplanInspector},
+        presence::PresenceManager,
     },
 };
 use anyhow::{Result, anyhow};
@@ -73,6 +74,7 @@ pub struct SipServerInner {
     pub call_record_hooks: Arc<Vec<Box<dyn crate::callrecord::CallRecordHook>>>,
     pub runnings_tx: Arc<AtomicUsize>,
     pub storage: Option<crate::storage::Storage>,
+    pub presence_manager: Arc<PresenceManager>,
 }
 
 pub type SipServerRef = Arc<SipServerInner>;
@@ -460,6 +462,8 @@ impl SipServerBuilder {
         };
 
         let active_call_registry = Arc::new(ActiveProxyCallRegistry::new());
+        let presence_manager = Arc::new(PresenceManager::new(database.clone()));
+        presence_manager.load_from_db().await.ok();
 
         let inner = Arc::new(SipServerInner {
             rtp_config,
@@ -484,6 +488,7 @@ impl SipServerBuilder {
             call_record_hooks: Arc::new(self.call_record_hooks),
             runnings_tx: Arc::new(AtomicUsize::new(0)),
             storage: self.storage,
+            presence_manager,
         });
 
         let inner_weak = Arc::downgrade(&inner);

@@ -10,6 +10,7 @@ impl MigratorTrait for Migrator {
             Box::new(super::extension::Migration),
             Box::new(super::extension_department::Migration),
             Box::new(super::sip_trunk::Migration),
+            Box::new(super::presence::Migration),
             Box::new(super::routing::Migration),
             Box::new(crate::addons::queue::models::Migration),
             Box::new(super::call_record::Migration),

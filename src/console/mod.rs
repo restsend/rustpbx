@@ -264,6 +264,10 @@ impl ConsoleState {
     pub fn forgot_url(&self) -> String {
         self.url_for("/forgot")
     }
+
+    pub fn get_sip_server(&self) -> Option<SipServerRef> {
+        self.sip_server.read().unwrap().clone()
+    }
 }
 
 fn normalize_base_path(path: &str) -> String {

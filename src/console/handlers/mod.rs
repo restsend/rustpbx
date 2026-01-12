@@ -11,6 +11,7 @@ pub mod dashboard;
 pub mod diagnostics;
 pub mod extension;
 pub mod forms;
+pub mod presence;
 pub mod routing;
 pub mod setting;
 pub mod sip_trunk;
@@ -48,6 +49,7 @@ pub fn router(state: Arc<ConsoleState>) -> Router {
         .merge(call_record::urls())
         .merge(diagnostics::urls())
         .merge(call_control::urls())
+        .merge(presence::urls())
         .merge(addons::urls());
 
     Router::new()

@@ -9,6 +9,7 @@ use crate::{
         acl::AclModule,
         auth::AuthModule,
         call::CallModule,
+        presence::PresenceModule,
         registrar::RegistrarModule,
         server::{SipServer, SipServerBuilder},
         ws::sip_ws_handler,
@@ -290,6 +291,7 @@ impl AppStateBuilder {
                     .with_storage(core.storage.clone())
                     .register_module("acl", AclModule::create)
                     .register_module("auth", AuthModule::create)
+                    .register_module("presence", PresenceModule::create)
                     .register_module("registrar", RegistrarModule::create)
                     .register_module("call", CallModule::create);
 

@@ -326,18 +326,32 @@ impl ProxyModule for AuthModule {
                     };
                 }
 
-                let www_auth = self.create_www_auth_challenge(&realm)?;
+                let (status_code, headers) = if tx.original.method == rsip::Method::Register {
+                    let www_auth = self.create_www_auth_challenge(&realm)?;
+                    (
+                        rsip::StatusCode::Unauthorized,
+                        vec![Header::WwwAuthenticate(www_auth)],
+                    )
+                } else {
+                    let www_auth = self.create_www_auth_challenge(&realm)?;
+                    let proxy_auth = self.create_proxy_auth_challenge(&realm)?;
+                    (
+                        rsip::StatusCode::ProxyAuthenticationRequired,
+                        vec![
+                            Header::WwwAuthenticate(www_auth),
+                            Header::ProxyAuthenticate(proxy_auth),
+                        ],
+                    )
+                };
+
                 info!(
                     from = from_uri.to_string(),
                     realm = realm,
-                    www_auth = www_auth.value(),
+                    status = %status_code,
                     %source,
-                    "WWW authentication failed, sending WWW challenge"
+                    "Authentication failed, sending challenge"
                 );
-                let headers = vec![Header::WwwAuthenticate(www_auth)];
-                tx.reply_with(rsip::StatusCode::Unauthorized, headers, None)
-                    .await
-                    .ok();
+                tx.reply_with(status_code, headers, None).await.ok();
                 Ok(ProxyAction::Abort)
             }
             Err(e) => {
