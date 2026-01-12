@@ -39,7 +39,7 @@ allow_registration = false
 secure_cookie = false
 
 [proxy]
-modules = ["acl", "auth", "registrar", "call"]
+modules = ["acl", "auth", "presence", "registrar", "call"]
 addr = "0.0.0.0"
 udp_port = 15060
 registrar_expires = 60

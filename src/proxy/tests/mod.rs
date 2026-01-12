@@ -26,5 +26,7 @@ mod test_media_proxy;
 #[cfg(test)]
 mod test_proxy_integration;
 #[cfg(test)]
+mod test_presence;
+#[cfg(test)]
 mod test_queue;
 pub mod test_ua;

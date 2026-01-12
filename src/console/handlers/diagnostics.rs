@@ -2280,6 +2280,11 @@ fn summarize_state(state: &DialogState) -> Option<DialogStateSnapshot> {
             detail: Some(req.method.to_string()),
             answer: decode_body(&req.body),
         }),
+        DialogState::Publish(_, req, _) => Some(DialogStateSnapshot {
+            label: "Publish".to_string(),
+            detail: Some(req.method.to_string()),
+            answer: decode_body(&req.body),
+        }),
         DialogState::Terminated(_, _) => None,
     }
 }

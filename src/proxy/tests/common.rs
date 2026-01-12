@@ -10,14 +10,13 @@ use crate::proxy::{
 use rsip::Header;
 use rsip::services::DigestGenerator;
 use rsip::{HostWithPort, prelude::*};
-use rsipstack::EndpointBuilder;
 use rsipstack::dialog::dialog_layer::DialogLayer;
 use rsipstack::transaction::endpoint::EndpointInner;
 use rsipstack::transaction::key::{TransactionKey, TransactionRole};
 use rsipstack::transaction::random_text;
 use rsipstack::transaction::transaction::Transaction;
+use rsipstack::transport::SipAddr;
 use rsipstack::transport::channel::ChannelConnection;
-use rsipstack::transport::{SipAddr, TransportLayer};
 use std::sync::Arc;
 use std::sync::atomic::AtomicUsize;
 use std::time::Duration;
@@ -46,7 +45,25 @@ pub async fn create_test_server_with_config(
     let user_backend = Box::new(MemoryUserBackend::new(None));
     let locator = Arc::new(Box::new(MemoryLocator::new()) as Box<dyn Locator>);
     let config = Arc::new(config);
-    let endpoint = EndpointBuilder::new().build();
+
+    let endpoint = rsipstack::EndpointBuilder::new().build();
+    // Add a mock transport to the endpoint so it can send out-of-dialog requests in tests
+    let (tx_chan, _rx_chan) = tokio::sync::mpsc::unbounded_channel();
+    let mock_addr = SipAddr {
+        r#type: Some(rsip::Transport::Udp),
+        addr: rsip::HostWithPort {
+            host: "127.0.0.1".parse().unwrap(),
+            port: Some(5060.into()),
+        },
+    };
+    let connection = ChannelConnection::create_connection(_rx_chan, tx_chan, mock_addr, None)
+        .await
+        .expect("failed to create channel connection");
+    endpoint
+        .inner
+        .transport_layer
+        .add_transport(connection.into());
+
     let dialog_layer = Arc::new(DialogLayer::new(endpoint.inner.clone()));
     // Create server inner directly
     let data_context = Arc::new(
@@ -54,6 +71,8 @@ pub async fn create_test_server_with_config(
             .await
             .expect("failed to init proxy data context for tests"),
     );
+
+    let (locator_events_tx, _) = tokio::sync::broadcast::channel(100);
 
     let server_inner = Arc::new(SipServerInner {
         rtp_config: RtpConfig::default(),
@@ -71,13 +90,14 @@ pub async fn create_test_server_with_config(
         dialplan_inspectors: Vec::new(),
         create_route_invite: None,
         ignore_out_of_dialog_request: true,
-        locator_events: None,
+        locator_events: Some(locator_events_tx),
         sip_flow: None,
         active_call_registry: Arc::new(ActiveProxyCallRegistry::new()),
         frequency_limiter: None,
         call_record_hooks: Arc::new(Vec::new()),
         runnings_tx: Arc::new(AtomicUsize::new(0)),
         storage: None,
+        presence_manager: Arc::new(crate::proxy::presence::PresenceManager::new(None)),
     });
 
     // Add test users
@@ -126,8 +146,9 @@ pub async fn create_transaction(request: rsip::Request) -> (Transaction, Arc<End
     let connection = ChannelConnection::create_connection(rx, tx, mock_addr, None)
         .await
         .expect("failed to create channel connection");
-    let transport_layer = TransportLayer::new(CancellationToken::new());
-    transport_layer.add_transport(connection.into());
+    let transport_layer = rsipstack::transport::TransportLayer::new(CancellationToken::new());
+    let sip_conn: rsipstack::transport::SipConnection = connection.into();
+    transport_layer.add_transport(sip_conn.clone());
 
     let endpoint_inner = EndpointInner::new(
         "RustPBX Test".to_string(),
@@ -142,7 +163,7 @@ pub async fn create_transaction(request: rsip::Request) -> (Transaction, Arc<End
     );
 
     let key = TransactionKey::from_request(&request, TransactionRole::Server).unwrap();
-    let tx = Transaction::new_server(key, request, endpoint_inner.clone(), None);
+    let tx = Transaction::new_server(key, request, endpoint_inner.clone(), Some(sip_conn));
 
     (tx, endpoint_inner)
 }
