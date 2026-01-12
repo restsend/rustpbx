@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 pub fn urls() -> Router<Arc<ConsoleState>> {
     Router::new().route(
-        "/api/presence/:extension",
+        "/api/presence/{extension}",
         get(get_presence).post(set_presence),
     )
 }
