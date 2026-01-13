@@ -485,7 +485,7 @@ impl CallSession {
 
         // Parse caller's offer to get their supported codecs
         let caller_offer = self.caller_offer.as_ref()?;
-        let (caller_codecs, _) = MediaNegotiator::extract_codec_params(caller_offer);
+        let (caller_codecs, caller_dtmf_pt) = MediaNegotiator::extract_codec_params(caller_offer);
 
         // Check if caller supports our chosen callee codec
         let caller_codec_info = caller_codecs.iter().find(|c| c.codec == callee_codec)?;
@@ -513,10 +513,15 @@ impl CallSession {
         let orig_offer_sdp =
             String::from_utf8_lossy(self.server_dialog.initial_request().body()).to_string();
 
-        let codec_preference: Vec<CodecType> = optimized_rtp_map
+        let mut codec_preference: Vec<CodecType> = optimized_rtp_map
             .iter()
             .map(|(_, (codec, _, _))| *codec)
             .collect();
+
+        // Add TelephoneEvent if caller supports DTMF
+        if caller_dtmf_pt.is_some() {
+            codec_preference.push(CodecType::TelephoneEvent);
+        }
 
         let mut track_builder = RtpTrackBuilder::new(track_id.clone())
             .with_cancel_token(self.caller_peer.cancel_token())
