@@ -138,46 +138,10 @@ pub async fn persist_call_record(
     // Update record with billing info so subsequent hooks can see it
     record.extensions.insert(args.clone());
 
-    if let Some(model) = Entity::find()
-        .filter(Column::CallId.eq(record.call_id.clone()))
-        .one(db)
-        .await?
-    {
-        let mut active: ActiveModel = model.into();
-        active.display_id = Set(None);
-        active.direction = Set(direction.clone());
-        active.status = Set(status.clone());
-        active.started_at = Set(record.start_time);
-        active.ended_at = Set(Some(record.end_time));
-        active.duration_secs = Set(duration_secs);
-        active.from_number = Set(from_number.clone());
-        active.to_number = Set(to_number.clone());
-        active.caller_name = Set(caller_name.clone());
-        active.agent_name = Set(agent_name.clone());
-        active.queue = Set(queue.clone());
-        active.department_id = Set(department_id);
-        active.extension_id = Set(extension_id);
-        active.sip_trunk_id = Set(sip_trunk_id);
-        active.route_id = Set(route_id);
-        active.sip_gateway = Set(sip_gateway.clone());
-        active.caller_uri = Set(caller_uri.clone());
-        active.callee_uri = Set(callee_uri.clone());
-        active.recording_url = Set(recording_url.clone());
-        active.recording_duration_secs = Set(recording_duration_secs);
-        active.has_transcript = Set(args.has_transcript);
-        active.transcript_status = Set(args
-            .transcript_status
-            .clone()
-            .unwrap_or_else(|| "none".to_string()));
-        active.transcript_language = Set(args.transcript_language.clone());
-        active.tags = Set(tags.clone());
-        active.analytics = Set(analytics.clone());
-        active.metadata = Set(metadata_value.clone());
-        active.signaling = Set(signaling_value.clone());
-        active.updated_at = Set(record.end_time);
-        Entity::update(active).exec(db).await?;
-        return Ok(());
-    }
+    let transcript_status = args
+        .transcript_status
+        .clone()
+        .unwrap_or_else(|| "none".to_string());
 
     let active = ActiveModel {
         call_id: Set(record.call_id.clone()),
@@ -201,9 +165,9 @@ pub async fn persist_call_record(
         callee_uri: Set(callee_uri.clone()),
         recording_url: Set(recording_url.clone()),
         recording_duration_secs: Set(recording_duration_secs),
-        has_transcript: Set(false),
-        transcript_status: Set("none".to_string()),
-        transcript_language: Set(None),
+        has_transcript: Set(args.has_transcript),
+        transcript_status: Set(transcript_status),
+        transcript_language: Set(args.transcript_language.clone()),
         tags: Set(tags.clone()),
         analytics: Set(analytics.clone()),
         metadata: Set(metadata_value.clone()),
@@ -214,7 +178,43 @@ pub async fn persist_call_record(
         ..Default::default()
     };
 
-    Entity::insert(active).exec(db).await?;
+    Entity::insert(active)
+        .on_conflict(
+            sea_orm::sea_query::OnConflict::column(Column::CallId)
+                .update_columns([
+                    Column::DisplayId,
+                    Column::Direction,
+                    Column::Status,
+                    Column::StartedAt,
+                    Column::EndedAt,
+                    Column::DurationSecs,
+                    Column::FromNumber,
+                    Column::ToNumber,
+                    Column::CallerName,
+                    Column::AgentName,
+                    Column::Queue,
+                    Column::DepartmentId,
+                    Column::ExtensionId,
+                    Column::SipTrunkId,
+                    Column::RouteId,
+                    Column::SipGateway,
+                    Column::CallerUri,
+                    Column::CalleeUri,
+                    Column::RecordingUrl,
+                    Column::RecordingDurationSecs,
+                    Column::HasTranscript,
+                    Column::TranscriptStatus,
+                    Column::TranscriptLanguage,
+                    Column::Tags,
+                    Column::Analytics,
+                    Column::Metadata,
+                    Column::Signaling,
+                    Column::UpdatedAt,
+                ])
+                .to_owned(),
+        )
+        .exec(db)
+        .await?;
 
     Ok(())
 }

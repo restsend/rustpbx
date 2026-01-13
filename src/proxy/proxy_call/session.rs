@@ -1738,7 +1738,7 @@ impl CallSession {
         targets: &[Location],
         inbox: ActionInbox<'_>,
     ) -> Result<()> {
-        info!(
+        debug!(
             session_id = %self.context.session_id,
             target_count = targets.len(),
             "Starting sequential dialing"
@@ -2241,7 +2241,7 @@ impl CallSession {
         {
             let cancel_token = self.cancel_token.clone();
             let session_id = self.context.session_id.clone();
-            info!(session_id = %session_id, ?duration, "Setting max duration timer");
+
             tokio::spawn(async move {
                 tokio::time::sleep(duration).await;
                 if !cancel_token.is_cancelled() {
@@ -2657,7 +2657,7 @@ impl CallSession {
                     {
                         let server_timer = server_timer.lock().unwrap();
                         if server_timer.is_expired() {
-                            info!(session_id = %context.session_id, "Server session timer expired, terminating");
+                            debug!(session_id = %context.session_id, "Server session timer expired, terminating");
                             should_terminate = true;
                         } else if server_timer.refresher == SessionRefresher::Uas && server_timer.should_refresh() {
                             should_refresh_server = true;
@@ -2906,7 +2906,7 @@ impl CallSession {
 
         let handle_future = async move {
             let r = server_dialog_clone.handle(tx).await;
-            info!(session_id = %context.session_id, "Server dialog handle returned");
+            debug!(session_id = %context.session_id, "Server dialog handle returned");
             if let Err(ref e) = r {
                 warn!(session_id = %context.session_id, error = %e, "Server dialog handle returned error, cancelling call");
                 cancel_token.cancel();

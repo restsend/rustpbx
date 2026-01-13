@@ -264,21 +264,69 @@ async fn main() -> Result<()> {
 
     let mut cached_config = Some(config);
     let mut next_config_path = config_path.clone();
+    let mut retry_count = 0;
+    let max_retries = 10;
+    let retry_interval = Duration::from_secs(5);
 
     loop {
         let config = if let Some(cfg) = cached_config.take() {
             cfg
         } else if let Some(ref path) = next_config_path {
-            Config::load(path)
-                .map_err(|err| anyhow::anyhow!("Failed to load config from {}: {}", path, err))?
+            match Config::load(path) {
+                Ok(cfg) => cfg,
+                Err(err) => {
+                    retry_count += 1;
+                    if retry_count > max_retries {
+                        return Err(anyhow::anyhow!(
+                            "Failed to load config from {} after {} retries: {}",
+                            path,
+                            max_retries,
+                            err
+                        ));
+                    }
+                    tracing::error!(
+                        "Failed to load config from {} (retry {}/{}): {}. Retrying in {:?}...",
+                        path,
+                        retry_count,
+                        max_retries,
+                        err,
+                        retry_interval
+                    );
+                    sleep(retry_interval).await;
+                    continue;
+                }
+            }
         } else {
             Config::default()
         };
 
         let state_builder = AppStateBuilder::new()
-            .with_config(config)
+            .with_config(config.clone())
             .with_config_metadata(next_config_path.clone(), Utc::now());
-        let state = state_builder.build().await.expect("Failed to build app");
+
+        let state = match state_builder.build().await {
+            Ok(state) => state,
+            Err(err) => {
+                retry_count += 1;
+                if retry_count > max_retries {
+                    return Err(anyhow::anyhow!(
+                        "Failed to build app after {} retries: {}",
+                        max_retries,
+                        err
+                    ));
+                }
+                tracing::error!(
+                    "Failed to build app (retry {}/{}): {}. Retrying in {:?}...",
+                    retry_count,
+                    max_retries,
+                    err,
+                    retry_interval
+                );
+                sleep(retry_interval).await;
+                cached_config = Some(config);
+                continue;
+            }
+        };
 
         info!("starting rustpbx on {}", state.config().http_addr);
         let router = create_router(state.clone());
@@ -291,15 +339,17 @@ async fn main() -> Result<()> {
         };
 
         let mut reload_requested = false;
+        let mut app_exit_err = None;
 
         #[cfg(unix)]
         {
             tokio::select! {
                 result = &mut app_future => {
                     if let Err(err) = result {
-                        return Err(err);
+                        app_exit_err = Some(err);
+                    } else {
+                        reload_requested = state.reload_requested.load(Ordering::Relaxed);
                     }
-                    reload_requested = state.reload_requested.load(Ordering::Relaxed);
                 }
                 _ = tokio::signal::ctrl_c() => {
                     info!("received CTRL+C, shutting down");
@@ -319,9 +369,10 @@ async fn main() -> Result<()> {
             tokio::select! {
                 result = &mut app_future => {
                     if let Err(err) = result {
-                        return Err(err);
+                        app_exit_err = Some(err);
+                    } else {
+                        reload_requested = state.reload_requested.load(Ordering::Relaxed);
                     }
-                    reload_requested = state.reload_requested.load(Ordering::Relaxed);
                 }
                 _ = tokio::signal::ctrl_c() => {
                     info!("received CTRL+C, shutting down");
@@ -331,10 +382,32 @@ async fn main() -> Result<()> {
             }
         }
 
+        if let Some(err) = app_exit_err {
+            retry_count += 1;
+            if retry_count > max_retries {
+                return Err(anyhow::anyhow!(
+                    "Application failed after {} retries: {}",
+                    max_retries,
+                    err
+                ));
+            }
+            tracing::error!(
+                "Application error (retry {}/{}): {}. Retrying in {:?}...",
+                retry_count,
+                max_retries,
+                err,
+                retry_interval
+            );
+            sleep(retry_interval).await;
+            cached_config = Some(config);
+            continue;
+        }
+
         if reload_requested {
             info!("Reload requested; restarting with updated configuration");
             next_config_path = state.config_path.clone();
             cached_config = None;
+            retry_count = 0;
             sleep(Duration::from_secs(3)).await; // give some time for sockets to be released
             continue;
         }

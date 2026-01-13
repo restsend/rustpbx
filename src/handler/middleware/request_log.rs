@@ -157,7 +157,7 @@ where
             let fallback = format::Format::default()
                 .with_timer(self.timer.clone())
                 .with_target(true)
-                .with_source_location(true);
+                .with_source_location(false);
             fallback.format_event(ctx, writer, event)
         }
     }
