@@ -7,9 +7,7 @@ use axum::{
 };
 use chrono::{DateTime, Duration, NaiveTime, Utc};
 use chrono_tz::Tz;
-use sea_orm::{
-    ColumnTrait, EntityTrait, QueryFilter, QueryOrder,
-};
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder};
 use std::sync::{Arc, RwLock};
 use tokio::time;
 use tracing::{error, info};
@@ -40,7 +38,7 @@ impl ArchiveAddon {
         let mut interval = time::interval(time::Duration::from_secs(60));
         loop {
             interval.tick().await;
-            
+
             let archive_config = {
                 let guard = archive_state.config.read().unwrap();
                 match &*guard {
@@ -62,19 +60,20 @@ impl ArchiveAddon {
             };
 
             let now = Utc::now().with_timezone(&timezone);
-            let archive_time = match NaiveTime::parse_from_str(&archive_config.archive_time, "%H:%M") {
-                Ok(t) => t,
-                Err(e) => {
-                    error!("Invalid archive_time format (expected HH:MM): {}", e);
-                    continue;
-                }
-            };
+            let archive_time =
+                match NaiveTime::parse_from_str(&archive_config.archive_time, "%H:%M") {
+                    Ok(t) => t,
+                    Err(e) => {
+                        error!("Invalid archive_time format (expected HH:MM): {}", e);
+                        continue;
+                    }
+                };
 
             // Check if it's time to run
             // We want to run if current time is >= archive_time and we haven't run today yet.
             // Or simpler: just check if HH:MM matches. But we might miss it if the loop is slow.
             // Better: Check if we have run today.
-            
+
             let last_run = *archive_state.last_run.read().unwrap();
             let should_run = match last_run {
                 Some(last) => {
@@ -96,11 +95,14 @@ impl ArchiveAddon {
         }
     }
 
-    pub async fn perform_archive(state: AppState, config: &crate::config::ArchiveConfig) -> anyhow::Result<()> {
+    pub async fn perform_archive(
+        state: AppState,
+        config: &crate::config::ArchiveConfig,
+    ) -> anyhow::Result<()> {
         use crate::models::call_record;
-        use std::io::Write;
-        use flate2::write::GzEncoder;
         use flate2::Compression;
+        use flate2::write::GzEncoder;
+        use std::io::Write;
 
         let db = state.db();
         let retention_days = config.retention_days as i64;
@@ -114,11 +116,11 @@ impl ArchiveAddon {
         // But if we have many days of backlog, we might want to split them into multiple files?
         // "archive/{date}-callrecords.gz" implies one file per date.
         // So we should find all distinct dates < cutoff.
-        
+
         // For simplicity, let's just take all records < cutoff and put them in one file named with today's date?
         // No, "archive/{date}-callrecords.gz" usually means the date of the records.
         // So we should iterate over days.
-        
+
         // Let's find the oldest record.
         let oldest_record = call_record::Entity::find()
             .filter(call_record::Column::StartedAt.lt(cutoff_date))
@@ -137,9 +139,13 @@ impl ArchiveAddon {
 
         while current_date < cutoff_date_naive {
             let next_date = current_date + chrono::Duration::days(1);
-            
-            let start_of_day: DateTime<Utc> = DateTime::from_naive_utc_and_offset(current_date.and_hms_opt(0, 0, 0).unwrap(), Utc);
-            let end_of_day: DateTime<Utc> = DateTime::from_naive_utc_and_offset(next_date.and_hms_opt(0, 0, 0).unwrap(), Utc);
+
+            let start_of_day: DateTime<Utc> = DateTime::from_naive_utc_and_offset(
+                current_date.and_hms_opt(0, 0, 0).unwrap(),
+                Utc,
+            );
+            let end_of_day: DateTime<Utc> =
+                DateTime::from_naive_utc_and_offset(next_date.and_hms_opt(0, 0, 0).unwrap(), Utc);
 
             let records = call_record::Entity::find()
                 .filter(call_record::Column::StartedAt.gte(start_of_day))
@@ -150,8 +156,13 @@ impl ArchiveAddon {
             if !records.is_empty() {
                 let date_str = current_date.format("%Y-%m-%d").to_string();
                 let filename = format!("archive/{}-callrecords.gz", date_str);
-                
-                info!("Archiving {} records for {} to {}", records.len(), date_str, filename);
+
+                info!(
+                    "Archiving {} records for {} to {}",
+                    records.len(),
+                    date_str,
+                    filename
+                );
 
                 // Create archive directory if not exists
                 if let Some(parent) = std::path::Path::new(&filename).parent() {
@@ -161,7 +172,7 @@ impl ArchiveAddon {
                 // Create CSV content
                 let mut wtr = csv::Writer::from_writer(vec![]);
                 for record in &records {
-                    // We need to serialize record to CSV. 
+                    // We need to serialize record to CSV.
                     // call_record::Model implements Serialize, so this should work.
                     wtr.serialize(record)?;
                 }
@@ -238,10 +249,14 @@ impl Addon for ArchiveAddon {
             >(console_state));
         }
 
-        Some(protected.with_state(state).layer(Extension(self.state.clone())))
+        Some(
+            protected
+                .with_state(state)
+                .layer(Extension(self.state.clone())),
+        )
     }
 
-    fn sidebar_items(&self) -> Vec<SidebarItem> {
+    fn sidebar_items(&self, _state: AppState) -> Vec<SidebarItem> {
         vec![SidebarItem {
             name: "Archive".to_string(),
             url: "/console/archive".to_string(),

@@ -88,13 +88,13 @@ pub trait Addon: Send + Sync {
     fn router(&self, state: AppState) -> Option<Router>;
 
     /// Return Sidebar menu items
-    fn sidebar_items(&self) -> Vec<SidebarItem> {
+    fn sidebar_items(&self, _state: AppState) -> Vec<SidebarItem> {
         vec![]
     }
 
     /// Return the configuration URL for the addon
-    fn config_url(&self) -> Option<String> {
-        self.sidebar_items().first().map(|s| s.url.clone())
+    fn config_url(&self, state: AppState) -> Option<String> {
+        self.sidebar_items(state).first().map(|s| s.url.clone())
     }
 
     /// Return Settings page injection items (HTML fragments or config definitions)
@@ -122,6 +122,11 @@ pub trait Addon: Send + Sync {
         _ctx: Arc<crate::app::CoreContext>,
     ) -> crate::proxy::server::SipServerBuilder {
         builder
+    }
+
+    /// Seed fixtures for the addon
+    async fn seed_fixtures(&self, _state: AppState) -> anyhow::Result<()> {
+        Ok(())
     }
 }
 

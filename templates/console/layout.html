@@ -317,6 +317,20 @@
                     </button>
                 </div>
                 <div class="flex items-center gap-3">
+                    {% if demo_mode %}
+                    <div
+                        class="hidden items-center gap-2 rounded-lg bg-amber-50 px-3 py-1.5 text-xs font-medium text-amber-800 ring-1 ring-inset ring-amber-200 sm:flex">
+                        <span class="flex h-2 w-2">
+                            <span
+                                class="animate-ping absolute inline-flex h-2 w-2 rounded-full bg-amber-400 opacity-75"></span>
+                            <span class="relative inline-flex rounded-full h-2 w-2 bg-amber-500"></span>
+                        </span>
+                        <span>Demo Mode: Data resets every hour</span>
+                        <span class="mx-1 text-amber-300">|</span>
+                        <a href="https://miuda.ai/?from=demo" target="_blank"
+                            class="font-semibold text-sky-600 hover:text-sky-500">Commercial Edition &rarr;</a>
+                    </div>
+                    {% endif %}
                     <button class="rounded-lg p-2 hover:bg-slate-100" title="Notifications">
                         <svg class="h-5 w-5 text-slate-600" viewBox="0 0 24 24" fill="none" stroke="currentColor"
                             stroke-width="1.8">

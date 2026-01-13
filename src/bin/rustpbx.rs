@@ -71,6 +71,8 @@ struct Cli {
 enum Commands {
     /// Validate configuration and exit without starting the server
     CheckConfig,
+    /// Initialize with fixture data (extensions, routes, wholesale demo data)
+    Fixtures,
 }
 
 #[tokio::main]
@@ -94,6 +96,26 @@ async fn main() -> Result<()> {
 
     println!("Start at {}", Utc::now());
     println!("{}", version::get_version_info());
+
+    if matches!(cli.command, Some(Commands::Fixtures)) {
+        let state = AppStateBuilder::new()
+            .with_config(config.clone())
+            .with_config_metadata(config_path.clone(), Utc::now())
+            .with_skip_sip_bind()
+            .build()
+            .await
+            .expect("Failed to build app state for fixtures");
+
+        state
+            .addon_registry
+            .initialize_all(state.clone())
+            .await
+            .expect("Failed to initialize addons for fixtures");
+
+        rustpbx::fixtures::run_fixtures(state).await?;
+        println!("Fixtures initialized successfully.");
+        return Ok(());
+    }
 
     if matches!(cli.command, Some(Commands::CheckConfig)) {
         match preflight::validate_start(&config).await {

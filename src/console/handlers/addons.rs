@@ -33,7 +33,7 @@ pub async fn index(State(state): State<Arc<ConsoleState>>) -> impl IntoResponse 
             (**app_state.config()).clone()
         };
 
-        let mut list = app_state.addon_registry.list_addons();
+        let mut list = app_state.addon_registry.list_addons(app_state.clone());
         for addon in &mut list {
             let enabled_in_disk = app_state.addon_registry.is_enabled(&addon.id, &config);
             let enabled_in_mem = app_state
@@ -157,7 +157,7 @@ pub async fn detail(
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     let addon = if let Some(app_state) = state.app_state() {
-        let list = app_state.addon_registry.list_addons();
+        let list = app_state.addon_registry.list_addons(app_state.clone());
         list.into_iter().find(|a| a.id == id)
     } else {
         None

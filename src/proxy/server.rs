@@ -105,6 +105,7 @@ pub struct SipServerBuilder {
     frequency_limiter: Option<Arc<dyn FrequencyLimiter>>,
     call_record_hooks: Vec<Box<dyn crate::callrecord::CallRecordHook>>,
     storage: Option<crate::storage::Storage>,
+    no_bind: bool,
 }
 
 impl SipServerBuilder {
@@ -129,7 +130,13 @@ impl SipServerBuilder {
             frequency_limiter: None,
             call_record_hooks: Vec::new(),
             storage: None,
+            no_bind: false,
         }
+    }
+
+    pub fn with_no_bind(mut self, no_bind: bool) -> Self {
+        self.no_bind = no_bind;
+        self
     }
 
     pub fn with_user_backend(mut self, user_backend: Box<dyn UserBackend>) -> Self {
@@ -261,144 +268,150 @@ impl SipServerBuilder {
         let cancel_token = self.cancel_token.unwrap_or_default();
         let config = self.config.clone();
         let transport_layer = TransportLayer::new(cancel_token.clone());
-        let local_addr = config
-            .addr
-            .parse::<IpAddr>()
-            .map_err(|e| anyhow!("failed to parse local ip address: {}", e))?;
 
-        let external_ip = match rtp_config.external_ip {
-            Some(ref s) => Some(
-                s.parse::<IpAddr>()
-                    .map_err(|e| anyhow!("failed to parse external ip address {}: {}", s, e))?,
-            ),
-            None => None,
-        };
+        if !self.no_bind {
+            let local_addr = config
+                .addr
+                .parse::<IpAddr>()
+                .map_err(|e| anyhow!("failed to parse local ip address: {}", e))?;
 
-        if config.udp_port.is_none()
-            && config.tcp_port.is_none()
-            && config.tls_port.is_none()
-            && config.ws_port.is_none()
-        {
-            return Err(anyhow::anyhow!(
-                "No port specified, please specify at least one port: udp, tcp, tls, ws"
-            ));
-        }
+            let external_ip = match rtp_config.external_ip {
+                Some(ref s) => Some(
+                    s.parse::<IpAddr>()
+                        .map_err(|e| anyhow!("failed to parse external ip address {}: {}", s, e))?,
+                ),
+                None => None,
+            };
 
-        if let Some(udp_port) = config.udp_port {
-            let local_addr = SocketAddr::new(local_addr, udp_port);
-            let external_addr = external_ip
-                .as_ref()
-                .map(|ip| SocketAddr::new(ip.clone(), udp_port));
-            let udp_conn = UdpConnection::create_connection(
-                local_addr,
-                external_addr,
-                Some(cancel_token.child_token()),
-            )
-            .await
-            .map_err(|e| anyhow!("Failed to create proxy UDP connection {} {}", local_addr, e))?;
-            info!("start proxy, udp port: {}", udp_conn.get_addr());
-            transport_layer.add_transport(udp_conn.into());
-        }
+            if config.udp_port.is_none()
+                && config.tcp_port.is_none()
+                && config.tls_port.is_none()
+                && config.ws_port.is_none()
+            {
+                return Err(anyhow::anyhow!(
+                    "No port specified, please specify at least one port: udp, tcp, tls, ws"
+                ));
+            }
 
-        if let Some(tcp_port) = config.tcp_port {
-            let local_addr = SocketAddr::new(local_addr, tcp_port);
-            let external_addr = external_ip
-                .as_ref()
-                .map(|ip| SocketAddr::new(ip.clone(), tcp_port));
-            let tcp_conn = TcpListenerConnection::new(local_addr.into(), external_addr)
+            if let Some(udp_port) = config.udp_port {
+                let local_addr = SocketAddr::new(local_addr, udp_port);
+                let external_addr = external_ip
+                    .as_ref()
+                    .map(|ip| SocketAddr::new(ip.clone(), udp_port));
+                let udp_conn = UdpConnection::create_connection(
+                    local_addr,
+                    external_addr,
+                    Some(cancel_token.child_token()),
+                )
                 .await
-                .map_err(|e| anyhow!("Failed to create TCP connection: {}", e))?;
-            info!("start proxy, tcp port: {}", tcp_conn.get_addr());
-            transport_layer.add_transport(tcp_conn.into());
-        }
-
-        if let Some(tls_port) = config.tls_port {
-            let local_addr = SocketAddr::new(local_addr, tls_port);
-            let external_addr = external_ip
-                .as_ref()
-                .map(|ip| SocketAddr::new(ip.clone(), tls_port));
-
-            let cert_path = config
-                .ssl_certificate
-                .as_ref()
-                .ok_or_else(|| anyhow!("ssl_certificate is required for tls transport"))?;
-
-            let key_path = config
-                .ssl_private_key
-                .as_ref()
-                .ok_or_else(|| anyhow!("ssl_private_key is required for tls transport"))?;
-
-            let mut well_done = true;
-            if !std::path::Path::new(cert_path).exists() {
-                well_done = false;
-                warn!("ssl_certificate file does not exist: {}", cert_path);
+                .map_err(|e| {
+                    anyhow!("Failed to create proxy UDP connection {} {}", local_addr, e)
+                })?;
+                info!("start proxy, udp port: {}", udp_conn.get_addr());
+                transport_layer.add_transport(udp_conn.into());
             }
 
-            if !std::path::Path::new(key_path).exists() {
-                well_done = false;
-                warn!("ssl_private_key file does not exist: {}", key_path);
+            if let Some(tcp_port) = config.tcp_port {
+                let local_addr = SocketAddr::new(local_addr, tcp_port);
+                let external_addr = external_ip
+                    .as_ref()
+                    .map(|ip| SocketAddr::new(ip.clone(), tcp_port));
+                let tcp_conn = TcpListenerConnection::new(local_addr.into(), external_addr)
+                    .await
+                    .map_err(|e| anyhow!("Failed to create TCP connection: {}", e))?;
+                info!("start proxy, tcp port: {}", tcp_conn.get_addr());
+                transport_layer.add_transport(tcp_conn.into());
             }
 
-            if well_done {
-                match async {
-                    let cert = tokio::fs::read(cert_path)
-                        .await
-                        .map_err(|e| anyhow!("failed to read cert: {}", e))?;
-                    let key = tokio::fs::read(key_path)
-                        .await
-                        .map_err(|e| anyhow!("failed to read key: {}", e))?;
-                    Ok::<_, anyhow::Error>((cert, key))
+            if let Some(tls_port) = config.tls_port {
+                let local_addr = SocketAddr::new(local_addr, tls_port);
+                let external_addr = external_ip
+                    .as_ref()
+                    .map(|ip| SocketAddr::new(ip.clone(), tls_port));
+
+                let cert_path = config
+                    .ssl_certificate
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("ssl_certificate is required for tls transport"))?;
+
+                let key_path = config
+                    .ssl_private_key
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("ssl_private_key is required for tls transport"))?;
+
+                let mut well_done = true;
+                if !std::path::Path::new(cert_path).exists() {
+                    well_done = false;
+                    warn!("ssl_certificate file does not exist: {}", cert_path);
                 }
-                .await
-                {
-                    Ok((cert_data, key_data)) => {
-                        let tls_config = TlsConfig {
-                            cert: Some(cert_data),
-                            key: Some(key_data),
-                            client_cert: None,
-                            client_key: None,
-                            ca_certs: None,
-                        };
-                        match TlsListenerConnection::new(
-                            local_addr.into(),
-                            external_addr,
-                            tls_config,
-                        )
-                        .await
-                        {
-                            Ok(conn) => {
-                                info!(
-                                    "start proxy, tls port: {} cert: {}, key: {}",
-                                    conn.get_addr(),
-                                    cert_path,
-                                    key_path
-                                );
-                                transport_layer.add_transport(conn.into());
-                            }
-                            Err(e) => {
-                                warn!("failed to create TLS connection: {}", e);
-                            }
-                        };
-                    }
-                    Err(e) => {
-                        warn!("failed to read TLS files: {}", e);
-                    }
-                }
-            } else {
-                warn!("skip starting TLS transport due to missing certificate or key");
-            }
-        }
 
-        if let Some(ws_port) = config.ws_port {
-            let local_addr = SocketAddr::new(local_addr, ws_port);
-            let external_addr = external_ip
-                .as_ref()
-                .map(|ip| SocketAddr::new(ip.clone(), ws_port));
-            let ws_conn = WebSocketListenerConnection::new(local_addr.into(), external_addr, false)
-                .await
-                .map_err(|e| anyhow!("Failed to create WS connection: {}", e))?;
-            info!("start proxy, ws port: {}", ws_conn.get_addr());
-            transport_layer.add_transport(ws_conn.into());
+                if !std::path::Path::new(key_path).exists() {
+                    well_done = false;
+                    warn!("ssl_private_key file does not exist: {}", key_path);
+                }
+
+                if well_done {
+                    match async {
+                        let cert = tokio::fs::read(cert_path)
+                            .await
+                            .map_err(|e| anyhow!("failed to read cert: {}", e))?;
+                        let key = tokio::fs::read(key_path)
+                            .await
+                            .map_err(|e| anyhow!("failed to read key: {}", e))?;
+                        Ok::<_, anyhow::Error>((cert, key))
+                    }
+                    .await
+                    {
+                        Ok((cert_data, key_data)) => {
+                            let tls_config = TlsConfig {
+                                cert: Some(cert_data),
+                                key: Some(key_data),
+                                client_cert: None,
+                                client_key: None,
+                                ca_certs: None,
+                            };
+                            match TlsListenerConnection::new(
+                                local_addr.into(),
+                                external_addr,
+                                tls_config,
+                            )
+                            .await
+                            {
+                                Ok(conn) => {
+                                    info!(
+                                        "start proxy, tls port: {} cert: {}, key: {}",
+                                        conn.get_addr(),
+                                        cert_path,
+                                        key_path
+                                    );
+                                    transport_layer.add_transport(conn.into());
+                                }
+                                Err(e) => {
+                                    warn!("failed to create TLS connection: {}", e);
+                                }
+                            };
+                        }
+                        Err(e) => {
+                            warn!("failed to read TLS files: {}", e);
+                        }
+                    }
+                } else {
+                    warn!("skip starting TLS transport due to missing certificate or key");
+                }
+            }
+
+            if let Some(ws_port) = config.ws_port {
+                let local_addr = SocketAddr::new(local_addr, ws_port);
+                let external_addr = external_ip
+                    .as_ref()
+                    .map(|ip| SocketAddr::new(ip.clone(), ws_port));
+                let ws_conn =
+                    WebSocketListenerConnection::new(local_addr.into(), external_addr, false)
+                        .await
+                        .map_err(|e| anyhow!("Failed to create WS connection: {}", e))?;
+                info!("start proxy, ws port: {}", ws_conn.get_addr());
+                transport_layer.add_transport(ws_conn.into());
+            }
         }
 
         let mut endpoint_builder = EndpointBuilder::new();
