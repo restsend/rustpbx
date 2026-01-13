@@ -1533,7 +1533,7 @@ impl CallSession {
             match timeout(duration, self.run_targets(strategy, inbox)).await {
                 Ok(outcome) => match outcome {
                     Ok(_) => {
-                        info!(session_id = %self.context.session_id, "Dialplan executed successfully");
+                        debug!(session_id = %self.context.session_id, "Dialplan executed successfully");
                         Ok(())
                     }
                     Err(_) => self.handle_failure(inbox).await,
@@ -1550,7 +1550,7 @@ impl CallSession {
         } else {
             match self.run_targets(strategy, inbox).await {
                 Ok(_) => {
-                    info!(session_id = %self.context.session_id, "Dialplan executed successfully");
+                    debug!(session_id = %self.context.session_id, "Dialplan executed successfully");
                     Ok(())
                 }
                 Err(_) => self.handle_failure(inbox).await,

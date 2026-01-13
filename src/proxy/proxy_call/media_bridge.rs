@@ -83,7 +83,7 @@ impl MediaBridge {
             return Ok(());
         }
         let needs_transcoding = self.codec_a != self.codec_b;
-        info!(
+        debug!(
             codec_a = ?self.codec_a,
             codec_b = ?self.codec_b,
             needs_transcoding,
@@ -152,7 +152,7 @@ impl MediaBridge {
         ssrc_b: Option<u32>,
         recorder: Arc<Mutex<Option<Recorder>>>,
     ) {
-        info!(
+        debug!(
             "bridge_pcs started: codec_a={:?} codec_b={:?} ssrc_a={:?} ssrc_b={:?}",
             codec_a, codec_b, ssrc_a, ssrc_b
         );
@@ -174,7 +174,7 @@ impl MediaBridge {
                     track_id, track_kind
                 );
                 if started_track_ids.insert(format!("A-{}", track_id)) {
-                    info!(
+                    debug!(
                         "Starting pre-existing track forwarder: Leg A track_id={}",
                         track_id
                     );
@@ -205,7 +205,7 @@ impl MediaBridge {
                     track_id, track_kind
                 );
                 if started_track_ids.insert(format!("B-{}", track_id)) {
-                    info!(
+                    debug!(
                         "Starting pre-existing track forwarder: Leg B track_id={}",
                         track_id
                     );
@@ -239,9 +239,8 @@ impl MediaBridge {
                                     let track = receiver.track();
                                     let track_id = track.id().to_string();
                                     let track_kind = track.kind();
-                                    info!("New Track event Leg A: track_id={} kind={:?}", track_id, track_kind);
+                                    debug!("New Track event Leg A: track_id={} kind={:?}", track_id, track_kind);
                                     if started_track_ids.insert(format!("A-{}", track_id)) {
-                                        info!("Starting new track forwarder: Leg A track_id={}", track_id);
                                         forwarders.push(Self::forward_track(
                                             track,
                                             pc_b.clone(),
@@ -317,7 +316,7 @@ impl MediaBridge {
     ) {
         let needs_transcoding = source_codec != target_codec;
         let track_id = track.id().to_string();
-        info!(
+        debug!(
             "forward_track {:?}: track_id={} source_codec={:?} target_codec={:?} needs_transcoding={}",
             leg, track_id, source_codec, target_codec, needs_transcoding
         );
@@ -331,7 +330,7 @@ impl MediaBridge {
             .find(|t| t.mid().is_some() && t.kind() == rustrtc::MediaKind::Audio);
 
         if let Some(transceiver) = existing_transceiver {
-            info!(
+            debug!(
                 "forward_track {:?}: Reusing existing transceiver mid={:?}",
                 leg,
                 transceiver.mid()
@@ -353,7 +352,7 @@ impl MediaBridge {
                     .build();
 
                 transceiver.set_sender(Some(new_sender));
-                info!(
+                debug!(
                     "forward_track {:?}: Replaced sender on existing transceiver with ssrc={}",
                     leg, ssrc
                 );
@@ -375,7 +374,7 @@ impl MediaBridge {
                     .params(params)
                     .build();
                 transceiver.set_sender(Some(new_sender));
-                info!(
+                debug!(
                     "forward_track {:?}: Created and attached new sender to existing transceiver ssrc={}",
                     leg, ssrc
                 );
@@ -383,7 +382,7 @@ impl MediaBridge {
         } else {
             match target_pc.add_track(track_target, target_params) {
                 Ok(_sender) => {
-                    info!(
+                    debug!(
                         "forward_track {:?}: add_track success (new transceiver)",
                         leg
                     );
@@ -442,7 +441,7 @@ impl MediaBridge {
             }
         }
 
-        info!(
+        debug!(
             "forward_track {:?} track={} finished: total_packets={}",
             leg, track_id, packet_count
         );
@@ -459,7 +458,6 @@ impl MediaBridge {
     }
 
     pub async fn resume_forwarding(&self, track_id: &str) -> Result<()> {
-        info!(track_id = %track_id, "Resuming forwarding in bridge");
         self.leg_a.resume_forwarding(track_id).await;
         self.leg_b.resume_forwarding(track_id).await;
         Ok(())
