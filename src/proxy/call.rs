@@ -522,34 +522,39 @@ impl CallModule {
             return dialplan;
         }
 
-        if !policy.directions.is_empty()
-            && !policy
-                .directions
-                .iter()
-                .any(|direction| direction.matches(&dialplan.direction))
-        {
-            return dialplan;
+        if !dialplan.recording.enabled {
+            if !policy.directions.is_empty()
+                && !policy
+                    .directions
+                    .iter()
+                    .any(|direction| direction.matches(&dialplan.direction))
+            {
+                return dialplan;
+            }
+
+            let caller_identity = Self::caller_identity(caller);
+            if Self::matches_any_pattern(&caller_identity, &policy.caller_deny) {
+                return dialplan;
+            }
+            if !policy.caller_allow.is_empty()
+                && !Self::matches_any_pattern(&caller_identity, &policy.caller_allow)
+            {
+                return dialplan;
+            }
+
+            let callee_identity = Self::callee_identity(&dialplan).unwrap_or_default();
+            if Self::matches_any_pattern(&callee_identity, &policy.callee_deny) {
+                return dialplan;
+            }
+            if !policy.callee_allow.is_empty()
+                && !Self::matches_any_pattern(&callee_identity, &policy.callee_allow)
+            {
+                return dialplan;
+            }
         }
 
         let caller_identity = Self::caller_identity(caller);
-        if Self::matches_any_pattern(&caller_identity, &policy.caller_deny) {
-            return dialplan;
-        }
-        if !policy.caller_allow.is_empty()
-            && !Self::matches_any_pattern(&caller_identity, &policy.caller_allow)
-        {
-            return dialplan;
-        }
-
         let callee_identity = Self::callee_identity(&dialplan).unwrap_or_default();
-        if Self::matches_any_pattern(&callee_identity, &policy.callee_deny) {
-            return dialplan;
-        }
-        if !policy.callee_allow.is_empty()
-            && !Self::matches_any_pattern(&callee_identity, &policy.callee_allow)
-        {
-            return dialplan;
-        }
 
         let recorder_option =
             match self.build_recorder_option(&dialplan, policy, &caller_identity, &callee_identity)
