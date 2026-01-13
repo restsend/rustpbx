@@ -2400,11 +2400,6 @@ impl CallSession {
                 }
                 state = state_rx.recv() => {
                     match state {
-                        Some(DialogState::Calling(dialog_id)) => {
-                            // Add callee dialog when INVITE is sent so SIP messages are captured
-                            // even if cancelled before receiving any response
-                            self.add_callee_dialog(dialog_id);
-                        }
                         Some(DialogState::Early(_, response)) => {
                             let sdp = String::from_utf8_lossy(response.body()).to_string();
                             let action = SessionAction::StartRinging{
@@ -2438,6 +2433,7 @@ impl CallSession {
             };
 
             let dialog_id_val = dialog.id();
+            self.add_callee_dialog(dialog_id_val.clone());
             let _ = self
                 .apply_session_action(
                     SessionAction::AcceptCall {
