@@ -1,0 +1,393 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RustPBX - Secure Software-Defined PBX</title>
+    <style>
+        :root {
+            --primary: #f06529;
+            --primary-dark: #cc521d;
+            --secondary: #2c3e50;
+            --bg: #f8f9fa;
+            --text: #333;
+            --white: #ffffff;
+            --gray: #6c757d;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            line-height: 1.6;
+            color: var(--text);
+            margin: 0;
+            padding: 0;
+            background-color: var(--bg);
+        }
+
+        .container {
+            max-width: 1000px;
+            margin: 0 auto;
+            padding: 0 20px;
+        }
+
+        header {
+            background-color: var(--white);
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+            padding: 1rem 0;
+            position: sticky;
+            top: 0;
+            z-index: 1000;
+        }
+
+        .header-content {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .logo {
+            font-size: 1.5rem;
+            font-weight: bold;
+            color: var(--primary);
+            text-decoration: none;
+            display: flex;
+            align-items: center;
+        }
+
+        .logo-icon {
+            margin-right: 10px;
+            width: 32px;
+            height: 32px;
+            background: var(--primary);
+            border-radius: 6px;
+            display: inline-block;
+        }
+
+        nav a {
+            margin-left: 20px;
+            text-decoration: none;
+            color: var(--secondary);
+            font-weight: 500;
+        }
+
+        nav a:hover {
+            color: var(--primary);
+        }
+
+        .hero {
+            padding: 80px 0;
+            text-align: center;
+            background: linear-gradient(135deg, #2c3e50 0%, #000000 100%);
+            color: var(--white);
+        }
+
+        .hero h1 {
+            font-size: 3rem;
+            margin-bottom: 20px;
+        }
+
+        .hero p {
+            font-size: 1.25rem;
+            max-width: 700px;
+            margin: 0 auto 30px;
+            opacity: 0.9;
+        }
+
+        .btn {
+            display: inline-block;
+            padding: 12px 30px;
+            background-color: var(--primary);
+            color: var(--white);
+            text-decoration: none;
+            border-radius: 5px;
+            font-weight: 600;
+            transition: background 0.3s;
+        }
+
+        .btn:hover {
+            background-color: var(--primary-dark);
+        }
+
+        .features {
+            padding: 60px 0;
+        }
+
+        .feature-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 30px;
+            margin-top: 40px;
+        }
+
+        .feature-card {
+            background: var(--white);
+            padding: 30px;
+            border-radius: 10px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.05);
+            transition: transform 0.3s;
+        }
+
+        .feature-card:hover {
+            transform: translateY(-5px);
+        }
+
+        .feature-card h3 {
+            color: var(--primary);
+            margin-top: 0;
+        }
+
+        .feature-card.highlighted {
+            border: 2px solid var(--primary);
+            background: #fff9f6;
+        }
+
+        .section-title {
+            text-align: center;
+            margin-bottom: 50px;
+        }
+
+        .section-title h2 {
+            font-size: 2rem;
+            color: var(--secondary);
+        }
+
+        .install-section {
+            background-color: #f1f3f5;
+            padding: 60px 0;
+        }
+
+        code {
+            background: #272822;
+            color: #f8f8f2;
+            padding: 15px;
+            border-radius: 5px;
+            display: block;
+            overflow-x: auto;
+            margin: 20px 0;
+            white-space: pre-wrap;
+            word-break: break-all;
+            font-family: 'Courier New', Courier, monospace;
+        }
+
+        .code-comment {
+            color: #75715e;
+        }
+
+        footer {
+            background-color: var(--secondary);
+            color: var(--white);
+            padding: 40px 0;
+            text-align: center;
+        }
+
+        .footer-links {
+            margin-top: 20px;
+        }
+
+        .footer-links a {
+            color: rgba(255, 255, 255, 0.7);
+            margin: 0 10px;
+            text-decoration: none;
+        }
+
+        .footer-links a:hover {
+            color: var(--white);
+        }
+
+        .screenshots {
+            padding: 60px 0;
+            background-color: var(--white);
+        }
+
+        .screenshot-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 20px;
+            margin-top: 40px;
+        }
+
+        .screenshot-item {
+            border: 1px solid #eee;
+            border-radius: 8px;
+            overflow: hidden;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.05);
+        }
+
+        .screenshot-item img {
+            width: 100%;
+            height: auto;
+            display: block;
+        }
+
+        .screenshot-item p {
+            padding: 10px;
+            margin: 0;
+            text-align: center;
+            font-size: 0.9rem;
+            background: #fafafa;
+            color: var(--secondary);
+            border-top: 1px solid #eee;
+        }
+
+        @media (max-width: 768px) {
+            .hero h1 {
+                font-size: 2rem;
+            }
+
+            .hero p {
+                font-size: 1.1rem;
+            }
+        }
+    </style>
+</head>
+
+<body>
+
+    <header>
+        <div class="container header-content">
+            <a href="/" class="logo">
+                <div class="logo-icon"></div>
+                RustPBX
+            </a>
+            <nav>
+                <a href="#features">Features</a>
+                <a href="#screenshots">Screenshots</a>
+                <a href="https://github.com/restsend/rustpbx">GitHub</a>
+                <a href="/console">Console</a>
+            </nav>
+        </div>
+    </header>
+
+    <section class="hero">
+        <div class="container">
+            <h1>Secure Software-Defined PBX</h1>
+            <p>A high-performance SIP PBX implemented in Rust, designed for modern communication pipelines and
+                AI-powered voice applications.</p>
+            <a href="https://github.com/restsend/rustpbx" class="btn">Get Started on GitHub</a>
+        </div>
+    </section>
+
+    <section id="screenshots" class="screenshots">
+        <div class="container">
+            <div class="section-title">
+                <h2>Product Screenshots</h2>
+                <p>A glimpse into the RustPBX administrative console and features.</p>
+            </div>
+            <div class="screenshot-grid">
+                <div class="screenshot-item">
+                    <img src="https://raw.githubusercontent.com/restsend/rustpbx/main/docs/screenshots/call-logs.png"
+                        alt="Call Logs">
+                    <p>Comprehensive Call Logs</p>
+                </div>
+                <div class="screenshot-item">
+                    <img src="https://raw.githubusercontent.com/restsend/rustpbx/main/docs/screenshots/extensions.png"
+                        alt="Extensions">
+                    <p>Extension Management</p>
+                </div>
+                <div class="screenshot-item">
+                    <img src="https://raw.githubusercontent.com/restsend/rustpbx/main/docs/screenshots/route-editor.png"
+                        alt="Route Editor">
+                    <p>Visual Route Editor</p>
+                </div>
+                <div class="screenshot-item">
+                    <img src="https://raw.githubusercontent.com/restsend/rustpbx/main/docs/screenshots/call-detail-sipflow.png"
+                        alt="SIP Flow">
+                    <p>SIP Message Flow Analysis</p>
+                </div>
+                <div class="screenshot-item">
+                    <img src="https://raw.githubusercontent.com/restsend/rustpbx/main/docs/screenshots/web-dailer.png"
+                        alt="Web Dialer">
+                    <p>Integrated Web Dialer</p>
+                </div>
+                <div class="screenshot-item">
+                    <img src="https://raw.githubusercontent.com/restsend/rustpbx/main/docs/screenshots/settings.png"
+                        alt="Settings">
+                    <p>System Configuration</p>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <section id="features" class="features">
+        <div class="container">
+            <div class="section-title">
+                <h2>Why Choose RustPBX?</h2>
+                <p>Modern telephony, simplified. Built for reliability, speed, and ease of use.</p>
+            </div>
+            <div class="feature-grid">
+                <div class="feature-card highlighted">
+                    <h3>Simple Web Management</h3>
+                    <p>Intuitive Web Console for all configurations. Manage extensions, trunks, and routes without
+                        touching complex config files.</p>
+                </div>
+                <div class="feature-card highlighted">
+                    <h3>Zero-Downtime Reload</h3>
+                    <p>Apply configuration changes instantly with one click. Supports seamless hot-reloading to keep
+                        your business running.</p>
+                </div>
+                <div class="feature-card">
+                    <h3>High Performance</h3>
+                    <p>Leveraging Rust's concurrency and memory safety for a rock-solid SIP core that scales
+                        horizontally.</p>
+                </div>
+                <div class="feature-card">
+                    <h3>Full SIP Stack</h3>
+                    <p>Complete proxy server with registration, authentication, and routing. Supports UDP, TCP, and
+                        WebSocket.</p>
+                </div>
+                <div class="feature-card">
+                    <h3>Media Proxying</h3>
+                    <p>Advanced RTP/RTCP proxying with NAT traversal and built-in call recording capabilities.</p>
+                </div>
+                <div class="feature-card">
+                    <h3>WebRTC Ready</h3>
+                    <p>First-class support for browser-based telephony via WebSockets and integrated JSSIP/SIP.js
+                        support.</p>
+                </div>
+                <div class="feature-card">
+                    <h3>Flexible Storage</h3>
+                    <p>Compatible with SQLite, PostgreSQL, and MySQL. Export CDRs and recordings to various backends.
+                    </p>
+                </div>
+                <div class="feature-card">
+                    <h3>Modern API</h3>
+                    <p>Built on Axum and SeaORM with a clean RESTful management interface and easy-to-use admin console.
+                    </p>
+                </div>
+            </div>
+        </div>
+    </section>
+
+
+    <section class="install-section">
+        <div class="container">
+            <div class="section-title">
+                <h2>Quick Start with Docker</h2>
+                <p>Get up and running in seconds.</p>
+            </div>
+            <code><span class="code-comment"># Just run the latest community image</span>
+docker run -d \
+  --name rustpbx \
+  --net host \
+  -v $(pwd)/db:/app/db \
+  ghcr.io/restsend/rustpbx:latest</code>
+            <p style="text-align: center;">Visit <a
+                    href="http://localhost:8080/console">http://localhost:8080/console</a> after launching.</p>
+        </div>
+    </section>
+
+    <footer>
+        <div class="container">
+            <p>&copy; 2026 RustPBX. All rights reserved.</p>
+            <div class="footer-links">
+                <a href="https://github.com/restsend/rustpbx">GitHub</a>
+                <a href="https://github.com/restsend/rustpbx/blob/main/LICENSE">License</a>
+                <a href="https://github.com/restsend/rustpbx/tree/main/docs">Documentation</a>
+            </div>
+        </div>
+    </footer>
+
+</body>
+
+</html>
