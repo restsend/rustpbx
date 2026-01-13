@@ -15,7 +15,7 @@ categories = ["network-programming", "multimedia"]
 opus = ["audio-codec/opus"]
 console = ["dep:minijinja"]
 addon-acme = []
-addon-wholesale = ["flate2"]
+addon-wholesale = ["flate2", "async-compression"]
 addon-archive = ["flate2"]
 addon-transcript = []
 commerce = ["addon-wholesale"]
@@ -101,6 +101,10 @@ argon2 = { version = "0.5.3", features = ["password-hash"] }
 object_store = { version = "0.13.0", features = ["aws", "azure", "gcp"] }
 humantime = "2.3.0"
 serde_with = "3.16.1"
+async-compression = { version = "0.4", features = [
+    "tokio",
+    "gzip",
+], optional = true }
 flate2 = { version = "1.0", optional = true }
 console-subscriber = "0.5.0"
 lru = "0.16.2"
@@ -115,6 +119,7 @@ rcgen = "0.14.6"
 axum-server = { version = "0.8.0", features = ["tls-rustls"] }
 sysinfo = "0.37.2"
 csv = "1.4.0"
+quick-xml = { version = "0.39.0", features = ["serialize"] }
 
 [dev-dependencies]
 tempfile = "3.24.0"
