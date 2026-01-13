@@ -8,6 +8,33 @@
         <div class="space-y-2 text-center">
             <h1 class="text-2xl font-semibold text-slate-900">Welcome back</h1>
             <p class="text-sm text-slate-500">Sign in to manage your RustPBX instance.</p>
+            {% if demo_mode %}
+            <div
+                class="mt-6 rounded-xl bg-amber-50 p-4 text-sm text-amber-800 border-2 border-amber-200 shadow-sm text-left">
+                <div class="flex items-center gap-2 font-bold text-amber-900 mb-3">
+                    <svg class="h-5 w-5 text-amber-600" viewBox="0 0 20 20" fill="currentColor">
+                        <path fill-rule="evenodd"
+                            d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 2h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z"
+                            clip-rule="evenodd" />
+                    </svg>
+                    Demo Mode Credentials
+                </div>
+                <div class="space-y-2 font-mono">
+                    <div
+                        class="flex justify-between items-center bg-white/60 px-3 py-2 rounded-lg border border-amber-100">
+                        <span class="text-xs text-amber-600 font-sans font-medium uppercase tracking-wider">User</span>
+                        <span class="select-all font-bold text-amber-900">demo@miuda.ai</span>
+                    </div>
+                    <div
+                        class="flex justify-between items-center bg-white/60 px-3 py-2 rounded-lg border border-amber-100">
+                        <span class="text-xs text-amber-600 font-sans font-medium uppercase tracking-wider">Pass</span>
+                        <span class="select-all font-bold text-amber-900">hello@miuda.ai</span>
+                    </div>
+                </div>
+                <p class="mt-3 text-[11px] text-amber-600 font-sans italic text-center text-balance leading-tight">
+                    Notice: System data is automatically reset every hour.</p>
+            </div>
+            {% endif %}
         </div>
         {% if error_message %}
         <div class="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-600">
@@ -16,13 +43,13 @@
         {% endif %}
         <form action="{{ login_action }}" method="post" class="space-y-6">
             <input type="hidden" name="next" value="{{ next | default('') }}" />
-            <div class="space-y-2">
+            <div class="space-y-2 text-left">
                 <label class="block text-sm font-medium text-slate-700">Email or username</label>
                 <input type="text" name="identifier" value="{{ identifier }}" required
                     class="w-full rounded-xl border border-slate-200 px-4 py-3 text-sm shadow-sm focus:border-sky-400 focus:outline-none focus:ring-2 focus:ring-sky-200"
                     placeholder="you@rustpbx.com or username" />
             </div>
-            <div class="space-y-2" x-data="{ reveal: false }">
+            <div class="space-y-2 text-left" x-data="{ reveal: false }">
                 <label class="block text-sm font-medium text-slate-700">Password</label>
                 <div class="relative flex items-center">
                     <input :type="reveal ? 'text' : 'password'" name="password" required

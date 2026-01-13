@@ -20,8 +20,9 @@ use anyhow::Result;
 use axum::{
     Json, Router,
     extract::{State, WebSocketUpgrade},
+    http::StatusCode,
     middleware,
-    response::{IntoResponse, Response},
+    response::{Html, IntoResponse, Response},
     routing::get,
 };
 use axum_server::tls_rustls::RustlsConfig;
@@ -76,6 +77,7 @@ pub struct AppStateBuilder {
     pub proxy_builder: Option<SipServerBuilder>,
     pub config_loaded_at: Option<DateTime<Utc>>,
     pub config_path: Option<String>,
+    pub skip_sip_bind: bool,
 }
 
 impl AppStateInner {
@@ -152,7 +154,13 @@ impl AppStateBuilder {
             proxy_builder: None,
             config_loaded_at: None,
             config_path: None,
+            skip_sip_bind: false,
         }
+    }
+
+    pub fn with_skip_sip_bind(mut self) -> Self {
+        self.skip_sip_bind = true;
+        self
     }
 
     pub fn with_config(mut self, mut config: Config) -> Self {
@@ -289,6 +297,7 @@ impl AppStateBuilder {
                     .with_database_connection(core.db.clone())
                     .with_call_record_hooks(call_record_hooks)
                     .with_storage(core.storage.clone())
+                    .with_no_bind(self.skip_sip_bind)
                     .register_module("acl", AclModule::create)
                     .register_module("auth", AuthModule::create)
                     .register_module("presence", PresenceModule::create)
@@ -489,9 +498,23 @@ async fn iceservers_handler(State(state): State<AppState>) -> impl IntoResponse 
 }
 
 pub fn create_router(state: AppState) -> Router {
-    let router = Router::new();
+    let mut router = Router::new();
+
     // Serve static files
     let static_files_service = ServeDir::new("static");
+
+    // If static/index.html exists, serve it at the root
+    if std::path::Path::new("static/index.html").exists() {
+        router = router.route(
+            "/",
+            get(|| async {
+                match tokio::fs::read_to_string("static/index.html").await {
+                    Ok(content) => Html(content).into_response(),
+                    Err(_) => StatusCode::NOT_FOUND.into_response(),
+                }
+            }),
+        );
+    }
 
     // CORS configuration to allow cross-origin requests
     let cors = CorsLayer::new()

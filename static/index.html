@@ -61,7 +61,12 @@
             height: 32px;
             background: var(--primary);
             border-radius: 6px;
-            display: inline-block;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            color: var(--white);
+            font-weight: bold;
+            font-size: 20px;
         }
 
         nav a {
@@ -246,15 +251,16 @@
 
     <header>
         <div class="container header-content">
-            <a href="/" class="logo">
-                <div class="logo-icon"></div>
+            <a href="https://miuda.ai/?from=rustpbx.com" class="logo">
+                <div class="logo-icon">R</div>
                 RustPBX
             </a>
             <nav>
                 <a href="#features">Features</a>
                 <a href="#screenshots">Screenshots</a>
                 <a href="https://github.com/restsend/rustpbx">GitHub</a>
-                <a href="/console">Console</a>
+                <a href="https://miuda.ai/?from=rustpbx.com">By Miuda.ai</a>
+                <a href="/console/">Demo Site</a>
             </nav>
         </div>
     </header>
@@ -379,7 +385,7 @@ docker run -d \
 
     <footer>
         <div class="container">
-            <p>&copy; 2026 RustPBX. All rights reserved.</p>
+            <p>&copy; 2026 Miuda.ai. All rights reserved.</p>
             <div class="footer-links">
                 <a href="https://github.com/restsend/rustpbx">GitHub</a>
                 <a href="https://github.com/restsend/rustpbx/blob/main/LICENSE">License</a>

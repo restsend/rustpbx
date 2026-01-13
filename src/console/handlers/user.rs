@@ -57,12 +57,15 @@ pub async fn login_page(
         None
     };
 
+    let demo_mode = state.config().demo_mode;
+
     state.render(
         "console/login.html",
         json!({
             "login_action": login_action,
             "register_url": register_url,
             "registration_allowed": policy.allowed,
+            "demo_mode": demo_mode,
             "error_message": null,
             "identifier": "",
             "next": query.next.clone(),
@@ -100,6 +103,7 @@ pub async fn login_post(
     } else {
         None
     };
+    let demo_mode = state.config().demo_mode;
     if identifier.is_empty() || password.is_empty() {
         return state.render(
             "console/login.html",
@@ -107,6 +111,7 @@ pub async fn login_post(
                 "login_action": state.login_url(next.clone()),
                 "register_url": register_url.clone(),
                 "registration_allowed": policy.allowed,
+                "demo_mode": demo_mode,
                 "error_message": "Please provide both username/email and password",
                 "identifier": identifier,
                 "next": next.clone(),
@@ -133,6 +138,7 @@ pub async fn login_post(
                 "login_action": state.login_url(next.clone()),
                 "register_url": register_url,
                 "registration_allowed": policy.allowed,
+                "demo_mode": demo_mode,
                 "error_message": "Invalid credentials",
                 "identifier": identifier,
                 "next": next,

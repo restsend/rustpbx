@@ -176,6 +176,8 @@ pub struct Config {
     #[serde(default)]
     pub archive: Option<ArchiveConfig>,
     #[serde(default)]
+    pub demo_mode: bool,
+    #[serde(default)]
     pub addons: HashMap<String, HashMap<String, String>>,
     #[serde(default)]
     pub storage: Option<StorageConfig>,
@@ -641,6 +643,7 @@ impl Default for Config {
             database_url: default_database_url(),
             recording: None,
             archive: None,
+            demo_mode: false,
             storage: None,
             addons: HashMap::new(),
         }
@@ -661,6 +664,12 @@ impl Config {
         let mut config: Self = toml::from_str(
             &std::fs::read_to_string(path).map_err(|e| anyhow::anyhow!("{}: {}", e, path))?,
         )?;
+        if std::env::var("RUSTPBX_DEMO_MODE")
+            .map(|v| v == "true" || v == "1")
+            .unwrap_or(false)
+        {
+            config.demo_mode = true;
+        }
         if config.ensure_recording_defaults() {
             tracing::warn!(
                 "recorder_format=ogg requires compiling with the 'opus' feature; falling back to wav"

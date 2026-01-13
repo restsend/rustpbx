@@ -102,6 +102,8 @@ impl ConsoleState {
                 map.entry("favicon_url").or_insert_with(|| {
                     serde_json::Value::String("/static/images/favicon.png".to_string())
                 });
+                map.entry("demo_mode")
+                    .or_insert_with(|| serde_json::Value::Bool(self.config().demo_mode));
                 if let Some(ref alpine_js) = self.config.alpine_js {
                     map.entry("alpine_js")
                         .or_insert_with(|| serde_json::Value::String(alpine_js.clone()));
@@ -209,6 +211,12 @@ impl ConsoleState {
             .read()
             .ok()
             .and_then(|opt| opt.as_ref().and_then(|weak| weak.upgrade()))
+    }
+
+    pub fn config(&self) -> Arc<crate::config::Config> {
+        self.app_state()
+            .map(|s| s.config().clone())
+            .unwrap_or_else(|| Arc::new(crate::config::Config::default()))
     }
 
     pub fn get_injected_scripts(&self, path: &str) -> Option<Vec<String>> {

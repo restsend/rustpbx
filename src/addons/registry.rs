@@ -48,6 +48,19 @@ impl AddonRegistry {
         Ok(())
     }
 
+    pub async fn seed_all_fixtures(&self, state: AppState) -> anyhow::Result<()> {
+        let config = state.config();
+        for addon in &self.addons {
+            if !self.is_enabled(addon.id(), &config) {
+                continue;
+            }
+            if let Err(e) = addon.seed_fixtures(state.clone()).await {
+                tracing::error!("Failed to seed fixtures for addon {}: {}", addon.name(), e);
+            }
+        }
+        Ok(())
+    }
+
     pub fn get_routers(&self, state: AppState) -> axum::Router {
         let config = state.config();
         let mut router = axum::Router::new();
@@ -84,7 +97,7 @@ impl AddonRegistry {
         self.addons
             .iter()
             .filter(|a| self.is_enabled(a.id(), config))
-            .flat_map(|a| a.sidebar_items())
+            .flat_map(|a| a.sidebar_items(state.clone()))
             .collect()
     }
 
@@ -102,11 +115,11 @@ impl AddonRegistry {
             .collect()
     }
 
-    pub fn list_addons(&self) -> Vec<super::AddonInfo> {
+    pub fn list_addons(&self, state: AppState) -> Vec<super::AddonInfo> {
         self.addons
             .iter()
             .map(|a| {
-                let config_url = a.config_url();
+                let config_url = a.config_url(state.clone());
 
                 super::AddonInfo {
                     id: a.id().to_string(),
