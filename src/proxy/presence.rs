@@ -15,6 +15,53 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use tracing::{debug, info};
 
+// PIDF-XML (RFC 3863) and RPID (RFC 4480) support
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename = "presence")]
+struct PidfPresence {
+    #[serde(rename = "@xmlns")]
+    xmlns: String,
+    #[serde(rename = "@xmlns:rpid", default)]
+    xmlns_rpid: Option<String>,
+    #[serde(rename = "@entity")]
+    entity: String,
+    #[serde(rename = "tuple", default)]
+    tuples: Vec<PidfTuple>,
+    #[serde(rename = "note", default)]
+    notes: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct PidfTuple {
+    #[serde(rename = "@id")]
+    id: String,
+    status: PidfStatus,
+    #[serde(rename = "note")]
+    note: Option<String>,
+    #[serde(rename = "contact")]
+    contact: Option<String>,
+    #[serde(rename = "rpid:activities", default)]
+    activities: Option<RpidActivities>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct PidfStatus {
+    basic: String, // "open" or "closed"
+}
+
+#[derive(Debug, Serialize, Deserialize, Default)]
+struct RpidActivities {
+    #[serde(rename = "rpid:away", default)]
+    away: Option<RpidEmpty>,
+    #[serde(rename = "rpid:busy", default)]
+    busy: Option<RpidEmpty>,
+    #[serde(rename = "rpid:on-the-phone", default)]
+    on_the_phone: Option<RpidEmpty>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Default)]
+struct RpidEmpty {}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum PresenceStatus {
@@ -389,22 +436,72 @@ impl PresenceModule {
             }
         };
 
-        // Simplified body parsing (expecting some pseudo-presence data)
-        // In reality, would parse PIDF-XML
-        let body = String::from_utf8_lossy(&tx.original.body).to_string();
+        let body = String::from_utf8_lossy(&tx.original.body);
         debug!("Handle PUBLISH for {}: {}", identity, body);
 
+        let expires = tx
+            .original
+            .expires_header()
+            .and_then(|h| h.seconds().ok())
+            .unwrap_or(3600);
+
         let mut current = self.manager.get_state(&identity);
-        if body.contains("busy") {
-            current.status = PresenceStatus::Busy;
-        } else if body.contains("away") {
-            current.status = PresenceStatus::Away;
-        } else if body.contains("offline") {
-            current.status = PresenceStatus::Offline;
-        } else {
-            current.status = PresenceStatus::Available;
-        }
         current.last_updated = chrono::Utc::now().timestamp();
+
+        if expires == 0 {
+            current.status = PresenceStatus::Offline;
+        } else if let Ok(pidf) = quick_xml::de::from_str::<PidfPresence>(&body) {
+            let mut status = PresenceStatus::Offline;
+            let mut activity_note = None;
+
+            for tuple in &pidf.tuples {
+                if tuple.status.basic == "open" {
+                    status = PresenceStatus::Available;
+
+                    // Try to refine status from RPID activities
+                    if let Some(activities) = &tuple.activities {
+                        if activities.busy.is_some() || activities.on_the_phone.is_some() {
+                            status = PresenceStatus::Busy;
+                        } else if activities.away.is_some() {
+                            status = PresenceStatus::Away;
+                        }
+                    }
+                    if let Some(note) = &tuple.note {
+                        activity_note = Some(note.clone());
+                    }
+                    break;
+                }
+            }
+
+            if status == PresenceStatus::Offline && pidf.tuples.is_empty() {
+                // Fallback to simple string check if XML parsed but no tuples found
+                if body.contains("busy") {
+                    status = PresenceStatus::Busy;
+                } else if body.contains("away") {
+                    status = PresenceStatus::Away;
+                } else if body.contains("available") || body.contains("open") {
+                    status = PresenceStatus::Available;
+                }
+            }
+
+            current.status = status;
+            if let Some(note) = activity_note {
+                current.note = Some(note);
+            } else if !pidf.notes.is_empty() {
+                current.note = Some(pidf.notes[0].clone());
+            }
+        } else {
+            // Fallback for non-compliant or simplified clients
+            if body.contains("busy") {
+                current.status = PresenceStatus::Busy;
+            } else if body.contains("away") {
+                current.status = PresenceStatus::Away;
+            } else if body.contains("offline") {
+                current.status = PresenceStatus::Offline;
+            } else {
+                current.status = PresenceStatus::Available;
+            }
+        }
 
         self.manager.update_state(&identity, current).await;
         tx.reply(rsip::StatusCode::OK).await.ok();
@@ -424,33 +521,54 @@ impl PresenceModule {
         );
 
         // Build PIDF-XML (RFC 3863)
-        let basic_status = if matches!(state.status, PresenceStatus::Available) {
+        let basic_status = if matches!(
+            state.status,
+            PresenceStatus::Available | PresenceStatus::Busy | PresenceStatus::Away
+        ) {
             "open"
         } else {
             "closed"
         };
 
-        let note_xml = if let Some(note) = &state.note {
-            format!("<note>{}</note>", note)
-        } else {
-            format!("<note>{}</note>", state.status)
+        let domain = sub.aor.host().to_string();
+        let entity = format!("sip:{}@{}", identity, domain);
+
+        let pidf = PidfPresence {
+            xmlns: "urn:ietf:params:xml:ns:pidf".to_string(),
+            xmlns_rpid: Some("urn:ietf:params:xml:ns:pidf:rpid".to_string()),
+            entity,
+            tuples: vec![PidfTuple {
+                id: "t1".to_string(),
+                status: PidfStatus {
+                    basic: basic_status.to_string(),
+                },
+                note: state
+                    .note
+                    .clone()
+                    .or_else(|| Some(state.status.to_string())),
+                contact: Some(format!("sip:{}@{}", identity, domain)),
+                activities: match state.status {
+                    PresenceStatus::Busy => Some(RpidActivities {
+                        busy: Some(RpidEmpty {}),
+                        ..Default::default()
+                    }),
+                    PresenceStatus::Away => Some(RpidActivities {
+                        away: Some(RpidEmpty {}),
+                        ..Default::default()
+                    }),
+                    _ => None,
+                },
+            }],
+            notes: vec![],
         };
 
-        // Use the domain from the subscriber's AoR as the entity realm
-        let domain = sub.aor.host().to_string();
-
-        let body = format!(
-            r#"<?xml version="1.0" encoding="UTF-8"?>
-<presence xmlns="urn:ietf:params:xml:ns:pidf" entity="sip:{}@{}">
-  <tuple id="t1">
-    <status>
-      <basic>{}</basic>
-    </status>
-    {}
-  </tuple>
-</presence>"#,
-            identity, domain, basic_status, note_xml
-        );
+        let body = match quick_xml::se::to_string(&pidf) {
+            Ok(xml) => format!(r#"<?xml version="1.0" encoding="UTF-8"?>{}"#, xml),
+            Err(e) => {
+                tracing::error!("failed to serialize PIDF-XML: {}", e);
+                return Err(anyhow!("XML serialization failed"));
+            }
+        };
 
         let dialog = self
             .server
