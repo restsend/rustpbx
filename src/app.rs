@@ -222,6 +222,7 @@ impl AppStateBuilder {
         };
 
         let mut callrecord_stats = None;
+        let mut callrecord_manager = None;
         let callrecord_sender = if let Some(sender) = self.callrecord_sender {
             Some(sender)
         } else if let Some(ref callrecord) = config.callrecord {
@@ -237,12 +238,10 @@ impl AppStateBuilder {
                 builder = builder.with_hook(hook);
             }
 
-            let mut callrecord_manager = builder.build();
-            let sender = callrecord_manager.sender.clone();
-            callrecord_stats = Some(callrecord_manager.stats.clone());
-            tokio::spawn(async move {
-                callrecord_manager.serve().await;
-            });
+            let manager = builder.build();
+            let sender = manager.sender.clone();
+            callrecord_stats = Some(manager.stats.clone());
+            callrecord_manager = Some(manager);
             Some(sender)
         } else {
             None
@@ -322,6 +321,12 @@ impl AppStateBuilder {
             #[cfg(feature = "console")]
             console: console_state,
         });
+
+        if let Some(mut manager) = callrecord_manager {
+            tokio::spawn(async move {
+                manager.serve().await;
+            });
+        }
 
         // Initialize addons
         if let Err(e) = addon_registry.initialize_all(app_state.clone()).await {

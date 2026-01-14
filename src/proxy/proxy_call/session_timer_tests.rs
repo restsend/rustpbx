@@ -13,6 +13,7 @@ mod tests {
             session_interval: Duration::from_secs(90),
             min_se: Duration::from_secs(90),
             last_refresh: Instant::now(),
+            refreshing: false,
         }));
 
         let timer_clone = timer.clone();
@@ -31,6 +32,7 @@ mod tests {
             session_interval: Duration::from_secs(90),
             min_se: Duration::from_secs(90),
             last_refresh: Instant::now() - Duration::from_secs(100),
+            refreshing: false,
         };
 
         // Check if expired
@@ -52,6 +54,7 @@ mod tests {
             session_interval: Duration::from_secs(90),
             min_se: Duration::from_secs(90),
             last_refresh: Instant::now() - Duration::from_secs(46), // Just past half (45s)
+            refreshing: false,
         };
 
         // Logic from handle_server_events

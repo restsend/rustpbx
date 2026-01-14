@@ -1,6 +1,6 @@
 use super::*;
-use chrono::Utc;
 use crate::callrecord::CallRecordHangupReason;
+use chrono::Utc;
 use std::collections::HashMap;
 use std::io::Write;
 use tempfile::NamedTempFile;
@@ -361,4 +361,3 @@ fn test_call_record_filename_sanitization() {
     assert!(!filename.contains("/"));
     assert!(!filename.contains("|"));
 }
-

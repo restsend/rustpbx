@@ -35,6 +35,10 @@ impl DialogStateReceiverGuard {
         self.dialog_id = None;
     }
 
+    pub fn set_dialog_id(&mut self, dialog_id: DialogId) {
+        self.dialog_id = Some(dialog_id);
+    }
+
     fn take_dialog(&mut self) -> Option<Dialog> {
         let id = match self.dialog_id.take() {
             Some(id) => id,
@@ -64,7 +68,7 @@ impl DialogStateReceiverGuard {
 impl Drop for DialogStateReceiverGuard {
     fn drop(&mut self) {
         if let Some(dialog) = self.take_dialog() {
-            tokio::spawn(async move {
+            crate::utils::spawn(async move {
                 if let Err(e) = dialog.hangup().await {
                     warn!(id=%dialog.id(), "error hanging up dialog on drop: {}", e);
                 }
@@ -100,7 +104,8 @@ impl Drop for ServerDialogGuard {
         if state.is_terminated() {
             return;
         }
-        tokio::spawn(async move {
+
+        crate::utils::spawn(async move {
             if state.can_cancel() {
                 dlg.reject(None, None).ok();
             } else {

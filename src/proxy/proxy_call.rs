@@ -53,7 +53,7 @@ impl CallSessionBuilder {
         self
     }
 
-    pub async fn spawn(
+    pub async fn build_and_serve(
         self,
         server: SipServerRef,
         tx: &mut rsipstack::transaction::transaction::Transaction,
@@ -62,8 +62,7 @@ impl CallSessionBuilder {
         let cancel_token = self.cancel_token.unwrap_or_default();
         let session_id = dialplan
             .session_id
-            .as_ref()
-            .map(|id| crate::utils::sanitize_id(id))
+            .clone()
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
         let original_caller = dialplan
@@ -93,7 +92,7 @@ impl CallSessionBuilder {
             max_forwards: self.max_forwards,
         };
 
-        CallSession::spawn(server, context, tx, cancel_token, self.call_record_sender).await
+        CallSession::serve(server, context, tx, cancel_token, self.call_record_sender).await
     }
 
     pub fn report_failure(
@@ -105,8 +104,7 @@ impl CallSessionBuilder {
         let dialplan = Arc::new(self.dialplan);
         let session_id = dialplan
             .session_id
-            .as_ref()
-            .map(|id| crate::utils::sanitize_id(id))
+            .clone()
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
         let original_caller = dialplan

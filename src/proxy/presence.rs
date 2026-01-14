@@ -318,7 +318,7 @@ impl ProxyModule for PresenceModule {
 
         // Spawn listener for notification requests (e.g. from UI or PUBLISH)
         let module_clone = self.clone();
-        tokio::spawn(async move {
+        crate::utils::spawn(async move {
             while let Some(identity) = rx.recv().await {
                 let state = module_clone.manager.get_state(&identity);
                 let subscribers = module_clone.manager.get_subscribers(&identity);
@@ -331,7 +331,7 @@ impl ProxyModule for PresenceModule {
         // Spawn listener for locator events
         let manager = self.manager.clone();
         if let Some(mut rx) = self.server.locator_events.as_ref().map(|tx| tx.subscribe()) {
-            tokio::spawn(async move {
+            crate::utils::spawn(async move {
                 while let Ok(event) = rx.recv().await {
                     manager.handle_locator_event(event).await;
                 }
@@ -340,7 +340,7 @@ impl ProxyModule for PresenceModule {
 
         // Spawn background cleanup for expired subscriptions
         let manager_cleanup = self.manager.clone();
-        tokio::spawn(async move {
+        crate::utils::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
             loop {
                 interval.tick().await;

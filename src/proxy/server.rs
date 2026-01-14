@@ -597,7 +597,7 @@ impl SipServer {
         if let Some(webhook_config) = &self.inner.proxy_config.locator_webhook {
             if let Some(events) = &self.inner.locator_events {
                 let rx = events.subscribe();
-                tokio::spawn(super::locator_webhook::handle_locator_webhook(
+                crate::utils::spawn(super::locator_webhook::handle_locator_webhook(
                     webhook_config.clone(),
                     rx,
                 ));
@@ -690,7 +690,7 @@ impl SipServer {
                     continue;
                 }
             }
-            tokio::spawn(async move {
+            crate::utils::spawn(async move {
                 runnings_tx.fetch_add(1, Ordering::Relaxed);
                 let start_time = Instant::now();
                 let cookie = TransactionCookie::from(&tx.key);
@@ -700,7 +700,7 @@ impl SipServer {
                         let final_status = tx.last_response.as_ref().map(|r| r.status_code());
                         match r {
                             Ok(_) => {
-                                info!(key = %tx.key, ?final_status, "transaction processed in {:?}", start_time.elapsed());
+                                debug!(key = %tx.key, ?final_status, "transaction processed in {:?}", start_time.elapsed());
                             },
                             Err(e) => {
                                 warn!(key = %tx.key, ?final_status, "failed to process transaction: {} in {:?}", e, start_time.elapsed());

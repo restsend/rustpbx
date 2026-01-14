@@ -474,6 +474,7 @@ impl FileTrack {
         }
     }
 
+
     pub fn with_path(mut self, path: String) -> Self {
         self.file_path = Some(path);
         self
@@ -545,7 +546,7 @@ impl FileTrack {
         let loop_playback = self.loop_playback;
         let cancel_token = self.cancel_token.clone();
 
-        tokio::spawn(async move {
+        crate::utils::spawn(async move {
             if !loop_playback {
                 tokio::select! {
                     _ = tokio::time::sleep(tokio::time::Duration::from_millis(100)) => {
