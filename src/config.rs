@@ -166,6 +166,7 @@ pub struct Config {
 
     pub callrecord: Option<CallRecordConfig>,
     pub ice_servers: Option<Vec<IceServer>>,
+    #[serde(default)]
     pub ami: Option<AmiConfig>,
     #[cfg(feature = "console")]
     pub console: Option<ConsoleConfig>,

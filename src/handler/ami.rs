@@ -41,6 +41,15 @@ pub fn ami_router(app_state: AppState) -> Router<AppState> {
 
 pub(super) async fn health_handler(State(state): State<AppState>) -> Response {
     let tx_stats = state.sip_server().inner.endpoint.inner.get_stats();
+    let app_tasks = {
+        let metrics = crate::utils::GLOBAL_TASK_METRICS.lock().unwrap();
+        metrics
+            .iter()
+            .filter(|&(_, &v)| v > 0)
+            .map(|(k, &v)| (k.clone(), serde_json::json!(v)))
+            .collect::<serde_json::Map<String, serde_json::Value>>()
+    };
+
     let sipserver_stats = serde_json::json!({
         "transactions": serde_json::json!({
             "running": tx_stats.running_transactions,
@@ -50,7 +59,7 @@ pub(super) async fn health_handler(State(state): State<AppState>) -> Response {
         "dialogs": state.sip_server().inner.dialog_layer.len(),
         "flows": state.sip_server().inner.sip_flow.as_ref().map(|sf| sf.count()).unwrap_or(0),
         "calls": state.sip_server().inner.active_call_registry.count(),
-        "running_tx": state.sip_server().inner.runnings_tx.load(Ordering::Relaxed)
+        "running_tx": state.sip_server().inner.runnings_tx.load(Ordering::Relaxed),
     });
 
     let callrecord_stats = match state.core.callrecord_stats {
@@ -66,6 +75,7 @@ pub(super) async fn health_handler(State(state): State<AppState>) -> Response {
         "version": crate::version::get_version_info(),
         "total": state.total_calls.load(Ordering::Relaxed),
         "failed": state.total_failed_calls.load(Ordering::Relaxed),
+        "tasks": app_tasks,
         "sipserver": sipserver_stats,
         "callrecord": callrecord_stats,
     });
@@ -356,7 +366,7 @@ async fn reload_app_handler(
 
     state.reload_requested.store(true, Ordering::Relaxed);
     let cancel_token = state.token().clone();
-    tokio::spawn(async move {
+    crate::utils::spawn(async move {
         sleep(Duration::from_millis(200)).await;
         cancel_token.cancel();
     });

@@ -227,7 +227,7 @@ impl Addon for ArchiveAddon {
         }
 
         let archive_state = self.state.clone();
-        tokio::spawn(async move {
+        crate::utils::spawn(async move {
             Self::run_scheduler(state, archive_state).await;
         });
         Ok(())

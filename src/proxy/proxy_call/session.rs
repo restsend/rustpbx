@@ -38,7 +38,7 @@ use rsipstack::dialog::{
 use rsipstack::rsip_ext::RsipResponseExt;
 use rustrtc;
 use std::{
-    collections::{HashSet, VecDeque},
+    collections::HashSet,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -119,32 +119,26 @@ pub(crate) enum ParallelEvent {
     Cancelled,
 }
 
-#[derive(Clone, Default)]
+#[derive(Debug)]
 pub(crate) struct SessionActionInbox {
-    pub queue: Arc<Mutex<VecDeque<SessionAction>>>,
+    rx: mpsc::UnboundedReceiver<SessionAction>,
 }
 
 impl SessionActionInbox {
-    pub fn push(&self, action: SessionAction) {
-        if let Ok(mut guard) = self.queue.lock() {
-            guard.push_back(action);
-        } else {
-            warn!("Session action inbox lock poisoned");
-        }
+    pub fn new(rx: mpsc::UnboundedReceiver<SessionAction>) -> Self {
+        Self { rx }
     }
 
-    pub fn drain(&self) -> Vec<SessionAction> {
-        match self.queue.lock() {
-            Ok(mut guard) => guard.drain(..).collect(),
-            Err(_) => {
-                warn!("Session action inbox lock poisoned while draining");
-                Vec::new()
-            }
-        }
+    pub fn try_recv(&mut self) -> Result<SessionAction, mpsc::error::TryRecvError> {
+        self.rx.try_recv()
+    }
+
+    pub async fn recv(&mut self) -> Option<SessionAction> {
+        self.rx.recv().await
     }
 }
 
-pub(crate) type ActionInbox<'a> = Option<&'a SessionActionInbox>;
+pub(crate) type ActionInbox<'a> = Option<&'a mut SessionActionInbox>;
 
 pub(crate) struct CallSessionRecordSnapshot {
     pub ring_time: Option<Instant>,
@@ -297,13 +291,22 @@ impl CallSession {
     }
 
     pub fn add_callee_guard(&mut self, mut guard: DialogStateReceiverGuard) {
-        guard.disarm();
         if let Some(tx) = &self.callee_event_tx {
             if let Some(mut receiver) = guard.take_receiver() {
                 let tx = tx.clone();
-                tokio::spawn(async move {
-                    while let Some(state) = receiver.recv().await {
-                        let _ = tx.send(state);
+                let cancel_token = self.cancel_token.clone();
+                crate::utils::spawn(async move {
+                    loop {
+                        tokio::select! {
+                            _ = cancel_token.cancelled() => break,
+                            state = receiver.recv() => {
+                                if let Some(state) = state {
+                                    let _ = tx.send(state);
+                                } else {
+                                    break;
+                                }
+                            }
+                        }
                     }
                 });
             }
@@ -975,7 +978,7 @@ impl CallSession {
         &mut self,
         callee: Option<String>,
         callee_answer: Option<String>,
-        dialog_id: Option<DialogId>,
+        dialog_id: Option<String>,
     ) -> Result<()> {
         // Ensure queue hold tones cease immediately once the call is answered.
         // self.stop_queue_hold().await;
@@ -1117,7 +1120,7 @@ impl CallSession {
                 .remove_track(Self::RINGBACK_TRACK_ID, true)
                 .await;
             if let Some(answer) = callee_answer.as_ref() {
-                self.setup_callee_track(answer, dialog_id.as_ref()).await?;
+                self.setup_callee_track(answer, None).await?;
             }
 
             if let Some(ref bridge) = self.media_bridge {
@@ -1284,9 +1287,9 @@ impl CallSession {
             .or_else(|| self.server.default_contact_uri())
     }
 
-    async fn process_pending_actions(&mut self, inbox: Option<&SessionActionInbox>) -> Result<()> {
+    async fn process_pending_actions(&mut self, inbox: ActionInbox<'_>) -> Result<()> {
         if let Some(inbox) = inbox {
-            for action in inbox.drain() {
+            while let Ok(action) = inbox.try_recv() {
                 self.apply_session_action(action, Some(inbox)).await?;
             }
         }
@@ -1364,7 +1367,7 @@ impl CallSession {
     pub fn apply_session_action<'a>(
         &'a mut self,
         action: SessionAction,
-        inbox: Option<&'a SessionActionInbox>,
+        inbox: ActionInbox<'a>,
     ) -> BoxFuture<'a, Result<()>> {
         async move {
             match action {
@@ -1391,13 +1394,8 @@ impl CallSession {
                 SessionAction::AcceptCall {
                     callee,
                     sdp,
-                    dialog_id: _,
-                } => {
-                    if let Some(callee) = callee {
-                        self.connected_callee = Some(callee);
-                    }
-                    self.accept_call(None, sdp, None).await
-                }
+                    dialog_id,
+                } => self.accept_call(callee, sdp, dialog_id).await,
                 SessionAction::StartRinging {
                     ringback,
                     passthrough: _,
@@ -1440,7 +1438,7 @@ impl CallSession {
     fn transfer_to_endpoint<'a>(
         &'a mut self,
         endpoint: &'a TransferEndpoint,
-        inbox: Option<&'a SessionActionInbox>,
+        inbox: ActionInbox<'a>,
     ) -> BoxFuture<'a, Result<()>> {
         async move {
             match endpoint {
@@ -1524,13 +1522,13 @@ impl CallSession {
     async fn execute_targets(
         &mut self,
         strategy: &DialStrategy,
-        inbox: ActionInbox<'_>,
+        mut inbox: ActionInbox<'_>,
     ) -> Result<()> {
-        self.process_pending_actions(inbox).await?;
+        self.process_pending_actions(inbox.as_deref_mut()).await?;
         let timeout_duration = self.forwarding_timeout();
 
         if let Some(duration) = timeout_duration {
-            match timeout(duration, self.run_targets(strategy, inbox)).await {
+            match timeout(duration, self.run_targets(strategy, inbox.as_deref_mut())).await {
                 Ok(outcome) => match outcome {
                     Ok(_) => {
                         debug!(session_id = %self.context.session_id, "Dialplan executed successfully");
@@ -1548,7 +1546,7 @@ impl CallSession {
                 }
             }
         } else {
-            match self.run_targets(strategy, inbox).await {
+            match self.run_targets(strategy, inbox.as_deref_mut()).await {
                 Ok(_) => {
                     debug!(session_id = %self.context.session_id, "Dialplan executed successfully");
                     Ok(())
@@ -1562,9 +1560,9 @@ impl CallSession {
         &mut self,
         plan: &QueuePlan,
         next: Option<&DialplanFlow>,
-        inbox: ActionInbox<'_>,
+        mut inbox: ActionInbox<'_>,
     ) -> Result<()> {
-        self.process_pending_actions(inbox).await?;
+        self.process_pending_actions(inbox.as_deref_mut()).await?;
 
         info!(
             session_id = %self.context.session_id,
@@ -1652,7 +1650,7 @@ impl CallSession {
 
         // Execute the dial strategy directly
         let dial_result = match &plan.dial_strategy {
-            Some(strategy) => self.run_targets(strategy, inbox).await,
+            Some(strategy) => self.run_targets(strategy, inbox.as_deref_mut()).await,
             None => {
                 warn!(session_id = %self.context.session_id, "No dial strategy");
                 Err(anyhow::anyhow!("No dial strategy configured"))
@@ -1718,8 +1716,12 @@ impl CallSession {
         self.handle_failure(inbox).await
     }
 
-    async fn run_targets(&mut self, strategy: &DialStrategy, inbox: ActionInbox<'_>) -> Result<()> {
-        self.process_pending_actions(inbox).await?;
+    async fn run_targets(
+        &mut self,
+        strategy: &DialStrategy,
+        mut inbox: ActionInbox<'_>,
+    ) -> Result<()> {
+        self.process_pending_actions(inbox.as_deref_mut()).await?;
         info!(
             session_id = %self.context.session_id,
             strategy = %strategy,
@@ -1736,7 +1738,7 @@ impl CallSession {
     async fn dial_sequential(
         &mut self,
         targets: &[Location],
-        inbox: ActionInbox<'_>,
+        mut inbox: ActionInbox<'_>,
     ) -> Result<()> {
         debug!(
             session_id = %self.context.session_id,
@@ -1745,7 +1747,7 @@ impl CallSession {
         );
 
         for (index, target) in targets.iter().enumerate() {
-            self.process_pending_actions(inbox).await?;
+            self.process_pending_actions(inbox.as_deref_mut()).await?;
             info!(
                 session_id = %self.context.session_id, index, %target,
                 "trying sequential target"
@@ -1830,7 +1832,11 @@ impl CallSession {
         Err(anyhow!("All sequential targets failed"))
     }
 
-    async fn dial_parallel(&mut self, targets: &[Location], inbox: ActionInbox<'_>) -> Result<()> {
+    async fn dial_parallel(
+        &mut self,
+        targets: &[Location],
+        mut inbox: ActionInbox<'_>,
+    ) -> Result<()> {
         info!(
             session_id = %self.context.session_id,
             target_count = targets.len(),
@@ -1857,10 +1863,9 @@ impl CallSession {
                 )
                 .await;
         }
-        self.process_pending_actions(inbox).await?;
+        self.process_pending_actions(inbox.as_deref_mut()).await?;
 
         let (ev_tx, mut ev_rx) = mpsc::unbounded_channel::<ParallelEvent>();
-        let dialog_layer = self.dialog_layer.clone();
         let cancel_token = self.cancel_token.clone();
 
         let caller = match self.context.dialplan.caller.as_ref() {
@@ -1879,7 +1884,7 @@ impl CallSession {
         let mut join_set = JoinSet::<()>::new();
 
         for (idx, target) in targets.iter().enumerate() {
-            let (state_tx, mut state_rx) = mpsc::unbounded_channel::<DialogState>();
+            let (state_tx, state_rx) = mpsc::unbounded_channel::<DialogState>();
             let ev_tx_c = ev_tx.clone();
 
             // Generate offer based on target's WebRTC support
@@ -1918,23 +1923,30 @@ impl CallSession {
                 .map(|addr| addr.to_string());
             let aor = target.aor.to_string();
 
+            let callee_event_tx = self.callee_event_tx.clone();
+            let dialog_layer_for_guard = self.dialog_layer.clone();
+            let dialog_layer_for_invite = self.dialog_layer.clone();
+            // let server_clone = self.server.clone();
+
             // Forward dialog state events to aggregator
-            tokio::spawn({
+            crate::utils::spawn({
                 let ev_tx_c = ev_tx_c.clone();
-                let callee_event_tx = self.callee_event_tx.clone();
                 async move {
-                    while let Some(state) = state_rx.recv().await {
+                    let mut guard = DialogStateReceiverGuard::new(dialog_layer_for_guard, state_rx);
+                    while let Some(state) = guard.recv().await {
                         if let Some(tx) = &callee_event_tx {
                             let _ = tx.send(state.clone());
                         }
                         match state {
                             DialogState::Calling(dialog_id) => {
+                                guard.set_dialog_id(dialog_id.clone());
                                 let _ = ev_tx_c.send(ParallelEvent::Calling {
                                     _idx: idx,
                                     dialog_id,
                                 });
                             }
                             DialogState::Early(dialog_id, response) => {
+                                guard.set_dialog_id(dialog_id.clone());
                                 let sdp = if !response.body().is_empty() {
                                     Some(String::from_utf8_lossy(response.body()).to_string())
                                 } else {
@@ -1956,13 +1968,14 @@ impl CallSession {
                 }
             });
 
-            let dialog_layer_c = dialog_layer.clone();
             let state_tx_c = state_tx.clone();
 
             join_set.spawn({
                 let ev_tx_c = ev_tx_c.clone();
                 async move {
-                    let invite_result = dialog_layer_c.do_invite(invite_option, state_tx_c).await;
+                    let invite_result = dialog_layer_for_invite
+                        .do_invite(invite_option, state_tx_c)
+                        .await;
                     match invite_result {
                         Ok((dialog, resp_opt)) => {
                             if let Some(resp) = resp_opt {
@@ -2033,107 +2046,130 @@ impl CallSession {
         let mut accepted_idx: Option<usize> = None;
         let mut known_dialogs: Vec<Option<DialogId>> = vec![None; targets.len()];
 
-        while let Some(event) = ev_rx.recv().await {
-            self.process_pending_actions(inbox).await?;
-            match event {
-                ParallelEvent::Calling {
-                    _idx: idx,
-                    dialog_id,
-                } => {
-                    known_dialogs[idx] = Some(dialog_id);
-                }
-                ParallelEvent::Early {
-                    _idx: _,
-                    dialog_id,
-                    sdp,
-                } => {
-                    if let Some(answer) = sdp {
-                        let _ = self
-                            .apply_session_action(
-                                SessionAction::ProvideEarlyMediaWithDialog(
-                                    dialog_id.to_string(),
-                                    answer,
-                                ),
-                                None,
-                            )
-                            .await;
-                    } else if !self.early_media_sent {
-                        let _ = self
-                            .apply_session_action(
-                                SessionAction::StartRinging {
-                                    ringback: None,
-                                    passthrough: false,
-                                },
-                                None,
-                            )
-                            .await;
-                    }
-                }
-                ParallelEvent::Accepted {
-                    _idx: idx,
-                    dialog_id,
-                    answer,
-                    aor,
-                    caller_uri,
-                    callee_uri,
-                    contact,
-                    destination,
-                } => {
-                    self.routed_caller = Some(caller_uri.clone());
-                    self.routed_callee = Some(callee_uri.clone());
-                    self.routed_contact = Some(contact.clone());
-                    self.routed_destination = destination.clone();
-                    if accepted_idx.is_none() {
-                        if let Err(e) = self
-                            .apply_session_action(
-                                SessionAction::AcceptCall {
-                                    callee: Some(aor),
-                                    sdp: Some(answer),
-                                    dialog_id: Some(dialog_id.to_string()),
-                                },
-                                None,
-                            )
-                            .await
-                        {
-                            warn!(session_id = %self.context.session_id, error = %e, "Failed to accept call on parallel branch");
-                            continue;
+        loop {
+            tokio::select! {
+                maybe_event = ev_rx.recv() => {
+                    let event = match maybe_event {
+                        Some(e) => e,
+                        None => break,
+                    };
+
+                    match event {
+                        ParallelEvent::Calling {
+                            _idx: idx,
+                            dialog_id,
+                        } => {
+                            known_dialogs[idx] = Some(dialog_id);
                         }
-                        accepted_idx = Some(idx);
-                        for (j, maybe_id) in known_dialogs.iter().enumerate() {
-                            if j != idx {
-                                if let Some(id) = maybe_id.clone() {
-                                    if let Some(dlg) = self.dialog_layer.get_dialog(&id) {
-                                        dlg.hangup().await.ok();
+                        ParallelEvent::Early {
+                            _idx: _,
+                            dialog_id,
+                            sdp,
+                        } => {
+                            if let Some(answer) = sdp {
+                                let _ = self
+                                    .apply_session_action(
+                                        SessionAction::ProvideEarlyMediaWithDialog(
+                                            dialog_id.to_string(),
+                                            answer,
+                                        ),
+                                        None,
+                                    )
+                                    .await;
+                            } else if !self.early_media_sent {
+                                let _ = self
+                                    .apply_session_action(
+                                        SessionAction::StartRinging {
+                                            ringback: None,
+                                            passthrough: false,
+                                        },
+                                        None,
+                                    )
+                                    .await;
+                            }
+                        }
+                        ParallelEvent::Accepted {
+                            _idx: idx,
+                            dialog_id,
+                            answer,
+                            aor,
+                            caller_uri,
+                            callee_uri,
+                            contact,
+                            destination,
+                        } => {
+                            self.routed_caller = Some(caller_uri.clone());
+                            self.routed_callee = Some(callee_uri.clone());
+                            self.routed_contact = Some(contact.clone());
+                            self.routed_destination = destination.clone();
+                            if accepted_idx.is_none() {
+                                if let Err(e) = self
+                                    .apply_session_action(
+                                        SessionAction::AcceptCall {
+                                            callee: Some(aor),
+                                            sdp: Some(answer),
+                                            dialog_id: Some(dialog_id.to_string()),
+                                        },
+                                        None,
+                                    )
+                                    .await
+                                {
+                                    warn!(session_id = %self.context.session_id, error = %e, "Failed to accept call on parallel branch");
+                                    continue;
+                                }
+                                accepted_idx = Some(idx);
+                                self.add_callee_dialog(dialog_id.clone());
+                                for (j, maybe_id) in known_dialogs.iter().enumerate() {
+                                    if j != idx {
+                                        if let Some(id) = maybe_id.clone() {
+                                            if let Some(dlg) = self.dialog_layer.get_dialog(&id) {
+                                                dlg.hangup().await.ok();
+                                                self.dialog_layer.remove_dialog(&id);
+                                            }
+                                        }
                                     }
                                 }
                             }
                         }
-                    }
-                }
-                ParallelEvent::Failed {
-                    code,
-                    reason,
-                    target,
-                    ..
-                } => {
-                    failures += 1;
-                    self.set_error(code, reason, target);
-                    if failures >= targets.len() && accepted_idx.is_none() {
-                        return Err(anyhow!("All parallel targets failed"));
-                    }
-                }
-                ParallelEvent::Terminated { _idx: idx } => {
-                    if Some(idx) == accepted_idx {
-                        return Ok(());
-                    }
-                }
-                ParallelEvent::Cancelled => {
-                    for maybe_id in known_dialogs.iter().filter_map(|o| o.as_ref()) {
-                        if let Some(dlg) = self.dialog_layer.get_dialog(maybe_id) {
-                            dlg.hangup().await.ok();
+                        ParallelEvent::Failed {
+                            code,
+                            reason,
+                            target,
+                            ..
+                        } => {
+                            failures += 1;
+                            self.set_error(code, reason, target);
+                            if failures >= targets.len() && accepted_idx.is_none() {
+                                return Err(anyhow!("All parallel targets failed"));
+                            }
+                        }
+                        ParallelEvent::Terminated { _idx: idx } => {
+                            if Some(idx) == accepted_idx {
+                                return Ok(());
+                            }
+                        }
+                        ParallelEvent::Cancelled => {
+                            for maybe_id in known_dialogs.iter().filter_map(|o| o.as_ref()) {
+                                if let Some(dlg) = self.dialog_layer.get_dialog(maybe_id) {
+                                    dlg.hangup().await.ok();
+                                    self.dialog_layer.remove_dialog(maybe_id);
+                                }
+                            }
+                            return Err(anyhow!("Caller cancelled"));
                         }
                     }
-                    return Err(anyhow!("Caller cancelled"));
+                }
+
+                maybe_action = async {
+                    if let Some(ref mut inbox) = inbox {
+                        inbox.recv().await
+                    } else {
+                        std::future::pending().await
+                    }
+                } => {
+                     if let Some(action) = maybe_action {
+                         self.apply_session_action(action, inbox.as_deref_mut()).await?;
+                     }
                 }
             }
         }
@@ -2232,27 +2268,6 @@ impl CallSession {
         } else {
             invite_option
         };
-
-        if let Some(duration) = self
-            .context
-            .dialplan
-            .max_call_duration
-            .or_else(|| self.context.cookie.get_max_duration())
-        {
-            let cancel_token = self.cancel_token.clone();
-            let session_id = self.context.session_id.clone();
-
-            tokio::spawn(async move {
-                tokio::time::sleep(duration).await;
-                if !cancel_token.is_cancelled() {
-                    info!(
-                        session_id = %session_id,
-                        "Max duration reached, cancelling call"
-                    );
-                    cancel_token.cancel();
-                }
-            });
-        }
 
         if let Some(contact_uri) = enforced_contact {
             invite_option.contact = contact_uri;
@@ -2414,7 +2429,8 @@ impl CallSession {
             }
         }
 
-        let state_rx_guard = DialogStateReceiverGuard::new(dialog_layer.clone(), state_rx);
+        let mut state_rx_guard = DialogStateReceiverGuard::new(dialog_layer.clone(), state_rx);
+        state_rx_guard.set_dialog_id(dialog.id());
 
         if self.server.proxy_config.session_timer {
             let default_expires = self.server.proxy_config.session_expires.unwrap_or(1800);
@@ -2450,7 +2466,7 @@ impl CallSession {
         Ok(())
     }
 
-    async fn handle_failure(&mut self, inbox: Option<&SessionActionInbox>) -> Result<()> {
+    async fn handle_failure(&mut self, inbox: ActionInbox<'_>) -> Result<()> {
         if self.failure_is_busy() {
             if let Some(config) = self.forwarding_config().cloned() {
                 if matches!(config.mode, CallForwardingMode::WhenBusy) {
@@ -2486,8 +2502,8 @@ impl CallSession {
         Err(anyhow!("Call failed"))
     }
 
-    async fn execute_dialplan(&mut self, inbox: ActionInbox<'_>) -> Result<()> {
-        self.process_pending_actions(inbox).await?;
+    async fn execute_dialplan(&mut self, mut inbox: ActionInbox<'_>) -> Result<()> {
+        self.process_pending_actions(inbox.as_deref_mut()).await?;
         if self.context.dialplan.is_empty() {
             self.set_error(
                 StatusCode::ServerInternalError,
@@ -2496,17 +2512,17 @@ impl CallSession {
             );
             return Err(anyhow!("Dialplan has no targets"));
         }
-        if self.try_forwarding_before_dial(inbox).await? {
+        if self
+            .try_forwarding_before_dial(inbox.as_deref_mut())
+            .await?
+        {
             return Ok(());
         }
         self.execute_flow(&self.context.dialplan.flow.clone(), inbox)
             .await
     }
 
-    async fn try_forwarding_before_dial(
-        &mut self,
-        inbox: Option<&SessionActionInbox>,
-    ) -> Result<bool> {
+    async fn try_forwarding_before_dial(&mut self, inbox: ActionInbox<'_>) -> Result<bool> {
         let Some(config) = self.immediate_forwarding_config().cloned() else {
             return Ok(false);
         };
@@ -2536,18 +2552,23 @@ impl CallSession {
         let mut refresh_interval = tokio::time::interval(Duration::from_secs(5));
         loop {
             tokio::select! {
+                _ = cancel_token.cancelled() => {
+                    debug!(session_id = %context.session_id, "Session loop cancelled via token");
+                    break;
+                }
                 state = state_rx.recv() => {
                     match state {
                         Some(state) => {
                             match state {
                                 DialogState::Terminated(dialog_id, reason) => {
-                                    info!(session_id = %context.session_id, reason = ?reason, %dialog_id, "Server dialog terminated");
+                                    debug!(session_id = %context.session_id, reason = ?reason, %dialog_id, "Server dialog terminated");
                                     Self::store_pending_hangup(
                                         &pending_hangup,
                                         Some(CallRecordHangupReason::ByCaller),
                                         Some(200),
                                         Some("caller".to_string()),
                                     ).ok();
+                                    cancel_token.cancel();
                                     break;
                                 }
                                 DialogState::Info(dialog_id, _request, tx_handle) => {
@@ -2621,14 +2642,23 @@ impl CallSession {
                         Some(state) => {
                             match state {
                                 DialogState::Terminated(dialog_id, reason) => {
-                                    info!(session_id = %context.session_id, reason = ?reason, %dialog_id, "Callee dialog terminated");
-                                    Self::store_pending_hangup(
-                                        &pending_hangup,
-                                        Some(CallRecordHangupReason::ByCallee),
-                                        Some(200),
-                                        Some("callee".to_string()),
-                                    ).ok();
-                                    break;
+                                    let is_active = {
+                                        let dialogs = callee_dialogs.lock().unwrap();
+                                        dialogs.contains(&dialog_id)
+                                    };
+                                    if is_active {
+                                        info!(session_id = %context.session_id, reason = ?reason, %dialog_id, "Callee dialog terminated");
+                                        Self::store_pending_hangup(
+                                            &pending_hangup,
+                                            Some(CallRecordHangupReason::ByCallee),
+                                            Some(200),
+                                            Some("callee".to_string()),
+                                        ).ok();
+                                        cancel_token.cancel();
+                                        break;
+                                    } else {
+                                        debug!(session_id = %context.session_id, %dialog_id, "Inactive callee dialog terminated, ignoring");
+                                    }
                                 }
                                 DialogState::Updated(dialog_id, _request, _) => {
                                     debug!(session_id = %context.session_id, %dialog_id, "Received UPDATE/INVITE on callee dialog");
@@ -2643,7 +2673,10 @@ impl CallSession {
                                 _ => {}
                             }
                         }
-                        None => {}
+                        None => {
+                            warn!(session_id = %context.session_id, "Callee dialog state channel closed");
+                            break;
+                        }
                     }
                 }
                 _ = refresh_interval.tick() => {
@@ -2655,21 +2688,21 @@ impl CallSession {
                     let mut should_refresh_client = false;
 
                     {
-                        let server_timer = server_timer.lock().unwrap();
-                        if server_timer.is_expired() {
+                        let  server_timer_guard = server_timer.lock().unwrap();
+                        if server_timer_guard.is_expired() {
                             debug!(session_id = %context.session_id, "Server session timer expired, terminating");
                             should_terminate = true;
-                        } else if server_timer.refresher == SessionRefresher::Uas && server_timer.should_refresh() {
+                        } else if server_timer_guard.refresher == SessionRefresher::Uas && server_timer_guard.should_refresh() {
                             should_refresh_server = true;
                         }
                     }
 
                     if !should_terminate {
-                        let client_timer = client_timer.lock().unwrap();
-                        if client_timer.is_expired() {
+                        let  client_timer_guard = client_timer.lock().unwrap();
+                        if client_timer_guard.is_expired() {
                             info!(session_id = %context.session_id, "Client session timer expired, terminating");
                             should_terminate = true;
-                        } else if client_timer.refresher == SessionRefresher::Uac && client_timer.should_refresh() {
+                        } else if client_timer_guard.refresher == SessionRefresher::Uac && client_timer_guard.should_refresh() {
                             should_refresh_client = true;
                         }
                     }
@@ -2681,10 +2714,12 @@ impl CallSession {
                     }
 
                     if should_refresh_server {
-                        info!(session_id = %context.session_id, "Server session timer: sending refresh (UAS)");
+                        debug!(session_id = %context.session_id, "Server session timer: sending refresh (UAS)");
 
                         let session_interval = {
-                            server_timer.lock().unwrap().session_interval
+                            let mut timer = server_timer.lock().unwrap();
+                            timer.refreshing = true;
+                            timer.session_interval
                         };
 
                         let headers = vec![
@@ -2695,28 +2730,46 @@ impl CallSession {
                             ),
                         ];
 
-                        match server_dialog.update(Some(headers), None).await {
-                            Err(e) => {
-                                warn!(session_id = %context.session_id, "Failed to send UPDATE for session refresh: {}", e);
-                            }
-                            Ok(None) => {
-                                warn!(session_id = %context.session_id, "UPDATE for session refresh returned no response");
-                            }
-                            Ok(Some(resp)) => {
-                                if matches!(resp.status_code.kind(), rsip::status_code::StatusCodeKind::Successful) {
-                                    server_timer.lock().unwrap().update_refresh();
-                                } else {
-                                    warn!(session_id = %context.session_id, status = %resp.status_code, "UPDATE for session refresh failed");
+                        let server_dialog = server_dialog.clone();
+                        let server_timer = server_timer.clone();
+                        let session_id = context.session_id.clone();
+                        let cancel_token_clone = cancel_token.clone();
+
+                        crate::utils::spawn(async move {
+                            tokio::select!{
+                                _ = cancel_token_clone.cancelled() => {
+                                    debug!(session_id = %session_id, "Not sending UPDATE for session refresh, session cancelled");
+                                },
+                                result = server_dialog.update(Some(headers), None) => {
+                                    let mut timer = server_timer.lock().unwrap();
+                                    timer.refreshing = false;
+                                    match result {
+                                        Err(e) => {
+                                            warn!(session_id = %session_id, "Failed to send UPDATE for session refresh: {}", e);
+                                        }
+                                        Ok(None) => {
+                                            warn!(session_id = %session_id, "UPDATE for session refresh returned no response");
+                                        }
+                                        Ok(Some(resp)) => {
+                                            if matches!(resp.status_code.kind(), rsip::status_code::StatusCodeKind::Successful) {
+                                                timer.update_refresh();
+                                            } else {
+                                                warn!(session_id = %session_id, status = %resp.status_code, "UPDATE for session refresh failed");
+                                            }
+                                        }
+                                    }
                                 }
                             }
-                        }
+                        });
                     }
 
                     if should_refresh_client {
-                        info!(session_id = %context.session_id, "Client session timer: sending refresh (UAC)");
+                        debug!(session_id = %context.session_id, "Client session timer: sending refresh (UAC)");
 
                         let session_interval = {
-                            client_timer.lock().unwrap().session_interval
+                            let mut timer = client_timer.lock().unwrap();
+                            timer.refreshing = true;
+                            timer.session_interval
                         };
 
                         let headers = vec![
@@ -2732,36 +2785,49 @@ impl CallSession {
                             dialogs.iter().cloned().collect()
                         };
 
-                        let mut success = false;
                         for dialog_id in dialog_ids {
                             if let Some(dialog) = dialog_layer.get_dialog(&dialog_id) {
                                 match dialog {
                                     rsipstack::dialog::dialog::Dialog::ClientInvite(invite_dialog) => {
-                                        match invite_dialog.update(Some(headers.clone()), None).await {
-                                            Err(e) => {
-                                                warn!(session_id = %context.session_id, %dialog_id, "Failed to send UPDATE for session refresh: {}", e);
-                                            }
-                                            Ok(None) => {
-                                                warn!(session_id = %context.session_id, %dialog_id, "UPDATE for session refresh returned no response");
-                                            }
-                                            Ok(Some(resp)) => {
-                                                if matches!(resp.status_code.kind(), rsip::status_code::StatusCodeKind::Successful) {
-                                                    success = true;
-                                                } else {
-                                                    warn!(session_id = %context.session_id, %dialog_id, status = %resp.status_code, "UPDATE for session refresh failed");
+                                        let client_timer = client_timer.clone();
+                                        let session_id = context.session_id.clone();
+                                        let headers = headers.clone();
+                                        let cancel_token_clone = cancel_token.clone();
+
+                                        crate::utils::spawn(async move {
+                                            tokio::select!{
+                                                _ = cancel_token_clone.cancelled() => {
+                                                    debug!(session_id = %session_id, %dialog_id, "Not sending UPDATE for session refresh, session cancelled");
+                                                },
+                                                result = invite_dialog.update(Some(headers), None) => {
+                                                    let mut timer = client_timer.lock().unwrap();
+                                                    timer.refreshing = false;
+                                                    match result {
+                                                        Err(e) => {
+                                                            warn!(session_id = %session_id, %dialog_id, "Failed to send UPDATE for session refresh: {}", e);
+                                                        }
+                                                        Ok(None) => {
+                                                            warn!(session_id = %session_id, %dialog_id, "UPDATE for session refresh returned no response");
+                                                        }
+                                                        Ok(Some(resp)) => {
+                                                            if matches!(resp.status_code.kind(), rsip::status_code::StatusCodeKind::Successful) {
+                                                                timer.update_refresh();
+                                                            } else {
+                                                                warn!(session_id = %session_id, %dialog_id, status = %resp.status_code, "UPDATE for session refresh failed");
+                                                            }
+                                                        }
+                                                    }
                                                 }
                                             }
-                                        }
+                                        });
                                     }
                                     _ => {
+                                        let mut timer = client_timer.lock().unwrap();
+                                        timer.refreshing = false;
                                         warn!(session_id = %context.session_id, %dialog_id, "Dialog is not a ClientInvite dialog, cannot send UPDATE");
                                     }
                                 }
                             }
-                        }
-
-                        if success {
-                            client_timer.lock().unwrap().update_refresh();
                         }
                     }
                 }
@@ -2770,7 +2836,7 @@ impl CallSession {
         Ok(())
     }
 
-    pub async fn spawn(
+    pub async fn serve(
         server: SipServerRef,
         context: CallContext,
         tx: &mut rsipstack::transaction::transaction::Transaction,
@@ -2805,7 +2871,6 @@ impl CallSession {
 
         let use_media_proxy =
             Self::check_media_proxy(&context, &offer_sdp, &server.proxy_config.media_proxy);
-        // false;
 
         let all_webrtc_target = context.dialplan.all_webrtc_target();
 
@@ -2876,162 +2941,169 @@ impl CallSession {
 
         let dialog_guard =
             ServerDialogGuard::new(server.dialog_layer.clone(), session.server_dialog.id());
-        let (handle, mut action_rx) = CallSessionHandle::with_shared(session_shared.clone());
+        let (handle, action_rx) = CallSessionHandle::with_shared(session_shared.clone());
         session.register_active_call(handle);
 
         let (callee_state_tx, callee_state_rx) = mpsc::unbounded_channel();
         session.callee_event_tx = Some(callee_state_tx);
 
-        let action_inbox = SessionActionInbox::default();
-        let inbox_forward = action_inbox.clone();
-        let cancel_token_clone = cancel_token.clone();
-
-        tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    _ = cancel_token_clone.cancelled() => {
-                        break;
-                    }
-                    Some(action) = action_rx.recv() => {
-                        inbox_forward.push(action);
-                    }
-                }
-            }
-            while let Ok(action) = action_rx.try_recv() {
-                inbox_forward.push(action);
-            }
-        });
+        let action_inbox = SessionActionInbox::new(action_rx);
 
         let mut server_dialog_clone = session.server_dialog.clone();
-
-        let handle_future = async move {
-            let r = server_dialog_clone.handle(tx).await;
-            debug!(session_id = %context.session_id, "Server dialog handle returned");
-            if let Err(ref e) = r {
-                warn!(session_id = %context.session_id, error = %e, "Server dialog handle returned error, cancelling call");
-                cancel_token.cancel();
-            } else {
-                debug!(session_id = %context.session_id, "Server dialog handle completed successfully");
-                // Do not cancel the token here. The session should continue even if the initial transaction is done.
+        crate::utils::spawn(async move {
+            session
+                .process(state_rx, callee_state_rx, action_inbox, dialog_guard)
+                .await
+        });
+        let ring_time_secs = context.dialplan.max_ring_time.clamp(30, 120);
+        let max_setup_duration = Duration::from_secs(ring_time_secs as u64);
+        tokio::select! {
+            r = server_dialog_clone.handle(tx) => {
+                debug!(session_id = %context.session_id, "Server dialog handle returned");
+                if let Err(ref e) = r {
+                    warn!(session_id = %context.session_id, error = %e, "Server dialog handle returned error, cancelling call");
+                    cancel_token.cancel();
+                }
             }
-        };
-
-        let session_future = session.start(state_rx, callee_state_rx, action_inbox, dialog_guard);
-
-        tokio::join!(handle_future, session_future);
+            _ = cancel_token.cancelled() => {
+                debug!(session_id = %context.session_id, "Call cancelled via token during setup");
+            }
+             _ = tokio::time::sleep(max_setup_duration) => {
+                 warn!(session_id = %context.session_id, "Call setup timed out (180s), forcing cancellation");
+                 cancel_token.cancel();
+            }
+        }
         Ok(())
     }
 
-    pub async fn start(
+    pub async fn process(
         mut self: Box<Self>,
         state_rx: mpsc::UnboundedReceiver<DialogState>,
         callee_state_rx: mpsc::UnboundedReceiver<DialogState>,
-        action_inbox: SessionActionInbox,
+        mut action_inbox: SessionActionInbox,
         dialog_guard: ServerDialogGuard,
     ) {
+        let _cancel_token_guard = self.cancel_token.clone().drop_guard();
+
         let use_media_proxy = self.use_media_proxy;
         let caller_peer = self.caller_peer.clone();
         let callee_peer = self.callee_peer.clone();
-        let action_inbox_clone = action_inbox.clone();
 
-        tokio::spawn(async move {
-            // Keep the dialog guard alive as long as the session is running
-            let _guard = dialog_guard;
+        let _guard = dialog_guard;
 
-            if self.server.proxy_config.session_timer {
-                let default_expires = self.server.proxy_config.session_expires.unwrap_or(1800);
-                if let Err((code, _min_se)) = self.init_server_timer(default_expires) {
-                    info!("Rejecting call with 422 Session Interval Too Small");
-                    let _ = self.server_dialog.reject(Some(code), None);
-                    return;
-                }
+        if self.server.proxy_config.session_timer {
+            let default_expires = self.server.proxy_config.session_expires.unwrap_or(1800);
+            if let Err((code, _min_se)) = self.init_server_timer(default_expires) {
+                info!("Rejecting call with 422 Session Interval Too Small");
+                let _ = self.server_dialog.reject(Some(code), None);
+                return;
             }
+        }
 
-            let server_timer = self.server_timer.clone();
-            let client_timer = self.client_timer.clone();
-            let callee_dialogs = self.callee_dialogs.clone();
-            let server_dialog_clone = self.server_dialog.clone();
-            let handle_for_events = self.handle.clone().unwrap();
+        let server_timer = self.server_timer.clone();
+        let client_timer = self.client_timer.clone();
+        let callee_dialogs = self.callee_dialogs.clone();
+        let server_dialog_clone = self.server_dialog.clone();
+        let handle_for_events = self.handle.clone().unwrap();
 
-            let context_clone = self.context.clone();
-            let proxy_config_clone = self.server.proxy_config.clone();
-            let dialog_layer_clone = self.dialog_layer.clone();
-            let cancel_token_for_select = self.cancel_token.clone();
-            let cancel_token_for_loop = self.cancel_token.clone();
-            let pending_hangup = self.pending_hangup.clone();
+        let context_clone = self.context.clone();
+        let proxy_config_clone = self.server.proxy_config.clone();
+        let dialog_layer_clone = self.dialog_layer.clone();
+        let cancel_token_for_select = self.cancel_token.clone();
+        let cancel_token_for_max_duration = self.cancel_token.clone();
+        let cancel_token_for_loop = self.cancel_token.clone();
+        let pending_hangup = self.pending_hangup.clone();
+        let session_id_for_max_duration = self.context.session_id.clone();
+        let max_duration = self
+            .context
+            .dialplan
+            .max_call_duration
+            .or_else(|| self.context.cookie.get_max_duration());
 
-            let _ = tokio::select! {
-                _ = cancel_token_for_select.cancelled() => {
-                    let (status_code, reason_text, hangup_reason) = self.resolve_pending_hangup();
-                    debug!(session_id = %self.context.session_id, ?status_code, ?reason_text, "Call cancelled via token");
-                    self.set_error(status_code, reason_text.clone(), None);
-                    if let Some(reason) = hangup_reason.clone() {
-                        self.hangup_reason = Some(reason.clone());
-                        self.shared.mark_hangup(reason);
+        let _ = tokio::select! {
+            _ = cancel_token_for_select.cancelled() => {
+                let (status_code, reason_text, hangup_reason) = self.resolve_pending_hangup();
+                debug!(session_id = %self.context.session_id, ?status_code, ?reason_text, "Call cancelled via token");
+                self.set_error(status_code, reason_text.clone(), None);
+                if let Some(reason) = hangup_reason.clone() {
+                    self.hangup_reason = Some(reason.clone());
+                    self.shared.mark_hangup(reason);
+                } else {
+                    self.hangup_reason = Some(CallRecordHangupReason::Canceled);
+                    self.shared
+                        .mark_hangup(CallRecordHangupReason::Canceled);
+                }
+                Err(anyhow!("Call cancelled"))
+            }
+            _ = async {
+                if use_media_proxy {
+                    let _ = tokio::join!(caller_peer.serve(), callee_peer.serve());
+                } else {
+                    cancel_token_for_select.cancelled().await;
+                }
+            } => { Ok(()) },
+            _ = async {
+                if let Some(duration) = max_duration {
+                    tokio::time::sleep(duration).await;
+                    info!(session_id = %session_id_for_max_duration, "max duration reached, cancelling call");
+                    cancel_token_for_max_duration.cancel();
+                } else {
+                    cancel_token_for_max_duration.cancelled().await;
+                }
+            } => { Ok(()) },
+            r = async {
+                self.execute_dialplan(Some(&mut action_inbox)).await?;
+                info!(session_id = %self.context.session_id, "Dialplan execution finished, waiting for call termination");
+                loop {
+                    if let Some(action) = action_inbox.recv().await {
+                        self.apply_session_action(action, Some(&mut action_inbox)).await?;
                     } else {
-                        self.hangup_reason = Some(CallRecordHangupReason::Canceled);
-                        self.shared
-                            .mark_hangup(CallRecordHangupReason::Canceled);
-                    }
-                    Err(anyhow!("Call cancelled"))
-                }
-                _ = async {
-                    if use_media_proxy {
-                        let _ = tokio::join!(caller_peer.serve(), callee_peer.serve());
-                    } else {
-                        std::future::pending::<()>().await;
-                    }
-                } => { Ok(()) },
-                r = async {
-                    self.execute_dialplan(Some(&action_inbox_clone)).await?;
-                    info!(session_id = %self.context.session_id, "Dialplan execution finished, waiting for call termination");
-                    loop {
-                        self.process_pending_actions(Some(&action_inbox_clone)).await?;
-                        tokio::time::sleep(Duration::from_millis(500)).await;
-                    }
-                } => r,
-                r = Self::run_server_events_loop(
-                    context_clone.clone(),
-                    proxy_config_clone,
-                    dialog_layer_clone.clone(),
-                    state_rx,
-                    callee_state_rx,
-                    server_timer,
-                    client_timer,
-                    callee_dialogs.clone(),
-                    server_dialog_clone.clone(),
-                    handle_for_events,
-                    cancel_token_for_loop,
-                    pending_hangup
-                ) => r,
-            };
-
-            // Process pending hangup if any
-            let (_, _, hangup_reason) = self.resolve_pending_hangup();
-            if let Some(reason) = hangup_reason {
-                self.hangup_reason = Some(reason.clone());
-                self.shared.mark_hangup(reason);
-            }
-
-            // Terminate all client dialogs
-            {
-                let dialogs = callee_dialogs.lock().unwrap().clone();
-                for dialog_id in dialogs {
-                    if let Some(dialog) = dialog_layer_clone.get_dialog(&dialog_id) {
-                        debug!(session_id = %context_clone.session_id, %dialog_id, "Terminating client dialog");
-                        dialog.hangup().await.ok();
+                        break;
                     }
                 }
-            }
+                Ok::<(), anyhow::Error>(())
+            } => r,
+            r = Self::run_server_events_loop(
+                context_clone.clone(),
+                proxy_config_clone,
+                dialog_layer_clone.clone(),
+                state_rx,
+                callee_state_rx,
+                server_timer,
+                client_timer,
+                callee_dialogs.clone(),
+                server_dialog_clone.clone(),
+                handle_for_events,
+                cancel_token_for_loop,
+                pending_hangup
+            ) => r,
+        };
 
-            // Terminate server dialog
-            if let Some(dialog) = dialog_layer_clone.get_dialog(&self.server_dialog.id()) {
-                debug!(session_id = %context_clone.session_id, "Terminating server dialog");
-                dialog.hangup().await.ok();
-            }
+        // Process pending hangup if any
+        let (_, _, hangup_reason) = self.resolve_pending_hangup();
+        if let Some(reason) = hangup_reason {
+            self.hangup_reason = Some(reason.clone());
+            self.shared.mark_hangup(reason);
+        }
 
-            self.cancel_token.cancel();
-        });
+        // Terminate all client dialogs
+        {
+            let dialogs = callee_dialogs.lock().unwrap().clone();
+            for dialog_id in dialogs {
+                if let Some(dialog) = dialog_layer_clone.get_dialog(&dialog_id) {
+                    debug!(session_id = %context_clone.session_id, %dialog_id, "Terminating client dialog");
+                    dialog_layer_clone.remove_dialog(&dialog_id);
+                    dialog.hangup().await.ok();
+                }
+            }
+        }
+
+        // Terminate server dialog
+        if let Some(dialog) = dialog_layer_clone.get_dialog(&self.server_dialog.id()) {
+            debug!(session_id = %context_clone.session_id, "Terminating server dialog");
+            dialog_layer_clone.remove_dialog(&self.server_dialog.id());
+            dialog.hangup().await.ok();
+        }
     }
 }
 

@@ -123,7 +123,7 @@ pub async fn request_cert(
 
     let acme_state_clone = acme_state.clone();
 
-    tokio::spawn(async move {
+    crate::utils::spawn(async move {
         if let Err(e) = process_acme(
             domain,
             email,

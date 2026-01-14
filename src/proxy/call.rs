@@ -281,18 +281,30 @@ impl CallModule {
             Some("db") => {
                 if let Some(db) = server.database.clone() {
                     let l = crate::call::policy::DbFrequencyLimiter::new(db);
-                    l.clone().start_cleanup(server.cancel_token.child_token());
+                    let l_clone = l.clone();
+                    let token = server.cancel_token.child_token();
+                    crate::utils::spawn(async move {
+                        l_clone.run_cleanup_loop(token).await;
+                    });
                     Some(l)
                 } else {
                     warn!("Frequency limiter configured as 'db' but no database connection available. Falling back to in-memory.");
                     let l = crate::call::policy::InMemoryFrequencyLimiter::new();
-                    l.clone().start_cleanup(server.cancel_token.child_token());
+                    let l_clone = l.clone();
+                    let token = server.cancel_token.child_token();
+                    crate::utils::spawn(async move {
+                        l_clone.run_cleanup_loop(token).await;
+                    });
                     Some(l)
                 }
             }
             Some(_) => {
                 let l = crate::call::policy::InMemoryFrequencyLimiter::new();
-                l.clone().start_cleanup(server.cancel_token.child_token());
+                let l_clone = l.clone();
+                let token = server.cancel_token.child_token();
+                crate::utils::spawn(async move {
+                    l_clone.run_cleanup_loop(token).await;
+                });
                 Some(l)
             }
             None => None,
@@ -325,8 +337,12 @@ impl CallModule {
             .uri()
             .map_err(|e| (anyhow::anyhow!(e), None))?;
         let callee_realm = callee_uri.host().to_string();
-        let dialog_id = DialogId::try_from(original).map_err(|e| (anyhow!(e), None))?;
-        let session_id = dialog_id.to_string();
+
+        let dialog_id = original
+            .call_id_header()
+            .map_err(|e| (anyhow::anyhow!(e), None))?
+            .value();
+        let session_id = crate::utils::sanitize_id(dialog_id);
 
         let media_config = MediaConfig::new()
             .with_proxy_mode(self.inner.config.media_proxy)
@@ -369,7 +385,7 @@ impl CallModule {
             (true, false) => DialDirection::Outbound,
             (false, true) => DialDirection::Inbound,
             (false, false) => {
-                warn!(%dialog_id, caller_realm = ?caller.realm, callee_realm, "Both caller and callee are external realm, reject");
+                warn!(dialog_id, caller_realm = ?caller.realm, callee_realm, "Both caller and callee are external realm, reject");
                 return Err((
                     anyhow::anyhow!("Both caller and callee are external realm"),
                     Some(rsip::StatusCode::Forbidden),
@@ -820,11 +836,9 @@ impl CallModule {
         } else {
             DialDirection::Internal
         };
-        let session_id = format!(
-            "{}",
-            DialogId::try_from(&tx.original)
-                .map(|d| d.to_string())
-                .unwrap_or_default()
+        let session_id = tx.original.call_id_header().map_or_else(
+            |_| uuid::Uuid::new_v4().to_string(),
+            |h| h.value().to_string(),
         );
         let dialplan = Dialplan::new(session_id, tx.original.clone(), direction);
         let proxy_call = CallSessionBuilder::new(cookie.clone(), dialplan, 70)
@@ -882,7 +896,7 @@ impl CallModule {
             .with_call_record_sender(self.inner.server.callrecord_sender.clone())
             .with_cancel_token(self.inner.server.cancel_token.child_token());
 
-        builder.spawn(self.inner.server.clone(), tx).await
+        builder.build_and_serve(self.inner.server.clone(), tx).await
     }
 
     async fn process_message(&self, tx: &mut Transaction) -> Result<()> {

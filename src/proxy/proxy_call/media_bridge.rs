@@ -117,7 +117,7 @@ impl MediaBridge {
             let recorder = self.recorder.clone();
             let cancel_token = self.leg_a.cancel_token();
 
-            tokio::spawn(async move {
+            crate::utils::spawn(async move {
                 tokio::select! {
                     _ = cancel_token.cancelled() => {},
                     _ = Self::bridge_pcs(
@@ -448,7 +448,6 @@ impl MediaBridge {
     }
 
     pub fn stop(&self) {
-        info!("Stopping media bridge");
         let mut guard = self.recorder.lock().unwrap();
         if let Some(ref mut r) = *guard {
             let _ = r.finalize();

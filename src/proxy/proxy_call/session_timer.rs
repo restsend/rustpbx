@@ -46,6 +46,7 @@ pub struct SessionTimerState {
     pub min_se: Duration,
     pub refresher: SessionRefresher,
     pub active: bool,
+    pub refreshing: bool,
     pub last_refresh: Instant,
 }
 
@@ -57,6 +58,7 @@ impl Default for SessionTimerState {
             min_se: Duration::from_secs(90),
             refresher: SessionRefresher::Uac,
             active: false,
+            refreshing: false,
             last_refresh: Instant::now(),
         }
     }
@@ -64,7 +66,7 @@ impl Default for SessionTimerState {
 
 impl SessionTimerState {
     pub fn should_refresh(&self) -> bool {
-        if !self.active {
+        if !self.active || self.refreshing {
             return false;
         }
         // RFC 4028: Refresher should send refresh at half the interval

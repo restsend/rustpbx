@@ -1,3 +1,6 @@
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+
 pub fn sanitize_id(id: &str) -> String {
     id.chars()
         .map(|c| match c {
@@ -6,6 +9,49 @@ pub fn sanitize_id(id: &str) -> String {
             _ => c,
         })
         .collect()
+}
+
+pub struct TaskGuard {
+    pub loc: String,
+}
+
+pub static GLOBAL_TASK_METRICS: once_cell::sync::Lazy<Arc<Mutex<HashMap<String, usize>>>> =
+    once_cell::sync::Lazy::new(|| Arc::new(Mutex::new(HashMap::new())));
+
+impl TaskGuard {
+    pub fn new(loc: String) -> Self {
+        if let Ok(mut metrics) = GLOBAL_TASK_METRICS.lock() {
+            *metrics.entry(loc.clone()).or_insert(0) += 1;
+        }
+        Self { loc }
+    }
+}
+
+impl Drop for TaskGuard {
+    fn drop(&mut self) {
+        if let Ok(mut metrics) = GLOBAL_TASK_METRICS.lock() {
+            if let Some(count) = metrics.get_mut(&self.loc) {
+                if *count > 0 {
+                    *count -= 1;
+                }
+            }
+        }
+    }
+}
+
+#[track_caller]
+pub fn spawn<T>(future: T) -> tokio::task::JoinHandle<T::Output>
+where
+    T: std::future::Future + Send + 'static,
+    T::Output: Send + 'static,
+{
+    let location = std::panic::Location::caller();
+    let loc = format!("{}:{}", location.file(), location.line());
+    let _guard = TaskGuard::new(loc);
+    tokio::spawn(async move {
+        let _guard = _guard;
+        future.await
+    })
 }
 
 #[cfg(test)]

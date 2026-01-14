@@ -424,19 +424,23 @@ impl InMemoryFrequencyLimiter {
             counts: RwLock::new(HashMap::new()),
         })
     }
-    pub fn start_cleanup(self: Arc<Self>, cancel_token: CancellationToken) {
-        tokio::spawn(async move {
-            let mut ticker = tokio::time::interval(tokio::time::Duration::from_secs(60));
-            loop {
-                tokio::select! {
-                    _ = ticker.tick() => {
-                        self.cleanup();
-                    }
-                    _ = cancel_token.cancelled() => {
-                        break;
-                    }
+    pub async fn run_cleanup_loop(self: Arc<Self>, cancel_token: CancellationToken) {
+        let mut ticker = tokio::time::interval(tokio::time::Duration::from_secs(60));
+        loop {
+            tokio::select! {
+                _ = ticker.tick() => {
+                    self.cleanup();
+                }
+                _ = cancel_token.cancelled() => {
+                    break;
                 }
             }
+        }
+    }
+
+    pub fn start_cleanup(self: Arc<Self>, cancel_token: CancellationToken) {
+        tokio::spawn(async move {
+            self.run_cleanup_loop(cancel_token).await;
         });
     }
 
@@ -669,21 +673,25 @@ impl DbFrequencyLimiter {
         Arc::new(Self { db })
     }
 
-    pub fn start_cleanup(self: Arc<Self>, cancel_token: CancellationToken) {
-        tokio::spawn(async move {
-            let mut ticker = tokio::time::interval(tokio::time::Duration::from_secs(60));
-            loop {
-                tokio::select! {
-                    _ = ticker.tick() => {
-                        if let Err(e) = self.cleanup().await {
-                            error!("Error during frequency limiter cleanup: {}", e);
-                        }
-                    }
-                    _ = cancel_token.cancelled() => {
-                        break;
+    pub async fn run_cleanup_loop(self: Arc<Self>, cancel_token: CancellationToken) {
+        let mut ticker = tokio::time::interval(tokio::time::Duration::from_secs(60));
+        loop {
+            tokio::select! {
+                _ = ticker.tick() => {
+                    if let Err(e) = self.cleanup().await {
+                        error!("Error during frequency limiter cleanup: {}", e);
                     }
                 }
+                _ = cancel_token.cancelled() => {
+                    break;
+                }
             }
+        }
+    }
+
+    pub fn start_cleanup(self: Arc<Self>, cancel_token: CancellationToken) {
+        tokio::spawn(async move {
+            self.run_cleanup_loop(cancel_token).await;
         });
     }
 

@@ -198,13 +198,6 @@ impl CallRouter for HttpCallRouter {
             "HTTP router resolved route"
         );
 
-        let session_id = format!(
-            "{}",
-            rsipstack::dialog::DialogId::try_from(original)
-                .map(|d| d.to_string())
-                .unwrap_or_else(|_| call_id)
-        );
-
         match result.action {
             HttpRouteAction::Spam => {
                 cookie.mark_as_spam(SpamResult::Spam);
@@ -259,7 +252,7 @@ impl CallRouter for HttpCallRouter {
                     _ => DialStrategy::Sequential(locs),
                 };
 
-                let mut dialplan = Dialplan::new(session_id, original.clone(), direction);
+                let mut dialplan = Dialplan::new(call_id, original.clone(), direction);
 
                 if let Some(from) = caller.from.as_ref() {
                     dialplan = dialplan.with_caller(from.clone());
