@@ -40,13 +40,16 @@ impl Transcoder {
         if let Some(resampler) = &mut self.resampler {
             pcmbuf = resampler.resample(&pcmbuf);
         }
+
         let samples = pcmbuf.len() as u32;
         let encoded_data = self.encoder.encode(&pcmbuf);
 
-        // Save current timestamp before incrementing
-        let current_ts = self.rtp_timestamp;
-        self.rtp_timestamp = self.rtp_timestamp.wrapping_add(samples);
+        let encoder_sample_rate = self.encoder.sample_rate();
+        let target_clock_rate = self.target.clock_rate();
+        let timestamp_increment = samples * target_clock_rate / encoder_sample_rate;
 
+        let current_ts = self.rtp_timestamp;
+        self.rtp_timestamp = self.rtp_timestamp.wrapping_add(timestamp_increment);
         let current_seq = self.sequence_number;
         self.sequence_number = self.sequence_number.wrapping_add(1);
 
