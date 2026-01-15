@@ -7,7 +7,7 @@ use anyhow::Result;
 use chrono::{DateTime, Utc};
 use rsip::StatusCode;
 use serde::{Deserialize, Serialize};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, RwLock, Weak};
 use std::time::Instant;
 use tokio::sync::mpsc;
 
@@ -93,7 +93,7 @@ pub struct CallSessionSnapshot {
 #[derive(Clone)]
 pub struct CallSessionShared {
     inner: Arc<RwLock<CallSessionSnapshot>>,
-    registry: Option<Arc<ActiveProxyCallRegistry>>,
+    registry: Option<Weak<ActiveProxyCallRegistry>>,
     events: Arc<RwLock<Option<ProxyCallEventSender>>>,
 }
 
@@ -123,7 +123,7 @@ impl CallSessionShared {
         };
         Self {
             inner: Arc::new(RwLock::new(inner)),
-            registry,
+            registry: registry.map(|r| Arc::downgrade(&r)),
             events: Arc::new(RwLock::new(None)),
         }
     }
@@ -134,7 +134,7 @@ impl CallSessionShared {
     }
 
     pub fn register_active_call(&self, handle: CallSessionHandle) {
-        if let Some(registry) = &self.registry {
+        if let Some(registry) = self.registry.as_ref().and_then(|r| r.upgrade()) {
             let inner = self.inner.read().unwrap();
             let entry = ActiveProxyCallEntry {
                 session_id: inner.session_id.clone(),
@@ -150,13 +150,13 @@ impl CallSessionShared {
     }
 
     pub fn register_dialog(&self, dialog_id: String, handle: CallSessionHandle) {
-        if let Some(registry) = &self.registry {
+        if let Some(registry) = self.registry.as_ref().and_then(|r| r.upgrade()) {
             registry.register_dialog(dialog_id, handle);
         }
     }
 
     pub fn unregister(&self) {
-        if let Some(registry) = &self.registry {
+        if let Some(registry) = self.registry.as_ref().and_then(|r| r.upgrade()) {
             let inner = self.inner.read().unwrap();
             registry.remove(&inner.session_id);
         }
@@ -289,7 +289,7 @@ impl CallSessionShared {
         if !changed {
             return false;
         }
-        if let Some(registry) = &self.registry {
+        if let Some(registry) = self.registry.as_ref().and_then(|r| r.upgrade()) {
             registry.update(&inner.session_id, |entry| {
                 entry.caller = inner.caller.clone();
                 entry.callee = inner.callee.clone();
