@@ -2957,20 +2957,29 @@ impl CallSession {
         });
         let ring_time_secs = context.dialplan.max_ring_time.clamp(30, 120);
         let max_setup_duration = Duration::from_secs(ring_time_secs as u64);
-        tokio::select! {
-            r = server_dialog_clone.handle(tx) => {
-                debug!(session_id = %context.session_id, "Server dialog handle returned");
-                if let Err(ref e) = r {
-                    warn!(session_id = %context.session_id, error = %e, "Server dialog handle returned error, cancelling call");
-                    cancel_token.cancel();
+        let teardown_duration = Duration::from_secs(2);
+        let mut timeout = tokio::time::sleep(max_setup_duration).boxed();
+        let mut canceld = false;
+        loop {
+            tokio::select! {
+                r = server_dialog_clone.handle(tx) => {
+                    debug!(session_id = %context.session_id, "Server dialog handle returned");
+                    if let Err(ref e) = r {
+                        warn!(session_id = %context.session_id, error = %e, "Server dialog handle returned error, cancelling call");
+                        cancel_token.cancel();
+                    }
+                    break;
                 }
-            }
-            _ = cancel_token.cancelled() => {
-                debug!(session_id = %context.session_id, "Call cancelled via token during setup");
-            }
-             _ = tokio::time::sleep(max_setup_duration) => {
-                 warn!(session_id = %context.session_id, "Call setup timed out (180s), forcing cancellation");
-                 cancel_token.cancel();
+                _ = cancel_token.cancelled(), if !canceld => {
+                    debug!(session_id = %context.session_id, "Call cancelled via token during setup");
+                    canceld = true;
+                    timeout = tokio::time::sleep(teardown_duration).boxed();
+                }
+                _ = &mut timeout => {
+                     warn!(session_id = %context.session_id, "Call setup timed out (180s), forcing cancellation");
+                     cancel_token.cancel();
+                     break;
+                }
             }
         }
         Ok(())
@@ -3096,13 +3105,6 @@ impl CallSession {
                     dialog.hangup().await.ok();
                 }
             }
-        }
-
-        // Terminate server dialog
-        if let Some(dialog) = dialog_layer_clone.get_dialog(&self.server_dialog.id()) {
-            debug!(session_id = %context_clone.session_id, "Terminating server dialog");
-            dialog_layer_clone.remove_dialog(&self.server_dialog.id());
-            dialog.hangup().await.ok();
         }
     }
 }
