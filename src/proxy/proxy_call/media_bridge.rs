@@ -4,21 +4,25 @@ use anyhow::Result;
 use audio_codec::CodecType;
 use futures::StreamExt;
 use futures::stream::FuturesUnordered;
-use rustrtc::media::{AudioFrame, MediaKind, MediaSample, MediaStreamTrack};
+use rustrtc::media::{MediaKind, MediaSample, MediaStreamTrack};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tracing::{debug, error, info, warn};
 
-pub trait IsAudioPayload {
-    fn is_audio(&self) -> bool;
-}
-
-impl IsAudioPayload for AudioFrame {
-    fn is_audio(&self) -> bool {
-        match &self.payload_type {
-            Some(pt) => matches!(pt, 0 | 8 | 9 | 18 | 111) || (*pt >= 96 && *pt <= 127),
-            _ => false,
+fn is_transcodable_audio(pt: Option<u8>, dtmf_pt: Option<u8>) -> bool {
+    match pt {
+        Some(payload_type) => {
+            if let Some(dtmf) = dtmf_pt {
+                if payload_type == dtmf {
+                    return false;
+                }
+            }
+            if payload_type == 101 {
+                return false;
+            }
+            matches!(payload_type, 0 | 8 | 9 | 18 | 111) || (payload_type >= 96 && payload_type <= 127)
         }
+        _ => false,
     }
 }
 pub struct MediaBridge {
@@ -424,7 +428,9 @@ impl MediaBridge {
                     }
                     last_seq = Some(seq);
                 }
-                if frame.is_audio() {
+
+                // Only transcode actual audio codecs, not DTMF (telephone-event)
+                if is_transcodable_audio(frame.payload_type, dtmf_pt) {
                     if let Some(ref mut t) = transcoder {
                         sample = MediaSample::Audio(t.transcode(frame))
                     }
