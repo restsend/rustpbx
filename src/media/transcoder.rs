@@ -1,4 +1,5 @@
 use audio_codec::{CodecType, Decoder, Encoder, Resampler, create_decoder, create_encoder};
+use rand::Rng;
 use rustrtc::media::AudioFrame;
 
 pub struct Transcoder {
@@ -6,8 +7,10 @@ pub struct Transcoder {
     encoder: Box<dyn Encoder>,
     target: CodecType,
     resampler: Option<Resampler>,
-    rtp_timestamp: u32,
-    sequence_number: u16,
+    first_input_timestamp: Option<u32>,
+    first_input_sequence: Option<u16>,
+    first_output_timestamp: u32,
+    first_output_sequence: u16,
 }
 
 impl Transcoder {
@@ -25,39 +28,54 @@ impl Transcoder {
         } else {
             None
         };
+
+        let mut rng = rand::rng();
+        let first_output_timestamp: u32 = rng.random();
+        let first_output_sequence: u16 = rng.random();
+
         Self {
             decoder,
             encoder,
             resampler,
             target,
-            rtp_timestamp: 0,
-            sequence_number: 0,
+            first_input_timestamp: None,
+            first_input_sequence: None,
+            first_output_timestamp,
+            first_output_sequence,
         }
     }
 
     pub fn transcode(&mut self, frame: &AudioFrame) -> AudioFrame {
+        if self.first_input_timestamp.is_none() {
+            self.first_input_timestamp = Some(frame.rtp_timestamp);
+            self.first_input_sequence = frame.sequence_number;
+        }
+
         let mut pcmbuf = self.decoder.decode(&frame.data);
         if let Some(resampler) = &mut self.resampler {
             pcmbuf = resampler.resample(&pcmbuf);
         }
 
-        let samples = pcmbuf.len() as u32;
         let encoded_data = self.encoder.encode(&pcmbuf);
 
-        let encoder_sample_rate = self.encoder.sample_rate();
+        let first_input_ts = self.first_input_timestamp.unwrap_or(0);
+        let input_ts_delta = frame.rtp_timestamp.wrapping_sub(first_input_ts);
+        let input_clock_rate = frame.clock_rate;
         let target_clock_rate = self.target.clock_rate();
-        let timestamp_increment = samples * target_clock_rate / encoder_sample_rate;
+        let output_ts_delta =
+            (input_ts_delta as u64 * target_clock_rate as u64 / input_clock_rate as u64) as u32;
+        let output_timestamp = self.first_output_timestamp.wrapping_add(output_ts_delta);
 
-        let current_ts = self.rtp_timestamp;
-        self.rtp_timestamp = self.rtp_timestamp.wrapping_add(timestamp_increment);
-        let current_seq = self.sequence_number;
-        self.sequence_number = self.sequence_number.wrapping_add(1);
+        let first_input_seq = self.first_input_sequence.unwrap_or(0);
+        let input_seq = frame.sequence_number.unwrap_or(0);
+        let seq_delta = input_seq.wrapping_sub(first_input_seq);
+        let output_sequence = self.first_output_sequence.wrapping_add(seq_delta);
 
         AudioFrame {
-            rtp_timestamp: current_ts, // Use timestamp before increment
+            rtp_timestamp: output_timestamp,
             clock_rate: self.target.clock_rate(),
             data: encoded_data.into(),
-            sequence_number: Some(current_seq), // Set sequence number to signal app control
+            sequence_number: Some(output_sequence),
             payload_type: Some(self.target.payload_type()),
         }
     }
