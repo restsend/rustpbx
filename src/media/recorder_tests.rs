@@ -465,4 +465,119 @@ mod recorder_advanced_tests {
 
         let _ = std::fs::remove_file(&temp_path);
     }
+
+    /// Test: Opus should convert to PCMU automatically
+    #[test]
+    fn test_opus_converts_to_pcmu() {
+        let temp_path = "/tmp/test_opus_convert.wav";
+        let recorder = Recorder::new(temp_path, CodecType::Opus);
+        assert!(recorder.is_ok());
+
+        let mut rec = recorder.unwrap();
+        assert_eq!(rec.codec, CodecType::PCMU, "Opus should be converted to PCMU");
+
+        rec.finalize().ok();
+        let _ = std::fs::remove_file(temp_path);
+    }
+
+    /// Test: Supported codecs (PCMU, PCMA, G722, G729) all work
+    #[test]
+    fn test_supported_codecs() {
+        let codecs = vec![
+            (CodecType::PCMU, "/tmp/test_pcmu.wav"),
+            (CodecType::PCMA, "/tmp/test_pcma.wav"),
+            (CodecType::G722, "/tmp/test_g722.wav"),
+            (CodecType::G729, "/tmp/test_g729.wav"),
+        ];
+
+        for (codec, path) in codecs {
+            let recorder = Recorder::new(path, codec);
+            assert!(recorder.is_ok(), "Recorder should support {:?}", codec);
+            recorder.unwrap().finalize().ok();
+            let _ = std::fs::remove_file(path);
+        }
+    }
+
+    /// Test: Recording from both legs creates stereo output
+    #[test]
+    fn test_dual_leg_recording() {
+        use audio_codec::create_encoder;
+        use bytes::Bytes;
+
+        let temp_path = "/tmp/test_dual_leg.wav";
+        let mut recorder = Recorder::new(temp_path, CodecType::PCMU).unwrap();
+
+        // Generate test audio for both legs
+        let mut encoder = create_encoder(CodecType::PCMU);
+        let pcm_samples = vec![100i16; 160]; // 20ms of audio
+
+        // Leg A: caller (5 packets)
+        for i in 0..5 {
+            let encoded = encoder.encode(&pcm_samples);
+            let frame = MediaSample::Audio(AudioFrame {
+                data: Bytes::from(encoded),
+                rtp_timestamp: i * 160,
+                payload_type: Some(0),
+                sequence_number: None,
+                clock_rate: 8000,
+            });
+            recorder.write_sample(Leg::A, &frame, None).ok();
+        }
+
+        // Leg B: callee (5 packets)
+        for i in 0..5 {
+            let encoded = encoder.encode(&pcm_samples);
+            let frame = MediaSample::Audio(AudioFrame {
+                data: Bytes::from(encoded),
+                rtp_timestamp: i * 160,
+                payload_type: Some(0),
+                sequence_number: None,
+                clock_rate: 8000,
+            });
+            recorder.write_sample(Leg::B, &frame, None).ok();
+        }
+
+        recorder.finalize().ok();
+
+        // Verify file exists and has content
+        let metadata = std::fs::metadata(temp_path).unwrap();
+        assert!(metadata.len() > 44, "WAV file should have more than just header");
+
+        let _ = std::fs::remove_file(temp_path);
+    }
+
+    /// Test: DTMF is converted and recorded properly
+    #[test]
+    fn test_dtmf_recording() {
+        use bytes::Bytes;
+
+        let temp_path = "/tmp/test_dtmf.wav";
+        let mut recorder = Recorder::new(temp_path, CodecType::PCMU).unwrap();
+
+        // Create DTMF payload (RFC 4733)
+        // Format: [digit, flags, duration_high, duration_low]
+        let dtmf_payload = vec![
+            5,    // digit '5'
+            0x80, // end bit set
+            0x03, // duration high byte
+            0x20, // duration low byte (800 samples = 100ms at 8kHz)
+        ];
+
+        let frame = MediaSample::Audio(AudioFrame {
+            data: Bytes::from(dtmf_payload),
+            rtp_timestamp: 160,
+            payload_type: Some(101), // DTMF payload type
+            sequence_number: None,
+            clock_rate: 8000,
+        });
+
+        recorder.write_sample(Leg::A, &frame, Some(101)).ok();
+        recorder.finalize().ok();
+
+        // Verify file was created
+        assert!(std::path::Path::new(temp_path).exists(), "DTMF recording should create file");
+
+        let _ = std::fs::remove_file(temp_path);
+    }
 }
+

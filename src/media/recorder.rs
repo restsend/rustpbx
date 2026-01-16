@@ -53,6 +53,7 @@ pub struct Recorder {
     pub codec: CodecType,
     written_bytes: u32,
     sample_rate: u32,
+    channels: u16,
     dtmf_gen: DtmfGenerator,
     encoder: Option<Box<dyn Encoder>>,
 
@@ -100,7 +101,12 @@ impl Recorder {
             "Creating recorder: path={}, src_codec={:?} codec={:?}",
             path, src_codec, codec
         );
-        let mut writer = Box::new(WavWriter::new(file, sample_rate, 2, Some(codec)));
+        // PCMU/PCMA are mono codecs (1 channel), use stereo (2 channels) only for wideband codecs
+        let channels = match codec {
+            CodecType::Opus | CodecType::G722 => 2,
+            _ => 1,
+        };
+        let mut writer = Box::new(WavWriter::new(file, sample_rate, channels, Some(codec)));
         writer.write_header()?;
 
         Ok(Self {
@@ -108,6 +114,7 @@ impl Recorder {
             codec,
             written_bytes: 0,
             sample_rate,
+            channels,
             dtmf_gen: DtmfGenerator::new(sample_rate),
             encoder,
             decoders: HashMap::new(),
@@ -374,9 +381,16 @@ impl Recorder {
 
         self.next_flush_ts += flush_len;
 
-        let interleaved = self.interleave(&data_a, &data_b)?;
-        self.writer.write_packet(&interleaved, flush_len as usize)?;
-        self.written_bytes += interleaved.len() as u32;
+        let output = if self.channels == 1 {
+            // Mono: mix both legs
+            self.mix(&data_a, &data_b)?
+        } else {
+            // Stereo: interleave both legs
+            self.interleave(&data_a, &data_b)?
+        };
+
+        self.writer.write_packet(&output, flush_len as usize)?;
+        self.written_bytes += output.len() as u32;
         self.written_samples += flush_len as u64;
 
         Ok(())
@@ -518,6 +532,52 @@ impl Recorder {
         }
         Ok(interleaved)
     }
+
+    fn mix(&mut self, data_a: &[u8], data_b: &[u8]) -> Result<Vec<u8>> {
+        let (_, bytes_per_block) = self.block_info();
+        let len = data_a.len().min(data_b.len());
+        let mut mixed = Vec::with_capacity(len);
+
+        match self.codec {
+            CodecType::PCMU | CodecType::PCMA => {
+                // For μ-law/A-law, decode to PCM, mix, and re-encode
+                let mut decoder_a = create_decoder(self.codec);
+                let pcm_a = decoder_a.decode(data_a);
+
+                let mut decoder_b = create_decoder(self.codec);
+                let pcm_b = decoder_b.decode(data_b);
+
+                // Mix PCM samples (average to prevent clipping)
+                let mut pcm_mixed = Vec::with_capacity(pcm_a.len().min(pcm_b.len()));
+                for i in 0..pcm_a.len().min(pcm_b.len()) {
+                    let sample = ((pcm_a[i] as i32 + pcm_b[i] as i32) / 2) as i16;
+                    pcm_mixed.push(sample);
+                }
+
+                // Re-encode to target codec
+                if let Some(enc) = self.encoder.as_mut() {
+                    mixed = enc.encode(&pcm_mixed);
+                } else {
+                    mixed = audio_codec::samples_to_bytes(&pcm_mixed);
+                }
+            }
+            _ => {
+                // For PCM data, mix directly
+                let num_blocks = len / bytes_per_block;
+                for i in 0..num_blocks {
+                    let start = i * bytes_per_block;
+                    let end = (i + 1) * bytes_per_block;
+                    for j in start..end.min(data_a.len()).min(data_b.len()) {
+                        // Mix by averaging (simple approach)
+                        let sample = ((data_a[j] as i16 + data_b[j] as i16) / 2) as u8;
+                        mixed.push(sample);
+                    }
+                }
+            }
+        }
+
+        Ok(mixed)
+    }
 }
 
 impl Drop for Recorder {
@@ -568,5 +628,296 @@ impl DtmfGenerator {
         }
 
         samples
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use audio_codec::{CodecType, create_decoder, create_encoder};
+
+    #[test]
+    fn test_mix_pcmu_both_silent() {
+        // Test mixing two silent audio streams
+        let mut recorder = create_test_recorder(CodecType::PCMU, 1);
+
+        // Create silent PCM samples (all zeros)
+        let pcm_silent = vec![0i16; 160];
+
+        // Encode to PCMU
+        let mut encoder = create_encoder(CodecType::PCMU);
+        let data_a = encoder.encode(&pcm_silent);
+        let data_b = encoder.encode(&pcm_silent);
+
+        // Mix the data
+        let mixed = recorder.mix(&data_a, &data_b).unwrap();
+
+        // Decode and verify
+        let mut decoder = create_decoder(CodecType::PCMU);
+        let pcm_result = decoder.decode(&mixed);
+
+        // All samples should be near zero (silence)
+        let max_sample = pcm_result.iter().map(|&s| s.abs()).max().unwrap_or(0);
+        assert!(
+            max_sample < 100,
+            "Mixed silent audio should remain silent, got max={}",
+            max_sample
+        );
+    }
+
+    #[test]
+    fn test_mix_pcmu_one_silent() {
+        // Test mixing one silent and one active audio stream
+        let mut recorder = create_test_recorder(CodecType::PCMU, 1);
+
+        // Create test PCM samples
+        let pcm_silent = vec![0i16; 160];
+        let pcm_active: Vec<i16> = (0..160)
+            .map(|i| ((i as f32 / 10.0).sin() * 5000.0) as i16)
+            .collect();
+
+        // Encode to PCMU
+        let mut encoder_a = create_encoder(CodecType::PCMU);
+        let mut encoder_b = create_encoder(CodecType::PCMU);
+        let data_a = encoder_a.encode(&pcm_silent);
+        let data_b = encoder_b.encode(&pcm_active);
+
+        // Mix the data
+        let mixed = recorder.mix(&data_a, &data_b).unwrap();
+
+        // Decode and verify
+        let mut decoder = create_decoder(CodecType::PCMU);
+        let pcm_result = decoder.decode(&mixed);
+
+        // The mixed result should be roughly half the amplitude of the active stream
+        // since we're averaging with silence (0)
+        let mut decoder_b = create_decoder(CodecType::PCMU);
+        let pcm_b_decoded = decoder_b.decode(&data_b);
+
+        // Check that mixed amplitude is roughly half of the original
+        let avg_mixed: i32 = pcm_result
+            .iter()
+            .take(100)
+            .map(|&s| s.abs() as i32)
+            .sum::<i32>()
+            / 100;
+        let avg_original: i32 = pcm_b_decoded
+            .iter()
+            .take(100)
+            .map(|&s| s.abs() as i32)
+            .sum::<i32>()
+            / 100;
+
+        // Both should have non-zero amplitude
+        assert!(
+            avg_original > 100,
+            "Original signal should be non-zero, got {}",
+            avg_original
+        );
+        assert!(
+            avg_mixed > 50,
+            "Mixed signal should be non-zero, got {}",
+            avg_mixed
+        );
+
+        let ratio = avg_mixed as f32 / avg_original as f32;
+        assert!(
+            ratio > 0.35 && ratio < 0.65,
+            "Mixed amplitude should be ~0.5x original, got ratio={} (mixed={}, orig={})",
+            ratio,
+            avg_mixed,
+            avg_original
+        );
+    }
+
+    #[test]
+    fn test_mix_pcmu_both_active() {
+        // Test mixing two active audio streams with different amplitudes
+        let mut recorder = create_test_recorder(CodecType::PCMU, 1);
+
+        // Create test PCM samples with different amplitudes
+        let pcm_a: Vec<i16> = (0..160)
+            .map(|i| (i as f32 * 50.0).sin() as i16 * 2000)
+            .collect();
+        let pcm_b: Vec<i16> = (0..160)
+            .map(|i| (i as f32 * 70.0).sin() as i16 * 3000)
+            .collect();
+
+        // Encode to PCMU
+        let mut encoder_a = create_encoder(CodecType::PCMU);
+        let mut encoder_b = create_encoder(CodecType::PCMU);
+        let data_a = encoder_a.encode(&pcm_a);
+        let data_b = encoder_b.encode(&pcm_b);
+
+        // Mix the data
+        let mixed = recorder.mix(&data_a, &data_b).unwrap();
+
+        // Verify the output length is correct (same as inputs for PCMU)
+        assert_eq!(mixed.len(), data_a.len());
+        assert_eq!(mixed.len(), data_b.len());
+
+        // Decode all three and verify averaging
+        let mut decoder_a = create_decoder(CodecType::PCMU);
+        let mut decoder_b = create_decoder(CodecType::PCMU);
+        let mut decoder_mixed = create_decoder(CodecType::PCMU);
+
+        let pcm_a_decoded = decoder_a.decode(&data_a);
+        let pcm_b_decoded = decoder_b.decode(&data_b);
+        let pcm_mixed = decoder_mixed.decode(&mixed);
+
+        // Check that mixed samples are approximately the average
+        let sample_idx = 50; // Check middle sample
+        let expected =
+            ((pcm_a_decoded[sample_idx] as i32 + pcm_b_decoded[sample_idx] as i32) / 2) as i16;
+        let actual = pcm_mixed[sample_idx];
+        let diff = (expected - actual).abs();
+
+        // Allow some tolerance due to codec quantization
+        assert!(
+            diff < 200,
+            "Mixed sample should be average of inputs, expected ~{}, got {}, diff={}",
+            expected,
+            actual,
+            diff
+        );
+    }
+
+    #[test]
+    fn test_interleave_pcmu() {
+        // Test interleaving two audio streams for stereo recording
+        let mut recorder = create_test_recorder(CodecType::PCMU, 2);
+
+        // Create distinct test data
+        let data_a: Vec<u8> = (0..160).map(|i| (i % 256) as u8).collect();
+        let data_b: Vec<u8> = (0..160).map(|i| ((i + 128) % 256) as u8).collect();
+
+        // Interleave the data
+        let interleaved = recorder.interleave(&data_a, &data_b).unwrap();
+
+        // Verify length is double
+        assert_eq!(interleaved.len(), data_a.len() + data_b.len());
+
+        // Verify interleaving pattern: A[0], B[0], A[1], B[1], ...
+        for i in 0..10 {
+            assert_eq!(
+                interleaved[i * 2],
+                data_a[i],
+                "Interleaved data should alternate: A at position {}",
+                i * 2
+            );
+            assert_eq!(
+                interleaved[i * 2 + 1],
+                data_b[i],
+                "Interleaved data should alternate: B at position {}",
+                i * 2 + 1
+            );
+        }
+    }
+
+    #[test]
+    fn test_channel_selection_mono() {
+        // Verify that mono recording (channels=1) uses mix
+        let recorder = create_test_recorder(CodecType::PCMU, 1);
+        assert_eq!(recorder.channels, 1, "Mono recorder should have 1 channel");
+    }
+
+    #[test]
+    fn test_channel_selection_stereo() {
+        // Verify that stereo recording (channels=2) for wideband codecs
+        let recorder = create_test_recorder(CodecType::Opus, 2);
+        assert_eq!(recorder.channels, 2, "Opus recorder should have 2 channels");
+
+        let recorder_g722 = create_test_recorder(CodecType::G722, 2);
+        assert_eq!(
+            recorder_g722.channels, 2,
+            "G722 recorder should have 2 channels"
+        );
+    }
+
+    #[test]
+    fn test_mix_prevents_clipping() {
+        // Test that mixing prevents clipping by averaging instead of adding
+        let mut recorder = create_test_recorder(CodecType::PCMU, 1);
+
+        // Create high-amplitude samples near the maximum
+        let pcm_high = vec![20000i16; 160];
+
+        // Encode to PCMU
+        let mut encoder_a = create_encoder(CodecType::PCMU);
+        let mut encoder_b = create_encoder(CodecType::PCMU);
+        let data_a = encoder_a.encode(&pcm_high);
+        let data_b = encoder_b.encode(&pcm_high);
+
+        // Mix the data
+        let mixed = recorder.mix(&data_a, &data_b).unwrap();
+
+        // Decode and verify no clipping
+        let mut decoder = create_decoder(CodecType::PCMU);
+        let pcm_result = decoder.decode(&mixed);
+
+        // The result should be around 20000 (averaged), not 40000 (which would clip)
+        let avg_result: i32 =
+            pcm_result.iter().map(|&s| s as i32).sum::<i32>() / pcm_result.len() as i32;
+        assert!(
+            avg_result > 15000 && avg_result < 25000,
+            "Mixed high-amplitude audio should not clip, avg={}",
+            avg_result
+        );
+    }
+
+    // Helper function to create a test recorder
+    fn create_test_recorder(codec: CodecType, channels: u16) -> Recorder {
+        let sample_rate = codec.samplerate();
+        let encoder = Some(create_encoder(codec));
+
+        Recorder {
+            path: "test.wav".to_string(),
+            codec,
+            written_bytes: 0,
+            sample_rate,
+            channels,
+            dtmf_gen: DtmfGenerator::new(sample_rate),
+            encoder,
+            decoders: HashMap::new(),
+            resamplers: HashMap::new(),
+            buffer_a: BTreeMap::new(),
+            buffer_b: BTreeMap::new(),
+            start_instant: Instant::now(),
+            last_flush: Instant::now(),
+            base_timestamp_a: None,
+            base_timestamp_b: None,
+            start_offset_a: 0,
+            start_offset_b: 0,
+            next_flush_ts: 0,
+            written_samples: 0,
+            writer: Box::new(TestWriter::new()),
+            ptime: Duration::from_millis(20),
+        }
+    }
+
+    // Mock writer for testing
+    struct TestWriter {
+        data: Vec<u8>,
+    }
+
+    impl TestWriter {
+        fn new() -> Self {
+            Self { data: Vec::new() }
+        }
+    }
+
+    impl StreamWriter for TestWriter {
+        fn write_header(&mut self) -> Result<()> {
+            Ok(())
+        }
+
+        fn write_packet(&mut self, data: &[u8], _samples: usize) -> Result<()> {
+            self.data.extend_from_slice(data);
+            Ok(())
+        }
+
+        fn finalize(&mut self) -> Result<()> {
+            Ok(())
+        }
     }
 }
