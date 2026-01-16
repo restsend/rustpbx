@@ -42,7 +42,7 @@ use std::{
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
-use tokio::{sync::mpsc, task::JoinSet, time::timeout};
+use tokio::{sync::Mutex as AsyncMutex, sync::mpsc, task::JoinSet, time::timeout};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
@@ -475,6 +475,20 @@ impl CallSession {
         sdp.contains("RTP/SAVPF")
     }
 
+    async fn find_track(
+        &self,
+        peer: &Arc<dyn MediaPeer>,
+        track_id: &str,
+    ) -> Option<Arc<AsyncMutex<Box<dyn Track>>>> {
+        let tracks = peer.get_tracks().await;
+        for t in tracks {
+            if t.lock().await.id() == track_id {
+                return Some(t);
+            }
+        }
+        None
+    }
+
     async fn optimize_caller_codec(&mut self, callee_answer: &str) -> Option<String> {
         // Parse callee's codecs from their answer
         let (callee_codecs, _) = MediaNegotiator::extract_codec_params(callee_answer);
@@ -516,19 +530,34 @@ impl CallSession {
         let orig_offer_sdp =
             String::from_utf8_lossy(self.server_dialog.initial_request().body()).to_string();
 
-        let mut codec_preference: Vec<CodecType> = optimized_rtp_map
-            .iter()
-            .map(|(_, (codec, _, _))| *codec)
+        let mut codec_info: Vec<CodecInfo> = optimized_rtp_map
+            .into_iter()
+            .map(|(pt, (codec, clock, channels))| CodecInfo {
+                payload_type: pt,
+                codec,
+                clock_rate: clock,
+                channels: channels as u16,
+            })
             .collect();
 
         // Add TelephoneEvent if caller supports DTMF
-        if caller_dtmf_pt.is_some() {
-            codec_preference.push(CodecType::TelephoneEvent);
+        if let Some(pt) = caller_dtmf_pt {
+            if !codec_info
+                .iter()
+                .any(|c| c.codec == CodecType::TelephoneEvent)
+            {
+                codec_info.push(CodecInfo {
+                    payload_type: pt,
+                    codec: CodecType::TelephoneEvent,
+                    clock_rate: 8000,
+                    channels: 1,
+                });
+            }
         }
 
         let mut track_builder = RtpTrackBuilder::new(track_id.clone())
             .with_cancel_token(self.caller_peer.cancel_token())
-            .with_codec_preference(codec_preference);
+            .with_codec_info(codec_info);
         if let Some(ref addr) = self.context.media_config.external_ip {
             track_builder = track_builder.with_external_ip(addr.clone());
         }
@@ -543,22 +572,39 @@ impl CallSession {
             track_builder = track_builder.with_mode(rustrtc::TransportMode::WebRtc);
         }
 
-        let mut rtp_track = track_builder.build();
+        let processed_answer =
+            if let Some(existing) = self.find_track(&self.caller_peer, &track_id).await {
+                debug!(%track_id, "Reusing existing caller track for optimized handshake");
+                let guard = existing.lock().await;
+                match guard.handshake(caller_offer.clone()).await {
+                    Ok(processed) => processed,
+                    Err(e) => {
+                        warn!(
+                            "Failed to handshake existing caller track for optimization: {}",
+                            e
+                        );
+                        return None;
+                    }
+                }
+            } else {
+                let rtp_track = track_builder.build();
+                match rtp_track.handshake(caller_offer.clone()).await {
+                    Ok(processed) => {
+                        self.caller_peer
+                            .update_track(Box::new(rtp_track), None)
+                            .await;
+                        processed
+                    }
+                    Err(e) => {
+                        warn!(
+                            "Failed to handshake caller track with optimized codec: {}",
+                            e
+                        );
+                        return None;
+                    }
+                }
+            };
 
-        let processed_answer = match rtp_track.handshake(caller_offer.clone()).await {
-            Ok(processed) => processed,
-            Err(e) => {
-                warn!(
-                    "Failed to handshake caller track with optimized codec: {}",
-                    e
-                );
-                return None;
-            }
-        };
-
-        self.caller_peer
-            .update_track(Box::new(rtp_track), None)
-            .await;
         Some(processed_answer)
     }
 
@@ -587,15 +633,20 @@ impl CallSession {
         }
 
         // Extract codec preference from caller RTP map
-        let codec_preference: Vec<CodecType> = caller_rtp_map
-            .iter()
-            .map(|(_, (codec, _, _))| *codec)
+        let codec_info: Vec<CodecInfo> = caller_rtp_map
+            .into_iter()
+            .map(|(pt, (codec, clock, channels))| CodecInfo {
+                payload_type: pt,
+                codec,
+                clock_rate: clock,
+                channels,
+            })
             .collect();
 
         // Unified track creation using RtpTrackBuilder
         let mut track_builder = RtpTrackBuilder::new(track_id.clone())
             .with_cancel_token(self.caller_peer.cancel_token())
-            .with_codec_preference(codec_preference);
+            .with_codec_info(codec_info);
 
         if let Some(ref addr) = self.context.media_config.external_ip {
             track_builder = track_builder.with_external_ip(addr.clone());
@@ -613,20 +664,41 @@ impl CallSession {
             track_builder = track_builder.with_mode(rustrtc::TransportMode::WebRtc);
         }
 
-        let mut track: Box<dyn Track> = Box::new(track_builder.build());
-
         let processed_answer = if let Some(ref offer) = self.caller_offer {
-            match track.handshake(offer.clone()).await {
-                Ok(processed) => processed,
-                Err(e) => {
-                    warn!("Failed to handshake caller track (from offer): {}", e);
-                    String::new()
+            if offer.trim().is_empty() {
+                let track = track_builder.build();
+                let sdp = track.local_description().await?;
+                self.caller_peer.update_track(Box::new(track), None).await;
+                sdp
+            } else if let Some(existing) = self.find_track(&self.caller_peer, &track_id).await {
+                debug!(%track_id, "Reusing existing caller track for handshake");
+                let guard = existing.lock().await;
+                match guard.handshake(offer.clone()).await {
+                    Ok(processed) => processed,
+                    Err(e) => {
+                        warn!("Failed to handshake existing caller track: {}", e);
+                        return Err(e);
+                    }
+                }
+            } else {
+                let track = track_builder.build();
+                match track.handshake(offer.clone()).await {
+                    Ok(processed) => {
+                        self.caller_peer.update_track(Box::new(track), None).await;
+                        processed
+                    }
+                    Err(e) => {
+                        warn!("Failed to handshake new caller track: {}", e);
+                        return Err(e);
+                    }
                 }
             }
         } else {
-            String::new()
+            let track = track_builder.build();
+            let sdp = track.local_description().await?;
+            self.caller_peer.update_track(Box::new(track), None).await;
+            sdp
         };
-        self.caller_peer.update_track(track, None).await;
         Ok(processed_answer)
     }
 
@@ -730,17 +802,20 @@ impl CallSession {
         }
 
         // Extract codec preference from merged RTP map
-        let mut codec_preference: Vec<CodecType> = Vec::new();
-        for (_, (codec, _, _)) in rtp_map {
-            if !codec_preference.contains(&codec) {
-                codec_preference.push(codec);
-            }
-        }
+        let codec_info: Vec<CodecInfo> = rtp_map
+            .into_iter()
+            .map(|(pt, (codec, clock, channels))| CodecInfo {
+                payload_type: pt,
+                codec,
+                clock_rate: clock,
+                channels,
+            })
+            .collect();
 
         // Unified track creation using RtpTrackBuilder
         let mut track_builder = RtpTrackBuilder::new(track_id.clone())
             .with_cancel_token(self.callee_peer.cancel_token())
-            .with_codec_preference(codec_preference.clone());
+            .with_codec_info(codec_info);
 
         if let Some(ref addr) = self.context.media_config.external_ip {
             track_builder = track_builder.with_external_ip(addr.clone());
@@ -758,11 +833,16 @@ impl CallSession {
             track_builder = track_builder.with_mode(rustrtc::TransportMode::WebRtc);
         }
 
-        let mut track = track_builder.build();
-        let offer = track.local_description().await?;
-        let (offer, track) = (offer, Box::new(track) as Box<dyn Track>);
-        self.callee_peer.update_track(track, None).await;
-        Ok(offer)
+        if let Some(existing) = self.find_track(&self.callee_peer, &track_id).await {
+            debug!(%track_id, "Reusing existing callee track for local description");
+            let guard = existing.lock().await;
+            guard.local_description().await
+        } else {
+            let track = track_builder.build();
+            let offer = track.local_description().await?;
+            self.callee_peer.update_track(Box::new(track), None).await;
+            Ok(offer)
+        }
     }
 
     async fn setup_callee_track(
@@ -984,6 +1064,18 @@ impl CallSession {
         // self.stop_queue_hold().await;
 
         let first_answer = self.answer_time.is_none();
+        if self.answer.is_none() {
+            match self.create_caller_answer_from_offer().await {
+                Ok(answer) => self.answer = Some(answer),
+                Err(e) => {
+                    let _ = self
+                        .server_dialog
+                        .reject(Some(StatusCode::BadRequest), None);
+                    return Err(e);
+                }
+            }
+        }
+
         if let Some(callee_addr) = callee {
             let resolved_callee = self.routed_callee.clone().unwrap_or(callee_addr);
             self.connected_callee = Some(resolved_callee);
@@ -1001,9 +1093,12 @@ impl CallSession {
 
         // Optimize codec negotiation: if callee chose a codec that caller also supports,
         // renegotiate caller's answer to use the same codec to avoid transcoding
-        if let Some(ref callee_sdp) = callee_answer {
-            if let Some(optimized_answer) = self.optimize_caller_codec(callee_sdp).await {
-                self.answer = Some(optimized_answer);
+        // Skip this if early media was already sent to avoid changing the DTLS fingerprint
+        if !self.early_media_sent {
+            if let Some(ref callee_sdp) = callee_answer {
+                if let Some(optimized_answer) = self.optimize_caller_codec(callee_sdp).await {
+                    self.answer = Some(optimized_answer);
+                }
             }
         }
 
@@ -1069,28 +1164,6 @@ impl CallSession {
                 let ssrc_b = callee_answer
                     .as_ref()
                     .and_then(|s| MediaNegotiator::extract_ssrc(s));
-
-                let tracks_a = self.caller_peer.get_tracks().await;
-                if let Some(track) = tracks_a.first() {
-                    if let Some(pc) = track.lock().await.get_peer_connection() {
-                        for transceiver in pc.get_transceivers() {
-                            if let Some(receiver) = transceiver.receiver() {
-                                receiver.set_params(params_a.clone());
-                            }
-                        }
-                    }
-                }
-
-                let tracks_b = self.callee_peer.get_tracks().await;
-                if let Some(track) = tracks_b.first() {
-                    if let Some(pc) = track.lock().await.get_peer_connection() {
-                        for transceiver in pc.get_transceivers() {
-                            if let Some(receiver) = transceiver.receiver() {
-                                receiver.set_params(params_b.clone());
-                            }
-                        }
-                    }
-                }
 
                 debug!(
                     ?codec_a,
@@ -2868,6 +2941,19 @@ impl CallSession {
 
         let initial_request = server_dialog.initial_request();
         let offer_sdp = String::from_utf8_lossy(initial_request.body()).to_string();
+
+        if !offer_sdp.trim().is_empty() {
+            if let Err(e) = rustrtc::SessionDescription::parse(rustrtc::SdpType::Offer, &offer_sdp)
+            {
+                info!(
+                    session_id = %context.session_id,
+                    error = %e,
+                    "Rejecting call with 400 Bad Request due to malformed SDP"
+                );
+                let _ = server_dialog.reject(Some(StatusCode::BadRequest), None);
+                return Ok(());
+            }
+        }
 
         let use_media_proxy =
             Self::check_media_proxy(&context, &offer_sdp, &server.proxy_config.media_proxy);

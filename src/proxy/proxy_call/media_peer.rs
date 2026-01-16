@@ -13,6 +13,7 @@ pub trait MediaPeer: Send + Sync {
     async fn update_remote_description(&self, track_id: &str, remote: &str) -> Result<()>;
     async fn suppress_forwarding(&self, track_id: &str);
     async fn resume_forwarding(&self, track_id: &str);
+    fn is_suppressed(&self, track_id: &str) -> bool;
     async fn remove_track(&self, track_id: &str, stop: bool);
     async fn serve(&self) -> Result<()>;
     fn stop(&self);
@@ -54,6 +55,10 @@ impl MediaPeer for VoiceEnginePeer {
 
     async fn resume_forwarding(&self, track_id: &str) {
         self.stream.resume_forwarding(track_id).await;
+    }
+
+    fn is_suppressed(&self, track_id: &str) -> bool {
+        self.stream.is_suppressed(track_id)
     }
 
     async fn remove_track(&self, track_id: &str, stop: bool) {

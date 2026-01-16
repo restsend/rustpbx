@@ -932,17 +932,21 @@ mod tests {
         }
 
         // Test empty SDP
+        println!("Testing empty SDP...");
         let empty_sdp_result = alice.make_call("bob", Some("".to_string())).await;
+        println!("Empty SDP result: {:?}", empty_sdp_result);
         if let Ok(dialog_id) = empty_sdp_result {
             alice.hangup(&dialog_id).await.ok();
             println!("Empty SDP handled gracefully");
         }
 
         // Test malformed SDP
+        println!("Testing malformed SDP...");
         let malformed_sdp = "v=0\nthis is not valid sdp";
         let malformed_result = alice
             .make_call("bob", Some(malformed_sdp.to_string()))
             .await;
+        println!("Malformed SDP result: {:?}", malformed_result);
         if let Ok(dialog_id) = malformed_result {
             alice.hangup(&dialog_id).await.ok();
             println!("Malformed SDP handled gracefully");

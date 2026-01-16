@@ -56,7 +56,7 @@ async fn test_file_track_with_ssrc_compatibility() {
 
 #[tokio::test]
 async fn test_file_track_generates_sdp() {
-    let mut track = FileTrack::new("test-sdp".to_string())
+    let track = FileTrack::new("test-sdp".to_string())
         .with_path("/tmp/test.wav".to_string())
         .with_codec_preference(vec![CodecType::PCMU]);
 
@@ -73,7 +73,7 @@ async fn test_file_track_generates_sdp() {
 
 #[tokio::test]
 async fn test_file_track_opus_codec_sdp() {
-    let mut track = FileTrack::new("test-opus".to_string())
+    let track = FileTrack::new("test-opus".to_string())
         .with_path("/tmp/test.wav".to_string())
         .with_codec_preference(vec![CodecType::Opus]);
 
@@ -90,7 +90,7 @@ async fn test_file_track_opus_codec_sdp() {
 
 #[tokio::test]
 async fn test_file_track_multiple_codecs() {
-    let mut track = FileTrack::new("test-multi".to_string())
+    let track = FileTrack::new("test-multi".to_string())
         .with_path("/tmp/test.wav".to_string())
         .with_codec_preference(vec![CodecType::PCMU, CodecType::PCMA, CodecType::Opus]);
 
@@ -113,7 +113,7 @@ async fn test_file_track_playback_starts() {
         .with_loop(false);
 
     // Initialize PC first
-    let mut track_mut = track.clone();
+    let track_mut = track.clone();
     let _ = track_mut.local_description().await;
 
     let result = track.start_playback().await;
@@ -136,7 +136,7 @@ async fn test_file_track_playback_completion() {
         .with_loop(false);
 
     // Initialize PC
-    let mut track_mut = track.clone();
+    let track_mut = track.clone();
     let _ = track_mut.local_description().await;
 
     track.start_playback().await.unwrap();
@@ -169,7 +169,7 @@ async fn test_file_track_looping_playback() {
         .with_cancel_token(cancel_token.clone());
 
     // Initialize PC
-    let mut track_mut = track.clone();
+    let track_mut = track.clone();
     let _ = track_mut.local_description().await;
 
     track.start_playback().await.unwrap();
@@ -198,7 +198,7 @@ async fn test_file_track_missing_file_error() {
         .with_path("/nonexistent/path/to/file.wav".to_string());
 
     // Initialize PC first
-    let mut track_mut = track.clone();
+    let track_mut = track.clone();
     let _ = track_mut.local_description().await;
 
     let result = track.start_playback().await;
@@ -208,7 +208,7 @@ async fn test_file_track_missing_file_error() {
 
 #[tokio::test]
 async fn test_file_track_set_remote_description() {
-    let mut track =
+    let track =
         FileTrack::new("remote-desc-test".to_string()).with_path("/tmp/test.wav".to_string());
 
     // Generate local description first
