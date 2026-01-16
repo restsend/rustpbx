@@ -8,9 +8,8 @@ use rustrtc::{
 use std::{
     collections::{HashMap, HashSet},
     sync::{Arc, Mutex},
-    time::Duration,
 };
-use tokio::{sync::Mutex as AsyncMutex, time::timeout};
+use tokio::sync::Mutex as AsyncMutex;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 pub use transcoder::Transcoder;
@@ -163,8 +162,7 @@ pub struct MediaTrack {
     rtp_start_port: Option<u16>,
     rtp_end_port: Option<u16>,
     external_ip: Option<String>,
-    ice_servers: Vec<IceServer>,
-    pc: Arc<AsyncMutex<Option<PeerConnection>>>,
+    pc: PeerConnection,
     mode: TransportMode,
     pub recorder_option: Option<RecorderOption>,
     rtp_map: Vec<negotiate::CodecInfo>,
@@ -176,29 +174,68 @@ impl MediaTrack {
         track_id: String,
         ice_servers: Vec<IceServer>,
     ) -> Self {
+        Self::new_with_mode(_cancel_token, track_id, ice_servers, TransportMode::WebRtc)
+    }
+
+    pub fn new_with_mode(
+        _cancel_token: CancellationToken,
+        track_id: String,
+        ice_servers: Vec<IceServer>,
+        mode: TransportMode,
+    ) -> Self {
+        let rtp_map = vec![
+            negotiate::CodecInfo {
+                payload_type: 0,
+                codec: CodecType::PCMU,
+                clock_rate: 8000,
+                channels: 1,
+            },
+            negotiate::CodecInfo {
+                payload_type: 8,
+                codec: CodecType::PCMA,
+                clock_rate: 8000,
+                channels: 1,
+            },
+        ];
+
+        let ice_servers_config: Vec<IceServer> = ice_servers
+            .iter()
+            .map(|s| IceServer {
+                urls: s.urls.clone(),
+                username: s.username.clone(),
+                credential: s.credential.clone(),
+                ..Default::default()
+            })
+            .collect();
+
+        let config = RtcConfiguration {
+            ice_servers: ice_servers_config,
+            transport_mode: mode.clone(),
+            ..Default::default()
+        };
+
+        let pc = PeerConnection::new(config);
+
+        // Add a dummy track to ensure a sender is created and SSRC is signaled in SDP
+        let (_, track, _) =
+            rustrtc::media::track::sample_track(rustrtc::media::MediaKind::Audio, 100);
+        let mut params = RtpCodecParameters::default();
+        if let Some(info) = rtp_map.first() {
+            params.payload_type = info.payload_type;
+            params.clock_rate = info.clock_rate;
+            params.channels = info.channels as u8;
+        }
+        let _ = pc.add_track(track, params);
+
         Self {
             track_id,
-            ice_servers,
             rtp_start_port: None,
             rtp_end_port: None,
             external_ip: None,
-            pc: Arc::new(AsyncMutex::new(None)),
-            mode: TransportMode::WebRtc,
+            pc,
+            mode,
             recorder_option: None,
-            rtp_map: vec![
-                negotiate::CodecInfo {
-                    payload_type: 0,
-                    codec: CodecType::PCMU,
-                    clock_rate: 8000,
-                    channels: 1,
-                },
-                negotiate::CodecInfo {
-                    payload_type: 8,
-                    codec: CodecType::PCMA,
-                    clock_rate: 8000,
-                    channels: 1,
-                },
-            ],
+            rtp_map,
         }
     }
 
@@ -239,51 +276,6 @@ impl MediaTrack {
             })
             .collect();
         self
-    }
-
-    async fn ensure_pc(&self) -> Result<PeerConnection> {
-        let mut pc_guard = self.pc.lock().await;
-        if let Some(pc) = &*pc_guard {
-            return Ok(pc.clone());
-        }
-
-        let ice_servers: Vec<IceServer> = self
-            .ice_servers
-            .iter()
-            .map(|s| IceServer {
-                urls: s.urls.clone(),
-                username: s.username.clone(),
-                credential: s.credential.clone(),
-                ..Default::default()
-            })
-            .collect();
-
-        let config = RtcConfiguration {
-            ice_servers,
-            transport_mode: self.mode.clone(),
-            rtp_start_port: self.rtp_start_port,
-            rtp_end_port: self.rtp_end_port,
-            external_ip: self.external_ip.clone(),
-            ..Default::default()
-        };
-
-        let pc = PeerConnection::new(config);
-
-        // Add a dummy track to ensure a sender is created and SSRC is signaled in SDP
-        let (_, track, _) =
-            rustrtc::media::track::sample_track(rustrtc::media::MediaKind::Audio, 100);
-        let mut params = RtpCodecParameters::default();
-        if let Some(info) = self.rtp_map.first() {
-            params.payload_type = info.payload_type;
-            params.clock_rate = info.clock_rate;
-            params.channels = info.channels as u8;
-        }
-        pc.add_track(track, params)
-            .map_err(|e| anyhow!("failed to add track: {}", e))?;
-
-        pc.wait_for_gathering_complete().await;
-        *pc_guard = Some(pc.clone());
-        Ok(pc)
     }
 
     async fn set_local(&self, pc: &PeerConnection, mut desc: SessionDescription) -> Result<String> {
@@ -330,7 +322,16 @@ impl MediaTrack {
     async fn set_remote(&self, pc: &PeerConnection, sdp: &str, ty: SdpType) -> Result<()> {
         let desc = SessionDescription::parse(ty, sdp)
             .map_err(|e| anyhow!("failed to parse sdp: {:?}", e))?;
-        pc.set_remote_description(desc).await?;
+        match pc.set_remote_description(desc).await {
+            Ok(_) => (),
+            Err(e) => {
+                warn!(
+                    track_id = self.track_id,
+                    error = %e,
+                    "failed to set remote description"
+                );
+            }
+        }
         Ok(())
     }
 }
@@ -342,40 +343,44 @@ impl Track for MediaTrack {
     }
 
     async fn handshake(&self, remote_offer: String) -> Result<String> {
-        let pc = self.ensure_pc().await?;
-        self.set_remote(&pc, &remote_offer, SdpType::Offer).await?;
-        let answer = pc.create_answer().await?;
-        let sdp = self.set_local(&pc, answer).await?;
+        self.pc.wait_for_gathering_complete().await;
+        self.set_remote(&self.pc, &remote_offer, SdpType::Offer)
+            .await?;
+        let answer = self.pc.create_answer().await?;
+        let sdp = self.set_local(&self.pc, answer).await?;
         Ok(sdp)
     }
 
     async fn local_description(&self) -> Result<String> {
-        let pc = self.ensure_pc().await?;
-        let offer = pc.create_offer().await?;
-        let sdp = self.set_local(&pc, offer).await?;
-        Ok(sdp)
+        self.pc.wait_for_gathering_complete().await;
+        match self.pc.create_offer().await {
+            Ok(offer) => {
+                let sdp = self.set_local(&self.pc, offer).await?;
+                Ok(sdp)
+            }
+            Err(e) => {
+                let err_str = e.to_string();
+                if err_str.contains("HaveLocalOffer") {
+                    if let Some(desc) = self.pc.local_description() {
+                        return Ok(desc.to_sdp_string());
+                    }
+                }
+                Err(anyhow!(e))
+            }
+        }
     }
 
     async fn set_remote_description(&self, remote: &str) -> Result<()> {
-        let pc_guard = self.pc.lock().await;
-        if let Some(pc) = &*pc_guard {
-            self.set_remote(pc, remote, SdpType::Answer).await
-        } else {
-            warn!(track_id = %self.track_id, "set_remote_description called before pc created");
-            Ok(())
-        }
+        self.pc.wait_for_gathering_complete().await;
+        self.set_remote(&self.pc, remote, SdpType::Answer).await
     }
 
     async fn stop(&self) {
-        let pc_guard = self.pc.lock().await;
-        if let Some(pc) = &*pc_guard {
-            pc.close();
-        }
+        self.pc.close();
     }
 
     async fn get_peer_connection(&self) -> Option<PeerConnection> {
-        let pc_guard = self.pc.lock().await;
-        pc_guard.clone()
+        Some(self.pc.clone())
     }
 
     fn set_codec_preference(&mut self, codecs: Vec<CodecType>) {
@@ -475,12 +480,12 @@ impl RtpTrackBuilder {
     }
 
     pub fn build(self) -> MediaTrack {
-        let track = MediaTrack::new(
+        let track = MediaTrack::new_with_mode(
             self.cancel_token.unwrap_or_else(CancellationToken::new),
             self.track_id,
             Vec::new(),
+            self.mode,
         )
-        .with_mode(self.mode)
         .with_codec_info(self.rtp_map);
 
         let track = if let Some(ip) = self.external_ip {
@@ -509,7 +514,7 @@ pub struct FileTrack {
     file_path: Option<String>,
     loop_playback: bool,
     cancel_token: CancellationToken,
-    pc: Arc<AsyncMutex<Option<PeerConnection>>>,
+    pc: PeerConnection,
     completion_notify: Arc<tokio::sync::Notify>,
     codec_preference: Vec<CodecType>,
     mode: TransportMode,
@@ -520,12 +525,20 @@ pub struct FileTrack {
 
 impl FileTrack {
     pub fn new(track_id: String) -> Self {
+        let config = RtcConfiguration {
+            transport_mode: TransportMode::Rtp,
+            ..Default::default()
+        };
+
+        let pc = PeerConnection::new(config);
+        pc.add_transceiver(MediaKind::Audio, TransceiverDirection::SendOnly);
+
         Self {
             track_id,
             file_path: None,
             loop_playback: false,
             cancel_token: CancellationToken::new(),
-            pc: Arc::new(AsyncMutex::new(None)),
+            pc,
             completion_notify: Arc::new(tokio::sync::Notify::new()),
             codec_preference: vec![CodecType::PCMU, CodecType::PCMA],
             mode: TransportMode::Rtp,
@@ -557,18 +570,35 @@ impl FileTrack {
 
     pub fn with_mode(mut self, mode: TransportMode) -> Self {
         self.mode = mode;
+        self.recreate_pc();
         self
     }
 
     pub fn with_rtp_range(mut self, start: u16, end: u16) -> Self {
         self.rtp_start_port = Some(start);
         self.rtp_end_port = Some(end);
+        self.recreate_pc();
         self
     }
 
     pub fn with_external_ip(mut self, ip: String) -> Self {
         self.external_ip = Some(ip);
+        self.recreate_pc();
         self
+    }
+
+    fn recreate_pc(&mut self) {
+        let config = RtcConfiguration {
+            transport_mode: self.mode.clone(),
+            rtp_start_port: self.rtp_start_port,
+            rtp_end_port: self.rtp_end_port,
+            external_ip: self.external_ip.clone(),
+            ..Default::default()
+        };
+
+        self.pc = PeerConnection::new(config);
+        self.pc
+            .add_transceiver(MediaKind::Audio, TransceiverDirection::SendOnly);
     }
 
     /// Set SSRC (for compatibility, currently unused in new implementation)
@@ -625,31 +655,6 @@ impl FileTrack {
 
         Ok(())
     }
-
-    async fn ensure_pc(&self) -> Result<PeerConnection> {
-        let mut guard = self.pc.lock().await;
-
-        if let Some(pc) = guard.as_ref() {
-            return Ok(pc.clone());
-        }
-
-        let config = RtcConfiguration {
-            transport_mode: self.mode.clone(),
-            rtp_start_port: self.rtp_start_port,
-            rtp_end_port: self.rtp_end_port,
-            external_ip: self.external_ip.clone(),
-            ..Default::default()
-        };
-
-        let pc = PeerConnection::new(config);
-
-        // Add audio transceiver (send-only for playback)
-        pc.add_transceiver(MediaKind::Audio, TransceiverDirection::SendOnly);
-        pc.wait_for_gathering_complete().await;
-
-        *guard = Some(pc.clone());
-        Ok(pc)
-    }
 }
 
 #[async_trait]
@@ -659,22 +664,22 @@ impl Track for FileTrack {
     }
 
     async fn handshake(&self, remote_offer: String) -> Result<String> {
-        let pc = self.ensure_pc().await?;
+        self.pc.wait_for_gathering_complete().await;
 
         // Parse the SDP string into SessionDescription
         let offer = SessionDescription::parse(SdpType::Offer, &remote_offer)?;
 
-        pc.set_remote_description(offer).await?;
-        let answer = pc.create_answer().await?;
-        pc.set_local_description(answer.clone())?;
+        self.pc.set_remote_description(offer).await?;
+        let answer = self.pc.create_answer().await?;
+        self.pc.set_local_description(answer.clone())?;
 
         Ok(answer.to_sdp_string())
     }
 
     async fn local_description(&self) -> Result<String> {
-        let pc = self.ensure_pc().await?;
+        self.pc.wait_for_gathering_complete().await;
 
-        let mut offer = pc.create_offer().await?;
+        let mut offer = self.pc.create_offer().await?;
 
         // Set codec preference
         if !self.codec_preference.is_empty() {
@@ -711,16 +716,14 @@ impl Track for FileTrack {
             }
         }
 
-        pc.set_local_description(offer.clone())?;
+        self.pc.set_local_description(offer.clone())?;
         Ok(offer.to_sdp_string())
     }
 
     async fn set_remote_description(&self, remote: &str) -> Result<()> {
-        let guard = self.pc.lock().await;
-        if let Some(pc) = guard.as_ref() {
-            let desc = SessionDescription::parse(SdpType::Answer, remote)?;
-            pc.set_remote_description(desc).await?;
-        }
+        self.pc.wait_for_gathering_complete().await;
+        let desc = SessionDescription::parse(SdpType::Answer, remote)?;
+        self.pc.set_remote_description(desc).await?;
         Ok(())
     }
 
@@ -729,7 +732,9 @@ impl Track for FileTrack {
     }
 
     async fn get_peer_connection(&self) -> Option<PeerConnection> {
-        let guard = self.pc.lock().await;
-        guard.clone()
+        Some(self.pc.clone())
     }
 }
+
+#[cfg(test)]
+mod media_track_tests;
