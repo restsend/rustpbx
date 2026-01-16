@@ -9,22 +9,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tracing::{debug, error, info, warn};
 
-fn is_transcodable_audio(pt: Option<u8>, dtmf_pt: Option<u8>) -> bool {
-    match pt {
-        Some(payload_type) => {
-            if let Some(dtmf) = dtmf_pt {
-                if payload_type == dtmf {
-                    return false;
-                }
-            }
-            if payload_type == 101 {
-                return false;
-            }
-            matches!(payload_type, 0 | 8 | 9 | 18 | 111) || (payload_type >= 96 && payload_type <= 127)
-        }
-        _ => false,
-    }
-}
 pub struct MediaBridge {
     pub leg_a: Arc<dyn MediaPeer>,
     pub leg_b: Arc<dyn MediaPeer>,
@@ -98,13 +82,13 @@ impl MediaBridge {
         let tracks_b = self.leg_b.get_tracks().await;
 
         let pc_a = if let Some(t) = tracks_a.first() {
-            t.lock().await.get_peer_connection()
+            t.lock().await.get_peer_connection().await
         } else {
             None
         };
 
         let pc_b = if let Some(t) = tracks_b.first() {
-            t.lock().await.get_peer_connection()
+            t.lock().await.get_peer_connection().await
         } else {
             None
         };
@@ -120,11 +104,15 @@ impl MediaBridge {
             let ssrc_b = self.ssrc_b;
             let recorder = self.recorder.clone();
             let cancel_token = self.leg_a.cancel_token();
+            let leg_a = self.leg_a.clone();
+            let leg_b = self.leg_b.clone();
 
             crate::utils::spawn(async move {
                 tokio::select! {
                     _ = cancel_token.cancelled() => {},
                     _ = Self::bridge_pcs(
+                        leg_a,
+                        leg_b,
                         pc_a,
                         pc_b,
                         params_a,
@@ -144,6 +132,8 @@ impl MediaBridge {
     }
 
     async fn bridge_pcs(
+        leg_a: Arc<dyn MediaPeer>,
+        leg_b: Arc<dyn MediaPeer>,
         pc_a: rustrtc::PeerConnection,
         pc_b: rustrtc::PeerConnection,
         params_a: rustrtc::RtpCodecParameters,
@@ -183,6 +173,7 @@ impl MediaBridge {
                         track_id
                     );
                     forwarders.push(Self::forward_track(
+                        leg_a.clone(),
                         track,
                         pc_b.clone(),
                         params_b.clone(),
@@ -190,6 +181,7 @@ impl MediaBridge {
                         codec_b,
                         Leg::A,
                         dtmf_pt_a,
+                        dtmf_pt_b,
                         None, // Don't use remote SSRC for outgoing stream
                         recorder.clone(),
                     ));
@@ -214,6 +206,7 @@ impl MediaBridge {
                         track_id
                     );
                     forwarders.push(Self::forward_track(
+                        leg_b.clone(),
                         track,
                         pc_a.clone(),
                         params_a.clone(),
@@ -221,6 +214,7 @@ impl MediaBridge {
                         codec_a,
                         Leg::B,
                         dtmf_pt_b,
+                        dtmf_pt_a,
                         None, // Don't use remote SSRC for outgoing stream
                         recorder.clone(),
                     ));
@@ -232,10 +226,12 @@ impl MediaBridge {
 
         let mut pc_a_recv = Box::pin(pc_a.recv());
         let mut pc_b_recv = Box::pin(pc_b.recv());
+        let mut pc_a_closed = false;
+        let mut pc_b_closed = false;
 
         loop {
             tokio::select! {
-                event_a = &mut pc_a_recv => {
+                event_a = &mut pc_a_recv, if !pc_a_closed => {
                     if let Some(event) = event_a {
                         match event {
                             rustrtc::PeerConnectionEvent::Track(transceiver) => {
@@ -246,6 +242,7 @@ impl MediaBridge {
                                     debug!("New Track event Leg A: track_id={} kind={:?}", track_id, track_kind);
                                     if started_track_ids.insert(format!("A-{}", track_id)) {
                                         forwarders.push(Self::forward_track(
+                                            leg_a.clone(),
                                             track,
                                             pc_b.clone(),
                                             params_b.clone(),
@@ -253,6 +250,7 @@ impl MediaBridge {
                                             codec_b,
                                             Leg::A,
                                             dtmf_pt_a,
+                                            dtmf_pt_b,
                                             None,
                                             recorder.clone(),
                                         ));
@@ -265,10 +263,13 @@ impl MediaBridge {
                                 debug!("Leg A PeerConnection received non-Track event");
                             }
                         }
+                        pc_a_recv = Box::pin(pc_a.recv());
+                    } else {
+                        debug!("Leg A PeerConnection closed");
+                        pc_a_closed = true;
                     }
-                    pc_a_recv = Box::pin(pc_a.recv());
                 }
-                event_b = &mut pc_b_recv => {
+                event_b = &mut pc_b_recv, if !pc_b_closed => {
                     if let Some(event) = event_b {
                         match event {
                             rustrtc::PeerConnectionEvent::Track(transceiver) => {
@@ -280,6 +281,7 @@ impl MediaBridge {
                                     if started_track_ids.insert(format!("B-{}", track_id)) {
                                         info!("Starting new track forwarder: Leg B track_id={}", track_id);
                                         forwarders.push(Self::forward_track(
+                                            leg_b.clone(),
                                             track,
                                             pc_a.clone(),
                                             params_a.clone(),
@@ -287,6 +289,7 @@ impl MediaBridge {
                                             codec_a,
                                             Leg::B,
                                             dtmf_pt_b,
+                                            dtmf_pt_a,
                                             None,
                                             recorder.clone(),
                                         ));
@@ -299,30 +302,44 @@ impl MediaBridge {
                                 debug!("Leg B PeerConnection received non-Track event");
                             }
                         }
+                        pc_b_recv = Box::pin(pc_b.recv());
+                    } else {
+                        debug!("Leg B PeerConnection closed");
+                        pc_b_closed = true;
                     }
-                    pc_b_recv = Box::pin(pc_b.recv());
                 }
                 Some(_) = forwarders.next(), if !forwarders.is_empty() => {}
+            }
+            if pc_a_closed && pc_b_closed && forwarders.is_empty() {
+                break;
             }
         }
     }
 
     async fn forward_track(
+        source_peer: Arc<dyn MediaPeer>,
         track: Arc<dyn MediaStreamTrack>,
         target_pc: rustrtc::PeerConnection,
         target_params: rustrtc::RtpCodecParameters,
         source_codec: CodecType,
         target_codec: CodecType,
         leg: Leg,
-        dtmf_pt: Option<u8>,
+        source_dtmf_pt: Option<u8>,
+        target_dtmf_pt: Option<u8>,
         target_ssrc: Option<u32>,
         recorder: Arc<Mutex<Option<Recorder>>>,
     ) {
         let needs_transcoding = source_codec != target_codec;
         let track_id = track.id().to_string();
         debug!(
-            "forward_track {:?}: track_id={} source_codec={:?} target_codec={:?} needs_transcoding={}",
-            leg, track_id, source_codec, target_codec, needs_transcoding
+            "forward_track {:?}: track_id={} source_codec={:?} target_codec={:?} needs_transcoding={} source_dtmf={:?} target_dtmf={:?}",
+            leg,
+            track_id,
+            source_codec,
+            target_codec,
+            needs_transcoding,
+            source_dtmf_pt,
+            target_dtmf_pt
         );
         let (source_target, track_target, _) =
             rustrtc::media::track::sample_track(MediaKind::Audio, 100);
@@ -331,13 +348,14 @@ impl MediaBridge {
         let transceivers = target_pc.get_transceivers();
         let existing_transceiver = transceivers
             .iter()
-            .find(|t| t.mid().is_some() && t.kind() == rustrtc::MediaKind::Audio);
+            .find(|t| t.kind() == rustrtc::MediaKind::Audio);
 
         if let Some(transceiver) = existing_transceiver {
             debug!(
-                "forward_track {:?}: Reusing existing transceiver mid={:?}",
+                "forward_track {:?}: Reusing existing transceiver mid={:?} for track {}",
                 leg,
-                transceiver.mid()
+                transceiver.mid(),
+                track_id
             );
 
             if let Some(old_sender) = transceiver.sender() {
@@ -346,9 +364,11 @@ impl MediaBridge {
                 let track_arc: Arc<dyn MediaStreamTrack> = track_target.clone();
 
                 debug!(
-                    "forward_track {:?}: Transceiver direction: {:?}",
+                    "forward_track {:?}: Transceiver direction: {:?}, ssrc={}, params_pt={:?}",
                     leg,
-                    transceiver.direction()
+                    transceiver.direction(),
+                    ssrc,
+                    params.payload_type
                 );
 
                 let new_sender = rustrtc::RtpSender::builder(track_arc, ssrc)
@@ -356,18 +376,10 @@ impl MediaBridge {
                     .build();
 
                 transceiver.set_sender(Some(new_sender));
-                debug!(
-                    "forward_track {:?}: Replaced sender on existing transceiver with ssrc={}",
-                    leg, ssrc
-                );
             } else {
                 let ssrc = target_ssrc.unwrap_or_else(|| rand::random::<u32>());
                 let track_arc: Arc<dyn MediaStreamTrack> = track_target.clone();
-                // Use target_params but ensure SSRC is set correctly
                 let params = target_params.clone();
-                // If target_params has no SSRC, use the random one
-                // Note: RtpCodecParameters doesn't have ssrc field directly usually,
-                // but RtpSender builder takes ssrc.
 
                 debug!(
                     "forward_track {:?}: Creating new sender with ssrc={} (target_ssrc={:?}) params={:?}",
@@ -378,17 +390,13 @@ impl MediaBridge {
                     .params(params)
                     .build();
                 transceiver.set_sender(Some(new_sender));
-                debug!(
-                    "forward_track {:?}: Created and attached new sender to existing transceiver ssrc={}",
-                    leg, ssrc
-                );
             }
         } else {
-            match target_pc.add_track(track_target, target_params) {
+            match target_pc.add_track(track_target, target_params.clone()) {
                 Ok(_sender) => {
                     debug!(
-                        "forward_track {:?}: add_track success (new transceiver)",
-                        leg
+                        "forward_track {:?}: add_track success (new transceiver) track {}",
+                        leg, track_id
                     );
                 }
                 Err(e) => {
@@ -408,18 +416,26 @@ impl MediaBridge {
 
         let mut last_seq: Option<u16> = None;
         let mut packet_count: u64 = 0;
+        let target_pt = target_params.payload_type;
 
         while let Ok(mut sample) = track.recv().await {
+            if source_peer.is_suppressed(&track_id) {
+                continue;
+            }
+
+            let mut is_dtmf = false;
+            let mut pt_for_recorder = None;
+
             if let MediaSample::Audio(ref mut frame) = sample {
-                // println!(
-                //     "forward_track {:?}: track_id={} received audio frame: pt={:?} seq={:?} len={}",
-                //     leg,
-                //     track_id,
-                //     frame.payload_type,
-                //     frame.sequence_number,
-                //     frame.data.len()
-                // );
                 packet_count += 1;
+                // Log every 100 packets to verify flow
+                if packet_count % 100 == 1 {
+                    debug!(
+                        "forward_track {:?} {} received packet #{} pt={:?}",
+                        leg, track_id, packet_count, frame.payload_type
+                    );
+                }
+
                 if let Some(seq) = frame.sequence_number {
                     if let Some(last) = last_seq {
                         if seq == last {
@@ -429,16 +445,36 @@ impl MediaBridge {
                     last_seq = Some(seq);
                 }
 
-                // Only transcode actual audio codecs, not DTMF (telephone-event)
-                if is_transcodable_audio(frame.payload_type, dtmf_pt) {
+                // Rewrite payload type to match target's expected PT
+                if let Some(pt) = frame.payload_type {
+                    if Some(pt) == source_dtmf_pt {
+                        is_dtmf = true;
+                        pt_for_recorder = target_dtmf_pt;
+                        if let Some(t_dtmf) = target_dtmf_pt {
+                            frame.payload_type = Some(t_dtmf);
+                        }
+                    } else if !needs_transcoding {
+                        // If not transcoding, rewrite audio PT to target PT
+                        frame.payload_type = Some(target_pt);
+                    }
+                }
+
+                if !is_dtmf {
                     if let Some(ref mut t) = transcoder {
-                        sample = MediaSample::Audio(t.transcode(frame))
+                        sample = MediaSample::Audio(t.transcode(frame));
+                        // After transcoding, ensure PT matches the target's negotiated PT
+                        if let MediaSample::Audio(ref mut new_frame) = sample {
+                            if new_frame.payload_type != Some(target_pt) {
+                                new_frame.payload_type = Some(target_pt);
+                            }
+                        }
                     }
                 }
             }
+
             {
                 if let Some(ref mut r) = *recorder.lock().unwrap() {
-                    let _ = r.write_sample(leg, &sample, dtmf_pt);
+                    let _ = r.write_sample(leg, &sample, pt_for_recorder);
                 }
             }
             if let Err(e) = source_target.send(sample).await {

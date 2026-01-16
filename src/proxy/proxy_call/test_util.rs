@@ -35,6 +35,9 @@ pub mod tests {
         }
         async fn suppress_forwarding(&self, _track_id: &str) {}
         async fn resume_forwarding(&self, _track_id: &str) {}
+        fn is_suppressed(&self, _track_id: &str) -> bool {
+            false
+        }
         async fn remove_track(&self, _track_id: &str, _stop: bool) {}
         async fn serve(&self) -> Result<()> {
             Ok(())
