@@ -9,22 +9,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tracing::{debug, error, info, warn};
 
-fn is_transcodable_audio(pt: Option<u8>, dtmf_pt: Option<u8>) -> bool {
-    match pt {
-        Some(payload_type) => {
-            if let Some(dtmf) = dtmf_pt {
-                if payload_type == dtmf {
-                    return false;
-                }
-            }
-            if payload_type == 101 {
-                return false;
-            }
-            matches!(payload_type, 0 | 8 | 9 | 18 | 111) || (payload_type >= 96 && payload_type <= 127)
-        }
-        _ => false,
-    }
+fn is_audio(pt: Option<u8>) -> bool {
+    pt.map(|p| matches!(p, 0 | 8 | 9 | 18 | 96..=127))
+        .unwrap_or_default()
 }
+
 pub struct MediaBridge {
     pub leg_a: Arc<dyn MediaPeer>,
     pub leg_b: Arc<dyn MediaPeer>,
@@ -411,14 +400,6 @@ impl MediaBridge {
 
         while let Ok(mut sample) = track.recv().await {
             if let MediaSample::Audio(ref mut frame) = sample {
-                // println!(
-                //     "forward_track {:?}: track_id={} received audio frame: pt={:?} seq={:?} len={}",
-                //     leg,
-                //     track_id,
-                //     frame.payload_type,
-                //     frame.sequence_number,
-                //     frame.data.len()
-                // );
                 packet_count += 1;
                 if let Some(seq) = frame.sequence_number {
                     if let Some(last) = last_seq {
@@ -429,9 +410,10 @@ impl MediaBridge {
                     last_seq = Some(seq);
                 }
 
-                // Only transcode actual audio codecs, not DTMF (telephone-event)
-                if is_transcodable_audio(frame.payload_type, dtmf_pt) {
-                    if let Some(ref mut t) = transcoder {
+                if let Some(ref mut t) = transcoder {
+                    if frame.payload_type == dtmf_pt || frame.payload_type == Some(101) {
+                        t.update_dtmf_timestamp(frame);
+                    } else if is_audio(frame.payload_type) {
                         sample = MediaSample::Audio(t.transcode(frame))
                     }
                 }

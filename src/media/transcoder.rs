@@ -79,4 +79,21 @@ impl Transcoder {
             payload_type: Some(self.target.payload_type()),
         }
     }
+
+
+    pub fn update_dtmf_timestamp(&mut self, frame: &mut AudioFrame) {
+        if self.first_input_timestamp.is_none() {
+            self.first_input_timestamp = Some(frame.rtp_timestamp);
+            self.first_input_sequence = frame.sequence_number;
+        }
+
+        let first_input_ts = self.first_input_timestamp.unwrap_or_default();
+        let ts_delta = frame.rtp_timestamp.wrapping_sub(first_input_ts);
+        frame.rtp_timestamp = self.first_output_timestamp.wrapping_add(ts_delta);
+
+        let first_input_seq = self.first_input_sequence.unwrap_or_default();
+        let sequence = frame.sequence_number.unwrap_or_default();
+        let delta = sequence.wrapping_sub(first_input_seq);
+        frame.sequence_number = Some(self.first_output_sequence.wrapping_add(delta));
+    }
 }
