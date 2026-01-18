@@ -900,7 +900,7 @@ impl CallModule {
     }
 
     async fn process_message(&self, tx: &mut Transaction) -> Result<()> {
-        let dialog_id = DialogId::try_from(&tx.original).map_err(|e| anyhow!(e))?;
+        let dialog_id = DialogId::from_uas_request(&tx.original).map_err(|e| anyhow!(e))?;
         let mut dialog = match self.inner.dialog_layer.get_dialog(&dialog_id) {
             Some(dialog) => dialog,
             None => {
@@ -948,7 +948,7 @@ impl ProxyModule for CallModule {
         if cookie.get_user().is_none() {
             cookie.set_user(SipUser::try_from(&*tx)?);
         }
-        let dialog_id = DialogId::try_from(&tx.original).map_err(|e| anyhow!(e))?;
+        let dialog_id = DialogId::from_uas_request(&tx.original).map_err(|e| anyhow!(e))?;
         info!(
             %dialog_id,
             tx = %tx.key,
@@ -959,7 +959,9 @@ impl ProxyModule for CallModule {
         match tx.original.method {
             rsip::Method::Invite => {
                 // Check for Re-invite (INVITE within an existing dialog)
-                if !dialog_id.to_tag.is_empty() {
+                // For server-side dialog, local_tag corresponds to To header tag
+                // A Re-INVITE has both From and To tags present
+                if !dialog_id.local_tag.is_empty() {
                     debug!(%dialog_id, "Detected Re-invite, processing via dialog layer");
                     if let Err(e) = self.process_message(tx).await {
                         warn!(%dialog_id, "Failed to process Re-invite message: {}", e);

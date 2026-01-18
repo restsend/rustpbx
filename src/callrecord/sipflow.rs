@@ -4,7 +4,7 @@ use rsip::{
     SipMessage,
     prelude::{HeadersExt, UntypedHeader},
 };
-use rsipstack::transaction::endpoint::MessageInspector;
+use rsipstack::{transaction::endpoint::MessageInspector, transport::SipAddr};
 use serde::{Deserialize, Serialize};
 use std::{
     num::NonZero,
@@ -101,20 +101,20 @@ impl SipFlow {
 }
 
 impl MessageInspector for SipFlow {
-    fn before_send(&self, msg: SipMessage) -> SipMessage {
+    fn before_send(&self, msg: SipMessage, dest: Option<&SipAddr>) -> SipMessage {
         self.record(SipFlowDirection::Outgoing, &msg);
         let mut modified_msg = msg;
         for inspector in &self.inner.inspectors {
-            modified_msg = inspector.before_send(modified_msg);
+            modified_msg = inspector.before_send(modified_msg, dest);
         }
         modified_msg
     }
 
-    fn after_received(&self, msg: SipMessage) -> SipMessage {
+    fn after_received(&self, msg: SipMessage, from: &SipAddr) -> SipMessage {
         self.record(SipFlowDirection::Incoming, &msg);
         let mut modified_msg = msg;
         for inspector in &self.inner.inspectors {
-            modified_msg = inspector.after_received(modified_msg);
+            modified_msg = inspector.after_received(modified_msg, from);
         }
         modified_msg
     }
