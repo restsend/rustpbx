@@ -459,8 +459,8 @@ impl MediaBridge {
                     }
                 }
 
-                if !is_dtmf {
-                    if let Some(ref mut t) = transcoder {
+                if let Some(ref mut t) = transcoder {
+                    if !is_dtmf {
                         sample = MediaSample::Audio(t.transcode(frame));
                         // After transcoding, ensure PT matches the target's negotiated PT
                         if let MediaSample::Audio(ref mut new_frame) = sample {
@@ -468,6 +468,8 @@ impl MediaBridge {
                                 new_frame.payload_type = Some(target_pt);
                             }
                         }
+                    } else {
+                        t.update_dtmf_timestamp(frame);
                     }
                 }
             }
