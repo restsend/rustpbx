@@ -657,8 +657,8 @@ mod tests {
             aor: sub_uri.clone(),
             dialog_id: rsipstack::dialog::DialogId {
                 call_id: "test-call-id".into(),
-                from_tag: "tag1".into(),
-                to_tag: "tag2".into(),
+                local_tag: "tag1".into(),
+                remote_tag: "tag2".into(),
             },
             expires: std::time::Instant::now() + std::time::Duration::from_secs(60),
         };

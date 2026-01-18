@@ -2184,8 +2184,8 @@ fn summarize_server_dialog(
     Some(DialogSummary {
         id: id.to_string(),
         call_id: id.call_id.clone(),
-        from_tag: id.from_tag.clone(),
-        to_tag: id.to_tag.clone(),
+        from_tag: id.local_tag.clone(),
+        to_tag: id.remote_tag.clone(),
         role: "server".to_string(),
         state: snapshot.label,
         state_detail: snapshot.detail,
@@ -2210,8 +2210,8 @@ fn summarize_client_dialog(
     Some(DialogSummary {
         id: id.to_string(),
         call_id: id.call_id.clone(),
-        from_tag: id.from_tag.clone(),
-        to_tag: id.to_tag.clone(),
+        from_tag: id.local_tag.clone(),
+        to_tag: id.remote_tag.clone(),
         role: "client".to_string(),
         state: snapshot.label,
         state_detail: snapshot.detail,

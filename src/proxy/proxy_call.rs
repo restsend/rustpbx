@@ -158,8 +158,8 @@ impl CallSessionBuilder {
             callee_dialogs: vec![],
             server_dialog_id: rsipstack::dialog::DialogId {
                 call_id: "".into(),
-                from_tag: "".into(),
-                to_tag: "".into(),
+                local_tag: "".into(),
+                remote_tag: "".into(),
             },
             extensions: dialplan.extensions.clone(),
         };

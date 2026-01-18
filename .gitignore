@@ -51,3 +51,4 @@ config.toml.dev
 *.log
 rustpbx.toml
 .DS_Store
+model.md
