@@ -95,7 +95,7 @@ mod recorder_advanced_tests {
 
     #[test]
     fn test_recorder_wav_header_pcmu() {
-        let temp_path = std::env::temp_dir().join("test_pcmu.wav");
+        let temp_path = std::env::temp_dir().join("test_wav_header_pcmu.wav");
         let path_str = temp_path.to_str().unwrap();
 
         // Create recorder with PCMU
@@ -123,7 +123,7 @@ mod recorder_advanced_tests {
 
     #[test]
     fn test_recorder_wav_header_pcma() {
-        let temp_path = std::env::temp_dir().join("test_pcma.wav");
+        let temp_path = std::env::temp_dir().join("test_wav_header_pcma.wav");
         let path_str = temp_path.to_str().unwrap();
 
         let recorder = Recorder::new(path_str, CodecType::PCMA);
@@ -137,7 +137,7 @@ mod recorder_advanced_tests {
 
     #[test]
     fn test_recorder_wav_header_g722() {
-        let temp_path = std::env::temp_dir().join("test_g722.wav");
+        let temp_path = std::env::temp_dir().join("test_wav_header_g722.wav");
         let path_str = temp_path.to_str().unwrap();
 
         let recorder = Recorder::new(path_str, CodecType::G722);
@@ -153,7 +153,7 @@ mod recorder_advanced_tests {
 
     #[test]
     fn test_recorder_dual_leg_recording() {
-        let temp_path = std::env::temp_dir().join("test_dual_leg.wav");
+        let temp_path = std::env::temp_dir().join("test_recorder_dual_leg.wav");
         let path_str = temp_path.to_str().unwrap();
 
         let mut recorder = Recorder::new(path_str, CodecType::PCMU).unwrap();
@@ -206,7 +206,7 @@ mod recorder_advanced_tests {
 
     #[test]
     fn test_recorder_single_channel_recording() {
-        let temp_path = std::env::temp_dir().join("test_single_channel.wav");
+        let temp_path = std::env::temp_dir().join("test_recorder_single_channel.wav");
         let path_str = temp_path.to_str().unwrap();
 
         let mut recorder = Recorder::new(path_str, CodecType::PCMU).unwrap();
@@ -239,7 +239,7 @@ mod recorder_advanced_tests {
 
     #[test]
     fn test_recorder_dtmf_event_payload() {
-        let temp_path = std::env::temp_dir().join("test_dtmf.wav");
+        let temp_path = std::env::temp_dir().join("test_recorder_dtmf_event.wav");
         let path_str = temp_path.to_str().unwrap();
 
         let mut recorder = Recorder::new(path_str, CodecType::PCMU).unwrap();
@@ -267,7 +267,7 @@ mod recorder_advanced_tests {
 
     #[test]
     fn test_recorder_dtmf_all_digits() {
-        let temp_path = std::env::temp_dir().join("test_dtmf_all.wav");
+        let temp_path = std::env::temp_dir().join("test_recorder_dtmf_all.wav");
         let path_str = temp_path.to_str().unwrap();
 
         let mut recorder = Recorder::new(path_str, CodecType::PCMU).unwrap();
@@ -512,10 +512,10 @@ mod recorder_advanced_tests {
     #[test]
     fn test_supported_codecs() {
         let codecs = vec![
-            (CodecType::PCMU, "/tmp/test_pcmu.wav"),
-            (CodecType::PCMA, "/tmp/test_pcma.wav"),
-            (CodecType::G722, "/tmp/test_g722.wav"),
-            (CodecType::G729, "/tmp/test_g729.wav"),
+            (CodecType::PCMU, "/tmp/test_supported_pcmu.wav"),
+            (CodecType::PCMA, "/tmp/test_supported_pcma.wav"),
+            (CodecType::G722, "/tmp/test_supported_g722.wav"),
+            (CodecType::G729, "/tmp/test_supported_g729.wav"),
         ];
 
         for (codec, path) in codecs {
@@ -528,11 +528,11 @@ mod recorder_advanced_tests {
 
     /// Test: Recording from both legs creates stereo output
     #[test]
-    fn test_dual_leg_recording() {
+    fn test_dual_leg_recording_stereo() {
         use audio_codec::create_encoder;
         use bytes::Bytes;
 
-        let temp_path = "/tmp/test_dual_leg.wav";
+        let temp_path = "/tmp/test_dual_leg_stereo.wav";
         let mut recorder = Recorder::new(temp_path, CodecType::PCMU).unwrap();
 
         // Generate test audio for both legs
@@ -588,7 +588,7 @@ mod recorder_advanced_tests {
     fn test_dtmf_recording() {
         use bytes::Bytes;
 
-        let temp_path = "/tmp/test_dtmf.wav";
+        let temp_path = "/tmp/test_dtmf_recording.wav";
         let mut recorder = Recorder::new(temp_path, CodecType::PCMU).unwrap();
 
         // Create DTMF payload (RFC 4733)
