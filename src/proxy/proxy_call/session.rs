@@ -1284,6 +1284,12 @@ impl CallSession {
                                 ssrc_a,
                                 ssrc_b,
                                 self.recorder_option.clone(),
+                                self.context
+                                    .dialplan
+                                    .call_id
+                                    .clone()
+                                    .unwrap_or_else(|| self.context.session_id.clone()),
+                                self.server.sip_flow.as_ref().and_then(|sf| sf.backend()),
                             );
 
                             self.media_bridge = Some(bridge);
@@ -1547,6 +1553,12 @@ impl CallSession {
                     ssrc_a,
                     ssrc_b,
                     self.recorder_option.clone(),
+                    self.context
+                        .dialplan
+                        .call_id
+                        .clone()
+                        .unwrap_or_else(|| self.context.session_id.clone()),
+                    self.server.sip_flow.as_ref().and_then(|sf| sf.backend()),
                 );
                 self.media_bridge = Some(bridge);
             }
@@ -2731,7 +2743,11 @@ impl CallSession {
                 match self
                     .server
                     .user_backend
-                    .get_user(&callee_uri.user().unwrap_or_default(), Some(&callee_realm))
+                    .get_user(
+                        &callee_uri.user().unwrap_or_default(),
+                        Some(&callee_realm),
+                        Some(&self.context.dialplan.original),
+                    )
                     .await
                 {
                     Ok(Some(_)) => {
@@ -2781,6 +2797,14 @@ impl CallSession {
         let _state_tx_keepalive = state_tx.clone();
         let dialog_layer = self.dialog_layer.clone();
         self.note_invite_details(&invite_option);
+
+        // Log client INVITE details
+        info!(
+            session_id = %self.context.session_id,
+            callee = %invite_option.callee,
+            destination = ?invite_option.destination,
+            "Sending client INVITE to target"
+        );
 
         let session_id = self.context.session_id.clone();
         let mut retry_count = 0;
@@ -2892,6 +2916,14 @@ impl CallSession {
             };
 
             let dialog_id_val = dialog.id();
+
+            // Log client dialog details after successful answer
+            info!(
+                session_id = %self.context.session_id,
+                dialog_id = %dialog_id_val,
+                "Client dialog established after 200 OK from callee"
+            );
+
             self.add_callee_dialog(dialog_id_val.clone());
             let _ = self
                 .apply_session_action(
@@ -3309,6 +3341,13 @@ impl CallSession {
             local_contact.clone(),
         )?;
 
+        // Log initial server dialog details
+        info!(
+            session_id = %context.session_id,
+            dialog_id = %server_dialog.id(),
+            "Server dialog created"
+        );
+
         let initial_request = server_dialog.initial_request();
         let offer_sdp = String::from_utf8_lossy(initial_request.body()).to_string();
 
@@ -3338,12 +3377,23 @@ impl CallSession {
             "starting proxy call processing"
         );
 
-        let recorder_option =
-            if context.dialplan.recording.enabled && context.dialplan.recording.auto_start {
-                context.dialplan.recording.option.clone()
-            } else {
-                None
-            };
+        // Only create recorder when:
+        // 1. Recording is enabled and auto_start is true
+        // 2. AND no sipflow backend is configured (to avoid duplicate storage)
+        let has_sipflow_backend = server
+            .sip_flow
+            .as_ref()
+            .and_then(|sf| sf.backend())
+            .is_some();
+
+        let recorder_option = if context.dialplan.recording.enabled
+            && context.dialplan.recording.auto_start
+            && !has_sipflow_backend
+        {
+            context.dialplan.recording.option.clone()
+        } else {
+            None
+        };
 
         let reporter = CallReporter {
             server: server.clone(),

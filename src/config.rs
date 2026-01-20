@@ -182,6 +182,8 @@ pub struct Config {
     pub addons: HashMap<String, HashMap<String, String>>,
     #[serde(default)]
     pub storage: Option<StorageConfig>,
+    #[serde(default)]
+    pub sipflow: Option<SipFlowConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -234,6 +236,7 @@ pub enum UserBackendConfig {
         username_field: Option<String>,
         realm_field: Option<String>,
         headers: Option<HashMap<String, String>>,
+        sip_headers: Option<Vec<String>>,
     },
     Plain {
         path: String,
@@ -299,6 +302,63 @@ pub enum CallRecordConfig {
         with_media: Option<bool>,
         keep_media_copy: Option<bool>,
     },
+}
+
+/// Directory structure for sipflow storage
+#[derive(Debug, Deserialize, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum SipFlowSubdirs {
+    /// No subdirectory structure - all files in root
+    None,
+    /// Daily subdirectories (YYYYMMDD)
+    Daily,
+    /// Hourly subdirectories (YYYYMMDD/HH)
+    Hourly,
+}
+
+impl Default for SipFlowSubdirs {
+    fn default() -> Self {
+        Self::Daily
+    }
+}
+
+#[derive(Debug, Deserialize, Clone, Serialize)]
+#[serde(tag = "type")]
+#[serde(rename_all = "snake_case")]
+pub enum SipFlowConfig {
+    Local {
+        root: String,
+        #[serde(default)]
+        subdirs: SipFlowSubdirs,
+        #[serde(default = "default_sipflow_flush_count")]
+        flush_count: usize,
+        #[serde(default = "default_sipflow_flush_interval")]
+        flush_interval_secs: u64,
+        #[serde(default = "default_sipflow_id_cache_size")]
+        id_cache_size: usize,
+    },
+    Remote {
+        udp_addr: String,
+        http_addr: String,
+        #[serde(default = "default_sipflow_timeout")]
+        timeout_secs: u64,
+    },
+}
+
+fn default_sipflow_flush_count() -> usize {
+    1000
+}
+
+fn default_sipflow_flush_interval() -> u64 {
+    5
+}
+
+fn default_sipflow_timeout() -> u64 {
+    10
+}
+
+fn default_sipflow_id_cache_size() -> usize {
+    8192
 }
 
 #[derive(Debug, Deserialize, Clone, Copy, Serialize)]
@@ -647,6 +707,7 @@ impl Default for Config {
             demo_mode: false,
             storage: None,
             addons: HashMap::new(),
+            sipflow: None,
         }
     }
 }

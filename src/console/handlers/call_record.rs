@@ -1,7 +1,6 @@
-use crate::callrecord::sipflow::{SipFlowDirection, SipMessageItem};
+use crate::callrecord::CallRecord;
 use crate::callrecord::storage;
 use crate::callrecord::storage::CdrStorage;
-use crate::callrecord::{CallRecord, CallRecordExtras};
 use crate::console::{ConsoleState, handlers::forms, middleware::AuthRequired};
 use axum::{
     Json, Router,
@@ -109,6 +108,164 @@ pub fn urls() -> Router<Arc<ConsoleState>> {
         )
         .route("/call-records/{id}/recording", get(stream_call_recording))
 }
+
+async fn download_call_record_sip_flow(
+    AxumPath(pk): AxumPath<i64>,
+    State(state): State<Arc<ConsoleState>>,
+    AuthRequired(_): AuthRequired,
+) -> Response {
+    let db = state.db();
+    let record = match CallRecordEntity::find_by_id(pk).one(db).await {
+        Ok(Some(model)) => model,
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "message": "Call record not found" })),
+            )
+                .into_response();
+        }
+        Err(err) => {
+            warn!(id = pk, "failed to load call record for sip flow: {}", err);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "message": "Failed to load call record" })),
+            )
+                .into_response();
+        }
+    };
+
+    let Some(server) = state.sip_server() else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "message": "SIP server not available" })),
+        )
+            .into_response();
+    };
+
+    let Some(sipflow) = &server.sip_flow else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "message": "SIP flow not configured" })),
+        )
+            .into_response();
+    };
+
+    let Some(backend) = sipflow.backend() else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "message": "SIP flow backend not available" })),
+        )
+            .into_response();
+    };
+
+    let call_time = record.created_at;
+    let start_time = (call_time - chrono::Duration::hours(1)).with_timezone(&chrono::Local);
+    let end_time = (call_time + chrono::Duration::hours(2)).with_timezone(&chrono::Local);
+
+    let mut call_id_roles: HashMap<String, String> = HashMap::new();
+    // Default main call_id to "primary" if not overridden
+    call_id_roles.insert(record.call_id.clone(), "primary".to_string());
+
+    if let Some(signaling) = &record.signaling {
+        if let Some(legs) = signaling.get("legs").and_then(|v| v.as_array()) {
+            for leg in legs {
+                if let Some(cid) = leg.get("call_id").and_then(|v| v.as_str()) {
+                    if !cid.is_empty() {
+                        let role = leg
+                            .get("role")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("unknown")
+                            .to_string();
+                        call_id_roles.insert(cid.to_string(), role);
+                    }
+                }
+            }
+        }
+    }
+
+    let mut flow_items = Vec::new();
+    // Map of (Role, Src, Dst) -> PacketCount
+    let mut rtp_stats: HashMap<(String, String, String), usize> = HashMap::new();
+
+    for (cid, role) in &call_id_roles {
+        match backend.query_flow(cid, start_time, end_time).await {
+            Ok(items) => {
+                for item in items {
+                    flow_items.push((item, role.clone(), cid.clone()));
+                }
+            }
+            Err(err) => {
+                warn!(id = pk, call_id = %cid, "failed to query sip flow for leg: {}", err);
+            }
+        }
+
+        match backend.query_media_stats(cid, start_time, end_time).await {
+            Ok(stats) => {
+                for (leg, src_addr, count) in stats {
+                    *rtp_stats
+                        .entry((
+                            role.clone(),
+                            if src_addr.is_empty() {
+                                format!("Leg {}", leg)
+                            } else {
+                                src_addr
+                            },
+                            "RTP".to_string(),
+                        ))
+                        .or_insert(0) += count;
+                }
+            }
+            Err(err) => {
+                warn!(id = pk, call_id = %cid, "failed to query media stats for leg: {}", err);
+            }
+        }
+    }
+
+    // Sort combined SIP flow by timestamp
+    flow_items.sort_by(|(a, _, _), (b, _, _)| {
+        a.timestamp
+            .partial_cmp(&b.timestamp)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let mut flow_json = Vec::new();
+
+    for (item, role, cid) in flow_items {
+        let raw_message = String::from_utf8_lossy(&item.payload).to_string();
+        flow_json.push(json!({
+            "timestamp": item.timestamp,
+            "seq": item.seq,
+            "msg_type": "Sip",
+            "src_addr": item.src_addr,
+            "dst_addr": item.dst_addr,
+            "raw_message": raw_message,
+            "role": role,
+            "call_id": cid,
+        }));
+    }
+
+    let rtp_streams: Vec<Value> = rtp_stats
+        .into_iter()
+        .map(|((role, src, dst), count)| {
+            json!({
+                "role": role,
+                "src_addr": src,
+                "dst_addr": dst,
+                "packet_count": count
+            })
+        })
+        .collect();
+
+    Json(json!({
+        "call_id": record.call_id,
+        "start_time": record.started_at,
+        "status": "success",
+        "flow": flow_json,
+        "rtp_streams": rtp_streams,
+    }))
+    .into_response()
+}
+
 async fn stream_call_recording(
     AxumPath(pk): AxumPath<i64>,
     State(state): State<Arc<ConsoleState>>,
@@ -137,36 +294,62 @@ async fn stream_call_recording(
 
     let cdr_data = load_cdr_data(&state, &record).await;
     let recording_path = match select_recording_path(&record, cdr_data.as_ref()) {
-        Some(path) => path,
-        None => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(json!({ "message": "Recording file not found" })),
-            )
-                .into_response();
-        }
+        Some(path) => Some(path),
+        None => None,
     };
 
-    let file_meta = match tokio::fs::metadata(&recording_path).await {
-        Ok(meta) if meta.is_file() => meta,
-        _ => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(json!({ "message": "Recording file not found" })),
-            )
-                .into_response();
+    // Try to stream from file first
+    if let Some(ref path) = recording_path {
+        if let Ok(meta) = tokio::fs::metadata(path).await {
+            if meta.is_file() && meta.len() > 0 {
+                return stream_file_with_range(path, meta.len(), &headers).await;
+            }
         }
-    };
-
-    let file_len = file_meta.len();
-    if file_len == 0 {
-        return (
-            StatusCode::NO_CONTENT,
-            Json(json!({ "message": "Recording file is empty" })),
-        )
-            .into_response();
     }
 
+    // Fallback: Try to get recording from sipflow backend
+    if let Some(server) = state.sip_server() {
+        if let Some(sipflow) = &server.sip_flow {
+            if let Some(backend) = sipflow.backend() {
+                let call_time = record.created_at;
+                let start_time =
+                    (call_time - chrono::Duration::hours(1)).with_timezone(&chrono::Local);
+                let end_time =
+                    (call_time + chrono::Duration::hours(2)).with_timezone(&chrono::Local);
+
+                if let Ok(audio_data) = backend
+                    .query_media(&record.call_id, start_time, end_time)
+                    .await
+                {
+                    if !audio_data.is_empty() {
+                        return Response::builder()
+                            .status(StatusCode::OK)
+                            .header(http::header::CONTENT_TYPE, "audio/wav")
+                            .header(http::header::CONTENT_LENGTH, audio_data.len())
+                            .header(
+                                http::header::CONTENT_DISPOSITION,
+                                "inline; filename=\"recording.wav\"",
+                            )
+                            .body(Body::from(audio_data))
+                            .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
+                    }
+                }
+            }
+        }
+    }
+
+    (
+        StatusCode::NOT_FOUND,
+        Json(json!({ "message": "Recording not found" })),
+    )
+        .into_response()
+}
+
+async fn stream_file_with_range(
+    recording_path: &str,
+    file_len: u64,
+    headers: &HeaderMap,
+) -> Response {
     let range_header = headers
         .get(http::header::RANGE)
         .and_then(|value| value.to_str().ok());
@@ -401,130 +584,6 @@ async fn download_call_record_metadata(
     (headers, Body::from(raw)).into_response()
 }
 
-async fn download_call_record_sip_flow(
-    AxumPath(pk): AxumPath<i64>,
-    Query(params): Query<DownloadRequest>,
-    State(state): State<Arc<ConsoleState>>,
-    AuthRequired(_): AuthRequired,
-) -> Response {
-    let db = state.db();
-    let model = match CallRecordEntity::find_by_id(pk).one(db).await {
-        Ok(Some(model)) => model,
-        Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(json!({ "message": "Call record not found" })),
-            )
-                .into_response();
-        }
-        Err(err) => {
-            warn!(id = pk, "failed to load call record sip flow: {}", err);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "message": "Failed to load call record" })),
-            )
-                .into_response();
-        }
-    };
-
-    let cdr_data = match load_cdr_data(&state, &model).await {
-        Some(data) => data,
-        None => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(json!({ "message": "SIP flow file not found" })),
-            )
-                .into_response();
-        }
-    };
-
-    let requested_path = params
-        .path
-        .as_ref()
-        .map(|value| value.trim())
-        .filter(|value| !value.is_empty());
-
-    let selected_path = if let Some(path) = requested_path {
-        if cdr_data
-            .sip_flow_paths
-            .iter()
-            .any(|entry| entry.path == path)
-        {
-            path.to_string()
-        } else {
-            warn!(
-                id = pk,
-                requested_path = path,
-                "sip flow path not registered for record"
-            );
-            return (
-                StatusCode::NOT_FOUND,
-                Json(json!({ "message": "SIP flow file not found" })),
-            )
-                .into_response();
-        }
-    } else if let Some(entry) = cdr_data.sip_flow_paths.first() {
-        entry.path.clone()
-    } else {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(json!({ "message": "SIP flow file not found" })),
-        )
-            .into_response();
-    };
-
-    let mut bytes: Option<Vec<u8>> = None;
-
-    if let Some(storage_ref) = cdr_data.storage.as_ref() {
-        let path_to_read = strip_storage_root(&state, &selected_path);
-        match storage_ref.read_bytes(&path_to_read).await {
-            Ok(data) => bytes = Some(data),
-            Err(err) => {
-                warn!(path = %path_to_read, "failed to download sip flow from storage: {}", err);
-            }
-        }
-    }
-
-    if bytes.is_none() {
-        match tokio::fs::read(&selected_path).await {
-            Ok(data) => bytes = Some(data),
-            Err(err) => {
-                warn!(path = %selected_path, "failed to read sip flow file: {}", err);
-                return (
-                    StatusCode::NOT_FOUND,
-                    Json(json!({ "message": "SIP flow file not found" })),
-                )
-                    .into_response();
-            }
-        }
-    }
-
-    let data = bytes.unwrap_or_default();
-    let filename =
-        safe_download_filename(&selected_path, &format!("call-record-{}-sip-flow.json", pk));
-    let len_header = data.len().to_string();
-
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        http::header::CONTENT_TYPE,
-        HeaderValue::from_static("application/json; charset=utf-8"),
-    );
-    headers.insert(
-        http::header::CACHE_CONTROL,
-        HeaderValue::from_static("no-store, max-age=0"),
-    );
-    if let Ok(value) = HeaderValue::from_str(&len_header) {
-        headers.insert(http::header::CONTENT_LENGTH, value);
-    }
-    if let Ok(disposition) =
-        HeaderValue::from_str(&format!("attachment; filename=\"{}\"", filename))
-    {
-        headers.insert(http::header::CONTENT_DISPOSITION, disposition);
-    }
-
-    (headers, Body::from(data)).into_response()
-}
-
 async fn page_call_records(
     State(state): State<Arc<ConsoleState>>,
     AuthRequired(_): AuthRequired,
@@ -707,63 +766,7 @@ async fn page_call_record_detail(
     };
 
     let cdr_data = load_cdr_data(&state, &model).await;
-
-    let mut sip_flow_items: Vec<LeggedSipMessage> = if let Some(ref cdr) = cdr_data {
-        load_sip_flow_from_files(cdr.storage.as_ref(), &cdr.sip_flow_paths).await
-    } else {
-        Vec::new()
-    };
-
-    if sip_flow_items.is_empty() {
-        sip_flow_items = load_sip_flow_from_metadata(&model).await;
-    }
-
-    if sip_flow_items.is_empty() {
-        if let Some(server) = state.sip_server() {
-            let mut call_ids: Vec<String> = vec![model.call_id.clone()];
-            if let Some(signaling) = model.signaling.as_ref() {
-                if let Some(legs) = signaling.get("legs").and_then(|value| value.as_array()) {
-                    for leg in legs {
-                        if let Some(call_id) = leg.get("call_id").and_then(|value| value.as_str()) {
-                            let trimmed = call_id.trim();
-                            if !trimmed.is_empty() {
-                                call_ids.push(trimmed.to_string());
-                            }
-                        }
-                    }
-                }
-            }
-
-            let mut visited = HashSet::new();
-            let mut snapshot_items = Vec::new();
-
-            for call_id in call_ids {
-                if !visited.insert(call_id.clone()) {
-                    continue;
-                }
-                if let Some(snapshot) = server.sip_flow_snapshot(&call_id) {
-                    for item in snapshot {
-                        snapshot_items.push(LeggedSipMessage {
-                            leg: Some(call_id.clone()),
-                            leg_role: None,
-                            item,
-                        });
-                    }
-                }
-            }
-
-            if !snapshot_items.is_empty() {
-                snapshot_items.sort_by(|a, b| a.item.timestamp.cmp(&b.item.timestamp));
-                sip_flow_items = snapshot_items;
-            }
-        }
-    }
-
-    if sip_flow_items.len() > 1 {
-        sip_flow_items.sort_by(|a, b| a.item.timestamp.cmp(&b.item.timestamp));
-    }
-
-    let payload = build_detail_payload(&model, &related, &state, sip_flow_items, cdr_data.as_ref());
+    let payload = build_detail_payload(&model, &related, &state, cdr_data.as_ref());
 
     state.render(
         "console/call_record_detail.html",
@@ -1189,198 +1192,9 @@ fn resolve_cdr_storage(state: &ConsoleState) -> Option<CdrStorage> {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct SipFlowFileRef {
-    pub leg: Option<String>,
-    pub leg_role: Option<String>,
-    pub path: String,
-}
-
-#[derive(Debug, Clone)]
-struct LeggedSipMessage {
-    leg: Option<String>,
-    leg_role: Option<String>,
-    item: SipMessageItem,
-}
-
-struct SipFlowContext {
-    caller_label: String,
-    pbx_label: String,
-    callee_label: String,
-}
-
-fn resolve_leg_roles(record: &CallRecordModel, cdr: Option<&CdrData>) -> HashMap<String, String> {
-    let mut roles = HashMap::new();
-
-    if let Some(cdr) = cdr {
-        collect_leg_roles_from_cdr(&cdr.record, "primary", &mut roles);
-    }
-
-    if let Some(signaling) = record.signaling.as_ref() {
-        collect_leg_roles_from_value(signaling, &mut roles);
-    }
-
-    if let Some(metadata) = record.metadata.as_ref() {
-        collect_leg_roles_from_metadata(metadata, &mut roles);
-    }
-
-    if !roles.contains_key(&record.call_id) {
-        roles.insert(record.call_id.clone(), "primary".to_string());
-    }
-
-    roles
-}
-
-fn collect_leg_roles_from_cdr(
-    record: &CallRecord,
-    role: &str,
-    target: &mut HashMap<String, String>,
-) {
-    let call_id = record.call_id.trim();
-    if !call_id.is_empty() {
-        target
-            .entry(call_id.to_string())
-            .or_insert_with(|| role.to_string());
-    }
-}
-
-fn collect_leg_roles_from_value(value: &Value, target: &mut HashMap<String, String>) {
-    if let Some(legs) = value.get("legs").and_then(|v| v.as_array()) {
-        for leg in legs {
-            let call_id = leg
-                .get("call_id")
-                .and_then(|v| v.as_str())
-                .map(|s| s.trim())
-                .filter(|s| !s.is_empty());
-            if let Some(id) = call_id {
-                let role = leg
-                    .get("role")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.trim().to_lowercase())
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or_else(|| "b2bua".to_string());
-                target.entry(id.to_string()).or_insert(role);
-            }
-        }
-    }
-}
-
-fn collect_leg_roles_from_metadata(value: &Value, target: &mut HashMap<String, String>) {
-    if let Some(entries) = value.get("sip_flow_files").and_then(|item| item.as_array()) {
-        for entry in entries {
-            let call_id = entry
-                .get("leg")
-                .and_then(|v| v.as_str())
-                .map(|s| s.trim())
-                .filter(|s| !s.is_empty());
-            let role = entry
-                .get("role")
-                .and_then(|v| v.as_str())
-                .map(|s| s.trim().to_lowercase())
-                .filter(|s| !s.is_empty());
-            if let (Some(id), Some(role)) = (call_id, role) {
-                target.entry(id.to_string()).or_insert(role);
-            }
-        }
-    }
-}
-
-fn derive_caller_label(record: &CallRecordModel) -> String {
-    let candidates = [
-        record.caller_name.as_ref(),
-        record.from_number.as_ref(),
-        record.caller_uri.as_ref(),
-    ];
-
-    candidates
-        .iter()
-        .filter_map(|value| value.as_ref())
-        .map(|text| text.trim())
-        .find(|text| !text.is_empty())
-        .map(|text| text.to_string())
-        .unwrap_or_else(|| "Caller".to_string())
-}
-
-fn derive_callee_label(record: &CallRecordModel) -> String {
-    let candidates = [
-        record.agent_name.as_ref(),
-        record.to_number.as_ref(),
-        record.callee_uri.as_ref(),
-    ];
-
-    candidates
-        .iter()
-        .filter_map(|value| value.as_ref())
-        .map(|text| text.trim())
-        .find(|text| !text.is_empty())
-        .map(|text| text.to_string())
-        .unwrap_or_else(|| "Callee".to_string())
-}
-
-fn build_sip_flow_columns(context: &SipFlowContext) -> Value {
-    Value::Array(vec![
-        json!({ "id": "time", "label": "Time" }),
-        json!({ "id": "caller", "label": context.caller_label.clone() }),
-        json!({ "id": "pbx", "label": context.pbx_label.clone() }),
-        json!({ "id": "callee", "label": context.callee_label.clone() }),
-    ])
-}
-
-fn determine_lanes(role: &str, direction: &SipFlowDirection) -> (&'static str, &'static str) {
-    match role {
-        "primary" => match direction {
-            SipFlowDirection::Incoming => ("caller", "pbx"),
-            SipFlowDirection::Outgoing => ("pbx", "caller"),
-        },
-        "b2bua" => match direction {
-            SipFlowDirection::Incoming => ("callee", "pbx"),
-            SipFlowDirection::Outgoing => ("pbx", "callee"),
-        },
-        _ => match direction {
-            SipFlowDirection::Incoming => ("caller", "pbx"),
-            SipFlowDirection::Outgoing => ("pbx", "callee"),
-        },
-    }
-}
-
-fn lane_label<'a>(lane: &str, context: &'a SipFlowContext) -> &'a str {
-    match lane {
-        "caller" => context.caller_label.as_str(),
-        "pbx" => context.pbx_label.as_str(),
-        "callee" => context.callee_label.as_str(),
-        _ => context.pbx_label.as_str(),
-    }
-}
-
-fn lane_index(lane: &str) -> i32 {
-    match lane {
-        "caller" => 0,
-        "pbx" => 1,
-        "callee" => 2,
-        _ => 1,
-    }
-}
-
-fn friendly_leg_label(leg_id: &str) -> String {
-    if leg_id.len() <= 8 {
-        leg_id.to_string()
-    } else {
-        format!("{}...", &leg_id[..8])
-    }
-}
-
-fn friendly_leg_role_label(role: &str) -> &'static str {
-    match role {
-        "primary" => "Caller leg",
-        "b2bua" => "Callee leg",
-        _ => "Signaling leg",
-    }
-}
-
 pub struct CdrData {
     pub record: CallRecord,
     pub raw_content: String,
-    pub sip_flow_paths: Vec<SipFlowFileRef>,
     pub cdr_path: String,
     pub storage: Option<CdrStorage>,
 }
@@ -1502,6 +1316,13 @@ fn build_recording_payload(
         }
     } else if let Some(fallback) = inline_recording_url {
         fallback.to_string()
+    } else if state
+        .sip_server()
+        .map(|server| server.sip_flow.is_some())
+        .unwrap_or(false)
+    {
+        // If sipflow is enabled, allow trying to play/download the recording
+        state.url_for(&format!("/call-records/{}/recording", record.id))
     } else {
         return None;
     };
@@ -1513,17 +1334,28 @@ fn build_recording_payload(
 }
 
 fn derive_recording_download_url(state: &ConsoleState, record: &CallRecordModel) -> Option<String> {
-    let raw = record
+    if let Some(raw) = record
         .recording_url
         .as_ref()
         .map(|value| value.trim())
-        .filter(|value| !value.is_empty())?;
-
-    if raw.starts_with("http://") || raw.starts_with("https://") {
-        Some(raw.to_string())
-    } else {
-        Some(state.url_for(&format!("/call-records/{}/recording", record.id)))
+        .filter(|value| !value.is_empty())
+    {
+        if raw.starts_with("http://") || raw.starts_with("https://") {
+            return Some(raw.to_string());
+        } else {
+            return Some(state.url_for(&format!("/call-records/{}/recording", record.id)));
+        }
     }
+
+    if state
+        .sip_server()
+        .map(|server| server.sip_flow.is_some())
+        .unwrap_or(false)
+    {
+        return Some(state.url_for(&format!("/call-records/{}/recording", record.id)));
+    }
+
+    None
 }
 
 fn strip_storage_root(state: &ConsoleState, path: &str) -> String {
@@ -1581,18 +1413,9 @@ pub async fn load_cdr_data(state: &ConsoleState, record: &CallRecordModel) -> Op
     if let Some(raw) = content {
         match serde_json::from_str::<CallRecord>(&raw) {
             Ok(parsed) => {
-                let mut sip_flow_paths = extract_sip_flow_paths_from_cdr(&parsed);
-                for flow in &mut sip_flow_paths {
-                    if let Some(leg) = flow.leg.as_deref() {
-                        flow.path = state
-                            .callrecord_formatter
-                            .format_sip_flow_path(&parsed, leg);
-                    }
-                }
                 return Some(CdrData {
                     record: parsed,
                     raw_content: raw,
-                    sip_flow_paths,
                     cdr_path: candidate,
                     storage: storage.clone(),
                 });
@@ -1604,40 +1427,6 @@ pub async fn load_cdr_data(state: &ConsoleState, record: &CallRecordModel) -> Op
     }
 
     None
-}
-
-fn extract_sip_flow_paths_from_cdr(record: &CallRecord) -> Vec<SipFlowFileRef> {
-    let mut paths = Vec::new();
-    if let Some(extras) = record.extensions.get::<CallRecordExtras>() {
-        if let Some(value) = extras.0.get("sip_flow_files") {
-            if let Some(entries) = value.as_array() {
-                for entry in entries {
-                    if let Some(path) = entry.get("path").and_then(|v| v.as_str()) {
-                        let leg = entry
-                            .get("leg")
-                            .and_then(|v| v.as_str())
-                            .map(|value| value.trim().to_string())
-                            .filter(|value| !value.is_empty());
-                        let leg_role = entry
-                            .get("role")
-                            .and_then(|v| v.as_str())
-                            .map(|value| value.trim().to_string())
-                            .filter(|value| !value.is_empty());
-                        let trimmed = path.trim();
-                        if trimmed.is_empty() {
-                            continue;
-                        }
-                        paths.push(SipFlowFileRef {
-                            leg: leg.clone(),
-                            leg_role: leg_role.clone(),
-                            path: trimmed.to_string(),
-                        });
-                    }
-                }
-            }
-        }
-    }
-    paths
 }
 
 fn guess_audio_mime(file_name: &str) -> &'static str {
@@ -1677,34 +1466,10 @@ pub fn select_recording_path(record: &CallRecordModel, cdr: Option<&CdrData>) ->
     None
 }
 
-async fn load_sip_flow_from_files(
-    storage: Option<&CdrStorage>,
-    paths: &[SipFlowFileRef],
-) -> Vec<LeggedSipMessage> {
-    let mut all_items = Vec::new();
-    for entry in paths {
-        let mut items = read_sip_flow_file(storage, &entry.path).await;
-        let leg = entry.leg.clone();
-        let leg_role = entry.leg_role.clone();
-        for item in items.drain(..) {
-            all_items.push(LeggedSipMessage {
-                leg: leg.clone(),
-                leg_role: leg_role.clone(),
-                item,
-            });
-        }
-    }
-    if all_items.len() > 1 {
-        all_items.sort_by(|a, b| a.item.timestamp.cmp(&b.item.timestamp));
-    }
-    all_items
-}
-
 fn build_detail_payload(
     record: &CallRecordModel,
     related: &RelatedContext,
     state: &ConsoleState,
-    mut sip_flow: Vec<LeggedSipMessage>,
     cdr: Option<&CdrData>,
 ) -> Value {
     let inline_recording_url = select_recording_path(record, cdr)
@@ -1734,56 +1499,17 @@ fn build_detail_payload(
         .cloned()
         .unwrap_or(Value::Null);
 
-    let leg_roles = resolve_leg_roles(record, cdr);
-    for entry in sip_flow.iter_mut() {
-        if entry.leg_role.is_none() {
-            if let Some(ref leg_id) = entry.leg {
-                if let Some(role) = leg_roles.get(leg_id) {
-                    entry.leg_role = Some(role.clone());
-                } else if leg_id == &record.call_id {
-                    entry.leg_role = Some("primary".to_string());
-                }
-            } else {
-                entry.leg_role = Some("primary".to_string());
-            }
-        }
-    }
-
-    let flow_context = SipFlowContext {
-        caller_label: derive_caller_label(record),
-        pbx_label: "PBX".to_string(),
-        callee_label: derive_callee_label(record),
-    };
-
-    let sip_flow_entries = build_sip_flow_entries(sip_flow, &flow_context);
-    let sip_flow_columns = build_sip_flow_columns(&flow_context);
-
-    let mut sip_flow_map = JsonMap::new();
-    sip_flow_map.insert("columns".to_string(), sip_flow_columns);
-    sip_flow_map.insert("entries".to_string(), Value::Array(sip_flow_entries));
-    let sip_flow_value = Value::Object(sip_flow_map);
-
-    let (metadata_download, sip_flow_download) = if let Some(data) = cdr {
-        let metadata_url = state.url_for(&format!(
+    let metadata_download = if let Some(data) = cdr {
+        Value::String(state.url_for(&format!(
             "/call-records/{}/metadata?path={}",
             record.id,
             encode(&data.cdr_path)
-        ));
-        let flow = data
-            .sip_flow_paths
-            .first()
-            .map(|entry| {
-                Value::String(state.url_for(&format!(
-                    "/call-records/{}/sip-flow?path={}",
-                    record.id,
-                    encode(&entry.path)
-                )))
-            })
-            .unwrap_or(Value::Null);
-        (Value::String(metadata_url), flow)
+        )))
     } else {
-        (Value::Null, Value::Null)
+        Value::Null
     };
+
+    let sip_flow_download = state.url_for(&format!("/call-records/{}/sip-flow", record.id));
 
     let mut download_recording = derive_recording_download_url(state, record);
     if download_recording.is_none() {
@@ -1793,7 +1519,7 @@ fn build_detail_payload(
     json!({
         "back_url": state.url_for("/call-records"),
         "record": record_payload,
-        "sip_flow": sip_flow_value,
+        //"sip_flow": sip_flow_download,
         "media_metrics": media_metrics,
         "notes": build_console_note_payload(&record.metadata),
         "participants": participants,
@@ -1841,248 +1567,6 @@ fn signaling_leg_payload(role: &str, record: &CallRecord) -> Value {
         "answer_time": record.answer_time,
         "end_time": record.end_time,
     })
-}
-
-async fn load_sip_flow_from_metadata(record: &CallRecordModel) -> Vec<LeggedSipMessage> {
-    let paths = extract_sip_flow_paths(record);
-    if paths.is_empty() {
-        return Vec::new();
-    }
-
-    load_sip_flow_from_files(None, &paths).await
-}
-
-fn extract_sip_flow_paths(record: &CallRecordModel) -> Vec<SipFlowFileRef> {
-    let mut paths = Vec::new();
-    if let Some(metadata) = record.metadata.as_ref() {
-        if let Some(entries) = metadata
-            .get("sip_flow_files")
-            .and_then(|value| value.as_array())
-        {
-            for entry in entries {
-                if let Some(path) = entry.get("path").and_then(|v| v.as_str()) {
-                    let leg = entry
-                        .get("leg")
-                        .and_then(|v| v.as_str())
-                        .map(|value| value.trim().to_string())
-                        .filter(|value| !value.is_empty());
-                    let leg_role = entry
-                        .get("role")
-                        .and_then(|v| v.as_str())
-                        .map(|value| value.trim().to_string())
-                        .filter(|value| !value.is_empty());
-                    let trimmed = path.trim();
-                    if !trimmed.is_empty() {
-                        paths.push(SipFlowFileRef {
-                            leg: leg.clone(),
-                            leg_role: leg_role.clone(),
-                            path: trimmed.to_string(),
-                        });
-                    }
-                }
-            }
-        }
-    }
-    paths
-}
-
-async fn read_sip_flow_file(storage: Option<&CdrStorage>, path: &str) -> Vec<SipMessageItem> {
-    let mut bytes: Option<Vec<u8>> = None;
-
-    if let Some(storage_ref) = storage {
-        if let Ok(data) = storage_ref.read_bytes(path).await {
-            bytes = Some(data);
-        }
-    }
-
-    // Fallback to local filesystem if storage read failed or storage is None
-    if bytes.is_none() {
-        match tokio::fs::read(path).await {
-            Ok(data) => bytes = Some(data),
-            Err(err) => {
-                warn!(path = %path, "failed to read sip flow file: {}", err);
-                return vec![];
-            }
-        }
-    }
-
-    parse_sip_flow_bytes(path, &bytes.unwrap_or_default())
-}
-
-fn parse_sip_flow_bytes(path: &str, bytes: &[u8]) -> Vec<SipMessageItem> {
-    let mut items = Vec::new();
-    let content = String::from_utf8_lossy(bytes);
-    for line in content.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        match serde_json::from_str::<SipMessageItem>(trimmed) {
-            Ok(item) => items.push(item),
-            Err(err) => {
-                warn!("failed to parse sip flow entry from '{}': {}", path, err);
-            }
-        }
-    }
-    items
-}
-
-fn build_sip_flow_entries(items: Vec<LeggedSipMessage>, context: &SipFlowContext) -> Vec<Value> {
-    if items.is_empty() {
-        return Vec::new();
-    }
-
-    let first_ts = items[0].item.timestamp;
-    items
-        .into_iter()
-        .enumerate()
-        .map(|(sequence, entry)| {
-            let LeggedSipMessage {
-                leg,
-                leg_role,
-                item,
-            } = entry;
-
-            let offset_ms = item
-                .timestamp
-                .signed_duration_since(first_ts)
-                .num_milliseconds();
-            let offset = if offset_ms == 0 {
-                "0 ms".to_string()
-            } else if offset_ms > 0 {
-                format!("+{} ms", offset_ms)
-            } else {
-                format!("{} ms", offset_ms)
-            };
-
-            let raw_first_line = item
-                .content
-                .lines()
-                .next()
-                .unwrap_or_default()
-                .trim()
-                .to_string();
-
-            let mut method: Option<String> = None;
-            let mut status_code: Option<u16> = None;
-            let mut summary = raw_first_line.clone();
-
-            if raw_first_line.to_ascii_uppercase().starts_with("SIP/2.0") {
-                let rest = raw_first_line[7..].trim();
-                let mut parts = rest.splitn(2, ' ');
-                if let Some(code_part) = parts.next() {
-                    if let Ok(code) = code_part.trim().parse::<u16>() {
-                        status_code = Some(code);
-                        method = Some(code.to_string());
-                    }
-                }
-                if let Some(reason) = parts.next() {
-                    summary = reason.trim().to_string();
-                } else {
-                    summary = "Response".to_string();
-                }
-            } else {
-                let mut parts = raw_first_line.split_whitespace();
-                if let Some(m) = parts.next() {
-                    method = Some(m.to_string());
-                    let rest = parts.collect::<Vec<_>>().join(" ");
-                    if !rest.is_empty() {
-                        summary = rest;
-                    }
-                }
-            }
-
-            let direction = match item.direction {
-                SipFlowDirection::Incoming => "Incoming",
-                SipFlowDirection::Outgoing => "Outgoing",
-            };
-
-            let role_value = leg_role
-                .unwrap_or_else(|| "primary".to_string())
-                .to_lowercase();
-            let (lane_from, lane_to) = determine_lanes(&role_value, &item.direction);
-            let flow_direction = if lane_to == "pbx" {
-                "inbound"
-            } else if lane_from == "pbx" {
-                "outbound"
-            } else {
-                "transit"
-            };
-            let arrow_direction = if lane_index(lane_from) <= lane_index(lane_to) {
-                "right"
-            } else {
-                "left"
-            };
-            let lane_display = if lane_from == "pbx" {
-                lane_to.to_string()
-            } else {
-                lane_from.to_string()
-            };
-
-            let mut object = JsonMap::new();
-            object.insert("sequence".to_string(), Value::from(sequence as i64));
-            object.insert(
-                "timestamp".to_string(),
-                Value::String(item.timestamp.to_rfc3339()),
-            );
-            object.insert("offset".to_string(), Value::String(offset));
-            object.insert(
-                "direction".to_string(),
-                Value::String(direction.to_string()),
-            );
-            object.insert("summary".to_string(), Value::String(summary));
-            if let Some(method_value) = method {
-                object.insert("method".to_string(), Value::String(method_value));
-            }
-            if let Some(status) = status_code {
-                object.insert("status_code".to_string(), Value::from(status));
-            }
-            object.insert("raw".to_string(), Value::String(item.content));
-            object.insert(
-                "lane_from".to_string(),
-                Value::String(lane_from.to_string()),
-            );
-            object.insert("lane_to".to_string(), Value::String(lane_to.to_string()));
-            object.insert(
-                "from_label".to_string(),
-                Value::String(lane_label(lane_from, context).to_string()),
-            );
-            object.insert(
-                "to_label".to_string(),
-                Value::String(lane_label(lane_to, context).to_string()),
-            );
-            object.insert(
-                "flow_direction".to_string(),
-                Value::String(flow_direction.to_string()),
-            );
-            object.insert(
-                "arrow".to_string(),
-                Value::String(arrow_direction.to_string()),
-            );
-            object.insert("lane_display".to_string(), Value::String(lane_display));
-
-            if let Some(leg_id) = leg {
-                let trimmed = leg_id.trim();
-                if !trimmed.is_empty() {
-                    object.insert("leg".to_string(), Value::String(trimmed.to_string()));
-                    object.insert(
-                        "leg_label".to_string(),
-                        Value::String(friendly_leg_label(trimmed)),
-                    );
-                }
-            }
-
-            if !role_value.is_empty() {
-                object.insert("leg_role".to_string(), Value::String(role_value.clone()));
-                object.insert(
-                    "leg_role_label".to_string(),
-                    Value::String(friendly_leg_role_label(&role_value).to_string()),
-                );
-            }
-
-            Value::Object(object)
-        })
-        .collect()
 }
 
 fn build_participants(record: &CallRecordModel, related: &RelatedContext) -> Value {

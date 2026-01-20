@@ -92,16 +92,6 @@ pub async fn persist_call_record(
         }
     }
 
-    // Sanitize leg IDs in sip_flows if present
-    if !record.sip_flows.is_empty() {
-        let old_flows = std::mem::take(&mut record.sip_flows);
-        for (id, flow) in old_flows {
-            record
-                .sip_flows
-                .insert(crate::utils::sanitize_id(&id), flow);
-        }
-    }
-
     let args = match record.extensions.get::<CallRecordPersistArgs>().cloned() {
         Some(args) => args,
         None => {
@@ -618,7 +608,6 @@ impl Into<CallRecord> for Model {
             hangup_reason: None,                             // No hangup_reason in Model
             hangup_messages: Vec::new(),                     // No hangup_messages in Model
             recorder: Vec::new(),                            // No recorder list in Model
-            sip_flows: std::collections::HashMap::new(),     // No sip_flows in Model
             sip_leg_roles: std::collections::HashMap::new(), // No sip_leg_roles in Model
             extensions: http::Extensions::new(),
         }

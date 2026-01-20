@@ -1,32 +1,15 @@
-use chrono::Utc;
-use lru::LruCache;
+use crate::sipflow::{SipFlowBackend, SipFlowItem, SipFlowMsgType};
+use bytes::Bytes;
 use rsip::{
     SipMessage,
     prelude::{HeadersExt, UntypedHeader},
 };
 use rsipstack::{transaction::endpoint::MessageInspector, transport::SipAddr};
-use serde::{Deserialize, Serialize};
-use std::{
-    num::NonZero,
-    sync::{Arc, Mutex},
-};
+use std::sync::Arc;
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub enum SipFlowDirection {
-    Incoming,
-    Outgoing,
-}
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct SipMessageItem {
-    pub timestamp: chrono::DateTime<chrono::Utc>,
-    pub direction: SipFlowDirection,
-    pub content: String,
-}
-
-pub(self) struct SipFlowInner {
+struct SipFlowInner {
+    backend: Option<Arc<dyn SipFlowBackend>>,
     inspectors: Vec<Box<dyn MessageInspector>>,
-    messages: Mutex<LruCache<String, Vec<SipMessageItem>>>,
 }
 #[derive(Clone)]
 pub struct SipFlow {
@@ -34,67 +17,48 @@ pub struct SipFlow {
 }
 
 impl SipFlow {
-    pub fn count(&self) -> usize {
-        match self.inner.messages.lock() {
-            Ok(messages) => messages.len(),
-            Err(_) => 0,
-        }
+    pub fn backend(&self) -> Option<Arc<dyn SipFlowBackend>> {
+        self.inner.backend.clone()
     }
 
-    pub fn take(&self, call_id: &str) -> Option<Vec<SipMessageItem>> {
-        match self.inner.messages.lock() {
-            Ok(mut messages) => messages.pop(call_id),
-            Err(_) => None,
-        }
-    }
+    pub fn record_sip(
+        &self,
+        is_outgoing: bool,
+        msg: &SipMessage,
+        addr: Option<&SipAddr>,
+    ) {
+        if let Some(backend) = &self.inner.backend {
+            if let Ok(id) = match msg {
+                rsip::SipMessage::Request(req) => req.call_id_header(),
+                rsip::SipMessage::Response(resp) => resp.call_id_header(),
+            } {
+                let call_id = id.value().to_string();
+                let msg_str = msg.to_string();
+                let msg_bytes = Bytes::from(msg_str);
 
-    pub fn get(&self, call_id: &str) -> Option<Vec<SipMessageItem>> {
-        match self.inner.messages.lock() {
-            Ok(mut messages) => messages.get(call_id).cloned(),
-            Err(_) => None,
-        }
-    }
-
-    fn record(&self, direction: SipFlowDirection, msg: &SipMessage) {
-        if let Ok(mut messages) = self.inner.messages.lock() {
-            let (call_id, method) = match msg {
-                rsip::SipMessage::Request(req) => (req.call_id_header(), Some(req.method.clone())),
-                rsip::SipMessage::Response(resp) => (
-                    resp.call_id_header(),
-                    resp.cseq_header().ok().map(|c| c.method().ok()).flatten(),
-                ),
-            };
-
-            if matches!(method, Some(rsip::Method::Register)) {
-                // register use same call-id for multiple messages, skip recording
-                return;
-            }
-
-            if let Ok(id) = call_id {
-                if let Some(items_mut) = messages.get_mut(&id.value().to_string()) {
-                    let item = SipMessageItem {
-                        direction,
-                        timestamp: Utc::now(),
-                        content: msg.to_string(),
-                    };
-                    items_mut.push(item);
-                } else {
-                    // Insert new entry
-                    let method = match msg {
-                        rsip::SipMessage::Request(req) => Some(req.method.clone()),
-                        rsip::SipMessage::Response(resp) => {
-                            resp.cseq_header().ok().map(|c| c.method().ok()).flatten()
-                        }
-                    };
-                    if matches!(method, Some(rsip::Method::Invite)) {
-                        let item = SipMessageItem {
-                            direction,
-                            timestamp: Utc::now(),
-                            content: msg.to_string(),
-                        };
-                        messages.put(id.value().to_string(), vec![item]);
+                // Extract addresses
+                let (src_addr, dst_addr) = if let Some(addr) = addr {
+                    let addr_str = addr.addr.to_string();
+                    if is_outgoing {
+                        // We're sending to addr
+                        (String::new(), addr_str)
+                    } else {
+                        // We received from addr
+                        (addr_str, String::new())
                     }
-                }
+                } else {
+                    (String::new(), String::new())
+                };
+
+                let item = SipFlowItem {
+                    timestamp: chrono::Utc::now().timestamp_micros() as u64,
+                    seq: 0,
+                    msg_type: SipFlowMsgType::Sip,
+                    src_addr,
+                    dst_addr,
+                    payload: msg_bytes,
+                };
+                backend.record(&call_id, item).ok();
             }
         }
     }
@@ -102,7 +66,7 @@ impl SipFlow {
 
 impl MessageInspector for SipFlow {
     fn before_send(&self, msg: SipMessage, dest: Option<&SipAddr>) -> SipMessage {
-        self.record(SipFlowDirection::Outgoing, &msg);
+        self.record_sip(true, &msg, dest);
         let mut modified_msg = msg;
         for inspector in &self.inner.inspectors {
             modified_msg = inspector.before_send(modified_msg, dest);
@@ -111,7 +75,7 @@ impl MessageInspector for SipFlow {
     }
 
     fn after_received(&self, msg: SipMessage, from: &SipAddr) -> SipMessage {
-        self.record(SipFlowDirection::Incoming, &msg);
+        self.record_sip(false, &msg, Some(from));
         let mut modified_msg = msg;
         for inspector in &self.inner.inspectors {
             modified_msg = inspector.after_received(modified_msg, from);
@@ -121,20 +85,20 @@ impl MessageInspector for SipFlow {
 }
 
 pub struct SipFlowBuilder {
-    max_items: Option<usize>,
     inspectors: Vec<Box<dyn MessageInspector>>,
+    backend: Option<Arc<dyn SipFlowBackend>>,
 }
 
 impl SipFlowBuilder {
     pub fn new() -> Self {
         Self {
-            max_items: None,
             inspectors: Vec::new(),
+            backend: None,
         }
     }
 
-    pub fn with_max_items(mut self, max_items: Option<usize>) -> Self {
-        self.max_items = max_items;
+    pub fn with_backend(mut self, backend: Arc<dyn SipFlowBackend>) -> Self {
+        self.backend = Some(backend);
         self
     }
 
@@ -144,14 +108,12 @@ impl SipFlowBuilder {
     }
 
     pub fn build(self) -> SipFlow {
-        let messages = LruCache::new(NonZero::new(self.max_items.unwrap_or(100 * 1024)).unwrap());
-        let inspectors = self.inspectors;
-        let inner = SipFlowInner {
-            messages: Mutex::new(messages),
-            inspectors,
-        };
+        let backend = self.backend;
         SipFlow {
-            inner: Arc::new(inner),
+            inner: Arc::new(SipFlowInner {
+                backend,
+                inspectors: self.inspectors,
+            }),
         }
     }
 }

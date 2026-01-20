@@ -366,7 +366,11 @@ impl CallModule {
                     .inner
                     .server
                     .user_backend
-                    .get_user(callee_uri.user().unwrap_or_default(), Some(&callee_realm))
+                    .get_user(
+                        callee_uri.user().unwrap_or_default(),
+                        Some(&callee_realm),
+                        Some(original),
+                    )
                     .await
                 {
                     Ok(None) => DialDirection::Outbound,
@@ -630,7 +634,7 @@ impl CallModule {
             .inner
             .server
             .user_backend
-            .get_user(username.as_str(), Some(&callee_realm))
+            .get_user(username.as_str(), Some(&callee_realm), Some(request))
             .await
             .map_err(Into::into)
         {

@@ -79,7 +79,7 @@ async fn test_db_backend() {
 
     // Test get_user
     let user = backend
-        .get_user("testuser", None)
+        .get_user("testuser", None, None)
         .await
         .unwrap()
         .expect("Failed to get user");
@@ -89,7 +89,7 @@ async fn test_db_backend() {
 
     // Test another user
     let admin_user = backend
-        .get_user("admin", None)
+        .get_user("admin", None, None)
         .await
         .unwrap()
         .expect("Failed to get user");
@@ -113,7 +113,7 @@ async fn test_db_backend() {
 
     // Test get_user with custom table
     let user = custom_backend
-        .get_user("customuser", None)
+        .get_user("customuser", None, None)
         .await
         .unwrap()
         .expect("Failed to get user");
@@ -123,7 +123,7 @@ async fn test_db_backend() {
 
     // Test with realm filtering
     let user_with_realm = custom_backend
-        .get_user("customuser", Some("rustpbx.com"))
+        .get_user("customuser", Some("rustpbx.com"), None)
         .await
         .unwrap()
         .expect("Failed to get user");

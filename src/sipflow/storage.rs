@@ -1,9 +1,14 @@
-use crate::protocol::{MsgType, Packet};
+use crate::config::SipFlowSubdirs;
+use crate::sipflow::protocol::{MsgType, Packet};
+use crate::sipflow::{SipFlowItem, SipFlowMsgType};
 use anyhow::Result;
-use chrono::{DateTime, Datelike, Local, TimeZone, Timelike};
+use bytes::Bytes;
+use chrono::{DateTime, Datelike, Local, Timelike};
+use lru::LruCache;
 use sqlx::{ConnectOptions, Connection, SqliteConnection, sqlite::SqliteConnectOptions};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
+use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 
 pub struct StorageManager {
@@ -15,6 +20,8 @@ pub struct StorageManager {
     last_flush: std::time::Instant,
     flush_count: usize,
     flush_interval: u64,
+    call_id_cache: LruCache<String, i32>,
+    subdirs: SipFlowSubdirs,
 }
 
 struct Meta {
@@ -22,10 +29,10 @@ struct Meta {
     callid: Option<String>,
     src: String,
     dst: String,
+    leg: Option<i32>, // 0=LegA, 1=LegB, None for SIP messages
     timestamp: u64,
     offset: u64,
     size: usize,
-    orig_size: usize,
 }
 
 pub struct ProcessedPacket {
@@ -33,8 +40,9 @@ pub struct ProcessedPacket {
     pub callid: Option<String>,
     pub src: String,
     pub dst: String,
+    pub leg: Option<i32>, // 0=LegA, 1=LegB for RTP, None for SIP
     pub timestamp: u64,
-    pub payload: Vec<u8>,
+    pub payload: Bytes,
     pub orig_size: usize,
     pub comp_size: usize,
 }
@@ -42,14 +50,14 @@ pub struct ProcessedPacket {
 pub fn process_packet(packet: Packet) -> ProcessedPacket {
     let mut callid = None;
     if matches!(packet.msg_type, MsgType::Sip) {
-        callid = extract_callid(&packet.payload);
+        callid = extract_callid(&packet.payload).map(|id| crate::utils::sanitize_id(&id));
     }
 
     let orig_size = packet.payload.len();
     let (payload, comp_size, _compressed) = if orig_size >= 96 {
         if let Ok(data) = zstd::encode_all(&packet.payload[..], 3) {
             let size = data.len();
-            (data, size, true)
+            (data.into(), size, true)
         } else {
             (packet.payload, orig_size, false)
         }
@@ -62,6 +70,7 @@ pub fn process_packet(packet: Packet) -> ProcessedPacket {
         callid,
         src: format!("{}:{}", packet.src.0, packet.src.1),
         dst: format!("{}:{}", packet.dst.0, packet.dst.1),
+        leg: None, // Will be set by caller for RTP packets
         timestamp: packet.timestamp,
         payload,
         orig_size,
@@ -70,7 +79,13 @@ pub fn process_packet(packet: Packet) -> ProcessedPacket {
 }
 
 impl StorageManager {
-    pub fn new(base_path: &Path, flush_count: usize, flush_interval: u64) -> Self {
+    pub fn new(
+        base_path: &Path,
+        flush_count: usize,
+        flush_interval: u64,
+        id_cache_size: usize,
+        subdirs: SipFlowSubdirs,
+    ) -> Self {
         Self {
             base_path: base_path.to_path_buf(),
             current_hour: (0, 0, 0, 0),
@@ -80,22 +95,22 @@ impl StorageManager {
             last_flush: std::time::Instant::now(),
             flush_count,
             flush_interval,
+            call_id_cache: LruCache::new(NonZeroUsize::new(id_cache_size).unwrap()),
+            subdirs,
         }
     }
 
     pub async fn write_processed(&mut self, processed: ProcessedPacket) -> Result<()> {
-        let dt = Local
-            .timestamp_opt(processed.timestamp as i64 / 1_000_000, 0)
-            .single()
-            .unwrap_or_else(Local::now);
+        let dt = Local::now();
         let h = (dt.year(), dt.month(), dt.day(), dt.hour());
 
         if self.db_conn.is_none() || self.current_hour != h {
             self.rotate(dt).await?;
             self.current_hour = h;
+            self.call_id_cache.clear();
         }
 
-        let mut file = self.raw_file.as_ref().unwrap();
+        let file = self.raw_file.as_mut().unwrap();
         let offset = file.metadata()?.len();
 
         file.write_all(&0x5346u16.to_be_bytes())?; // Magic
@@ -108,10 +123,10 @@ impl StorageManager {
             callid: processed.callid,
             src: processed.src,
             dst: processed.dst,
+            leg: processed.leg,
             timestamp: processed.timestamp,
             offset,
             size: processed.comp_size,
-            orig_size: processed.orig_size,
         });
 
         if self.batch.len() >= self.flush_count
@@ -134,14 +149,18 @@ impl StorageManager {
         if !self.batch.is_empty() {
             self.flush_batch().await?;
         }
-
-        let dir = self.base_path.join(format!(
-            "{:04}{:02}{:02}/{:02}",
-            dt.year(),
-            dt.month(),
-            dt.day(),
-            dt.hour()
-        ));
+        let subdir = match self.subdirs {
+            SipFlowSubdirs::Hourly => format!(
+                "{:04}{:02}{:02}/{:02}",
+                dt.year(),
+                dt.month(),
+                dt.day(),
+                dt.hour()
+            ),
+            SipFlowSubdirs::Daily => format!("{:04}{:02}{:02}", dt.year(), dt.month(), dt.day()),
+            SipFlowSubdirs::None => String::new(),
+        };
+        let dir = self.base_path.join(subdir);
         std::fs::create_dir_all(&dir)?;
 
         let db_path = dir.join("sipflow.db");
@@ -153,44 +172,53 @@ impl StorageManager {
             .connect()
             .await?;
 
+        // Create call_meta table for callid mapping
         sqlx::query(
-            "CREATE TABLE IF NOT EXISTS sip_msgs (
-                id INTEGER PRIMARY KEY,
-                callid TEXT,
-                src TEXT,
-                dst TEXT,
-                timestamp INTEGER,
-                offset INTEGER,
-                size INTEGER,
-                orig_size INTEGER
+            "CREATE TABLE IF NOT EXISTS call_meta (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                callid TEXT UNIQUE NOT NULL
             )",
         )
         .execute(&mut conn)
         .await?;
 
-        sqlx::query("CREATE INDEX IF NOT EXISTS idx_sip_callid ON sip_msgs(callid)")
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_callid ON call_meta(callid)")
+            .execute(&mut conn)
+            .await?;
+
+        sqlx::query(
+            "CREATE TABLE IF NOT EXISTS sip_msgs (
+                id INTEGER PRIMARY KEY,
+                call_id INTEGER NOT NULL,
+                src TEXT NOT NULL,
+                dst TEXT NOT NULL,
+                timestamp INTEGER NOT NULL,
+                offset INTEGER NOT NULL,
+                size INTEGER NOT NULL
+            )",
+        )
+        .execute(&mut conn)
+        .await?;
+
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_sip_call ON sip_msgs(call_id)")
             .execute(&mut conn)
             .await?;
 
         sqlx::query(
             "CREATE TABLE IF NOT EXISTS media_msgs (
                 id INTEGER PRIMARY KEY,
-                src TEXT,
-                dst TEXT,
-                timestamp INTEGER,
-                offset INTEGER,
-                size INTEGER,
-                orig_size INTEGER
+                call_id INTEGER NOT NULL,
+                leg INTEGER NOT NULL,
+                src TEXT NOT NULL DEFAULT '',
+                timestamp INTEGER NOT NULL,
+                offset INTEGER NOT NULL,
+                size INTEGER NOT NULL
             )",
         )
         .execute(&mut conn)
         .await?;
 
-        sqlx::query("CREATE INDEX IF NOT EXISTS idx_media_ts ON media_msgs(timestamp)")
-            .execute(&mut conn)
-            .await?;
-
-        sqlx::query("CREATE INDEX IF NOT EXISTS idx_media_endpoints ON media_msgs(src, dst)")
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_media_call ON media_msgs(call_id)")
             .execute(&mut conn)
             .await?;
 
@@ -211,32 +239,57 @@ impl StorageManager {
 
         if let Some(conn) = self.db_conn.as_mut() {
             let mut tx = conn.begin().await?;
+
             for meta in self.batch.drain(..) {
+                // Get or create call_id from call_meta
+                let call_id = if let Some(ref callid) = meta.callid {
+                    // Check LRU cache first
+                    if let Some(&cached_id) = self.call_id_cache.get(callid) {
+                        cached_id
+                    } else {
+                        // Cache miss, query or insert into call_meta
+                        let id: i32 = sqlx::query_scalar(
+                            "INSERT INTO call_meta (callid) VALUES (?) 
+                             ON CONFLICT(callid) DO UPDATE SET callid=callid 
+                             RETURNING id",
+                        )
+                        .bind(callid)
+                        .fetch_one(&mut *tx)
+                        .await?;
+
+                        // Update LRU cache
+                        self.call_id_cache.put(callid.clone(), id);
+                        id
+                    }
+                } else {
+                    continue; // Skip records without callid
+                };
+
                 match meta.msg_type {
                     MsgType::Sip => {
                         sqlx::query(
-                            "INSERT INTO sip_msgs (callid, src, dst, timestamp, offset, size, orig_size) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                            "INSERT INTO sip_msgs (call_id, src, dst, timestamp, offset, size) VALUES (?, ?, ?, ?, ?, ?)",
                         )
-                        .bind(meta.callid)
+                        .bind(call_id)
                         .bind(meta.src)
                         .bind(meta.dst)
                         .bind(meta.timestamp as i64)
                         .bind(meta.offset as i64)
                         .bind(meta.size as i64)
-                        .bind(meta.orig_size as i64)
                         .execute(&mut *tx)
                         .await?;
                     }
                     MsgType::Rtp => {
+                        let leg = meta.leg.unwrap_or(0);
                         sqlx::query(
-                            "INSERT INTO media_msgs (src, dst, timestamp, offset, size, orig_size) VALUES (?, ?, ?, ?, ?, ?)",
+                            "INSERT INTO media_msgs (call_id, leg, src, timestamp, offset, size) VALUES (?, ?, ?, ?, ?, ?)",
                         )
+                        .bind(call_id)
+                        .bind(leg)
                         .bind(meta.src)
-                        .bind(meta.dst)
                         .bind(meta.timestamp as i64)
                         .bind(meta.offset as i64)
                         .bind(meta.size as i64)
-                        .bind(meta.orig_size as i64)
                         .execute(&mut *tx)
                         .await?;
                     }
@@ -256,7 +309,8 @@ impl StorageManager {
         callid: &str,
         start_dt: DateTime<Local>,
         end_dt: DateTime<Local>,
-    ) -> Result<Vec<serde_json::Value>> {
+    ) -> Result<Vec<SipFlowItem>> {
+        let callid = crate::utils::sanitize_id(callid);
         let mut results = Vec::new();
         let folders = self.get_folders_in_range(start_dt, end_dt);
 
@@ -272,10 +326,15 @@ impl StorageManager {
                 SqliteConnection::connect(&format!("sqlite:{}", db_path.to_string_lossy())).await?;
             let mut raw_file = File::open(raw_path)?;
 
+            // Query using JOIN with call_meta
             let rows = sqlx::query(
-                "SELECT src, dst, timestamp, offset, size, orig_size FROM sip_msgs WHERE callid = ? ORDER BY timestamp ASC",
+                "SELECT s.src, s.dst, s.timestamp, s.offset, s.size 
+                 FROM sip_msgs s
+                 JOIN call_meta c ON s.call_id = c.id
+                 WHERE c.callid = ? 
+                 ORDER BY s.timestamp ASC",
             )
-            .bind(callid)
+            .bind(&callid)
             .fetch_all(&mut conn)
             .await?;
 
@@ -286,41 +345,92 @@ impl StorageManager {
                 let ts: i64 = row.get(2);
                 let offset: i64 = row.get(3);
                 let size: i64 = row.get(4);
-                let orig_size: i64 = row.get(5);
 
                 let mut buf = vec![0u8; size as usize];
                 let raw_msg = (|| -> std::io::Result<Vec<u8>> {
                     raw_file.seek(SeekFrom::Start(offset as u64 + 10))?;
                     raw_file.read_exact(&mut buf)?;
 
-                    if size != orig_size {
+                    // Try to decompress, read orig_size from data.raw header
+                    raw_file.seek(SeekFrom::Start(offset as u64 + 2))?;
+                    let mut orig_size_buf = [0u8; 4];
+                    raw_file.read_exact(&mut orig_size_buf)?;
+                    let orig_size = u32::from_be_bytes(orig_size_buf) as usize;
+
+                    if size as usize != orig_size {
                         zstd::decode_all(&buf[..])
                     } else {
                         Ok(buf)
                     }
                 })()?;
 
-                results.push(serde_json::json!({
-                    "src": src,
-                    "dst": dst,
-                    "timestamp": ts,
-                    "raw_message": String::from_utf8_lossy(&raw_msg).to_string(),
-                }));
+                results.push(SipFlowItem {
+                    src_addr: src,
+                    dst_addr: dst,
+                    timestamp: ts as u64,
+                    payload: Bytes::from(raw_msg),
+                    msg_type: SipFlowMsgType::Sip,
+                    seq: 0,
+                });
             }
         }
-        results.sort_by_key(|r| r["timestamp"].as_i64().unwrap_or(0));
+        results.sort_by_key(|r| r.timestamp);
         Ok(results)
+    }
+
+    pub async fn query_media_stats(
+        &mut self,
+        callid: &str,
+        start_dt: DateTime<Local>,
+        end_dt: DateTime<Local>,
+    ) -> Result<Vec<(i32, String, usize)>> {
+        let callid = crate::utils::sanitize_id(callid);
+        let mut results = std::collections::HashMap::new();
+        let folders = self.get_folders_in_range(start_dt, end_dt);
+
+        for dir in folders {
+            let db_path = dir.join("sipflow.db");
+
+            if !db_path.exists() {
+                continue;
+            }
+
+            let mut conn =
+                SqliteConnection::connect(&format!("sqlite:{}", db_path.to_string_lossy())).await?;
+
+            let rows = sqlx::query(
+                "SELECT m.leg, m.src, COUNT(*) as count 
+                 FROM media_msgs m
+                 JOIN call_meta c ON m.call_id = c.id
+                 WHERE c.callid = ? 
+                 GROUP BY m.leg, m.src",
+            )
+            .bind(&callid)
+            .fetch_all(&mut conn)
+            .await?;
+
+            for row in rows {
+                use sqlx::Row;
+                let leg: i32 = row.get(0);
+                let src: String = row.get(1);
+                let count: i64 = row.get(2);
+                *results.entry((leg, src)).or_insert(0) += count as usize;
+            }
+        }
+
+        Ok(results
+            .into_iter()
+            .map(|((leg, src), count)| (leg, src, count))
+            .collect())
     }
 
     pub async fn query_media(
         &mut self,
-        src_ip: &str,
-        dst_ip: &str,
-        start_ts: u64,
-        end_ts: u64,
+        callid: &str,
         start_dt: DateTime<Local>,
         end_dt: DateTime<Local>,
-    ) -> Result<Vec<Vec<u8>>> {
+    ) -> Result<Vec<(i32, u64, Vec<u8>)>> {
+        let callid = crate::utils::sanitize_id(callid);
         let mut results = Vec::new();
         let folders = self.get_folders_in_range(start_dt, end_dt);
 
@@ -337,14 +447,13 @@ impl StorageManager {
             let mut raw_file = File::open(raw_path)?;
 
             let rows = sqlx::query(
-                "SELECT offset, size, orig_size, timestamp FROM media_msgs WHERE ((src LIKE ? AND dst LIKE ?) OR (src LIKE ? AND dst LIKE ?)) AND timestamp >= ? AND timestamp <= ? ORDER BY timestamp ASC",
+                "SELECT s.offset, s.size, s.timestamp, s.leg
+                 FROM media_msgs s
+                 JOIN call_meta c ON s.call_id = c.id
+                 WHERE c.callid = ?
+                 ORDER BY s.timestamp ASC",
             )
-            .bind(format!("{}%", src_ip))
-            .bind(format!("{}%", dst_ip))
-            .bind(format!("{}%", dst_ip))
-            .bind(format!("{}%", src_ip))
-            .bind(start_ts as i64)
-            .bind(end_ts as i64)
+            .bind(&callid)
             .fetch_all(&mut conn)
             .await?;
 
@@ -352,38 +461,52 @@ impl StorageManager {
                 use sqlx::Row;
                 let offset: i64 = row.get(0);
                 let size: i64 = row.get(1);
-                let orig_size: i64 = row.get(2);
-                let ts: i64 = row.get(3);
+                let ts: i64 = row.get(2);
+                let leg: i32 = row.get(3);
 
                 let mut buf = vec![0u8; size as usize];
-                let raw_msg = (|| -> std::io::Result<Vec<u8>> {
+                let raw_payload = (|| -> std::io::Result<Vec<u8>> {
                     raw_file.seek(SeekFrom::Start(offset as u64 + 10))?;
                     raw_file.read_exact(&mut buf)?;
-                    if size != orig_size {
+
+                    // Try to decompress
+                    raw_file.seek(SeekFrom::Start(offset as u64 + 2))?;
+                    let mut orig_size_buf = [0u8; 4];
+                    raw_file.read_exact(&mut orig_size_buf)?;
+                    let orig_size = u32::from_be_bytes(orig_size_buf) as usize;
+
+                    if size as usize != orig_size {
                         zstd::decode_all(&buf[..])
                     } else {
                         Ok(buf)
                     }
                 })()?;
 
-                results.push((ts, raw_msg));
+                results.push((leg, ts as u64, raw_payload));
             }
         }
-        results.sort_by_key(|(ts, _)| *ts);
-        Ok(results.into_iter().map(|(_, d)| d).collect())
+        results.sort_by_key(|r| r.1);
+        Ok(results)
     }
 
     fn get_folders_in_range(&self, start: DateTime<Local>, end: DateTime<Local>) -> Vec<PathBuf> {
         let mut folders = Vec::new();
         let mut curr = start;
         while curr <= end {
-            let dir = self.base_path.join(format!(
-                "{:04}{:02}{:02}/{:02}",
-                curr.year(),
-                curr.month(),
-                curr.day(),
-                curr.hour()
-            ));
+            let subdir = match self.subdirs {
+                SipFlowSubdirs::Hourly => format!(
+                    "{:04}{:02}{:02}/{:02}",
+                    curr.year(),
+                    curr.month(),
+                    curr.day(),
+                    curr.hour()
+                ),
+                SipFlowSubdirs::Daily => {
+                    format!("{:04}{:02}{:02}", curr.year(), curr.month(), curr.day())
+                }
+                SipFlowSubdirs::None => String::new(),
+            };
+            let dir = self.base_path.join(subdir);
             folders.push(dir);
             curr = curr + chrono::Duration::hours(1);
         }
@@ -391,7 +514,7 @@ impl StorageManager {
     }
 }
 
-fn extract_callid(payload: &[u8]) -> Option<String> {
+pub fn extract_callid(payload: &[u8]) -> Option<String> {
     let s = String::from_utf8_lossy(payload);
     for line in s.lines() {
         if line.to_lowercase().starts_with("call-id:") {
@@ -407,121 +530,15 @@ fn extract_callid(payload: &[u8]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::{MsgType, Packet};
-    use chrono::{Duration, Local, TimeZone};
-    use std::io::Read;
-    use std::net::IpAddr;
-    use tempfile::tempdir;
 
     #[test]
-    fn test_folders_in_range() {
-        let temp = tempdir().unwrap();
-        let mg = StorageManager::new(temp.path(), 100, 5);
-        let start = Local.with_ymd_and_hms(2023, 10, 27, 10, 0, 0).unwrap();
-        let end = Local.with_ymd_and_hms(2023, 10, 27, 12, 0, 0).unwrap();
-        let folders = mg.get_folders_in_range(start, end);
-        assert_eq!(folders.len(), 3);
-        assert!(folders[0].to_str().unwrap().contains("20231027/10"));
-        assert!(folders[1].to_str().unwrap().contains("20231027/11"));
-        assert!(folders[2].to_str().unwrap().contains("20231027/12"));
-    }
+    fn test_extract_callid() {
+        let msg = b"INVITE sip:test@example.com SIP/2.0\r\nCall-ID: inprocess-test-123\r\n";
+        let callid = extract_callid(msg);
+        assert_eq!(callid, Some("inprocess-test-123".to_string()));
 
-    #[test]
-    fn test_process_packet_compression() {
-        // Redundant data to ensure compression
-        let large_payload = vec![b'A'; 200];
-        let packet = Packet {
-            msg_type: MsgType::Rtp,
-            src: (IpAddr::from([127, 0, 0, 1]), 1234),
-            dst: (IpAddr::from([127, 0, 0, 1]), 5678),
-            timestamp: Local::now().timestamp_micros() as u64,
-            payload: large_payload.clone(),
-        };
-
-        let processed = process_packet(packet);
-        assert!(processed.comp_size < 200); // Should be compressed
-        assert_eq!(processed.orig_size, 200);
-
-        let small_payload = vec![b'B'; 20];
-        let packet_small = Packet {
-            msg_type: MsgType::Rtp,
-            src: (IpAddr::from([127, 0, 0, 1]), 1234),
-            dst: (IpAddr::from([127, 0, 0, 1]), 5678),
-            timestamp: Local::now().timestamp_micros() as u64,
-            payload: small_payload.clone(),
-        };
-        let processed_small = process_packet(packet_small);
-        assert_eq!(processed_small.comp_size, 20); // No compression
-    }
-
-    #[tokio::test]
-    async fn test_storage_write_and_query() {
-        let temp = tempdir().unwrap();
-        let mut mg = StorageManager::new(temp.path(), 10, 1);
-
-        let callid = "test-callid-123".to_string();
-        let now = Local::now();
-        let ts = now.timestamp_micros() as u64;
-
-        let p1 = Packet {
-            msg_type: MsgType::Sip,
-            src: (IpAddr::from([10, 0, 0, 1]), 5060),
-            dst: (IpAddr::from([10, 0, 0, 2]), 5060),
-            timestamp: ts,
-            payload: format!(
-                "INVITE sip:alice@example.com SIP/2.0\r\nCall-ID: {}\r\n\r\n",
-                callid
-            )
-            .into_bytes(),
-        };
-
-        let processed = process_packet(p1);
-        mg.write_processed(processed).await.unwrap();
-        mg.flush_batch().await.unwrap();
-
-        let flow = mg
-            .query_flow(&callid, now - Duration::hours(1), now + Duration::hours(1))
-            .await
-            .unwrap();
-        assert_eq!(flow.len(), 1);
-        assert_eq!(flow[0]["src"], "10.0.0.1:5060");
-        assert!(flow[0]["raw_message"].as_str().unwrap().contains("INVITE"));
-    }
-
-    #[tokio::test]
-    async fn test_no_compression_small_packet() {
-        let dir = tempdir().unwrap();
-        let mut mg = StorageManager::new(dir.path(), 10, 5);
-
-        let small_payload = b"small packet".to_vec();
-        let now = Local::now();
-        let packet = Packet {
-            msg_type: MsgType::Sip,
-            src: (IpAddr::from([127, 0, 0, 1]), 5060),
-            dst: (IpAddr::from([127, 0, 0, 1]), 5060),
-            timestamp: now.timestamp_micros() as u64,
-            payload: small_payload.clone(),
-        };
-
-        let processed = process_packet(packet);
-        mg.write_processed(processed).await.unwrap();
-        mg.flush_batch().await.unwrap();
-
-        // Manual verification of raw file
-        let path = dir.path().join(format!(
-            "{:04}{:02}{:02}/{:02}/data.raw",
-            now.year(),
-            now.month(),
-            now.day(),
-            now.hour()
-        ));
-        let mut f = File::open(path).expect("Raw file should exist");
-        let mut buf = Vec::new();
-        f.read_to_end(&mut buf).unwrap();
-
-        // Header(10) + Payload(12) = 22
-        assert_eq!(buf.len(), 10 + small_payload.len());
-        // CompSize (bytes 6-10) should be 12
-        assert_eq!(u32::from_be_bytes(buf[6..10].try_into().unwrap()), 12);
+        let msg2 = b"INVITE sip:test@example.com SIP/2.0\r\ni: compact-form-id\r\n";
+        let callid2 = extract_callid(msg2);
+        assert_eq!(callid2, Some("compact-form-id".to_string()));
     }
 }

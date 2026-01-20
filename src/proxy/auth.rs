@@ -110,7 +110,7 @@ impl AuthModule {
         match self
             .server
             .user_backend
-            .get_user(&user.username, user.realm.as_deref())
+            .get_user(&user.username, user.realm.as_deref(), Some(&tx.original))
             .await?
         {
             Some(mut stored_user) => {
@@ -274,7 +274,7 @@ impl ProxyModule for AuthModule {
                     match self
                         .server
                         .user_backend
-                        .get_user(&callee_user, Some(&callee_realm))
+                        .get_user(&callee_user, Some(&callee_realm), Some(&tx.original))
                         .await
                     {
                         Ok(Some(callee_profile)) if callee_profile.allow_guest_calls => {
@@ -310,7 +310,11 @@ impl ProxyModule for AuthModule {
                     match self
                         .server
                         .user_backend
-                        .get_user(&from_uri.user().unwrap_or_else(|| ""), Some(&realm))
+                        .get_user(
+                            &from_uri.user().unwrap_or_else(|| ""),
+                            Some(&realm),
+                            Some(&tx.original),
+                        )
                         .await
                     {
                         Ok(Some(_)) => {}

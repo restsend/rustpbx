@@ -83,6 +83,7 @@ impl TargetLocator for DialogTargetLocator {
             Ok(locs) => {
                 if let Some(loc) = locs.first() {
                     if let Some(dest) = &loc.destination {
+                        debug!(%uri, %dest, "Located target for dialog");
                         return Ok(dest.clone());
                     }
                 }

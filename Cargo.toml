@@ -56,7 +56,7 @@ chrono-tz = "0.10.4"
 rsipstack = "0.4.3"
 #rsipstack = { path = "../rsipstack" }
 audio-codec = { version = "0.3.30", default-features = false }
-rustrtc = "0.3.5"
+rustrtc = "0.3.6"
 #rustrtc = { path = "../rustrtc" }
 rsip = "0.4.0"
 reqwest = { version = "0.13.1", features = [
@@ -120,6 +120,9 @@ axum-server = { version = "0.8.0", features = ["tls-rustls"] }
 sysinfo = "0.37.2"
 csv = "1.4.0"
 quick-xml = { version = "0.39.0", features = ["serialize"] }
+socket2 = "0.5"
+zstd = "0.13"
+hound = "3.5"
 
 [dev-dependencies]
 tempfile = "3.24.0"
@@ -128,7 +131,11 @@ mockall = "0.14.0"
 warp = { version = "0.4.1", features = ["server", "websocket"] }
 portpicker = "0.1.1"
 
-
 [[bin]]
 name = "rustpbx"
 path = "src/bin/rustpbx.rs"
+
+[[bin]]
+name = "sipflow"
+path = "src/bin/sipflow.rs"
+required-features = ["opus"]
