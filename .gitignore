@@ -52,3 +52,5 @@ config.toml.dev
 rustpbx.toml
 .DS_Store
 model.md
+*.raw
+*.db

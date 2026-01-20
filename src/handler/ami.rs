@@ -57,7 +57,6 @@ pub(super) async fn health_handler(State(state): State<AppState>) -> Response {
             "waiting_ack": tx_stats.waiting_ack,
         }),
         "dialogs": state.sip_server().inner.dialog_layer.len(),
-        "flows": state.sip_server().inner.sip_flow.as_ref().map(|sf| sf.count()).unwrap_or(0),
         "calls": state.sip_server().inner.active_call_registry.count(),
         "running_tx": state.sip_server().inner.runnings_tx.load(Ordering::Relaxed),
     });

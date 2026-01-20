@@ -173,6 +173,8 @@ async fn main() -> Result<()> {
         env_filter = env_filter.add_directive(level.into());
     }
 
+    env_filter = env_filter.add_directive("sqlx=info".parse().unwrap());
+
     let tokio_console_enabled = cli.tokio_console.is_some()
         || std::env::var_os("TOKIO_CONSOLE").is_some()
         || std::env::var_os("TOKIO_CONSOLE_BIND").is_some();

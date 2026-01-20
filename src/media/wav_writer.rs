@@ -4,15 +4,15 @@ use audio_codec::CodecType;
 use std::fs::File;
 use std::io::{Seek, SeekFrom, Write};
 
-pub struct WavWriter {
-    file: File,
+pub struct WavWriter<W: Write + Seek> {
+    writer: W,
     sample_rate: u32,
     channels: u16,
     codec: Option<CodecType>,
     written_bytes: u32,
 }
 
-impl StreamWriter for WavWriter {
+impl<W: Write + Seek + Send + Sync> StreamWriter for WavWriter<W> {
     fn write_header(&mut self) -> Result<()> {
         self.write_header_internal()
     }
@@ -26,10 +26,27 @@ impl StreamWriter for WavWriter {
     }
 }
 
-impl WavWriter {
+impl WavWriter<File> {
     pub fn new(file: File, sample_rate: u32, channels: u16, codec: Option<CodecType>) -> Self {
         Self {
-            file,
+            writer: file,
+            sample_rate,
+            channels,
+            codec,
+            written_bytes: 0,
+        }
+    }
+}
+
+impl<W: Write + Seek> WavWriter<W> {
+    pub fn new_with_writer(
+        writer: W,
+        sample_rate: u32,
+        channels: u16,
+        codec: Option<CodecType>,
+    ) -> Self {
+        Self {
+            writer,
             sample_rate,
             channels,
             codec,
@@ -39,7 +56,7 @@ impl WavWriter {
 
     pub fn write_header_internal(&mut self) -> Result<()> {
         Self::write_wav_header(
-            &mut self.file,
+            &mut self.writer,
             self.codec,
             self.sample_rate,
             self.channels,
@@ -48,18 +65,18 @@ impl WavWriter {
     }
 
     pub fn write_packet_internal(&mut self, data: &[u8]) -> Result<()> {
-        self.file.write_all(data)?;
+        self.writer.write_all(data)?;
         self.written_bytes += data.len() as u32;
         Ok(())
     }
 
     pub fn finalize_internal(&mut self) -> Result<()> {
-        self.file.seek(SeekFrom::Start(0))?;
+        self.writer.seek(SeekFrom::Start(0))?;
         self.write_header_internal()
     }
 
     fn write_wav_header(
-        file: &mut File,
+        file: &mut W,
         codec: Option<CodecType>,
         sample_rate: u32,
         channels: u16,
@@ -76,7 +93,7 @@ impl WavWriter {
         let format_tag: u16 = match codec {
             Some(CodecType::PCMU) => 7,      // mu-law
             Some(CodecType::PCMA) => 6,      // a-law
-            Some(CodecType::G722) => 0x028F, // G.722
+            Some(CodecType::G722) => 0x0065, // G.722
             Some(CodecType::G729) => 0x0083, // G.729
             None => 1,                       // PCM
             _ => 1,                          // Default to PCM

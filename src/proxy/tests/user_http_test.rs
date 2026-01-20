@@ -11,6 +11,7 @@ async fn test_http_backend_creation() -> Result<()> {
         &Some("user".to_string()),
         &Some("realm".to_string()),
         &None,
+        &None,
     );
 
     // Test that the backend was created successfully
@@ -31,6 +32,7 @@ async fn test_http_backend_with_custom_headers() -> Result<()> {
         &Some("user".to_string()),
         &Some("realm".to_string()),
         &Some(headers),
+        &None,
     );
 
     // Test that the backend was created successfully with custom headers
@@ -45,6 +47,7 @@ async fn test_http_backend_with_post_method() -> Result<()> {
         &Some("username".to_string()),
         &Some("domain".to_string()),
         &None,
+        &None,
     );
 
     // Test that the backend was created successfully with POST method
@@ -53,7 +56,7 @@ async fn test_http_backend_with_post_method() -> Result<()> {
 
 #[tokio::test]
 async fn test_http_backend_with_defaults() -> Result<()> {
-    let _backend = HttpUserBackend::new("http://rustpbx.com/auth", &None, &None, &None, &None);
+    let _backend = HttpUserBackend::new("http://rustpbx.com/auth", &None, &None, &None, &None, &None);
 
     // Test that the backend was created successfully with default values
     Ok(())
@@ -67,12 +70,13 @@ async fn test_http_backend_get_user() -> Result<()> {
         &Some("username".to_string()),
         &Some("realm".to_string()),
         &None,
+        &None,
     );
 
     // Note: This test will fail if httpbin.org is not available
     // In a real test environment, you'd use a mock server
     // For now, we just test that the method exists and can be called
-    let result = backend.get_user("testuser", Some("rustpbx.com")).await;
+    let result = backend.get_user("testuser", Some("rustpbx.com"), None).await;
 
     // We expect this to fail since httpbin.org/json doesn't return SipUser format
     // But it verifies the method signature and that the HTTP client works

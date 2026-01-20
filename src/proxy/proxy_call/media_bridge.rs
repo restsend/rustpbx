@@ -1,5 +1,6 @@
 use crate::media::recorder::{Leg, Recorder, RecorderOption};
 use crate::proxy::proxy_call::media_peer::MediaPeer;
+use crate::sipflow::{SipFlowBackend, SipFlowItem, SipFlowMsgType};
 use anyhow::Result;
 use audio_codec::CodecType;
 use futures::StreamExt;
@@ -22,6 +23,8 @@ pub struct MediaBridge {
     pub ssrc_b: Option<u32>,
     started: AtomicBool,
     recorder: Arc<Mutex<Option<Recorder>>>,
+    call_id: String,
+    sipflow_backend: Option<Arc<dyn SipFlowBackend>>,
 }
 
 impl MediaBridge {
@@ -37,6 +40,8 @@ impl MediaBridge {
         ssrc_a: Option<u32>,
         ssrc_b: Option<u32>,
         recorder_option: Option<RecorderOption>,
+        call_id: String,
+        sipflow_backend: Option<Arc<dyn SipFlowBackend>>,
     ) -> Self {
         let recorder = if let Some(option) = recorder_option {
             match Recorder::new(&option.recorder_file, codec_a) {
@@ -63,6 +68,8 @@ impl MediaBridge {
             ssrc_b,
             started: AtomicBool::new(false),
             recorder: Arc::new(Mutex::new(recorder)),
+            call_id,
+            sipflow_backend,
         }
     }
 
@@ -106,6 +113,8 @@ impl MediaBridge {
             let cancel_token = self.leg_a.cancel_token();
             let leg_a = self.leg_a.clone();
             let leg_b = self.leg_b.clone();
+            let call_id = self.call_id.clone();
+            let sipflow_backend = self.sipflow_backend.clone();
 
             crate::utils::spawn(async move {
                 tokio::select! {
@@ -124,6 +133,8 @@ impl MediaBridge {
                         ssrc_a,
                         ssrc_b,
                         recorder,
+                        call_id,
+                        sipflow_backend,
                     ) => {}
                 }
             });
@@ -145,6 +156,8 @@ impl MediaBridge {
         ssrc_a: Option<u32>,
         ssrc_b: Option<u32>,
         recorder: Arc<Mutex<Option<Recorder>>>,
+        call_id: String,
+        sipflow_backend: Option<Arc<dyn SipFlowBackend>>,
     ) {
         debug!(
             "bridge_pcs started: codec_a={:?} codec_b={:?} ssrc_a={:?} ssrc_b={:?}",
@@ -184,6 +197,8 @@ impl MediaBridge {
                         dtmf_pt_b,
                         None, // Don't use remote SSRC for outgoing stream
                         recorder.clone(),
+                        call_id.clone(),
+                        sipflow_backend.clone(),
                     ));
                 } else {
                     debug!("Track A {} already started, skipping", track_id);
@@ -217,6 +232,8 @@ impl MediaBridge {
                         dtmf_pt_a,
                         None, // Don't use remote SSRC for outgoing stream
                         recorder.clone(),
+                        call_id.clone(),
+                        sipflow_backend.clone(),
                     ));
                 } else {
                     debug!("Track B {} already started, skipping", track_id);
@@ -253,6 +270,8 @@ impl MediaBridge {
                                             dtmf_pt_b,
                                             None,
                                             recorder.clone(),
+                                            call_id.clone(),
+                                            sipflow_backend.clone(),
                                         ));
                                     } else {
                                         debug!("Track event for already started Leg A track id={}, skipping", track_id);
@@ -292,6 +311,8 @@ impl MediaBridge {
                                             dtmf_pt_a,
                                             None,
                                             recorder.clone(),
+                                            call_id.clone(),
+                                            sipflow_backend.clone(),
                                         ));
                                     } else {
                                         debug!("Track event for already started Leg B track id={}, skipping", track_id);
@@ -328,6 +349,8 @@ impl MediaBridge {
         target_dtmf_pt: Option<u8>,
         target_ssrc: Option<u32>,
         recorder: Arc<Mutex<Option<Recorder>>>,
+        call_id: String,
+        sipflow_backend: Option<Arc<dyn SipFlowBackend>>,
     ) {
         let needs_transcoding = source_codec != target_codec;
         let track_id = track.id().to_string();
@@ -474,11 +497,39 @@ impl MediaBridge {
                 }
             }
 
+            // Send to recorder if configured
             {
                 if let Some(ref mut r) = *recorder.lock().unwrap() {
                     let _ = r.write_sample(leg, &sample, pt_for_recorder);
                 }
             }
+
+            // Send RTP packet to sipflow backend if configured (only when raw_packet is available)
+            if let (Some(backend), MediaSample::Audio(audio_frame)) = (&sipflow_backend, &sample) {
+                if let Some(ref rtp_packet) = audio_frame.raw_packet {
+                    let payload = bytes::Bytes::copy_from_slice(&rtp_packet.payload);
+
+                    let src_addr: String = if let Some(addr) = audio_frame.source_addr {
+                        format!("{:?}_{}", leg, addr)
+                    } else {
+                        format!("{:?}", leg)
+                    };
+
+                    let item = SipFlowItem {
+                        timestamp: audio_frame.rtp_timestamp as u64,
+                        seq: audio_frame.sequence_number.unwrap_or(0) as u64,
+                        msg_type: SipFlowMsgType::Rtp,
+                        src_addr,
+                        dst_addr: format!("bridge"),
+                        payload,
+                    };
+
+                    if let Err(e) = backend.record(&call_id, item) {
+                        debug!("Failed to record RTP to sipflow: {}", e);
+                    }
+                }
+            }
+
             if let Err(e) = source_target.send(sample).await {
                 error!("forward_track {:?}: source_target.send failed: {}", leg, e);
                 break;
@@ -535,6 +586,8 @@ mod tests {
             None,
             None,
             None,
+            "test-call-id".to_string(),
+            None,
         );
 
         bridge.start().await.unwrap();
@@ -560,6 +613,8 @@ mod tests {
             CodecType::PCMA,
             None,
             None,
+            None,
+            "test-call-id".to_string(),
             None,
         );
 

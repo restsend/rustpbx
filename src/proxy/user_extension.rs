@@ -85,6 +85,7 @@ impl UserBackend for ExtensionUserBackend {
         &self,
         username: &str,
         realm: Option<&str>,
+        _request: Option<&rsip::Request>,
     ) -> Result<Option<SipUser>, AuthError> {
         if username.trim().is_empty() {
             return Ok(None);
@@ -156,7 +157,7 @@ mod tests {
         let backend = ExtensionUserBackend::new(db.clone(), 30);
 
         let user = backend
-            .get_user("1001", Some("rustpbx.com"))
+            .get_user("1001", Some("rustpbx.com"), None)
             .await
             .expect("query user")
             .expect("user exists");
@@ -172,6 +173,6 @@ mod tests {
     async fn missing_user_returns_none() {
         let db = setup_db().await;
         let backend = ExtensionUserBackend::new(db, 30);
-        assert!(backend.get_user("2001", None).await.unwrap().is_none());
+        assert!(backend.get_user("2001", None, None).await.unwrap().is_none());
     }
 }

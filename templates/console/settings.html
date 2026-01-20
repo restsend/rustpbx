@@ -852,6 +852,172 @@
 
         </section>
 
+        <section x-show="activeTab === 'sipflow'" x-cloak x-transition.opacity class="space-y-6"
+            id="settings-tab-sipflow" role="tabpanel" tabindex="0">
+            <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+                <div class="flex flex-col gap-2 md:flex-row md:items-end md:justify-between">
+                    <div>
+                        <h2 class="text-base font-semibold text-slate-900">SipFlow - Advanced Recording System</h2>
+                        <p class="text-xs text-slate-500">Unified SIP+RTP recording with optimized I/O pattern for 1000+
+                            concurrent calls.</p>
+                    </div>
+                    <span class="text-xs font-semibold uppercase tracking-wide text-slate-400">
+                        Backend · <span
+                            :class="sipflowSettings.backend_type !== 'none' ? 'text-emerald-600' : 'text-slate-400'"
+                            x-text="sipflowSettings.backend_type || 'none'"></span>
+                    </span>
+                </div>
+                <div class="mt-4 rounded-lg border border-sky-100 bg-sky-50 px-4 py-3 text-xs text-sky-700">
+                    <div class="flex items-start gap-2">
+                        <svg class="h-4 w-4 flex-none" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                        </svg>
+                        <div>
+                            <p class="font-semibold">Better I/O performance than legacy call recording</p>
+                            <p class="mt-1">Open-write-close pattern avoids FD exhaustion. Supports 1000+ concurrent
+                                calls with hourly file organization.</p>
+                        </div>
+                    </div>
+                </div>
+                <form class="mt-4 space-y-4" @submit.prevent="saveSipFlowSettings">
+                    <div>
+                        <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Backend
+                            Type</label>
+                        <select x-model="sipflowDraft.backend_type" :disabled="sipflowProcessing"
+                            class="mt-1 block w-full rounded-md border-slate-200 py-2 pl-3 pr-10 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                            <option value="none">Disabled</option>
+                            <option value="dir">Directory (Recommended for high concurrency)</option>
+                            <option value="local">Local SQLite + Structured files</option>
+                            <option value="remote">Remote via UDP/HTTP</option>
+                        </select>
+                        <p class="mt-1 text-xs text-slate-500">Select backend type to enable SipFlow. Dir mode has best
+                            I/O performance for 1000+ concurrent calls.</p>
+                    </div>
+
+                    <div x-show="sipflowDraft.backend_type !== 'none'" x-cloak
+                        class="border-t border-slate-200 pt-4 space-y-4">
+
+                        <!-- Dir Backend Config -->
+                        <div x-show="sipflowDraft.backend_type === 'dir'"
+                            class="space-y-4 rounded-lg border border-slate-200 bg-slate-50 p-4">
+                            <div>
+                                <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Root
+                                    Directory</label>
+                                <input type="text" x-model="sipflowDraft.dir_root" :disabled="sipflowProcessing"
+                                    class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                    placeholder="./config/cdr">
+                                <p class="mt-1 text-xs text-slate-500">Base path for storing .sipflow.jsonl files</p>
+                            </div>
+                            <div>
+                                <label
+                                    class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Subdirectory
+                                    Structure</label>
+                                <select x-model="sipflowDraft.dir_subdirs" :disabled="sipflowProcessing"
+                                    class="mt-1 block w-full rounded-md border-slate-200 py-2 pl-3 pr-10 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                                    <option value="none">Flat (all in root)</option>
+                                    <option value="daily">Daily folders (YYYYMMDD)</option>
+                                    <option value="hourly">Hourly folders (YYYYMMDD/HH) - Recommended</option>
+                                </select>
+                                <p class="mt-1 text-xs text-slate-500">Hourly organization best for high-volume systems
+                                </p>
+                            </div>
+                        </div>
+
+                        <!-- Local Backend Config -->
+                        <div x-show="sipflowDraft.backend_type === 'local'"
+                            class="space-y-4 rounded-lg border border-slate-200 bg-slate-50 p-4">
+                            <div>
+                                <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Data
+                                    Directory</label>
+                                <input type="text" x-model="sipflowDraft.local_root" :disabled="sipflowProcessing"
+                                    class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                    placeholder="./config/sipflow">
+                                <p class="mt-1 text-xs text-slate-500">SQLite database and structured file storage
+                                    location</p>
+                            </div>
+                            <div class="grid gap-4 md:grid-cols-2">
+                                <div>
+                                    <label
+                                        class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Flush
+                                        Count</label>
+                                    <input type="number" x-model.number="sipflowDraft.local_flush_count"
+                                        :disabled="sipflowProcessing"
+                                        class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                        placeholder="1000" min="1">
+                                    <p class="mt-1 text-xs text-slate-500">Buffer size before writing to disk</p>
+                                </div>
+                                <div>
+                                    <label
+                                        class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Flush
+                                        Interval (seconds)</label>
+                                    <input type="number" x-model.number="sipflowDraft.local_flush_interval_secs"
+                                        :disabled="sipflowProcessing"
+                                        class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                        placeholder="5" min="1">
+                                    <p class="mt-1 text-xs text-slate-500">Maximum time to hold data in memory</p>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Remote Backend Config -->
+                        <div x-show="sipflowDraft.backend_type === 'remote'"
+                            class="space-y-4 rounded-lg border border-slate-200 bg-slate-50 p-4">
+                            <div class="grid gap-4 md:grid-cols-2">
+                                <div>
+                                    <label
+                                        class="block text-xs font-semibold uppercase tracking-wide text-slate-400">UDP
+                                        Address</label>
+                                    <input type="text" x-model="sipflowDraft.remote_udp_addr"
+                                        :disabled="sipflowProcessing"
+                                        class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                        placeholder="192.168.1.100:3000">
+                                    <p class="mt-1 text-xs text-slate-500">UDP endpoint for real-time flow data</p>
+                                </div>
+                                <div>
+                                    <label
+                                        class="block text-xs font-semibold uppercase tracking-wide text-slate-400">HTTP
+                                        Address</label>
+                                    <input type="text" x-model="sipflowDraft.remote_http_addr"
+                                        :disabled="sipflowProcessing"
+                                        class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                        placeholder="http://192.168.1.100:3001">
+                                    <p class="mt-1 text-xs text-slate-500">HTTP endpoint for queries and downloads</p>
+                                </div>
+                            </div>
+                            <div>
+                                <label
+                                    class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Timeout
+                                    (seconds)</label>
+                                <input type="number" x-model.number="sipflowDraft.remote_timeout_secs"
+                                    :disabled="sipflowProcessing"
+                                    class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                    placeholder="10" min="1">
+                                <p class="mt-1 text-xs text-slate-500">Connection and request timeout</p>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div
+                        class="flex items-center justify-between gap-2 border-t border-slate-200 pt-3 text-xs text-slate-500">
+                        <span>Restart required to apply changes.</span>
+                        <div class="flex gap-2">
+                            <button type="button"
+                                class="inline-flex items-center justify-center rounded-md border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-600 transition hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-60"
+                                @click="resetSipFlowDraft" :disabled="sipflowProcessing">
+                                Reset
+                            </button>
+                            <button type="submit"
+                                class="inline-flex items-center justify-center rounded-md bg-sky-600 px-3 py-2 text-xs font-semibold text-white shadow-sm transition hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60"
+                                :disabled="sipflowProcessing">
+                                <span x-text="sipflowProcessing ? 'Saving…' : 'Save changes'"></span>
+                            </button>
+                        </div>
+                    </div>
+                </form>
+            </div>
+        </section>
+
         <section x-show="activeTab === 'recording'" x-cloak x-transition.opacity class="space-y-6"
             id="settings-tab-recording" role="tabpanel" tabindex="0">
             <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
@@ -1777,6 +1943,7 @@
                 { id: 'platform', label: 'Platform overview' },
                 { id: 'proxy', label: 'Proxy settings' },
                 { id: 'storage', label: 'Storage & retention' },
+                { id: 'sipflow', label: 'SipFlow recording' },
                 { id: 'recording', label: 'Recording policy' },
                 { id: 'security', label: 'Security posture' },
                 { id: 'departments', label: 'Departments' },
@@ -1832,6 +1999,19 @@
                 recording_filename_pattern: '',
             },
             storageProcessing: false,
+            sipflowDraft: {
+                backend_type: 'none',
+                dir_root: '',
+                dir_subdirs: 'hourly',
+                local_root: '',
+                local_flush_count: 1000,
+                local_flush_interval_secs: 5,
+                remote_udp_addr: '',
+                remote_http_addr: '',
+                remote_timeout_secs: 10,
+            },
+            sipflowProcessing: false,
+            sipflowSettings: { backend_type: 'none', config: {} },
             securityDraft: {
                 acl_rules: '',
             },
@@ -1978,6 +2158,7 @@
                 this.initProxyDraft();
                 this.initStorageDraft();
                 this.initSecurityDraft();
+                this.fetchSipFlowSettings();
                 this.directory = { departments: [], users: [], pending_invites: [] };
                 this.departmentPagination = null;
                 this.userPagination = null;
@@ -3738,6 +3919,148 @@
                     });
                 } finally {
                     this.storageProcessing = false;
+                }
+            },
+            async fetchSipFlowSettings() {
+                try {
+                    const response = await fetch(`${this.basePath}/sipflow/settings`, {
+                        method: 'GET',
+                        headers: {
+                            Accept: 'application/json',
+                        },
+                    });
+                    if (!response.ok) {
+                        console.warn('Failed to fetch sipflow settings');
+                        return;
+                    }
+                    const data = await response.json();
+                    this.sipflowSettings = {
+                        backend_type: data.backend_type || 'none',
+                        config: data.config || {},
+                    };
+                    this.initSipFlowDraft();
+                } catch (err) {
+                    console.error('Error fetching sipflow settings:', err);
+                }
+            },
+            initSipFlowDraft() {
+                const config = this.sipflowSettings.config || {};
+                const backendType = this.sipflowSettings.backend_type || 'none';
+
+                this.sipflowDraft = {
+                    backend_type: backendType,
+                    // Dir backend
+                    dir_root: backendType === 'dir' ? (config.root || '') : '',
+                    dir_subdirs: backendType === 'dir' ? (config.subdirs || 'hourly') : 'hourly',
+                    // Local backend
+                    local_root: backendType === 'local' ? (config.root || '') : '',
+                    local_flush_count: backendType === 'local' ? (config.flush_count || 1000) : 1000,
+                    local_flush_interval_secs: backendType === 'local' ? (config.flush_interval_secs || 5) : 5,
+                    // Remote backend
+                    remote_udp_addr: backendType === 'remote' ? (config.udp_addr || '') : '',
+                    remote_http_addr: backendType === 'remote' ? (config.http_addr || '') : '',
+                    remote_timeout_secs: backendType === 'remote' ? (config.timeout_secs || 10) : 10,
+                };
+            },
+            resetSipFlowDraft() {
+                this.initSipFlowDraft();
+            },
+            async saveSipFlowSettings() {
+                if (this.sipflowProcessing) {
+                    return;
+                }
+
+                const backendType = this.sipflowDraft.backend_type || 'none';
+                let config = {};
+
+                if (backendType === 'dir') {
+                    const root = (this.sipflowDraft.dir_root || '').trim();
+                    if (!root) {
+                        this.$dispatch('toast', {
+                            title: 'Missing information',
+                            message: 'Root directory is required for Dir backend.',
+                        });
+                        return;
+                    }
+                    config = {
+                        root,
+                        subdirs: this.sipflowDraft.dir_subdirs || 'hourly',
+                    };
+                } else if (backendType === 'local') {
+                    const root = (this.sipflowDraft.local_root || '').trim();
+                    if (!root) {
+                        this.$dispatch('toast', {
+                            title: 'Missing information',
+                            message: 'Data directory is required for Local backend.',
+                        });
+                        return;
+                    }
+                    config = {
+                        root,
+                        flush_count: this.sipflowDraft.local_flush_count || 1000,
+                        flush_interval_secs: this.sipflowDraft.local_flush_interval_secs || 5,
+                    };
+                } else if (backendType === 'remote') {
+                    const udp_addr = (this.sipflowDraft.remote_udp_addr || '').trim();
+                    const http_addr = (this.sipflowDraft.remote_http_addr || '').trim();
+                    if (!udp_addr || !http_addr) {
+                        this.$dispatch('toast', {
+                            title: 'Missing information',
+                            message: 'UDP and HTTP addresses are required for Remote backend.',
+                        });
+                        return;
+                    }
+                    config = {
+                        udp_addr,
+                        http_addr,
+                        timeout_secs: this.sipflowDraft.remote_timeout_secs || 10,
+                    };
+                }
+
+                const body = {
+                    enabled: backendType !== 'none',
+                    backend_type: backendType,
+                    config,
+                };
+
+                this.sipflowProcessing = true;
+                try {
+                    const response = await fetch(`${this.basePath}/sipflow/settings`, {
+                        method: 'PUT',
+                        headers: {
+                            Accept: 'application/json',
+                            'Content-Type': 'application/json',
+                        },
+                        body: JSON.stringify(body),
+                    });
+                    const data = await response.json().catch(() => ({}));
+                    if (!response.ok) {
+                        throw new Error(data?.message || data?.error || 'Failed to update SipFlow settings');
+                    }
+
+                    this.sipflowSettings = {
+                        backend_type: backendType,
+                        config,
+                    };
+
+                    this.$dispatch('toast', {
+                        title: 'Settings saved',
+                        message: data?.message || 'SipFlow settings saved. Restart required to apply.',
+                    });
+
+                    this.lastOperation = {
+                        label: 'SipFlow settings',
+                        timestamp: new Date().toLocaleString(),
+                        status: 'Saved. Restart required.',
+                    };
+                } catch (err) {
+                    console.error(err);
+                    this.$dispatch('toast', {
+                        title: 'Update failed',
+                        message: err?.message || 'Unable to update SipFlow settings.',
+                    });
+                } finally {
+                    this.sipflowProcessing = false;
                 }
             },
             async testStorageConnection() {

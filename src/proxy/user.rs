@@ -27,6 +27,7 @@ pub trait UserBackend: Send + Sync {
         &self,
         username: &str,
         realm: Option<&str>,
+        request: Option<&rsip::Request>,
     ) -> Result<Option<SipUser>, AuthError>;
     async fn create_user(&self, _user: SipUser) -> Result<()> {
         Ok(())
@@ -145,6 +146,7 @@ impl UserBackend for MemoryUserBackend {
         &self,
         username: &str,
         realm: Option<&str>,
+        _request: Option<&rsip::Request>,
     ) -> Result<Option<SipUser>, AuthError> {
         let users = self.users.lock().await;
         let identifier = self.get_identifier(username, realm);
@@ -179,8 +181,16 @@ pub async fn create_user_backend(config: &UserBackendConfig) -> Result<Box<dyn U
             username_field,
             realm_field,
             headers,
+            sip_headers,
         } => {
-            let backend = HttpUserBackend::new(url, method, username_field, realm_field, headers);
+            let backend = HttpUserBackend::new(
+                url,
+                method,
+                username_field,
+                realm_field,
+                headers,
+                sip_headers,
+            );
             Ok(Box::new(backend) as Box<dyn UserBackend>)
         }
         UserBackendConfig::Memory { users } => {
@@ -260,10 +270,11 @@ impl UserBackend for ChainedUserBackend {
         &self,
         username: &str,
         realm: Option<&str>,
+        request: Option<&rsip::Request>,
     ) -> Result<Option<SipUser>, AuthError> {
         let mut last_err: Option<AuthError> = None;
         for backend in &self.backends {
-            match backend.get_user(username, realm).await {
+            match backend.get_user(username, realm, request).await {
                 Ok(Some(user)) => return Ok(Some(user)),
                 Ok(None) => {}
                 Err(err) => last_err = Some(err),
@@ -321,20 +332,23 @@ mod tests {
 
         // Test with exact realm
         let found = backend
-            .get_user("alice", Some("example.com"))
+            .get_user("alice", Some("example.com"), None)
             .await
             .unwrap();
         assert!(found.is_some());
 
         // Test with realm including port
         let found = backend
-            .get_user("alice", Some("example.com:5060"))
+            .get_user("alice", Some("example.com:5060"), None)
             .await
             .unwrap();
         assert!(found.is_some());
 
-        // Test with different realm
-        let found = backend.get_user("alice", Some("other.com")).await.unwrap();
+        // Test with wrong realm
+        let found = backend
+            .get_user("alice", Some("other.com"), None)
+            .await
+            .unwrap();
         assert!(found.is_none());
     }
 }

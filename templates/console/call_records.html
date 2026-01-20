@@ -384,13 +384,12 @@
                                 </td>
                                 <td class="px-4 py-2">
                                     <div class="flex flex-wrap gap-1 text-[11px]">
-                                        <template x-for="tag in (record.tags || [])" :key="record.id + tag">
+                                        <template x-for="tag in (Array.isArray(record.tags) ? record.tags : [])"
+                                            :key="record.id + tag">
                                             <span
                                                 class="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2 py-0.5 text-slate-600">
                                                 <span x-text="tag"></span>
                                             </span>
-                                        </template>
-                                        <template x-if="!(record.tags || []).length">
                                         </template>
                                     </div>
                                 </td>
@@ -554,6 +553,7 @@
             onlyTranscribed: false,
             selectedDepartments: [],
             selectedSipTrunks: [],
+            selectedTags: [],
             billingStatusFilter: 'any',
             exportedAt: null,
             loading: false,

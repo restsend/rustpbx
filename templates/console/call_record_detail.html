@@ -154,8 +154,8 @@
                         :aria-selected="detailTab === 'diagnostics'" aria-controls="call-record-tab-diagnostics"
                         @click="detailTab = 'diagnostics'">
                         <div class="flex flex-col">
-                            <span class="text-[13px]">Diagnostics</span>
-                            <span class="text-[11px] font-normal text-slate-400">SIP flow, metrics</span>
+                            <span class="text-[13px]">Signalling</span>
+                            <span class="text-[11px] font-normal text-slate-400">SIP flow, RTP metrics</span>
                         </div>
                     </button>
                     <button type="button" class="flex-1 rounded-md px-3 py-1.5 text-left transition sm:flex-none"
@@ -316,179 +316,247 @@
                 <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
                     <div class="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
                         <div>
-                            <h2 class="text-base font-semibold text-slate-900">Interaction insights</h2>
+                            <h2 class="text-base font-semibold text-slate-900">Signalling</h2>
                             <p class="text-xs text-slate-500">Inspect SIP signalling timeline to speed up
                                 troubleshooting.</p>
                         </div>
                     </div>
-                    <div>
-                        <p class="text-xs text-slate-500">Compare caller, PBX, and callee lanes. Click a row to inspect
-                            the raw SIP payload.</p>
-                        <div class="mt-4 flex flex-col gap-4 lg:flex-row">
-                            <div class="lg:w-7/12 lg:min-w-0 space-y-3">
-                                <div class="rounded-xl bg-white shadow-sm ring-1 ring-black/5">
-                                    <div class="max-h-[520px] overflow-y-auto overflow-x-hidden">
-                                        <table class="min-w-full divide-y divide-slate-200 text-sm">
-                                            <thead
-                                                class="bg-slate-50 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
-                                                <tr>
-                                                    <template x-for="column in sipFlowColumns"
-                                                        :key="'head-' + column.id">
-                                                        <th class="px-3 py-2 text-left"
-                                                            :class="column.id === 'pbx' ? 'text-center' : (column.id === 'callee' ? 'text-right' : 'text-left')"
-                                                            x-text="column.label"></th>
+
+                    <!-- RTP Streams -->
+                    <div class="mt-4 overflow-hidden rounded-xl bg-white shadow-sm ring-1 ring-black/5">
+                        <div class="flex items-center justify-between border-b border-slate-200 bg-slate-50 px-4 py-2">
+                            <div class="font-medium text-slate-700 text-xs">RTP Streams</div>
+                            <template x-if="mediaMetrics && mediaMetrics.rtp_packets !== undefined">
+                                <div class="text-[10px] text-slate-500">
+                                    Total Packets (Analytics): <span class="font-mono text-slate-700"
+                                        x-text="mediaMetrics.rtp_packets"></span>
+                                </div>
+                            </template>
+                        </div>
+                        <div class="overflow-x-auto">
+                            <table class="w-full text-left text-xs" x-show="rtpStreams && rtpStreams.length">
+                                <thead class="bg-slate-50 text-slate-500">
+                                    <tr>
+                                        <th class="px-4 py-2 font-semibold">Leg</th>
+                                        <th class="px-4 py-2 font-semibold">Source</th>
+                                        <th class="px-4 py-2 font-semibold">Destination</th>
+                                        <th class="px-4 py-2 font-semibold text-right">Packets</th>
+                                    </tr>
+                                </thead>
+                                <tbody class="divide-y divide-slate-100">
+                                    <template x-for="(stream, idx) in rtpStreams" :key="idx">
+                                        <tr class="hover:bg-slate-50">
+                                            <td class="px-4 py-2 font-medium text-slate-700 w-24">
+                                                <span
+                                                    class="inline-flex items-center rounded-md bg-slate-100 px-2 py-1 text-xs font-medium text-slate-600 ring-1 ring-inset ring-slate-500/10"
+                                                    x-text="stream.role"></span>
+                                            </td>
+                                            <td class="px-4 py-2 font-mono text-slate-600" x-text="stream.src_addr">
+                                            </td>
+                                            <td class="px-4 py-2 font-mono text-slate-600" x-text="stream.dst_addr">
+                                            </td>
+                                            <td class="px-4 py-2 font-mono text-emerald-600 text-right"
+                                                x-text="stream.packet_count"></td>
+                                        </tr>
+                                    </template>
+                                </tbody>
+                            </table>
+                            <div class="p-4 text-center text-xs text-slate-400"
+                                x-show="!rtpStreams || !rtpStreams.length">
+                                <span x-show="sipFlowLoading">Calculating RTP streams...</span>
+                                <span x-show="!sipFlowLoading">No RTP stream details available.</span>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- SIP Signalling Timeline -->
+                    <div class="mt-4">
+                        <template x-if="sipFlowLoading">
+                            <div class="rounded-xl bg-slate-50 p-12 text-center">
+                                <svg class="inline-block h-5 w-5 animate-spin text-slate-400"
+                                    xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                                    <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor"
+                                        stroke-width="4"></circle>
+                                    <path class="opacity-75" fill="currentColor"
+                                        d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z">
+                                    </path>
+                                </svg>
+                                <span class="ml-2 text-xs text-slate-400">Loading signalling data...</span>
+                            </div>
+                        </template>
+
+                        <template x-if="!sipFlowLoading && sipMessages.length === 0">
+                            <div class="rounded-xl bg-slate-50 p-12 text-center text-xs text-slate-400">
+                                No signalling data available.
+                            </div>
+                        </template>
+
+                        <template x-if="!sipFlowLoading && sipMessages.length > 0">
+                            <div class="flex gap-4">
+                                <!-- Left: Timeline (3/5) -->
+                                <div class="flex-1 w-3/5 flex flex-col gap-4">
+                                    <!-- Timeline Header -->
+                                    <div
+                                        class="grid grid-cols-[90px_1fr_1fr_1fr] gap-2 px-4 py-2 bg-slate-50 rounded-lg border border-slate-200">
+                                        <div class="text-[10px] font-semibold text-slate-500 uppercase tracking-wide">
+                                            Time</div>
+                                        <div class="text-[10px] font-semibold text-slate-500 uppercase tracking-wide text-center"
+                                            x-text="getParticipantLabel('caller')">Caller</div>
+                                        <div
+                                            class="text-[10px] font-semibold text-slate-500 uppercase tracking-wide text-center">
+                                            PBX</div>
+                                        <div class="text-[10px] font-semibold text-slate-500 uppercase tracking-wide text-center"
+                                            x-text="getParticipantLabel('callee')">Callee</div>
+                                    </div>
+
+                                    <!-- Timeline Messages -->
+                                    <div class="space-y-0.5 max-h-[calc(100vh-280px)] overflow-y-auto">
+                                        <template x-for="(entry, idx) in sipMessages"
+                                            :key="'msg-' + idx + '-' + entry.timestamp">
+                                            <div class="grid grid-cols-[90px_1fr_1fr_1fr] gap-2 items-center px-4 py-1 hover:bg-sky-50/50 transition-colors cursor-pointer group relative rounded"
+                                                @click="selectedSipEntry = entry"
+                                                :class="selectedSipEntry === entry ? 'bg-sky-50' : ''">
+
+                                                <!-- Time Column -->
+                                                <div class="text-[10px] font-mono text-slate-500"
+                                                    x-text="formatDateTimeWithMs(entry.timestamp)"></div>
+
+                                                <!-- Caller Column -->
+                                                <div class="relative">
+                                                    <template x-if="getRole(entry.src_addr) === 'leg-a'">
+                                                        <div>
+                                                            <div class="rounded-lg border px-2 py-1 text-xs shadow-sm transition hover:shadow-md"
+                                                                :class="getMessageColorClass(entry.raw_message)">
+                                                                <div class="font-semibold whitespace-nowrap"
+                                                                    x-text="extractSipMethod(entry.raw_message)"></div>
+                                                            </div>
+                                                            <!-- Arrow Right -->
+                                                            <div
+                                                                class="absolute left-full top-1/2 -translate-y-1/2 flex items-center pointer-events-none">
+                                                                <svg class="w-6 h-2 text-sky-400" viewBox="0 0 24 8"
+                                                                    fill="none">
+                                                                    <line x1="0" y1="4" x2="18" y2="4"
+                                                                        stroke="currentColor" stroke-width="1.5" />
+                                                                    <polygon points="18,0 24,4 18,8"
+                                                                        fill="currentColor" />
+                                                                </svg>
+                                                            </div>
+                                                        </div>
                                                     </template>
-                                                </tr>
-                                            </thead>
-                                            <tbody class="bg-white">
-                                                <template x-if="sipFlowEntries.length">
-                                                    <template x-for="entry in sipFlowEntries"
-                                                        :key="'sip-' + entry.sequence">
-                                                        <tr class="cursor-pointer transition" :class="selectedSipEntry && selectedSipEntry.sequence === entry.sequence
-                                                                ? 'bg-sky-50 ring-1 ring-inset ring-sky-300'
-                                                                : 'hover:bg-slate-50'" @click="selectSipEntry(entry)">
-                                                            <template x-for="column in sipFlowColumns"
-                                                                :key="column.id + '-' + entry.sequence">
-                                                                <td
-                                                                    class="align-top px-3 py-2 whitespace-normal break-words">
-                                                                    <template x-if="column.id === 'time'">
-                                                                        <div class="space-y-0.5 text-xs text-slate-600">
-                                                                            <div class="font-mono text-[12px] font-semibold text-slate-700"
-                                                                                x-text="formatRelativeToStart(entry)">
-                                                                            </div>
-                                                                            <div class="text-[10px] font-mono text-slate-400"
-                                                                                x-text="entry.offset || ''"></div>
-                                                                            <div class="text-[10px] uppercase tracking-wide text-slate-400"
-                                                                                x-text="(entry.flow_direction || entry.direction || '') ? (entry.flow_direction || entry.direction || '').toUpperCase() : ''">
-                                                                            </div>
-                                                                        </div>
-                                                                    </template>
-                                                                    <template x-if="column.id !== 'time'">
-                                                                        <div
-                                                                            class="space-y-0.5 text-[11px] text-slate-600">
-                                                                            <template
-                                                                                x-if="column.id === (entry.lane_display || entry.lane_from)">
-                                                                                <div class="flex items-start gap-1.5"
-                                                                                    :class="laneContentClass(entry, column.id)">
-                                                                                    <template
-                                                                                        x-if="laneCell(entry, column.id) === 'from' && arrowPlacement(entry, column.id, 'from') === 'left'">
-                                                                                        <span
-                                                                                            class="text-base leading-none text-slate-400"
-                                                                                            x-text="cellArrow(entry, column.id)"></span>
-                                                                                    </template>
-                                                                                    <template
-                                                                                        x-if="laneCell(entry, column.id) === 'to' && arrowPlacement(entry, column.id, 'to') === 'left'">
-                                                                                        <span
-                                                                                            class="text-base leading-none text-slate-400"
-                                                                                            x-text="cellArrow(entry, column.id)"></span>
-                                                                                    </template>
-                                                                                    <div class="space-y-1"
-                                                                                        :class="laneCell(entry, column.id) === 'to' ? 'text-right' : 'text-left'">
-                                                                                        <span
-                                                                                            class="inline-flex items-center gap-1 rounded-full px-2 py-0.5 font-mono text-[11px] font-semibold"
-                                                                                            :class="laneCell(entry, column.id) === 'to' ? 'bg-slate-100 text-slate-600' : 'bg-slate-200 text-slate-700'">
-                                                                                            <span
-                                                                                                x-text="entry.method || entry.status_code || '—'"></span>
-                                                                                            <span
-                                                                                                x-show="entry.status_code && entry.method && entry.method !== String(entry.status_code)"
-                                                                                                class="text-emerald-600"
-                                                                                                x-text="entry.status_code"></span>
-                                                                                        </span>
-                                                                                        <div class="leading-snug break-words"
-                                                                                            x-text="formatSummary(entry.summary)">
-                                                                                        </div>
-                                                                                    </div>
-                                                                                    <template
-                                                                                        x-if="laneCell(entry, column.id) === 'from' && arrowPlacement(entry, column.id, 'from') === 'right'">
-                                                                                        <span
-                                                                                            class="text-base leading-none text-slate-400"
-                                                                                            x-text="cellArrow(entry, column.id)"></span>
-                                                                                    </template>
-                                                                                    <template
-                                                                                        x-if="laneCell(entry, column.id) === 'to' && arrowPlacement(entry, column.id, 'to') === 'right'">
-                                                                                        <span
-                                                                                            class="text-base leading-none text-slate-400"
-                                                                                            x-text="cellArrow(entry, column.id)"></span>
-                                                                                    </template>
-                                                                                </div>
-                                                                            </template>
-                                                                            <template
-                                                                                x-if="laneCell(entry, column.id) === 'self'">
-                                                                                <div
-                                                                                    class="mx-auto h-1.5 w-1.5 rounded-full bg-slate-400">
-                                                                                </div>
-                                                                            </template>
-                                                                        </div>
-                                                                    </template>
-                                                                </td>
-                                                            </template>
-                                                        </tr>
+                                                </div>
+
+                                                <!-- PBX Column -->
+                                                <div class="relative">
+                                                    <!-- PBX to Caller (PBX sends response back) -->
+                                                    <template
+                                                        x-if="getRole(entry.src_addr) === 'pbx' && (getRole(entry.dst_addr) === 'leg-a' || entry._correctedDstRole === 'leg-a')">
+                                                        <div>
+                                                            <!-- Arrow Left -->
+                                                            <div
+                                                                class="absolute right-full top-1/2 -translate-y-1/2 flex items-center pointer-events-none">
+                                                                <svg class="w-6 h-2 text-emerald-400" viewBox="0 0 24 8"
+                                                                    fill="none">
+                                                                    <polygon points="6,0 0,4 6,8" fill="currentColor" />
+                                                                    <line x1="6" y1="4" x2="24" y2="4"
+                                                                        stroke="currentColor" stroke-width="1.5" />
+                                                                </svg>
+                                                            </div>
+                                                            <div class="rounded-lg border px-2 py-1 text-xs shadow-sm transition hover:shadow-md"
+                                                                :class="getMessageColorClass(entry.raw_message)">
+                                                                <div class="font-semibold whitespace-nowrap"
+                                                                    x-text="extractSipMethod(entry.raw_message)"></div>
+                                                            </div>
+                                                        </div>
                                                     </template>
-                                                </template>
-                                                <template x-if="!sipFlowEntries.length">
-                                                    <tr>
-                                                        <td class="px-4 py-6 text-center text-xs text-slate-400"
-                                                            :colspan="sipFlowColumns.length">
-                                                            No SIP trace captured for this session.
-                                                        </td>
-                                                    </tr>
-                                                </template>
-                                            </tbody>
-                                        </table>
+
+                                                    <!-- PBX to Callee (PBX forwards request) -->
+                                                    <template
+                                                        x-if="getRole(entry.src_addr) === 'pbx' && (getRole(entry.dst_addr) === 'leg-b' || entry._correctedDstRole === 'leg-b')">
+                                                        <div>
+                                                            <div class="rounded-lg border px-2 py-1 text-xs shadow-sm transition hover:shadow-md"
+                                                                :class="getMessageColorClass(entry.raw_message)">
+                                                                <div class="font-semibold whitespace-nowrap"
+                                                                    x-text="extractSipMethod(entry.raw_message)"></div>
+                                                            </div>
+                                                            <!-- Arrow Right -->
+                                                            <div
+                                                                class="absolute left-full top-1/2 -translate-y-1/2 flex items-center pointer-events-none">
+                                                                <svg class="w-6 h-2 text-indigo-400" viewBox="0 0 24 8"
+                                                                    fill="none">
+                                                                    <line x1="0" y1="4" x2="18" y2="4"
+                                                                        stroke="currentColor" stroke-width="1.5" />
+                                                                    <polygon points="18,0 24,4 18,8"
+                                                                        fill="currentColor" />
+                                                                </svg>
+                                                            </div>
+                                                        </div>
+                                                    </template>
+
+                                                    <!-- PBX internal messages (same src and dst, no correction) -->
+                                                    <template
+                                                        x-if="getRole(entry.src_addr) === 'pbx' && getRole(entry.dst_addr) === 'pbx' && !entry._correctedDstRole">
+                                                        <div class="rounded-lg border px-2 py-1 text-xs shadow-sm transition hover:shadow-md border-dashed"
+                                                            :class="getMessageColorClass(entry.raw_message)">
+                                                            <div class="font-semibold whitespace-nowrap"
+                                                                x-text="extractSipMethod(entry.raw_message)"></div>
+                                                        </div>
+                                                    </template>
+                                                </div>
+
+                                                <!-- Callee Column -->
+                                                <div class="relative">
+                                                    <!-- Only show messages FROM leg-b (callee sends) -->
+                                                    <template x-if="getRole(entry.src_addr) === 'leg-b'">
+                                                        <div>
+                                                            <!-- Arrow Left -->
+                                                            <div
+                                                                class="absolute right-full top-1/2 -translate-y-1/2 flex items-center pointer-events-none">
+                                                                <svg class="w-6 h-2 text-purple-400" viewBox="0 0 24 8"
+                                                                    fill="none">
+                                                                    <polygon points="6,0 0,4 6,8" fill="currentColor" />
+                                                                    <line x1="6" y1="4" x2="24" y2="4"
+                                                                        stroke="currentColor" stroke-width="1.5" />
+                                                                </svg>
+                                                            </div>
+                                                            <div class="rounded-lg border px-2 py-1 text-xs shadow-sm transition hover:shadow-md"
+                                                                :class="getMessageColorClass(entry.raw_message)">
+                                                                <div class="font-semibold whitespace-nowrap"
+                                                                    x-text="extractSipMethod(entry.raw_message)"></div>
+                                                            </div>
+                                                        </div>
+                                                    </template>
+                                                </div>
+                                            </div>
+                                        </template>
+                                    </div>
+                                </div>
+
+                                <!-- Right: Detail Panel (2/5) -->
+                                <div class="w-2/5 flex flex-col">
+                                    <div
+                                        class="rounded-xl bg-white shadow-sm ring-1 ring-black/5 overflow-hidden flex flex-col h-[calc(100vh-280px)]">
+                                        <div
+                                            class="border-b border-slate-200 bg-slate-50 px-4 py-2 flex justify-between items-center flex-shrink-0">
+                                            <span class="font-medium text-slate-700 text-xs">Packet Details</span>
+                                            <span class="font-mono text-slate-500 text-[10px]" x-show="selectedSipEntry"
+                                                x-text="selectedSipEntry ? formatDateTimeWithMs(selectedSipEntry.timestamp) : ''"></span>
+                                        </div>
+                                        <div class="p-4 overflow-auto flex-1 bg-slate-900">
+                                            <template x-if="selectedSipEntry">
+                                                <pre class="font-mono text-[11px] text-emerald-400 whitespace-pre-wrap break-all"
+                                                    x-text="selectedSipEntry.raw_message || 'No content'"></pre>
+                                            </template>
+                                            <template x-if="!selectedSipEntry">
+                                                <div
+                                                    class="h-full flex items-center justify-center text-slate-500 text-xs">
+                                                    Select a message to view details
+                                                </div>
+                                            </template>
+                                        </div>
                                     </div>
                                 </div>
                             </div>
-                            <div class="flex-1 min-w-0">
-                                <div class="h-full rounded-xl bg-white p-4 shadow-sm ring-1 ring-black/5">
-                                    <template x-if="selectedSipEntry">
-                                        <div class="flex h-full flex-col">
-                                            <div
-                                                class="flex flex-col gap-2 border-b border-slate-200 pb-3 text-sm text-slate-600">
-                                                <div class="flex flex-wrap items-center gap-2 text-xs text-slate-500">
-                                                    <span
-                                                        class="inline-flex items-center gap-1 rounded-full bg-slate-100 px-3 py-1 font-semibold text-slate-700">
-                                                        <span
-                                                            x-text="selectedSipEntry.method || selectedSipEntry.status_code || 'Message'"></span>
-                                                        <span
-                                                            x-show="selectedSipEntry.status_code && selectedSipEntry.method && selectedSipEntry.method !== String(selectedSipEntry.status_code)"
-                                                            class="text-emerald-600"
-                                                            x-text="selectedSipEntry.status_code"></span>
-                                                    </span>
-                                                    <span class="font-mono text-[13px] text-slate-700"
-                                                        x-text="formatDateTimeWithMs(selectedSipEntry.timestamp)"></span>
-                                                    <span class="font-mono text-[11px] text-slate-400"
-                                                        x-text="formatRelativeToStart(selectedSipEntry)"></span>
-                                                </div>
-                                                <div
-                                                    class="flex flex-wrap items-center gap-2 text-[11px] text-slate-500">
-                                                    <span x-text="selectedSipEntry.from_label"></span>
-                                                    <span class="text-base leading-none text-slate-300"
-                                                        x-text="selectedSipEntry.arrow === 'right' ? '→' : '←'"></span>
-                                                    <span x-text="selectedSipEntry.to_label"></span>
-                                                    <span x-show="selectedSipEntry.leg_role_label"
-                                                        class="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2 py-0.5 font-semibold text-slate-600"
-                                                        x-text="selectedSipEntry.leg_role_label"></span>
-                                                    <span x-show="selectedSipEntry.leg_label"
-                                                        class="inline-flex items-center gap-1 rounded-full border border-slate-200 px-2 py-0.5 font-mono text-[10px] text-slate-500"
-                                                        x-text="selectedSipEntry.leg_label"></span>
-                                                </div>
-                                                <div class="text-sm font-semibold text-slate-700"
-                                                    x-text="selectedSipEntry.summary"></div>
-                                            </div>
-                                            <div class="mt-3 flex-1 overflow-auto">
-                                                <pre
-                                                    class="h-96 max-w-full overflow-auto whitespace-pre rounded bg-slate-950/90 p-3 text-[11px] leading-relaxed text-emerald-100"><code x-text="selectedSipEntry.raw || 'No raw payload captured.'"></code></pre>
-                                            </div>
-                                        </div>
-                                    </template>
-                                    <template x-if="!selectedSipEntry">
-                                        <div class="flex h-full items-center justify-center text-xs text-slate-400">
-                                            Select a SIP message to inspect its raw payload.
-                                        </div>
-                                    </template>
-                                </div>
-                            </div>
-                        </div>
+                        </template>
                     </div>
                 </div>
             </div>
@@ -527,7 +595,7 @@
                                     </button>
                                 </span>
                             </template>
-                            <template x-if="!(record.tags || []).length">
+                            <template x-if="!Array.isArray(record.tags) || record.tags.length === 0">
                                 <span class="rounded-full bg-slate-100 px-3 py-1 text-sm text-slate-400">No tags
                                     yet</span>
                             </template>
@@ -571,6 +639,7 @@
 </div>
 
 <script defer src="https://unpkg.com/wavesurfer.js@7/dist/wavesurfer.min.js"></script>
+
 <script>
     document.addEventListener('alpine:init', () => {
         Alpine.data('callRecordDetail', (payload) => ({
@@ -582,39 +651,16 @@
                     : null;
                 const topLevelRewrite = (data.rewrite && typeof data.rewrite === 'object') ? data.rewrite : null;
                 this.rewrite = recordRewrite || topLevelRewrite || {};
-                const sipFlowPayload = (data.sip_flow && typeof data.sip_flow === 'object' && !Array.isArray(data.sip_flow))
-                    ? data.sip_flow
-                    : { entries: Array.isArray(data.sip_flow) ? data.sip_flow : [] };
-                const sipFlowEntriesRaw = Array.isArray(sipFlowPayload.entries) ? sipFlowPayload.entries : [];
-                this.sipFlowEntries = sipFlowEntriesRaw.map((entry, index) => {
-                    const clone = Object.assign({}, entry || {});
-                    if (clone.sequence === undefined || clone.sequence === null) {
-                        clone.sequence = index;
-                    }
-                    return clone;
-                });
-                const payloadColumnLabels = {};
-                if (Array.isArray(sipFlowPayload.columns)) {
-                    sipFlowPayload.columns.forEach((column) => {
-                        if (!column || typeof column !== 'object') {
-                            return;
-                        }
-                        const normalized = this.normalizeLaneId(column.id || column.label);
-                        if (normalized && ['time', 'caller', 'pbx', 'callee'].includes(normalized)) {
-                            payloadColumnLabels[normalized] = column.label || column.id || payloadColumnLabels[normalized];
-                        }
-                    });
-                }
+                this.sipFlowEntries = [];
+                this.rtpStreams = [];
                 this.sipFlowColumns = [
-                    { id: 'time', label: payloadColumnLabels.time || 'Time' },
-                    { id: 'caller', label: payloadColumnLabels.caller || 'Caller' },
-                    { id: 'pbx', label: payloadColumnLabels.pbx || 'PBX' },
-                    { id: 'callee', label: payloadColumnLabels.callee || 'Callee' },
+                    { id: 'time', label: 'Time' },
+                    { id: 'source', label: 'Source' },
+                    { id: 'destination', label: 'Destination' },
+                    { id: 'info', label: 'Info' },
                 ];
-                this.selectedSipEntry = this.sipFlowEntries.length ? this.sipFlowEntries[0] : null;
-                const recordStartTs = this.parseTimestamp(this.record.started_at);
-                const firstEntryTs = this.sipFlowEntries.length ? this.parseTimestamp(this.sipFlowEntries[0].timestamp) : null;
-                this.flowStartEpoch = Number.isFinite(recordStartTs) ? recordStartTs : firstEntryTs;
+                this.selectedSipEntry = null;
+                this.flowStartEpoch = this.parseTimestamp(this.record.started_at);
                 this.mediaMetrics = data.media_metrics || {};
 
                 this.actions = data.actions || {};
@@ -657,6 +703,9 @@
                     if (this.record && this.record.recording && this.record.recording.url) {
                         this.prepareWaveform();
                     }
+                    if (this.actions.download_sip_flow) {
+                        this.fetchSipFlow();
+                    }
                 });
                 this.$watch('detailTab', (value) => {
                     if (value !== 'overview') {
@@ -681,10 +730,15 @@
             },
             record: {},
             sipFlowEntries: [],
+            sipMessages: [],
             sipFlowColumns: [],
+            sipFlowLoading: false,
             selectedSipEntry: null,
             flowStartEpoch: null,
             mediaMetrics: {},
+            roleMap: new Map(),
+            rolePortMap: {},
+            rtpStreams: [],
 
             updateUrl: '',
             transcriptUrl: '',
@@ -1295,6 +1349,14 @@
                 if (!value) {
                     return NaN;
                 }
+                let numeric = Number(value);
+                if (!Number.isNaN(numeric)) {
+                    // Check for microseconds (often > 10^14)
+                    if (numeric > 100000000000000) {
+                        return numeric / 1000;
+                    }
+                    return numeric;
+                }
                 const date = new Date(value);
                 if (!Number.isNaN(date.getTime())) {
                     return date.getTime();
@@ -1339,14 +1401,50 @@
                 }
                 const date = new Date(timestamp);
                 const pad = (num, len = 2) => String(num).padStart(len, '0');
-                const year = date.getFullYear();
-                const month = pad(date.getMonth() + 1);
-                const day = pad(date.getDate());
                 const hours = pad(date.getHours());
                 const minutes = pad(date.getMinutes());
                 const seconds = pad(date.getSeconds());
                 const milliseconds = pad(date.getMilliseconds(), 3);
-                return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}.${milliseconds}`;
+                return `${hours}:${minutes}:${seconds}.${milliseconds}`;
+            },
+            getSipInfoClass(value) {
+                const original = (value || '').toString().trim();
+                if (!original) return 'text-slate-500';
+                const firstLine = original.split('\n')[0].trim();
+
+                // Response
+                if (firstLine.startsWith('SIP/2.0')) {
+                    const parts = firstLine.split(' ');
+                    if (parts.length >= 2) {
+                        const code = Number(parts[1]);
+                        if (code >= 100 && code < 200) return 'text-slate-500'; // 1xx
+                        if (code >= 200 && code < 300) return 'text-emerald-600'; // 2xx
+                        if (code >= 300 && code < 400) return 'text-sky-600'; // 3xx
+                        if (code >= 400) return 'text-rose-600'; // 4xx/5xx/6xx
+                    }
+                    return 'text-slate-500';
+                }
+
+                // Request
+                return 'text-indigo-600';
+            },
+            formatSipSummary(value) {
+                const original = (value || '').toString().trim();
+                if (!original) {
+                    return '—';
+                }
+                const firstLine = original.split('\n')[0].trim();
+                // If it's a response (starts with SIP/2.0), show status code and reason
+                if (firstLine.startsWith('SIP/2.0')) {
+                    const parts = firstLine.split(' ');
+                    if (parts.length >= 3) {
+                        return parts.slice(1).join(' '); // "200 OK"
+                    }
+                    return firstLine;
+                }
+                // If it's a request, show method
+                const method = firstLine.split(' ')[0];
+                return method;
             },
             formatSummary(value) {
                 const original = (value || '').toString().trim();
@@ -1998,6 +2096,279 @@
                 } catch (err) {
                     return String(value);
                 }
+            },
+            async fetchSipFlow() {
+                if (!this.actions.download_sip_flow) return;
+                this.sipFlowLoading = true;
+                try {
+                    const response = await fetch(this.actions.download_sip_flow);
+                    if (!response.ok) return;
+                    const data = await response.json();
+
+                    if (data && Array.isArray(data.rtp_streams)) {
+                        this.rtpStreams = data.rtp_streams;
+                    }
+
+                    if (data && Array.isArray(data.flow)) {
+                        this.sipFlowEntries = data.flow.map((entry, index) => ({
+                            ...entry,
+                            sequence: index,
+                            summary: this.formatSummary(entry.raw_message)
+                        }));
+                        if (this.sipFlowEntries.length && Number.isFinite(this.sipFlowEntries[0].timestamp)) {
+                            const firstTs = this.parseTimestamp(this.sipFlowEntries[0].timestamp);
+                            if (Number.isFinite(firstTs) && (!Number.isFinite(this.flowStartEpoch) || firstTs < this.flowStartEpoch)) {
+                                this.flowStartEpoch = firstTs;
+                            }
+                        }
+                        // Filter SIP messages and identify roles
+                        this.sipMessages = this.sipFlowEntries.filter(e =>
+                            e.msg_type === 'Sip' && e.raw_message && e.raw_message.trim()
+                        );
+                        this.identifyRoles();
+                        this.fixResponseDestinations();
+                    }
+                } catch (err) {
+                    console.error('Failed to fetch sip flow', err);
+                } finally {
+                    this.sipFlowLoading = false;
+                }
+            },
+
+            // Identify roles from SIP flow entries
+            identifyRoles() {
+                this.roleMap.clear();
+
+                if (!this.sipFlowEntries || this.sipFlowEntries.length === 0) {
+                    console.warn('No sipFlowEntries found');
+                    return;
+                }
+
+                // Filter only SIP messages
+                const sipMessages = this.sipFlowEntries.filter(e =>
+                    e.msg_type === 'Sip' && e.raw_message && e.raw_message.trim()
+                );
+
+                if (sipMessages.length === 0) {
+                    console.warn('No SIP messages found after filtering');
+                    return;
+                }
+
+                // Find the first INVITE (from Leg A to PBX)
+                const firstInvite = sipMessages.find(e =>
+                    e.raw_message.startsWith('INVITE')
+                );
+
+                if (firstInvite) {
+                    // Leg A is the source of first INVITE
+                    const legAAddr = this.normalizeAddr(firstInvite.src_addr);
+                    const legAPort = this.extractPort(firstInvite.src_addr);
+                    this.roleMap.set(legAAddr, 'leg-a');
+
+                    // PBX is the destination of first INVITE
+                    const pbxAddr = this.normalizeAddr(firstInvite.dst_addr);
+                    const pbxPort = this.extractPort(firstInvite.dst_addr);
+                    this.roleMap.set(pbxAddr, 'pbx');
+
+                    // Find PBX's INVITE to Leg B
+                    const pbxInvite = sipMessages.find(e =>
+                        this.normalizeAddr(e.src_addr) === pbxAddr &&
+                        e.raw_message.startsWith('INVITE') &&
+                        this.normalizeAddr(e.dst_addr) !== legAAddr
+                    );
+
+                    if (pbxInvite) {
+                        const legBAddr = this.normalizeAddr(pbxInvite.dst_addr);
+                        const legBPort = this.extractPort(pbxInvite.dst_addr);
+                        this.roleMap.set(legBAddr, 'leg-b');
+
+                        // Store ports for fallback matching
+                        this.rolePortMap = {
+                            'leg-a': legAPort,
+                            'pbx': pbxPort,
+                            'leg-b': legBPort
+                        };
+                    } else {
+                        this.rolePortMap = {
+                            'leg-a': legAPort,
+                            'pbx': pbxPort
+                        };
+                    }
+                } else {
+                    console.warn('No INVITE message found');
+                }
+            },
+
+            // Fix response destinations that are incorrectly marked as pbx->pbx
+            fixResponseDestinations() {
+                if (!this.sipMessages || this.sipMessages.length === 0) return;
+
+                // Track the last request from each participant
+                const lastRequestFrom = {};
+
+                this.sipMessages.forEach((msg) => {
+                    const srcRole = this.getRole(msg.src_addr);
+                    const dstRole = this.getRole(msg.dst_addr);
+                    const firstLine = msg.raw_message.split('\n')[0].trim();
+
+                    // Check if this is a request (starts with METHOD)
+                    const isRequest = /^[A-Z]+\s+/.test(firstLine);
+
+                    if (isRequest && srcRole && dstRole) {
+                        // Record that srcRole sent a request to dstRole
+                        lastRequestFrom[dstRole] = srcRole;
+                    }
+
+                    // Check if this is a response that goes pbx->pbx
+                    const isResponse = /^SIP\/\d\.\d\s+\d{3}/.test(firstLine);
+                    if (isResponse && srcRole === 'pbx' && dstRole === 'pbx') {
+                        // This is a response from PBX, figure out who should receive it
+                        // It should go back to whoever sent the last request to PBX
+                        const shouldGoTo = lastRequestFrom['pbx'];
+
+                        if (shouldGoTo) {
+                            // Mark this message with corrected destination
+                            msg._correctedDstRole = shouldGoTo;
+                        }
+                    }
+                });
+            },
+
+            // Extract port from address
+            extractPort(addr) {
+                if (!addr) return null;
+                const parts = addr.split('_').pop().split(':');
+                return parts.length > 1 ? parts[1] : null;
+            },
+
+            // Normalize address for comparison (keep IP:port for local scenarios)
+            normalizeAddr(addr) {
+                if (!addr) return '';
+                // Extract IP:port (handle formats like "A_192.168.1.1:5060" or "192.168.1.1:5060")
+                return addr.split('_').pop();
+            },
+
+            // Get role for an address
+            getRole(addr) {
+                const normalized = this.normalizeAddr(addr);
+                let role = this.roleMap.get(normalized);
+
+                // If not found by full address, try to match by port
+                if (!role && this.rolePortMap) {
+                    const port = this.extractPort(addr);
+                    if (port) {
+                        for (const [roleName, rolePort] of Object.entries(this.rolePortMap)) {
+                            if (port === rolePort) {
+                                role = roleName;
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                return role || null;
+            },
+
+            // Extract SIP method from message
+            extractSipMethod(message) {
+                if (!message) return 'Unknown';
+
+                const lines = message.split('\n');
+                const firstLine = lines[0].trim();
+
+                // Request: "METHOD sip:..."
+                const requestMatch = firstLine.match(/^([A-Z]+)\s+/);
+                if (requestMatch) {
+                    return requestMatch[1];
+                }
+
+                // Response: "SIP/2.0 CODE Description"
+                const responseMatch = firstLine.match(/^SIP\/\d\.\d\s+(\d{3})\s*(.*)/);
+                if (responseMatch) {
+                    const code = responseMatch[1];
+                    let desc = responseMatch[2].trim();
+                    // Truncate long descriptions
+                    if (desc.length > 20) {
+                        desc = desc.substring(0, 17) + '...';
+                    }
+                    return `${code} ${desc}`;
+                }
+
+                return firstLine.substring(0, 50);
+            },
+
+            // Get message color class based on SIP method/status
+            getMessageColorClass(message) {
+                if (!message) return 'border-slate-200 bg-slate-50 text-slate-900';
+
+                const firstLine = message.split('\n')[0].trim();
+
+                // INVITE
+                if (firstLine.startsWith('INVITE')) {
+                    return 'border-sky-200 bg-sky-50 text-sky-900';
+                }
+
+                // BYE/CANCEL
+                if (firstLine.startsWith('BYE') || firstLine.startsWith('CANCEL')) {
+                    return 'border-slate-300 bg-slate-100 text-slate-900';
+                }
+
+                // ACK
+                if (firstLine.startsWith('ACK')) {
+                    return 'border-blue-200 bg-blue-50 text-blue-900';
+                }
+
+                // Response codes
+                const responseMatch = firstLine.match(/^SIP\/\d\.\d\s+(\d{3})/);
+                if (responseMatch) {
+                    const code = parseInt(responseMatch[1]);
+                    if (code < 200) return 'border-amber-200 bg-amber-50 text-amber-900'; // 1xx
+                    if (code < 300) return 'border-emerald-200 bg-emerald-50 text-emerald-900'; // 2xx
+                    if (code < 400) return 'border-blue-200 bg-blue-50 text-blue-900'; // 3xx
+                    return 'border-rose-200 bg-rose-50 text-rose-900'; // 4xx/5xx
+                }
+
+                return 'border-indigo-200 bg-indigo-50 text-indigo-900';
+            },
+
+            // Get message color class based on SIP method/status
+            getMessageColorClass(message) {
+                if (!message) return 'border-slate-200 bg-slate-50 text-slate-900';
+
+                const firstLine = message.split('\n')[0].trim();
+
+                // INVITE
+                if (firstLine.startsWith('INVITE')) {
+                    return 'border-sky-200 bg-sky-50 text-sky-900';
+                }
+
+                // BYE/CANCEL
+                if (firstLine.startsWith('BYE') || firstLine.startsWith('CANCEL')) {
+                    return 'border-slate-300 bg-slate-100 text-slate-900';
+                }
+
+                // ACK
+                if (firstLine.startsWith('ACK')) {
+                    return 'border-blue-200 bg-blue-50 text-blue-900';
+                }
+
+                // Response codes
+                const responseMatch = firstLine.match(/^SIP\/\d\.\d\s+(\d{3})/);
+                if (responseMatch) {
+                    const code = parseInt(responseMatch[1]);
+                    if (code < 200) return 'border-amber-200 bg-amber-50 text-amber-900'; // 1xx
+                    if (code < 300) return 'border-emerald-200 bg-emerald-50 text-emerald-900'; // 2xx
+                    if (code < 400) return 'border-blue-200 bg-blue-50 text-blue-900'; // 3xx
+                    return 'border-rose-200 bg-rose-50 text-rose-900'; // 4xx/5xx
+                }
+
+                return 'border-indigo-200 bg-indigo-50 text-indigo-900';
+            },
+
+            // Get participant label
+            getParticipantLabel(role) {
+                const participant = this.participants.find(p => p.role === role);
+                return participant?.address || (role === 'caller' ? 'Caller' : 'Callee');
             },
         }));
     });

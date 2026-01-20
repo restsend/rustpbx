@@ -1,14 +1,11 @@
-use self::sipflow::SipMessageItem;
 use crate::config::{CallRecordConfig, S3Vendor};
 use anyhow::{Error, Result};
 use futures::stream::{FuturesUnordered, StreamExt};
 use reqwest;
 use sea_orm::prelude::DateTimeUtc;
 use serde::{Deserialize, Serialize};
-use serde_json::{Map as JsonMap, Value};
-use std::{
-    collections::HashMap, future::Future, mem, path::Path, pin::Pin, sync::Arc, time::Instant,
-};
+use serde_json::Value;
+use std::{collections::HashMap, future::Future, path::Path, pin::Pin, sync::Arc, time::Instant};
 use tokio::{
     fs::{self, File},
     io::AsyncWriteExt,
@@ -79,8 +76,6 @@ pub struct CallRecord {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     #[serde(default)]
     pub recorder: Vec<CallRecordMedia>,
-    #[serde(skip_serializing, skip_deserializing, default)]
-    pub sip_flows: HashMap<String, Vec<SipMessageItem>>,
     #[serde(skip_serializing_if = "HashMap::is_empty", default)]
     pub sip_leg_roles: HashMap<String, String>,
     #[serde(skip_serializing, skip_deserializing, default)]
@@ -474,11 +469,10 @@ impl CallRecordManager {
     ) -> Pin<Box<dyn Future<Output = CallRecordSaveResult> + Send>> {
         Box::pin(async move {
             let mut record = record;
-            let sip_flows = mem::take(&mut record.sip_flows);
             let start_time = Instant::now();
             let result = match config.as_ref() {
                 CallRecordConfig::Local { .. } => {
-                    Self::save_local_record(formatter.clone(), &mut record, sip_flows).await
+                    Self::save_local_record(formatter.clone(), &mut record).await
                 }
                 CallRecordConfig::S3 {
                     vendor,
@@ -502,7 +496,6 @@ impl CallRecordManager {
                         with_media,
                         keep_media_copy,
                         &record,
-                        sip_flows,
                     )
                     .await
                 }
@@ -519,7 +512,6 @@ impl CallRecordManager {
                         with_media,
                         keep_media_copy,
                         &record,
-                        sip_flows,
                     )
                     .await
                 }
@@ -542,79 +534,21 @@ impl CallRecordManager {
     async fn save_local_record(
         formatter: Arc<dyn CallRecordFormatter>,
         record: &mut CallRecord,
-        sip_flows: HashMap<String, Vec<SipMessageItem>>,
     ) -> Result<String> {
-        let mut recorded_files = Vec::new();
-
-        for (leg, entries) in sip_flows.into_iter() {
-            if entries.is_empty() {
-                continue;
-            }
-            let file_path = formatter.format_sip_flow_path(record, &leg);
-            if let Some(parent) = Path::new(&file_path).parent() {
-                fs::create_dir_all(parent).await?;
-            }
-            let mut file = File::create(&file_path).await.map_err(|e| {
-                anyhow::anyhow!("Failed to create SIP flow file {}: {}", file_path, e)
-            })?;
-            for entry in entries {
-                let line = serde_json::to_string(&entry)?;
-                file.write_all(line.as_bytes()).await?;
-                file.write_all(b"\n").await?;
-            }
-            file.flush().await?;
-            recorded_files.push((leg, file_path));
-        }
-
-        if recorded_files.is_empty() {
-            Self::remove_sip_flow_metadata(record);
-        } else {
-            Self::attach_sip_flow_metadata(record, &recorded_files);
-        }
-
         let file_content = formatter.format(record)?;
         let file_name = formatter.format_file_name(record);
+
+        // Ensure parent directory exists
+        if let Some(parent) = Path::new(&file_name).parent() {
+            fs::create_dir_all(parent).await?;
+        }
+
         let mut file = File::create(&file_name).await.map_err(|e| {
             anyhow::anyhow!("Failed to create call record file {}: {}", file_name, e)
         })?;
         file.write_all(file_content.as_bytes()).await?;
         file.flush().await?;
         Ok(file_name.to_string())
-    }
-
-    fn attach_sip_flow_metadata(record: &mut CallRecord, files: &[(String, String)]) {
-        let mut extras = record
-            .extensions
-            .get::<CallRecordExtras>()
-            .cloned()
-            .unwrap_or_default();
-        let entries: Vec<Value> = files
-            .iter()
-            .map(|(leg, path)| {
-                let mut entry = JsonMap::new();
-                entry.insert("leg".to_string(), Value::String(leg.clone()));
-                entry.insert("path".to_string(), Value::String(path.clone()));
-                if let Some(role) = record.sip_leg_roles.get(leg) {
-                    entry.insert("role".to_string(), Value::String(role.clone()));
-                }
-                Value::Object(entry)
-            })
-            .collect();
-        extras
-            .0
-            .insert("sip_flow_files".to_string(), Value::Array(entries));
-        record.extensions.insert(extras);
-    }
-
-    fn remove_sip_flow_metadata(record: &mut CallRecord) {
-        if let Some(mut extras) = record.extensions.get::<CallRecordExtras>().cloned() {
-            extras.0.remove("sip_flow_files");
-            if extras.0.is_empty() {
-                record.extensions.remove::<CallRecordExtras>();
-            } else {
-                record.extensions.insert(extras);
-            }
-        }
     }
 
     async fn save_with_http(
@@ -624,7 +558,6 @@ impl CallRecordManager {
         with_media: &Option<bool>,
         keep_media_copy: &Option<bool>,
         record: &CallRecord,
-        sip_flows: HashMap<String, Vec<SipMessageItem>>,
     ) -> Result<String> {
         let client = reqwest::Client::new();
         // Serialize call record to JSON
@@ -667,30 +600,6 @@ impl CallRecordManager {
                 }
             }
         }
-
-        if !sip_flows.is_empty() {
-            // Process SIP flows
-            for (leg, entries) in sip_flows {
-                if entries.is_empty() {
-                    continue;
-                }
-
-                let mut buffer = Vec::new();
-                for entry in entries {
-                    let line = serde_json::to_vec(&entry)?;
-                    buffer.extend_from_slice(&line);
-                    buffer.push(b'\n');
-                }
-
-                let file_name = default_sip_flow_file_name(record, &leg);
-                let field_name = format!("sip_flow_{}", sanitize_filename_component(&leg));
-                let part = reqwest::multipart::Part::bytes(buffer)
-                    .file_name(file_name)
-                    .mime_str("application/x-ndjson")?;
-                form = form.part(field_name, part);
-            }
-        }
-
         let mut request = client.post(url).multipart(form);
         if let Some(headers_map) = headers {
             for (key, value) in headers_map {
@@ -730,7 +639,6 @@ impl CallRecordManager {
         with_media: &Option<bool>,
         keep_media_copy: &Option<bool>,
         record: &CallRecord,
-        sip_flows: HashMap<String, Vec<SipMessageItem>>,
     ) -> Result<String> {
         let start_time = Instant::now();
         let storage_config = crate::storage::StorageConfig::S3 {
@@ -748,7 +656,7 @@ impl CallRecordManager {
         let call_log_json = formatter.format(record)?;
         // Upload call log JSON
         let filename = formatter.format_file_name(record);
-        let mut local_files = vec![filename.clone()];
+        let local_files = vec![filename.clone()];
         let buf_size = call_log_json.len();
         match storage.write(&filename, call_log_json.into()).await {
             Ok(_) => {
@@ -759,35 +667,6 @@ impl CallRecordManager {
             }
             Err(e) => {
                 warn!(filename, "failed to upload call record: {}", e);
-            }
-        }
-        if !sip_flows.is_empty() {
-            for (leg, entries) in sip_flows {
-                if entries.is_empty() {
-                    continue;
-                }
-                let start_time = Instant::now();
-                let file_name = formatter.format_sip_flow_path(record, &leg);
-                local_files.push(file_name.clone());
-
-                let mut buffer = Vec::new();
-                for entry in entries {
-                    let line = serde_json::to_vec(&entry)?;
-                    buffer.extend_from_slice(&line);
-                    buffer.push(b'\n');
-                }
-                let buf_size = buffer.len();
-                match storage.write(&file_name, buffer.into()).await {
-                    Ok(_) => {
-                        info!(
-                            elapsed = start_time.elapsed().as_secs_f64(),
-                            file_name, buf_size, "upload sip flow file"
-                        );
-                    }
-                    Err(e) => {
-                        warn!(file_name, "failed to upload sip flow file: {}", e);
-                    }
-                }
             }
         }
         // Upload media files if with_media is true

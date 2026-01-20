@@ -2,7 +2,7 @@ use crate::{
     call::{CalleeDisplayName, TransactionCookie, TrunkContext},
     callrecord::{
         CallRecord, CallRecordExtras, CallRecordHangupMessage, CallRecordHangupReason,
-        CallRecordMedia, CallRecordSender, sipflow::SipMessageItem,
+        CallRecordMedia, CallRecordSender,
     },
     models::call_record::{CallRecordPersistArgs, extract_sip_username},
     proxy::{
@@ -158,7 +158,6 @@ impl CallReporter {
         }
         extras_map.insert("rewrite".to_string(), Value::Object(rewrite_payload));
 
-        let mut sip_flows_map: HashMap<String, Vec<SipMessageItem>> = HashMap::new();
         let server_dialog_id = snapshot.server_dialog_id.clone();
         let mut call_ids: HashSet<String> = HashSet::new();
         call_ids.insert(server_dialog_id.call_id.clone());
@@ -167,28 +166,19 @@ impl CallReporter {
             call_ids.insert(dialog_id.call_id.clone());
         }
 
-        let mut sip_leg_roles: HashMap<String, String> = HashMap::new();
+        let mut sip_leg_roles = HashMap::new();
         sip_leg_roles.insert(
             crate::utils::sanitize_id(&server_dialog_id.call_id),
-            "primary".to_string(),
+            "caller".to_string(),
         );
         for dialog_id in &snapshot.callee_dialogs {
-            sip_leg_roles
-                .entry(crate::utils::sanitize_id(&dialog_id.call_id))
-                .or_insert_with(|| "b2bua".to_string());
+            sip_leg_roles.insert(
+                crate::utils::sanitize_id(&dialog_id.call_id),
+                "callee".to_string(),
+            );
         }
 
-        // Only collect SIP flows if enabled in dialplan
-        if self.context.dialplan.enable_sipflow {
-            for call_id in &call_ids {
-                if let Some(items) = self.server.drain_sip_flow(call_id) {
-                    if !items.is_empty() {
-                        sip_flows_map.insert(crate::utils::sanitize_id(call_id), items);
-                    }
-                }
-            }
-        }
-
+        let has_sipflow_backend = self.server.sip_flow.as_ref().is_some();
         let direction = self.context.dialplan.direction.to_string();
 
         // Helper to resolve call status (copied from proxy_call.rs logic)
@@ -216,7 +206,8 @@ impl CallReporter {
         };
 
         let mut recorder = Vec::new();
-        if self.context.dialplan.recording.enabled {
+
+        if self.context.dialplan.recording.enabled && !has_sipflow_backend {
             if let Some(recorder_config) = self.context.dialplan.recording.option.as_ref() {
                 if !recorder_config.recorder_file.is_empty() {
                     let size = fs::metadata(&recorder_config.recorder_file)
@@ -269,7 +260,6 @@ impl CallReporter {
             hangup_reason: hangup_reason.clone(),
             hangup_messages: hangup_messages.clone(),
             recorder,
-            sip_flows: sip_flows_map,
             sip_leg_roles,
             extensions: snapshot.extensions,
         };

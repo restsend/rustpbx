@@ -13,7 +13,11 @@ RustPBX is a high-performance, secure software-defined PBX (Private Branch Excha
 - **Full SIP Stack**: Complete SIP proxy server with registration, authentication, and call routing
 - **Media Proxy**: Advanced RTP/RTCP media proxying with NAT traversal support
 - **Multi-Transport**: UDP, TCP, and WebSocket transport support
-- **Call Recording**: Built-in call recording with multiple storage backends
+- **SipFlow Recording**: 🔥 **Advanced unified SIP+RTP recording system** with superior I/O performance
+  - Two backends: Local (file system + SQLite with date-based organization), Remote (distributed)
+  - Open-write-close pattern to avoid file descriptor exhaustion
+  - Query API for on-demand playback and analysis
+- **Call Recording**: Traditional call recording with multiple storage backends (legacy)
 - **User Management**: Flexible user authentication and registration system
 
 ## 📖 Documentation
@@ -21,6 +25,39 @@ RustPBX is a high-performance, secure software-defined PBX (Private Branch Excha
 For detailed configuration and usage instructions, please refer to:
 
 - [**Configuration Guide**](docs/configuration.md): Complete reference for platform settings, SIP proxy, auth, routing, and more.
+- [**SipFlow Configuration**](docs/sipflow-config.md): Detailed guide for the unified SIP+RTP recording system.
+
+### 🎯 SipFlow - Advanced Recording System
+
+SipFlow is a next-generation unified SIP+RTP recording system that provides superior I/O performance compared to traditional call recording:
+
+**Key Advantages:**
+- **Better I/O Performance**: Open-write-close pattern avoids file descriptor exhaustion in high-concurrency scenarios
+- **Unified Storage**: SIP messages and RTP packets stored together for complete call analysis
+- **Date-Based Organization**: Automatic YYYYMMDD/HH directory structure for efficient archival
+- **Flexible Backends**: Choose between Local (file system + SQLite) or Remote (distributed) based on your needs
+- **Query API**: On-demand media generation from RTP packets, saving storage space
+
+**Comparison with Traditional Call Recording:**
+
+| Feature      | SipFlow (New)                | Call Recording (Legacy) |
+| ------------ | ---------------------------- | ----------------------- |
+| I/O Pattern  | Open-write-close             | Keep file handles open  |
+| Scalability  | High (1000+ concurrent)      | Limited by FD limits    |
+| SIP Messages | ✅ Full capture               | ❌ Not included          |
+| RTP Packets  | ✅ Captured                   | ❌ Only audio            |
+| Query Speed  | Fast (indexed)               | Slow (file scan)        |
+| Storage      | Efficient (on-demand decode) | Full WAV files          |
+
+**Configuration Example:**
+```toml
+[sipflow]
+type = "local"         # Local storage with SQLite indexing
+root = "./config/cdr"
+subdirs = "hourly"     # "hourly" | "daily" | "none" - organize by hour for better archival
+```
+
+See [docs/sipflow-config.md](docs/sipflow-config.md) for complete configuration guide.
 
 ## 🐳 Docker Deployment
 
@@ -67,6 +104,12 @@ For detailed configuration and usage instructions, please refer to:
     users = [
         { username = "1001", password = "password" }
     ]
+
+    # SipFlow: Unified SIP+RTP recording (recommended for better I/O performance)
+    [sipflow]
+    type = "local"         # "local" (file system + SQLite) or "remote" (distributed)
+    root = "./config/cdr"
+    subdirs = "hourly"     # "hourly" | "daily" | "none"
     ```
 
     > See the [Configuration Guide](docs/configuration.md) for all available options.
@@ -192,6 +235,13 @@ cargo build --release
     [callrecord]
     type = "local"
     root = "./config/cdr"
+
+    # SipFlow: Advanced unified SIP+RTP recording (recommended)
+    # Better I/O performance with date-based file organization
+    [sipflow]
+    type = "local"         # "local" (file system + SQLite) | "remote" (distributed)
+    root = "./config/cdr"
+    subdirs = "hourly"     # "hourly" | "daily" | "none"
     
     EOF
     ```

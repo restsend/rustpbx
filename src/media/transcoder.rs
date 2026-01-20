@@ -64,6 +64,8 @@ impl Transcoder {
             sequence_number: Some(output_sequence),
             payload_type: Some(self.target.payload_type()),
             marker: frame.marker,
+            raw_packet: None,
+            source_addr: frame.source_addr,
         }
     }
 

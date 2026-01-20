@@ -81,6 +81,7 @@ impl UserBackend for DbBackend {
         &self,
         username: &str,
         realm: Option<&str>,
+        _request: Option<&rsip::Request>,
     ) -> Result<Option<SipUser>, AuthError> {
         // Build SELECT clause with optional columns
         let mut select_columns = vec![

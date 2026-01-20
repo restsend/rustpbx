@@ -166,6 +166,8 @@ mod recorder_advanced_tests {
             payload_type: Some(0),
             clock_rate: 8000,
             marker: false,
+            raw_packet: None,
+            source_addr: None,
         };
 
         let frame_b = AudioFrame {
@@ -175,6 +177,8 @@ mod recorder_advanced_tests {
             payload_type: Some(0),
             clock_rate: 8000,
             marker: false,
+            raw_packet: None,
+            source_addr: None,
         };
 
         // Write samples from both legs
@@ -214,6 +218,8 @@ mod recorder_advanced_tests {
             payload_type: Some(0),
             clock_rate: 8000,
             marker: false,
+            raw_packet: None,
+            source_addr: None,
         };
 
         recorder
@@ -377,6 +383,8 @@ mod recorder_advanced_tests {
             payload_type: Some(8), // PCMA
             clock_rate: 8000,
             marker: false,
+            raw_packet: None,
+            source_addr: None,
         };
 
         recorder
@@ -406,6 +414,8 @@ mod recorder_advanced_tests {
             payload_type: Some(0),
             clock_rate: 8000,
             marker: false,
+            raw_packet: None,
+            source_addr: None,
         };
 
         // Leg B starts at 40ms (320 samples later)
@@ -416,6 +426,8 @@ mod recorder_advanced_tests {
             payload_type: Some(0),
             clock_rate: 8000,
             marker: false,
+            raw_packet: None,
+            source_addr: None,
         };
 
         recorder
@@ -448,6 +460,8 @@ mod recorder_advanced_tests {
             payload_type: Some(18),
             clock_rate: 8000,
             marker: false,
+            raw_packet: None,
+            source_addr: None,
         };
 
         let frame_b = AudioFrame {
@@ -457,6 +471,8 @@ mod recorder_advanced_tests {
             payload_type: Some(18),
             clock_rate: 8000,
             marker: false,
+            raw_packet: None,
+            source_addr: None,
         };
 
         recorder
@@ -533,6 +549,8 @@ mod recorder_advanced_tests {
                 sequence_number: None,
                 clock_rate: 8000,
                 marker: false,
+                raw_packet: None,
+                source_addr: None,
             });
             recorder.write_sample(Leg::A, &frame, None).ok();
         }
@@ -547,6 +565,8 @@ mod recorder_advanced_tests {
                 sequence_number: None,
                 clock_rate: 8000,
                 marker: false,
+                raw_packet: None,
+                source_addr: None,
             });
             recorder.write_sample(Leg::B, &frame, None).ok();
         }
@@ -587,6 +607,8 @@ mod recorder_advanced_tests {
             sequence_number: None,
             clock_rate: 8000,
             marker: false,
+            raw_packet: None,
+            source_addr: None,
         });
 
         recorder.write_sample(Leg::A, &frame, Some(101)).ok();

@@ -80,6 +80,25 @@ auto_start = true
 type = "local"
 root = "./config/cdr"
 
+# SipFlow: Unified SIP+RTP recording system
+[sipflow]
+type = "local"
+root = "./config/cdr"
+subdirs = "hourly"  # "none" | "daily" | "hourly"
+
+# Local: SQLite + structured file (default settings)
+# type = "local"
+# root = "./config/sipflow"
+# flush_count = 1000
+# flush_interval_secs = 5
+# id_cache_size = 8192
+
+# Remote
+# type = "remote"
+# udp_addr = "192.168.1.100:3000"
+# http_addr = "http://192.168.1.100:3001"
+# timeout_secs = 10
+
 
 # [proxy.trunks.wuhoo]
 # dest = "sip:123.456.789.00:1234"

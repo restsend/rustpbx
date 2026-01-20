@@ -5,21 +5,21 @@ use super::{
     user::{UserBackend, build_user_backend},
 };
 use crate::{
-    call::TransactionCookie,
-    call::policy::FrequencyLimiter,
+    call::{TransactionCookie, policy::FrequencyLimiter},
     callrecord::{
         CallRecordSender,
-        sipflow::{SipFlow, SipFlowBuilder, SipMessageItem},
+        sipflow::{SipFlow, SipFlowBuilder},
     },
-    config::{ProxyConfig, RtpConfig},
-    proxy::locator::{DialogTargetLocator, LocatorEventSender, TransportInspectorLocator},
+    config::{ProxyConfig, RtpConfig, SipFlowConfig},
     proxy::{
         FnCreateRouteInvite,
         active_call_registry::ActiveProxyCallRegistry,
         auth::AuthBackend,
         call::{CallRouter, DialplanInspector},
+        locator::{DialogTargetLocator, LocatorEventSender, TransportInspectorLocator},
         presence::PresenceManager,
     },
+    sipflow::backend::create_backend,
 };
 use anyhow::{Result, anyhow};
 use rsip::prelude::{HeadersExt, UntypedHeader};
@@ -105,6 +105,7 @@ pub struct SipServerBuilder {
     frequency_limiter: Option<Arc<dyn FrequencyLimiter>>,
     call_record_hooks: Vec<Box<dyn crate::callrecord::CallRecordHook>>,
     storage: Option<crate::storage::Storage>,
+    sipflow_config: Option<SipFlowConfig>,
     no_bind: bool,
 }
 
@@ -130,8 +131,14 @@ impl SipServerBuilder {
             frequency_limiter: None,
             call_record_hooks: Vec::new(),
             storage: None,
+            sipflow_config: None,
             no_bind: false,
         }
+    }
+
+    pub fn with_sipflow_config(mut self, config: Option<SipFlowConfig>) -> Self {
+        self.sipflow_config = config;
+        self
     }
 
     pub fn with_no_bind(mut self, no_bind: bool) -> Self {
@@ -429,7 +436,18 @@ impl SipServerBuilder {
             .with_option(endpoint_option)
             .with_transport_layer(transport_layer);
 
-        let mut sip_flow_builder = SipFlowBuilder::new().with_max_items(config.sip_flow_max_items);
+        let mut sip_flow_builder = SipFlowBuilder::new();
+
+        // Create sipflow backend if configured
+        if let Some(sipflow_config) = &self.sipflow_config {
+            if let Ok(backend) = create_backend(sipflow_config) {
+                info!("Sipflow backend initialized: {:?}", sipflow_config);
+                sip_flow_builder = sip_flow_builder.with_backend(Arc::from(backend));
+            } else {
+                warn!("Failed to create sipflow backend");
+            }
+        }
+
         if let Some(inspector) = self.message_inspector {
             sip_flow_builder = sip_flow_builder.register_inspector(inspector);
         }
@@ -777,14 +795,6 @@ impl Drop for SipServerInner {
 }
 
 impl SipServerInner {
-    pub fn drain_sip_flow(&self, call_id: &str) -> Option<Vec<SipMessageItem>> {
-        self.sip_flow.as_ref().and_then(|flow| flow.take(call_id))
-    }
-
-    pub fn sip_flow_snapshot(&self, call_id: &str) -> Option<Vec<SipMessageItem>> {
-        self.sip_flow.as_ref().and_then(|flow| flow.get(call_id))
-    }
-
     pub fn default_contact_uri(&self) -> Option<rsip::Uri> {
         let addr = self.endpoint.get_addrs().first()?.clone();
         let mut params = Vec::new();
