@@ -56,8 +56,8 @@ chrono-tz = "0.10.4"
 rsipstack = "0.4.3"
 #rsipstack = { path = "../rsipstack" }
 audio-codec = { version = "0.3.30", default-features = false }
-rustrtc = "0.3.2"
-# rustrtc = { path = "../rustrtc" }
+rustrtc = "0.3.4"
+#rustrtc = { path = "../rustrtc" }
 rsip = "0.4.0"
 reqwest = { version = "0.13.1", features = [
     "json",

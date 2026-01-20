@@ -2,7 +2,7 @@ use rsipstack::dialog::DialogId;
 use rsipstack::dialog::dialog::{Dialog, DialogState, DialogStateReceiver};
 use rsipstack::dialog::dialog_layer::DialogLayer;
 use std::sync::Arc;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 pub struct DialogStateReceiverGuard {
     pub(super) dialog_layer: Arc<DialogLayer>,
@@ -92,6 +92,7 @@ impl Drop for ServerDialogGuard {
     fn drop(&mut self) {
         let dlg = match self.dialog_layer.get_dialog(&self.id) {
             Some(dlg) => {
+                debug!(%self.id, state = %dlg.state(), "server dialog removed on drop");
                 self.dialog_layer.remove_dialog(&self.id);
                 match dlg {
                     Dialog::ServerInvite(dlg) => dlg,

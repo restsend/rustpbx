@@ -63,6 +63,7 @@ impl Transcoder {
             data: encoded_data.into(),
             sequence_number: Some(output_sequence),
             payload_type: Some(self.target.payload_type()),
+            marker: frame.marker,
         }
     }
 

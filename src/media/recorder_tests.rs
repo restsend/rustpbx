@@ -165,6 +165,7 @@ mod recorder_advanced_tests {
             sequence_number: Some(1),
             payload_type: Some(0),
             clock_rate: 8000,
+            marker: false,
         };
 
         let frame_b = AudioFrame {
@@ -173,6 +174,7 @@ mod recorder_advanced_tests {
             sequence_number: Some(1),
             payload_type: Some(0),
             clock_rate: 8000,
+            marker: false,
         };
 
         // Write samples from both legs
@@ -211,6 +213,7 @@ mod recorder_advanced_tests {
             sequence_number: Some(1),
             payload_type: Some(0),
             clock_rate: 8000,
+            marker: false,
         };
 
         recorder
@@ -373,6 +376,7 @@ mod recorder_advanced_tests {
             sequence_number: Some(1),
             payload_type: Some(8), // PCMA
             clock_rate: 8000,
+            marker: false,
         };
 
         recorder
@@ -401,6 +405,7 @@ mod recorder_advanced_tests {
             sequence_number: Some(1),
             payload_type: Some(0),
             clock_rate: 8000,
+            marker: false,
         };
 
         // Leg B starts at 40ms (320 samples later)
@@ -410,6 +415,7 @@ mod recorder_advanced_tests {
             sequence_number: Some(1),
             payload_type: Some(0),
             clock_rate: 8000,
+            marker: false,
         };
 
         recorder
@@ -441,6 +447,7 @@ mod recorder_advanced_tests {
             sequence_number: Some(1),
             payload_type: Some(18),
             clock_rate: 8000,
+            marker: false,
         };
 
         let frame_b = AudioFrame {
@@ -449,6 +456,7 @@ mod recorder_advanced_tests {
             sequence_number: Some(1),
             payload_type: Some(18),
             clock_rate: 8000,
+            marker: false,
         };
 
         recorder
@@ -474,7 +482,11 @@ mod recorder_advanced_tests {
         assert!(recorder.is_ok());
 
         let mut rec = recorder.unwrap();
-        assert_eq!(rec.codec, CodecType::PCMU, "Opus should be converted to PCMU");
+        assert_eq!(
+            rec.codec,
+            CodecType::PCMU,
+            "Opus should be converted to PCMU"
+        );
 
         rec.finalize().ok();
         let _ = std::fs::remove_file(temp_path);
@@ -520,6 +532,7 @@ mod recorder_advanced_tests {
                 payload_type: Some(0),
                 sequence_number: None,
                 clock_rate: 8000,
+                marker: false,
             });
             recorder.write_sample(Leg::A, &frame, None).ok();
         }
@@ -533,6 +546,7 @@ mod recorder_advanced_tests {
                 payload_type: Some(0),
                 sequence_number: None,
                 clock_rate: 8000,
+                marker: false,
             });
             recorder.write_sample(Leg::B, &frame, None).ok();
         }
@@ -541,7 +555,10 @@ mod recorder_advanced_tests {
 
         // Verify file exists and has content
         let metadata = std::fs::metadata(temp_path).unwrap();
-        assert!(metadata.len() > 44, "WAV file should have more than just header");
+        assert!(
+            metadata.len() > 44,
+            "WAV file should have more than just header"
+        );
 
         let _ = std::fs::remove_file(temp_path);
     }
@@ -569,15 +586,18 @@ mod recorder_advanced_tests {
             payload_type: Some(101), // DTMF payload type
             sequence_number: None,
             clock_rate: 8000,
+            marker: false,
         });
 
         recorder.write_sample(Leg::A, &frame, Some(101)).ok();
         recorder.finalize().ok();
 
         // Verify file was created
-        assert!(std::path::Path::new(temp_path).exists(), "DTMF recording should create file");
+        assert!(
+            std::path::Path::new(temp_path).exists(),
+            "DTMF recording should create file"
+        );
 
         let _ = std::fs::remove_file(temp_path);
     }
 }
-
