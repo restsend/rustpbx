@@ -7,6 +7,7 @@ use crate::{
     proxy::server::SipServerRef,
 };
 use anyhow::Result;
+use rsip::prelude::{HeadersExt, UntypedHeader};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio_util::sync::CancellationToken;
@@ -108,13 +109,17 @@ impl CallSessionBuilder {
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
         let original_caller = dialplan
-            .caller
-            .as_ref()
-            .map(|c| c.to_string())
+            .original
+            .from_header()
+            .ok()
+            .map(|t| t.value().to_string())
             .unwrap_or_default();
+
         let original_callee = dialplan
-            .first_target()
-            .map(|location| location.aor.to_string())
+            .original
+            .to_header()
+            .ok()
+            .map(|t| t.value().to_string())
             .unwrap_or_default();
 
         let context = CallContext {

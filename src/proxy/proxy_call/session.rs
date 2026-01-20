@@ -1286,17 +1286,6 @@ impl CallSession {
                                 self.recorder_option.clone(),
                             );
 
-                            // Create bridge during early media, but DON'T start it yet
-                            // We'll start it in accept_call when WebRTC connections are ready
-                            // if let Err(e) = bridge.start().await {
-                            //     warn!("Failed to start media bridge during early media: {}", e);
-                            // } else {
-                            //     info!(
-                            //         session_id = %self.context.session_id,
-                            //         "Media bridge started successfully during early media"
-                            //     );
-                            // }
-
                             self.media_bridge = Some(bridge);
                         }
 

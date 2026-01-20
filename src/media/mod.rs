@@ -157,47 +157,23 @@ impl MediaStream {
     }
 }
 
-pub struct MediaTrack {
+pub struct RtcTrack {
     track_id: String,
-    rtp_start_port: Option<u16>,
-    rtp_end_port: Option<u16>,
-    external_ip: Option<String>,
     pc: PeerConnection,
-    mode: TransportMode,
     pub recorder_option: Option<RecorderOption>,
     rtp_map: Vec<negotiate::CodecInfo>,
 }
 
-impl MediaTrack {
+impl RtcTrack {
     pub fn new(
-        _cancel_token: CancellationToken,
-        track_id: String,
-        ice_servers: Vec<IceServer>,
-    ) -> Self {
-        Self::new_with_mode(_cancel_token, track_id, ice_servers, TransportMode::WebRtc)
-    }
-
-    pub fn new_with_mode(
-        _cancel_token: CancellationToken,
         track_id: String,
         ice_servers: Vec<IceServer>,
         mode: TransportMode,
+        external_ip: Option<String>,
+        rtp_start_port: Option<u16>,
+        rtp_end_port: Option<u16>,
+        rtp_map: Vec<negotiate::CodecInfo>,
     ) -> Self {
-        let rtp_map = vec![
-            negotiate::CodecInfo {
-                payload_type: 0,
-                codec: CodecType::PCMU,
-                clock_rate: 8000,
-                channels: 1,
-            },
-            negotiate::CodecInfo {
-                payload_type: 8,
-                codec: CodecType::PCMA,
-                clock_rate: 8000,
-                channels: 1,
-            },
-        ];
-
         let ice_servers_config: Vec<IceServer> = ice_servers
             .iter()
             .map(|s| IceServer {
@@ -210,7 +186,10 @@ impl MediaTrack {
 
         let config = RtcConfiguration {
             ice_servers: ice_servers_config,
-            transport_mode: mode.clone(),
+            transport_mode: mode,
+            rtp_start_port,
+            rtp_end_port,
+            external_ip,
             ..Default::default()
         };
 
@@ -229,11 +208,7 @@ impl MediaTrack {
 
         Self {
             track_id,
-            rtp_start_port: None,
-            rtp_end_port: None,
-            external_ip: None,
             pc,
-            mode,
             recorder_option: None,
             rtp_map,
         }
@@ -241,40 +216,6 @@ impl MediaTrack {
 
     pub fn with_recorder_option(mut self, option: RecorderOption) -> Self {
         self.recorder_option = Some(option);
-        self
-    }
-
-    pub fn with_rtp_range(mut self, start: u16, end: u16) -> Self {
-        self.rtp_start_port = Some(start);
-        self.rtp_end_port = Some(end);
-        self
-    }
-
-    pub fn with_external_ip(mut self, ip: String) -> Self {
-        self.external_ip = Some(ip);
-        self
-    }
-
-    pub fn with_mode(mut self, mode: TransportMode) -> Self {
-        self.mode = mode;
-        self
-    }
-
-    pub fn with_codec_info(mut self, codecs: Vec<negotiate::CodecInfo>) -> Self {
-        self.rtp_map = codecs;
-        self
-    }
-
-    pub fn with_codec_preference(mut self, codecs: Vec<CodecType>) -> Self {
-        self.rtp_map = codecs
-            .into_iter()
-            .map(|c| negotiate::CodecInfo {
-                payload_type: c.payload_type(),
-                clock_rate: c.clock_rate(),
-                channels: c.channels() as u16,
-                codec: c,
-            })
-            .collect();
         self
     }
 
@@ -337,7 +278,7 @@ impl MediaTrack {
 }
 
 #[async_trait]
-impl Track for MediaTrack {
+impl Track for RtcTrack {
     fn id(&self) -> &str {
         &self.track_id
     }
@@ -381,18 +322,6 @@ impl Track for MediaTrack {
 
     async fn get_peer_connection(&self) -> Option<PeerConnection> {
         Some(self.pc.clone())
-    }
-
-    fn set_codec_preference(&mut self, codecs: Vec<CodecType>) {
-        self.rtp_map = codecs
-            .into_iter()
-            .map(|c| negotiate::CodecInfo {
-                payload_type: c.payload_type(),
-                clock_rate: c.clock_rate(),
-                channels: c.channels() as u16,
-                codec: c,
-            })
-            .collect();
     }
 }
 
@@ -445,7 +374,6 @@ impl RtpTrackBuilder {
         self
     }
     pub fn with_rtp_range(mut self, start: u16, end: u16) -> Self {
-        // This method is intentionally left blank as RTP range is not stored in the builder.
         self.rtp_start_port = Some(start);
         self.rtp_end_port = Some(end);
         self
@@ -479,28 +407,16 @@ impl RtpTrackBuilder {
         self
     }
 
-    pub fn build(self) -> MediaTrack {
-        let track = MediaTrack::new_with_mode(
-            self.cancel_token.unwrap_or_else(CancellationToken::new),
+    pub fn build(self) -> RtcTrack {
+        RtcTrack::new(
             self.track_id,
             Vec::new(),
             self.mode,
+            self.external_ip,
+            self.rtp_start_port,
+            self.rtp_end_port,
+            self.rtp_map,
         )
-        .with_codec_info(self.rtp_map);
-
-        let track = if let Some(ip) = self.external_ip {
-            track.with_external_ip(ip)
-        } else {
-            track
-        };
-
-        let track = if let (Some(start), Some(end)) = (self.rtp_start_port, self.rtp_end_port) {
-            track.with_rtp_range(start, end)
-        } else {
-            track
-        };
-
-        track
     }
 }
 
