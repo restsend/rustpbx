@@ -1,4 +1,7 @@
-use crate::config::{CallRecordConfig, S3Vendor};
+use crate::{
+    config::{CallRecordConfig, S3Vendor},
+    utils::sanitize_id,
+};
 use anyhow::{Error, Result};
 use futures::stream::{FuturesUnordered, StreamExt};
 use reqwest;
@@ -207,41 +210,12 @@ pub async fn write_call_record_event<T: Serialize>(
     }
 }
 
-fn sanitize_filename_component(value: &str) -> String {
-    let sanitized: String = value
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
-        .collect();
-    if sanitized.is_empty() {
-        "leg".to_string()
-    } else {
-        sanitized
-    }
-}
-
 pub fn default_cdr_file_name(record: &CallRecord) -> String {
-    format!(
-        "{}_{}.json",
-        record.start_time.format("%Y%m%d-%H%M%S"),
-        crate::utils::sanitize_id(&record.call_id)
-    )
-}
-
-pub fn default_sip_flow_file_name(record: &CallRecord, leg: &str) -> String {
-    format!(
-        "{}_{}_{}.sipflow.jsonl",
-        record.start_time.format("%Y%m%d-%H%M%S"),
-        crate::utils::sanitize_id(&record.call_id),
-        sanitize_filename_component(leg)
-    )
+    format!("{}.json", sanitize_id(&record.call_id))
 }
 
 pub fn default_transcript_file_name(record: &CallRecord) -> String {
-    format!(
-        "{}_{}.transcript.json",
-        record.start_time.format("%Y%m%d-%H%M%S"),
-        crate::utils::sanitize_id(&record.call_id)
-    )
+    format!("{}.transcript.json", sanitize_id(&record.call_id))
 }
 
 pub trait CallRecordFormatter: Send + Sync {
@@ -257,8 +231,6 @@ pub trait CallRecordFormatter: Send + Sync {
         Ok(serde_json::to_string(&value)?)
     }
     fn format_file_name(&self, record: &CallRecord) -> String;
-    fn format_dump_events_path(&self, record: &CallRecord) -> String;
-    fn format_sip_flow_path(&self, record: &CallRecord, leg: &str) -> String;
     fn format_transcript_path(&self, record: &CallRecord) -> String;
     fn format_media_path(&self, record: &CallRecord, media: &CallRecordMedia) -> String;
 }
@@ -302,28 +274,6 @@ impl CallRecordFormatter for DefaultCallRecordFormatter {
         }
     }
 
-    fn format_dump_events_path(&self, record: &CallRecord) -> String {
-        format!(
-            "{}/{}/{}.jsonl",
-            self.root.trim_end_matches('/'),
-            record.start_time.format("%Y%m%d"),
-            record.call_id
-        )
-    }
-    fn format_sip_flow_path(&self, record: &CallRecord, leg: &str) -> String {
-        let trimmed_root = self.root.trim_end_matches('/');
-        let file_name = default_sip_flow_file_name(record, leg);
-        if trimmed_root.is_empty() {
-            file_name
-        } else {
-            format!(
-                "{}/{}/{}",
-                trimmed_root,
-                record.start_time.format("%Y%m%d"),
-                file_name
-            )
-        }
-    }
     fn format_transcript_path(&self, record: &CallRecord) -> String {
         let trimmed_root = self.root.trim_end_matches('/');
         let file_name = default_transcript_file_name(record);
