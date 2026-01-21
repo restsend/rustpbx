@@ -81,10 +81,10 @@ type = "local"
 root = "./config/cdr"
 
 # SipFlow: Unified SIP+RTP recording system
-[sipflow]
-type = "local"
-root = "./config/cdr"
-subdirs = "hourly"  # "none" | "daily" | "hourly"
+# [sipflow]
+# type = "local"
+# root = "./config/sipflow"
+# subdirs = "daily"  # "none" | "daily" | "hourly"
 
 # Local: SQLite + structured file (default settings)
 # type = "local"
