@@ -887,43 +887,14 @@
                         <select x-model="sipflowDraft.backend_type" :disabled="sipflowProcessing"
                             class="mt-1 block w-full rounded-md border-slate-200 py-2 pl-3 pr-10 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
                             <option value="none">Disabled</option>
-                            <option value="dir">Directory (Recommended for high concurrency)</option>
                             <option value="local">Local SQLite + Structured files</option>
                             <option value="remote">Remote via UDP/HTTP</option>
                         </select>
-                        <p class="mt-1 text-xs text-slate-500">Select backend type to enable SipFlow. Dir mode has best
-                            I/O performance for 1000+ concurrent calls.</p>
+                        <p class="mt-1 text-xs text-slate-500">Select backend type to enable SipFlow. </p>
                     </div>
 
                     <div x-show="sipflowDraft.backend_type !== 'none'" x-cloak
                         class="border-t border-slate-200 pt-4 space-y-4">
-
-                        <!-- Dir Backend Config -->
-                        <div x-show="sipflowDraft.backend_type === 'dir'"
-                            class="space-y-4 rounded-lg border border-slate-200 bg-slate-50 p-4">
-                            <div>
-                                <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Root
-                                    Directory</label>
-                                <input type="text" x-model="sipflowDraft.dir_root" :disabled="sipflowProcessing"
-                                    class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                    placeholder="./config/cdr">
-                                <p class="mt-1 text-xs text-slate-500">Base path for storing .sipflow.jsonl files</p>
-                            </div>
-                            <div>
-                                <label
-                                    class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Subdirectory
-                                    Structure</label>
-                                <select x-model="sipflowDraft.dir_subdirs" :disabled="sipflowProcessing"
-                                    class="mt-1 block w-full rounded-md border-slate-200 py-2 pl-3 pr-10 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
-                                    <option value="none">Flat (all in root)</option>
-                                    <option value="daily">Daily folders (YYYYMMDD)</option>
-                                    <option value="hourly">Hourly folders (YYYYMMDD/HH) - Recommended</option>
-                                </select>
-                                <p class="mt-1 text-xs text-slate-500">Hourly organization best for high-volume systems
-                                </p>
-                            </div>
-                        </div>
-
                         <!-- Local Backend Config -->
                         <div x-show="sipflowDraft.backend_type === 'local'"
                             class="space-y-4 rounded-lg border border-slate-200 bg-slate-50 p-4">

@@ -241,7 +241,14 @@ impl TryFrom<&Transaction> for SipUser {
     type Error = anyhow::Error;
 
     fn try_from(tx: &Transaction) -> Result<Self, Self::Error> {
-        let from_uri = tx.original.from_header()?.uri()?;
+        let from_header = tx.original.from_header()?;
+        let from_uri = from_header.uri()?;
+        let from_display_name = from_header
+            .typed()
+            .ok()
+            .and_then(|h| h.display_name)
+            .map(|s| s.to_string());
+
         let (username, realm) = match check_authorization_headers(&tx.original) {
             Ok(Some((user, _))) => (user.username, user.realm),
             _ => {
@@ -287,7 +294,7 @@ impl TryFrom<&Transaction> for SipUser {
             call_forwarding_destination: None,
             call_forwarding_timeout: None,
             departments: None,
-            display_name: None,
+            display_name: from_display_name,
             email: None,
             phone: None,
             note: None,

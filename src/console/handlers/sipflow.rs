@@ -294,7 +294,6 @@ async fn query_flow(
     AxumPath(call_id): AxumPath<String>,
     Query(params): Query<FlowQueryParams>,
 ) -> Response {
-    let call_id = crate::utils::sanitize_id(&call_id);
     let sip_server = match state.sip_server() {
         Some(server) => server,
         None => {
@@ -416,7 +415,6 @@ async fn query_media(
     AxumPath(call_id): AxumPath<String>,
     Query(params): Query<FlowQueryParams>,
 ) -> Response {
-    let call_id = crate::utils::sanitize_id(&call_id);
     let sip_server = match state.sip_server() {
         Some(server) => server,
         None => {

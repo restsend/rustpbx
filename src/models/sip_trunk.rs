@@ -202,6 +202,7 @@ impl MigrationTrait for Migration {
         manager
             .create_index(
                 Index::create()
+                    .if_not_exists()
                     .name("idx_rustpbx_sip_trunks_name")
                     .table(Entity)
                     .col(Column::Name)
@@ -213,6 +214,7 @@ impl MigrationTrait for Migration {
         manager
             .create_index(
                 Index::create()
+                    .if_not_exists()
                     .name("idx_rustpbx_sip_trunks_status")
                     .table(Entity)
                     .col(Column::Status)
@@ -224,6 +226,7 @@ impl MigrationTrait for Migration {
         manager
             .create_index(
                 Index::create()
+                    .if_not_exists()
                     .name("idx_rustpbx_sip_trunks_direction")
                     .table(Entity)
                     .col(Column::Direction)

@@ -326,12 +326,14 @@
                     <div class="mt-4 overflow-hidden rounded-xl bg-white shadow-sm ring-1 ring-black/5">
                         <div class="flex items-center justify-between border-b border-slate-200 bg-slate-50 px-4 py-2">
                             <div class="font-medium text-slate-700 text-xs">RTP Streams</div>
+                            <!-- Analytics removed
                             <template x-if="mediaMetrics && mediaMetrics.rtp_packets !== undefined">
                                 <div class="text-[10px] text-slate-500">
                                     Total Packets (Analytics): <span class="font-mono text-slate-700"
                                         x-text="mediaMetrics.rtp_packets"></span>
                                 </div>
                             </template>
+                            -->
                         </div>
                         <div class="overflow-x-auto">
                             <table class="w-full text-left text-xs" x-show="rtpStreams && rtpStreams.length">

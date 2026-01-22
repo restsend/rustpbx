@@ -50,7 +50,7 @@ pub struct ProcessedPacket {
 pub fn process_packet(packet: Packet) -> ProcessedPacket {
     let mut callid = None;
     if matches!(packet.msg_type, MsgType::Sip) {
-        callid = extract_callid(&packet.payload).map(|id| crate::utils::sanitize_id(&id));
+        callid = extract_callid(&packet.payload);
     }
 
     let orig_size = packet.payload.len();
@@ -310,7 +310,6 @@ impl StorageManager {
         start_dt: DateTime<Local>,
         end_dt: DateTime<Local>,
     ) -> Result<Vec<SipFlowItem>> {
-        let callid = crate::utils::sanitize_id(callid);
         let mut results = Vec::new();
         let folders = self.get_folders_in_range(start_dt, end_dt);
 
@@ -384,7 +383,6 @@ impl StorageManager {
         start_dt: DateTime<Local>,
         end_dt: DateTime<Local>,
     ) -> Result<Vec<(i32, String, usize)>> {
-        let callid = crate::utils::sanitize_id(callid);
         let mut results = std::collections::HashMap::new();
         let folders = self.get_folders_in_range(start_dt, end_dt);
 
@@ -430,7 +428,6 @@ impl StorageManager {
         start_dt: DateTime<Local>,
         end_dt: DateTime<Local>,
     ) -> Result<Vec<(i32, u64, Vec<u8>)>> {
-        let callid = crate::utils::sanitize_id(callid);
         let mut results = Vec::new();
         let folders = self.get_folders_in_range(start_dt, end_dt);
 

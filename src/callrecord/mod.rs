@@ -58,7 +58,53 @@ impl CallRecordStats {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct CallRecordExtras(pub HashMap<String, Value>);
+#[serde(rename_all = "camelCase")]
+#[serde_with::skip_serializing_none]
+pub struct CallDetails {
+    pub direction: String,
+    pub status: String,
+    pub from_number: Option<String>,
+    pub to_number: Option<String>,
+    pub caller_name: Option<String>,
+    pub agent_name: Option<String>,
+    pub queue: Option<String>,
+    pub department_id: Option<i64>,
+    pub extension_id: Option<i64>,
+    pub sip_trunk_id: Option<i64>,
+    pub route_id: Option<i64>,
+    pub sip_gateway: Option<String>,
+    pub recording_url: Option<String>,
+    pub recording_duration_secs: Option<i32>,
+    pub has_transcript: bool,
+    pub transcript_status: Option<String>,
+    pub transcript_language: Option<String>,
+    pub tags: Option<Value>,
+
+    #[serde(default)]
+    pub rewrite: CallRecordRewrite,
+    pub last_error: Option<CallRecordLastError>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct CallRecordRewrite {
+    pub caller_original: String,
+    pub caller_final: String,
+    pub callee_original: String,
+    pub callee_final: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub contact: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub destination: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CallRecordLastError {
+    pub code: u16,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
 
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -81,6 +127,8 @@ pub struct CallRecord {
     pub recorder: Vec<CallRecordMedia>,
     #[serde(skip_serializing_if = "HashMap::is_empty", default)]
     pub sip_leg_roles: HashMap<String, String>,
+    #[serde(flatten, default)]
+    pub details: CallDetails,
     #[serde(skip_serializing, skip_deserializing, default)]
     pub extensions: http::Extensions,
 }
@@ -220,15 +268,7 @@ pub fn default_transcript_file_name(record: &CallRecord) -> String {
 
 pub trait CallRecordFormatter: Send + Sync {
     fn format(&self, record: &CallRecord) -> Result<String> {
-        let mut value = serde_json::to_value(record)?;
-        if let Value::Object(values) = &mut value {
-            if let Some(extras) = record.extensions.get::<CallRecordExtras>() {
-                for (key, extra_value) in &extras.0 {
-                    values.insert(key.clone(), extra_value.clone());
-                }
-            }
-        }
-        Ok(serde_json::to_string(&value)?)
+        Ok(serde_json::to_string(record)?)
     }
     fn format_file_name(&self, record: &CallRecord) -> String;
     fn format_transcript_path(&self, record: &CallRecord) -> String;

@@ -2,7 +2,6 @@ use crate::addons::transcript::models::{
     SenseVoiceCliChannel, StoredTranscript, StoredTranscriptAnalysis, StoredTranscriptSegment,
     TranscriptRequest, TranscriptSettingsUpdate,
 };
-use crate::callrecord::CallRecord;
 use crate::callrecord::storage::CdrStorage;
 use crate::console::ConsoleState;
 use crate::console::handlers::call_record::{CdrData, load_cdr_data, select_recording_path};
@@ -531,18 +530,10 @@ async fn load_stored_transcript(
 ) -> AnyResult<Option<StoredTranscript>> {
     let mut candidates: Vec<String> = Vec::new();
 
-    if let Some(path) = transcript_file_from_metadata(&record.metadata) {
-        candidates.push(path);
-    }
-
     if let Some(cdr_data) = cdr {
-        if let Some(path) = transcript_file_from_cdr(&cdr_data.record) {
-            candidates.push(path);
-        } else {
-            let mut fallback = PathBuf::from(&cdr_data.cdr_path);
-            fallback.set_extension("transcript.json");
-            candidates.push(fallback.to_string_lossy().into_owned());
-        }
+        let mut fallback = PathBuf::from(&cdr_data.cdr_path);
+        fallback.set_extension("transcript.json");
+        candidates.push(fallback.to_string_lossy().into_owned());
     }
 
     candidates.retain(|candidate| !candidate.trim().is_empty());
@@ -603,24 +594,24 @@ async fn read_transcript_file(
     Ok(transcript)
 }
 
-fn transcript_file_from_cdr(record: &CallRecord) -> Option<String> {
-    record
-        .extensions
-        .get::<crate::callrecord::CallRecordExtras>()
-        .and_then(|extras| extras.0.get("transcript_file"))
-        .and_then(|value| value.as_str())
-        .map(|value| value.trim().to_string())
-        .filter(|value| !value.is_empty())
-}
+// fn transcript_file_from_cdr(record: &CallRecord) -> Option<String> {
+//     record
+//         .extensions
+//         .get::<crate::callrecord::CallRecordExtras>()
+//         .and_then(|extras| extras.0.get("transcript_file"))
+//         .and_then(|value| value.as_str())
+//         .map(|value| value.trim().to_string())
+//         .filter(|value| !value.is_empty())
+// }
 
-fn transcript_file_from_metadata(metadata: &Option<Value>) -> Option<String> {
-    metadata
-        .as_ref()
-        .and_then(|m| m.get("transcript_file"))
-        .and_then(|v| v.as_str())
-        .map(|v| v.trim().to_string())
-        .filter(|v| !v.is_empty())
-}
+// fn transcript_file_from_metadata(metadata: &Option<Value>) -> Option<String> {
+//     metadata
+//         .as_ref()
+//         .and_then(|m| m.get("transcript_file"))
+//         .and_then(|v| v.as_str())
+//         .map(|v| v.trim().to_string())
+//         .filter(|v| !v.is_empty())
+// }
 
 fn build_transcript_payload_value(
     record: &CallRecordModel,

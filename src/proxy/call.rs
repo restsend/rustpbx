@@ -342,7 +342,7 @@ impl CallModule {
             .call_id_header()
             .map_err(|e| (anyhow::anyhow!(e), None))?
             .value();
-        let session_id = crate::utils::sanitize_id(dialog_id);
+        let session_id = dialog_id.to_string();
 
         let media_config = MediaConfig::new()
             .with_proxy_mode(self.inner.config.media_proxy)
