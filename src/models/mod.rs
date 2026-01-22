@@ -4,6 +4,7 @@ use sea_orm_migration::MigratorTrait;
 use sqlx::Connection;
 use url::Url;
 
+pub mod add_rewrite_columns;
 pub mod call_record;
 pub mod call_record_dashboard_index;
 pub mod call_record_from_number_index;

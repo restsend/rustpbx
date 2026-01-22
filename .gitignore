@@ -45,6 +45,7 @@ config/routes/*.toml
 config/trunks/*.toml
 config/routing_profiles/*.toml
 config/rate_decks/*.toml
+config/recordings/
 *.bak
 *.jsonl
 config.toml.dev

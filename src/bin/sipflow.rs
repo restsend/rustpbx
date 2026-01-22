@@ -140,7 +140,6 @@ async fn flow_handler(
     Query(params): Query<HashMap<String, String>>,
 ) -> axum::Json<serde_json::Value> {
     let callid = params.get("callid").cloned().unwrap_or_default();
-    let callid = rustpbx::utils::sanitize_id(&callid);
     let start_ts = params
         .get("start")
         .and_then(|s| s.parse::<i64>().ok())
@@ -172,7 +171,6 @@ async fn media_handler(
     Query(params): Query<HashMap<String, String>>,
 ) -> impl axum::response::IntoResponse {
     let callid = params.get("callid").cloned().unwrap_or_default();
-    let callid = rustpbx::utils::sanitize_id(&callid);
     let start_ts_param = params
         .get("start")
         .and_then(|s| s.parse::<i64>().ok())

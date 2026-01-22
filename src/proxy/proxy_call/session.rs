@@ -1571,17 +1571,8 @@ impl CallSession {
             }
 
             if let Some(ref bridge) = self.media_bridge {
-                info!(
-                    session_id = %self.context.session_id,
-                    "About to start media bridge in accept_call (200 OK)"
-                );
                 if let Err(e) = bridge.start().await {
                     warn!(session_id = %self.context.session_id, "Failed to start media bridge: {}", e);
-                } else {
-                    info!(
-                        session_id = %self.context.session_id,
-                        "Media bridge start() returned Ok in accept_call"
-                    );
                 }
                 let _ = bridge.resume_forwarding(&track_id).await;
             }
@@ -2203,14 +2194,14 @@ impl CallSession {
 
         for (index, target) in targets.iter().enumerate() {
             self.process_pending_actions(inbox.as_deref_mut()).await?;
-            info!(
+            debug!(
                 session_id = %self.context.session_id, index, %target,
                 "trying sequential target"
             );
 
             let result = if let Some(plan) = self.context.dialplan.flow.get_queue_plan_recursive() {
                 if let Some(timeout) = plan.no_trying_timeout {
-                    info!(session_id = %self.context.session_id, ?timeout, "Applying no-trying timeout");
+                    debug!(session_id = %self.context.session_id, ?timeout, "Applying no-trying timeout");
                     match tokio::time::timeout(timeout, self.try_single_target(target)).await {
                         Ok(res) => res,
                         Err(_) => {
@@ -2230,7 +2221,7 @@ impl CallSession {
 
             match result {
                 Ok(_) => {
-                    info!(
+                    debug!(
                         session_id = %self.context.session_id,
                         target_index = index,
                         "Sequential target succeeded"

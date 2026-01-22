@@ -436,25 +436,24 @@ impl SipServerBuilder {
             .with_option(endpoint_option)
             .with_transport_layer(transport_layer);
 
-        let mut sip_flow_builder = SipFlowBuilder::new();
-
+        let mut sip_flow = None;
         // Create sipflow backend if configured
         if let Some(sipflow_config) = &self.sipflow_config {
+            let mut sip_flow_builder = SipFlowBuilder::new();
             if let Ok(backend) = create_backend(sipflow_config) {
                 info!("Sipflow backend initialized: {:?}", sipflow_config);
                 sip_flow_builder = sip_flow_builder.with_backend(Arc::from(backend));
             } else {
                 warn!("Failed to create sipflow backend");
             }
+            if let Some(inspector) = self.message_inspector {
+                sip_flow_builder = sip_flow_builder.register_inspector(inspector);
+            }
+            let sflow = sip_flow_builder.build();
+            endpoint_builder = endpoint_builder
+                .with_inspector(Box::new(sflow.clone()) as Box<dyn MessageInspector>);
+            sip_flow = Some(sflow);
         }
-
-        if let Some(inspector) = self.message_inspector {
-            sip_flow_builder = sip_flow_builder.register_inspector(inspector);
-        }
-
-        let sip_flow = sip_flow_builder.build();
-        endpoint_builder = endpoint_builder
-            .with_inspector(Box::new(sip_flow.clone()) as Box<dyn MessageInspector>);
 
         let locator_events = self.locator_events.unwrap_or_else(|| {
             let (tx, _) = tokio::sync::broadcast::channel(12);
@@ -513,7 +512,7 @@ impl SipServerBuilder {
             create_route_invite: self.create_route_invite,
             ignore_out_of_dialog_request: self.ignore_out_of_dialog_request,
             locator_events: Some(locator_events),
-            sip_flow: Some(sip_flow),
+            sip_flow,
             active_call_registry,
             frequency_limiter: self.frequency_limiter,
             call_record_hooks: Arc::new(self.call_record_hooks),

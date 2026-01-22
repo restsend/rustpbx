@@ -1,10 +1,10 @@
 use crate::{
     call::{CalleeDisplayName, TransactionCookie, TrunkContext},
     callrecord::{
-        CallRecord, CallRecordExtras, CallRecordHangupMessage, CallRecordHangupReason,
-        CallRecordMedia, CallRecordSender,
+        CallDetails, CallRecord, CallRecordHangupMessage, CallRecordHangupReason,
+        CallRecordLastError, CallRecordMedia, CallRecordRewrite, CallRecordSender,
     },
-    models::call_record::{CallRecordPersistArgs, extract_sip_username},
+    models::call_record::extract_sip_username,
     proxy::{
         proxy_call::{session::CallSessionRecordSnapshot, state::CallContext},
         server::SipServerRef,
@@ -12,7 +12,6 @@ use crate::{
 };
 use chrono::{Duration, Utc};
 use rsip::prelude::HeadersExt;
-use serde_json::{Map as JsonMap, Number as JsonNumber, Value};
 use std::{
     collections::{HashMap, HashSet},
     fs,
@@ -92,33 +91,13 @@ impl CallReporter {
             .or_else(|| snapshot.connected_callee.clone())
             .unwrap_or_else(|| original_callee.clone());
 
-        let mut extras_map: HashMap<String, Value> = HashMap::new();
-        extras_map.insert(
-            "status_code".to_string(),
-            Value::Number(JsonNumber::from(status_code)),
-        );
-        if let Some(reason) = hangup_reason.as_ref() {
-            extras_map.insert(
-                "hangup_reason".to_string(),
-                Value::String(reason.to_string()),
-            );
-        }
-        if let Some((code, reason)) = snapshot.last_error.as_ref() {
-            extras_map.insert(
-                "last_error_code".to_string(),
-                Value::Number(JsonNumber::from(u16::from(code.clone()))),
-            );
-            if let Some(reason) = reason {
-                extras_map.insert(
-                    "last_error_reason".to_string(),
-                    Value::String(reason.clone()),
-                );
-            }
-        }
-
-        if let Some(queue) = snapshot.last_queue_name.clone() {
-            extras_map.insert("last_queue".to_string(), Value::String(queue));
-        }
+        let last_error = snapshot
+            .last_error
+            .as_ref()
+            .map(|(code, reason)| CallRecordLastError {
+                code: u16::from(code.clone()),
+                reason: reason.clone(),
+            });
 
         let mut hangup_messages = snapshot.hangup_messages.clone();
         if hangup_messages.is_empty() {
@@ -130,33 +109,15 @@ impl CallReporter {
                 });
             }
         }
-        if !hangup_messages.is_empty() {
-            if let Ok(value) = serde_json::to_value(&hangup_messages) {
-                extras_map.insert("hangup_messages".to_string(), value);
-            }
-        }
 
-        let mut rewrite_payload = JsonMap::new();
-        rewrite_payload.insert(
-            "caller_original".to_string(),
-            Value::String(original_caller.clone()),
-        );
-        rewrite_payload.insert("caller_final".to_string(), Value::String(caller.clone()));
-        rewrite_payload.insert(
-            "callee_original".to_string(),
-            Value::String(original_callee.clone()),
-        );
-        rewrite_payload.insert("callee_final".to_string(), Value::String(callee.clone()));
-        if let Some(contact) = snapshot.routed_contact.as_ref() {
-            rewrite_payload.insert("contact".to_string(), Value::String(contact.clone()));
-        }
-        if let Some(destination) = snapshot.routed_destination.as_ref() {
-            rewrite_payload.insert(
-                "destination".to_string(),
-                Value::String(destination.clone()),
-            );
-        }
-        extras_map.insert("rewrite".to_string(), Value::Object(rewrite_payload));
+        let rewrite = CallRecordRewrite {
+            caller_original: original_caller.clone(),
+            caller_final: caller.clone(),
+            callee_original: original_callee.clone(),
+            callee_final: callee.clone(),
+            contact: snapshot.routed_contact.clone(),
+            destination: snapshot.routed_destination.clone(),
+        };
 
         let server_dialog_id = snapshot.server_dialog_id.clone();
         let mut call_ids: HashSet<String> = HashSet::new();
@@ -167,15 +128,9 @@ impl CallReporter {
         }
 
         let mut sip_leg_roles = HashMap::new();
-        sip_leg_roles.insert(
-            crate::utils::sanitize_id(&server_dialog_id.call_id),
-            "caller".to_string(),
-        );
+        sip_leg_roles.insert(server_dialog_id.call_id.clone(), "caller".to_string());
         for dialog_id in &snapshot.callee_dialogs {
-            sip_leg_roles.insert(
-                crate::utils::sanitize_id(&dialog_id.call_id),
-                "callee".to_string(),
-            );
+            sip_leg_roles.insert(dialog_id.call_id.clone(), "callee".to_string());
         }
 
         let has_sipflow_backend = self.server.sip_flow.as_ref().is_some();
@@ -222,33 +177,34 @@ impl CallReporter {
                 }
             }
         }
-
+        tracing::warn!(
+            recording = ?self.context.dialplan.recording,
+            has_sipflow_backend = ?has_sipflow_backend,
+            "Call recording files collected: {:?}",
+            recorder
+        );
         // Copy values from cookie to extras_map
         // (Removed as TransactionCookie no longer has values)
 
-        let metadata_value = if extras_map.is_empty() {
-            None
-        } else {
-            Some(serde_json::to_value(&extras_map).unwrap_or_default())
-        };
         let recording_path_for_db = recorder.first().map(|media| media.path.clone());
 
-        let mut persist_args = CallRecordPersistArgs::default();
-        persist_args.direction = direction;
-        persist_args.status = status;
-        persist_args.from_number = from_number;
-        persist_args.to_number = to_number;
-        persist_args.caller_name = from_name;
-        persist_args.agent_name = to_name;
-        persist_args.queue = snapshot.last_queue_name.clone();
-        persist_args.department_id = department_id;
-        persist_args.extension_id = extension_id;
-        persist_args.sip_trunk_id = sip_trunk_id;
-        persist_args.sip_gateway = sip_gateway;
-        persist_args.metadata = metadata_value;
-        persist_args.recording_url = recording_path_for_db;
+        let mut details = CallDetails::default();
+        details.direction = direction;
+        details.status = status;
+        details.from_number = from_number;
+        details.to_number = to_number;
+        details.caller_name = from_name;
+        details.agent_name = to_name;
+        details.queue = snapshot.last_queue_name.clone();
+        details.department_id = department_id;
+        details.extension_id = extension_id;
+        details.sip_trunk_id = sip_trunk_id;
+        details.sip_gateway = sip_gateway;
+        details.recording_url = recording_path_for_db;
+        details.rewrite = rewrite;
+        details.last_error = last_error;
 
-        let mut record = CallRecord {
+        let record = CallRecord {
             call_id: self.context.session_id.clone(),
             start_time,
             ring_time,
@@ -261,11 +217,9 @@ impl CallReporter {
             hangup_messages: hangup_messages.clone(),
             recorder,
             sip_leg_roles,
+            details,
             extensions: snapshot.extensions,
         };
-
-        record.extensions.insert(persist_args);
-        record.extensions.insert(CallRecordExtras(extras_map));
 
         if let Some(ref sender) = self.call_record_sender {
             let _ = sender.send(record);

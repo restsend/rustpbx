@@ -2,33 +2,6 @@ use crate::callrecord::CallRecord;
 use crate::callrecord::storage;
 use crate::callrecord::storage::CdrStorage;
 use crate::console::{ConsoleState, handlers::forms, middleware::AuthRequired};
-use axum::{
-    Json, Router,
-    body::Body,
-    extract::{Path as AxumPath, Query, State},
-    http::{self, HeaderMap, HeaderValue, StatusCode},
-    response::{IntoResponse, Response},
-    routing::get,
-};
-use chrono::{DateTime, NaiveDate, SecondsFormat, TimeZone, Utc};
-use sea_orm::sea_query::Order;
-use sea_orm::{
-    ActiveModelTrait, ActiveValue::Set, ColumnTrait, Condition, DatabaseConnection, DbErr,
-    EntityTrait, PaginatorTrait, QueryFilter, QueryOrder,
-};
-use serde::{Deserialize, Serialize};
-use serde_json::{Map as JsonMap, Value, json};
-use std::{
-    collections::{HashMap, HashSet},
-    convert::TryFrom,
-    path::Path,
-    sync::Arc,
-};
-use tokio::io::{AsyncReadExt, AsyncSeekExt};
-use tokio_util::io::ReaderStream;
-use tracing::warn;
-use urlencoding::encode;
-
 use crate::models::{
     call_record::{
         ActiveModel as CallRecordActiveModel, Column as CallRecordColumn,
@@ -40,6 +13,31 @@ use crate::models::{
     extension::{Entity as ExtensionEntity, Model as ExtensionModel},
     sip_trunk::{Column as SipTrunkColumn, Entity as SipTrunkEntity, Model as SipTrunkModel},
 };
+use axum::{
+    Json, Router,
+    body::Body,
+    extract::{Path as AxumPath, Query, State},
+    http::{self, HeaderMap, HeaderValue, StatusCode},
+    response::{IntoResponse, Response},
+    routing::get,
+};
+use chrono::{DateTime, NaiveDate, TimeZone, Utc};
+use sea_orm::sea_query::Order;
+use sea_orm::{
+    ActiveModelTrait, ActiveValue::Set, ColumnTrait, Condition, DatabaseConnection, DbErr,
+    EntityTrait, PaginatorTrait, QueryFilter, QueryOrder,
+};
+use serde::Deserialize;
+use serde_json::{Value, json};
+use std::{
+    collections::{HashMap, HashSet},
+    path::Path,
+    sync::Arc,
+};
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
+use tokio_util::io::ReaderStream;
+use tracing::warn;
+use urlencoding::encode;
 
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
@@ -75,15 +73,6 @@ struct DownloadRequest {
 struct UpdateCallRecordPayload {
     #[serde(default)]
     tags: Option<Vec<String>>,
-    #[serde(default)]
-    note: Option<UpdateCallRecordNote>,
-}
-
-#[derive(Debug, Clone, Deserialize, Default)]
-#[serde(rename_all = "camelCase")]
-struct UpdateCallRecordNote {
-    #[serde(default)]
-    text: Option<String>,
 }
 
 pub fn urls() -> Router<Arc<ConsoleState>> {
@@ -166,20 +155,10 @@ async fn download_call_record_sip_flow(
     // Default main call_id to "primary" if not overridden
     call_id_roles.insert(record.call_id.clone(), "primary".to_string());
 
-    if let Some(signaling) = &record.signaling {
-        if let Some(legs) = signaling.get("legs").and_then(|v| v.as_array()) {
-            for leg in legs {
-                if let Some(cid) = leg.get("call_id").and_then(|v| v.as_str()) {
-                    if !cid.is_empty() {
-                        let role = leg
-                            .get("role")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("unknown")
-                            .to_string();
-                        call_id_roles.insert(cid.to_string(), role);
-                    }
-                }
-            }
+    let cdr_data = load_cdr_data(&state, &record).await;
+    if let Some(cdr) = &cdr_data {
+        for (cid, role) in &cdr.record.sip_leg_roles {
+            call_id_roles.insert(cid.clone(), role.clone());
         }
     }
 
@@ -784,10 +763,10 @@ async fn page_call_record_detail(
 async fn update_call_record(
     AxumPath(pk): AxumPath<i64>,
     State(state): State<Arc<ConsoleState>>,
-    AuthRequired(user): AuthRequired,
+    AuthRequired(_user): AuthRequired,
     Json(payload): Json<UpdateCallRecordPayload>,
 ) -> Response {
-    if payload.tags.is_none() && payload.note.is_none() {
+    if payload.tags.is_none() {
         return (
             StatusCode::BAD_REQUEST,
             Json(json!({ "message": "No updates supplied" })),
@@ -844,66 +823,6 @@ async fn update_call_record(
             changed = true;
         }
     }
-
-    let mut metadata_value = record.metadata.clone();
-    if let Some(note_payload) = payload.note.as_ref() {
-        let mut metadata_map = match metadata_value.as_ref() {
-            Some(Value::Object(map)) => map.clone(),
-            Some(_) => {
-                warn!(
-                    call_record_id = pk,
-                    "unexpected metadata format; resetting for note update"
-                );
-                JsonMap::new()
-            }
-            None => JsonMap::new(),
-        };
-
-        let text = note_payload
-            .text
-            .as_ref()
-            .map(|value| value.trim())
-            .unwrap_or("")
-            .to_string();
-
-        if text.is_empty() {
-            if metadata_map.remove("console_note").is_some() {
-                metadata_value = if metadata_map.is_empty() {
-                    None
-                } else {
-                    Some(Value::Object(metadata_map.clone()))
-                };
-                active.metadata = Set(metadata_value.clone());
-                changed = true;
-            }
-        } else {
-            let updated_at = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
-            let updated_by = {
-                let username = user.username.trim();
-                if username.is_empty() {
-                    user.email.clone()
-                } else {
-                    user.username.clone()
-                }
-            };
-            let note_value = json!({
-                "text": text,
-                "updated_at": updated_at,
-                "updated_by": updated_by,
-            });
-            let existing_equal = metadata_map
-                .get("console_note")
-                .map(|value| value == &note_value)
-                .unwrap_or(false);
-            if !existing_equal {
-                metadata_map.insert("console_note".to_string(), note_value);
-                metadata_value = Some(Value::Object(metadata_map.clone()));
-                active.metadata = Set(metadata_value.clone());
-                changed = true;
-            }
-        }
-    }
-
     if !changed {
         let response = json!({
             "status": "noop",
@@ -911,7 +830,7 @@ async fn update_call_record(
                 "id": record.id,
                 "tags": extract_tags(&record.tags),
             },
-            "notes": build_console_note_payload(&metadata_value),
+            "notes": Value::Null,
         });
         return Json(response).into_response();
     }
@@ -935,7 +854,7 @@ async fn update_call_record(
             "id": updated_record.id,
             "tags": extract_tags(&updated_record.tags),
         },
-        "notes": build_console_note_payload(&updated_record.metadata),
+        "notes": Value::Null,
     });
     Json(response).into_response()
 }
@@ -1233,23 +1152,17 @@ fn build_record_payload(
 
     let recording = build_recording_payload(state, record, inline_recording_url);
 
-    let rewrite_caller_original =
-        json_lookup_nested_str(&record.metadata, &["rewrite", "caller_original"]);
-    let rewrite_caller_final =
-        json_lookup_nested_str(&record.metadata, &["rewrite", "caller_final"])
-            .or_else(|| caller_uri.clone());
-    let rewrite_callee_original =
-        json_lookup_nested_str(&record.metadata, &["rewrite", "callee_original"]);
-    let rewrite_callee_final =
-        json_lookup_nested_str(&record.metadata, &["rewrite", "callee_final"])
-            .or_else(|| callee_uri.clone());
-    let rewrite_contact = json_lookup_nested_str(&record.metadata, &["rewrite", "contact"]);
-    let rewrite_destination = json_lookup_nested_str(&record.metadata, &["rewrite", "destination"]);
-    let status_code = json_lookup_u16(&record.metadata, "status_code");
-    let ring_time = json_lookup_str(&record.metadata, "ring_time");
-    let answer_time = json_lookup_str(&record.metadata, "answer_time");
-    let hangup_reason = json_lookup_str(&record.metadata, "hangup_reason");
-    let hangup_messages = extract_hangup_messages(&record.metadata);
+    let rewrite_caller_original = record.rewrite_original_from.clone();
+    let rewrite_caller_final = caller_uri.clone();
+    let rewrite_callee_original = record.rewrite_original_to.clone();
+    let rewrite_callee_final = callee_uri.clone();
+    let rewrite_contact = Option::<String>::None;
+    let rewrite_destination = Option::<String>::None;
+    let status_code = Option::<u16>::None;
+    let ring_time = Option::<String>::None;
+    let answer_time = Option::<String>::None;
+    let hangup_reason = Option::<String>::None;
+    let hangup_messages = Vec::<Value>::new();
 
     json!({
         "id": record.id,
@@ -1479,25 +1392,37 @@ fn build_detail_payload(
     let participants = build_participants(record, related);
 
     let media_metrics = json!({
-        "audio_codec": json_lookup_str(&record.metadata, "audio_codec"),
-        "rtp_packets": json_lookup_number(&record.analytics, "rtp_packets"),
+        "audio_codec": Value::Null,
+        "rtp_packets": 0,
         "rtcp_observations": Value::Array(vec![]),
     });
 
     let signaling = if let Some(data) = cdr {
-        let value = build_signaling_from_cdr(data);
-        if value.is_null() {
-            record.signaling.clone().unwrap_or(Value::Null)
-        } else {
-            value
-        }
+        build_signaling_from_cdr(data)
     } else {
-        record.signaling.clone().unwrap_or(Value::Null)
+        Value::Null
     };
-    let rewrite = record_payload
+
+    let mut rewrite = record_payload
         .get("rewrite")
         .cloned()
         .unwrap_or(Value::Null);
+
+    if let Some(data) = cdr {
+        let details_rewrite = &data.record.details.rewrite;
+        rewrite = json!({
+            "caller": {
+                "original": details_rewrite.caller_original,
+                "final": details_rewrite.caller_final,
+            },
+            "callee": {
+                "original": details_rewrite.callee_original,
+                "final": details_rewrite.callee_final,
+            },
+            "contact": details_rewrite.contact,
+            "destination": details_rewrite.destination,
+        });
+    }
 
     let metadata_download = if let Some(data) = cdr {
         Value::String(state.url_for(&format!(
@@ -1521,7 +1446,7 @@ fn build_detail_payload(
         "record": record_payload,
         //"sip_flow": sip_flow_download,
         "media_metrics": media_metrics,
-        "notes": build_console_note_payload(&record.metadata),
+        "notes": Value::Null,
         "participants": participants,
         "signaling": signaling,
         "rewrite": rewrite,
@@ -1562,6 +1487,8 @@ fn signaling_leg_payload(role: &str, record: &CallRecord) -> Value {
             .hangup_reason
             .as_ref()
             .map(|reason| reason.to_string()),
+        "hangup_messages": record.hangup_messages,
+        "last_error": record.details.last_error,
         "start_time": record.start_time,
         "ring_time": record.ring_time,
         "answer_time": record.answer_time,
@@ -1638,131 +1565,6 @@ fn extract_tags(tags: &Option<Value>) -> Vec<String> {
             .collect(),
         _ => Vec::new(),
     }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-#[serde(rename_all = "camelCase")]
-struct ConsoleNote {
-    #[serde(default)]
-    text: String,
-    #[serde(default)]
-    updated_at: Option<String>,
-    #[serde(default)]
-    updated_by: Option<String>,
-}
-
-fn extract_console_note(metadata: &Option<Value>) -> Option<ConsoleNote> {
-    let value = metadata
-        .as_ref()
-        .and_then(|value| value.as_object())
-        .and_then(|map| map.get("console_note"))?
-        .clone();
-    let mut note: ConsoleNote = serde_json::from_value(value).ok()?;
-    note.text = note.text.trim().to_string();
-    Some(note)
-}
-
-fn build_console_note_payload(metadata: &Option<Value>) -> Value {
-    match extract_console_note(metadata) {
-        Some(note) => json!({
-            "text": note.text,
-            "updated_at": note.updated_at,
-            "updated_by": note.updated_by,
-        }),
-        None => Value::Null,
-    }
-}
-
-fn json_lookup_str(source: &Option<Value>, key: &str) -> Option<String> {
-    source
-        .as_ref()
-        .and_then(|value| value.get(key))
-        .and_then(|value| value.as_str())
-        .map(|value| value.to_string())
-}
-
-fn json_lookup_number(source: &Option<Value>, key: &str) -> Option<f64> {
-    source
-        .as_ref()
-        .and_then(|value| value.get(key))
-        .and_then(|value| value.as_f64())
-}
-
-fn json_lookup_nested_str(source: &Option<Value>, path: &[&str]) -> Option<String> {
-    let mut current = source.as_ref()?;
-    for key in path {
-        current = current.get(*key)?;
-    }
-    current.as_str().map(|value| value.to_string())
-}
-
-fn json_lookup_u16(source: &Option<Value>, key: &str) -> Option<u16> {
-    let value = source.as_ref()?.get(key)?;
-    if let Some(number) = value.as_u64() {
-        return u16::try_from(number).ok();
-    }
-    if let Some(number) = value.as_i64() {
-        if number < 0 {
-            return None;
-        }
-        return u16::try_from(number as u64).ok();
-    }
-    value.as_f64().and_then(|number| {
-        if !number.is_finite() {
-            return None;
-        }
-        if number < 0.0 || number > u16::MAX as f64 {
-            return None;
-        }
-        Some(number.round() as u16)
-    })
-}
-
-fn extract_hangup_messages(metadata: &Option<Value>) -> Vec<Value> {
-    let entries = metadata
-        .as_ref()
-        .and_then(|value| value.get("hangup_messages"))
-        .and_then(|value| value.as_array())
-        .cloned()
-        .unwrap_or_default();
-
-    entries
-        .iter()
-        .filter_map(|entry| {
-            let code = entry
-                .get("code")
-                .and_then(|value| {
-                    value
-                        .as_u64()
-                        .or_else(|| value.as_i64().map(|v| v.max(0) as u64))
-                })
-                .and_then(|value| u16::try_from(value).ok())?;
-
-            let reason = entry
-                .get("reason")
-                .and_then(|value| value.as_str())
-                .map(|value| value.trim())
-                .filter(|value| !value.is_empty())
-                .map(|value| value.to_string());
-
-            let target = entry
-                .get("target")
-                .and_then(|value| value.as_str())
-                .map(|value| value.trim())
-                .filter(|value| !value.is_empty())
-                .map(|value| value.to_string());
-
-            let mut object = JsonMap::new();
-            object.insert("code".to_string(), Value::from(code));
-            if let Some(reason_value) = reason {
-                object.insert("reason".to_string(), Value::String(reason_value));
-            }
-            if let Some(target_value) = target {
-                object.insert("target".to_string(), Value::String(target_value));
-            }
-            Some(Value::Object(object))
-        })
-        .collect()
 }
 
 async fn build_summary(_db: &DatabaseConnection, _condition: Condition) -> Result<Value, DbErr> {

@@ -8,60 +8,10 @@ use sea_orm_migration::schema::{
 use sea_orm_migration::sea_query::{ColumnDef, ForeignKeyAction as MigrationForeignKeyAction};
 use sea_query::Expr;
 use serde::{Deserialize, Serialize};
-use serde_json::{Map as JsonMap, Number as JsonNumber, Value, json};
 
-use crate::callrecord::{CallRecord, CallRecordExtras, CallRecordHook};
+use crate::callrecord::{CallRecord, CallRecordHook};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CallRecordPersistArgs {
-    pub direction: String,
-    pub status: String,
-    pub from_number: Option<String>,
-    pub to_number: Option<String>,
-    pub caller_name: Option<String>,
-    pub agent_name: Option<String>,
-    pub queue: Option<String>,
-    pub department_id: Option<i64>,
-    pub extension_id: Option<i64>,
-    pub sip_trunk_id: Option<i64>,
-    pub route_id: Option<i64>,
-    pub sip_gateway: Option<String>,
-    pub recording_url: Option<String>,
-    pub recording_duration_secs: Option<i32>,
-    pub has_transcript: bool,
-    pub transcript_status: Option<String>,
-    pub transcript_language: Option<String>,
-    pub tags: Option<Value>,
-    pub analytics: Option<Value>,
-    pub metadata: Option<Value>,
-}
-
-impl Default for CallRecordPersistArgs {
-    fn default() -> Self {
-        Self {
-            direction: "unknown".to_string(),
-            status: "failed".to_string(),
-            from_number: None,
-            to_number: None,
-            caller_name: None,
-            agent_name: None,
-            queue: None,
-            department_id: None,
-            extension_id: None,
-            sip_trunk_id: None,
-            route_id: None,
-            sip_gateway: None,
-            recording_url: None,
-            recording_duration_secs: None,
-            has_transcript: false,
-            transcript_status: None,
-            transcript_language: None,
-            tags: None,
-            analytics: None,
-            metadata: None,
-        }
-    }
-}
+// CallRecordPersistArgs removed
 
 pub struct DatabaseHook {
     pub db: DatabaseConnection,
@@ -79,57 +29,51 @@ pub async fn persist_call_record(
     db: &DatabaseConnection,
     record: &mut CallRecord,
 ) -> anyhow::Result<()> {
-    // Ensure call_id is sanitized before database persistence
-    record.call_id = crate::utils::sanitize_id(&record.call_id);
+    let details = &record.details;
 
-    // Sanitize leg IDs in sip_leg_roles for database signaling column
-    if !record.sip_leg_roles.is_empty() {
-        let old_roles = std::mem::take(&mut record.sip_leg_roles);
-        for (id, role) in old_roles {
-            record
-                .sip_leg_roles
-                .insert(crate::utils::sanitize_id(&id), role);
-        }
-    }
+    let direction = details.direction.trim().to_ascii_lowercase();
+    let status = details.status.trim().to_ascii_lowercase();
+    let from_number = details.from_number.clone();
+    let to_number = details.to_number.clone();
+    let caller_name = details.caller_name.clone();
+    let agent_name = details.agent_name.clone();
+    let queue = details.queue.clone();
+    let department_id = details.department_id;
+    let extension_id = details.extension_id;
+    let sip_trunk_id = details.sip_trunk_id;
+    let route_id = details.route_id;
+    let sip_gateway = details.sip_gateway.clone();
 
-    let args = match record.extensions.get::<CallRecordPersistArgs>().cloned() {
-        Some(args) => args,
-        None => {
-            return Ok(());
-        }
+    // Derived from trace info if not explicit (but here we just use what's in details.rewrite)
+    // Note: older PersistArgs had these as Option<String>, but Rewrite struct has them as String.
+    // If they are empty strings, we might want to store None or Some("")?
+    // Let's assume "" is valid or check if empty.
+    let rewrite_original_from = if !details.rewrite.caller_original.is_empty() {
+        Some(details.rewrite.caller_original.clone())
+    } else {
+        None
+    };
+    let rewrite_original_to = if !details.rewrite.callee_original.is_empty() {
+        Some(details.rewrite.callee_original.clone())
+    } else {
+        None
     };
 
-    let direction = args.direction.trim().to_ascii_lowercase();
-    let status = args.status.trim().to_ascii_lowercase();
-    let from_number = args.from_number.clone();
-    let to_number = args.to_number.clone();
-    let caller_name = args.caller_name.clone();
-    let agent_name = args.agent_name.clone();
-    let queue = args.queue.clone();
-    let department_id = args.department_id;
-    let extension_id = args.extension_id;
-    let sip_trunk_id = args.sip_trunk_id;
-    let route_id = args.route_id;
-    let sip_gateway = args.sip_gateway.clone();
-    let recording_url = args
+    let recording_url = details
         .recording_url
         .clone()
         .or_else(|| record.recorder.first().map(|media| media.path.clone()));
-    let recording_duration_secs = args.recording_duration_secs;
-    let tags = args.tags.clone();
-    let analytics = args.analytics.clone();
-    let metadata_value = merge_metadata(record, args.metadata.clone());
-    let signaling_value = build_signaling_payload(record);
+    let recording_duration_secs = details.recording_duration_secs;
+    let has_transcript = details.has_transcript;
+    let transcript_status = details.transcript_status.clone();
+    let transcript_language = details.transcript_language.clone();
+    let tags = details.tags.clone();
     let duration_secs = (record.end_time - record.start_time).num_seconds().max(0) as i32;
 
     let caller_uri = normalize_endpoint_uri(&record.caller);
     let callee_uri = normalize_endpoint_uri(&record.callee);
 
-    // Update record with billing info so subsequent hooks can see it
-    record.extensions.insert(args.clone());
-
-    let transcript_status = args
-        .transcript_status
+    let transcript_status_str = transcript_status
         .clone()
         .unwrap_or_else(|| "none".to_string());
 
@@ -151,17 +95,16 @@ pub async fn persist_call_record(
         sip_trunk_id: Set(sip_trunk_id),
         route_id: Set(route_id),
         sip_gateway: Set(sip_gateway.clone()),
+        rewrite_original_from: Set(rewrite_original_from),
+        rewrite_original_to: Set(rewrite_original_to),
         caller_uri: Set(caller_uri.clone()),
         callee_uri: Set(callee_uri.clone()),
         recording_url: Set(recording_url.clone()),
         recording_duration_secs: Set(recording_duration_secs),
-        has_transcript: Set(args.has_transcript),
-        transcript_status: Set(transcript_status),
-        transcript_language: Set(args.transcript_language.clone()),
+        has_transcript: Set(has_transcript),
+        transcript_status: Set(transcript_status_str),
+        transcript_language: Set(transcript_language.clone()),
         tags: Set(tags.clone()),
-        analytics: Set(analytics.clone()),
-        metadata: Set(metadata_value.clone()),
-        signaling: Set(signaling_value.clone()),
         created_at: Set(record.start_time),
         updated_at: Set(record.end_time),
         archived_at: Set(None),
@@ -188,6 +131,8 @@ pub async fn persist_call_record(
                     Column::SipTrunkId,
                     Column::RouteId,
                     Column::SipGateway,
+                    Column::RewriteOriginalFrom,
+                    Column::RewriteOriginalTo,
                     Column::CallerUri,
                     Column::CalleeUri,
                     Column::RecordingUrl,
@@ -196,9 +141,6 @@ pub async fn persist_call_record(
                     Column::TranscriptStatus,
                     Column::TranscriptLanguage,
                     Column::Tags,
-                    Column::Analytics,
-                    Column::Metadata,
-                    Column::Signaling,
                     Column::UpdatedAt,
                 ])
                 .to_owned(),
@@ -261,121 +203,6 @@ fn normalize_endpoint_uri(value: &str) -> Option<String> {
     }
 }
 
-fn build_signaling_payload(record: &CallRecord) -> Option<Value> {
-    let mut legs = Vec::new();
-
-    if !record.sip_leg_roles.is_empty() {
-        for (sip_call_id, role) in record.sip_leg_roles.iter() {
-            let leg_record = match role.as_str() {
-                "primary" => Some(record),
-                _ => None,
-            };
-
-            let payload = match leg_record {
-                Some(inner) => call_leg_payload(role, inner, Some(sip_call_id)),
-                None => minimal_leg_payload(role, sip_call_id),
-            };
-
-            legs.push(payload);
-        }
-    }
-
-    if legs.is_empty() {
-        legs.push(call_leg_payload("primary", record, None));
-    }
-
-    if legs.is_empty() {
-        None
-    } else {
-        Some(json!({
-            "is_b2bua": false,
-            "legs": legs,
-        }))
-    }
-}
-
-fn call_leg_payload(role: &str, record: &CallRecord, sip_call_id: Option<&String>) -> Value {
-    let call_id = sip_call_id
-        .cloned()
-        .unwrap_or_else(|| record.call_id.clone());
-
-    json!({
-        "role": role,
-        "call_id": call_id,
-        "session_id": record.call_id.clone(),
-        "caller": record.caller.clone(),
-        "callee": record.callee.clone(),
-        "status_code": record.status_code,
-        "hangup_reason": record
-            .hangup_reason
-            .as_ref()
-            .map(|reason| reason.to_string()),
-        "start_time": record.start_time.clone(),
-        "ring_time": record.ring_time.clone(),
-        "answer_time": record.answer_time.clone(),
-        "end_time": record.end_time.clone(),
-    })
-}
-
-fn minimal_leg_payload(role: &str, sip_call_id: &str) -> Value {
-    json!({
-        "role": role,
-        "call_id": sip_call_id,
-    })
-}
-
-fn merge_metadata(record: &CallRecord, extra_metadata: Option<Value>) -> Option<Value> {
-    let mut map = JsonMap::new();
-    map.insert(
-        "status_code".to_string(),
-        Value::Number(JsonNumber::from(record.status_code)),
-    );
-    if let Some(ring_time) = record.ring_time {
-        map.insert(
-            "ring_time".to_string(),
-            Value::String(ring_time.to_rfc3339()),
-        );
-    }
-    if let Some(answer_time) = record.answer_time {
-        map.insert(
-            "answer_time".to_string(),
-            Value::String(answer_time.to_rfc3339()),
-        );
-    }
-    if let Some(reason) = record
-        .hangup_reason
-        .as_ref()
-        .map(|reason| reason.to_string())
-    {
-        map.insert("hangup_reason".to_string(), Value::String(reason));
-    }
-    if !record.hangup_messages.is_empty() {
-        if let Ok(value) = serde_json::to_value(&record.hangup_messages) {
-            map.insert("hangup_messages".to_string(), value);
-        }
-    }
-
-    if let Some(extras) = record.extensions.get::<CallRecordExtras>() {
-        for (key, value) in &extras.0 {
-            map.insert(key.clone(), value.clone());
-        }
-    }
-
-    if let Some(Value::Object(values)) = extra_metadata {
-        for (key, value) in values {
-            map.insert(key, value);
-        }
-    } else if let Some(value) = extra_metadata {
-        map.insert("extra_metadata".to_string(), value);
-    }
-
-    if map.is_empty() {
-        None
-    } else {
-        Some(Value::Object(map))
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Serialize, Deserialize)]
 #[sea_orm(table_name = "rustpbx_call_records")]
 pub struct Model {
@@ -399,6 +226,8 @@ pub struct Model {
     pub sip_trunk_id: Option<i64>,
     pub route_id: Option<i64>,
     pub sip_gateway: Option<String>,
+    pub rewrite_original_from: Option<String>,
+    pub rewrite_original_to: Option<String>,
     pub caller_uri: Option<String>,
     pub callee_uri: Option<String>,
     pub recording_url: Option<String>,
@@ -407,9 +236,6 @@ pub struct Model {
     pub transcript_status: String,
     pub transcript_language: Option<String>,
     pub tags: Option<Json>,
-    pub analytics: Option<Json>,
-    pub metadata: Option<Json>,
-    pub signaling: Option<Json>,
     pub created_at: DateTimeUtc,
     pub updated_at: DateTimeUtc,
     pub archived_at: Option<DateTimeUtc>,
@@ -487,6 +313,8 @@ impl MigrationTrait for Migration {
                     .col(ColumnDef::new(Column::SipTrunkId).big_integer().null())
                     .col(ColumnDef::new(Column::RouteId).big_integer().null())
                     .col(string_null(Column::SipGateway).char_len(160))
+                    .col(string_null(Column::RewriteOriginalFrom).char_len(64))
+                    .col(string_null(Column::RewriteOriginalTo).char_len(64))
                     .col(text_null(Column::CallerUri))
                     .col(text_null(Column::CalleeUri))
                     .col(string_null(Column::RecordingUrl).char_len(255))
@@ -499,9 +327,6 @@ impl MigrationTrait for Migration {
                     )
                     .col(string_null(Column::TranscriptLanguage).char_len(16))
                     .col(json_null(Column::Tags))
-                    .col(json_null(Column::Analytics))
-                    .col(json_null(Column::Metadata))
-                    .col(json_null(Column::Signaling))
                     .col(timestamp(Column::CreatedAt).default(Expr::current_timestamp()))
                     .col(timestamp(Column::UpdatedAt).default(Expr::current_timestamp()))
                     .col(timestamp_null(Column::ArchivedAt))
@@ -596,19 +421,54 @@ impl MigrationTrait for Migration {
 
 impl Into<CallRecord> for Model {
     fn into(self) -> CallRecord {
+        let details = crate::callrecord::CallDetails {
+            direction: self.direction,
+            status: self.status,
+            from_number: self.from_number.clone(),
+            to_number: self.to_number.clone(),
+            caller_name: self.caller_name,
+            agent_name: self.agent_name,
+            queue: self.queue,
+            department_id: self.department_id,
+            extension_id: self.extension_id,
+            sip_trunk_id: self.sip_trunk_id,
+            route_id: self.route_id,
+            sip_gateway: self.sip_gateway,
+            recording_url: self.recording_url,
+            recording_duration_secs: self.recording_duration_secs,
+            has_transcript: self.has_transcript,
+            transcript_status: Some(self.transcript_status),
+            transcript_language: self.transcript_language,
+            tags: self.tags,
+            rewrite: crate::callrecord::CallRecordRewrite {
+                caller_original: self.rewrite_original_from.unwrap_or_default(),
+                caller_final: String::new(),
+                callee_original: self.rewrite_original_to.unwrap_or_default(),
+                callee_final: String::new(),
+                contact: None,
+                destination: None,
+            },
+            last_error: None,
+        };
+
         CallRecord {
             call_id: self.call_id,
             start_time: self.started_at,
             ring_time: None,   // No ring_time in Model
             answer_time: None, // No answer_time in Model
             end_time: self.ended_at.unwrap_or(self.started_at),
-            caller: self.from_number.unwrap_or_default(),
-            callee: self.to_number.unwrap_or_default(),
+            caller: self
+                .caller_uri
+                .unwrap_or_else(|| self.from_number.unwrap_or_default()),
+            callee: self
+                .callee_uri
+                .unwrap_or_else(|| self.to_number.unwrap_or_default()),
             status_code: 0,                                  // No status_code in Model
             hangup_reason: None,                             // No hangup_reason in Model
             hangup_messages: Vec::new(),                     // No hangup_messages in Model
             recorder: Vec::new(),                            // No recorder list in Model
             sip_leg_roles: std::collections::HashMap::new(), // No sip_leg_roles in Model
+            details,
             extensions: http::Extensions::new(),
         }
     }

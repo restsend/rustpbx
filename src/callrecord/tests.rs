@@ -8,13 +8,7 @@ use tempfile::NamedTempFile;
 #[tokio::test]
 async fn test_save_with_http_without_media() {
     // Create a test CallRecord
-    let mut extras = HashMap::new();
-    extras.insert(
-        "test_key".to_string(),
-        serde_json::Value::String("test_value".to_string()),
-    );
-
-    let mut record = CallRecord {
+    let record = CallRecord {
         call_id: "test_call_123".to_string(),
         start_time: Utc::now(),
         end_time: Utc::now(),
@@ -24,7 +18,6 @@ async fn test_save_with_http_without_media() {
         hangup_messages: Vec::new(),
         ..Default::default()
     };
-    record.extensions.insert(CallRecordExtras(extras));
 
     // Test without media (should not fail if no server available)
     let url = "http://httpbin.org/post".to_string();
@@ -69,13 +62,7 @@ async fn test_save_with_http_with_media() {
         extra: None,
     };
 
-    let mut extras = HashMap::new();
-    extras.insert(
-        "test_key".to_string(),
-        serde_json::Value::String("test_value".to_string()),
-    );
-
-    let mut record = CallRecord {
+    let record = CallRecord {
         call_id: "test_call_with_media_456".to_string(),
         start_time: Utc::now(),
         end_time: Utc::now(),
@@ -86,7 +73,6 @@ async fn test_save_with_http_with_media() {
         recorder: vec![media],
         ..Default::default()
     };
-    record.extensions.insert(CallRecordExtras(extras));
 
     // Test with media
     let url = "http://httpbin.org/post".to_string();
@@ -119,13 +105,7 @@ async fn test_save_with_http_with_custom_headers() {
     headers.insert("Authorization".to_string(), "Bearer test_token".to_string());
     headers.insert("X-Custom-Header".to_string(), "test_value".to_string());
 
-    let mut extras = HashMap::new();
-    extras.insert(
-        "test_key".to_string(),
-        serde_json::Value::String("test_value".to_string()),
-    );
-
-    let mut record = CallRecord {
+    let record = CallRecord {
         call_id: "test_call_headers_789".to_string(),
         start_time: Utc::now(),
         end_time: Utc::now(),
@@ -135,7 +115,6 @@ async fn test_save_with_http_with_custom_headers() {
         hangup_reason: Some(CallRecordHangupReason::ByCaller),
         ..Default::default()
     };
-    record.extensions.insert(CallRecordExtras(extras));
 
     let url = "http://httpbin.org/post".to_string();
     let with_media = Some(false);
@@ -166,13 +145,7 @@ async fn test_save_with_s3_like_with_custom_headers() {
     headers.insert("Authorization".to_string(), "Bearer test_token".to_string());
     headers.insert("X-Custom-Header".to_string(), "test_value".to_string());
 
-    let mut extras = HashMap::new();
-    extras.insert(
-        "test_key".to_string(),
-        serde_json::Value::String("test_value".to_string()),
-    );
-
-    let mut record = CallRecord {
+    let record = CallRecord {
         call_id: "test_call_headers_789".to_string(),
         start_time: Utc::now(),
         end_time: Utc::now(),
@@ -182,7 +155,6 @@ async fn test_save_with_s3_like_with_custom_headers() {
         hangup_reason: Some(CallRecordHangupReason::ByCaller),
         ..Default::default()
     };
-    record.extensions.insert(CallRecordExtras(extras));
 
     let url = "http://httpbin.org/post".to_string();
     let with_media = Some(false);
@@ -219,13 +191,7 @@ async fn test_save_with_s3_like_memory_store() {
     let with_media = Some(false);
     let keep_media_copy = Some(false);
 
-    let mut extras = HashMap::new();
-    extras.insert(
-        "test_key".to_string(),
-        serde_json::Value::String("test_value".to_string()),
-    );
-
-    let mut record = CallRecord {
+    let record = CallRecord {
         call_id: "test_s3_call_123".to_string(),
         start_time: Utc::now(),
         end_time: Utc::now(),
@@ -235,7 +201,6 @@ async fn test_save_with_s3_like_memory_store() {
         hangup_reason: Some(CallRecordHangupReason::ByCaller),
         ..Default::default()
     };
-    record.extensions.insert(CallRecordExtras(extras));
 
     // This test will only succeed if there's a local minio instance running
     // In real scenarios, this would use actual cloud storage credentials
@@ -278,13 +243,7 @@ async fn test_save_with_s3_like_with_media() {
         extra: None,
     };
 
-    let mut extras = HashMap::new();
-    extras.insert(
-        "test_key".to_string(),
-        serde_json::Value::String("test_value".to_string()),
-    );
-
-    let mut record = CallRecord {
+    let record = CallRecord {
         call_id: "test_s3_media_456".to_string(),
         start_time: Utc::now(),
         end_time: Utc::now(),
@@ -295,7 +254,6 @@ async fn test_save_with_s3_like_with_media() {
         recorder: vec![media],
         ..Default::default()
     };
-    record.extensions.insert(CallRecordExtras(extras));
 
     // Test with different S3 vendors
     let test_cases = vec![

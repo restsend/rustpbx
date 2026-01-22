@@ -67,13 +67,24 @@ impl CallSessionBuilder {
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
         let original_caller = dialplan
-            .caller
-            .as_ref()
-            .map(|c| c.to_string())
+            .original
+            .from_header()
+            .ok()
+            .and_then(|h| h.uri().ok())
+            .map(|u| u.to_string())
+            .or_else(|| dialplan.caller.as_ref().map(|c| c.to_string()))
             .unwrap_or_default();
         let original_callee = dialplan
-            .first_target()
-            .map(|location| location.aor.to_string())
+            .original
+            .to_header()
+            .ok()
+            .and_then(|h| h.uri().ok())
+            .map(|u| u.to_string())
+            .or_else(|| {
+                dialplan
+                    .first_target()
+                    .map(|location| location.aor.to_string())
+            })
             .unwrap_or_default();
 
         let context = CallContext {
