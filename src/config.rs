@@ -54,7 +54,7 @@ fn default_useragent() -> Option<String> {
 }
 
 fn default_callid_suffix() -> Option<String> {
-    Some("rustpbx.com".to_string())
+    Some("miuda.ai".to_string())
 }
 
 fn default_user_backends() -> Vec<UserBackendConfig> {
