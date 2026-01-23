@@ -95,7 +95,7 @@ pub struct SipServerBuilder {
     module_fns: HashMap<String, FnCreateProxyModule>,
     locator: Option<Box<dyn Locator>>,
     callrecord_sender: Option<CallRecordSender>,
-    message_inspector: Option<Box<dyn MessageInspector>>,
+    message_inspectors: Vec<Box<dyn MessageInspector>>,
     dialplan_inspectors: Vec<Box<dyn DialplanInspector>>,
     create_route_invite: Option<FnCreateRouteInvite>,
     database: Option<DatabaseConnection>,
@@ -121,7 +121,7 @@ impl SipServerBuilder {
             module_fns: HashMap::new(),
             locator: None,
             callrecord_sender: None,
-            message_inspector: None,
+            message_inspectors: Vec::new(),
             dialplan_inspectors: Vec::new(),
             create_route_invite: None,
             database: None,
@@ -200,7 +200,7 @@ impl SipServerBuilder {
     }
 
     pub fn with_message_inspector(mut self, inspector: Box<dyn MessageInspector>) -> Self {
-        self.message_inspector = Some(inspector);
+        self.message_inspectors.push(inspector);
         self
     }
 
@@ -436,24 +436,28 @@ impl SipServerBuilder {
             .with_option(endpoint_option)
             .with_transport_layer(transport_layer);
 
+        let mut inspectors: Vec<Box<dyn MessageInspector>> = self.message_inspectors;
+        if self.config.nat_fix {
+            inspectors.insert(0, Box::new(super::nat::NatInspector::new()));
+        }
+
         let mut sip_flow = None;
-        // Create sipflow backend if configured
         if let Some(sipflow_config) = &self.sipflow_config {
-            let mut sip_flow_builder = SipFlowBuilder::new();
             if let Ok(backend) = create_backend(sipflow_config) {
                 info!("Sipflow backend initialized: {:?}", sipflow_config);
-                sip_flow_builder = sip_flow_builder.with_backend(Arc::from(backend));
+                let sflow = SipFlowBuilder::new()
+                    .with_backend(Arc::from(backend))
+                    .build();
+                sip_flow = Some(sflow.clone());
+                inspectors.push(Box::new(sflow));
             } else {
                 warn!("Failed to create sipflow backend");
             }
-            if let Some(inspector) = self.message_inspector {
-                sip_flow_builder = sip_flow_builder.register_inspector(inspector);
-            }
-            let sflow = sip_flow_builder.build();
-            endpoint_builder = endpoint_builder
-                .with_inspector(Box::new(sflow.clone()) as Box<dyn MessageInspector>);
-            sip_flow = Some(sflow);
         }
+
+        endpoint_builder = endpoint_builder.with_inspector(Box::new(CompositeMessageInspector {
+            inspectors,
+        }) as Box<dyn MessageInspector>);
 
         let locator_events = self.locator_events.unwrap_or_else(|| {
             let (tx, _) = tokio::sync::broadcast::channel(12);
@@ -729,10 +733,14 @@ impl SipServer {
                     }
                 };
                 runnings_tx.fetch_sub(1, Ordering::Relaxed);
+                let is_mid_dialog = tx.original.to_header().ok()
+                    .and_then(|h| h.tag().ok().flatten())
+                    .is_some();
+
                 if !matches!(
                     tx.original.method,
-                    rsip::Method::Bye | rsip::method::Method::Cancel | rsip::Method::Ack
-                ) && tx.last_response.is_none()
+                    rsip::Method::Bye | rsip::Method::Cancel | rsip::Method::Ack
+                ) && !is_mid_dialog && tx.last_response.is_none()
                     && !cookie.is_spam()
                 {
                     tx.reply(rsip::StatusCode::NotImplemented).await.ok();
@@ -864,5 +872,33 @@ impl SipServerInner {
                 self.user_backend.is_same_realm(callee_realm).await
             }
         }
+    }
+}
+
+struct CompositeMessageInspector {
+    inspectors: Vec<Box<dyn MessageInspector>>,
+}
+
+impl MessageInspector for CompositeMessageInspector {
+    fn before_send(
+        &self,
+        mut msg: rsip::SipMessage,
+        dest: Option<&rsipstack::transport::SipAddr>,
+    ) -> rsip::SipMessage {
+        for inspector in &self.inspectors {
+            msg = inspector.before_send(msg, dest);
+        }
+        msg
+    }
+
+    fn after_received(
+        &self,
+        mut msg: rsip::SipMessage,
+        from: &rsipstack::transport::SipAddr,
+    ) -> rsip::SipMessage {
+        for inspector in &self.inspectors {
+            msg = inspector.after_received(msg, from);
+        }
+        msg
     }
 }
