@@ -140,7 +140,7 @@ async fn test_b2bua_full_flow() {
     let alice = create_test_ua("alice", "password123", proxy_addr, alice_port)
         .await
         .unwrap();
-    let mut bob = create_test_ua("bob", "password456", proxy_addr, bob_port)
+    let bob = create_test_ua("bob", "password456", proxy_addr, bob_port)
         .await
         .unwrap();
 
@@ -285,7 +285,7 @@ async fn test_rtp_to_webrtc_bridge() {
     let alice_port = portpicker::pick_unused_port().unwrap_or(25032);
     let bob_port = portpicker::pick_unused_port().unwrap_or(25033);
 
-    let mut alice_ua = create_test_ua("alice", "password123", proxy_addr, alice_port)
+    let alice_ua = create_test_ua("alice", "password123", proxy_addr, alice_port)
         .await
         .unwrap();
     let bob_ua = create_test_ua("bob", "password456", proxy_addr, bob_port)
@@ -407,7 +407,7 @@ async fn test_webrtc_to_rtp_bridge() {
     let alice_ua = create_test_ua("alice", "password123", proxy_addr, alice_port)
         .await
         .unwrap();
-    let mut bob_ua = create_test_ua("bob", "password456", proxy_addr, bob_port)
+    let bob_ua = create_test_ua("bob", "password456", proxy_addr, bob_port)
         .await
         .unwrap();
 

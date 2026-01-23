@@ -120,7 +120,7 @@ See [docs/sipflow-config.md](docs/sipflow-config.md) for complete configuration 
     ```bash
     docker run -d \
       --name rustpbx \
-      -net host \
+      --net host \
       --env-file .env \
       -v $(pwd)/db:/app/db \
       -v $(pwd)/config.toml:/app/config.toml \

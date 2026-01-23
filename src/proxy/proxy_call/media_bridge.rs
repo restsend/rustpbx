@@ -8,7 +8,7 @@ use futures::stream::FuturesUnordered;
 use rustrtc::media::{MediaKind, MediaSample, MediaStreamTrack};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
 pub struct MediaBridge {
     pub leg_a: Arc<dyn MediaPeer>,
@@ -355,9 +355,10 @@ impl MediaBridge {
         let needs_transcoding = source_codec != target_codec;
         let track_id = track.id().to_string();
         debug!(
-            "forward_track {:?}: track_id={} source_codec={:?} target_codec={:?} needs_transcoding={} source_dtmf={:?} target_dtmf={:?}",
-            leg,
+            call_id,
             track_id,
+            ?leg,
+            "forward_track source_codec={:?} target_codec={:?} needs_transcoding={} source_dtmf={:?} target_dtmf={:?}",
             source_codec,
             target_codec,
             needs_transcoding,
@@ -375,23 +376,23 @@ impl MediaBridge {
 
         if let Some(transceiver) = existing_transceiver {
             debug!(
-                "forward_track {:?}: Reusing existing transceiver mid={:?} for track {}",
-                leg,
-                transceiver.mid(),
-                track_id
+                call_id,
+                track_id,
+                ?leg,
+                "forward_track reusing existing transceiver",
             );
 
             if let Some(old_sender) = transceiver.sender() {
                 let ssrc = target_ssrc.unwrap_or(old_sender.ssrc());
                 let params = target_params.clone();
                 let track_arc: Arc<dyn MediaStreamTrack> = track_target.clone();
-
                 debug!(
-                    "forward_track {:?}: Transceiver direction: {:?}, ssrc={}, params_pt={:?}",
-                    leg,
-                    transceiver.direction(),
+                    call_id,
+                    track_id,
                     ssrc,
-                    params.payload_type
+                    ?leg,
+                    ?params,
+                    "forward_track replacing sender on existing transceiver",
                 );
 
                 let new_sender = rustrtc::RtpSender::builder(track_arc, ssrc)
@@ -403,10 +404,12 @@ impl MediaBridge {
                 let ssrc = target_ssrc.unwrap_or_else(|| rand::random::<u32>());
                 let track_arc: Arc<dyn MediaStreamTrack> = track_target.clone();
                 let params = target_params.clone();
-
                 debug!(
-                    "forward_track {:?}: Creating new sender with ssrc={} (target_ssrc={:?}) params={:?}",
-                    leg, ssrc, target_ssrc, params
+                    call_id,
+                    track_id,
+                    ?leg,
+                    ?params,
+                    "forward_track creating new sender on existing transceiver",
                 );
 
                 let new_sender = rustrtc::RtpSender::builder(track_arc, ssrc)
@@ -417,15 +420,15 @@ impl MediaBridge {
         } else {
             match target_pc.add_track(track_target, target_params.clone()) {
                 Ok(_sender) => {
-                    debug!(
-                        "forward_track {:?}: add_track success (new transceiver) track {}",
-                        leg, track_id
-                    );
+                    debug!(call_id, track_id, ?leg, "forward_track add_track success");
                 }
                 Err(e) => {
-                    error!(
-                        "forward_track for {:?} exiting early due to add_track failure {}",
-                        leg, e
+                    warn!(
+                        call_id,
+                        track_id,
+                        ?leg,
+                        "forward_track add_track failed: {}",
+                        e
                     );
                     return;
                 }
@@ -454,9 +457,16 @@ impl MediaBridge {
                 // Log every 100 packets to verify flow
                 if packet_count % 100 == 1 {
                     debug!(
-                        "forward_track {:?} {} received packet #{} pt={:?}",
-                        leg, track_id, packet_count, frame.payload_type
+                        call_id,
+                        track_id,
+                        ?leg,
+                        packet_count,
+                        "forward_track received"
                     );
+                    // debug!(
+                    //     "forward_track {:?} {} received packet #{} pt={:?}",
+                    //     leg, track_id, packet_count, frame.payload_type
+                    // );
                 }
 
                 if let Some(seq) = frame.sequence_number {
@@ -531,14 +541,23 @@ impl MediaBridge {
             }
 
             if let Err(e) = source_target.send(sample).await {
-                error!("forward_track {:?}: source_target.send failed: {}", leg, e);
+                warn!(
+                    call_id,
+                    track_id,
+                    ?leg,
+                    "forward_track source_target.send failed: {}",
+                    e
+                );
                 break;
             }
         }
 
         debug!(
-            "forward_track {:?} track={} finished: total_packets={}",
-            leg, track_id, packet_count
+            call_id,
+            track_id,
+            ?leg,
+            packet_count,
+            "forward_track finished",
         );
     }
 

@@ -53,6 +53,10 @@ fn default_useragent() -> Option<String> {
     Some(crate::version::get_useragent())
 }
 
+fn default_nat_fix() -> bool {
+    true
+}
+
 fn default_callid_suffix() -> Option<String> {
     Some("miuda.ai".to_string())
 }
@@ -454,6 +458,8 @@ pub struct ProxyConfig {
     #[serde(default)]
     pub queues: HashMap<String, RouteQueueConfig>,
     #[serde(default)]
+    pub enable_latching: bool,
+    #[serde(default)]
     pub trunks: HashMap<String, TrunkConfig>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub trunks_files: Vec<String>,
@@ -463,6 +469,8 @@ pub struct ProxyConfig {
     pub recording: Option<RecordingPolicy>,
     #[serde(default = "default_generated_config_dir")]
     pub generated_dir: String,
+    #[serde(default = "default_nat_fix")]
+    pub nat_fix: bool,
     pub sip_flow_max_items: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub addons: Option<Vec<String>>,
@@ -632,6 +640,7 @@ impl Default for ProxyConfig {
             max_concurrency: None,
             registrar_expires: Some(60),
             ensure_user: Some(true),
+            enable_latching: false,
             user_backends: default_user_backends(),
             locator: LocatorConfig::default(),
             locator_webhook: None,
@@ -652,6 +661,7 @@ impl Default for ProxyConfig {
             queue_dir: None,
             recording: None,
             generated_dir: default_generated_config_dir(),
+            nat_fix: true,
             sip_flow_max_items: None,
             addons: None,
         }

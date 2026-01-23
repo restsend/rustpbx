@@ -167,32 +167,9 @@ pub struct RtcTrack {
 impl RtcTrack {
     pub fn new(
         track_id: String,
-        ice_servers: Vec<IceServer>,
-        mode: TransportMode,
-        external_ip: Option<String>,
-        rtp_start_port: Option<u16>,
-        rtp_end_port: Option<u16>,
+        config: RtcConfiguration,
         rtp_map: Vec<negotiate::CodecInfo>,
     ) -> Self {
-        let ice_servers_config: Vec<IceServer> = ice_servers
-            .iter()
-            .map(|s| IceServer {
-                urls: s.urls.clone(),
-                username: s.username.clone(),
-                credential: s.credential.clone(),
-                ..Default::default()
-            })
-            .collect();
-
-        let config = RtcConfiguration {
-            ice_servers: ice_servers_config,
-            transport_mode: mode,
-            rtp_start_port,
-            rtp_end_port,
-            external_ip,
-            ..Default::default()
-        };
-
         let pc = PeerConnection::new(config);
 
         // Add a dummy track to ensure a sender is created and SSRC is signaled in SDP
@@ -338,6 +315,8 @@ pub struct RtpTrackBuilder {
     rtp_end_port: Option<u16>,
     mode: TransportMode,
     rtp_map: Vec<negotiate::CodecInfo>,
+    enable_latching: bool,
+    ice_servers: Vec<IceServer>,
 }
 
 impl RtpTrackBuilder {
@@ -349,6 +328,8 @@ impl RtpTrackBuilder {
             rtp_start_port: None,
             rtp_end_port: None,
             mode: TransportMode::Rtp,
+            enable_latching: false,
+            ice_servers: Vec::new(),
             rtp_map: vec![
                 #[cfg(feature = "opus")]
                 CodecType::Opus,
@@ -407,16 +388,28 @@ impl RtpTrackBuilder {
         self
     }
 
+    pub fn with_enable_latching(mut self, enable: bool) -> Self {
+        self.enable_latching = enable;
+        self
+    }
+
+    pub fn with_ice_servers(mut self, servers: Vec<IceServer>) -> Self {
+        self.ice_servers = servers;
+        self
+    }
+
     pub fn build(self) -> RtcTrack {
-        RtcTrack::new(
-            self.track_id,
-            Vec::new(),
-            self.mode,
-            self.external_ip,
-            self.rtp_start_port,
-            self.rtp_end_port,
-            self.rtp_map,
-        )
+        let config = RtcConfiguration {
+            ice_servers: self.ice_servers,
+            transport_mode: self.mode,
+            rtp_start_port: self.rtp_start_port,
+            rtp_end_port: self.rtp_end_port,
+            external_ip: self.external_ip,
+            enable_latching: self.enable_latching,
+            ..Default::default()
+        };
+
+        RtcTrack::new(self.track_id, config, self.rtp_map)
     }
 }
 

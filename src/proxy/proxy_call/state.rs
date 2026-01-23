@@ -48,7 +48,7 @@ pub enum SessionAction {
         code: Option<u16>,
         initiator: Option<String>,
     },
-    HandleReInvite(String), // Stores the request method or body if needed, but here we just signal
+    HandleReInvite(String, String), // (method, sdp)
     RefreshSession,
     MuteTrack(String),
     UnmuteTrack(String),
@@ -88,6 +88,7 @@ pub struct CallSessionSnapshot {
     current_target: Option<String>,
     queue_name: Option<String>,
     direction: String,
+    pub answer_sdp: Option<String>,
 }
 
 #[derive(Clone)]
@@ -120,6 +121,7 @@ impl CallSessionShared {
             current_target: None,
             queue_name: None,
             direction: direction.to_string(),
+            answer_sdp: None,
         };
         Self {
             inner: Arc::new(RwLock::new(inner)),
@@ -131,6 +133,16 @@ impl CallSessionShared {
     pub fn snapshot(&self) -> CallSessionSnapshot {
         let inner = self.inner.read().unwrap();
         inner.clone()
+    }
+
+    pub fn set_answer_sdp(&self, sdp: String) {
+        let mut inner = self.inner.write().unwrap();
+        inner.answer_sdp = Some(sdp);
+    }
+
+    pub fn answer_sdp(&self) -> Option<String> {
+        let inner = self.inner.read().unwrap();
+        inner.answer_sdp.clone()
     }
 
     pub fn register_active_call(&self, handle: CallSessionHandle) {

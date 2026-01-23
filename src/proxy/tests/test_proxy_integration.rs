@@ -265,7 +265,7 @@ async fn test_call_success() {
     let alice = create_test_ua("alice", "password123", proxy_addr, alice_port)
         .await
         .unwrap();
-    let mut bob = create_test_ua("bob", "password456", proxy_addr, bob_port)
+    let bob = create_test_ua("bob", "password456", proxy_addr, bob_port)
         .await
         .unwrap();
 
@@ -374,7 +374,7 @@ async fn test_call_rejection() {
     let alice = create_test_ua("alice", "password123", proxy_addr, alice_port)
         .await
         .unwrap();
-    let mut bob = create_test_ua("bob", "password456", proxy_addr, bob_port)
+    let bob = create_test_ua("bob", "password456", proxy_addr, bob_port)
         .await
         .unwrap();
 
@@ -432,7 +432,7 @@ async fn test_call_hangup_flow() {
     let alice = create_test_ua("alice", "password123", proxy_addr, alice_port)
         .await
         .unwrap();
-    let mut bob = create_test_ua("bob", "password456", proxy_addr, bob_port)
+    let bob = create_test_ua("bob", "password456", proxy_addr, bob_port)
         .await
         .unwrap();
 

@@ -39,11 +39,12 @@ pub struct TestUaConfig {
 }
 
 /// Simplified TestUa structure with essential fields only
+#[derive(Clone)]
 pub struct TestUa {
     config: TestUaConfig,
     cancel_token: CancellationToken,
     dialog_layer: Option<Arc<DialogLayer>>,
-    state_receiver: Option<DialogStateReceiver>,
+    state_receiver: Option<Arc<tokio::sync::Mutex<DialogStateReceiver>>>,
     contact_uri: Option<rsip::Uri>,
 }
 
@@ -58,6 +59,7 @@ pub enum TestUaEvent {
     CallEstablished(DialogId),
     CallTerminated(DialogId),
     CallFailed(String),
+    CallUpdated(DialogId, rsip::Method, Option<String>),
 }
 
 impl TestUa {
@@ -91,7 +93,7 @@ impl TestUa {
         let dialog_layer = Arc::new(DialogLayer::new(endpoint.inner.clone()));
         let (state_sender, state_receiver) = dialog_layer.new_dialog_state_channel();
         self.dialog_layer = Some(dialog_layer);
-        self.state_receiver = Some(state_receiver);
+        self.state_receiver = Some(Arc::new(tokio::sync::Mutex::new(state_receiver)));
 
         // Create Contact URI
         self.contact_uri = Some(rsip::Uri {
@@ -364,11 +366,86 @@ impl TestUa {
         self.hangup(dialog_id).await
     }
 
+    /// Send UPDATE request within a dialog and return the answer SDP if any
+    pub async fn send_update(
+        &self,
+        dialog_id: &DialogId,
+        sdp: Option<String>,
+    ) -> Result<Option<String>> {
+        self.send_mid_dialog_request(dialog_id, rsip::Method::Update, sdp)
+            .await
+    }
+
+    /// Send re-INVITE request within a dialog and return the answer SDP if any
+    pub async fn send_reinvite(
+        &self,
+        dialog_id: &DialogId,
+        sdp: Option<String>,
+    ) -> Result<Option<String>> {
+        self.send_mid_dialog_request(dialog_id, rsip::Method::Invite, sdp)
+            .await
+    }
+
+    async fn send_mid_dialog_request(
+        &self,
+        dialog_id: &DialogId,
+        method: rsip::Method,
+        sdp: Option<String>,
+    ) -> Result<Option<String>> {
+        let dialog_layer = self
+            .dialog_layer
+            .as_ref()
+            .ok_or_else(|| anyhow!("TestUa not started"))?;
+
+        if let Some(mut dialog) = dialog_layer.get_dialog(dialog_id) {
+            let body = sdp.map(|s| s.into_bytes());
+            let headers = if body.is_some() {
+                vec![rsip::typed::ContentType(MediaType::Sdp(vec![])).into()]
+            } else {
+                vec![]
+            };
+
+            let resp = match (method, &mut dialog) {
+                (rsip::Method::Update, Dialog::ClientInvite(d)) => d
+                    .update(Some(headers), body)
+                    .await
+                    .map_err(|e| e.into_anyhow())?,
+                (rsip::Method::Update, Dialog::ServerInvite(d)) => d
+                    .update(Some(headers), body)
+                    .await
+                    .map_err(|e| e.into_anyhow())?,
+                (rsip::Method::Invite, Dialog::ClientInvite(d)) => d
+                    .reinvite(Some(headers), body)
+                    .await
+                    .map_err(|e| e.into_anyhow())?,
+                (rsip::Method::Invite, Dialog::ServerInvite(d)) => d
+                    .reinvite(Some(headers), body)
+                    .await
+                    .map_err(|e| e.into_anyhow())?,
+                _ => return Err(anyhow!("Dialog does not support {} request", method)),
+            };
+
+            let sdp_answer = if let Some(r) = resp {
+                if !r.body().is_empty() {
+                    Some(String::from_utf8_lossy(r.body()).to_string())
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            Ok(sdp_answer)
+        } else {
+            Err(anyhow!("Dialog not found: {}", dialog_id))
+        }
+    }
+
     /// Process dialog events and return collected events
-    pub async fn process_dialog_events(&mut self) -> Result<Vec<TestUaEvent>> {
+    pub async fn process_dialog_events(&self) -> Result<Vec<TestUaEvent>> {
         let mut events = Vec::new();
 
-        if let Some(state_receiver) = &mut self.state_receiver {
+        if let Some(state_receiver_mutex) = &self.state_receiver {
+            let mut state_receiver = state_receiver_mutex.lock().await;
             while let Ok(state) = state_receiver.try_recv() {
                 match state {
                     DialogState::Calling(id) => {
@@ -404,6 +481,20 @@ impl TestUa {
                         if let Some(dialog_layer) = &self.dialog_layer {
                             dialog_layer.remove_dialog(&id);
                         }
+                    }
+                    DialogState::Updated(id, request, tx_handle) => {
+                        debug!(
+                            "TestUa: Received UPDATED state for {} (method: {})",
+                            id, request.method
+                        );
+                        let sdp = if !request.body().is_empty() {
+                            Some(String::from_utf8_lossy(request.body()).to_string())
+                        } else {
+                            None
+                        };
+                        events.push(TestUaEvent::CallUpdated(id, request.method.clone(), sdp));
+                        // Automatically reply 200 OK for tests if not handled otherwise
+                        tx_handle.reply(rsip::StatusCode::OK).await.ok();
                     }
                     _ => {}
                 }
@@ -753,7 +844,7 @@ mod tests {
             );
 
             let bob_port = portpicker::pick_unused_port().unwrap_or(25011);
-            let mut bob = create_test_ua("bob", "password456", proxy_addr, bob_port)
+            let bob = create_test_ua("bob", "password456", proxy_addr, bob_port)
                 .await
                 .unwrap();
 
@@ -1042,7 +1133,7 @@ a=setup:actpass"#.to_string()),
                 .unwrap();
 
             let bob_port = portpicker::pick_unused_port().unwrap_or(25051);
-            let mut bob = create_test_ua("bob", "password456", proxy_addr, bob_port)
+            let bob = create_test_ua("bob", "password456", proxy_addr, bob_port)
                 .await
                 .unwrap();
 
@@ -1094,7 +1185,7 @@ a=setup:actpass"#.to_string()),
         );
 
         let bob_port = portpicker::pick_unused_port().unwrap_or(25061);
-        let mut bob = create_test_ua("bob", "password456", proxy_addr, bob_port)
+        let bob = create_test_ua("bob", "password456", proxy_addr, bob_port)
             .await
             .unwrap();
 
@@ -1168,7 +1259,7 @@ a=setup:actpass"#.to_string()),
         );
 
         let bob_port = portpicker::pick_unused_port().unwrap_or(25071);
-        let mut bob = create_test_ua("bob", "password456", proxy_addr, bob_port)
+        let bob = create_test_ua("bob", "password456", proxy_addr, bob_port)
             .await
             .unwrap();
 

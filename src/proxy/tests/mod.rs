@@ -18,6 +18,8 @@ mod user_http_test;
 #[cfg(test)]
 mod test_b2bua_flow;
 #[cfg(test)]
+mod test_reinvite;
+#[cfg(test)]
 mod test_call;
 #[cfg(test)]
 mod test_cdr;

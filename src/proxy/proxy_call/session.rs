@@ -170,6 +170,7 @@ pub(crate) struct CallSession {
     pub callee_dialogs: Arc<Mutex<HashSet<DialogId>>>,
     pub last_error: Option<(StatusCode, Option<String>)>,
     pub connected_callee: Option<String>,
+    pub connected_dialog_id: Option<DialogId>,
     pub ring_time: Option<Instant>,
     pub answer_time: Option<Instant>,
     pub caller_offer: Option<String>,
@@ -255,6 +256,7 @@ impl CallSession {
             callee_dialogs: Arc::new(Mutex::new(HashSet::new())),
             last_error: None,
             connected_callee: None,
+            connected_dialog_id: None,
             ring_time: None,
             answer_time: None,
             caller_offer,
@@ -559,7 +561,26 @@ impl CallSession {
 
         let mut track_builder = RtpTrackBuilder::new(track_id.clone())
             .with_cancel_token(self.caller_peer.cancel_token())
-            .with_codec_info(codec_info);
+            .with_codec_info(codec_info)
+            .with_enable_latching(self.context.media_config.enable_latching);
+        if let Some(ref servers) = self.context.media_config.ice_servers {
+            track_builder = track_builder.with_ice_servers(servers.clone());
+        }
+        if let Some(ref servers) = self.context.media_config.ice_servers {
+            track_builder = track_builder.with_ice_servers(servers.clone());
+        }
+        if let Some(ref servers) = self.context.media_config.ice_servers {
+            track_builder = track_builder.with_ice_servers(servers.clone());
+        }
+        if let Some(ref servers) = self.context.media_config.ice_servers {
+            track_builder = track_builder.with_ice_servers(servers.clone());
+        }
+        if let Some(ref servers) = self.context.media_config.ice_servers {
+            track_builder = track_builder.with_ice_servers(servers.clone());
+        }
+        if let Some(ref servers) = self.context.media_config.ice_servers {
+            track_builder = track_builder.with_ice_servers(servers.clone());
+        }
         if let Some(ref addr) = self.context.media_config.external_ip {
             track_builder = track_builder.with_external_ip(addr.clone());
         }
@@ -711,12 +732,15 @@ impl CallSession {
         // Build track with negotiated codecs
         let mut track_builder = RtpTrackBuilder::new(track_id.clone())
             .with_cancel_token(self.caller_peer.cancel_token())
-            .with_codec_info(negotiated_codecs);
+            .with_codec_info(negotiated_codecs)
+            .with_enable_latching(self.context.media_config.enable_latching);
 
         if let Some(ref addr) = self.context.media_config.external_ip {
             track_builder = track_builder.with_external_ip(addr.clone());
         }
-
+        if let Some(ref ice_servers) = self.context.media_config.ice_servers {
+            track_builder = track_builder.with_ice_servers(ice_servers.clone());
+        }
         if let (Some(start), Some(end)) = (
             self.context.media_config.rtp_start_port,
             self.context.media_config.rtp_end_port,
@@ -840,7 +864,8 @@ impl CallSession {
         // Unified track creation using RtpTrackBuilder
         let mut track_builder = RtpTrackBuilder::new(track_id.clone())
             .with_cancel_token(self.caller_peer.cancel_token())
-            .with_codec_info(codec_info);
+            .with_codec_info(codec_info)
+            .with_enable_latching(self.context.media_config.enable_latching);
 
         if let Some(ref addr) = self.context.media_config.external_ip {
             track_builder = track_builder.with_external_ip(addr.clone());
@@ -1023,7 +1048,8 @@ impl CallSession {
         // Unified track creation using RtpTrackBuilder
         let mut track_builder = RtpTrackBuilder::new(track_id.clone())
             .with_cancel_token(self.callee_peer.cancel_token())
-            .with_codec_info(codec_info);
+            .with_codec_info(codec_info)
+            .with_enable_latching(self.context.media_config.enable_latching);
 
         if let Some(ref addr) = self.context.media_config.external_ip {
             track_builder = track_builder.with_external_ip(addr.clone());
@@ -1117,7 +1143,11 @@ impl CallSession {
                 "Track does not exist, creating new callee track"
             );
             let mut track = RtpTrackBuilder::new(track_id.clone())
-                .with_cancel_token(self.callee_peer.cancel_token());
+                .with_cancel_token(self.callee_peer.cancel_token())
+                .with_enable_latching(self.context.media_config.enable_latching);
+            if let Some(ref servers) = self.context.media_config.ice_servers {
+                track = track.with_ice_servers(servers.clone());
+            }
             if let Some(ref addr) = self.context.media_config.external_ip {
                 track = track.with_external_ip(addr.clone());
             }
@@ -1212,7 +1242,7 @@ impl CallSession {
                 // Negotiate final codec based on dialplan priority
                 match self.negotiate_final_codec(&answer).await {
                     Ok(answer_for_caller) => {
-                        self.answer = Some(answer_for_caller.clone());
+                        self.set_answer(answer_for_caller.clone());
                         answer = answer_for_caller;
 
                         // Create media bridge during early media (183) if not already created
@@ -1353,18 +1383,23 @@ impl CallSession {
         }
     }
 
-    pub async fn handle_reinvite(&mut self, sdp: Option<String>) {
+    pub async fn handle_reinvite(&mut self, method: rsip::Method, sdp: Option<String>) {
+        if self.answer.is_none() {
+            self.answer = self.shared.answer_sdp();
+        }
+        info!(session_id = %self.context.session_id, ?method, has_answer = self.answer.is_some(), "Handle re-INVITE/UPDATE");
+
         if let Some(offer) = sdp {
-            debug!("Received Re-invite with SDP (Offer)");
+            debug!(?method, "Received Re-invite/UPDATE with SDP (Offer)");
             self.negotiation_state = NegotiationState::RemoteOfferReceived;
 
             // Update caller peer with the new offer
             if let Err(e) = self
                 .caller_peer
-                .update_remote_description(Self::CALLEE_TRACK_ID, &offer)
+                .update_remote_description("caller-track", &offer)
                 .await
             {
-                warn!("Failed to update caller peer with re-INVITE offer: {}", e);
+                warn!(?method, "Failed to update caller peer with offer: {}", e);
                 let _ = self
                     .server_dialog
                     .reject(Some(StatusCode::NotAcceptableHere), None);
@@ -1372,27 +1407,65 @@ impl CallSession {
                 return;
             }
 
-            // Handle re-INVITE by replying with current answer
-            if let Some(sdp) = &self.answer {
-                let headers = vec![rsip::Header::ContentType("application/sdp".into())];
-                if let Err(e) = self
-                    .server_dialog
-                    .accept(Some(headers), Some(sdp.clone().into_bytes()))
-                {
-                    warn!("Failed to reply to re-INVITE: {}", e);
+            if let Some(callee_dialog_id) = &self.connected_dialog_id {
+                if let Some(dialog) = self.dialog_layer.get_dialog(callee_dialog_id) {
+                    if let rsipstack::dialog::dialog::Dialog::ClientInvite(client_dialog) = dialog {
+                        debug!(%callee_dialog_id, "Forwarding re-INVITE/UPDATE offer to callee");
+                        let headers = vec![rsip::Header::ContentType("application/sdp".into())];
+                        let method_clone = method.clone();
+                        let offer_clone = offer.clone();
+
+                        // Spawn this so we don't block the session event loop
+                        crate::utils::spawn(async move {
+                            if method_clone == rsip::Method::Invite {
+                                let _ = client_dialog
+                                    .reinvite(Some(headers), Some(offer_clone.into_bytes()))
+                                    .await;
+                            } else {
+                                let _ = client_dialog
+                                    .update(Some(headers), Some(offer_clone.into_bytes()))
+                                    .await;
+                            }
+                        });
+                    }
+                }
+            }
+
+            // For re-INVITE, we reply with current answer SDP using server_dialog.accept()
+            // Note: If CallModule already replied to the transaction, this will just fail gracefully
+            if method == rsip::Method::Invite {
+                if let Some(sdp) = &self.answer {
+                    let headers = vec![rsip::Header::ContentType("application/sdp".into())];
+                    if let Err(e) = self
+                        .server_dialog
+                        .accept(Some(headers), Some(sdp.clone().into_bytes()))
+                    {
+                        debug!(
+                            ?method,
+                            "Failed to reply to re-INVITE with SDP (likely handled by CallModule): {}",
+                            e
+                        );
+                    } else {
+                        info!(?method, "Replied to re-INVITE with current SDP");
+                        self.negotiation_state = NegotiationState::Stable;
+                    }
                 } else {
-                    info!("Replied to re-INVITE with current SDP");
+                    println!("DEBUG: Received re-INVITE but no answer SDP available");
+                    let _ = self
+                        .server_dialog
+                        .reject(Some(StatusCode::NotAcceptableHere), None);
                     self.negotiation_state = NegotiationState::Stable;
                 }
             } else {
-                warn!("Received re-INVITE but no answer SDP available");
-                let _ = self
-                    .server_dialog
-                    .reject(Some(StatusCode::NotAcceptableHere), None);
+                // For UPDATE, we just update the state
                 self.negotiation_state = NegotiationState::Stable;
+                debug!(?method, "Marked negotiation stable after processing UPDATE");
             }
         } else {
-            debug!("Received Re-invite without SDP (Request for Offer)");
+            debug!(
+                ?method,
+                "Received Re-invite/UPDATE without SDP (Request for Offer)"
+            );
             self.negotiation_state = NegotiationState::LocalOfferSent;
 
             if let Some(sdp) = &self.answer {
@@ -1401,9 +1474,15 @@ impl CallSession {
                     .server_dialog
                     .accept(Some(headers), Some(sdp.clone().into_bytes()))
                 {
-                    warn!("Failed to reply to re-INVITE (no SDP): {}", e);
+                    warn!(
+                        ?method,
+                        "Failed to reply to re-INVITE/UPDATE (no SDP): {}", e
+                    );
                 } else {
-                    info!("Replied to re-INVITE (no SDP) with current SDP as Offer");
+                    info!(
+                        ?method,
+                        "Replied to re-INVITE/UPDATE (no SDP) with current SDP as Offer"
+                    );
                     self.negotiation_state = NegotiationState::Stable;
                 }
             }
@@ -1422,6 +1501,11 @@ impl CallSession {
         self.answer_time.is_some()
     }
 
+    pub fn set_answer(&mut self, sdp: String) {
+        self.shared.set_answer_sdp(sdp.clone());
+        self.answer = Some(sdp);
+    }
+
     pub async fn accept_call(
         &mut self,
         callee: Option<String>,
@@ -1434,7 +1518,7 @@ impl CallSession {
         let first_answer = self.answer_time.is_none();
         if self.answer.is_none() {
             match self.create_caller_answer_from_offer().await {
-                Ok(answer) => self.answer = Some(answer),
+                Ok(answer) => self.set_answer(answer),
                 Err(e) => {
                     let _ = self
                         .server_dialog
@@ -1447,6 +1531,12 @@ impl CallSession {
         if let Some(callee_addr) = callee {
             let resolved_callee = self.routed_callee.clone().unwrap_or(callee_addr);
             self.connected_callee = Some(resolved_callee);
+        }
+        if let Some(ref id_str) = dialog_id {
+            let callee_dialogs = self.callee_dialogs.lock().unwrap();
+            if let Some(id) = callee_dialogs.iter().find(|id| id.to_string() == **id_str) {
+                self.connected_dialog_id = Some(id.clone());
+            }
         }
         if first_answer {
             self.answer_time = Some(Instant::now());
@@ -1465,14 +1555,14 @@ impl CallSession {
         if !self.early_media_sent {
             if let Some(ref callee_sdp) = callee_answer {
                 if let Some(optimized_answer) = self.optimize_caller_codec(callee_sdp).await {
-                    self.answer = Some(optimized_answer);
+                    self.set_answer(optimized_answer);
                 }
             }
         }
 
         if self.answer.is_none() {
             let answer_for_caller = self.create_caller_answer_from_offer().await?;
-            self.answer = Some(answer_for_caller);
+            self.set_answer(answer_for_caller);
         }
 
         if self.use_media_proxy {
@@ -1578,7 +1668,7 @@ impl CallSession {
             }
         } else {
             if let Some(answer) = callee_answer {
-                self.answer = Some(answer);
+                self.set_answer(answer);
             }
             if let Some(ref bridge) = self.media_bridge {
                 bridge.stop();
@@ -1870,9 +1960,14 @@ impl CallSession {
                         self.transfer_to_uri(&target).await
                     }
                 }
-                SessionAction::HandleReInvite(sdp) => {
+                SessionAction::HandleReInvite(method_str, sdp) => {
                     let sdp_opt = if sdp.is_empty() { None } else { Some(sdp) };
-                    self.handle_reinvite(sdp_opt).await;
+                    let method = match method_str.to_uppercase().as_str() {
+                        "INVITE" => rsip::Method::Invite,
+                        "UPDATE" => rsip::Method::Update,
+                        _ => rsip::Method::Invite, // Default to Invite for now
+                    };
+                    self.handle_reinvite(method, sdp_opt).await;
                     Ok(())
                 }
                 _ => unreachable!("unsupported session control action"),
@@ -2041,7 +2136,7 @@ impl CallSession {
             if self.answer.is_none() {
                 match self.create_caller_answer_from_offer().await {
                     Ok(answer) => {
-                        self.answer = Some(answer);
+                        self.set_answer(answer);
                     }
                     Err(e) => {
                         warn!(
@@ -3014,6 +3109,7 @@ impl CallSession {
         handle: CallSessionHandle,
         cancel_token: CancellationToken,
         pending_hangup: Arc<Mutex<Option<PendingHangup>>>,
+        _shared: CallSessionShared,
     ) -> Result<()> {
         let mut refresh_interval = tokio::time::interval(Duration::from_secs(5));
         loop {
@@ -3043,32 +3139,46 @@ impl CallSession {
                                 }
                                 DialogState::Updated(dialog_id, request, tx_handle) => {
                                     debug!(session_id = %context.session_id, %dialog_id, "Received UPDATE/INVITE on server dialog");
-                                    if request.method == rsip::Method::Invite {
-                                        let sdp = if !request.body.is_empty() {
-                                            Some(String::from_utf8_lossy(&request.body).to_string())
-                                        } else {
-                                            None
-                                        };
-                                        let _ = handle.send_command(SessionAction::HandleReInvite(sdp.unwrap_or_default()));
 
-                                    }
-                                    // Update server timer on incoming refresh
-                                    if let Some(value) = get_header_value(&request.headers, HEADER_SESSION_EXPIRES) {
-                                        if let Some((interval, _)) = parse_session_expires(&value) {
-                                            let mut timer = server_timer.lock().unwrap();
-                                            timer.session_interval = interval;
-                                            timer.update_refresh();
-                                            timer.active = true;
-                                            debug!(session_id = %context.session_id, "Server session timer refreshed by incoming request");
+                                    let has_sdp = !request.body.is_empty();
+                                    let is_reinvite = request.method == rsip::Method::Invite;
+                                    let is_update = request.method == rsip::Method::Update;
+
+                                    // Handle Re-INVITE or UPDATE with SDP
+                                    if (is_reinvite || is_update) && has_sdp {
+                                        let sdp = String::from_utf8_lossy(&request.body).to_string();
+
+                                        // Send command to update media
+                                        let _ = handle.send_command(SessionAction::HandleReInvite(request.method.to_string(), sdp));
+
+                                        if is_update {
+                                            // For UPDATE, we reply here using the transaction handle
+                                            // Note: rsipstack 0.4.3 TransactionHandle::reply only takes status,
+                                            // cannot send body. Re-INVITE is preferred if SDP answer is required.
+                                            tx_handle.reply(rsip::StatusCode::OK).await.ok();
+                                            debug!(session_id = %context.session_id, "Replied to UPDATE (200 OK)");
                                         }
+                                        // For re-INVITE, handle_reinvite will call server_dialog.accept()
                                     } else {
-                                        let mut timer = server_timer.lock().unwrap();
-                                        if timer.active {
-                                            timer.update_refresh();
-                                            debug!(session_id = %context.session_id, "Server session timer refreshed by incoming request (no Session-Expires)");
+                                        // Update server timer on incoming refresh
+                                        if let Some(value) = get_header_value(&request.headers, HEADER_SESSION_EXPIRES) {
+                                            if let Some((interval, _)) = parse_session_expires(&value) {
+                                                let mut timer = server_timer.lock().unwrap();
+                                                timer.session_interval = interval;
+                                                timer.update_refresh();
+                                                timer.active = true;
+                                                debug!(session_id = %context.session_id, "Server session timer refreshed by incoming request");
+                                            }
+                                        } else {
+                                            let mut timer = server_timer.lock().unwrap();
+                                            if timer.active {
+                                                timer.update_refresh();
+                                                debug!(session_id = %context.session_id, "Server session timer refreshed by incoming request (no Session-Expires)");
+                                            }
                                         }
+                                        // For requests without SDP, reply with 200 OK
+                                        tx_handle.reply(rsip::StatusCode::OK).await.ok();
                                     }
-                                    tx_handle.reply(rsip::StatusCode::OK).await.ok();
                                 }
                                 DialogState::Notify(dialog_id, _request, tx_handle) => {
                                     debug!(session_id = %context.session_id, %dialog_id, "Received NOTIFY on server dialog");
@@ -3526,6 +3636,7 @@ impl CallSession {
             .max_call_duration
             .or_else(|| self.context.cookie.get_max_duration());
 
+        let shared_for_loop = self.shared.clone();
         let _ = tokio::select! {
             _ = cancel_token_for_select.cancelled() => {
                 let (status_code, reason_text, hangup_reason) = self.resolve_pending_hangup();
@@ -3581,7 +3692,8 @@ impl CallSession {
                 server_dialog_clone.clone(),
                 handle_for_events,
                 cancel_token_for_loop,
-                pending_hangup
+                pending_hangup,
+                shared_for_loop
             ) => r,
         };
 
