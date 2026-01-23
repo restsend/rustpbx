@@ -6,7 +6,7 @@ WORKDIR /build
 RUN --mount=type=cache,target=/build/.cargo/registry \
     --mount=type=cache,target=/build/target/release/incremental\
     --mount=type=cache,target=/build/target/release/build\
-    cargo build --release --bin rustpbx
+    cargo build --release --bin rustpbx --bin sipflow
 
 FROM debian:bookworm
 LABEL maintainer="shenjindi@miuda.ai"
@@ -21,6 +21,7 @@ COPY --from=rust-builder /build/src/addons/transcript/static /app/static/transcr
 COPY --from=rust-builder /build/src/addons/queue/static /app/static/queue
 
 COPY --from=rust-builder /build/target/release/rustpbx /app/rustpbx
+COPY --from=rust-builder /build/target/release/sipflow /app/sipflow
 COPY --from=rust-builder /build/templates /app/templates
 COPY --from=rust-builder /build/src/addons/acme/templates /app/templates/acme
 COPY --from=rust-builder /build/src/addons/archive/templates /app/templates/archive
