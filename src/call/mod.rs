@@ -231,22 +231,34 @@ impl std::fmt::Display for DialStrategy {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RingbackMode {
+    Local,
+    Passthrough,
+    Auto,
+    None,
+}
+
+impl Default for RingbackMode {
+    fn default() -> Self {
+        Self::Auto
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RingbackConfig {
-    /// Audio file to play as local ringback
+    #[serde(default)]
+    pub mode: RingbackMode,
     pub audio_file: Option<String>,
+    #[serde(default = "default_ringback_loop")]
+    pub loop_playback: bool,
+    #[serde(default)]
+    pub wait_for_completion: bool,
+}
 
-    /// Whether to wait for ringtone playback completion before starting call dialing (default: false)
-    pub wait_for_completion: Option<bool>,
-
-    /// Whether to play local ringback tone (183 + local audio file)
-    pub play_local_ringback: bool,
-
-    /// Local ringback audio file path (alternative to audio_file)
-    pub local_ringback_file: Option<String>,
-
-    /// Whether to passthrough callee's early media (183 from callee)
-    pub passthrough_early_media: Option<bool>,
+fn default_ringback_loop() -> bool {
+    true
 }
 
 impl Default for RingbackConfig {
@@ -258,12 +270,16 @@ impl Default for RingbackConfig {
 impl RingbackConfig {
     pub fn new() -> Self {
         Self {
+            mode: RingbackMode::Auto,
             audio_file: None,
-            wait_for_completion: Some(false),
-            play_local_ringback: false,
-            local_ringback_file: None,
-            passthrough_early_media: None,
+            loop_playback: true,
+            wait_for_completion: false,
         }
+    }
+
+    pub fn with_mode(mut self, mode: RingbackMode) -> Self {
+        self.mode = mode;
+        self
     }
 
     pub fn with_audio_file(mut self, file: String) -> Self {
@@ -271,14 +287,8 @@ impl RingbackConfig {
         self
     }
 
-    pub fn with_local_ringback(mut self, file: String) -> Self {
-        self.play_local_ringback = true;
-        self.local_ringback_file = Some(file);
-        self
-    }
-
-    pub fn with_passthrough_early_media(mut self, enable: bool) -> Self {
-        self.passthrough_early_media = Some(enable);
+    pub fn with_loop(mut self, loop_playback: bool) -> Self {
+        self.loop_playback = loop_playback;
         self
     }
 }
@@ -675,12 +685,12 @@ impl Dialplan {
             with_original_headers: true,
             extensions: http::Extensions::new(),
             allow_codecs: vec![
-                // #[cfg(feature = "opus")]
-                // CodecType::Opus,
-                // CodecType::G729,
-                // CodecType::G722,
+                CodecType::G729,
+                CodecType::G722,
                 CodecType::PCMU,
                 CodecType::PCMA,
+                #[cfg(feature = "opus")]
+                CodecType::Opus,
                 CodecType::TelephoneEvent,
             ],
         }

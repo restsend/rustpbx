@@ -67,6 +67,7 @@ reqwest = { version = "0.13.1", features = [
     "form",
     "query",
     "gzip",
+    "blocking",
 ] }
 base64 = "0.22.1"
 hmac = "0.12"
@@ -123,6 +124,7 @@ quick-xml = { version = "0.39.0", features = ["serialize"] }
 socket2 = "0.5"
 zstd = "0.13"
 hound = "3.5"
+minimp3 = "0.5"
 
 [dev-dependencies]
 tempfile = "3.24.0"

@@ -493,6 +493,17 @@ impl CallSession {
         None
     }
 
+    /// Helper method to create queue hold music track (unified PC approach)
+    async fn create_queue_hold_track(&self, audio_file: &str, loop_playback: bool) {
+        let hold_ssrc = rand::random::<u32>();
+        let track = crate::media::FileTrack::new("queue-hold-music".to_string())
+            .with_path(audio_file.to_string())
+            .with_loop(loop_playback)
+            .with_ssrc(hold_ssrc);
+
+        self.caller_peer.update_track(Box::new(track), None).await;
+    }
+
     async fn optimize_caller_codec(&mut self, callee_answer: &str) -> Option<String> {
         // Parse callee's codecs from their answer
         let (callee_codecs, _) = MediaNegotiator::extract_codec_params(callee_answer);
@@ -1208,8 +1219,6 @@ impl CallSession {
             return;
         }
 
-        // If it's the same dialog and we already sent early media, skip
-        // But if it's a DIFFERENT dialog, we might want to send another 183
         if self.early_media_sent && dialog_id.is_none() {
             debug!("Early media already sent, skipping ringing");
             return;
@@ -1217,35 +1226,47 @@ impl CallSession {
 
         self.shared.transition_to_ringing(!answer.is_empty());
 
-        // if self.queue_hold_active && !answer.is_empty() {
-        //     if self.queue_passthrough_ringback {
-        //         debug!("Stopping queue hold audio to passthrough remote ringback");
-        //         self.stop_queue_hold().await;
-        //     } else {
-        //         debug!("Queue hold audio active, suppressing remote early-media ringback");
-        //         return;
-        //     }
-        // }
-
         if self.ring_time.is_none() {
             self.ring_time = Some(Instant::now());
         }
 
-        if !answer.is_empty() {
-            self.early_media_sent = true;
-            if self.use_media_proxy {
-                // Setup callee track first
-                self.setup_callee_track(&answer, dialog_id.as_ref())
-                    .await
-                    .ok();
+        let has_early_media = !answer.is_empty();
+        let ringback_mode = self.context.dialplan.ringback.mode;
 
-                // Negotiate final codec based on dialplan priority
+        let should_play_local = match ringback_mode {
+            crate::call::RingbackMode::Local => true,
+            crate::call::RingbackMode::Passthrough => false,
+            crate::call::RingbackMode::Auto => !has_early_media,
+            crate::call::RingbackMode::None => false,
+        };
+
+        let should_passthrough = match ringback_mode {
+            crate::call::RingbackMode::Local => false,
+            crate::call::RingbackMode::Passthrough => has_early_media,
+            crate::call::RingbackMode::Auto => has_early_media,
+            crate::call::RingbackMode::None => false,
+        };
+
+        if has_early_media {
+            self.early_media_sent = true;
+
+            if self.use_media_proxy {
+                if should_passthrough {
+                    info!(
+                        session_id = %self.context.session_id,
+                        mode = ?ringback_mode,
+                        "Forwarding callee early media to caller (passthrough mode)"
+                    );
+                    self.setup_callee_track(&answer, dialog_id.as_ref())
+                        .await
+                        .ok();
+                }
+
                 match self.negotiate_final_codec(&answer).await {
                     Ok(answer_for_caller) => {
                         self.set_answer(answer_for_caller.clone());
                         answer = answer_for_caller;
 
-                        // Create media bridge during early media (183) if not already created
                         if self.media_bridge.is_none() {
                             let (params_a, dtmf_pt_a, codec_a) = self
                                 .answer
@@ -1325,10 +1346,17 @@ impl CallSession {
                             self.media_bridge = Some(bridge);
                         }
 
-                        if !call_answered {
+                        if !call_answered && should_play_local {
                             if let Some(ref file_name) = self.context.dialplan.ringback.audio_file {
+                                info!(
+                                    session_id = %self.context.session_id,
+                                    mode = ?ringback_mode,
+                                    audio_file = %file_name,
+                                    "Playing local ringback (local/auto mode with early media)"
+                                );
+                                let loop_playback = self.context.dialplan.ringback.loop_playback;
                                 let mut track = FileTrack::new(Self::RINGBACK_TRACK_ID.to_string());
-                                track = track.with_path(file_name.clone());
+                                track = track.with_path(file_name.clone()).with_loop(loop_playback);
                                 self.caller_peer.update_track(Box::new(track), None).await;
                                 let track_id = if let Some(ref id) = dialog_id {
                                     format!("callee-track-{}", id)
@@ -1345,19 +1373,37 @@ impl CallSession {
                     }
                 };
             }
-        };
+        } else {
+            if should_play_local {
+                if let Some(ref file_name) = self.context.dialplan.ringback.audio_file {
+                    info!(
+                        session_id = %self.context.session_id,
+                        mode = ?ringback_mode,
+                        audio_file = %file_name,
+                        "Playing local ringback (no callee early media)"
+                    );
+
+                    if self.use_media_proxy {
+                        let loop_playback = self.context.dialplan.ringback.loop_playback;
+                        let mut track = FileTrack::new(Self::RINGBACK_TRACK_ID.to_string());
+                        track = track.with_path(file_name.clone()).with_loop(loop_playback);
+                        self.caller_peer.update_track(Box::new(track), None).await;
+                    }
+                }
+            }
+        }
 
         if call_answered {
             return;
         }
 
-        let status_code = if !answer.is_empty() {
+        let status_code = if has_early_media {
             StatusCode::SessionProgress
         } else {
             StatusCode::Ringing
         };
 
-        let (headers, body) = if !answer.is_empty() {
+        let (headers, body) = if has_early_media && should_passthrough {
             let headers = vec![rsip::Header::ContentType("application/sdp".into())];
             (Some(headers), Some(answer.into_bytes()))
         } else {
@@ -1369,14 +1415,11 @@ impl CallSession {
             return;
         }
 
-        if self.early_media_sent && self.context.dialplan.ringback.audio_file.is_some() {
-            if !self
-                .context
-                .dialplan
-                .ringback
-                .wait_for_completion
-                .unwrap_or(false)
-            {
+        if self.early_media_sent
+            && self.context.dialplan.ringback.audio_file.is_some()
+            && should_play_local
+        {
+            if !self.context.dialplan.ringback.wait_for_completion {
                 return;
             }
             // wait for done
@@ -1569,8 +1612,8 @@ impl CallSession {
             let track_id = Self::CALLEE_TRACK_ID.to_string();
 
             if self.media_bridge.is_none() {
-                let (params_a, dtmf_pt_a, codec_a) = self
-                    .answer
+                // First, extract codec from callee's answer (this is the authoritative choice)
+                let (params_b, dtmf_pt_b, codec_b) = callee_answer
                     .as_ref()
                     .map(|s| {
                         let (codecs, dtmf) = MediaNegotiator::extract_codec_params(s);
@@ -1592,21 +1635,33 @@ impl CallSession {
                         None,
                         CodecType::PCMU,
                     ));
-                let (params_b, dtmf_pt_b, codec_b) = callee_answer
+
+                // For params_a (caller side), find the same codec from caller's answer
+                // This ensures both sides use the codec chosen by the callee (answerer)
+                let (params_a, dtmf_pt_a, codec_a) = self
+                    .answer
                     .as_ref()
                     .map(|s| {
                         let (codecs, dtmf) = MediaNegotiator::extract_codec_params(s);
-                        let chosen = MediaNegotiator::select_best_codec(
-                            &codecs,
-                            &self.context.dialplan.allow_codecs,
-                        )
-                        .or_else(|| codecs.into_iter().next())
-                        .unwrap_or(CodecInfo {
-                            payload_type: 0,
-                            codec: CodecType::PCMU,
-                            clock_rate: 8000,
-                            channels: 1,
-                        });
+                        // Look for the same codec that callee chose
+                        let chosen = codecs
+                            .iter()
+                            .find(|c| c.codec == codec_b)
+                            .cloned()
+                            .unwrap_or_else(|| {
+                                // Fallback: use select_best_codec if exact match not found
+                                MediaNegotiator::select_best_codec(
+                                    &codecs,
+                                    &self.context.dialplan.allow_codecs,
+                                )
+                                .or_else(|| codecs.into_iter().next())
+                                .unwrap_or(CodecInfo {
+                                    payload_type: 0,
+                                    codec: CodecType::PCMU,
+                                    clock_rate: 8000,
+                                    channels: 1,
+                                })
+                            });
                         (chosen.to_params(), dtmf, chosen.codec)
                     })
                     .unwrap_or((
@@ -2166,16 +2221,41 @@ impl CallSession {
                         session_id = %self.context.session_id,
                         audio_file = %audio_file,
                         loop_playback = hold_config.loop_playback,
-                        "Starting queue hold music"
+                        "Starting queue hold music (unified PC)"
                     );
 
-                    let hold_ssrc = rand::random::<u32>();
-                    let track = crate::media::FileTrack::new("queue-hold-music".to_string())
-                        .with_path(audio_file.clone())
-                        .with_loop(hold_config.loop_playback)
-                        .with_ssrc(hold_ssrc);
+                    // Use unified PC architecture: try to switch audio source on existing track
+                    // or create new track if needed
+                    let existing_track =
+                        self.find_track(&self.caller_peer, "queue-hold-music").await;
 
-                    self.caller_peer.update_track(Box::new(track), None).await;
+                    if let Some(track_handle) = existing_track {
+                        // Reuse existing track and switch audio source
+                        let mut track_guard = track_handle.lock().await;
+                        if let Some(file_track) = track_guard
+                            .as_any_mut()
+                            .downcast_mut::<crate::media::FileTrack>()
+                        {
+                            if let Err(e) = file_track
+                                .switch_audio_source(audio_file.clone(), hold_config.loop_playback)
+                            {
+                                warn!("Failed to switch audio source: {}, creating new track", e);
+                                drop(track_guard);
+                                self.create_queue_hold_track(audio_file, hold_config.loop_playback)
+                                    .await;
+                            } else {
+                                debug!("Successfully switched audio source on existing track");
+                            }
+                        } else {
+                            drop(track_guard);
+                            self.create_queue_hold_track(audio_file, hold_config.loop_playback)
+                                .await;
+                        }
+                    } else {
+                        // No existing track, create new one
+                        self.create_queue_hold_track(audio_file, hold_config.loop_playback)
+                            .await;
+                    }
 
                     // Suppress forwarding from callee while playing hold music
                     if let Some(ref bridge) = self.media_bridge {
@@ -4044,6 +4124,119 @@ mod codec_negotiation_tests {
             negotiated.len(),
             0,
             "No common codec should result in empty negotiation"
+        );
+    }
+
+    /// Test: RFC 3264 Answer prioritization in media bridge setup
+    /// This test covers the real-world scenario that caused the audio corruption bug
+    #[test]
+    fn test_rfc3264_answer_prioritization() {
+        use crate::media::negotiate::MediaNegotiator;
+        use audio_codec::CodecType;
+
+        // Bob (WebRTC) OFFER: Opus(111), G722(9), PCMU(0), PCMA(8)
+        let bob_offer_sdp = "v=0\r\n\
+            o=- 123 123 IN IP4 127.0.0.1\r\n\
+            s=-\r\n\
+            t=0 0\r\n\
+            m=audio 64348 UDP/TLS/RTP/SAVPF 111 63 9 0 8 13 110 126\r\n\
+            a=rtpmap:111 opus/48000/2\r\n\
+            a=rtpmap:63 red/48000/2\r\n\
+            a=rtpmap:9 G722/8000\r\n\
+            a=rtpmap:0 PCMU/8000\r\n\
+            a=rtpmap:8 PCMA/8000\r\n\
+            a=rtpmap:13 CN/8000\r\n\
+            a=rtpmap:110 telephone-event/48000\r\n\
+            a=rtpmap:126 telephone-event/8000\r\n";
+
+        // Alice (RTP) ANSWER: PCMU(0), PCMA(8), G722(9), G729(18) - Alice chose PCMU first!
+        let alice_answer_sdp = "v=0\r\n\
+            o=- 456 456 IN IP4 192.168.3.211\r\n\
+            s=-\r\n\
+            c=IN IP4 192.168.3.211\r\n\
+            t=0 0\r\n\
+            m=audio 58721 RTP/AVP 0 8 9 18 111\r\n\
+            a=mid:0\r\n\
+            a=sendrecv\r\n\
+            a=rtcp-mux\r\n\
+            a=rtpmap:0 PCMU/8000/1\r\n\
+            a=rtpmap:8 PCMA/8000/1\r\n\
+            a=rtpmap:9 G722/8000/1\r\n\
+            a=rtpmap:18 G729/8000/1\r\n\
+            a=rtpmap:111 opus/48000/2\r\n\
+            a=ssrc:853670255 cname:rustrtc-cname-853670255\r\n";
+
+        // Step 1: Extract codecs from Alice's Answer (callee's authoritative choice)
+        let (alice_codecs, _) = MediaNegotiator::extract_codec_params(alice_answer_sdp);
+        let alice_chosen = MediaNegotiator::select_best_codec(&alice_codecs, &[]);
+        assert!(alice_chosen.is_some());
+        let alice_codec = alice_chosen.unwrap();
+
+        // RFC 3264: Alice chose PCMU as the first codec in her Answer
+        assert_eq!(
+            alice_codec.codec,
+            CodecType::PCMU,
+            "Alice's Answer should prioritize PCMU (first in Answer)"
+        );
+
+        // Step 2: Find the same codec in Bob's offer (for params_a)
+        let (bob_codecs, _) = MediaNegotiator::extract_codec_params(bob_offer_sdp);
+        let bob_matching = bob_codecs
+            .iter()
+            .find(|c| c.codec == alice_codec.codec)
+            .cloned();
+        assert!(bob_matching.is_some(), "Bob should support PCMU");
+        let bob_codec = bob_matching.unwrap();
+
+        // Step 3: Verify both sides will use the same codec
+        assert_eq!(
+            bob_codec.codec, alice_codec.codec,
+            "Both sides must use the same codec (PCMU)"
+        );
+        assert_eq!(
+            bob_codec.codec,
+            CodecType::PCMU,
+            "The negotiated codec must be PCMU"
+        );
+
+        // Step 4: Verify no transcoding is needed
+        assert_eq!(
+            bob_codec.codec, alice_codec.codec,
+            "Same codec on both sides means no transcoding"
+        );
+    }
+
+    /// Test: TelephoneEvent should be skipped when selecting audio codec
+    #[test]
+    fn test_skip_telephone_event_in_codec_selection() {
+        use crate::media::negotiate::MediaNegotiator;
+        use audio_codec::CodecType;
+
+        // SDP with TelephoneEvent as first codec (should be skipped)
+        let sdp_with_dtmf_first = "v=0\r\n\
+            o=- 456 456 IN IP4 192.168.3.211\r\n\
+            s=-\r\n\
+            c=IN IP4 192.168.3.211\r\n\
+            t=0 0\r\n\
+            m=audio 58721 RTP/AVP 101 0 8\r\n\
+            a=rtpmap:101 telephone-event/8000\r\n\
+            a=rtpmap:0 PCMU/8000\r\n\
+            a=rtpmap:8 PCMA/8000\r\n";
+
+        let (codecs, _) = MediaNegotiator::extract_codec_params(sdp_with_dtmf_first);
+        let chosen = MediaNegotiator::select_best_codec(&codecs, &[]);
+
+        assert!(chosen.is_some());
+        let chosen_codec = chosen.unwrap();
+        assert_eq!(
+            chosen_codec.codec,
+            CodecType::PCMU,
+            "Should skip TelephoneEvent and select PCMU (first audio codec)"
+        );
+        assert_ne!(
+            chosen_codec.codec,
+            CodecType::TelephoneEvent,
+            "Should never select TelephoneEvent as audio codec"
         );
     }
 }
