@@ -54,7 +54,7 @@ impl MediaNegotiator {
                             let parts: Vec<&str> = codec_str.split('/').collect();
                             if parts.len() >= 2 {
                                 let codec_name = parts[0];
-                                let clock_rate = parts[1].parse::<u32>().unwrap_or(8000);
+                                let mut clock_rate = parts[1].parse::<u32>().unwrap_or(8000);
                                 let channels = if parts.len() >= 3 {
                                     parts[2].parse::<u16>().unwrap_or(1)
                                 } else {
@@ -65,6 +65,10 @@ impl MediaNegotiator {
                                     Ok(c) => c,
                                     Err(_) => continue,
                                 };
+
+                                if codec_type == CodecType::G722 && clock_rate != 8000 {
+                                    clock_rate = 8000;
+                                }
 
                                 rtp_map.push((pt, (codec_type, clock_rate, channels)));
                                 seen_pts.insert(pt);
@@ -82,18 +86,29 @@ impl MediaNegotiator {
                     continue;
                 }
 
-                let static_codec = match pt {
-                    0 => Some((CodecType::PCMU, 8000, 1)),
-                    8 => Some((CodecType::PCMA, 8000, 1)),
-                    9 => Some((CodecType::G722, 8000, 1)),
-                    18 => Some((CodecType::G729, 8000, 1)),
+                // Use CodecType::try_from for standard payload type conversion
+                let static_codec = if let Ok(codec) = CodecType::try_from(pt) {
+                    // Standard payload types: 0=PCMU, 8=PCMA, 9=G722, 18=G729
+                    let (rate, chans) = match codec {
+                        CodecType::PCMU | CodecType::PCMA | CodecType::G722 | CodecType::G729 => {
+                            (8000, 1)
+                        }
+                        #[cfg(feature = "opus")]
+                        CodecType::Opus => (48000, 2),
+                        _ => continue, // Ignore telephone-event and other types
+                    };
+                    Some((codec, rate, chans))
+                } else {
                     // Non-standard fallback for common dynamic payload types when rtpmap is missing
                     // Only apply this for Audio logic to implicit infer Opus
                     #[cfg(feature = "opus")]
-                    96 | 111 if section.kind == MediaKind::Audio => {
+                    if (pt == 96 || pt == 111) && section.kind == MediaKind::Audio {
                         Some((CodecType::Opus, 48000, 2))
+                    } else {
+                        None
                     }
-                    _ => None,
+                    #[cfg(not(feature = "opus"))]
+                    None
                 };
 
                 if let Some((codec, rate, chans)) = static_codec {
@@ -152,20 +167,18 @@ impl MediaNegotiator {
         }
 
         if allowed_codecs.is_empty() {
-            // No restriction: pick the first one from remote (respecting their preference)
-            return Some(remote_codecs[0].clone());
+            // No restriction: pick the first audio codec from remote (skip TelephoneEvent)
+            return remote_codecs
+                .iter()
+                .find(|c| c.codec != CodecType::TelephoneEvent)
+                .cloned();
         }
 
-        // Try to find the highest priority allowed codec that the remote also supports
-        for allowed in allowed_codecs {
-            if let Some(found) = remote_codecs.iter().find(|c| &c.codec == allowed) {
-                return Some(found.clone());
-            }
-        }
-
-        // Fallback: search for any remote codec that is allowed
+        // RFC 3264: When remote_codecs is from an Answer, respect the answerer's preference
+        // Select the first audio codec from remote_codecs that is in our allowed list
+        // Skip TelephoneEvent as it's not an audio codec
         for remote in remote_codecs {
-            if allowed_codecs.contains(&remote.codec) {
+            if remote.codec != CodecType::TelephoneEvent && allowed_codecs.contains(&remote.codec) {
                 return Some(remote.clone());
             }
         }
@@ -521,6 +534,7 @@ mod tests {
 
     #[test]
     fn test_select_best_codec_with_preference() {
+        // Simulating Answer codecs where remote peer chose G722 first, then PCMU
         let codecs = vec![
             CodecInfo {
                 payload_type: 9,
@@ -536,19 +550,155 @@ mod tests {
             },
         ];
 
-        // Preference: [PCMU, G722]
+        // RFC 3264: Respect remote (answerer's) preference
+        // Even if our preference is [PCMU, G722], we should respect the Answer order
         let allowed = vec![CodecType::PCMU, CodecType::G722];
         let best = MediaNegotiator::select_best_codec(&codecs, &allowed).unwrap();
-        assert_eq!(best.codec, CodecType::PCMU);
+        // Should pick G722 because it's first in the Answer (remote preference)
+        assert_eq!(best.codec, CodecType::G722);
 
-        // Preference: [G722, PCMU]
+        // If our allowed list is [G722, PCMU], still pick G722 (first in remote)
         let allowed = vec![CodecType::G722, CodecType::PCMU];
         let best = MediaNegotiator::select_best_codec(&codecs, &allowed).unwrap();
         assert_eq!(best.codec, CodecType::G722);
 
-        // Preference: [] (empty) - should follow remote order
+        // Only allow PCMU - should skip G722 and pick PCMU
+        let allowed = vec![CodecType::PCMU];
+        let best = MediaNegotiator::select_best_codec(&codecs, &allowed).unwrap();
+        assert_eq!(best.codec, CodecType::PCMU);
+
+        // Empty allowed list - should follow remote order (first codec)
         let allowed = vec![];
         let best = MediaNegotiator::select_best_codec(&codecs, &allowed).unwrap();
         assert_eq!(best.codec, CodecType::G722);
+    }
+
+    #[test]
+    fn test_select_best_codec_skips_telephone_event() {
+        // Simulating Answer with TelephoneEvent as first codec (should be skipped)
+        let codecs = vec![
+            CodecInfo {
+                payload_type: 101,
+                codec: CodecType::TelephoneEvent,
+                clock_rate: 8000,
+                channels: 1,
+            },
+            CodecInfo {
+                payload_type: 0,
+                codec: CodecType::PCMU,
+                clock_rate: 8000,
+                channels: 1,
+            },
+            CodecInfo {
+                payload_type: 8,
+                codec: CodecType::PCMA,
+                clock_rate: 8000,
+                channels: 1,
+            },
+        ];
+
+        // Should skip TelephoneEvent and pick PCMU (first audio codec)
+        let allowed = vec![CodecType::PCMU, CodecType::PCMA];
+        let best = MediaNegotiator::select_best_codec(&codecs, &allowed).unwrap();
+        assert_eq!(best.codec, CodecType::PCMU);
+        assert_ne!(best.codec, CodecType::TelephoneEvent);
+
+        // Empty allowed list - should skip TelephoneEvent and pick first audio codec
+        let allowed = vec![];
+        let best = MediaNegotiator::select_best_codec(&codecs, &allowed).unwrap();
+        assert_eq!(best.codec, CodecType::PCMU);
+        assert_ne!(best.codec, CodecType::TelephoneEvent);
+    }
+
+    #[test]
+    fn test_g722_clock_rate_correction() {
+        // Test that G722/16000 (incorrect) is corrected to G722/8000 (RFC 3551)
+        let sdp = "v=0\r\n\
+            o=- 1769236545 1769236546 IN IP4 192.168.3.211\r\n\
+            s=-\r\n\
+            c=IN IP4 192.168.3.211\r\n\
+            t=0 0\r\n\
+            m=audio 51624 RTP/AVP 0 8 9 18 111\r\n\
+            a=mid:0\r\n\
+            a=sendrecv\r\n\
+            a=rtcp-mux\r\n\
+            a=rtpmap:0 PCMU/8000/1\r\n\
+            a=rtpmap:8 PCMA/8000/1\r\n\
+            a=rtpmap:9 G722/16000/1\r\n\
+            a=rtpmap:18 G729/8000/1\r\n\
+            a=rtpmap:111 opus/48000/2\r\n";
+
+        let (codecs, _) = MediaNegotiator::extract_codec_params(sdp);
+
+        // Find G722 codec
+        let g722_info = codecs.iter().find(|c| c.codec == CodecType::G722);
+        assert!(g722_info.is_some(), "G722 should be parsed");
+
+        let g722_info = g722_info.unwrap();
+        assert_eq!(
+            g722_info.clock_rate, 8000,
+            "G722 RTP clock rate should be corrected to 8000 Hz (RFC 3551)"
+        );
+        assert_eq!(g722_info.payload_type, 9);
+        assert_eq!(g722_info.channels, 1);
+
+        // Verify other codecs are not affected
+        let g729_info = codecs.iter().find(|c| c.codec == CodecType::G729);
+        assert!(g729_info.is_some());
+        assert_eq!(g729_info.unwrap().clock_rate, 8000);
+    }
+
+    #[test]
+    fn test_answer_codec_selection_respects_answerer_preference() {
+        // Simulating the scenario from user's log:
+        // rustpbx sent INVITE with: 96(G729), 9(G722), 0(PCMU), 8(PCMA), 111(Opus)
+        // alice answered with:     0(PCMU), 8(PCMA), 9(G722), 18(G729), 111(Opus)
+        // RFC 3264: We MUST use PCMU (alice's first choice), not G729 (our first choice)
+
+        let answer_codecs = vec![
+            CodecInfo {
+                payload_type: 0,
+                codec: CodecType::PCMU,
+                clock_rate: 8000,
+                channels: 1,
+            },
+            CodecInfo {
+                payload_type: 8,
+                codec: CodecType::PCMA,
+                clock_rate: 8000,
+                channels: 1,
+            },
+            CodecInfo {
+                payload_type: 9,
+                codec: CodecType::G722,
+                clock_rate: 8000,
+                channels: 1,
+            },
+            CodecInfo {
+                payload_type: 18,
+                codec: CodecType::G729,
+                clock_rate: 8000,
+                channels: 1,
+            },
+        ];
+
+        // Our preference was G729 first, but we should respect alice's choice (PCMU)
+        let our_offer_order = vec![
+            CodecType::G729,
+            CodecType::G722,
+            CodecType::PCMU,
+            CodecType::PCMA,
+        ];
+
+        let selected = MediaNegotiator::select_best_codec(&answer_codecs, &our_offer_order);
+        assert!(selected.is_some(), "Should find a matching codec");
+
+        let selected = selected.unwrap();
+        assert_eq!(
+            selected.codec,
+            CodecType::PCMU,
+            "Must use PCMU (answerer's first choice), not G729 (offerer's first choice)"
+        );
+        assert_eq!(selected.payload_type, 0);
     }
 }

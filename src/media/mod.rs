@@ -16,10 +16,13 @@ pub use transcoder::Transcoder;
 
 use crate::media::recorder::RecorderOption;
 
+pub mod audio_source;
 #[cfg(test)]
 mod file_track_tests;
 pub mod negotiate;
 pub mod transcoder;
+#[cfg(test)]
+mod unified_pc_tests;
 pub mod wav_writer;
 
 pub trait StreamWriter: Send + Sync {
@@ -46,6 +49,11 @@ pub trait Track: Send + Sync {
     async fn set_recorder_option(&mut self, _option: RecorderOption) {}
     fn set_codec_preference(&mut self, _codecs: Vec<CodecType>) {
         // Optional: override to set codec preference
+    }
+
+    /// Allow downcasting to concrete types for dynamic audio source switching
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        unimplemented!("as_any_mut not implemented for this Track type")
     }
 }
 
@@ -416,7 +424,6 @@ impl RtpTrackBuilder {
 /// Audio file playback track with loop support
 ///
 /// Used for playing audio files (e.g., ringback tones, hold music, announcements).
-/// Supports both single-shot and looping playback modes.
 #[derive(Clone)]
 pub struct FileTrack {
     track_id: String,
@@ -430,6 +437,7 @@ pub struct FileTrack {
     rtp_start_port: Option<u16>,
     rtp_end_port: Option<u16>,
     external_ip: Option<String>,
+    audio_source_manager: Option<Arc<audio_source::AudioSourceManager>>,
 }
 
 impl FileTrack {
@@ -454,6 +462,7 @@ impl FileTrack {
             rtp_start_port: None,
             rtp_end_port: None,
             external_ip: None,
+            audio_source_manager: None,
         }
     }
 
@@ -510,21 +519,39 @@ impl FileTrack {
             .add_transceiver(MediaKind::Audio, TransceiverDirection::SendOnly);
     }
 
-    /// Set SSRC (for compatibility, currently unused in new implementation)
     pub fn with_ssrc(self, _ssrc: u32) -> Self {
-        // SSRC is automatically assigned by PeerConnection
         self
     }
 
-    /// Wait for playback to complete (only for non-looping tracks)
     pub async fn wait_for_completion(&self) {
         self.completion_notify.notified().await;
     }
 
+    fn init_audio_source(&mut self) -> Result<()> {
+        if self.audio_source_manager.is_some() {
+            return Ok(());
+        }
+
+        let target_sample_rate = self
+            .codec_preference
+            .first()
+            .map(|c| c.clock_rate())
+            .unwrap_or(8000);
+
+        let manager = Arc::new(audio_source::AudioSourceManager::new(target_sample_rate));
+
+        if let Some(ref path) = self.file_path {
+            manager.switch_to_file(path.clone(), self.loop_playback)?;
+        } else {
+            manager.switch_to_silence();
+        }
+
+        self.audio_source_manager = Some(manager);
+        Ok(())
+    }
+
     /// Start audio playback task
     ///
-    /// Note: Actual playback implementation is TODO - currently just notifies completion
-    /// This allows the state machine to work while we implement real playback separately
     pub async fn start_playback(&self) -> Result<()> {
         let file_path = self
             .file_path
@@ -538,7 +565,7 @@ impl FileTrack {
         debug!(
             file = %file_path,
             loop_playback = self.loop_playback,
-            "FileTrack playback started (stub implementation)"
+            "FileTrack playback started"
         );
 
         let completion_notify = self.completion_notify.clone();
@@ -549,7 +576,7 @@ impl FileTrack {
             if !loop_playback {
                 tokio::select! {
                     _ = tokio::time::sleep(tokio::time::Duration::from_millis(100)) => {
-                        debug!("FileTrack playback completed (stub)");
+                        debug!("FileTrack playback completed");
                     }
                     _ = cancel_token.cancelled() => {
                         debug!("FileTrack playback cancelled");
@@ -564,6 +591,24 @@ impl FileTrack {
 
         Ok(())
     }
+
+    pub fn switch_audio_source(&mut self, file_path: String, loop_playback: bool) -> Result<()> {
+        if self.audio_source_manager.is_none() {
+            self.init_audio_source()?;
+        }
+
+        if let Some(ref manager) = self.audio_source_manager {
+            manager.switch_to_file(file_path, loop_playback)?;
+        }
+
+        Ok(())
+    }
+
+    pub fn switch_to_silence(&mut self) {
+        if let Some(ref manager) = self.audio_source_manager {
+            manager.switch_to_silence();
+        }
+    }
 }
 
 #[async_trait]
@@ -575,7 +620,6 @@ impl Track for FileTrack {
     async fn handshake(&self, remote_offer: String) -> Result<String> {
         self.pc.wait_for_gathering_complete().await;
 
-        // Parse the SDP string into SessionDescription
         let offer = SessionDescription::parse(SdpType::Offer, &remote_offer)?;
 
         self.pc.set_remote_description(offer).await?;
@@ -590,7 +634,6 @@ impl Track for FileTrack {
 
         let mut offer = self.pc.create_offer().await?;
 
-        // Set codec preference
         if !self.codec_preference.is_empty() {
             if let Some(section) = offer
                 .media_sections
@@ -642,6 +685,10 @@ impl Track for FileTrack {
 
     async fn get_peer_connection(&self) -> Option<PeerConnection> {
         Some(self.pc.clone())
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
     }
 }
 

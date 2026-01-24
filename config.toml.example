@@ -99,6 +99,26 @@ root = "./config/cdr"
 # http_addr = "http://192.168.1.100:3001"
 # timeout_secs = 10
 
+# Ringback tone configuration
+# [dialplan.ringback]
+# Ringback mode: "local" | "passthrough" | "auto" | "none"
+# - local: Always play local ringback file (ignore callee early media)
+# - passthrough: Always forward callee's early media (silent if no early media)
+# - auto: Smart selection - passthrough if early media exists, otherwise play local (default)
+# - none: Disable ringback (standard 180 Ringing, no audio)
+# mode = "auto"
+
+# Local ringback audio file (used in local and auto modes)
+# Supports WAV, MP3, raw audio formats, and HTTP/HTTPS URLs
+# audio_file = "/sounds/company_ringback.mp3"
+# audio_file = "https://cdn.example.com/ringback.wav"
+
+# Whether to loop the ringback audio (default: true)
+# loop_playback = true
+
+# Whether to wait for ringtone playback completion (default: false)
+# wait_for_completion = false
+
 
 # [proxy.trunks.wuhoo]
 # dest = "sip:123.456.789.00:1234"
