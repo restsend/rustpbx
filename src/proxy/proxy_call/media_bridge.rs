@@ -279,7 +279,6 @@ impl MediaBridge {
                                 }
                             }
                             _ => {
-                                debug!("Leg A PeerConnection received non-Track event");
                             }
                         }
                         pc_a_recv = Box::pin(pc_a.recv());
@@ -319,9 +318,7 @@ impl MediaBridge {
                                     }
                                 }
                             }
-                            _ => {
-                                debug!("Leg B PeerConnection received non-Track event");
-                            }
+                            _ => {}
                         }
                         pc_b_recv = Box::pin(pc_b.recv());
                     } else {
@@ -444,6 +441,11 @@ impl MediaBridge {
         let mut packet_count: u64 = 0;
         let target_pt = target_params.payload_type;
 
+        // Stats tracking
+        let mut last_stats_time = std::time::Instant::now();
+        let mut packets_since_last_stat = 0;
+        let mut bytes_since_last_stat = 0;
+
         while let Ok(mut sample) = track.recv().await {
             if source_peer.is_suppressed(&track_id) {
                 continue;
@@ -451,6 +453,30 @@ impl MediaBridge {
 
             let mut is_dtmf = false;
             let mut pt_for_recorder = None;
+
+            packets_since_last_stat += 1;
+            if let MediaSample::Audio(ref f) = sample {
+                bytes_since_last_stat += f.data.len();
+            }
+
+            // Periodic stats logging (simulated RTCP report)
+            if last_stats_time.elapsed().as_secs() >= 5 {
+                let duration = last_stats_time.elapsed().as_secs_f64();
+                let bitrate_kbps = (bytes_since_last_stat as f64 * 8.0) / duration / 1000.0;
+                let pps = packets_since_last_stat as f64 / duration;
+
+                info!(
+                   ?leg,
+                   %track_id,
+                   pps,
+                   bitrate_kbps,
+                   total_packets = packet_count,
+                   "Media Stream Stats"
+                );
+                last_stats_time = std::time::Instant::now();
+                packets_since_last_stat = 0;
+                bytes_since_last_stat = 0;
+            }
 
             if let MediaSample::Audio(ref mut frame) = sample {
                 packet_count += 1;
