@@ -480,8 +480,8 @@ impl MediaBridge {
 
             if let MediaSample::Audio(ref mut frame) = sample {
                 packet_count += 1;
-                // Log every 100 packets to verify flow
-                if packet_count % 100 == 1 {
+                if packet_count % 250 == 1 {
+                    // 5 seconds at 50pps
                     debug!(
                         call_id,
                         track_id,

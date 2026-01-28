@@ -196,7 +196,6 @@ pub(crate) struct CallSession {
     pub handle: Option<CallSessionHandle>,
     pub callee_event_tx: Option<mpsc::UnboundedSender<DialogState>>,
     pub callee_guards: Vec<crate::call::sip::DialogStateReceiverGuard>,
-    pub extensions: http::Extensions,
     pub callee_answer_sdp: Option<String>,
 }
 
@@ -243,8 +242,6 @@ impl CallSession {
             Some(String::from_utf8_lossy(initial.body()).to_string())
         };
 
-        let extensions = context.dialplan.extensions.clone();
-
         Self {
             server,
             dialog_layer,
@@ -282,7 +279,6 @@ impl CallSession {
             handle: None,
             callee_event_tx: None,
             callee_guards: Vec::new(),
-            extensions,
             callee_answer_sdp: None,
         }
     }
@@ -453,7 +449,7 @@ impl CallSession {
                 .cloned()
                 .collect(),
             server_dialog_id: self.server_dialog.id(),
-            extensions: self.extensions.clone(),
+            extensions: self.context.dialplan.extensions.clone(),
         }
     }
 
