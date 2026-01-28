@@ -177,7 +177,7 @@ impl CallReporter {
                 }
             }
         }
-        tracing::warn!(
+        tracing::info!(
             recording = ?self.context.dialplan.recording,
             has_sipflow_backend = ?has_sipflow_backend,
             "Call recording files collected: {:?}",
