@@ -522,7 +522,7 @@ impl TestUa {
                         // Handle existing dialog
                         match tx.original.to_header()?.tag()?.as_ref() {
                             Some(_) => {
-                                if let Some(mut d) = dialog_layer.match_dialog(&tx.original) {
+                                if let Some(mut d) = dialog_layer.match_dialog(&tx) {
                                     tokio::spawn(async move {
                                         d.handle(&mut tx).await.ok();
                                     });

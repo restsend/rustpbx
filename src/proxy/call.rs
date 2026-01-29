@@ -22,6 +22,7 @@ use rsip::prelude::HeadersExt;
 use rsipstack::dialog::DialogId;
 use rsipstack::dialog::dialog_layer::DialogLayer;
 use rsipstack::dialog::invitation::InviteOption;
+use rsipstack::transaction::key::TransactionRole;
 use rsipstack::transaction::transaction::Transaction;
 use rsipstack::transport::SipConnection;
 use std::{collections::HashMap, net::IpAddr, path::PathBuf, sync::Arc};
@@ -904,7 +905,8 @@ impl CallModule {
     }
 
     async fn process_message(&self, tx: &mut Transaction) -> Result<()> {
-        let dialog_id = DialogId::from_uas_request(&tx.original).map_err(|e| anyhow!(e))?;
+        let dialog_id =
+            DialogId::try_from((&tx.original, TransactionRole::Server)).map_err(|e| anyhow!(e))?;
         let mut dialog = match self.inner.dialog_layer.get_dialog(&dialog_id) {
             Some(dialog) => dialog,
             None => {
@@ -920,12 +922,19 @@ impl CallModule {
         let has_sdp = !tx.original.body.is_empty();
 
         if (is_reinvite || is_update) && has_sdp {
-            if let Some(handle) = self.inner.server.active_call_registry.get_handle_by_dialog(&dialog_id.to_string()) {
+            if let Some(handle) = self
+                .inner
+                .server
+                .active_call_registry
+                .get_handle_by_dialog(&dialog_id.to_string())
+            {
                 let snapshot = handle.snapshot();
                 if let Some(sdp) = snapshot.answer_sdp {
                     info!(%dialog_id, ?tx.original.method, "Replying to mid-dialog request with SDP from shared state");
                     let headers = vec![rsip::Header::ContentType("application/sdp".into())];
-                    tx.reply_with(rsip::StatusCode::OK, headers, Some(sdp.into_bytes())).await.map_err(|e| anyhow!(e))?;
+                    tx.reply_with(rsip::StatusCode::OK, headers, Some(sdp.into_bytes()))
+                        .await
+                        .map_err(|e| anyhow!(e))?;
 
                     // Still pass it to the dialog so it can emit events and update its state
                     return dialog.handle(tx).await.map_err(|e| anyhow!(e));
@@ -973,7 +982,8 @@ impl ProxyModule for CallModule {
         if cookie.get_user().is_none() {
             cookie.set_user(SipUser::try_from(&*tx)?);
         }
-        let dialog_id = DialogId::from_uas_request(&tx.original).map_err(|e| anyhow!(e))?;
+        let dialog_id =
+            DialogId::try_from((&tx.original, TransactionRole::Server)).map_err(|e| anyhow!(e))?;
         info!(
             %dialog_id,
             tx = %tx.key,

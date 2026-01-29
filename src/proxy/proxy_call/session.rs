@@ -36,6 +36,7 @@ use rsipstack::dialog::{
     server_dialog::ServerInviteDialog,
 };
 use rsipstack::rsip_ext::RsipResponseExt;
+use rsipstack::transaction::key::TransactionRole;
 use rustrtc;
 use std::{
     collections::HashSet,
@@ -1781,7 +1782,10 @@ impl CallSession {
             call_record_sender: self.call_record_sender.clone(),
         };
 
-        let server_dialog_id = DialogId::from_uas_request(self.context.dialplan.original.as_ref())?;
+        let server_dialog_id = DialogId::try_from((
+            self.context.dialplan.original.as_ref(),
+            TransactionRole::Server,
+        ))?;
 
         let snapshot = CallSessionRecordSnapshot {
             ring_time: None,
