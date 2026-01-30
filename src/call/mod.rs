@@ -545,6 +545,8 @@ pub struct MediaConfig {
     pub external_ip: Option<String>,
     pub rtp_start_port: Option<u16>,
     pub rtp_end_port: Option<u16>,
+    pub webrtc_port_start: Option<u16>,
+    pub webrtc_port_end: Option<u16>,
     pub ice_servers: Option<Vec<IceServer>>,
     pub enable_latching: bool,
 }
@@ -556,6 +558,8 @@ impl MediaConfig {
             external_ip: None,
             rtp_start_port: None,
             rtp_end_port: None,
+            webrtc_port_start: None,
+            webrtc_port_end: None,
             ice_servers: None,
             enable_latching: false,
         }

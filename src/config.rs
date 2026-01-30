@@ -49,6 +49,14 @@ fn default_config_rtp_end_port() -> Option<u16> {
     Some(42000)
 }
 
+fn default_config_webrtc_start_port() -> Option<u16> {
+    Some(30000)
+}
+
+fn default_config_webrtc_end_port() -> Option<u16> {
+    Some(40000)
+}
+
 fn default_useragent() -> Option<String> {
     Some(crate::version::get_useragent())
 }
@@ -167,6 +175,11 @@ pub struct Config {
     pub rtp_start_port: Option<u16>,
     #[serde(default = "default_config_rtp_end_port")]
     pub rtp_end_port: Option<u16>,
+
+    #[serde(default = "default_config_webrtc_start_port")]
+    pub webrtc_port_start: Option<u16>,
+    #[serde(default = "default_config_webrtc_end_port")]
+    pub webrtc_port_end: Option<u16>,
 
     pub callrecord: Option<CallRecordConfig>,
     pub ice_servers: Option<Vec<IceServer>>,
@@ -390,6 +403,8 @@ pub struct RtpConfig {
     pub external_ip: Option<String>,
     pub start_port: Option<u16>,
     pub end_port: Option<u16>,
+    pub webrtc_start_port: Option<u16>,
+    pub webrtc_end_port: Option<u16>,
     pub ice_servers: Option<Vec<IceServer>>,
 }
 
@@ -709,6 +724,8 @@ impl Default for Config {
             external_ip: None,
             rtp_start_port: default_config_rtp_start_port(),
             rtp_end_port: default_config_rtp_end_port(),
+            webrtc_port_start: default_config_webrtc_start_port(),
+            webrtc_port_end: default_config_webrtc_end_port(),
             #[cfg(feature = "console")]
             console: None,
             database_url: default_database_url(),
@@ -755,6 +772,8 @@ impl Config {
             external_ip: self.external_ip.clone(),
             start_port: self.rtp_start_port.clone(),
             end_port: self.rtp_end_port.clone(),
+            webrtc_start_port: self.webrtc_port_start.clone(),
+            webrtc_end_port: self.webrtc_port_end.clone(),
             ice_servers: self.ice_servers.clone(),
         }
     }
