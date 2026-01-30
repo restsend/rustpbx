@@ -592,14 +592,25 @@ impl CallSession {
         if let Some(ref addr) = self.context.media_config.external_ip {
             track_builder = track_builder.with_external_ip(addr.clone());
         }
-        if let (Some(start), Some(end)) = (
-            self.context.media_config.rtp_start_port,
-            self.context.media_config.rtp_end_port,
-        ) {
+
+        let is_webrtc = Self::is_webrtc_sdp(&orig_offer_sdp);
+        let (start_port, end_port) = if is_webrtc {
+            (
+                self.context.media_config.webrtc_port_start,
+                self.context.media_config.webrtc_port_end,
+            )
+        } else {
+            (
+                self.context.media_config.rtp_start_port,
+                self.context.media_config.rtp_end_port,
+            )
+        };
+
+        if let (Some(start), Some(end)) = (start_port, end_port) {
             track_builder = track_builder.with_rtp_range(start, end);
         }
 
-        if Self::is_webrtc_sdp(&orig_offer_sdp) {
+        if is_webrtc {
             track_builder = track_builder.with_mode(rustrtc::TransportMode::WebRtc);
         }
 
@@ -749,14 +760,25 @@ impl CallSession {
         if let Some(ref ice_servers) = self.context.media_config.ice_servers {
             track_builder = track_builder.with_ice_servers(ice_servers.clone());
         }
-        if let (Some(start), Some(end)) = (
-            self.context.media_config.rtp_start_port,
-            self.context.media_config.rtp_end_port,
-        ) {
+
+        let is_webrtc = Self::is_webrtc_sdp(&orig_offer_sdp);
+        let (start_port, end_port) = if is_webrtc {
+            (
+                self.context.media_config.webrtc_port_start,
+                self.context.media_config.webrtc_port_end,
+            )
+        } else {
+            (
+                self.context.media_config.rtp_start_port,
+                self.context.media_config.rtp_end_port,
+            )
+        };
+
+        if let (Some(start), Some(end)) = (start_port, end_port) {
             track_builder = track_builder.with_rtp_range(start, end);
         }
 
-        if Self::is_webrtc_sdp(&orig_offer_sdp) {
+        if is_webrtc {
             track_builder = track_builder.with_mode(rustrtc::TransportMode::WebRtc);
         }
 
@@ -879,15 +901,25 @@ impl CallSession {
             track_builder = track_builder.with_external_ip(addr.clone());
         }
 
-        if let (Some(start), Some(end)) = (
-            self.context.media_config.rtp_start_port,
-            self.context.media_config.rtp_end_port,
-        ) {
+        let is_webrtc = Self::is_webrtc_sdp(&orig_offer_sdp);
+        let (start_port, end_port) = if is_webrtc {
+            (
+                self.context.media_config.webrtc_port_start,
+                self.context.media_config.webrtc_port_end,
+            )
+        } else {
+            (
+                self.context.media_config.rtp_start_port,
+                self.context.media_config.rtp_end_port,
+            )
+        };
+
+        if let (Some(start), Some(end)) = (start_port, end_port) {
             track_builder = track_builder.with_rtp_range(start, end);
         }
 
         // Set mode based on SDP type
-        if Self::is_webrtc_sdp(&orig_offer_sdp) {
+        if is_webrtc {
             track_builder = track_builder.with_mode(rustrtc::TransportMode::WebRtc);
         }
 
@@ -1063,10 +1095,19 @@ impl CallSession {
             track_builder = track_builder.with_external_ip(addr.clone());
         }
 
-        if let (Some(start), Some(end)) = (
-            self.context.media_config.rtp_start_port,
-            self.context.media_config.rtp_end_port,
-        ) {
+        let (start_port, end_port) = if is_webrtc {
+            (
+                self.context.media_config.webrtc_port_start,
+                self.context.media_config.webrtc_port_end,
+            )
+        } else {
+            (
+                self.context.media_config.rtp_start_port,
+                self.context.media_config.rtp_end_port,
+            )
+        };
+
+        if let (Some(start), Some(end)) = (start_port, end_port) {
             track_builder = track_builder.with_rtp_range(start, end);
         }
 
@@ -3262,6 +3303,10 @@ impl CallSession {
                                 }
                                 DialogState::Notify(dialog_id, _request, tx_handle) => {
                                     debug!(session_id = %context.session_id, %dialog_id, "Received NOTIFY on server dialog");
+                                    tx_handle.reply(rsip::StatusCode::OK).await.ok();
+                                }
+                                DialogState::Options(dialog_id, _request, tx_handle) => {
+                                    debug!(session_id = %context.session_id, %dialog_id, "Received Option on server dialog");
                                     tx_handle.reply(rsip::StatusCode::OK).await.ok();
                                 }
                                 DialogState::Calling(dialog_id) => {
