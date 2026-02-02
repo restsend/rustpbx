@@ -20,6 +20,14 @@ addon-archive = ["flate2"]
 addon-transcript = []
 commerce = ["addon-wholesale"]
 default = ["opus", "console", "addon-acme", "addon-transcript", "addon-archive"]
+cross = [
+    "opus",
+    "console",
+    "addon-acme",
+    "addon-transcript",
+    "addon-archive",
+    "aws-lc-rs/bindgen",
+]
 perfcli-bin = []
 text2wav-bin = []
 wav2text-bin = []
@@ -125,6 +133,7 @@ socket2 = "0.5"
 zstd = "0.13"
 hound = "3.5"
 minimp3 = "0.5"
+aws-lc-rs = "1"
 
 [dev-dependencies]
 tempfile = "3.24.0"
