@@ -1,32 +1,44 @@
-FROM rust:bookworm AS rust-builder
-RUN apt-get update && apt-get install -y libasound2-dev libopus-dev cmake
-RUN mkdir /build
-ADD . /build/
-WORKDIR /build
-RUN --mount=type=cache,target=/build/.cargo/registry \
-    --mount=type=cache,target=/build/target/release/incremental\
-    --mount=type=cache,target=/build/target/release/build\
-    cargo build --release --bin rustpbx --bin sipflow
+FROM debian:bookworm-slim
 
-FROM debian:bookworm
 LABEL maintainer="shenjindi@miuda.ai"
-RUN --mount=type=cache,target=/var/apt apt-get update && apt-get install -y ca-certificates tzdata libopus0
-ENV DEBIAN_FRONTEND=noninteractive
+LABEL org.opencontainers.image.source="https://github.com/restsend/rustpbx"
+LABEL org.opencontainers.image.description="A SIP PBX implementation in Rust"
+
+# Set environment variables
+ARG DEBIAN_FRONTEND=noninteractive
 ENV LANG=C.UTF-8
+ENV TZ=UTC
 
+# Install runtime dependencies
+RUN --mount=type=cache,target=/var/cache/apt \
+    apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    tzdata \
+    libopus0 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create application directory structure
 WORKDIR /app
-COPY --from=rust-builder /build/static /app/static
-COPY --from=rust-builder /build/src/addons/acme/static /app/static/acme
-COPY --from=rust-builder /build/src/addons/transcript/static /app/static/transcript
-COPY --from=rust-builder /build/src/addons/queue/static /app/static/queue
+RUN mkdir -p /app/config /app/sounds /app/templates
 
-COPY --from=rust-builder /build/target/release/rustpbx /app/rustpbx
-COPY --from=rust-builder /build/target/release/sipflow /app/sipflow
-COPY --from=rust-builder /build/templates /app/templates
-COPY --from=rust-builder /build/src/addons/acme/templates /app/templates/acme
-COPY --from=rust-builder /build/src/addons/archive/templates /app/templates/archive
-COPY --from=rust-builder /build/src/addons/queue/templates /app/templates/queue
-COPY --from=rust-builder /build/src/addons/transcript/templates /app/templates/transcript
-COPY --from=rust-builder /build/config/sounds /app/sounds
+# Automatically pick the correct binary based on the architecture being built
+# We expect binaries to be placed in bin/amd64/ and bin/arm64/ by the build script
+ARG TARGETARCH
+COPY bin/${TARGETARCH}/rustpbx /app/rustpbx
+COPY bin/${TARGETARCH}/sipflow /app/sipflow
+
+# Copy static resources
+COPY ./static /app/static
+COPY ./templates /app/templates
+COPY ./config/sounds /app/sounds
+
+# Copy addon static and templates
+COPY ./src/addons/acme/static /app/static/acme
+COPY ./src/addons/transcript/static /app/static/transcript
+COPY ./src/addons/queue/static /app/static/queue
+COPY ./src/addons/acme/templates /app/templates/acme
+COPY ./src/addons/archive/templates /app/templates/archive
+COPY ./src/addons/queue/templates /app/templates/queue
+COPY ./src/addons/transcript/templates /app/templates/transcript
 
 ENTRYPOINT ["/app/rustpbx"]

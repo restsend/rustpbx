@@ -1,0 +1,8 @@
+FROM ghcr.io/cross-rs/x86_64-unknown-linux-gnu:main
+
+# Install clang, libclang (for bindgen), and dependencies  
+RUN apt-get update && apt-get install -y \
+    cmake \
+    pkg-config \
+    libopus-dev \
+    && rm -rf /var/lib/apt/lists/*
