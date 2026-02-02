@@ -1,0 +1,25 @@
+FROM ghcr.io/cross-rs/aarch64-unknown-linux-gnu:main
+
+# Install clang, libclang (for bindgen), and dependencies
+RUN apt-get update && apt-get install -y \
+    cmake \
+    pkg-config \
+    clang \
+    llvm \
+    libclang-dev \
+    crossbuild-essential-arm64 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install cross-compiled libs for ARM64
+RUN dpkg --add-architecture arm64 && \
+    apt-get update && \
+    apt-get install -y libopus-dev:arm64 || true && \
+    rm -rf /var/lib/apt/lists/*
+
+# Bake all cross-compilation environment variables into the image
+ENV LIBCLANG_PATH=/usr/lib/llvm-10/lib
+ENV CC=clang
+ENV CXX=clang++
+ENV PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig
+ENV PKG_CONFIG_SYSROOT_DIR=/usr/aarch64-linux-gnu
+ENV PKG_CONFIG_ALLOW_CROSS=1
