@@ -21,6 +21,7 @@ enum Command {
 pub struct LocalBackend {
     sender: mpsc::UnboundedSender<Command>,
     root: String,
+    subdirs: SipFlowSubdirs,
     cancel_token: CancellationToken,
 }
 
@@ -38,6 +39,7 @@ impl LocalBackend {
         let cancel_token = CancellationToken::new();
         let cancel_token_clone = cancel_token.clone();
         let root_clone = root.clone();
+        let subdirs_clone = subdirs.clone();
         // Spawn background worker task
         tokio::spawn(async move {
             let mut storage = StorageManager::new(
@@ -45,7 +47,7 @@ impl LocalBackend {
                 flush_count,
                 flush_interval_secs,
                 id_cache_size,
-                subdirs,
+                subdirs_clone,
             );
 
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
@@ -134,6 +136,7 @@ impl LocalBackend {
         Ok(Self {
             sender: tx,
             root,
+            subdirs,
             cancel_token,
         })
     }
@@ -157,10 +160,10 @@ impl SipFlowBackend for LocalBackend {
     ) -> Result<Vec<SipFlowItem>> {
         let call_id = call_id.to_string();
         let root = self.root.clone();
+        let subdirs = self.subdirs.clone();
 
         let mut items = tokio::task::spawn(async move {
-            let mut storage =
-                StorageManager::new(&PathBuf::from(&root), 1000, 5, 1024, SipFlowSubdirs::None);
+            let mut storage = StorageManager::new(&PathBuf::from(&root), 1000, 5, 1024, subdirs);
             storage.query_flow(&call_id, start_time, end_time).await
         })
         .await??;
@@ -179,10 +182,10 @@ impl SipFlowBackend for LocalBackend {
     ) -> Result<Vec<(i32, String, usize)>> {
         let call_id = call_id.to_string();
         let root = self.root.clone();
+        let subdirs = self.subdirs.clone();
 
         let stats = tokio::task::spawn(async move {
-            let mut storage =
-                StorageManager::new(&PathBuf::from(&root), 1000, 5, 1024, SipFlowSubdirs::None);
+            let mut storage = StorageManager::new(&PathBuf::from(&root), 1000, 5, 1024, subdirs);
             storage
                 .query_media_stats(&call_id, start_time, end_time)
                 .await
@@ -200,10 +203,10 @@ impl SipFlowBackend for LocalBackend {
     ) -> Result<Vec<u8>> {
         let call_id = call_id.to_string();
         let root = self.root.clone();
+        let subdirs = self.subdirs.clone();
 
         let result = tokio::task::spawn(async move {
-            let mut storage =
-                StorageManager::new(&PathBuf::from(&root), 1000, 5, 1024, SipFlowSubdirs::None);
+            let mut storage = StorageManager::new(&PathBuf::from(&root), 1000, 5, 1024, subdirs);
 
             // Query media packets directly by call_id
             let packets = storage.query_media(&call_id, start_time, end_time).await?;
