@@ -488,24 +488,47 @@ impl StorageManager {
 
     fn get_folders_in_range(&self, start: DateTime<Local>, end: DateTime<Local>) -> Vec<PathBuf> {
         let mut folders = Vec::new();
-        let mut curr = start;
-        while curr <= end {
-            let subdir = match self.subdirs {
-                SipFlowSubdirs::Hourly => format!(
-                    "{:04}{:02}{:02}/{:02}",
-                    curr.year(),
-                    curr.month(),
-                    curr.day(),
-                    curr.hour()
-                ),
-                SipFlowSubdirs::Daily => {
-                    format!("{:04}{:02}{:02}", curr.year(), curr.month(), curr.day())
+        match self.subdirs {
+            SipFlowSubdirs::None => {
+                folders.push(self.base_path.clone());
+            }
+            SipFlowSubdirs::Daily => {
+                let mut curr = start.date_naive();
+                let end = end.date_naive();
+                while curr <= end {
+                    let subdir = format!("{:04}{:02}{:02}", curr.year(), curr.month(), curr.day());
+                    folders.push(self.base_path.join(subdir));
+                    curr += chrono::Duration::days(1);
                 }
-                SipFlowSubdirs::None => String::new(),
-            };
-            let dir = self.base_path.join(subdir);
-            folders.push(dir);
-            curr = curr + chrono::Duration::hours(1);
+            }
+            SipFlowSubdirs::Hourly => {
+                let mut curr = start
+                    .with_minute(0)
+                    .unwrap()
+                    .with_second(0)
+                    .unwrap()
+                    .with_nanosecond(0)
+                    .unwrap();
+                let end = end
+                    .with_minute(0)
+                    .unwrap()
+                    .with_second(0)
+                    .unwrap()
+                    .with_nanosecond(0)
+                    .unwrap();
+
+                while curr <= end {
+                    let subdir = format!(
+                        "{:04}{:02}{:02}/{:02}",
+                        curr.year(),
+                        curr.month(),
+                        curr.day(),
+                        curr.hour()
+                    );
+                    folders.push(self.base_path.join(subdir));
+                    curr += chrono::Duration::hours(1);
+                }
+            }
         }
         folders
     }
