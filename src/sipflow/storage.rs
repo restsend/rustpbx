@@ -11,6 +11,8 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 
+const ZSTD_MAGIC: [u8; 4] = [0x28, 0xB5, 0x2F, 0xFD];
+
 pub struct StorageManager {
     base_path: PathBuf,
     current_hour: (i32, u32, u32, u32), // Year, Month, Day, Hour
@@ -354,9 +356,7 @@ impl StorageManager {
                     raw_file.seek(SeekFrom::Start(offset as u64 + 2))?;
                     let mut orig_size_buf = [0u8; 4];
                     raw_file.read_exact(&mut orig_size_buf)?;
-                    let orig_size = u32::from_be_bytes(orig_size_buf) as usize;
-
-                    if size as usize != orig_size {
+                    if buf.starts_with(&ZSTD_MAGIC) {
                         zstd::decode_all(&buf[..])
                     } else {
                         Ok(buf)
@@ -470,9 +470,8 @@ impl StorageManager {
                     raw_file.seek(SeekFrom::Start(offset as u64 + 2))?;
                     let mut orig_size_buf = [0u8; 4];
                     raw_file.read_exact(&mut orig_size_buf)?;
-                    let orig_size = u32::from_be_bytes(orig_size_buf) as usize;
 
-                    if size as usize != orig_size {
+                    if buf.starts_with(&ZSTD_MAGIC) {
                         zstd::decode_all(&buf[..])
                     } else {
                         Ok(buf)
