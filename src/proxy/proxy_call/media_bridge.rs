@@ -503,6 +503,31 @@ impl MediaBridge {
                     }
                     last_seq = Some(seq);
                 }
+                // Send RTP packet to sipflow backend if configured (only when raw_packet is available)
+                if let Some(backend) = &sipflow_backend {
+                    if let Some(ref rtp_packet) = frame.raw_packet {
+                        if let Ok(rtp_bytes) = rtp_packet.marshal() {
+                            let payload = bytes::Bytes::from(rtp_bytes);
+                            let src_addr: String = if let Some(addr) = frame.source_addr {
+                                format!("{:?}_{}", leg, addr)
+                            } else {
+                                format!("{:?}", leg)
+                            };
+                            let item = SipFlowItem {
+                                timestamp: frame.rtp_timestamp as u64,
+                                seq: frame.sequence_number.unwrap_or(0) as u64,
+                                msg_type: SipFlowMsgType::Rtp,
+                                src_addr,
+                                dst_addr: format!("bridge"),
+                                payload,
+                            };
+
+                            if let Err(e) = backend.record(&call_id, item) {
+                                debug!("Failed to record RTP to sipflow: {}", e);
+                            }
+                        }
+                    }
+                }
 
                 // Rewrite payload type to match target's expected PT
                 if let Some(pt) = frame.payload_type {
@@ -537,32 +562,6 @@ impl MediaBridge {
             {
                 if let Some(ref mut r) = *recorder.lock().unwrap() {
                     let _ = r.write_sample(leg, &sample, pt_for_recorder);
-                }
-            }
-
-            // Send RTP packet to sipflow backend if configured (only when raw_packet is available)
-            if let (Some(backend), MediaSample::Audio(audio_frame)) = (&sipflow_backend, &sample) {
-                if let Some(ref rtp_packet) = audio_frame.raw_packet {
-                    let payload = bytes::Bytes::copy_from_slice(&rtp_packet.payload);
-
-                    let src_addr: String = if let Some(addr) = audio_frame.source_addr {
-                        format!("{:?}_{}", leg, addr)
-                    } else {
-                        format!("{:?}", leg)
-                    };
-
-                    let item = SipFlowItem {
-                        timestamp: audio_frame.rtp_timestamp as u64,
-                        seq: audio_frame.sequence_number.unwrap_or(0) as u64,
-                        msg_type: SipFlowMsgType::Rtp,
-                        src_addr,
-                        dst_addr: format!("bridge"),
-                        payload,
-                    };
-
-                    if let Err(e) = backend.record(&call_id, item) {
-                        debug!("Failed to record RTP to sipflow: {}", e);
-                    }
                 }
             }
 

@@ -1,5 +1,6 @@
 use anyhow::{Result, anyhow};
 use audio_codec::{CodecType, Decoder, Resampler, create_decoder};
+use rustrtc::rtp::RtpPacket;
 use std::{
     collections::{BTreeMap, HashMap},
     io::{Cursor, Seek, SeekFrom, Write},
@@ -90,14 +91,16 @@ pub fn generate_wav_from_packets(packets: &[(i32, u64, Vec<u8>)]) -> Result<Vec<
         }
 
         // Detect if it's a valid RTP v2 packet
-        let is_rtp = p.len() >= 12 && (p[0] & 0xC0) == 0x80;
+        let pt = RtpPacket::parse(p)
+            .map(|packet| packet.header.payload_type)
+            .unwrap_or(0);
 
-        let pt = if is_rtp { p[1] & 0x7F } else { 0 }; // Default to PCMU if raw
         let codec = match pt {
             0 => CodecType::PCMU,
             8 => CodecType::PCMA,
             9 => CodecType::G722,
             18 => CodecType::G729,
+            97 | 111 => CodecType::Opus,
             _ => CodecType::PCMU,
         };
         legs_codecs.entry(*leg).or_default().push(codec);
@@ -145,15 +148,22 @@ pub fn generate_wav_from_packets(packets: &[(i32, u64, Vec<u8>)]) -> Result<Vec<
             continue;
         }
 
-        let is_rtp = (p[0] & 0xC0) == 0x80;
-        let pt = if is_rtp { p[1] & 0x7F } else { 0 };
-        let payload = if is_rtp { &p[12..] } else { &p[..] };
+        let rtp = match rustrtc::rtp::RtpPacket::parse(p) {
+            Ok(packet) => packet,
+            Err(_) => {
+                continue;
+            }
+        };
+
+        let pt = rtp.header.payload_type;
+        let payload = &rtp.payload;
 
         let codec = match pt {
             0 => CodecType::PCMU,
             8 => CodecType::PCMA,
             9 => CodecType::G722,
             18 => CodecType::G729,
+            97 | 111 => CodecType::Opus,
             _ => CodecType::PCMU,
         };
 
@@ -187,7 +197,8 @@ pub fn generate_wav_from_packets(packets: &[(i32, u64, Vec<u8>)]) -> Result<Vec<
         }
 
         let rtp_diff = ts.wrapping_sub(base);
-        let target_timestamp = (rtp_diff as u64 * target_sample_rate as u64 / 8000) as u32;
+        let clock_rate = codec.clock_rate() as u64;
+        let target_timestamp = (rtp_diff as u64 * target_sample_rate as u64 / clock_rate) as u32;
 
         if logged_packets < 20 {
             let header_hex = if p.len() >= 12 {

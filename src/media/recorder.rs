@@ -92,6 +92,7 @@ impl Recorder {
         let src_codec = codec;
         let codec = match codec {
             CodecType::Opus => CodecType::PCMU,
+            CodecType::G722 => CodecType::PCMU,
             _ => codec,
         };
 
