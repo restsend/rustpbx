@@ -1,5 +1,5 @@
 use audio_codec::{CodecType, Decoder, Encoder, Resampler, create_decoder, create_encoder};
-use rand::Rng;
+use rand::RngExt;
 use rustrtc::media::AudioFrame;
 
 pub struct Transcoder {

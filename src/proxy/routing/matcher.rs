@@ -1,5 +1,6 @@
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
+use rand::RngExt;
 use regex::Regex;
 use rsipstack::{
     dialog::{authenticate::Credential, invitation::InviteOption},
@@ -393,7 +394,7 @@ async fn match_invite_impl(
                 // Actually, `rule.action.queue` comes from the route rule config.
                 // If it's a file path, `load_queue` handles it.
                 // If it's an ID, we need to handle it.
-                
+
                 // If the reference is just digits, treat it as a DB ID reference "db-<id>"
                 let lookup_ref = if queue_ref.chars().all(|c| c.is_ascii_digit()) {
                     format!("db-{}", queue_ref)
@@ -404,9 +405,7 @@ async fn match_invite_impl(
                 let queue_cfg = lookup
                     .load_queue(lookup_ref.as_str())
                     .await?
-                    .ok_or_else(|| {
-                        anyhow!("queue '{}' not found", queue_ref)
-                    })?;
+                    .ok_or_else(|| anyhow!("queue '{}' not found", queue_ref))?;
                 let mut queue_plan = queue_cfg.to_queue_plan()?;
                 if queue_plan.label.is_none() {
                     queue_plan.label = Some(queue_ref.clone());
@@ -1001,7 +1000,6 @@ fn select_trunk(
 
     match select_method {
         "random" => {
-            use rand::Rng;
             let index = rand::rng().random_range(0..trunks.len());
             Ok(trunks[index].clone())
         }

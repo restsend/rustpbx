@@ -1,7 +1,7 @@
 use anyhow::Result;
 use chrono::Utc;
 use clap::{Parser, Subcommand};
-use dotenv::dotenv;
+use dotenvy::dotenv;
 use rustpbx::{
     app::{AppStateBuilder, create_router},
     config::Config,
