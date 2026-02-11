@@ -1,6 +1,6 @@
 [package]
 name = "rustpbx"
-version = "0.3.17"
+version = "0.3.18"
 edition = "2024"
 default-run = "rustpbx"
 authors = ["jinti<shenjindi@fourz.cn>"]
@@ -59,7 +59,7 @@ chrono-tz = "0.10.4"
 rsipstack = "0.4.7"
 #rsipstack = { path = "../rsipstack" }
 audio-codec = { version = "0.3.30", default-features = false }
-rustrtc = "0.3.20"
+rustrtc = "0.3.21"
 #rustrtc = { path = "../rustrtc" }
 reqwest = { version = "0.13", features = [
     "json",

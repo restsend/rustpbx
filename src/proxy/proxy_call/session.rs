@@ -1302,36 +1302,55 @@ impl CallSession {
 
                 match self.negotiate_final_codec(&answer).await {
                     Ok(answer_for_caller) => {
+                        // Save callee's original SDP before overwriting
+                        let callee_early_sdp = answer.clone();
                         self.set_answer(answer_for_caller.clone());
                         answer = answer_for_caller;
 
                         if self.media_bridge.is_none() {
-                            let (params_a, dtmf_pt_a, codec_a) = self
-                                .answer
-                                .as_ref()
-                                .map(|s| {
-                                    let (codecs, dtmf) = MediaNegotiator::extract_codec_params(s);
-                                    let chosen = MediaNegotiator::select_best_codec(
-                                        &codecs,
-                                        &self.context.dialplan.allow_codecs,
-                                    )
-                                    .or_else(|| codecs.into_iter().next())
-                                    .unwrap_or(CodecInfo {
-                                        payload_type: 0,
-                                        codec: CodecType::PCMU,
-                                        clock_rate: 8000,
-                                        channels: 1,
-                                    });
-                                    (chosen.to_params(), dtmf, chosen.codec)
+                            // codec_a: use caller's OFFER to determine what
+                            // they actually send (first codec in m= line)
+                            let (params_a, dtmf_pt_a, codec_a) = {
+                                let from_offer = self.caller_offer.as_ref().and_then(|offer| {
+                                    let (codecs, dtmf) =
+                                        MediaNegotiator::extract_codec_params(offer);
+                                    let chosen = codecs
+                                        .iter()
+                                        .find(|c| c.codec != CodecType::TelephoneEvent)
+                                        .cloned()?;
+                                    Some((chosen.to_params(), dtmf, chosen.codec))
+                                });
+                                from_offer.unwrap_or_else(|| {
+                                    self.answer
+                                        .as_ref()
+                                        .map(|s| {
+                                            let (codecs, dtmf) =
+                                                MediaNegotiator::extract_codec_params(s);
+                                            let chosen = codecs
+                                                .iter()
+                                                .find(|c| c.codec != CodecType::TelephoneEvent)
+                                                .cloned()
+                                                .unwrap_or(CodecInfo {
+                                                    payload_type: 0,
+                                                    codec: CodecType::PCMU,
+                                                    clock_rate: 8000,
+                                                    channels: 1,
+                                                });
+                                            (chosen.to_params(), dtmf, chosen.codec)
+                                        })
+                                        .unwrap_or((
+                                            rustrtc::RtpCodecParameters::default(),
+                                            None,
+                                            CodecType::PCMU,
+                                        ))
                                 })
-                                .unwrap_or((
-                                    rustrtc::RtpCodecParameters::default(),
-                                    None,
-                                    CodecType::PCMU,
-                                ));
+                            };
 
+                            // codec_b: use callee's ORIGINAL early media SDP
+                            // (not the overwritten answer_for_caller)
                             let (params_b, dtmf_pt_b, codec_b) = {
-                                let (codecs, dtmf) = MediaNegotiator::extract_codec_params(&answer);
+                                let (codecs, dtmf) =
+                                    MediaNegotiator::extract_codec_params(&callee_early_sdp);
                                 let chosen = MediaNegotiator::select_best_codec(
                                     &codecs,
                                     &self.context.dialplan.allow_codecs,
@@ -1674,39 +1693,54 @@ impl CallSession {
                         CodecType::PCMU,
                     ));
 
-                // For params_a (caller side), find the same codec from caller's answer
-                // This ensures both sides use the codec chosen by the callee (answerer)
-                let (params_a, dtmf_pt_a, codec_a) = self
-                    .answer
-                    .as_ref()
-                    .map(|s| {
-                        let (codecs, dtmf) = MediaNegotiator::extract_codec_params(s);
-                        // Look for the same codec that callee chose
+                // For params_a (caller side), determine what codec the caller will
+                // actually send. The caller's OFFER m= line order reflects their
+                // sending preference. Using select_best_codec on the answer is wrong
+                // because the caller may ignore the answer's codec ordering and send
+                // whichever codec it prefers (e.g., active-call forwards carrier's
+                // PCMA regardless of our answer's codec preference).
+                let (params_a, dtmf_pt_a, codec_a) = {
+                    // First try: use caller's offer (what they actually send)
+                    let from_offer = self.caller_offer.as_ref().and_then(|offer| {
+                        let (codecs, dtmf) = MediaNegotiator::extract_codec_params(offer);
+                        // First codec in offer's m= line is caller's preferred sending codec
                         let chosen = codecs
                             .iter()
-                            .find(|c| c.codec == codec_b)
-                            .cloned()
-                            .unwrap_or_else(|| {
-                                // Fallback: use select_best_codec if exact match not found
-                                MediaNegotiator::select_best_codec(
-                                    &codecs,
-                                    &self.context.dialplan.allow_codecs,
-                                )
-                                .or_else(|| codecs.into_iter().next())
-                                .unwrap_or(CodecInfo {
-                                    payload_type: 0,
-                                    codec: CodecType::PCMU,
-                                    clock_rate: 8000,
-                                    channels: 1,
-                                })
-                            });
-                        (chosen.to_params(), dtmf, chosen.codec)
+                            .find(|c| c.codec != CodecType::TelephoneEvent)
+                            .cloned()?;
+                        Some((chosen.to_params(), dtmf, chosen.codec))
+                    });
+                    from_offer.unwrap_or_else(|| {
+                        // Fallback: use answer SDP
+                        self.answer
+                            .as_ref()
+                            .map(|s| {
+                                let (codecs, dtmf) = MediaNegotiator::extract_codec_params(s);
+                                let chosen = codecs
+                                    .iter()
+                                    .find(|c| c.codec == codec_b)
+                                    .cloned()
+                                    .or_else(|| {
+                                        codecs
+                                            .iter()
+                                            .find(|c| c.codec != CodecType::TelephoneEvent)
+                                            .cloned()
+                                    })
+                                    .unwrap_or(CodecInfo {
+                                        payload_type: 0,
+                                        codec: CodecType::PCMU,
+                                        clock_rate: 8000,
+                                        channels: 1,
+                                    });
+                                (chosen.to_params(), dtmf, chosen.codec)
+                            })
+                            .unwrap_or((
+                                rustrtc::RtpCodecParameters::default(),
+                                None,
+                                CodecType::PCMU,
+                            ))
                     })
-                    .unwrap_or((
-                        rustrtc::RtpCodecParameters::default(),
-                        None,
-                        CodecType::PCMU,
-                    ));
+                };
 
                 let ssrc_a = self
                     .answer
@@ -4248,6 +4282,177 @@ mod codec_negotiation_tests {
         assert_eq!(
             bob_codec.codec, alice_codec.codec,
             "Same codec on both sides means no transcoding"
+        );
+    }
+
+    /// Test: codec_a should come from caller's OFFER, not select_best_codec on answer
+    ///
+    /// This is the regression test for the noise bug where MediaBridge created
+    /// Transcoder(G722, opus) but the caller actually sent PCMA.
+    ///
+    /// Scenario: active-call sends INVITE with `m=audio 12000 RTP/AVP 8 0 9 101`
+    /// (PCMA first). rustpbx creates callee WebRTC track, callee answers with opus.
+    /// Old code used `select_best_codec(answer, allow_codecs)` which picked G722
+    /// (because allow_codecs = [G729, G722, PCMU, PCMA, Opus, TelephoneEvent] has
+    /// G722 before PCMA). New code uses caller's OFFER first codec = PCMA.
+    #[test]
+    fn test_codec_a_from_caller_offer_not_answer() {
+        use crate::media::negotiate::MediaNegotiator;
+        use audio_codec::CodecType;
+
+        // Caller's OFFER: PCMA(8) first, then PCMU(0), G722(9), telephone-event(101)
+        // This is what active-call sends - carrier provides PCMA
+        let caller_offer_sdp = "v=0\r\n\
+            o=- 100 100 IN IP4 10.0.0.1\r\n\
+            s=-\r\n\
+            c=IN IP4 10.0.0.1\r\n\
+            t=0 0\r\n\
+            m=audio 12000 RTP/AVP 8 0 9 101\r\n\
+            a=rtpmap:8 PCMA/8000\r\n\
+            a=rtpmap:0 PCMU/8000\r\n\
+            a=rtpmap:9 G722/8000\r\n\
+            a=rtpmap:101 telephone-event/8000\r\n\
+            a=fmtp:101 0-15\r\n";
+
+        // Our answer to the caller (what rustpbx sends back)
+        // In the buggy scenario, the answer's codec order was derived from the
+        // WebRTC callee's offer which had G722(9) before PCMA(8):
+        //   callee offer: UDP/TLS/RTP/SAVPF 96 9 0 8 97 101
+        // So the answer to caller also has G722 before PCMA.
+        let answer_to_caller_sdp = "v=0\r\n\
+            o=- 200 200 IN IP4 10.0.0.2\r\n\
+            s=-\r\n\
+            c=IN IP4 10.0.0.2\r\n\
+            t=0 0\r\n\
+            m=audio 20000 RTP/AVP 9 0 8 101\r\n\
+            a=rtpmap:9 G722/8000\r\n\
+            a=rtpmap:0 PCMU/8000\r\n\
+            a=rtpmap:8 PCMA/8000\r\n\
+            a=rtpmap:101 telephone-event/8000\r\n";
+
+        // Default allow_codecs (same as Dialplan default)
+        let allow_codecs = vec![
+            CodecType::G729,
+            CodecType::G722,
+            CodecType::PCMU,
+            CodecType::PCMA,
+            CodecType::Opus,
+            CodecType::TelephoneEvent,
+        ];
+
+        // === OLD BUG: select_best_codec on the answer picks G722 ===
+        let (answer_codecs, _) = MediaNegotiator::extract_codec_params(answer_to_caller_sdp);
+        let old_codec_a = MediaNegotiator::select_best_codec(&answer_codecs, &allow_codecs);
+        assert!(old_codec_a.is_some());
+        // G722 comes before PCMA in allow_codecs, so the old code would pick G722
+        assert_eq!(
+            old_codec_a.unwrap().codec,
+            CodecType::G722,
+            "Old bug: select_best_codec on answer picks G722 (higher priority in allow_codecs) \
+             but caller actually sends PCMA → Transcoder(G722, opus) decodes PCMA as G722 = noise"
+        );
+
+        // === NEW FIX: first non-TelephoneEvent codec from caller's OFFER ===
+        let (offer_codecs, _) = MediaNegotiator::extract_codec_params(caller_offer_sdp);
+        let new_codec_a = offer_codecs
+            .iter()
+            .find(|c| c.codec != CodecType::TelephoneEvent)
+            .cloned();
+        assert!(new_codec_a.is_some());
+        assert_eq!(
+            new_codec_a.unwrap().codec,
+            CodecType::PCMA,
+            "Fix: first codec from caller's OFFER is PCMA (what they actually send)"
+        );
+    }
+
+    /// Test: early media path should also use caller's OFFER for codec_a
+    /// and use callee's original SDP (not overwritten answer_for_caller) for codec_b
+    #[test]
+    fn test_early_media_codec_extraction() {
+        use crate::media::negotiate::MediaNegotiator;
+        use audio_codec::CodecType;
+
+        // Caller's OFFER: PCMA first
+        let caller_offer_sdp = "v=0\r\n\
+            o=- 100 100 IN IP4 10.0.0.1\r\n\
+            s=-\r\n\
+            c=IN IP4 10.0.0.1\r\n\
+            t=0 0\r\n\
+            m=audio 12000 RTP/AVP 8 0 101\r\n\
+            a=rtpmap:8 PCMA/8000\r\n\
+            a=rtpmap:0 PCMU/8000\r\n\
+            a=rtpmap:101 telephone-event/8000\r\n\
+            a=fmtp:101 0-15\r\n";
+
+        // Callee's 183 early media SDP (WebRTC client, offers opus)
+        let callee_early_sdp = "v=0\r\n\
+            o=- 300 300 IN IP4 10.0.0.3\r\n\
+            s=-\r\n\
+            c=IN IP4 10.0.0.3\r\n\
+            t=0 0\r\n\
+            m=audio 30000 UDP/TLS/RTP/SAVPF 111 9 0 8 101\r\n\
+            a=rtpmap:111 opus/48000/2\r\n\
+            a=rtpmap:9 G722/8000\r\n\
+            a=rtpmap:0 PCMU/8000\r\n\
+            a=rtpmap:8 PCMA/8000\r\n\
+            a=rtpmap:101 telephone-event/8000\r\n";
+
+        // answer_for_caller (negotiated answer sent to caller) - this would
+        // overwrite the `answer` variable in the old buggy code
+        let answer_for_caller = "v=0\r\n\
+            o=- 200 200 IN IP4 10.0.0.2\r\n\
+            s=-\r\n\
+            c=IN IP4 10.0.0.2\r\n\
+            t=0 0\r\n\
+            m=audio 20000 RTP/AVP 8 0 101\r\n\
+            a=rtpmap:8 PCMA/8000\r\n\
+            a=rtpmap:0 PCMU/8000\r\n\
+            a=rtpmap:101 telephone-event/8000\r\n";
+
+        let allow_codecs = vec![
+            CodecType::G729,
+            CodecType::G722,
+            CodecType::PCMU,
+            CodecType::PCMA,
+            CodecType::Opus,
+            CodecType::TelephoneEvent,
+        ];
+
+        // codec_a from caller's OFFER (not from answer_for_caller)
+        let (offer_codecs, _) = MediaNegotiator::extract_codec_params(caller_offer_sdp);
+        let codec_a = offer_codecs
+            .iter()
+            .find(|c| c.codec != CodecType::TelephoneEvent)
+            .cloned()
+            .unwrap();
+        assert_eq!(
+            codec_a.codec,
+            CodecType::PCMA,
+            "codec_a should be PCMA from caller's OFFER"
+        );
+
+        // codec_b from callee's ORIGINAL early media SDP (not answer_for_caller)
+        let (callee_codecs, _) = MediaNegotiator::extract_codec_params(callee_early_sdp);
+        let codec_b = MediaNegotiator::select_best_codec(&callee_codecs, &allow_codecs).unwrap();
+        // G722 has higher priority in allow_codecs, but callee offers opus first
+        // select_best_codec with allow_codecs will pick based on allow_codecs order
+        // among the codecs present in callee's SDP
+        assert_ne!(
+            codec_b.codec,
+            CodecType::TelephoneEvent,
+            "codec_b should not be TelephoneEvent"
+        );
+
+        // OLD BUG: if we extracted codec_b from answer_for_caller instead of
+        // callee's original SDP, we'd get PCMA and no transcoding would happen
+        // → but callee (WebRTC) doesn't speak PCMA, it speaks opus → silence/noise
+        let (wrong_codecs, _) = MediaNegotiator::extract_codec_params(answer_for_caller);
+        let wrong_codec_b =
+            MediaNegotiator::select_best_codec(&wrong_codecs, &allow_codecs).unwrap();
+        assert_ne!(
+            wrong_codec_b.codec, codec_b.codec,
+            "Using answer_for_caller for codec_b gives wrong codec (PCMA instead of callee's actual codec)"
         );
     }
 
