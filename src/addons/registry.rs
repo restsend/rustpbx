@@ -26,6 +26,16 @@ impl AddonRegistry {
         #[cfg(feature = "addon-transcript")]
         addons.push(Box::new(super::transcript::TranscriptAddon::new()));
 
+        // Endpoint Manager Addon
+        #[cfg(feature = "addon-endpoint-manager")]
+        addons.push(Box::new(
+            super::endpoint_manager::EndpointManagerAddon::new(),
+        ));
+
+        // Enterprise Auth Addon
+        #[cfg(feature = "addon-enterprise-auth")]
+        addons.push(Box::new(super::enterprise_auth::EnterpriseAuthAddon::new()));
+
         // Queue Addon
         addons.push(Box::new(super::queue::QueueAddon::new()));
 
@@ -165,6 +175,27 @@ impl AddonRegistry {
             .iter()
             .find(|a| a.id() == id)
             .map(|a| a.as_ref())
+    }
+
+    pub async fn authenticate_all(
+        &self,
+        state: AppState,
+        identifier: &str,
+        password: &str,
+    ) -> anyhow::Result<Option<crate::models::user::Model>> {
+        let config = state.config();
+        for addon in &self.addons {
+            if !self.is_enabled(addon.id(), config) {
+                continue;
+            }
+            if let Some(user) = addon
+                .authenticate(state.clone(), identifier, password)
+                .await?
+            {
+                return Ok(Some(user));
+            }
+        }
+        Ok(None)
     }
 
     pub fn apply_proxy_server_hooks(

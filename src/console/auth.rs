@@ -143,6 +143,27 @@ impl ConsoleState {
         identifier: &str,
         password: &str,
     ) -> Result<Option<UserModel>> {
+        // Commercial Addon Authentication (Enterprise Auth strategy)
+        let auth_app_state = if let Ok(guard) = self.app_state.read() {
+            guard.as_ref().and_then(|weak| weak.upgrade())
+        } else {
+            None
+        };
+
+        if let Some(app_state) = auth_app_state {
+            if let Ok(Some(user)) = app_state
+                .addon_registry
+                .authenticate_all(app_state.clone(), identifier, password)
+                .await
+            {
+                tracing::info!(
+                    "User {} authenticated via Enterprise Auth addon",
+                    user.username
+                );
+                return Ok(Some(user));
+            }
+        }
+
         let trimmed = identifier.trim();
         if trimmed.is_empty() {
             return Ok(None);

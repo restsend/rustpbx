@@ -17,8 +17,10 @@ console = ["dep:minijinja"]
 addon-acme = ["instant-acme"]
 addon-wholesale = ["flate2", "async-compression"]
 addon-archive = ["flate2"]
+addon-endpoint-manager = []
+addon-enterprise-auth = []
 addon-transcript = []
-commerce = ["addon-wholesale"]
+commerce = ["addon-wholesale", "addon-endpoint-manager", "addon-enterprise-auth"]
 default = ["opus", "console", "addon-acme", "addon-transcript", "addon-archive"]
 cross = ["aws-lc-rs/bindgen"]
 perfcli-bin = []
@@ -39,6 +41,7 @@ minijinja = { version = "2", features = ["loader", "json"], optional = true }
 serde = { version = "1", features = ["derive"] }
 glob = "0.3.3"
 serde_json = "1"
+thiserror = "1"
 tokio = { version = "1.49.0", features = ["full", "tracing"] }
 tokio-stream = { version = "0.1.18", features = ["net", "sync"] }
 tokio-tungstenite = { version = "0.28.0", features = [
@@ -125,6 +128,8 @@ zstd = "0.13"
 hound = "3.5"
 minimp3 = "0.6.1"
 aws-lc-rs = { version = "1", optional = true }
+totp-rs = { version = "5.7.0", features = ["qr", "gen_secret"] }
+ldap3 = "0.12.1"
 
 [dev-dependencies]
 tempfile = "3.24.0"

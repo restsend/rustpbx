@@ -56,7 +56,8 @@ async fn test_http_backend_with_post_method() -> Result<()> {
 
 #[tokio::test]
 async fn test_http_backend_with_defaults() -> Result<()> {
-    let _backend = HttpUserBackend::new("http://rustpbx.com/auth", &None, &None, &None, &None, &None);
+    let _backend =
+        HttpUserBackend::new("http://rustpbx.com/auth", &None, &None, &None, &None, &None);
 
     // Test that the backend was created successfully with default values
     Ok(())
@@ -76,7 +77,9 @@ async fn test_http_backend_get_user() -> Result<()> {
     // Note: This test will fail if httpbin.org is not available
     // In a real test environment, you'd use a mock server
     // For now, we just test that the method exists and can be called
-    let result = backend.get_user("testuser", Some("rustpbx.com"), None).await;
+    let result = backend
+        .get_user("testuser", Some("rustpbx.com"), None)
+        .await;
 
     // We expect this to fail since httpbin.org/json doesn't return SipUser format
     // But it verifies the method signature and that the HTTP client works

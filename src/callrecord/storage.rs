@@ -35,7 +35,9 @@ impl CdrStorage {
     }
 
     pub async fn write_bytes(&self, path: &str, bytes: &[u8]) -> Result<String> {
-        self.inner.write(path, Bytes::copy_from_slice(bytes)).await?;
+        self.inner
+            .write(path, Bytes::copy_from_slice(bytes))
+            .await?;
         Ok(path.to_string())
     }
 

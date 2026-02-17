@@ -15,6 +15,7 @@ use std::{
 use tracing::info;
 
 use crate::{
+    addons::queue::services::utils as queue_utils,
     config::{ProxyConfig, RecordingPolicy},
     models::{routing, sip_trunk},
     proxy::routing::matcher::RouteResourceLookup,
@@ -22,7 +23,6 @@ use crate::{
         ConfigOrigin, DestConfig, MatchConditions, RewriteRules, RouteAction, RouteDirection,
         RouteQueueConfig, RouteRule, TrunkConfig,
     },
-    addons::queue::services::utils as queue_utils,
 };
 
 pub struct ProxyDataContext {
@@ -283,12 +283,12 @@ impl ProxyDataContext {
 
         let config = self.config.read().unwrap().clone();
         let started_at = Utc::now();
-        
+
         let mut queues: HashMap<String, RouteQueueConfig> = HashMap::new();
         let mut config_count = 0usize;
         let mut file_count = 0usize;
         let mut files: Vec<String> = Vec::new();
-        
+
         if !config.queues.is_empty() {
             config_count = config.queues.len();
             info!(count = config_count, "loading queues from embedded config");
@@ -299,7 +299,7 @@ impl ProxyDataContext {
 
         let generated_file = config.generated_queue_dir().join("queues.generated.toml");
         if generated_file.exists() {
-             match fs::read_to_string(&generated_file) {
+            match fs::read_to_string(&generated_file) {
                 Ok(content) => {
                     match toml::from_str::<HashMap<String, RouteQueueConfig>>(&content) {
                         Ok(loaded) => {
@@ -315,7 +315,7 @@ impl ProxyDataContext {
                 Err(e) => {
                     tracing::error!("failed to read queues.generated.toml: {}", e);
                 }
-             }
+            }
         }
 
         let len = queues.len();
@@ -326,7 +326,7 @@ impl ProxyDataContext {
             total = len,
             config_count, file_count, duration_ms, "queues reloaded"
         );
-        
+
         Ok(ReloadMetrics {
             total: len,
             config_count,
