@@ -455,9 +455,10 @@ impl SipServerBuilder {
             }
         }
 
-        endpoint_builder = endpoint_builder.with_inspector(Box::new(CompositeMessageInspector {
-            inspectors,
-        }) as Box<dyn MessageInspector>);
+        endpoint_builder =
+            endpoint_builder.with_inspector(
+                Box::new(CompositeMessageInspector { inspectors }) as Box<dyn MessageInspector>
+            );
 
         let locator_events = self.locator_events.unwrap_or_else(|| {
             let (tx, _) = tokio::sync::broadcast::channel(12);
@@ -733,14 +734,18 @@ impl SipServer {
                     }
                 };
                 runnings_tx.fetch_sub(1, Ordering::Relaxed);
-                let is_mid_dialog = tx.original.to_header().ok()
+                let is_mid_dialog = tx
+                    .original
+                    .to_header()
+                    .ok()
                     .and_then(|h| h.tag().ok().flatten())
                     .is_some();
 
                 if !matches!(
                     tx.original.method,
                     rsip::Method::Bye | rsip::Method::Cancel | rsip::Method::Ack
-                ) && !is_mid_dialog && tx.last_response.is_none()
+                ) && !is_mid_dialog
+                    && tx.last_response.is_none()
                     && !cookie.is_spam()
                 {
                     tx.reply(rsip::StatusCode::NotImplemented).await.ok();

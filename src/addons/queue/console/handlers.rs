@@ -1,12 +1,12 @@
-use crate::config::ProxyConfig;
-use crate::console::handlers::{bad_request, forms, normalize_optional_string, require_field};
-use crate::console::{ConsoleState, middleware::AuthRequired};
 use crate::addons::queue::models::{
     ActiveModel as QueueActiveModel, Column as QueueColumn, Entity as QueueEntity,
     Model as QueueModel,
 };
-use crate::proxy::routing::RouteQueueConfig;
 use crate::addons::queue::services::{exporter::QueueExporter, utils as queue_utils};
+use crate::config::ProxyConfig;
+use crate::console::handlers::{bad_request, forms, normalize_optional_string, require_field};
+use crate::console::{ConsoleState, middleware::AuthRequired};
+use crate::proxy::routing::RouteQueueConfig;
 use axum::{
     Json, Router,
     extract::{Path as AxumPath, State},

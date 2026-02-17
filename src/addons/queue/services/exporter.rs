@@ -2,7 +2,10 @@ use anyhow::{Context, Result};
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOrder};
 use std::{collections::HashMap, fs, path::Path};
 
-use crate::{config::ProxyConfig, addons::queue::models as queue, addons::queue::services::utils as queue_utils};
+use crate::{
+    addons::queue::models as queue, addons::queue::services::utils as queue_utils,
+    config::ProxyConfig,
+};
 
 pub struct QueueExporter {
     db: DatabaseConnection,
@@ -38,9 +41,9 @@ impl QueueExporter {
         }
 
         let file_path = dir.join("queues.generated.toml");
-        let toml_str = toml::to_string_pretty(&queues_map)
-            .context("failed to serialize queues to toml")?;
-        
+        let toml_str =
+            toml::to_string_pretty(&queues_map).context("failed to serialize queues to toml")?;
+
         fs::write(&file_path, toml_str)
             .with_context(|| format!("failed to write queues file {}", file_path.display()))?;
 

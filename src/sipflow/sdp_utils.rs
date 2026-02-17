@@ -27,10 +27,7 @@ pub fn extract_rtp_addr(sdp: &str) -> Option<String> {
 pub fn extract_call_id(message: &str) -> Option<String> {
     for line in message.lines() {
         if line.starts_with("Call-ID:") || line.starts_with("i:") {
-            return line
-                .split(':')
-                .nth(1)
-                .map(|s| s.trim().to_string());
+            return line.split(':').nth(1).map(|s| s.trim().to_string());
         }
     }
     None

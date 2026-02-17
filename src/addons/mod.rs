@@ -128,6 +128,16 @@ pub trait Addon: Send + Sync {
     async fn seed_fixtures(&self, _state: AppState) -> anyhow::Result<()> {
         Ok(())
     }
+
+    /// Authenticate a user
+    async fn authenticate(
+        &self,
+        _state: AppState,
+        _identifier: &str,
+        _password: &str,
+    ) -> anyhow::Result<Option<crate::models::user::Model>> {
+        Ok(None)
+    }
 }
 
 pub mod registry;
@@ -142,3 +152,9 @@ pub mod transcript;
 pub mod wholesale;
 
 pub mod queue;
+
+#[cfg(feature = "addon-endpoint-manager")]
+pub mod endpoint_manager;
+
+#[cfg(feature = "addon-enterprise-auth")]
+pub mod enterprise_auth;

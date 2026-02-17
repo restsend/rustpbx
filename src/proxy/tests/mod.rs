@@ -18,17 +18,17 @@ mod user_http_test;
 #[cfg(test)]
 mod test_b2bua_flow;
 #[cfg(test)]
-mod test_reinvite;
-#[cfg(test)]
 mod test_call;
 #[cfg(test)]
 mod test_cdr;
 #[cfg(test)]
 mod test_media_proxy;
 #[cfg(test)]
-mod test_proxy_integration;
-#[cfg(test)]
 mod test_presence;
 #[cfg(test)]
+mod test_proxy_integration;
+#[cfg(test)]
 mod test_queue;
+#[cfg(test)]
+mod test_reinvite;
 pub mod test_ua;

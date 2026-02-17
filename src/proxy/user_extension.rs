@@ -173,6 +173,12 @@ mod tests {
     async fn missing_user_returns_none() {
         let db = setup_db().await;
         let backend = ExtensionUserBackend::new(db, 30);
-        assert!(backend.get_user("2001", None, None).await.unwrap().is_none());
+        assert!(
+            backend
+                .get_user("2001", None, None)
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 }
