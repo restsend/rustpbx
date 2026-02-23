@@ -389,6 +389,12 @@ impl CallModule {
             (true, true) => DialDirection::Outbound,
             (true, false) => DialDirection::Outbound,
             (false, true) => DialDirection::Inbound,
+            (false, false) if is_from_trunk => {
+                // Trunk providers (e.g. Telnyx) may use internal IPs in To header.
+                // Since the call arrived from a recognized trunk, treat as inbound.
+                debug!(dialog_id, caller_realm = ?caller.realm, callee_realm, "Trunk call with external callee realm, treating as inbound");
+                DialDirection::Inbound
+            }
             (false, false) => {
                 warn!(dialog_id, caller_realm = ?caller.realm, callee_realm, "Both caller and callee are external realm, reject");
                 return Err((
