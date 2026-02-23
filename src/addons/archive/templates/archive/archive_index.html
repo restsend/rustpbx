@@ -58,6 +58,16 @@
                             placeholder="30">
                     </div>
 
+                    <div>
+                        <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Archive
+                            Directory</label>
+                        <input type="text" x-model="config.archive_dir"
+                            class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                            placeholder="{{ effective_archive_dir }}">
+                        <p class="mt-1 text-xs text-slate-400">Leave blank to use default:
+                            <code>{{ effective_archive_dir }}</code></p>
+                    </div>
+
                     <div class="border-t border-slate-200 pt-4">
                         <button @click="saveConfig" :disabled="saving"
                             class="inline-flex w-full items-center justify-center rounded-md bg-sky-600 px-3 py-2 text-xs font-semibold text-white shadow-sm transition hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60">
@@ -118,7 +128,7 @@
     function archiveManager(archives, config) {
         return {
             archives: archives || [],
-            config: config || { enabled: false, archive_time: '03:00', timezone: 'UTC', retention_days: 30 },
+            config: config || { enabled: false, archive_time: '03:00', timezone: 'UTC', retention_days: 30, archive_dir: '' },
             saving: false,
 
             formatSize(bytes) {

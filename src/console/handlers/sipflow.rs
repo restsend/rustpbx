@@ -66,6 +66,7 @@ async fn get_settings(
                     flush_count,
                     flush_interval_secs,
                     id_cache_size,
+                    ..
                 } => (
                     "local",
                     json!({

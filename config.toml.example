@@ -30,6 +30,14 @@ database_url = "sqlite://rustpbx.sqlite3"
 # username = "user"
 # credential = "pass"
 
+# Root directory for all runtime-generated data files.
+# All sub-paths below are derived from this unless individually overridden.
+# storage_dir = "storage"
+
+[addons.wholesale]
+# Override billing archive CSV directory (default: {storage_dir}/wholesale/bills)
+# bills_dir = "storage/wholesale/bills"
+
 [console]
 #session_secret = "please_change_me_to_a_random_secret"
 base_path = "/console"

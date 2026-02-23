@@ -148,19 +148,23 @@ See [docs/sipflow-config.md](docs/sipflow-config.md) for complete configuration 
 
 - Rust 1.75 or later
 - Cargo package manager
-- `pkg-config`, `libasound2-dev`
+- `cmake`, `pkg-config`, `libasound2-dev`, `libssl-dev`, `libopus-dev`
 
 Linux:
 
 ```bash
-apt-get install -y cmake libasound2-dev
+apt-get install -y cmake pkg-config libasound2-dev libssl-dev libopus-dev
 ```
 
 macOS:
 
 ```bash
-brew install cmake
+brew install cmake openssl pkg-config
 ```
+
+> **Note**: `libssl-dev` (OpenSSL development headers) is required because several dependencies
+> (`object_store`, `rcgen`, `instant-acme`) transitively pull in `openssl-sys` or `aws-lc-sys`
+> which need OpenSSL or its headers at compile time.
 
 ### Install & Build
 
@@ -172,6 +176,35 @@ cargo build --release
 
 > For a minimal footprint you can disable heavy features:
 > `cargo build -r --no-default-features --features vad_webrtc,console`
+
+### Cross-Compilation (Docker)
+
+The project provides cross-compilation Docker images for `x86_64` and `aarch64` targets via [Cross.toml](Cross.toml):
+
+| File | Target |
+|------|--------|
+| `Dockerfile.cross-x86_64` | `x86_64-unknown-linux-gnu` |
+| `Dockerfile.cross-aarch64` | `aarch64-unknown-linux-gnu` |
+
+Both images include the necessary system libraries (`libssl-dev`, `libopus-dev`, `cmake`, `pkg-config`).
+The `aarch64` image additionally installs the `arm64` architecture variants (`libssl-dev:arm64`, `libopus-dev:arm64`)
+and sets the appropriate `PKG_CONFIG_PATH` / `PKG_CONFIG_SYSROOT_DIR` environment variables for cross-compilation.
+
+To build with cross:
+
+```bash
+# Install cross
+cargo install cross
+
+# Build for x86_64
+cross build --release --target x86_64-unknown-linux-gnu
+
+# Build for aarch64
+cross build --release --target aarch64-unknown-linux-gnu
+```
+
+> The `cross` feature flag enables bindgen for `aws-lc-rs` when cross-compiling:
+> `cross build --release --features cross --target aarch64-unknown-linux-gnu`
 
 ### PBX Quick Start (SQLite + console admin)
 

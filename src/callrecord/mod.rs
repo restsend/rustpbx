@@ -17,6 +17,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 pub mod sipflow;
+pub mod sipflow_upload;
 pub mod storage;
 #[cfg(test)]
 mod tests;
@@ -235,6 +236,18 @@ pub type FnSaveCallRecord = Arc<
 >;
 
 type CallRecordSaveResult = std::result::Result<(CallRecord, String), (CallRecord, Error)>;
+
+/// A no-op saver that immediately returns success without writing any files.
+/// Use this when you only need hooks to run (e.g. `DatabaseHook`, `SipFlowUploadHook`)
+/// but do not want CDR JSON files on disk.
+pub fn noop_saver(
+    _cancel_token: CancellationToken,
+    _formatter: Arc<dyn CallRecordFormatter>,
+    _config: Arc<CallRecordConfig>,
+    record: CallRecord,
+) -> Pin<Box<dyn Future<Output = CallRecordSaveResult> + Send>> {
+    Box::pin(async move { Ok((record, String::new())) })
+}
 
 pub async fn write_call_record_event<T: Serialize>(
     r#type: CallRecordEventType,

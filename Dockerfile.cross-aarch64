@@ -8,12 +8,15 @@ RUN apt-get update && apt-get install -y \
     llvm \
     libclang-dev \
     crossbuild-essential-arm64 \
+    libssl-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Install cross-compiled libs for ARM64
 RUN dpkg --add-architecture arm64 && \
     apt-get update && \
-    apt-get install -y libopus-dev:arm64 || true && \
+    apt-get install -y \
+    libopus-dev:arm64 \
+    libssl-dev:arm64 || true && \
     rm -rf /var/lib/apt/lists/*
 
 # Bake all cross-compilation environment variables into the image

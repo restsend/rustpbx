@@ -147,6 +147,11 @@ impl StorageManager {
         Ok(())
     }
 
+    /// Force-flush all pending items regardless of thresholds.
+    pub async fn force_flush(&mut self) -> Result<()> {
+        self.flush_batch().await
+    }
+
     async fn rotate(&mut self, dt: DateTime<Local>) -> Result<()> {
         if !self.batch.is_empty() {
             self.flush_batch().await?;

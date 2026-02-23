@@ -14,7 +14,13 @@ use crate::sipflow::wav_utils::generate_wav_from_packets;
 use crate::sipflow::{SipFlowItem, SipFlowMsgType};
 
 enum Command {
-    RecordItem { call_id: String, item: SipFlowItem },
+    RecordItem {
+        call_id: String,
+        item: SipFlowItem,
+    },
+    Flush {
+        done: tokio::sync::oneshot::Sender<()>,
+    },
 }
 
 /// Local (embedded) backend that runs sipflow storage in a background task
@@ -124,6 +130,10 @@ impl LocalBackend {
 
                                 let _ = storage.write_processed(processed).await;
                             }
+                            Command::Flush { done } => {
+                                let _ = storage.force_flush().await;
+                                let _ = done.send(());
+                            }
                         }
                     }
                     _ = interval.tick() => {
@@ -144,6 +154,13 @@ impl LocalBackend {
 
 #[async_trait]
 impl SipFlowBackend for LocalBackend {
+    async fn flush(&self) -> Result<()> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let _ = self.sender.send(Command::Flush { done: tx });
+        rx.await.ok();
+        Ok(())
+    }
+
     fn record(&self, call_id: &str, item: SipFlowItem) -> Result<()> {
         self.sender.send(Command::RecordItem {
             call_id: call_id.to_string(),

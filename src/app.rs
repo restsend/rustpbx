@@ -1,6 +1,8 @@
 use crate::{
     callrecord::{
-        CallRecordFormatter, CallRecordManagerBuilder, CallRecordSender, DefaultCallRecordFormatter,
+        CallRecordFormatter, CallRecordManagerBuilder, CallRecordSender,
+        DefaultCallRecordFormatter, noop_saver,
+        sipflow_upload::SipFlowUploadHook,
     },
     config::{Config, UserBackendConfig},
     handler::middleware::clientaddr::ClientAddr,
@@ -210,6 +212,26 @@ impl AppStateBuilder {
         let db_conn = crate::models::create_db(&config.database_url).await?;
 
         let addon_registry = Arc::new(crate::addons::registry::AddonRegistry::new());
+
+        // Pre-build the SipFlow backend so it can be shared between the SipServer
+        // (for recording RTP packets) and the SipFlowUploadHook (for post-call upload).
+        // Building it here ensures only one backend instance is ever created for a given
+        // spool directory, avoiding concurrent SQLite writes.
+        let sipflow_backend_arc: Option<Arc<dyn crate::sipflow::SipFlowBackend>> =
+            config.sipflow.as_ref().and_then(|cfg| {
+                crate::sipflow::backend::create_backend(cfg)
+                    .map(|b| Arc::from(b) as Arc<dyn crate::sipflow::SipFlowBackend>)
+                    .map_err(|e| warn!("Failed to create sipflow backend: {e}"))
+                    .ok()
+            });
+
+        // The upload hook is wired in when [sipflow.upload] is configured.
+        let sipflow_upload_config: Option<crate::config::SipFlowUploadConfig> =
+            config.sipflow.as_ref().and_then(|s| match s {
+                crate::config::SipFlowConfig::Local { upload, .. } => upload.clone(),
+                _ => None,
+            });
+
         let callrecord_formatter = if let Some(formatter) = self.callrecord_formatter {
             formatter
         } else {
@@ -225,14 +247,37 @@ impl AppStateBuilder {
         let mut callrecord_manager = None;
         let callrecord_sender = if let Some(sender) = self.callrecord_sender {
             Some(sender)
-        } else if let Some(ref callrecord) = config.callrecord {
+        } else if config.callrecord.is_some() || sipflow_upload_config.is_some() {
+            // Build a CallRecordManager when either:
+            //  - [callrecord] is configured (CDR JSON files / S3), or
+            //  - [sipflow.upload] is configured (post-call WAV upload)
+            // DatabaseHook is always included so call records reach the DB.
             let mut builder = CallRecordManagerBuilder::new()
                 .with_cancel_token(token.child_token())
-                .with_config(callrecord.clone())
                 .with_formatter(callrecord_formatter.clone())
                 .with_hook(Box::new(DatabaseHook {
                     db: db_conn.clone(),
                 }));
+
+            if let Some(ref callrecord) = config.callrecord {
+                builder = builder.with_config(callrecord.clone());
+            } else {
+                // No CDR file output needed – use a no-op saver so only hooks run.
+                builder = builder
+                    .with_config(crate::config::CallRecordConfig::default())
+                    .with_saver(Arc::new(Box::new(noop_saver)));
+            }
+
+            // Attach the SipFlow upload hook if configured.
+            if let (Some(backend), Some(upload_cfg)) = (
+                sipflow_backend_arc.as_ref(),
+                sipflow_upload_config.as_ref(),
+            ) {
+                builder = builder.with_hook(Box::new(SipFlowUploadHook {
+                    backend: backend.clone(),
+                    upload_config: upload_cfg.clone(),
+                }));
+            }
 
             for hook in addon_registry.get_call_record_hooks(&config, &db_conn) {
                 builder = builder.with_hook(hook);
@@ -297,6 +342,7 @@ impl AppStateBuilder {
                     .with_call_record_hooks(call_record_hooks)
                     .with_storage(core.storage.clone())
                     .with_sipflow_config(config.sipflow.clone())
+                    .with_sipflow_backend(sipflow_backend_arc.clone())
                     .with_no_bind(self.skip_sip_bind)
                     .register_module("acl", AclModule::create)
                     .register_module("auth", AuthModule::create)

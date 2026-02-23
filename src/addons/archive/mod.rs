@@ -7,12 +7,15 @@ use axum::{
 };
 use chrono::{DateTime, Duration, NaiveTime, Utc};
 use chrono_tz::Tz;
-use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder};
+use sea_orm::{ColumnTrait, EntityTrait, QueryFilter, QueryOrder, QuerySelect};
 use std::sync::{Arc, RwLock};
 use tokio::time;
 use tracing::{error, info};
 
 mod handlers;
+
+#[cfg(test)]
+mod tests;
 
 #[derive(Clone)]
 pub struct ArchiveState {
@@ -85,7 +88,10 @@ impl ArchiveAddon {
 
             if should_run {
                 info!("Starting scheduled archive job");
-                if let Err(e) = Self::perform_archive(state.clone(), &archive_config).await {
+                let archive_dir = state.config().archive_dir();
+                if let Err(e) =
+                    Self::perform_archive(state.db(), &archive_config, &archive_dir).await
+                {
                     error!("Archive job failed: {}", e);
                 } else {
                     info!("Archive job completed successfully");
@@ -96,15 +102,13 @@ impl ArchiveAddon {
     }
 
     pub async fn perform_archive(
-        state: AppState,
+        db: &sea_orm::DatabaseConnection,
         config: &crate::config::ArchiveConfig,
+        archive_dir: &str,
     ) -> anyhow::Result<()> {
         use crate::models::call_record;
         use flate2::Compression;
-        use flate2::write::GzEncoder;
-        use std::io::Write;
 
-        let db = state.db();
         let retention_days = config.retention_days as i64;
         let cutoff_date = Utc::now() - Duration::days(retention_days);
 
@@ -147,52 +151,68 @@ impl ArchiveAddon {
             let end_of_day: DateTime<Utc> =
                 DateTime::from_naive_utc_and_offset(next_date.and_hms_opt(0, 0, 0).unwrap(), Utc);
 
-            let records = call_record::Entity::find()
-                .filter(call_record::Column::StartedAt.gte(start_of_day))
-                .filter(call_record::Column::StartedAt.lt(end_of_day))
-                .all(db)
-                .await?;
+            // --- cursor-based batching to avoid loading entire day into memory ---
+            let batch_size: u64 = 1000;
+            let mut last_id: i64 = 0;
+            let mut total_archived = 0usize;
+            let date_str = current_date.format("%Y-%m-%d").to_string();
+            let filename = format!("{}/{}-callrecords.gz", archive_dir, date_str);
 
-            if !records.is_empty() {
-                let date_str = current_date.format("%Y-%m-%d").to_string();
-                let filename = format!("archive/{}-callrecords.gz", date_str);
+            // We build a single compressed file for the day, writing in batches.
+            // Use a temp path while writing, then rename on success.
+            let tmp_filename = format!("{}.tmp", filename);
 
-                info!(
-                    "Archiving {} records for {} to {}",
-                    records.len(),
-                    date_str,
-                    filename
-                );
+            // Create archive directory if not exists
+            if let Some(parent) = std::path::Path::new(&filename).parent() {
+                tokio::fs::create_dir_all(parent).await?;
+            }
 
-                // Create archive directory if not exists
-                if let Some(parent) = std::path::Path::new(&filename).parent() {
-                    tokio::fs::create_dir_all(parent).await?;
+            let file = std::fs::File::create(&tmp_filename)?;
+            let encoder = flate2::write::GzEncoder::new(file, Compression::default());
+            let mut wtr = csv::Writer::from_writer(encoder);
+
+            loop {
+                let batch = call_record::Entity::find()
+                    .filter(call_record::Column::StartedAt.gte(start_of_day))
+                    .filter(call_record::Column::StartedAt.lt(end_of_day))
+                    .filter(call_record::Column::Id.gt(last_id))
+                    .order_by_asc(call_record::Column::Id)
+                    .limit(batch_size)
+                    .all(db)
+                    .await?;
+
+                if batch.is_empty() {
+                    break;
                 }
 
-                // Create CSV content
-                let mut wtr = csv::Writer::from_writer(vec![]);
-                for record in &records {
-                    // We need to serialize record to CSV.
-                    // call_record::Model implements Serialize, so this should work.
+                let batch_ids: Vec<i64> = batch.iter().map(|r| r.id).collect();
+                last_id = *batch_ids.last().unwrap();
+
+                for record in &batch {
                     wtr.serialize(record)?;
                 }
-                let data = wtr.into_inner()?;
+                total_archived += batch.len();
 
-                // Compress
-                let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
-                encoder.write_all(&data)?;
-                let compressed_data = encoder.finish()?;
-
-                // Save to file
-                tokio::fs::write(&filename, compressed_data).await?;
-
-                // Delete from DB
-                // We can delete by ID to be safe
-                let ids: Vec<i64> = records.iter().map(|r| r.id).collect();
+                // Delete this batch from DB immediately to keep memory bounded
                 call_record::Entity::delete_many()
-                    .filter(call_record::Column::Id.is_in(ids))
+                    .filter(call_record::Column::Id.is_in(batch_ids))
                     .exec(db)
                     .await?;
+            }
+
+            // Drop writer to flush+finish the gzip stream
+            wtr.into_inner()?.finish()?;
+
+            if total_archived > 0 {
+                // Rename tmp file to final name
+                tokio::fs::rename(&tmp_filename, &filename).await?;
+                info!(
+                    "Archived {} records for {} to {}",
+                    total_archived, date_str, filename
+                );
+            } else {
+                // No records for this day, remove the empty tmp file
+                let _ = tokio::fs::remove_file(&tmp_filename).await;
             }
 
             current_date = next_date;

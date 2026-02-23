@@ -19,6 +19,7 @@ use crate::{
         locator::{DialogTargetLocator, LocatorEventSender, TransportInspectorLocator},
         presence::PresenceManager,
     },
+    sipflow::SipFlowBackend,
     sipflow::backend::create_backend,
 };
 use anyhow::{Result, anyhow};
@@ -106,6 +107,8 @@ pub struct SipServerBuilder {
     call_record_hooks: Vec<Box<dyn crate::callrecord::CallRecordHook>>,
     storage: Option<crate::storage::Storage>,
     sipflow_config: Option<SipFlowConfig>,
+    /// Pre-built SipFlow backend (takes precedence over sipflow_config).
+    sipflow_backend: Option<Arc<dyn SipFlowBackend>>,
     no_bind: bool,
 }
 
@@ -132,12 +135,21 @@ impl SipServerBuilder {
             call_record_hooks: Vec::new(),
             storage: None,
             sipflow_config: None,
+            sipflow_backend: None,
             no_bind: false,
         }
     }
 
     pub fn with_sipflow_config(mut self, config: Option<SipFlowConfig>) -> Self {
         self.sipflow_config = config;
+        self
+    }
+
+    /// Use a pre-built SipFlow backend (takes precedence over `with_sipflow_config`).
+    /// This allows sharing a single backend instance with other components, e.g.
+    /// `SipFlowUploadHook`, avoiding duplicate writers to the same spool directory.
+    pub fn with_sipflow_backend(mut self, backend: Option<Arc<dyn SipFlowBackend>>) -> Self {
+        self.sipflow_backend = backend;
         self
     }
 
@@ -242,7 +254,7 @@ impl SipServerBuilder {
         self
     }
 
-    pub async fn build(self) -> Result<SipServer> {
+    pub async fn build(mut self) -> Result<SipServer> {
         let user_backend = if let Some(backend) = self.user_backend {
             backend
         } else {
@@ -442,17 +454,17 @@ impl SipServerBuilder {
         }
 
         let mut sip_flow = None;
-        if let Some(sipflow_config) = &self.sipflow_config {
-            if let Ok(backend) = create_backend(sipflow_config) {
-                info!("Sipflow backend initialized: {:?}", sipflow_config);
-                let sflow = SipFlowBuilder::new()
-                    .with_backend(Arc::from(backend))
-                    .build();
-                sip_flow = Some(sflow.clone());
-                inspectors.push(Box::new(sflow));
-            } else {
-                warn!("Failed to create sipflow backend");
-            }
+        let sipflow_backend = self.sipflow_backend.take().or_else(|| {
+            self.sipflow_config
+                .as_ref()
+                .and_then(|cfg| create_backend(cfg).ok())
+                .map(|b| Arc::from(b) as Arc<dyn SipFlowBackend>)
+        });
+        if let Some(backend) = sipflow_backend {
+            info!("Sipflow backend initialized");
+            let sflow = SipFlowBuilder::new().with_backend(backend).build();
+            sip_flow = Some(sflow.clone());
+            inspectors.push(Box::new(sflow));
         }
 
         endpoint_builder =
