@@ -162,7 +162,7 @@ impl CallReporter {
 
         let mut recorder = Vec::new();
 
-        if self.context.dialplan.recording.enabled && !has_sipflow_backend {
+        if self.context.dialplan.recording.enabled {
             if let Some(recorder_config) = self.context.dialplan.recording.option.as_ref() {
                 if !recorder_config.recorder_file.is_empty() {
                     let size = fs::metadata(&recorder_config.recorder_file)

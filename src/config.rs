@@ -201,6 +201,36 @@ pub struct Config {
     pub storage: Option<StorageConfig>,
     #[serde(default)]
     pub sipflow: Option<SipFlowConfig>,
+    /// Root directory for all runtime-generated data (archives, exports, billing CSVs).
+    /// Sub-paths are derived automatically unless individually overridden.
+    #[serde(default = "default_storage_dir")]
+    pub storage_dir: String,
+}
+
+fn default_storage_dir() -> String {
+    "storage".to_string()
+}
+
+impl Config {
+    /// Resolved directory for call-record archives.
+    /// Priority: `[archive] archive_dir` > `{storage_dir}/archive`
+    pub fn archive_dir(&self) -> String {
+        self.archive
+            .as_ref()
+            .and_then(|a| a.archive_dir.as_deref())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| format!("{}/archive", self.storage_dir))
+    }
+
+    /// Resolved directory for wholesale billing CSV archives.
+    /// Priority: `[addons.wholesale] bills_dir` > `{storage_dir}/wholesale/bills`
+    pub fn wholesale_bills_dir(&self) -> String {
+        self.addons
+            .get("wholesale")
+            .and_then(|m| m.get("bills_dir"))
+            .cloned()
+            .unwrap_or_else(|| format!("{}/wholesale/bills", self.storage_dir))
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -209,6 +239,9 @@ pub struct ArchiveConfig {
     pub archive_time: String,
     pub timezone: Option<String>,
     pub retention_days: u32,
+    /// Override the archive directory. Defaults to `{storage_dir}/archive`.
+    #[serde(default)]
+    pub archive_dir: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -353,6 +386,9 @@ pub enum SipFlowConfig {
         flush_interval_secs: u64,
         #[serde(default = "default_sipflow_id_cache_size")]
         id_cache_size: usize,
+        /// Optional upload target for recording WAV files.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        upload: Option<SipFlowUploadConfig>,
     },
     Remote {
         udp_addr: String,
@@ -376,6 +412,32 @@ fn default_sipflow_timeout() -> u64 {
 
 fn default_sipflow_id_cache_size() -> usize {
     8192
+}
+
+/// Upload destination for SipFlow recordings (WAV files generated from captured RTP).
+/// When configured, the WAV for each completed call is uploaded asynchronously
+/// after the call ends; `keep_local` controls whether the local spool file is removed.
+#[derive(Debug, Deserialize, Clone, Serialize)]
+#[serde(tag = "type")]
+#[serde(rename_all = "snake_case")]
+pub enum SipFlowUploadConfig {
+    S3 {
+        vendor: S3Vendor,
+        bucket: String,
+        region: String,
+        access_key: String,
+        secret_key: String,
+        endpoint: String,
+        /// Key prefix / folder inside the bucket (default: empty).
+        #[serde(default)]
+        root: String,
+    },
+    Http {
+        /// Endpoint that receives a multipart/form-data POST with the WAV file.
+        url: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        headers: Option<HashMap<String, String>>,
+    },
 }
 
 #[derive(Debug, Deserialize, Clone, Copy, Serialize)]
@@ -735,6 +797,7 @@ impl Default for Config {
             storage: None,
             addons: HashMap::new(),
             sipflow: None,
+            storage_dir: default_storage_dir(),
         }
     }
 }

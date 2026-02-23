@@ -702,7 +702,7 @@
         </section>
 
         <section x-show="activeTab === 'storage'" x-cloak x-transition.opacity class="space-y-6"
-            id="settings-tab-storage" role="tabpanel" tabindex="0">
+            id="settings-tab-storage" role="tabpanel" tabindex="0" style="display:none!important">
             <div class="space-y-6">
                 <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
                     <div class="flex flex-col gap-2 md:flex-row md:items-end md:justify-between">
@@ -1913,7 +1913,6 @@
             tabs: [
                 { id: 'platform', label: 'Platform overview' },
                 { id: 'proxy', label: 'Proxy settings' },
-                { id: 'storage', label: 'Storage & retention' },
                 { id: 'sipflow', label: 'SipFlow recording' },
                 { id: 'recording', label: 'Recording policy' },
                 { id: 'security', label: 'Security posture' },
@@ -3751,12 +3750,6 @@
                 const recorderFormat = (meta?.recorder_format || 'wav').toString();
                 const mediaCache = meta?.media_cache_path || '';
 
-                let callrecordRoot = '';
-                const callrecordProfile = (this.storageProfiles || []).find((profile) => String(profile?.id || '').startsWith('callrecord'));
-                if (callrecordProfile && callrecordProfile.config && callrecordProfile.config.root) {
-                    callrecordRoot = callrecordProfile.config.root;
-                }
-
                 const recording = meta?.recording || this.recordingPolicy || {};
                 const normalizeList = (list) => Array.isArray(list) ? list.join('\n') : '';
                 const directionList = Array.isArray(recording?.directions)
@@ -3770,7 +3763,6 @@
                     recorder_path: recorderPath,
                     recorder_format: recorderFormat || 'wav',
                     media_cache_path: mediaCache,
-                    callrecord_root: callrecordRoot || '',
                     recording_enabled: !!recording?.enabled,
                     recording_auto_start: recording?.auto_start !== undefined ? !!recording.auto_start : true,
                     recording_direction_inbound: directionInbound,
@@ -3802,11 +3794,6 @@
                         });
                         return;
                     }
-                }
-                let callrecordPayload = null;
-                const root = this.normalizeOptionalString(this.storageDraft.callrecord_root);
-                if (root) {
-                    callrecordPayload = { mode: 'local', root };
                 }
                 if (
                     this.storageDraft.recording_enabled &&
@@ -3850,7 +3837,6 @@
                     recorder_path: this.normalizeOptionalString(this.storageDraft.recorder_path),
                     media_cache_path: this.normalizeOptionalString(this.storageDraft.media_cache_path),
                     recorder_format: recorderFormat,
-                    callrecord: callrecordPayload,
                     recording_policy: recordingPayload,
                 };
                 this.storageProcessing = true;

@@ -27,6 +27,9 @@ pub struct UpdateConfigPayload {
     archive_time: String,
     timezone: String,
     retention_days: u32,
+    /// Empty string means "use default"; omitted/None also means default.
+    #[serde(default)]
+    archive_dir: Option<String>,
 }
 
 pub async fn ui_index(
@@ -40,11 +43,13 @@ pub async fn ui_index(
                 .await
                 .unwrap_or_default();
             let config = archive_state.config.read().unwrap().clone();
+            let effective_archive_dir = state.config().archive_dir();
             return console.render(
                 "archive/archive_index.html",
                 serde_json::json!({
                     "archives": archives,
                     "config": config,
+                    "effective_archive_dir": effective_archive_dir,
                     "nav_active": "Archive"
                 }),
             );
@@ -107,7 +112,17 @@ pub async fn update_config(
         archive["archive_time"] = value(&payload.archive_time);
         archive["timezone"] = value(&payload.timezone);
         archive["retention_days"] = value(payload.retention_days as i64);
-
+        match payload.archive_dir.as_deref() {
+            Some(d) if !d.trim().is_empty() => {
+                archive["archive_dir"] = value(d.trim());
+            }
+            _ => {
+                // Remove override → fall back to derived default
+                if let Some(t) = doc["archive"].as_table_mut() {
+                    t.remove("archive_dir");
+                }
+            }
+        }
         std::fs::write(&config_path, doc.to_string())?;
         info!("Updated archive config in {}", config_path);
         Ok(())
@@ -117,11 +132,17 @@ pub async fn update_config(
         Ok(_) => {
             // Update in-memory config
             let mut config_guard = archive_state.config.write().unwrap();
+            let new_archive_dir = payload
+                .archive_dir
+                .as_deref()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty());
             *config_guard = Some(crate::config::ArchiveConfig {
                 enabled: payload.enabled,
                 archive_time: payload.archive_time,
                 timezone: Some(payload.timezone),
                 retention_days: payload.retention_days,
+                archive_dir: new_archive_dir,
             });
             Json(serde_json::json!({"success": true}))
         }

@@ -11,6 +11,12 @@ use crate::sipflow::SipFlowItem;
 #[async_trait]
 pub trait SipFlowBackend: Send + Sync {
     fn record(&self, call_id: &str, item: SipFlowItem) -> Result<()>;
+    /// Flush any in-memory batch to durable storage.
+    /// This is a best-effort operation; implementations that have no in-memory
+    /// buffer (e.g. the Remote backend) may ignore it.
+    async fn flush(&self) -> Result<()> {
+        Ok(())
+    }
     async fn query_flow(
         &self,
         call_id: &str,
@@ -40,6 +46,7 @@ pub fn create_backend(config: &SipFlowConfig) -> Result<Box<dyn SipFlowBackend>>
             flush_count,
             flush_interval_secs,
             id_cache_size,
+            ..
         } => local::LocalBackend::new(
             root.clone(),
             subdirs.clone(),
