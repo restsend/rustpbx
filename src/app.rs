@@ -14,6 +14,7 @@ use crate::{
         presence::PresenceModule,
         registrar::RegistrarModule,
         server::{SipServer, SipServerBuilder},
+        trunk_register::TrunkRegistrationModule,
         ws::sip_ws_handler,
     },
 };
@@ -348,7 +349,8 @@ impl AppStateBuilder {
                     .register_module("auth", AuthModule::create)
                     .register_module("presence", PresenceModule::create)
                     .register_module("registrar", RegistrarModule::create)
-                    .register_module("call", CallModule::create);
+                    .register_module("call", CallModule::create)
+                    .register_module("trunk_register", TrunkRegistrationModule::create);
 
                 builder = addon_registry.apply_proxy_server_hooks(builder, core.clone());
                 builder.build().await

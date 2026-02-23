@@ -78,6 +78,12 @@ pub struct TrunkConfig {
     pub country: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub policy: Option<crate::models::policy::PolicySpec>,
+    /// Enable upstream registration (for inbound call delivery)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub register: Option<bool>,
+    /// Registration expiry in seconds (default 3600)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub register_expires: Option<u32>,
     #[serde(skip)]
     pub origin: ConfigOrigin,
 }
@@ -103,6 +109,8 @@ impl Default for TrunkConfig {
             incoming_to_user_prefix: None,
             country: None,
             policy: None,
+            register: None,
+            register_expires: None,
             origin: ConfigOrigin::embedded(),
         }
     }
