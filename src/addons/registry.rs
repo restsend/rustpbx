@@ -26,16 +26,6 @@ impl AddonRegistry {
         #[cfg(feature = "addon-transcript")]
         addons.push(Box::new(super::transcript::TranscriptAddon::new()));
 
-        // Endpoint Manager Addon
-        #[cfg(feature = "addon-endpoint-manager")]
-        addons.push(Box::new(
-            super::endpoint_manager::EndpointManagerAddon::new(),
-        ));
-
-        // Enterprise Auth Addon
-        #[cfg(feature = "addon-enterprise-auth")]
-        addons.push(Box::new(super::enterprise_auth::EnterpriseAuthAddon::new()));
-
         // Queue Addon
         addons.push(Box::new(super::queue::QueueAddon::new()));
 

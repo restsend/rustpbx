@@ -146,15 +146,8 @@ pub mod registry;
 pub mod acme;
 #[cfg(feature = "addon-archive")]
 pub mod archive;
+pub mod queue;
 #[cfg(feature = "addon-transcript")]
 pub mod transcript;
 #[cfg(feature = "addon-wholesale")]
 pub mod wholesale;
-
-pub mod queue;
-
-#[cfg(feature = "addon-endpoint-manager")]
-pub mod endpoint_manager;
-
-#[cfg(feature = "addon-enterprise-auth")]
-pub mod enterprise_auth;
