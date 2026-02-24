@@ -390,40 +390,47 @@
             }
         }
 
-        window.hangupCall = async function (sessionId) {
-            if (!confirm('Are you sure you want to hangup this call?')) {
-                return;
-            }
-            try {
-                const basePath = bootstrap.endpoint ? bootstrap.endpoint.replace('/dashboard/data', '') : '/console';
-                const resp = await fetch(`${basePath}/calls/active/${sessionId}/commands`, {
-                    method: 'POST',
-                    headers: {
-                        'Content-Type': 'application/json'
-                    },
-                    body: JSON.stringify({
-                        action: 'hangup',
-                        reason: 'admin_dashboard'
-                    })
-                });
-                if (resp.ok) {
-                    window.dispatchEvent(new CustomEvent('toast', {
-                        detail: { title: 'Success', message: 'Hangup command sent' }
-                    }));
-                    // Refresh dashboard data
-                    if (rangeSelect) {
-                        rangeSelect.dispatchEvent(new Event('change'));
-                    }
-                } else {
-                    const err = await resp.json();
-                    throw new Error(err.message || 'Failed to hangup call');
-                }
-            } catch (err) {
-                console.error(err);
-                window.dispatchEvent(new CustomEvent('toast', {
-                    detail: { title: 'Error', message: err.message }
-                }));
-            }
+        window.hangupCall = function (sessionId) {
+            window.dispatchEvent(new CustomEvent('console:confirm', {
+                detail: {
+                    title: 'Hangup Call',
+                    message: 'Are you sure you want to hangup this call?',
+                    confirmLabel: 'Hangup',
+                    destructive: true,
+                    onConfirm: async () => {
+                        try {
+                            const basePath = bootstrap.endpoint ? bootstrap.endpoint.replace('/dashboard/data', '') : '/console';
+                            const resp = await fetch(`${basePath}/calls/active/${sessionId}/commands`, {
+                                method: 'POST',
+                                headers: {
+                                    'Content-Type': 'application/json'
+                                },
+                                body: JSON.stringify({
+                                    action: 'hangup',
+                                    reason: 'admin_dashboard'
+                                })
+                            });
+                            if (resp.ok) {
+                                window.dispatchEvent(new CustomEvent('toast', {
+                                    detail: { title: 'Success', message: 'Hangup command sent' }
+                                }));
+                                // Refresh dashboard data
+                                if (rangeSelect) {
+                                    rangeSelect.dispatchEvent(new Event('change'));
+                                }
+                            } else {
+                                const err = await resp.json();
+                                throw new Error(err.message || 'Failed to hangup call');
+                            }
+                        } catch (err) {
+                            console.error(err);
+                            window.dispatchEvent(new CustomEvent('toast', {
+                                detail: { title: 'Error', message: err.message }
+                            }));
+                        }
+                    },  // onConfirm
+                },      // detail
+            }));
         };
 
         function renderActiveCalls(calls) {
