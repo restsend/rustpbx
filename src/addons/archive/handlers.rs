@@ -1,19 +1,24 @@
-use super::ArchiveState;
+use super::{ArchiveAddon, ArchiveState, ManualTaskStatus};
 use crate::app::AppState;
 use axum::{
     Extension,
-    extract::{Json, State},
+    extract::{Json, Path, Query, State},
     response::IntoResponse,
 };
+use chrono::NaiveDate;
+use sea_orm::{ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter};
 use serde::{Deserialize, Serialize};
+use std::sync::{Arc, RwLock};
 use toml_edit::{DocumentMut, value};
 use tracing::{error, info};
+use uuid::Uuid;
 
 #[derive(Serialize)]
 pub struct ArchiveFile {
     name: String,
     size: u64,
     date: String,
+    count: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -39,9 +44,8 @@ pub async fn ui_index(
     #[cfg(feature = "console")]
     {
         if let Some(console) = &state.console {
-            let archives = list_archive_files(&state.core.storage)
-                .await
-                .unwrap_or_default();
+            let archive_dir = state.config().archive_dir();
+            let archives = list_archive_files(&archive_dir).await.unwrap_or_default();
             let config = archive_state.config.read().unwrap().clone();
             let effective_archive_dir = state.config().archive_dir();
             return console.render(
@@ -64,9 +68,8 @@ pub async fn ui_index(
 }
 
 pub async fn list_archives(State(state): State<AppState>) -> impl IntoResponse {
-    let archives = list_archive_files(&state.core.storage)
-        .await
-        .unwrap_or_default();
+    let archive_dir = state.config().archive_dir();
+    let archives = list_archive_files(&archive_dir).await.unwrap_or_default();
     Json(archives)
 }
 
@@ -74,7 +77,6 @@ pub async fn delete_archive(
     State(state): State<AppState>,
     Json(payload): Json<DeleteArchivePayload>,
 ) -> impl IntoResponse {
-    let path = format!("archive/{}", payload.filename);
     // Security check: ensure no path traversal
     if payload.filename.contains("..")
         || payload.filename.contains("/")
@@ -83,9 +85,13 @@ pub async fn delete_archive(
         return Json(serde_json::json!({"success": false, "error": "Invalid filename"}));
     }
 
-    if let Err(e) = state.core.storage.delete(&path).await {
+    let archive_dir = state.config().archive_dir();
+    let full_path = format!("{}/{}", archive_dir, payload.filename);
+    if let Err(e) = tokio::fs::remove_file(&full_path).await {
         return Json(serde_json::json!({"success": false, "error": e.to_string()}));
     }
+    // Best-effort delete the count sidecar
+    let _ = tokio::fs::remove_file(format!("{}.count", full_path)).await;
     Json(serde_json::json!({"success": true}))
 }
 
@@ -99,6 +105,21 @@ pub async fn update_config(
         .clone()
         .unwrap_or_else(|| "config.toml".to_string());
 
+    // Validate timezone before touching the config file
+    let tz_str = payload.timezone.trim();
+    if tz_str.parse::<chrono_tz::Tz>().is_err() {
+        return Json(
+            serde_json::json!({"success": false, "error": format!("Invalid timezone '{}'. Use IANA format, e.g. Asia/Shanghai, America/New_York, UTC.", tz_str)})
+        ).into_response();
+    }
+
+    // Validate archive_time format HH:MM
+    if chrono::NaiveTime::parse_from_str(payload.archive_time.trim(), "%H:%M").is_err() {
+        return Json(
+            serde_json::json!({"success": false, "error": format!("Invalid archive_time '{}'. Expected HH:MM format, e.g. 03:00.", payload.archive_time.trim())})
+        ).into_response();
+    }
+
     let res = (|| -> anyhow::Result<()> {
         let config_content = std::fs::read_to_string(&config_path)?;
         let mut doc = config_content.parse::<DocumentMut>()?;
@@ -109,8 +130,8 @@ pub async fn update_config(
 
         let archive = &mut doc["archive"];
         archive["enabled"] = value(payload.enabled);
-        archive["archive_time"] = value(&payload.archive_time);
-        archive["timezone"] = value(&payload.timezone);
+        archive["archive_time"] = value(payload.archive_time.trim());
+        archive["timezone"] = value(tz_str);
         archive["retention_days"] = value(payload.retention_days as i64);
         match payload.archive_dir.as_deref() {
             Some(d) if !d.trim().is_empty() => {
@@ -131,6 +152,7 @@ pub async fn update_config(
     match res {
         Ok(_) => {
             // Update in-memory config
+            let tz_str = tz_str.to_string();
             let mut config_guard = archive_state.config.write().unwrap();
             let new_archive_dir = payload
                 .archive_dir
@@ -139,35 +161,189 @@ pub async fn update_config(
                 .filter(|s| !s.is_empty());
             *config_guard = Some(crate::config::ArchiveConfig {
                 enabled: payload.enabled,
-                archive_time: payload.archive_time,
-                timezone: Some(payload.timezone),
+                archive_time: payload.archive_time.trim().to_string(),
+                timezone: Some(tz_str.to_string()),
                 retention_days: payload.retention_days,
                 archive_dir: new_archive_dir,
             });
-            Json(serde_json::json!({"success": true}))
+            Json(serde_json::json!({"success": true})).into_response()
         }
         Err(e) => {
             error!("Failed to update archive config: {}", e);
-            Json(serde_json::json!({"success": false, "error": e.to_string()}))
+            Json(serde_json::json!({"success": false, "error": e.to_string()})).into_response()
         }
     }
 }
 
-async fn list_archive_files(storage: &crate::storage::Storage) -> anyhow::Result<Vec<ArchiveFile>> {
+async fn list_archive_files(archive_dir: &str) -> anyhow::Result<Vec<ArchiveFile>> {
+    use chrono::{DateTime, Utc};
+    use std::time::SystemTime;
+
     let mut archives = Vec::new();
-    let entries = storage.list(Some("archive")).await?;
-    for entry in entries {
-        let name = entry.location.to_string();
-        if name.ends_with(".gz") {
-            let filename = name.split('/').last().unwrap_or(&name).to_string();
-            archives.push(ArchiveFile {
-                name: filename,
-                size: entry.size as u64,
-                date: entry.last_modified.to_rfc3339(),
-            });
+    let mut read_dir = match tokio::fs::read_dir(archive_dir).await {
+        Ok(rd) => rd,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(archives),
+        Err(e) => return Err(e.into()),
+    };
+    while let Some(entry) = read_dir.next_entry().await? {
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !name.ends_with(".gz") {
+            continue;
         }
+        let meta = entry.metadata().await?;
+        let modified: DateTime<Utc> = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH).into();
+        // Read sidecar count file
+        let count_path = format!("{}/{}.count", archive_dir, name);
+        let count = tokio::fs::read_to_string(&count_path)
+            .await
+            .ok()
+            .and_then(|s| s.trim().parse::<u64>().ok());
+        archives.push(ArchiveFile {
+            name,
+            size: meta.len(),
+            date: modified.to_rfc3339(),
+            count,
+        });
     }
     // Sort by date desc
     archives.sort_by(|a, b| b.date.cmp(&a.date));
     Ok(archives)
+}
+
+// ─── Manual archive endpoints ────────────────────────────────────────────────
+
+#[derive(Deserialize)]
+pub struct DateRangeQuery {
+    pub start_date: String,
+    pub end_date: String,
+}
+
+#[derive(Deserialize)]
+pub struct ManualArchivePayload {
+    pub start_date: String,
+    pub end_date: String,
+}
+
+pub async fn count_records(
+    State(state): State<AppState>,
+    Query(params): Query<DateRangeQuery>,
+) -> impl IntoResponse {
+    let start = match params.start_date.parse::<NaiveDate>() {
+        Ok(d) => d,
+        Err(_) => {
+            return Json(serde_json::json!({"success": false, "error": "Invalid start_date"}));
+        }
+    };
+    let end = match params.end_date.parse::<NaiveDate>() {
+        Ok(d) => d,
+        Err(_) => return Json(serde_json::json!({"success": false, "error": "Invalid end_date"})),
+    };
+    if end <= start {
+        return Json(
+            serde_json::json!({"success": false, "error": "end_date must be after start_date"}),
+        );
+    }
+
+    use crate::models::call_record;
+    use chrono::{DateTime, Utc};
+
+    let start_dt: DateTime<Utc> =
+        DateTime::from_naive_utc_and_offset(start.and_hms_opt(0, 0, 0).unwrap(), Utc);
+    let end_dt: DateTime<Utc> =
+        DateTime::from_naive_utc_and_offset(end.and_hms_opt(0, 0, 0).unwrap(), Utc);
+
+    match call_record::Entity::find()
+        .filter(call_record::Column::StartedAt.gte(start_dt))
+        .filter(call_record::Column::StartedAt.lt(end_dt))
+        .count(state.db())
+        .await
+    {
+        Ok(count) => Json(serde_json::json!({"success": true, "count": count})),
+        Err(e) => Json(serde_json::json!({"success": false, "error": e.to_string()})),
+    }
+}
+
+pub async fn manual_archive(
+    State(state): State<AppState>,
+    Extension(archive_state): Extension<ArchiveState>,
+    Json(payload): Json<ManualArchivePayload>,
+) -> impl IntoResponse {
+    let start = match payload.start_date.parse::<NaiveDate>() {
+        Ok(d) => d,
+        Err(_) => {
+            return Json(serde_json::json!({"success": false, "error": "Invalid start_date"}));
+        }
+    };
+    let end = match payload.end_date.parse::<NaiveDate>() {
+        Ok(d) => d,
+        Err(_) => return Json(serde_json::json!({"success": false, "error": "Invalid end_date"})),
+    };
+    if end <= start {
+        return Json(
+            serde_json::json!({"success": false, "error": "end_date must be after start_date"}),
+        );
+    }
+
+    let task_id = Uuid::new_v4().to_string();
+    let task_status = Arc::new(RwLock::new(ManualTaskStatus {
+        status: "running".to_string(),
+        archived: 0,
+        total: 0,
+        message: "Starting...".to_string(),
+        completed_at: None,
+    }));
+
+    // Prune tasks that finished more than 1 hour ago to prevent unbounded growth
+    {
+        let ttl = std::time::Duration::from_secs(3600);
+        let mut tasks = archive_state.manual_tasks.write().unwrap();
+        tasks.retain(|_, v| {
+            let s = v.read().unwrap();
+            s.completed_at.map_or(true, |t| t.elapsed() < ttl)
+        });
+    }
+
+    archive_state
+        .manual_tasks
+        .write()
+        .unwrap()
+        .insert(task_id.clone(), task_status.clone());
+
+    let archive_dir = state.config().archive_dir();
+    let db = state.db().clone();
+
+    crate::utils::spawn(async move {
+        if let Err(e) =
+            ArchiveAddon::perform_archive_range(&db, start, end, &archive_dir, task_status.clone())
+                .await
+        {
+            error!("Manual archive failed: {}", e);
+            let mut s = task_status.write().unwrap();
+            s.status = "error".to_string();
+            s.message = e.to_string();
+            s.completed_at = Some(std::time::Instant::now());
+        }
+    });
+
+    Json(serde_json::json!({"success": true, "task_id": task_id}))
+}
+
+pub async fn task_status(
+    Extension(archive_state): Extension<ArchiveState>,
+    Path(task_id): Path<String>,
+) -> impl IntoResponse {
+    let tasks = archive_state.manual_tasks.read().unwrap();
+    match tasks.get(&task_id) {
+        Some(task) => {
+            let s = task.read().unwrap();
+            Json(serde_json::json!({
+                "success": true,
+                "status": s.status,
+                "archived": s.archived,
+                "total": s.total,
+                "message": s.message,
+            }))
+        }
+        None => Json(serde_json::json!({"success": false, "error": "Task not found"})),
+    }
 }

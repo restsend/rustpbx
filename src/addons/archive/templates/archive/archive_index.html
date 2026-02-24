@@ -48,6 +48,8 @@
                         <input type="text" x-model="config.timezone"
                             class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                             placeholder="UTC">
+                        <p class="mt-1 text-xs text-slate-400">IANA format, e.g. <code>Asia/Shanghai</code>,
+                            <code>America/New_York</code>, <code>UTC</code></p>
                     </div>
 
                     <div>
@@ -65,15 +67,20 @@
                             class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                             placeholder="{{ effective_archive_dir }}">
                         <p class="mt-1 text-xs text-slate-400">Leave blank to use default:
-                            <code>{{ effective_archive_dir }}</code></p>
+                            <code>{{ effective_archive_dir }}</code>
+                        </p>
                     </div>
 
-                    <div class="border-t border-slate-200 pt-4">
+                    <div class="border-t border-slate-200 pt-4 space-y-3">
                         <button @click="saveConfig" :disabled="saving"
                             class="inline-flex w-full items-center justify-center rounded-md bg-sky-600 px-3 py-2 text-xs font-semibold text-white shadow-sm transition hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60">
                             <span x-show="!saving">Save Configuration</span>
                             <span x-show="saving">Saving...</span>
                         </button>
+                        <div x-show="configMsg" x-transition x-cloak class="rounded-md p-3 text-xs"
+                            :class="configStatus === 'success' ? 'bg-emerald-50 text-emerald-700' : 'bg-rose-50 text-rose-700'">
+                            <p x-text="configMsg"></p>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -88,14 +95,15 @@
                     <button @click="refreshList()"
                         class="text-sky-600 hover:text-sky-800 text-xs font-semibold">Refresh</button>
                 </div>
-                <div class="mt-4 overflow-x-auto">
+                <div class="mt-4 max-h-96 overflow-y-auto overflow-x-auto">
                     <table class="min-w-full divide-y divide-slate-200 text-sm">
                         <thead
-                            class="bg-slate-50 text-left text-xs font-semibold uppercase tracking-wide text-slate-500">
+                            class="sticky top-0 bg-slate-50 text-left text-xs font-semibold uppercase tracking-wide text-slate-500">
                             <tr>
                                 <th class="px-4 py-2">Filename</th>
                                 <th class="px-4 py-2">Date</th>
                                 <th class="px-4 py-2">Size</th>
+                                <th class="px-4 py-2">Records</th>
                                 <th class="px-4 py-2 text-right">Actions</th>
                             </tr>
                         </thead>
@@ -106,6 +114,9 @@
                                     <td class="px-4 py-3 text-slate-500" x-text="new Date(file.date).toLocaleString()">
                                     </td>
                                     <td class="px-4 py-3 text-slate-500" x-text="formatSize(file.size)"></td>
+                                    <td class="px-4 py-3 text-slate-500"
+                                        x-text="file.count !== null && file.count !== undefined ? file.count.toLocaleString() : '—'">
+                                    </td>
                                     <td class="px-4 py-3 text-right">
                                         <button @click="deleteArchive(file.name)"
                                             class="text-red-600 hover:text-red-900 text-xs font-semibold">Delete</button>
@@ -113,11 +124,73 @@
                                 </tr>
                             </template>
                             <tr x-show="archives.length === 0">
-                                <td colspan="4" class="px-4 py-8 text-center text-slate-400 italic">No archives found
+                                <td colspan="5" class="px-4 py-8 text-center text-slate-400 italic">No archives found
                                 </td>
                             </tr>
                         </tbody>
                     </table>
+                </div>
+            </div>
+        </div>
+
+        <!-- Manual Archive -->
+        <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+            <div class="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+                <div>
+                    <h2 class="text-base font-semibold text-slate-900">Manual Archive</h2>
+                    <p class="text-xs text-slate-500">Select a date range to archive call records immediately.</p>
+                </div>
+            </div>
+            <div class="mt-4 grid gap-4 sm:grid-cols-3 items-end">
+                <div>
+                    <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Start Date</label>
+                    <input type="date" x-model="manual.startDate"
+                        class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                </div>
+                <div>
+                    <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">End Date <span
+                            class="normal-case font-normal text-slate-400">(exclusive)</span></label>
+                    <input type="date" x-model="manual.endDate"
+                        class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                </div>
+                <div class="flex gap-2">
+                    <button @click="countRecords" :disabled="manual.counting"
+                        class="flex-1 inline-flex items-center justify-center rounded-md border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-sky-400 disabled:opacity-60">
+                        <span x-show="!manual.counting">Calculate</span>
+                        <span x-show="manual.counting">Counting...</span>
+                    </button>
+                    <button @click="startManualArchive" :disabled="manual.count === null || manual.taskId !== null"
+                        class="flex-1 inline-flex items-center justify-center rounded-md bg-amber-600 px-3 py-2 text-xs font-semibold text-white shadow-sm transition hover:bg-amber-500 focus:outline-none focus:ring-2 focus:ring-amber-400 disabled:opacity-60 disabled:cursor-not-allowed">
+                        Archive
+                    </button>
+                </div>
+            </div>
+
+            <!-- Count & Progress -->
+            <div class="mt-4 space-y-3">
+                <div x-show="manual.count !== null" x-transition x-cloak
+                    class="rounded-md bg-slate-50 px-4 py-3 text-sm text-slate-700">
+                    <span class="font-semibold" x-text="manual.count"></span> records found in the selected range.
+                </div>
+
+                <div x-show="manual.taskId !== null" x-transition x-cloak>
+                    <!-- Progress Bar -->
+                    <div class="mb-2 flex items-center justify-between text-xs text-slate-500">
+                        <span x-text="manual.progressMsg"></span>
+                        <span x-show="manual.total > 0"
+                            x-text="Math.round(manual.archived / manual.total * 100) + '%'"></span>
+                    </div>
+                    <div class="h-2 w-full overflow-hidden rounded-full bg-slate-200">
+                        <div class="h-2 rounded-full transition-all duration-500"
+                            :class="manual.taskStatus === 'success' ? 'bg-emerald-500' : (manual.taskStatus === 'error' ? 'bg-rose-500' : 'bg-sky-500 animate-pulse')"
+                            :style="`width: ${manual.total > 0 ? Math.round(manual.archived / manual.total * 100) : (manual.taskStatus === 'running' ? 10 : 100)}%`">
+                        </div>
+                    </div>
+                    <div x-show="manual.taskStatus === 'success' || manual.taskStatus === 'error'"
+                        class="mt-2 rounded-md p-3 text-xs"
+                        :class="manual.taskStatus === 'success' ? 'bg-emerald-50 text-emerald-700' : 'bg-rose-50 text-rose-700'"
+                        x-text="manual.progressMsg">
+                    </div>
                 </div>
             </div>
         </div>
@@ -130,6 +203,21 @@
             archives: archives || [],
             config: config || { enabled: false, archive_time: '03:00', timezone: 'UTC', retention_days: 30, archive_dir: '' },
             saving: false,
+            configMsg: '',
+            configStatus: '',
+
+            manual: {
+                startDate: '',
+                endDate: '',
+                counting: false,
+                count: null,
+                taskId: null,
+                taskStatus: '',
+                archived: 0,
+                total: 0,
+                progressMsg: '',
+                _pollTimer: null,
+            },
 
             formatSize(bytes) {
                 if (bytes === 0) return '0 B';
@@ -152,51 +240,155 @@
 
             async saveConfig() {
                 this.saving = true;
+                this.configMsg = '';
                 try {
                     const response = await fetch('/api/archive/config', {
                         method: 'POST',
-                        headers: {
-                            'Content-Type': 'application/json',
-                        },
+                        headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify(this.config),
                     });
                     const result = await response.json();
                     if (result.success) {
-                        alert('Configuration saved successfully. Restart may be required for some changes.');
+                        this.configStatus = 'success';
+                        this.configMsg = 'Configuration saved successfully.';
+                        setTimeout(() => this.configMsg = '', 4000);
                     } else {
-                        alert('Failed to save configuration: ' + result.error);
+                        this.configStatus = 'error';
+                        this.configMsg = 'Failed to save: ' + result.error;
                     }
                 } catch (error) {
                     console.error('Failed to save config', error);
-                    alert('Failed to save configuration');
+                    this.configStatus = 'error';
+                    this.configMsg = 'Failed to save configuration.';
                 } finally {
                     this.saving = false;
                 }
             },
 
-            async deleteArchive(filename) {
-                if (!confirm(`Are you sure you want to delete ${filename}?`)) return;
-
-                try {
-                    const response = await fetch('/api/archive/delete', {
-                        method: 'POST',
-                        headers: {
-                            'Content-Type': 'application/json',
+            deleteArchive(filename) {
+                window.dispatchEvent(new CustomEvent('console:confirm', {
+                    detail: {
+                        title: 'Delete Archive',
+                        message: `Delete "${filename}"? This cannot be undone.`,
+                        confirmLabel: 'Delete',
+                        destructive: true,
+                        onConfirm: async () => {
+                            try {
+                                const response = await fetch('/api/archive/delete', {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify({ filename }),
+                                });
+                                const result = await response.json();
+                                if (result.success) {
+                                    this.refreshList();
+                                } else {
+                                    this.configStatus = 'error';
+                                    this.configMsg = 'Failed to delete: ' + result.error;
+                                }
+                            } catch (error) {
+                                console.error('Failed to delete', error);
+                                this.configStatus = 'error';
+                                this.configMsg = 'Failed to delete archive.';
+                            }
                         },
-                        body: JSON.stringify({ filename }),
-                    });
+                    },
+                }));
+            },
 
-                    const result = await response.json();
-                    if (result.success) {
-                        this.refreshList();
+            async countRecords() {
+                if (!this.manual.startDate || !this.manual.endDate) return;
+                this.manual.counting = true;
+                this.manual.count = null;
+                try {
+                    const url = `/api/archive/count?start_date=${this.manual.startDate}&end_date=${this.manual.endDate}`;
+                    const res = await fetch(url);
+                    const data = await res.json();
+                    if (data.success) {
+                        this.manual.count = data.count;
                     } else {
-                        alert('Failed to delete: ' + result.error);
+                        this.configStatus = 'error';
+                        this.configMsg = 'Count failed: ' + data.error;
                     }
-                } catch (error) {
-                    console.error('Failed to delete', error);
-                    alert('Failed to delete archive');
+                } catch (e) {
+                    console.error(e);
+                    this.configStatus = 'error';
+                    this.configMsg = 'Failed to count records.';
+                } finally {
+                    this.manual.counting = false;
                 }
-            }
+            },
+
+            startManualArchive() {
+                if (!this.manual.startDate || !this.manual.endDate) return;
+                window.dispatchEvent(new CustomEvent('console:confirm', {
+                    detail: {
+                        title: 'Manual Archive',
+                        message: `Archive ${this.manual.count} records from ${this.manual.startDate} to ${this.manual.endDate}? Records will be permanently deleted from the database after archiving.`,
+                        confirmLabel: 'Archive',
+                        destructive: true,
+                        onConfirm: async () => {
+                            await this._doManualArchive();
+                        },
+                    },
+                }));
+            },
+
+            async _doManualArchive() {
+                this.manual.taskId = null;
+                this.manual.taskStatus = 'running';
+                this.manual.archived = 0;
+                this.manual.total = 0;
+                this.manual.progressMsg = 'Starting...';
+                try {
+                    const res = await fetch('/api/archive/manual', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ start_date: this.manual.startDate, end_date: this.manual.endDate }),
+                    });
+                    const data = await res.json();
+                    if (data.success) {
+                        this.manual.taskId = data.task_id;
+                        this._startPolling();
+                    } else {
+                        this.manual.taskStatus = 'error';
+                        this.manual.progressMsg = data.error || 'Failed to start task.';
+                    }
+                } catch (e) {
+                    this.manual.taskStatus = 'error';
+                    this.manual.progressMsg = 'Failed to start archive task.';
+                }
+            },
+
+            _startPolling() {
+                if (this.manual._pollTimer) clearInterval(this.manual._pollTimer);
+                this.manual._pollTimer = setInterval(async () => {
+                    await this._pollTask();
+                }, 1000);
+            },
+
+            async _pollTask() {
+                if (!this.manual.taskId) return;
+                try {
+                    const res = await fetch(`/api/archive/task/${this.manual.taskId}`);
+                    const data = await res.json();
+                    if (!data.success) return;
+                    this.manual.taskStatus = data.status;
+                    this.manual.archived = data.archived;
+                    this.manual.total = data.total;
+                    this.manual.progressMsg = data.message;
+                    if (data.status === 'success' || data.status === 'error') {
+                        clearInterval(this.manual._pollTimer);
+                        this.manual._pollTimer = null;
+                        if (data.status === 'success') {
+                            this.manual.count = null;
+                            this.refreshList();
+                        }
+                    }
+                } catch (e) {
+                    console.error('Poll error', e);
+                }
+            },
         }
     }
 </script>

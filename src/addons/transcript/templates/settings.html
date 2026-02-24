@@ -165,8 +165,18 @@
                 }
             },
 
-            async downloadModel() {
-                if (!confirm('This will download ~500MB of model files. Continue?')) return;
+            downloadModel() {
+                window.dispatchEvent(new CustomEvent('console:confirm', {
+                    detail: {
+                        title: 'Download Model',
+                        message: 'This will download ~500MB of model files. Continue?',
+                        confirmLabel: 'Download',
+                        onConfirm: async () => { await this._doDownloadModel(); },
+                    },
+                }));
+            },
+
+            async _doDownloadModel() {
 
                 this.downloading = true;
                 this.downloadMessage = 'Starting download... this may take a while.';
