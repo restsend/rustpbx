@@ -1308,42 +1308,42 @@ impl CallSession {
                         answer = answer_for_caller;
 
                         if self.media_bridge.is_none() {
-                            // codec_a: use caller's OFFER to determine what
-                            // they actually send (first codec in m= line)
-                            let (params_a, dtmf_pt_a, codec_a) = {
-                                let from_offer = self.caller_offer.as_ref().and_then(|offer| {
-                                    let (codecs, dtmf) =
-                                        MediaNegotiator::extract_codec_params(offer);
-                                    let chosen = codecs
-                                        .iter()
-                                        .find(|c| c.codec != CodecType::TelephoneEvent)
-                                        .cloned()?;
-                                    Some((chosen.to_params(), dtmf, chosen.codec))
-                                });
-                                from_offer.unwrap_or_else(|| {
-                                    self.answer
-                                        .as_ref()
-                                        .map(|s| {
-                                            let (codecs, dtmf) =
-                                                MediaNegotiator::extract_codec_params(s);
-                                            let chosen = codecs
-                                                .iter()
-                                                .find(|c| c.codec != CodecType::TelephoneEvent)
-                                                .cloned()
-                                                .unwrap_or(CodecInfo {
-                                                    payload_type: 0,
-                                                    codec: CodecType::PCMU,
-                                                    clock_rate: 8000,
-                                                    channels: 1,
-                                                });
-                                            (chosen.to_params(), dtmf, chosen.codec)
-                                        })
-                                        .unwrap_or((
-                                            rustrtc::RtpCodecParameters::default(),
-                                            None,
-                                            CodecType::PCMU,
-                                        ))
-                                })
+                            let caller_is_webrtc = self
+                                .caller_offer
+                                .as_ref()
+                                .map(|offer| Self::is_webrtc_sdp(offer))
+                                .unwrap_or(false);
+                            let from_offer = self.caller_offer.as_ref().and_then(|offer| {
+                                let (codecs, dtmf) = MediaNegotiator::extract_codec_params(offer);
+                                let chosen = codecs
+                                    .iter()
+                                    .find(|c| c.codec != CodecType::TelephoneEvent)
+                                    .cloned()?;
+                                Some((chosen.to_params(), dtmf, chosen.codec))
+                            });
+                            let from_answer = self.answer.as_ref().map(|s| {
+                                let (codecs, dtmf) = MediaNegotiator::extract_codec_params(s);
+                                let chosen = codecs
+                                    .iter()
+                                    .find(|c| c.codec != CodecType::TelephoneEvent)
+                                    .cloned()
+                                    .unwrap_or(CodecInfo {
+                                        payload_type: 0,
+                                        codec: CodecType::PCMU,
+                                        clock_rate: 8000,
+                                        channels: 1,
+                                    });
+                                (chosen.to_params(), dtmf, chosen.codec)
+                            });
+                            let default_codec = (
+                                rustrtc::RtpCodecParameters::default(),
+                                None,
+                                CodecType::PCMU,
+                            );
+                            let (params_a, dtmf_pt_a, codec_a) = if caller_is_webrtc {
+                                from_answer.or(from_offer).unwrap_or(default_codec)
+                            } else {
+                                from_offer.or(from_answer).unwrap_or(default_codec)
                             };
 
                             // codec_b: use callee's ORIGINAL early media SDP
@@ -1693,53 +1693,48 @@ impl CallSession {
                         CodecType::PCMU,
                     ));
 
-                // For params_a (caller side), determine what codec the caller will
-                // actually send. The caller's OFFER m= line order reflects their
-                // sending preference. Using select_best_codec on the answer is wrong
-                // because the caller may ignore the answer's codec ordering and send
-                // whichever codec it prefers (e.g., active-call forwards carrier's
-                // PCMA regardless of our answer's codec preference).
-                let (params_a, dtmf_pt_a, codec_a) = {
-                    // First try: use caller's offer (what they actually send)
-                    let from_offer = self.caller_offer.as_ref().and_then(|offer| {
-                        let (codecs, dtmf) = MediaNegotiator::extract_codec_params(offer);
-                        // First codec in offer's m= line is caller's preferred sending codec
-                        let chosen = codecs
-                            .iter()
-                            .find(|c| c.codec != CodecType::TelephoneEvent)
-                            .cloned()?;
-                        Some((chosen.to_params(), dtmf, chosen.codec))
-                    });
-                    from_offer.unwrap_or_else(|| {
-                        // Fallback: use answer SDP
-                        self.answer
-                            .as_ref()
-                            .map(|s| {
-                                let (codecs, dtmf) = MediaNegotiator::extract_codec_params(s);
-                                let chosen = codecs
-                                    .iter()
-                                    .find(|c| c.codec == codec_b)
-                                    .cloned()
-                                    .or_else(|| {
-                                        codecs
-                                            .iter()
-                                            .find(|c| c.codec != CodecType::TelephoneEvent)
-                                            .cloned()
-                                    })
-                                    .unwrap_or(CodecInfo {
-                                        payload_type: 0,
-                                        codec: CodecType::PCMU,
-                                        clock_rate: 8000,
-                                        channels: 1,
-                                    });
-                                (chosen.to_params(), dtmf, chosen.codec)
-                            })
-                            .unwrap_or((
-                                rustrtc::RtpCodecParameters::default(),
-                                None,
-                                CodecType::PCMU,
-                            ))
-                    })
+                let caller_is_webrtc = self
+                    .caller_offer
+                    .as_ref()
+                    .map(|offer| Self::is_webrtc_sdp(offer))
+                    .unwrap_or(false);
+                let from_offer = self.caller_offer.as_ref().and_then(|offer| {
+                    let (codecs, dtmf) = MediaNegotiator::extract_codec_params(offer);
+                    let chosen = codecs
+                        .iter()
+                        .find(|c| c.codec != CodecType::TelephoneEvent)
+                        .cloned()?;
+                    Some((chosen.to_params(), dtmf, chosen.codec))
+                });
+                let from_answer = self.answer.as_ref().map(|s| {
+                    let (codecs, dtmf) = MediaNegotiator::extract_codec_params(s);
+                    let chosen = codecs
+                        .iter()
+                        .find(|c| c.codec == codec_b)
+                        .cloned()
+                        .or_else(|| {
+                            codecs
+                                .iter()
+                                .find(|c| c.codec != CodecType::TelephoneEvent)
+                                .cloned()
+                        })
+                        .unwrap_or(CodecInfo {
+                            payload_type: 0,
+                            codec: CodecType::PCMU,
+                            clock_rate: 8000,
+                            channels: 1,
+                        });
+                    (chosen.to_params(), dtmf, chosen.codec)
+                });
+                let default_codec = (
+                    rustrtc::RtpCodecParameters::default(),
+                    None,
+                    CodecType::PCMU,
+                );
+                let (params_a, dtmf_pt_a, codec_a) = if caller_is_webrtc {
+                    from_answer.or(from_offer).unwrap_or(default_codec)
+                } else {
+                    from_offer.or(from_answer).unwrap_or(default_codec)
                 };
 
                 let ssrc_a = self
