@@ -237,20 +237,7 @@ pub async fn trigger_call_record_transcript(
         path.to_string_lossy().into_owned()
     };
 
-    let local_transcript_path = match storage.as_ref() {
-        Some(storage_ref) => storage_ref
-            .local_full_path(&transcript_storage_path)
-            .unwrap_or_else(|| {
-                let mut temp_path = env::temp_dir();
-                temp_path.push(format!(
-                    "rustpbx-{}-{}.transcript.json",
-                    record.call_id,
-                    Uuid::new_v4()
-                ));
-                temp_path
-            }),
-        None => PathBuf::from(&transcript_storage_path),
-    };
+    let local_transcript_path = PathBuf::from(&transcript_storage_path);
 
     if let Some(parent) = local_transcript_path.parent() {
         if let Err(err) = tokio::fs::create_dir_all(parent).await {
@@ -490,7 +477,9 @@ pub async fn trigger_call_record_transcript(
     };
 
     // Save transcript
-    if let Some(storage_ref) = storage.as_ref() {
+    if let Some(storage_ref) = storage.as_ref()
+        && !storage_ref.is_local()
+    {
         let json_content = serde_json::to_string_pretty(&stored_transcript).unwrap();
         if let Err(e) = storage_ref
             .write_bytes(&transcript_storage_path, json_content.as_bytes())
