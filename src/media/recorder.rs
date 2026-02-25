@@ -155,7 +155,7 @@ impl Recorder {
             _ => return Ok(()),
         };
         let decoder_type = CodecType::try_from(frame.payload_type.unwrap_or(0))?;
-        let mut decoder_samplerate = self.sample_rate;
+        let decoder_clockrate = decoder_type.clock_rate();
 
         if decoder_type != self.codec {
             let decoder = self
@@ -163,7 +163,6 @@ impl Recorder {
                 .entry((leg, decoder_type.payload_type()))
                 .or_insert_with(|| create_decoder(decoder_type));
             let pcm = decoder.decode(&encoded);
-            decoder_samplerate = decoder.sample_rate();
             let resampler = self
                 .resamplers
                 .entry((leg, decoder_type.payload_type()))
@@ -197,7 +196,7 @@ impl Recorder {
                     .rtp_timestamp
                     .wrapping_sub(self.base_timestamp_a.unwrap());
                 let scaled_relative =
-                    (relative as u64 * self.sample_rate as u64 / decoder_samplerate as u64) as u32;
+                    (relative as u64 * self.sample_rate as u64 / decoder_clockrate as u64) as u32;
                 self.start_offset_a.wrapping_add(scaled_relative)
             }
             Leg::B => {
@@ -215,7 +214,7 @@ impl Recorder {
                     .rtp_timestamp
                     .wrapping_sub(self.base_timestamp_b.unwrap());
                 let scaled_relative =
-                    (relative as u64 * self.sample_rate as u64 / decoder_samplerate as u64) as u32;
+                    (relative as u64 * self.sample_rate as u64 / decoder_clockrate as u64) as u32;
                 self.start_offset_b.wrapping_add(scaled_relative)
             }
         };
