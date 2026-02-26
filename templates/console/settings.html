@@ -907,6 +907,17 @@
                                 <p class="mt-1 text-xs text-slate-500">SQLite database and structured file storage
                                     location</p>
                             </div>
+                            <div>
+                                <label
+                                    class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Subdirectories</label>
+                                <select x-model="sipflowDraft.local_subdirs" :disabled="sipflowProcessing"
+                                    class="mt-1 block w-full rounded-md border-slate-200 py-2 pl-3 pr-10 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                                    <option value="none">None (Flat structure)</option>
+                                    <option value="daily">Daily (YYYYMMDD)</option>
+                                    <option value="hourly">Hourly (YYYYMMDD/HH)</option>
+                                </select>
+                                <p class="mt-1 text-xs text-slate-500">Directory structure for stored files</p>
+                            </div>
                             <div class="grid gap-4 md:grid-cols-2">
                                 <div>
                                     <label
@@ -3906,11 +3917,9 @@
 
                 this.sipflowDraft = {
                     backend_type: backendType,
-                    // Dir backend
-                    dir_root: backendType === 'dir' ? (config.root || '') : '',
-                    dir_subdirs: backendType === 'dir' ? (config.subdirs || 'hourly') : 'hourly',
                     // Local backend
                     local_root: backendType === 'local' ? (config.root || '') : '',
+                    local_subdirs: backendType === 'local' ? (config.subdirs || 'daily') : 'daily',
                     local_flush_count: backendType === 'local' ? (config.flush_count || 1000) : 1000,
                     local_flush_interval_secs: backendType === 'local' ? (config.flush_interval_secs || 5) : 5,
                     // Remote backend
@@ -3930,20 +3939,7 @@
                 const backendType = this.sipflowDraft.backend_type || 'none';
                 let config = {};
 
-                if (backendType === 'dir') {
-                    const root = (this.sipflowDraft.dir_root || '').trim();
-                    if (!root) {
-                        this.$dispatch('toast', {
-                            title: 'Missing information',
-                            message: 'Root directory is required for Dir backend.',
-                        });
-                        return;
-                    }
-                    config = {
-                        root,
-                        subdirs: this.sipflowDraft.dir_subdirs || 'hourly',
-                    };
-                } else if (backendType === 'local') {
+                if (backendType === 'local') {
                     const root = (this.sipflowDraft.local_root || '').trim();
                     if (!root) {
                         this.$dispatch('toast', {
@@ -3954,6 +3950,7 @@
                     }
                     config = {
                         root,
+                        subdirs: this.sipflowDraft.local_subdirs || 'daily',
                         flush_count: this.sipflowDraft.local_flush_count || 1000,
                         flush_interval_secs: this.sipflowDraft.local_flush_interval_secs || 5,
                     };
