@@ -161,8 +161,9 @@ impl SipFlowBackend for RemoteBackend {
         start_time: DateTime<Local>,
         end_time: DateTime<Local>,
     ) -> Result<Vec<u8>> {
+        // Request PCM format for ASR compatibility (sensevoice-cli requires 16-bit PCM)
         let url = format!(
-            "{}/media?callid={}&start={}&end={}",
+            "{}/media?callid={}&start={}&end={}&format=pcm",
             self.http_addr,
             call_id,
             start_time.timestamp(),

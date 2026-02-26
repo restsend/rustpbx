@@ -11,7 +11,7 @@ use rustpbx::sipflow::{
     protocol::{Packet, parse_packet},
     storage::{StorageManager, process_packet},
 };
-use rustpbx::{config::SipFlowSubdirs, sipflow::wav_utils::generate_wav_from_packets};
+use rustpbx::{config::SipFlowSubdirs, sipflow::wav_utils::generate_wav_from_packets_ex};
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -180,6 +180,12 @@ async fn media_handler(
         .and_then(|s| s.parse::<i64>().ok())
         .unwrap_or_else(|| Local::now().timestamp() + 3600);
 
+    // Check if PCM format is requested (for ASR tools like sensevoice-cli)
+    let force_pcm = params
+        .get("format")
+        .map(|s| s.to_lowercase() == "pcm")
+        .unwrap_or(false);
+
     let start_dt = Local.timestamp_opt(start_ts_param, 0).unwrap();
     let end_dt = Local.timestamp_opt(end_ts_param, 0).unwrap();
 
@@ -190,7 +196,7 @@ async fn media_handler(
             .unwrap_or_default()
     };
 
-    match generate_wav_from_packets(&packets) {
+    match generate_wav_from_packets_ex(&packets, force_pcm) {
         Ok(wav_data) => axum::response::Response::builder()
             .header("Content-Type", "audio/wav")
             .header(
@@ -206,6 +212,8 @@ async fn media_handler(
 
 #[cfg(test)]
 mod tests {
+    use rustpbx::sipflow::wav_utils::generate_wav_from_packets;
+
     use super::*;
 
     #[test]

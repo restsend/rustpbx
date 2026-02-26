@@ -10,7 +10,7 @@ use crate::config::SipFlowSubdirs;
 use crate::sipflow::backend::SipFlowBackend;
 use crate::sipflow::protocol::{MsgType, Packet};
 use crate::sipflow::storage::{StorageManager, process_packet};
-use crate::sipflow::wav_utils::generate_wav_from_packets;
+use crate::sipflow::wav_utils::generate_wav_from_packets_ex;
 use crate::sipflow::{SipFlowItem, SipFlowMsgType};
 
 enum Command {
@@ -230,7 +230,7 @@ impl SipFlowBackend for LocalBackend {
             if packets.is_empty() {
                 return Ok(Vec::new());
             }
-            generate_wav_from_packets(&packets)
+            generate_wav_from_packets_ex(&packets, true)
         })
         .await??;
 
