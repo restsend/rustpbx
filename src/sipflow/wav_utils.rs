@@ -70,6 +70,13 @@ pub fn write_wav_header<W: Write + Seek>(
 }
 
 pub fn generate_wav_from_packets(packets: &[(i32, u64, Vec<u8>)]) -> Result<Vec<u8>> {
+    generate_wav_from_packets_ex(packets, false)
+}
+
+pub fn generate_wav_from_packets_ex(
+    packets: &[(i32, u64, Vec<u8>)],
+    force_pcm: bool,
+) -> Result<Vec<u8>> {
     if packets.is_empty() {
         return Err(anyhow!("No RTP packets found"));
     }
@@ -118,7 +125,10 @@ pub fn generate_wav_from_packets(packets: &[(i32, u64, Vec<u8>)]) -> Result<Vec<
         .values()
         .any(|s| s.iter().any(|c| *c == CodecType::PCMA));
 
-    let (target_codec, target_sample_rate) = if !has_other && has_pcmu && !has_pcma {
+    // If force_pcm is true, always output PCM format (for ASR compatibility)
+    let (target_codec, target_sample_rate) = if force_pcm {
+        (None, 16000)
+    } else if !has_other && has_pcmu && !has_pcma {
         (Some(CodecType::PCMU), 8000)
     } else if !has_other && has_pcma && !has_pcmu {
         (Some(CodecType::PCMA), 8000)

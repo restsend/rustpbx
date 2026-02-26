@@ -19,7 +19,7 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
-use chrono::Utc;
+use chrono::{Local, Utc};
 use sea_orm::{ActiveModelTrait, EntityTrait, Set};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -29,6 +29,11 @@ use std::time::{Duration as StdDuration, Instant};
 use tokio::time::timeout;
 use toml_edit::{DocumentMut, Item, Table, value};
 use tracing::{info, warn};
+
+enum AudioSource {
+    LocalFile(String),
+    SipFlowData { data: Vec<u8>, temp_path: String },
+}
 
 #[derive(Clone, Debug, Deserialize, Serialize, Default)]
 pub struct TranscriptConfig {
@@ -145,14 +150,42 @@ pub async fn trigger_call_record_transcript(
     let transcript_cfg = get_merged_config(&app_state).await;
 
     let cdr_data = load_cdr_data(&state, &record).await;
-    let recording_path = match select_recording_path(&record, cdr_data.as_ref()) {
-        Some(path) => path,
+
+    let audio_source = match resolve_audio_source(&state, &record, cdr_data.as_ref()).await {
+        Some(source) => source,
         None => {
             return (
                 StatusCode::NOT_FOUND,
-                Json(json!({ "message": "Recording file not found for this call" })),
+                Json(json!({ "message": "Recording file not found for this call and SipFlow audio is not available" })),
             )
                 .into_response();
+        }
+    };
+
+    // Get the recording path and handle SipFlow temp file if needed
+    let (recording_path, temp_file_to_cleanup) = match &audio_source {
+        AudioSource::LocalFile(path) => (path.clone(), None),
+        AudioSource::SipFlowData { data, temp_path } => {
+            // Write SipFlow audio data to temp file
+            if let Err(err) = tokio::fs::write(temp_path, data).await {
+                warn!(
+                    call_id = %record.call_id,
+                    temp_path = %temp_path,
+                    "Failed to write SipFlow audio to temp file: {}", err
+                );
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "message": format!("Failed to prepare audio data: {}", err) })),
+                )
+                    .into_response();
+            }
+            info!(
+                call_id = %record.call_id,
+                temp_path = %temp_path,
+                size = data.len(),
+                "Wrote SipFlow audio to temp file"
+            );
+            (temp_path.clone(), Some(temp_path.clone()))
         }
     };
 
@@ -503,6 +536,22 @@ pub async fn trigger_call_record_transcript(
     .update(db)
     .await;
 
+    if let Some(temp_path) = temp_file_to_cleanup {
+        if let Err(err) = tokio::fs::remove_file(&temp_path).await {
+            warn!(
+                call_id = %record.call_id,
+                temp_path = %temp_path,
+                "Failed to cleanup temp file: {}", err
+            );
+        } else {
+            info!(
+                call_id = %record.call_id,
+                temp_path = %temp_path,
+                "Cleaned up temp file"
+            );
+        }
+    }
+
     let payload = build_transcript_payload_value(&record, Some(&stored_transcript));
     Json(json!({
         "status": "completed",
@@ -559,6 +608,100 @@ fn resolve_models_path(cfg: &TranscriptConfig) -> Option<String> {
         .map(|value| value.trim())
         .filter(|value| !value.is_empty())
         .map(|value| value.to_string())
+}
+
+async fn get_audio_from_sipflow(
+    state: &ConsoleState,
+    record: &CallRecordModel,
+    cdr_data: Option<&CdrData>,
+) -> Option<Vec<u8>> {
+    let sip_server = state.sip_server()?;
+    let sipflow = sip_server.sip_flow.as_ref()?;
+    let backend = sipflow.backend()?;
+
+    let call_time = record.created_at;
+    let start_time = (call_time - chrono::Duration::hours(1)).with_timezone(&Local);
+    let end_time = (call_time + chrono::Duration::hours(2)).with_timezone(&Local);
+
+    // Collect all call IDs to try: main call_id and any leg call_ids from CDR
+    let mut all_call_ids = vec![record.call_id.clone()];
+    if let Some(cdr) = cdr_data {
+        for (cid, _) in &cdr.record.sip_leg_roles {
+            all_call_ids.push(cid.clone());
+        }
+    }
+    // Deduplicate
+    all_call_ids.sort();
+    all_call_ids.dedup();
+
+    info!(
+        call_id = %record.call_id,
+        call_ids = ?all_call_ids,
+        "Attempting to get audio from SipFlow"
+    );
+
+    // Try each call_id until we find audio data
+    for cid in all_call_ids {
+        match backend.query_media(&cid, start_time, end_time).await {
+            Ok(data) if !data.is_empty() => {
+                info!(
+                    call_id = %record.call_id,
+                    source_call_id = %cid,
+                    size = data.len(),
+                    "Got audio data from SipFlow"
+                );
+                return Some(data);
+            }
+            Ok(_) => {
+                // Empty data, try next call_id
+                info!(
+                    call_id = %record.call_id,
+                    source_call_id = %cid,
+                    "SipFlow returned empty audio data"
+                );
+            }
+            Err(err) => {
+                warn!(
+                    call_id = %record.call_id,
+                    source_call_id = %cid,
+                    "Failed to query SipFlow media: {}", err
+                );
+            }
+        }
+    }
+
+    None
+}
+
+/// Resolve audio source for transcription.
+/// First tries traditional recording file, then falls back to SipFlow if available.
+async fn resolve_audio_source(
+    state: &ConsoleState,
+    record: &CallRecordModel,
+    cdr_data: Option<&CdrData>,
+) -> Option<AudioSource> {
+    // First, try traditional recording file
+    if let Some(path) = select_recording_path(record, cdr_data) {
+        info!(call_id = %record.call_id, path = %path, "Using traditional recording file");
+        return Some(AudioSource::LocalFile(path));
+    }
+
+    // Fallback to SipFlow
+    info!(call_id = %record.call_id, "No traditional recording, trying SipFlow");
+    if let Some(data) = get_audio_from_sipflow(state, record, cdr_data).await {
+        // Create temp file path
+        let temp_dir = std::env::temp_dir();
+        let temp_file_name = format!(
+            "transcript_{}_{}.wav",
+            record.id,
+            chrono::Utc::now().timestamp_millis()
+        );
+        let temp_path = temp_dir.join(temp_file_name).to_string_lossy().into_owned();
+        info!(call_id = %record.call_id, temp_path = %temp_path, "Using SipFlow audio data");
+        return Some(AudioSource::SipFlowData { data, temp_path });
+    }
+
+    None
 }
 
 async fn read_transcript_file(
