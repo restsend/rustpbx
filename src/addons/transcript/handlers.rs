@@ -23,14 +23,12 @@ use chrono::Utc;
 use sea_orm::{ActiveModelTrait, EntityTrait, Set};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::env;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration as StdDuration, Instant};
 use tokio::time::timeout;
 use toml_edit::{DocumentMut, Item, Table, value};
 use tracing::{info, warn};
-use uuid::Uuid;
 
 #[derive(Clone, Debug, Deserialize, Serialize, Default)]
 pub struct TranscriptConfig {

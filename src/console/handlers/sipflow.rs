@@ -141,25 +141,13 @@ async fn update_settings(
             table.remove("http_addr");
             table.remove("timeout_secs");
         }
-        "dir" => {
-            table["type"] = value("dir");
+        "local" => {
+            table["type"] = value("local");
             if let Some(root) = payload.config.get("root").and_then(|v| v.as_str()) {
                 table["root"] = value(root);
             }
             if let Some(subdirs) = payload.config.get("subdirs").and_then(|v| v.as_str()) {
                 table["subdirs"] = value(subdirs);
-            }
-            // Remove other backend fields
-            table.remove("flush_count");
-            table.remove("flush_interval_secs");
-            table.remove("udp_addr");
-            table.remove("http_addr");
-            table.remove("timeout_secs");
-        }
-        "local" => {
-            table["type"] = value("local");
-            if let Some(root) = payload.config.get("root").and_then(|v| v.as_str()) {
-                table["root"] = value(root);
             }
             if let Some(count) = payload.config.get("flush_count").and_then(|v| v.as_i64()) {
                 table["flush_count"] = value(count);
@@ -172,7 +160,6 @@ async fn update_settings(
                 table["flush_interval_secs"] = value(secs);
             }
             // Remove other backend fields
-            table.remove("subdirs");
             table.remove("udp_addr");
             table.remove("http_addr");
             table.remove("timeout_secs");
@@ -283,7 +270,9 @@ fn persist_document(path: &str, contents: String) -> Result<(), Response> {
 }
 
 fn ensure_table_mut<'doc>(doc: &'doc mut DocumentMut, key: &str) -> &'doc mut Table {
-    if !doc[key].is_table() {
+    if doc.get(key).is_none() {
+        doc[key] = Item::Table(Table::new());
+    } else if !doc[key].is_table() {
         doc[key] = Item::Table(Table::new());
     }
     doc[key].as_table_mut().expect("table")
