@@ -1,4 +1,5 @@
 use crate::{
+    addons::registry::AddonRegistry,
     call::MediaConfig,
     call::{Dialplan, TransactionCookie},
     callrecord::CallRecordSender,
@@ -31,6 +32,7 @@ pub struct CallSessionBuilder {
     max_forwards: u32,
     cancel_token: Option<CancellationToken>,
     call_record_sender: Option<CallRecordSender>,
+    addon_registry: Option<Arc<AddonRegistry>>,
 }
 
 impl CallSessionBuilder {
@@ -41,6 +43,7 @@ impl CallSessionBuilder {
             max_forwards,
             cancel_token: None,
             call_record_sender: None,
+            addon_registry: None,
         }
     }
 
@@ -51,6 +54,11 @@ impl CallSessionBuilder {
 
     pub fn with_call_record_sender(mut self, sender: Option<CallRecordSender>) -> Self {
         self.call_record_sender = sender;
+        self
+    }
+
+    pub fn with_addon_registry(mut self, registry: Option<Arc<AddonRegistry>>) -> Self {
+        self.addon_registry = registry;
         self
     }
 

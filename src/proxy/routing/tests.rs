@@ -44,6 +44,7 @@ async fn test_match_invite_no_routes() {
         RouteResult::Queue { .. } => {
             panic!("Unexpected queue result")
         }
+        RouteResult::Application { .. } => panic!("unexpected Application route in test"),
     }
 }
 
@@ -176,6 +177,7 @@ async fn test_match_invite_inbound_respects_source_trunk() {
         RouteResult::Queue { .. } => {
             panic!("unexpected queue result")
         }
+        RouteResult::Application { .. } => panic!("unexpected Application route in test"),
     }
 }
 
@@ -233,6 +235,7 @@ async fn test_match_invite_inbound_without_source_trunk() {
         RouteResult::Queue { .. } => {
             panic!("unexpected queue result")
         }
+        RouteResult::Application { .. } => panic!("unexpected Application route in test"),
     }
 }
 
@@ -307,6 +310,7 @@ async fn test_match_invite_exact_match() {
         RouteResult::Queue { .. } => {
             panic!("unexpected queue result")
         }
+        RouteResult::Application { .. } => panic!("unexpected Application route in test"),
     }
 }
 
@@ -378,6 +382,7 @@ async fn test_match_invite_regex_match() {
         RouteResult::Queue { .. } => {
             panic!("unexpected queue result")
         }
+        RouteResult::Application { .. } => panic!("unexpected Application route in test"),
     }
 }
 
@@ -476,6 +481,7 @@ async fn test_match_invite_queue_action_builds_hold_and_fallback() {
         RouteResult::Forward(_, _) => panic!("route forwarded instead of enqueuing"),
         RouteResult::NotHandled(_, _) => panic!("route was not handled"),
         RouteResult::Abort(..) => panic!("queue route aborted"),
+        RouteResult::Application { .. } => panic!("unexpected Application route in test"),
     }
 }
 
@@ -627,6 +633,7 @@ async fn test_match_invite_reject_rule() {
         RouteResult::Queue { .. } => {
             panic!("unexpected queue result")
         }
+        RouteResult::Application { .. } => panic!("unexpected Application route in test"),
     }
 }
 
@@ -695,6 +702,7 @@ async fn test_match_invite_rewrite_rules() {
         RouteResult::Queue { .. } => {
             panic!("unexpected queue result")
         }
+        RouteResult::Application { .. } => panic!("unexpected Application route in test"),
     }
 }
 
@@ -784,6 +792,7 @@ async fn test_match_invite_load_balancing() {
             RouteResult::Queue { .. } => {
                 panic!("unexpected queue result")
             }
+            RouteResult::Application { .. } => panic!("unexpected Application route in test"),
         }
     }
 
@@ -865,6 +874,7 @@ async fn test_match_invite_header_matching() {
         RouteResult::Queue { .. } => {
             panic!("unexpected queue result")
         }
+        RouteResult::Application { .. } => panic!("unexpected Application route in test"),
     }
 }
 
@@ -931,6 +941,7 @@ async fn test_match_invite_default_route() {
         RouteResult::Queue { .. } => {
             panic!("unexpected queue result")
         }
+        RouteResult::Application { .. } => panic!("unexpected Application route in test"),
     }
 }
 
@@ -1004,6 +1015,7 @@ async fn test_match_invite_advanced_rewrite_patterns() {
         RouteResult::Queue { .. } => {
             panic!("unexpected queue result")
         }
+        RouteResult::Application { .. } => panic!("unexpected Application route in test"),
     }
 
     // Test case 2: Simple digit extraction 12345 -> prefix{1}suffix
@@ -1063,6 +1075,7 @@ async fn test_match_invite_advanced_rewrite_patterns() {
         RouteResult::Queue { .. } => {
             panic!("unexpected queue result")
         }
+        RouteResult::Application { .. } => panic!("unexpected Application route in test"),
     }
 }
 
@@ -1140,6 +1153,7 @@ async fn test_match_invite_rewrite_from_host_uses_match_capture() {
         RouteResult::Queue { .. } => {
             panic!("unexpected queue result")
         }
+        RouteResult::Application { .. } => panic!("unexpected Application route in test"),
     }
 }
 
@@ -1295,4 +1309,203 @@ fn create_test_request() -> rsip::Request {
         1,
         None,
     )
+}
+
+#[tokio::test]
+async fn test_match_invite_application_action() {
+    let routing_state = Arc::new(RoutingState::new());
+    let routes = vec![RouteRule {
+        name: "voicemail_route".to_string(),
+        priority: 100,
+        match_conditions: MatchConditions {
+            to_user: Some("voicemail".to_string()),
+            ..Default::default()
+        },
+        action: RouteAction {
+            action: Some("application".to_string()),
+            app: Some("voicemail".to_string()),
+            app_params: Some(serde_json::json!({"mailbox": "1001"})),
+            auto_answer: true,
+            ..Default::default()
+        },
+        ..Default::default()
+    }];
+
+    let option = create_invite_option(
+        "sip:alice@rustpbx.com",
+        "sip:voicemail@rustpbx.com",
+        None,
+        Some("application/sdp"),
+        None,
+    );
+    let origin = create_test_request();
+    let trunks = HashMap::new();
+
+    let result = match_invite(
+        Some(&trunks),
+        Some(&routes),
+        None,
+        option,
+        &origin,
+        None,
+        routing_state,
+        &DialDirection::Outbound,
+    )
+    .await
+    .unwrap();
+
+    match result {
+        RouteResult::Application {
+            app_name,
+            app_params,
+            auto_answer,
+            ..
+        } => {
+            assert_eq!(app_name, "voicemail");
+            assert_eq!(app_params, Some(serde_json::json!({"mailbox": "1001"})));
+            assert!(auto_answer);
+        }
+        RouteResult::Forward(_, _) => panic!("Expected Application, got Forward"),
+        RouteResult::NotHandled(_, _) => panic!("Expected Application, got NotHandled"),
+        RouteResult::Abort(_, _) => panic!("Expected Application, got Abort"),
+        RouteResult::Queue { .. } => panic!("Expected Application, got Queue"),
+    }
+}
+
+#[tokio::test]
+async fn test_match_invite_application_inferred_from_app_field() {
+    let routing_state = Arc::new(RoutingState::new());
+    let routes = vec![RouteRule {
+        name: "implicit_app_route".to_string(),
+        priority: 100,
+        match_conditions: MatchConditions {
+            to_user: Some("vm".to_string()),
+            ..Default::default()
+        },
+        action: RouteAction {
+            app: Some("voicemail".to_string()),
+            app_params: None,
+            ..Default::default()
+        },
+        ..Default::default()
+    }];
+
+    let option = create_invite_option(
+        "sip:alice@rustpbx.com",
+        "sip:vm@rustpbx.com",
+        None,
+        Some("application/sdp"),
+        None,
+    );
+    let origin = create_test_request();
+    let trunks = HashMap::new();
+
+    let result = match_invite(
+        Some(&trunks),
+        Some(&routes),
+        None,
+        option,
+        &origin,
+        None,
+        routing_state,
+        &DialDirection::Outbound,
+    )
+    .await
+    .unwrap();
+
+    match result {
+        RouteResult::Application { app_name, .. } => {
+            assert_eq!(app_name, "voicemail");
+        }
+        other => panic!("Expected Application"),
+    }
+}
+
+#[tokio::test]
+async fn test_match_invite_application_auto_answer_false() {
+    let routing_state = Arc::new(RoutingState::new());
+    let routes = vec![RouteRule {
+        name: "custom_app_route".to_string(),
+        priority: 100,
+        match_conditions: MatchConditions {
+            to_user: Some("custom".to_string()),
+            ..Default::default()
+        },
+        action: RouteAction {
+            action: Some("application".to_string()),
+            app: Some("custom_app".to_string()),
+            app_params: Some(serde_json::json!({"mode": "interactive"})),
+            auto_answer: false,
+            ..Default::default()
+        },
+        ..Default::default()
+    }];
+
+    let option = create_invite_option(
+        "sip:alice@rustpbx.com",
+        "sip:custom@rustpbx.com",
+        None,
+        Some("application/sdp"),
+        None,
+    );
+    let origin = create_test_request();
+    let trunks = HashMap::new();
+
+    let result = match_invite(
+        Some(&trunks),
+        Some(&routes),
+        None,
+        option,
+        &origin,
+        None,
+        routing_state,
+        &DialDirection::Outbound,
+    )
+    .await
+    .unwrap();
+
+    match result {
+        RouteResult::Application {
+            app_name,
+            auto_answer,
+            ..
+        } => {
+            assert_eq!(app_name, "custom_app");
+            assert!(!auto_answer);
+        }
+        other => panic!("Expected Application"),
+    }
+}
+
+#[test]
+fn test_route_action_get_action_type_application() {
+    let action_explicit = RouteAction {
+        action: Some("application".to_string()),
+        app: Some("voicemail".to_string()),
+        ..Default::default()
+    };
+    assert_eq!(
+        action_explicit.get_action_type(),
+        crate::proxy::routing::ActionType::Application
+    );
+
+    let action_implicit = RouteAction {
+        action: None,
+        app: Some("voicemail".to_string()),
+        ..Default::default()
+    };
+    assert_eq!(
+        action_implicit.get_action_type(),
+        crate::proxy::routing::ActionType::Application
+    );
+
+    let action_forward = RouteAction {
+        action: None,
+        dest: Some(DestConfig::Single("trunk1".to_string())),
+        ..Default::default()
+    };
+    assert_eq!(
+        action_forward.get_action_type(),
+        crate::proxy::routing::ActionType::Forward
+    );
 }

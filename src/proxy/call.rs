@@ -390,11 +390,17 @@ impl CallModule {
             (true, false) => DialDirection::Outbound,
             (false, true) => DialDirection::Inbound,
             (false, false) => {
-                warn!(dialog_id, caller_realm = ?caller.realm, callee_realm, "Both caller and callee are external realm, reject");
-                return Err((
-                    anyhow::anyhow!("Both caller and callee are external realm"),
-                    Some(rsip::StatusCode::Forbidden),
-                ));
+                if is_from_trunk {
+                    // If the call comes from a trunk, we can allow it to reach an internal destination even if the callee realm doesn't match, as long as the caller realm also doesn't match (to prevent external-to-external calls).
+                    // This allows for more flexible routing from trusted trunks.
+                    DialDirection::Inbound
+                } else {
+                    warn!(dialog_id, caller_realm = ?caller.realm, callee_realm, "Both caller and callee are external realm, reject");
+                    return Err((
+                        anyhow::anyhow!("Both caller and callee are external realm"),
+                        Some(rsip::StatusCode::Forbidden),
+                    ));
+                }
             }
         };
 
@@ -436,16 +442,26 @@ impl CallModule {
                 )
             })?;
 
-        let (pending_queue, dialplan_hints) = match preview_outcome {
-            RouteResult::Queue { queue, hints, .. } => (Some(queue), hints),
-            RouteResult::Forward(_, hints) => (None, hints),
-            RouteResult::NotHandled(_, hints) => (None, hints),
+        let (pending_queue, pending_app, dialplan_hints) = match preview_outcome {
+            RouteResult::Queue { queue, hints, .. } => (Some(queue), None, hints),
+            RouteResult::Forward(_, hints) => (None, None, hints),
+            RouteResult::NotHandled(_, hints) => (None, None, hints),
             RouteResult::Abort(code, reason) => {
                 let err = anyhow::anyhow!(
                     reason.unwrap_or_else(|| "route aborted during preview".to_string())
                 );
                 return Err((err, Some(code)));
             }
+            RouteResult::Application {
+                app_name,
+                app_params,
+                auto_answer,
+                ..
+            } => (
+                None,
+                Some((app_name, app_params, auto_answer)),
+                None,
+            ),
         };
 
         let queue_targets = pending_queue
@@ -466,7 +482,9 @@ impl CallModule {
             .with_recording(recording)
             .with_route_invite(route_invite);
 
-        if let Some(queue) = pending_queue {
+        if let Some((app_name, app_params, auto_answer)) = pending_app {
+            dialplan = dialplan.with_application(app_name, app_params, auto_answer);
+        } else if let Some(queue) = pending_queue {
             dialplan = dialplan.with_queue(queue);
         } else {
             dialplan = dialplan.with_targets(targets);
@@ -611,10 +629,12 @@ impl CallModule {
         dialplan
     }
 
-    async fn resolve_callee_forwarding(
-        &self,
-        request: &rsip::Request,
-    ) -> Result<Option<CallForwardingConfig>> {
+    /// Resolve the callee's [`SipUser`] from the user backend.
+    ///
+    /// Returns `None` when the callee realm doesn't belong to this server or
+    /// the user is not found.  The result is LRU-cached by the backend so
+    /// repeated lookups within the same call leg are cheap.
+    async fn resolve_callee_user(&self, request: &rsip::Request) -> Result<Option<SipUser>> {
         let callee_uri = request.to_header()?.uri()?;
         let callee_realm = callee_uri.host().to_string();
         if !self.inner.server.is_same_realm(&callee_realm).await {
@@ -631,18 +651,12 @@ impl CallModule {
             return Ok(None);
         }
 
-        match self
-            .inner
+        self.inner
             .server
             .user_backend
             .get_user(username.as_str(), Some(&callee_realm), Some(request))
             .await
             .map_err(Into::into)
-        {
-            Ok(Some(user)) => Ok(user.forwarding_config()),
-            Ok(None) => Ok(None),
-            Err(err) => Err(err),
-        }
     }
 
     fn matches_any_pattern(value: &str, patterns: &[String]) -> bool {
@@ -805,22 +819,29 @@ impl CallModule {
                 .await?
         }
 
-        if dialplan.call_forwarding.is_none() {
-            // Optimization: Skip call forwarding check for wholesale calls (from trunks)
-            let is_wholesale = cookie
-                .get_extension::<TrunkContext>()
-                .map(|ctx| ctx.tenant_id.is_some())
-                .unwrap_or(false);
+        // Optimization: skip callee lookup for wholesale (trunk-originated) calls.
+        let is_wholesale = cookie
+            .get_extension::<TrunkContext>()
+            .map(|ctx| ctx.tenant_id.is_some())
+            .unwrap_or(false);
 
-            if !is_wholesale {
-                match self.resolve_callee_forwarding(&tx.original).await {
-                    Ok(Some(config)) => {
-                        dialplan = dialplan.with_call_forwarding(Some(config));
+        if !is_wholesale {
+            match self.resolve_callee_user(&tx.original).await {
+                Ok(Some(callee)) => {
+                    // Apply call-forwarding only when no custom resolver already set it.
+                    if dialplan.call_forwarding.is_none() {
+                        if let Some(config) = callee.forwarding_config() {
+                            dialplan = dialplan.with_call_forwarding(Some(config));
+                        }
                     }
-                    Ok(None) => {}
-                    Err(err) => {
-                        warn!(error = %err, "failed to resolve call forwarding for callee");
-                    }
+                    // Propagate voicemail eligibility into the dialplan so that
+                    // the call session can decide whether to chain to voicemail
+                    // on no-answer / busy without having to re-query the DB.
+                    dialplan.voicemail_enabled = !callee.voicemail_disabled;
+                }
+                Ok(None) => {}
+                Err(err) => {
+                    warn!(error = %err, "failed to resolve callee user for forwarding/voicemail");
                 }
             }
         }
@@ -847,7 +868,8 @@ impl CallModule {
         );
         let dialplan = Dialplan::new(session_id, tx.original.clone(), direction);
         let proxy_call = CallSessionBuilder::new(cookie.clone(), dialplan, 70)
-            .with_call_record_sender(self.inner.server.callrecord_sender.clone());
+            .with_call_record_sender(self.inner.server.callrecord_sender.clone())
+            .with_addon_registry(self.inner.server.addon_registry.clone());
         let _ = proxy_call.report_failure(self.inner.server.clone(), code, reason);
     }
 

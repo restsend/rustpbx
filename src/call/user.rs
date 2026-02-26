@@ -29,6 +29,10 @@ pub struct SipUser {
     pub note: Option<String>,
     #[serde(default)]
     pub allow_guest_calls: bool,
+    /// When `true` the extension has opted out of voicemail; unanswered calls
+    /// should **not** be forwarded to the voicemail application.
+    #[serde(default)]
+    pub voicemail_disabled: bool,
     #[serde(default)]
     pub call_forwarding_mode: Option<String>,
     #[serde(default)]
@@ -86,6 +90,7 @@ impl Default for SipUser {
             phone: None,
             note: None,
             allow_guest_calls: false,
+            voicemail_disabled: false,
             call_forwarding_mode: None,
             call_forwarding_destination: None,
             call_forwarding_timeout: None,
@@ -299,9 +304,78 @@ impl TryFrom<&Transaction> for SipUser {
             phone: None,
             note: None,
             allow_guest_calls: false,
+            voicemail_disabled: false,
         };
         u.build_contact(tx);
         Ok(u)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── SipUser::voicemail_disabled ────────────────────────────────────────────
+
+    #[test]
+    fn voicemail_disabled_default_is_false() {
+        // Voicemail should be active for a user unless explicitly disabled.
+        let user = SipUser::default();
+        assert!(
+            !user.voicemail_disabled,
+            "SipUser::default() must have voicemail_disabled = false"
+        );
+    }
+
+    #[test]
+    fn voicemail_disabled_can_be_set_true() {
+        let user = SipUser {
+            username: "1001".into(),
+            voicemail_disabled: true,
+            ..Default::default()
+        };
+        assert!(user.voicemail_disabled);
+    }
+
+    #[test]
+    fn merge_with_does_not_override_voicemail_disabled_when_true() {
+        // If the primary record already has voicemail_disabled = true the
+        // merge should **not** overwrite it with the other side's false.
+        let mut primary = SipUser {
+            username: "1001".into(),
+            voicemail_disabled: true,
+            ..Default::default()
+        };
+        let secondary = SipUser {
+            username: "1001".into(),
+            voicemail_disabled: false,
+            email: Some("alice@pbx.local".into()),
+            ..Default::default()
+        };
+        primary.merge_with(&secondary);
+        // voicemail_disabled is a plain bool; merge_with only copies optional
+        // fields and bool flags using the `if !flag { flag = other }` pattern.
+        // voicemail_disabled is intentionally NOT merged (it is not an Option),
+        // so the primary side wins.
+        assert!(
+            primary.voicemail_disabled,
+            "primary.voicemail_disabled should remain true after merge"
+        );
+        // merge_with should still fill in missing optional fields
+        assert_eq!(primary.email.as_deref(), Some("alice@pbx.local"));
+    }
+
+    #[test]
+    fn merge_with_propagates_voicemail_disabled_when_not_yet_set() {
+        // A freshly built SipUser (voicemail_disabled = false) that merges with
+        // a DB record that also has voicemail_disabled = false stays false.
+        let mut primary = SipUser::default();
+        let secondary = SipUser {
+            voicemail_disabled: false,
+            ..Default::default()
+        };
+        primary.merge_with(&secondary);
+        assert!(!primary.voicemail_disabled);
     }
 }
 

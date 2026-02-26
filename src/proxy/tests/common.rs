@@ -98,6 +98,7 @@ pub async fn create_test_server_with_config(
         runnings_tx: Arc::new(AtomicUsize::new(0)),
         storage: None,
         presence_manager: Arc::new(crate::proxy::presence::PresenceManager::new(None)),
+        addon_registry: None,
     });
 
     // Add test users

@@ -10,6 +10,22 @@ impl AddonRegistry {
     pub fn new() -> Self {
         let mut addons: Vec<Box<dyn Addon>> = Vec::new();
 
+        #[cfg(all(feature = "addon-observability", not(feature = "addon-telemetry")))]
+        {
+            if let Err(e) = super::observability::ObservabilityAddon::install_recorder() {
+                tracing::warn!("Prometheus recorder not installed: {}", e);
+            }
+            addons.push(Box::new(super::observability::ObservabilityAddon::new()));
+        }
+
+        #[cfg(feature = "addon-telemetry")]
+        {
+            if let Err(e) = crate::addons::telemetry::TelemetryAddon::install_recorder() {
+                tracing::warn!("Prometheus recorder not installed (commercial): {}", e);
+            }
+            addons.push(Box::new(crate::addons::telemetry::TelemetryAddon::new()));
+        }
+
         // ACME Addon (Free/Built-in for now as per request)
         #[cfg(feature = "addon-acme")]
         addons.push(Box::new(super::acme::AcmeAddon::new()));
@@ -25,6 +41,20 @@ impl AddonRegistry {
         // Transcript Addon
         #[cfg(feature = "addon-transcript")]
         addons.push(Box::new(super::transcript::TranscriptAddon::new()));
+
+        // Endpoint Manager Addon
+        #[cfg(feature = "addon-endpoint-manager")]
+        addons.push(Box::new(
+            super::endpoint_manager::EndpointManagerAddon::new(),
+        ));
+
+        // Enterprise Auth Addon
+        #[cfg(feature = "addon-enterprise-auth")]
+        addons.push(Box::new(super::enterprise_auth::EnterpriseAuthAddon::new()));
+
+        // Voicemail Addon
+        #[cfg(feature = "addon-voicemail")]
+        addons.push(Box::new(crate::voicemail::VoicemailAddon::new()));
 
         // Queue Addon
         addons.push(Box::new(super::queue::QueueAddon::new()));
@@ -107,8 +137,9 @@ impl AddonRegistry {
             .iter()
             .filter(|a| self.is_enabled(a.id(), config))
             .flat_map(|a| {
-                [
+                vec![
                     format!("src/addons/{}/templates", a.id()),
+                    format!("src/{}/templates", a.id()),
                     format!("templates/{}", a.id()),
                 ]
             })

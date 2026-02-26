@@ -2,6 +2,7 @@ use super::{ProxyAction, ProxyModule, server::SipServerRef};
 use crate::call::user::SipUser;
 use crate::call::{Location, TransactionCookie};
 use crate::config::ProxyConfig;
+use crate::metrics;
 use crate::proxy::locator::LocatorEvent;
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
@@ -474,10 +475,21 @@ impl ProxyModule for RegistrarModule {
             return Ok(ProxyAction::Continue);
         }
 
+        // P0: SIP registration metrics
+        let realm = tx
+            .original
+            .from_header()
+            .ok()
+            .and_then(|f| f.uri().ok())
+            .map(|u| u.host().to_string())
+            .unwrap_or_else(|| "unknown".to_string());
+        metrics::sip::registration_received(&realm);
+
         let user = match SipUser::try_from(&*tx) {
             Ok(u) => u,
             Err(e) => {
                 info!("failed to parse user: {:?}", e);
+                metrics::sip::registration_failed(&realm, "invalid_user");
                 tx.reply(rsip::StatusCode::BadRequest).await.ok();
                 return Ok(ProxyAction::Abort);
             }
@@ -539,6 +551,9 @@ impl ProxyModule for RegistrarModule {
                 .unregister(user.username.as_str(), user.realm.as_deref())
                 .await
                 .ok();
+
+            // P0: SIP unregistration metrics
+            metrics::sip::unregistration(&realm);
 
             if let Some(locator_events) = &self.server.locator_events {
                 locator_events
@@ -639,12 +654,15 @@ impl ProxyModule for RegistrarModule {
                 .await
             {
                 Ok(_) => {
+                    // P0: SIP registration success metrics
+                    metrics::sip::registration_succeeded(&realm);
                     if let Some(locator_events) = &self.server.locator_events {
                         locator_events.send(LocatorEvent::Registered(location)).ok();
                     }
                 }
                 Err(e) => {
                     info!("failed to register user: {:?}", e);
+                    metrics::sip::registration_failed(&realm, "storage_error");
                     tx.reply(rsip::StatusCode::ServiceUnavailable).await.ok();
                     return Ok(ProxyAction::Abort);
                 }

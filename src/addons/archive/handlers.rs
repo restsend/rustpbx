@@ -210,8 +210,6 @@ async fn list_archive_files(archive_dir: &str) -> anyhow::Result<Vec<ArchiveFile
     Ok(archives)
 }
 
-// ─── Manual archive endpoints ────────────────────────────────────────────────
-
 #[derive(Deserialize)]
 pub struct DateRangeQuery {
     pub start_date: String,

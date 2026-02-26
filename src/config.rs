@@ -201,10 +201,14 @@ pub struct Config {
     pub storage: Option<StorageConfig>,
     #[serde(default)]
     pub sipflow: Option<SipFlowConfig>,
-    /// Root directory for all runtime-generated data (archives, exports, billing CSVs).
-    /// Sub-paths are derived automatically unless individually overridden.
     #[serde(default = "default_storage_dir")]
     pub storage_dir: String,
+    #[cfg(feature = "addon-observability")]
+    #[serde(default)]
+    pub metrics: Option<MetricsConfig>,
+    #[cfg(feature = "addon-telemetry")]
+    #[serde(default)]
+    pub otel: Option<OtelConfig>,
 }
 
 fn default_storage_dir() -> String {
@@ -232,6 +236,70 @@ impl Config {
             .unwrap_or_else(|| format!("{}/wholesale/bills", self.storage_dir))
     }
 }
+
+fn default_metrics_path() -> String {
+    "/metrics".into()
+}
+
+fn default_healthz_path() -> String {
+    "/healthz".into()
+}
+
+fn default_otel_sample_ratio() -> f64 {
+    0.1
+}
+
+/// Configuration for the community Prometheus exporter (`addon-observability`).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct MetricsConfig {
+    /// Expose the Prometheus scrape endpoint. Default: true.
+    #[serde(default = "bool_true")]
+    pub enabled: bool,
+    /// HTTP path for the Prometheus scrape endpoint. Default: `/metrics`.
+    #[serde(default = "default_metrics_path")]
+    pub path: String,
+    /// HTTP path for the liveness probe. Default: `/healthz`.
+    #[serde(default = "default_healthz_path")]
+    pub healthz_path: String,
+    /// Optional bearer token required on `GET /metrics`.  Omit to allow
+    /// unauthenticated access (fine when the endpoint is not publicly reachable).
+    pub token: Option<String>,
+}
+
+impl Default for MetricsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            path: default_metrics_path(),
+            healthz_path: default_healthz_path(),
+            token: None,
+        }
+    }
+}
+
+/// Configuration for the commercial OpenTelemetry addon (`addon-telemetry`).
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct OtelConfig {
+    /// OTLP gRPC endpoint, e.g. `http://otelcol:4317`.
+    pub endpoint: Option<String>,
+    /// `service.name` resource attribute sent to the collector.
+    pub service_name: Option<String>,
+    /// Trace head-sampling ratio in [0, 1].  Default: 0.1 (10 %).
+    #[serde(default = "default_otel_sample_ratio")]
+    pub sample_ratio: f64,
+    /// Whether to also push metrics via OTLP (in addition to traces).
+    #[serde(default)]
+    pub export_metrics: bool,
+    /// Whether to attach trace IDs to structured log records.
+    #[serde(default = "bool_true")]
+    pub log_trace_id: bool,
+}
+
+fn bool_true() -> bool {
+    true
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ArchiveConfig {
@@ -581,6 +649,12 @@ pub enum RouteResult {
         queue: QueuePlan,
         hints: Option<DialplanHints>,
     },
+    Application {
+        option: InviteOption,
+        app_name: String,
+        app_params: Option<serde_json::Value>,
+        auto_answer: bool,
+    },
     NotHandled(InviteOption, Option<DialplanHints>),
     Abort(StatusCode, Option<String>),
 }
@@ -798,6 +872,11 @@ impl Default for Config {
             addons: HashMap::new(),
             sipflow: None,
             storage_dir: default_storage_dir(),
+
+            #[cfg(feature = "addon-observability")]
+            metrics: None,
+            #[cfg(feature = "addon-telemetry")]
+            otel: None,
         }
     }
 }
