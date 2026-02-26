@@ -621,6 +621,8 @@ fn trunk_config_from_model(model: &sip_trunk::Model) -> Option<routing::TrunkCon
         origin: routing::ConfigOrigin::embedded(),
         country: None,
         policy: None,
+        register: None,
+        register_expires: None,
     })
 }
 

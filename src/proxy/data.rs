@@ -849,6 +849,8 @@ fn convert_trunk(model: sip_trunk::Model) -> Option<(String, TrunkConfig)> {
         country: None,
         policy: None,
         origin: ConfigOrigin::embedded(),
+        register: None,
+        register_expires: None
     };
 
     Some((model.name, trunk))
