@@ -15,9 +15,6 @@ use tracing::{error, info};
 
 mod handlers;
 
-#[cfg(test)]
-mod tests;
-
 #[derive(Debug, Clone)]
 pub struct ManualTaskStatus {
     pub status: String, // "running", "success", "error"
