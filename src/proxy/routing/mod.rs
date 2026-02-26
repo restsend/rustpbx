@@ -372,32 +372,38 @@ pub struct RewriteRules {
     pub headers: HashMap<String, String>,
 }
 
-/// Route action
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct RouteAction {
-    /// Explicit action type (optional, defaults to forward if dest is specified)
     #[serde(default)]
     pub action: Option<String>,
 
-    /// Forward destination (when action is forward or unspecified)
     #[serde(default)]
     pub dest: Option<DestConfig>,
 
-    /// Load balancing selection algorithm
     #[serde(default = "default_select")]
     pub select: String,
 
-    /// Hash algorithm key
     #[serde(default)]
     pub hash_key: Option<String>,
 
-    /// Reject configuration (when action is reject)
     #[serde(default)]
     pub reject: Option<RejectConfig>,
 
-    /// Queue configuration file (when action is queue)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub queue: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app: Option<String>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_params: Option<serde_json::Value>,
+
+    #[serde(default = "default_auto_answer")]
+    pub auto_answer: bool,
+}
+
+fn default_auto_answer() -> bool {
+    true
 }
 
 impl Default for RouteAction {
@@ -409,23 +415,27 @@ impl Default for RouteAction {
             hash_key: None,
             reject: None,
             queue: None,
+            app: None,
+            app_params: None,
+            auto_answer: default_auto_answer(),
         }
     }
 }
 
 impl RouteAction {
-    /// Get the actual action type
     pub fn get_action_type(&self) -> ActionType {
         match &self.action {
             Some(action) => match action.as_str() {
                 "reject" => ActionType::Reject,
                 "busy" => ActionType::Busy,
                 "queue" => ActionType::Queue,
+                "application" => ActionType::Application,
                 _ => ActionType::Forward,
             },
             None => {
-                // If no explicit action, infer from other fields
-                if self.queue.is_some() {
+                if self.app.is_some() {
+                    ActionType::Application
+                } else if self.queue.is_some() {
                     ActionType::Queue
                 } else if self.reject.is_some() {
                     ActionType::Reject
@@ -444,6 +454,7 @@ pub enum ActionType {
     Reject,
     Busy,
     Queue,
+    Application,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]

@@ -468,6 +468,7 @@ async fn test_guest_call_allowed_extension() {
         runnings_tx: Arc::new(AtomicUsize::new(0)),
         storage: None,
         presence_manager: Arc::new(crate::proxy::presence::PresenceManager::new(None)),
+        addon_registry: None,
     });
 
     let module = AuthModule::new(server_inner);

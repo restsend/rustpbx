@@ -218,6 +218,7 @@ impl UserBackend for DbBackend {
             phone,
             note,
             allow_guest_calls: false,
+            voicemail_disabled: false,
         }))
     }
 }

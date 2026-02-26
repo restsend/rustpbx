@@ -76,6 +76,8 @@ pub struct SipServerInner {
     pub runnings_tx: Arc<AtomicUsize>,
     pub storage: Option<crate::storage::Storage>,
     pub presence_manager: Arc<PresenceManager>,
+    /// Addon registry for accessing call applications (voicemail, ivr, etc.)
+    pub addon_registry: Option<Arc<crate::addons::registry::AddonRegistry>>,
 }
 
 pub type SipServerRef = Arc<SipServerInner>;
@@ -110,6 +112,8 @@ pub struct SipServerBuilder {
     /// Pre-built SipFlow backend (takes precedence over sipflow_config).
     sipflow_backend: Option<Arc<dyn SipFlowBackend>>,
     no_bind: bool,
+    /// Addon registry for accessing call applications (voicemail, ivr, etc.)
+    addon_registry: Option<Arc<crate::addons::registry::AddonRegistry>>,
 }
 
 impl SipServerBuilder {
@@ -137,6 +141,7 @@ impl SipServerBuilder {
             sipflow_config: None,
             sipflow_backend: None,
             no_bind: false,
+            addon_registry: None,
         }
     }
 
@@ -251,6 +256,15 @@ impl SipServerBuilder {
 
     pub fn with_storage(mut self, storage: crate::storage::Storage) -> Self {
         self.storage = Some(storage);
+        self
+    }
+
+    /// Set the addon registry for accessing call applications (voicemail, ivr, etc.)
+    pub fn with_addon_registry(
+        mut self,
+        registry: Option<Arc<crate::addons::registry::AddonRegistry>>,
+    ) -> Self {
+        self.addon_registry = registry;
         self
     }
 
@@ -536,6 +550,7 @@ impl SipServerBuilder {
             runnings_tx: Arc::new(AtomicUsize::new(0)),
             storage: self.storage,
             presence_manager,
+            addon_registry: self.addon_registry,
         });
 
         let inner_weak = Arc::downgrade(&inner);

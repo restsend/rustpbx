@@ -214,8 +214,6 @@ async fn media_handler(
 mod tests {
     use rustpbx::sipflow::wav_utils::generate_wav_from_packets;
 
-    use super::*;
-
     #[test]
     fn test_generate_wav_pcmu_no_transcode() {
         // Setup: Two legs, PCMU packets

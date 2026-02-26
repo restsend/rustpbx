@@ -6,6 +6,7 @@ use rustpbx::{
     app::{AppStateBuilder, create_router},
     config::Config,
     handler::middleware::request_log::AccessLogEventFormat,
+    observability,
     preflight, version,
 };
 use std::net::SocketAddr;
@@ -175,6 +176,11 @@ async fn main() -> Result<()> {
 
     env_filter = env_filter.add_directive("sqlx=info".parse().unwrap());
 
+    // Install the hot-swappable reload layer BEFORE the subscriber is built.
+    // The commercial TelemetryAddon will inject an OTel layer into this slot
+    // during addon initialization.
+    let otel_reload_layer = observability::init_reload_layer();
+
     let tokio_console_enabled = cli.tokio_console.is_some()
         || std::env::var_os("TOKIO_CONSOLE").is_some()
         || std::env::var_os("TOKIO_CONSOLE_BIND").is_some();
@@ -245,18 +251,24 @@ async fn main() -> Result<()> {
         );
     }
 
+    // Every branch receives the same OTel reload layer so that the commercial
+    // TelemetryAddon can inject a live OTel tracing layer later, regardless of
+    // which logging backend was chosen.
     if let Some(console_layer) = console_layer {
         tracing_subscriber::registry()
+            .with(otel_reload_layer)
             .with(env_filter)
             .with(console_layer)
             .try_init()?;
     } else if let Some(file_layer) = file_layer {
         tracing_subscriber::registry()
+            .with(otel_reload_layer)
             .with(env_filter)
             .with(file_layer)
             .try_init()?;
     } else if let Some(fmt_layer) = fmt_layer {
         tracing_subscriber::registry()
+            .with(otel_reload_layer)
             .with(env_filter)
             .with(fmt_layer)
             .try_init()?;
@@ -420,6 +432,10 @@ async fn main() -> Result<()> {
 
         break;
     }
+
+    // Flush any buffered OTel spans before the process exits.
+    #[cfg(feature = "addon-telemetry")]
+    rustpbx::addons::telemetry::TelemetryAddon::shutdown();
 
     Ok(())
 }

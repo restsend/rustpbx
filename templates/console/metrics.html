@@ -1,0 +1,387 @@
+{% extends "console/layout.html" %}
+
+{% block title %}Runtime Metrics · {{site_name|default('RustPBX')}}{% endblock %}
+
+{% block content %}
+<div class="min-h-[70vh] py-6">
+    <div class="mx-auto max-w-7xl px-4">
+        <!-- Header -->
+        <div class="mb-6">
+            <h1 class="text-2xl font-semibold text-slate-800">Runtime Metrics</h1>
+            <p class="mt-1 text-sm text-slate-500">Real-time system and call metrics from the running server.</p>
+        </div>
+
+        <!-- Prometheus Metrics Endpoint Guide -->
+        {% if prometheus.enabled %}
+        <section class="mb-6 rounded-2xl bg-gradient-to-r from-sky-50 to-indigo-50 p-6 ring-1 ring-sky-200">
+            <div class="flex items-start gap-4">
+                <div class="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-sky-100 text-sky-600">
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="h-5 w-5">
+                        <path
+                            d="M11.25 4.533A9.707 9.707 0 006 3a9.735 9.735 0 00-3.25.555.5.5 0 00-.25.432v17.191a.5.5 0 00.75.414A8.237 8.237 0 016 20.25c1.455 0 2.836.376 4.036 1.038a.5.5 0 00.464 0 10.235 10.235 0 014.036-1.038c1.455 0 2.836.376 4.036 1.038.14.076.31.076.464 0a8.237 8.237 0 012.75-.414 8.237 8.237 0 012.75.414.5.5 0 00.75-.414V3.987a.5.5 0 00-.25-.432A9.735 9.735 0 0018 3a9.707 9.707 0 00-5.25 1.533.5.5 0 01-.5 0z">
+                        </path>
+                    </svg>
+                </div>
+                <div class="flex-1">
+                    <h3 class="text-sm font-semibold text-slate-800">Prometheus Metrics Endpoint</h3>
+                    <p class="mt-1 text-sm text-slate-600">
+                        Scrape metrics from <code
+                            class="rounded bg-sky-100 px-1.5 py-0.5 text-sky-700">{{ prometheus.path }}</code> for
+                        Prometheus, Grafana, or other monitoring systems.
+                        {% if prometheus.auth_required %}
+                        <span class="ml-1 inline-flex items-center gap-1 text-amber-700">
+                            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor"
+                                class="h-4 w-4">
+                                <path fill-rule="evenodd"
+                                    d="M10 1a4.5 4.5 0 00-4.5 4.5V9H5a2 2 0 00-2 2v6a2 2 0 002 2h10a2 2 0 002-2v-6a2 2 0 00-2-2h-.5V5.5A4.5 4.5 0 0010 1zm3 8V5.5a3 3 0 10-6 0V9h6z"
+                                    clip-rule="evenodd"></path>
+                            </svg>
+                            Requires Bearer token authentication
+                        </span>
+                        {% endif %}
+                    </p>
+                    <div class="mt-3 flex flex-wrap items-center gap-2">
+                        <a href="{{ prometheus.path }}" target="_blank" rel="noopener noreferrer"
+                            class="inline-flex items-center gap-1.5 rounded-lg bg-sky-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-sky-700">
+                            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor"
+                                class="h-3.5 w-3.5">
+                                <path d="M10 12.5a2.5 2.5 0 100-5 2.5 2.5 0 000 5z"></path>
+                                <path fill-rule="evenodd"
+                                    d="M.664 10.59a1.651 1.651 0 010-1.186A10.004 10.004 0 0110 2c4.257 0 7.893 2.66 9.336 6.41.147.381.146.804 0 1.186A10.004 10.004 0 0110 18c-4.257 0-7.893-2.66-9.336-6.41zM14 10a4 4 0 11-8 0 4 4 0 018 0z"
+                                    clip-rule="evenodd"></path>
+                            </svg>
+                            Open Endpoint
+                        </a>
+                        <button type="button" onclick="copyMetricsUrl()"
+                            class="inline-flex items-center gap-1.5 rounded-lg border border-sky-200 bg-white px-3 py-1.5 text-xs font-medium text-sky-700 hover:bg-sky-50">
+                            <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor"
+                                class="h-3.5 w-3.5">
+                                <path
+                                    d="M7 3.5A1.5 1.5 0 018.5 2h3.879a1.5 1.5 0 011.06.44l3.122 3.12A1.5 1.5 0 0117 6.622V12.5a1.5 1.5 0 01-1.5 1.5h-1v-3.379a3 3 0 00-.879-2.121L10.5 5.379A3 3 0 008.379 4.5H7v-1z">
+                                </path>
+                                <path
+                                    d="M4.5 6A1.5 1.5 0 003 7.5v9A1.5 1.5 0 004.5 18h7a1.5 1.5 0 001.5-1.5v-5.879a1.5 1.5 0 00-.44-1.06L9.44 6.439A1.5 1.5 0 008.378 6H4.5z">
+                                </path>
+                            </svg>
+                            Copy URL
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </section>
+        {% else %}
+        <section class="mb-6 rounded-2xl bg-slate-50 p-6 ring-1 ring-slate-200">
+            <div class="flex items-start gap-4">
+                <div class="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-slate-100 text-slate-500">
+                    <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" class="h-5 w-5">
+                        <path fill-rule="evenodd"
+                            d="M12 1.5a.75.75 0 01.75.75V4.5a.75.75 0 01-1.5 0V2.25A.75.75 0 0112 1.5zM5.636 4.136a.75.75 0 011.06 0l1.592 1.591a.75.75 0 01-1.061 1.06l-1.591-1.59a.75.75 0 010-1.061zm12.728 0a.75.75 0 010 1.06l-1.591 1.592a.75.75 0 01-1.06-1.061l1.59-1.591a.75.75 0 011.061 0zm-6.816 4.496a.75.75 0 01.82.311l5.228 7.917a.75.75 0 01-.77 1.148l-2.097-.43 1.045 3.9a.75.75 0 01-1.45.388l-1.044-3.899-1.601 1.42a.75.75 0 01-1.247-.606l.569-9.47a.75.75 0 01.557-.68zM3 10.5a.75.75 0 01.75-.75H6a.75.75 0 010 1.5H3.75A.75.75 0 013 10.5zm14.25 0a.75.75 0 01.75-.75h2.25a.75.75 0 010 1.5H18a.75.75 0 01-.75-.75zm-8.962 3.712a.75.75 0 010 1.061l-1.591 1.591a.75.75 0 11-1.061-1.06l1.591-1.592a.75.75 0 011.06 0z"
+                            clip-rule="evenodd"></path>
+                    </svg>
+                </div>
+                <div class="flex-1">
+                    <h3 class="text-sm font-semibold text-slate-700">Prometheus Metrics Disabled</h3>
+                    <p class="mt-1 text-sm text-slate-500">
+                        Enable the observability addon to expose Prometheus metrics. Add the following to your <code
+                            class="rounded bg-slate-200 px-1 py-0.5">config.toml</code>:
+                    </p>
+                    <pre class="mt-2 rounded-lg bg-slate-800 p-3 text-xs text-slate-200 overflow-x-auto"><code>[metrics]
+enabled = true
+path = "/metrics"
+# token = "your-secret-token"  # optional</code></pre>
+                </div>
+            </div>
+        </section>
+        {% endif %}
+
+        <!-- System Info -->
+        <section class="mb-6 rounded-2xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+            <div class="flex items-center justify-between">
+                <h2 class="text-sm font-semibold text-slate-600">System Information</h2>
+                <span id="collected-at" class="text-xs text-slate-400">{{ metrics.collected_at | default('—') }}</span>
+            </div>
+            <div class="mt-4 grid gap-4 sm:grid-cols-3">
+                <div class="rounded-lg bg-slate-50 p-4">
+                    <div class="text-xs text-slate-500">Uptime</div>
+                    <div id="uptime" class="mt-1 text-lg font-semibold text-slate-700">{{ metrics.system.uptime_seconds
+                        | default(0) }}s</div>
+                </div>
+                <div class="rounded-lg bg-slate-50 p-4">
+                    <div class="text-xs text-slate-500">Version</div>
+                    <div id="version" class="mt-1 text-lg font-semibold text-slate-700">{{ metrics.system.version |
+                        default('unknown') }}</div>
+                </div>
+                <div class="rounded-lg bg-slate-50 p-4">
+                    <div class="text-xs text-slate-500">Edition</div>
+                    <div id="edition" class="mt-1 text-lg font-semibold text-slate-700">{{ metrics.system.edition |
+                        default('community') }}</div>
+                </div>
+            </div>
+        </section>
+
+        <!-- Call Metrics -->
+        <section class="mb-6 grid gap-4 md:grid-cols-3">
+            <div class="rounded-xl bg-white p-5 ring-1 ring-black/5">
+                <div class="text-xs text-slate-500">Active Calls</div>
+                <div class="mt-2 flex items-end justify-between">
+                    <div id="calls-active" class="text-3xl font-semibold">{{ metrics.calls.active | default(0) }}</div>
+                </div>
+                <div class="mt-3 h-2 w-full overflow-hidden rounded bg-slate-100">
+                    <div id="calls-util-bar" class="h-full bg-amber-500"
+                        data-utilization="{{ metrics.calls.utilization | default(0) }}"></div>
+                </div>
+                <div class="mt-2 text-xs text-slate-500">Capacity: <span id="calls-capacity">{{ metrics.calls.capacity |
+                        default(0) }}</span></div>
+            </div>
+            <div class="rounded-xl bg-white p-5 ring-1 ring-black/5">
+                <div class="text-xs text-slate-500">Active SIP Dialogs</div>
+                <div class="mt-2">
+                    <div id="sip-dialogs" class="text-3xl font-semibold">{{ metrics.sip.dialogs_active | default(0) }}
+                    </div>
+                </div>
+                <div class="mt-3 h-2 w-full overflow-hidden rounded bg-slate-100">
+                    <div class="h-full bg-sky-500" data-value="{{ metrics.sip.dialogs_active | default(0) }}"></div>
+                </div>
+            </div>
+            <div class="rounded-xl bg-white p-5 ring-1 ring-black/5">
+                <div class="text-xs text-slate-500">Call Utilization</div>
+                <div class="mt-2">
+                    <div id="calls-utilization" class="text-3xl font-semibold">{{ metrics.calls.utilization | default(0)
+                        }}%</div>
+                </div>
+                <div class="mt-3 h-2 w-full overflow-hidden rounded bg-slate-100">
+                    <div id="calls-util-bar-2" class="h-full bg-indigo-500"
+                        data-utilization="{{ metrics.calls.utilization | default(0) }}"></div>
+                </div>
+            </div>
+        </section>
+
+        <!-- SIP Metrics -->
+        <section class="mb-6 rounded-2xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+            <h2 class="text-sm font-semibold text-slate-600">SIP Layer</h2>
+            <div class="mt-4 overflow-x-auto">
+                <table class="min-w-full divide-y divide-slate-100 text-sm">
+                    <thead class="bg-slate-50">
+                        <tr>
+                            <th scope="col" class="px-4 py-3 text-left font-medium text-slate-500">Metric</th>
+                            <th scope="col" class="px-4 py-3 text-left font-medium text-slate-500">Value</th>
+                            <th scope="col" class="px-4 py-3 text-left font-medium text-slate-500">Description</th>
+                        </tr>
+                    </thead>
+                    <tbody class="divide-y divide-slate-100">
+                        <tr class="hover:bg-slate-50">
+                            <td class="px-4 py-3 font-medium text-slate-700">dialogs_active</td>
+                            <td class="px-4 py-3 text-slate-600">{{ metrics.sip.dialogs_active | default(0) }}</td>
+                            <td class="px-4 py-3 text-slate-500">Active SIP dialogs currently tracked</td>
+                        </tr>
+                        <tr class="hover:bg-slate-50">
+                            <td class="px-4 py-3 font-medium text-slate-700">registrations_active</td>
+                            <td class="px-4 py-3 text-slate-600">{{ metrics.sip.registrations_active | default(0) }}
+                            </td>
+                            <td class="px-4 py-3 text-slate-500">Currently registered SIP endpoints</td>
+                        </tr>
+                        <tr class="hover:bg-slate-50">
+                            <td class="px-4 py-3 font-medium text-slate-700">registrations_total</td>
+                            <td class="px-4 py-3 text-slate-600">{{ metrics.sip.registrations_total | default(0) }}</td>
+                            <td class="px-4 py-3 text-slate-500">Total registration attempts since startup</td>
+                        </tr>
+                        <tr class="hover:bg-slate-50">
+                            <td class="px-4 py-3 font-medium text-slate-700">registrations_succeeded</td>
+                            <td class="px-4 py-3 text-slate-600">{{ metrics.sip.registrations_succeeded | default(0) }}
+                            </td>
+                            <td class="px-4 py-3 text-slate-500">Successful registrations since startup</td>
+                        </tr>
+                        <tr class="hover:bg-slate-50">
+                            <td class="px-4 py-3 font-medium text-slate-700">registrations_failed</td>
+                            <td class="px-4 py-3 text-slate-600">{{ metrics.sip.registrations_failed | default(0) }}
+                            </td>
+                            <td class="px-4 py-3 text-slate-500">Failed registrations since startup</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <!-- Call Metrics Table -->
+        <section class="mb-6 rounded-2xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+            <h2 class="text-sm font-semibold text-slate-600">Call Metrics</h2>
+            <div class="mt-4 overflow-x-auto">
+                <table class="min-w-full divide-y divide-slate-100 text-sm">
+                    <thead class="bg-slate-50">
+                        <tr>
+                            <th scope="col" class="px-4 py-3 text-left font-medium text-slate-500">Metric</th>
+                            <th scope="col" class="px-4 py-3 text-left font-medium text-slate-500">Value</th>
+                            <th scope="col" class="px-4 py-3 text-left font-medium text-slate-500">Description</th>
+                        </tr>
+                    </thead>
+                    <tbody class="divide-y divide-slate-100">
+                        <tr class="hover:bg-slate-50">
+                            <td class="px-4 py-3 font-medium text-slate-700">active</td>
+                            <td class="px-4 py-3 text-slate-600">{{ metrics.calls.active | default(0) }}</td>
+                            <td class="px-4 py-3 text-slate-500">Current active calls</td>
+                        </tr>
+                        <tr class="hover:bg-slate-50">
+                            <td class="px-4 py-3 font-medium text-slate-700">capacity</td>
+                            <td class="px-4 py-3 text-slate-600">{{ metrics.calls.capacity | default(0) }}</td>
+                            <td class="px-4 py-3 text-slate-500">Maximum concurrent calls configured</td>
+                        </tr>
+                        <tr class="hover:bg-slate-50">
+                            <td class="px-4 py-3 font-medium text-slate-700">utilization</td>
+                            <td class="px-4 py-3 text-slate-600">{{ metrics.calls.utilization | default(0) }}%</td>
+                            <td class="px-4 py-3 text-slate-500">Active calls as percentage of capacity</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <!-- Media & Voicemail Metrics (placeholder) -->
+        <section class="grid gap-6 lg:grid-cols-2">
+            <div class="rounded-2xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+                <h2 class="text-sm font-semibold text-slate-600">Media</h2>
+                <div class="mt-4 text-sm text-slate-500">
+                    <p>WebRTC connections: {{ metrics.media.webrtc_connections | default(0) }}</p>
+                </div>
+            </div>
+            <div class="rounded-2xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+                <h2 class="text-sm font-semibold text-slate-600">Voicemail</h2>
+                <div class="mt-4 text-sm text-slate-500">
+                    <p>Messages today: {{ metrics.voicemail.messages_today | default(0) }}</p>
+                    <p>Active mailboxes: {{ metrics.voicemail.active_mailboxes | default(0) }}</p>
+                </div>
+            </div>
+        </section>
+
+        <!-- Refresh Button -->
+        <div class="mt-6 flex justify-end">
+            <button id="refresh-btn" type="button"
+                class="inline-flex items-center gap-2 rounded-lg bg-sky-500 px-4 py-2 text-sm font-medium text-white hover:bg-sky-600">
+                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor" class="h-4 w-4">
+                    <path fill-rule="evenodd"
+                        d="M15.312 11.424a5.5 5.5 0 01-9.201 2.466l-.312-.311h2.433a.75.75 0 000-1.5H3.989a.75.75 0 00-.75.75v4.242a.75.75 0 001.5 0v-2.43l.31.31a7 7 0 0011.712-3.138.75.75 0 00-1.449-.39zm1.23-3.723a.75.75 0 00.219-.53V2.927a.75.75 0 00-1.5 0V5.36l-.31-.31A7 7 0 003.239 8.188a.75.75 0 101.448.389A5.5 5.5 0 0113.89 6.11l.311.31h-2.432a.75.75 0 000 1.5h4.243a.75.75 0 00.53-.219z"
+                        clip-rule="evenodd"></path>
+                </svg>
+                Refresh
+            </button>
+        </div>
+    </div>
+</div>
+
+<div id="metrics-bootstrap" class="hidden" data-endpoint="{{ base_path }}/metrics/runtime/data"
+    data-prometheus-path="{{ prometheus.path | default('/metrics') }}"></div>
+<script>
+    (function () {
+        var bootstrapNode = document.getElementById('metrics-bootstrap');
+        var endpoint = bootstrapNode ? bootstrapNode.dataset.endpoint : null;
+        var prometheusPath = bootstrapNode ? bootstrapNode.dataset.prometheusPath : '/metrics';
+        var refreshBtn = document.getElementById('refresh-btn');
+
+        // Initialize utilization bars from data attributes
+        function initUtilizationBars() {
+            var bars = document.querySelectorAll('[data-utilization]');
+            bars.forEach(function (bar) {
+                var val = parseInt(bar.dataset.utilization, 10) || 0;
+                bar.style.width = val + '%';
+            });
+        }
+
+        function formatUptime(seconds) {
+            if (seconds < 60) return seconds + 's';
+            if (seconds < 3600) return Math.floor(seconds / 60) + 'm ' + (seconds % 60) + 's';
+            if (seconds < 86400) {
+                var hours = Math.floor(seconds / 3600);
+                var mins = Math.floor((seconds % 3600) / 60);
+                return hours + 'h ' + mins + 'm';
+            }
+            var days = Math.floor(seconds / 86400);
+            var hours2 = Math.floor((seconds % 86400) / 3600);
+            return days + 'd ' + hours2 + 'h';
+        }
+
+        function updatePage(data) {
+            var uptimeEl = document.getElementById('uptime');
+            if (uptimeEl && data.system) {
+                uptimeEl.textContent = formatUptime(data.system.uptime_seconds || 0);
+            }
+
+            var callsActive = document.getElementById('calls-active');
+            var callsCapacity = document.getElementById('calls-capacity');
+            var callsUtilization = document.getElementById('calls-utilization');
+            var callsUtilBar = document.getElementById('calls-util-bar');
+            var callsUtilBar2 = document.getElementById('calls-util-bar-2');
+
+            if (callsActive && data.calls) {
+                callsActive.textContent = data.calls.active || 0;
+            }
+            if (callsCapacity && data.calls) {
+                callsCapacity.textContent = data.calls.capacity || 0;
+            }
+            if (callsUtilization && data.calls) {
+                callsUtilization.textContent = (data.calls.utilization || 0) + '%';
+            }
+            if (callsUtilBar && data.calls) {
+                callsUtilBar.style.width = (data.calls.utilization || 0) + '%';
+            }
+            if (callsUtilBar2 && data.calls) {
+                callsUtilBar2.style.width = (data.calls.utilization || 0) + '%';
+            }
+
+            var sipDialogs = document.getElementById('sip-dialogs');
+            if (sipDialogs && data.sip) {
+                sipDialogs.textContent = data.sip.dialogs_active || 0;
+            }
+
+            var collectedAt = document.getElementById('collected-at');
+            if (collectedAt) {
+                collectedAt.textContent = data.collected_at || new Date().toISOString();
+            }
+        }
+
+        function refresh() {
+            if (!endpoint) return;
+            refreshBtn.disabled = true;
+            refreshBtn.textContent = 'Loading...';
+
+            fetch(endpoint, { headers: { 'Accept': 'application/json' } })
+                .then(function (resp) {
+                    if (!resp.ok) throw new Error('Request failed: ' + resp.status);
+                    return resp.json();
+                })
+                .then(function (data) {
+                    updatePage(data);
+                })
+                .catch(function (err) {
+                    console.error('Failed to refresh metrics', err);
+                })
+                .finally(function () {
+                    refreshBtn.disabled = false;
+                    refreshBtn.innerHTML = '<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 20 20\" fill=\"currentColor\" class=\"h-4 w-4\"><path fill-rule=\"evenodd\" d=\"M15.312 11.424a5.5 5.5 0 01-9.201 2.466l-.312-.311h2.433a.75.75 0 000-1.5H3.989a.75.75 0 00-.75.75v4.242a.75.75 0 001.5 0v-2.43l.31.31a7 7 0 0011.712-3.138.75.75 0 00-1.449-.39zm1.23-3.723a.75.75 0 00.219-.53V2.927a.75.75 0 00-1.5 0V5.36l-.31-.31A7 7 0 003.239 8.188a.75.75 0 101.448.389A5.5 5.5 0 0113.89 6.11l.311.31h-2.432a.75.75 0 000 1.5h4.243a.75.75 0 00.53-.219z\" clip-rule=\"evenodd\"></path></svg> Refresh';
+                });
+        }
+
+        if (refreshBtn) {
+            refreshBtn.addEventListener('click', refresh);
+        }
+
+        // Initialize on load
+        initUtilizationBars();
+
+        // Auto-refresh every 30 seconds
+        setInterval(refresh, 30000);
+
+        // Copy Prometheus metrics URL to clipboard
+        window.copyMetricsUrl = function () {
+            var url = window.location.origin + prometheusPath;
+            if (navigator.clipboard && navigator.clipboard.writeText) {
+                navigator.clipboard.writeText(url).then(function () {
+                    window.dispatchEvent(new CustomEvent('toast', {
+                        detail: { title: 'Copied', message: 'Metrics URL copied to clipboard' }
+                    }));
+                }).catch(function (err) {
+                    console.error('Failed to copy:', err);
+                });
+            }
+        };
+    })();
+</script>
+{% endblock %}

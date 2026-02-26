@@ -1342,6 +1342,20 @@ async fn route_evaluate(
             request.uri.to_string(),
             Vec::new(),
         ),
+        RouteResult::Application {
+            option, app_name, ..
+        } => {
+            let rewrites = collect_rewrite_diff(&original_option, &option);
+            (
+                RouteOutcomeView::Application {
+                    app_type: app_name.clone(),
+                },
+                option.caller.to_string(),
+                option.callee.to_string(),
+                request.uri.to_string(),
+                rewrites,
+            )
+        }
     };
 
     Json(RouteEvaluationResponse {
@@ -1564,6 +1578,7 @@ enum RouteOutcomeView {
     Queue(RouteQueueOutcome),
     NotHandled,
     Abort(RouteAbortOutcome),
+    Application { app_type: String },
 }
 
 #[derive(Serialize)]

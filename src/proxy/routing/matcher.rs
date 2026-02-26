@@ -14,7 +14,7 @@ use std::{
 use tracing::info;
 
 use crate::{
-    call::{DialDirection, RoutingState, policy::PolicyCheckStatus},
+    call::{DialDirection, RouteContext, RoutingState, policy::PolicyCheckStatus},
     config::{DialplanHints, RouteResult},
     proxy::routing::{ActionType, RouteQueueConfig, RouteRule, SourceTrunk, TrunkConfig},
 };
@@ -475,6 +475,20 @@ async fn match_invite_impl(
                     option,
                     queue: queue_plan,
                     hints,
+                });
+            }
+            ActionType::Application => {
+                let app_name = rule
+                    .action
+                    .app
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("application action requires 'app' field"))?;
+
+                return Ok(RouteResult::Application {
+                    option,
+                    app_name: app_name.clone(),
+                    app_params: rule.action.app_params.clone(),
+                    auto_answer: rule.action.auto_answer,
                 });
             }
         }

@@ -43,6 +43,11 @@ pub enum SessionAction {
         send_progress: bool,
         await_completion: bool,
     },
+    StartRecording {
+        path: String,
+        max_duration: Option<std::time::Duration>,
+        beep: bool,
+    },
     Hangup {
         reason: Option<CallRecordHangupReason>,
         code: Option<u16>,

@@ -70,6 +70,7 @@ impl ExtensionUserBackend {
             email: model.email,
             note: model.notes,
             allow_guest_calls: model.allow_guest_calls,
+            voicemail_disabled: model.voicemail_disabled,
             ..Default::default()
         }
     }
@@ -180,5 +181,96 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+
+    // ── voicemail_disabled mapping ─────────────────────────────────────────
+
+    #[tokio::test]
+    async fn voicemail_disabled_false_by_default() {
+        // An extension whose voicemail_disabled column was never set should
+        // produce a SipUser with voicemail_disabled = false (voicemail active).
+        let db = setup_db().await;
+
+        extension::ActiveModel {
+            extension: Set("2001".to_string()),
+            sip_password: Set(Some("pw".to_string())),
+            // voicemail_disabled defaults to false in the schema
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .unwrap();
+
+        let backend = ExtensionUserBackend::new(db, 30);
+        let user = backend
+            .get_user("2001", None, None)
+            .await
+            .unwrap()
+            .expect("extension must exist");
+
+        assert!(
+            !user.voicemail_disabled,
+            "voicemail_disabled should be false when not explicitly set"
+        );
+    }
+
+    #[tokio::test]
+    async fn voicemail_disabled_true_is_mapped_from_db() {
+        // An extension with voicemail_disabled = true must flow through to the
+        // SipUser so that the routing layer can skip voicemail chaining.
+        let db = setup_db().await;
+
+        extension::ActiveModel {
+            extension: Set("3001".to_string()),
+            sip_password: Set(Some("pw".to_string())),
+            voicemail_disabled: Set(true),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .unwrap();
+
+        let backend = ExtensionUserBackend::new(db, 30);
+        let user = backend
+            .get_user("3001", None, None)
+            .await
+            .unwrap()
+            .expect("extension must exist");
+
+        assert!(
+            user.voicemail_disabled,
+            "voicemail_disabled = true in DB must be reflected in SipUser"
+        );
+    }
+
+    #[tokio::test]
+    async fn voicemail_enabled_extension_returns_false_disabled() {
+        // Explicitly verify the positive path: voicemail_disabled = false
+        // means voicemail IS enabled (i.e. !voicemail_disabled == true).
+        let db = setup_db().await;
+
+        extension::ActiveModel {
+            extension: Set("4001".to_string()),
+            sip_password: Set(Some("pw".to_string())),
+            voicemail_disabled: Set(false),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .unwrap();
+
+        let backend = ExtensionUserBackend::new(db, 30);
+        let user = backend
+            .get_user("4001", None, None)
+            .await
+            .unwrap()
+            .expect("extension must exist");
+
+        assert!(
+            !user.voicemail_disabled,
+            "voicemail_disabled = false means voicemail is enabled"
+        );
+        // Invariant used by call.rs: dialplan.voicemail_enabled = !callee.voicemail_disabled
+        assert!(!user.voicemail_disabled == true);
     }
 }

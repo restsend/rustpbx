@@ -17,6 +17,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+pub mod app;
 pub mod cookie;
 pub mod policy;
 pub mod queue_config;
@@ -24,6 +25,41 @@ pub mod sip;
 pub mod user;
 pub use cookie::{CalleeDisplayName, TenantId, TransactionCookie, TrunkContext};
 pub use user::SipUser;
+
+pub struct RouteContext<'a> {
+    pub caller: rsip::Uri,
+    pub callee: rsip::Uri,
+    pub original_request: &'a rsip::Request,
+    pub captures: &'a std::collections::HashMap<String, Vec<String>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CallFailureType {
+    NoAnswer,
+    Busy,
+    Declined,
+    Offline,
+    Timeout,
+}
+
+#[async_trait::async_trait]
+pub trait CallAppFactory: Send + Sync {
+    async fn create_app(
+        &self,
+        app_name: &str,
+        context: &RouteContext<'_>,
+        params: &serde_json::Value,
+    ) -> Option<Box<dyn app::CallApp>>;
+}
+
+#[async_trait::async_trait]
+pub trait CallFailureHandler: Send + Sync {
+    async fn on_call_failure(
+        &self,
+        context: &RouteContext<'_>,
+        failure_type: CallFailureType,
+    ) -> Option<Box<dyn app::CallApp>>;
+}
 
 /// Default hold audio that ships with config/sounds.
 pub const DEFAULT_QUEUE_HOLD_AUDIO: &str = "config/sounds/phone-calling.wav";
@@ -390,6 +426,12 @@ pub enum DialplanFlow {
         plan: QueuePlan,
         next: Box<DialplanFlow>,
     },
+    /// Route directly to a call application (voicemail, IVR, etc.)
+    Application {
+        app_name: String,
+        app_params: Option<serde_json::Value>,
+        auto_answer: bool,
+    },
 }
 
 impl DialplanFlow {
@@ -411,6 +453,7 @@ impl DialplanFlow {
                 }
             },
             DialplanFlow::Queue { .. } => false,
+            DialplanFlow::Application { .. } => false,
         }
     }
 
@@ -429,6 +472,7 @@ impl DialplanFlow {
                 }
             },
             DialplanFlow::Queue { next, .. } => next.all_webrtc_target(),
+            DialplanFlow::Application { .. } => false,
         }
     }
 
@@ -440,6 +484,7 @@ impl DialplanFlow {
                 }
             },
             DialplanFlow::Queue { next, .. } => next.find_targets(),
+            DialplanFlow::Application { .. } => None,
         }
     }
 
@@ -634,6 +679,10 @@ pub struct Dialplan {
     pub enable_sipflow: bool,
 
     pub call_forwarding: Option<CallForwardingConfig>,
+    /// Whether voicemail is enabled for the callee extension.
+    /// `true` means the callee has voicemail active (i.e. `voicemail_disabled == false`).
+    /// Populated by the proxy layer after resolving the callee user; defaults to `false`.
+    pub voicemail_enabled: bool,
 
     pub route_invite: Option<Box<dyn RouteInvite>>,
     pub with_original_headers: bool,
@@ -685,6 +734,7 @@ impl Dialplan {
             failure_action: FailureAction::default(),
             enable_sipflow: true, // Enable SIP flow recording by default
             call_forwarding: None,
+            voicemail_enabled: false,
             route_invite: None,
             with_original_headers: true,
             extensions: http::Extensions::new(),
@@ -707,6 +757,20 @@ impl Dialplan {
     }
     pub fn with_targets(mut self, targets: DialStrategy) -> Self {
         self.set_terminal_flow(DialplanFlow::Targets(targets));
+        self
+    }
+
+    pub fn with_application(
+        mut self,
+        app_name: String,
+        app_params: Option<serde_json::Value>,
+        auto_answer: bool,
+    ) -> Self {
+        self.flow = DialplanFlow::Application {
+            app_name,
+            app_params,
+            auto_answer,
+        };
         self
     }
 
@@ -903,6 +967,84 @@ pub struct RoutingState {
 impl Default for RoutingState {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn minimal_request() -> rsip::Request {
+        let uri = rsip::Uri {
+            scheme: Some(rsip::Scheme::Sip),
+            auth: Some(rsip::Auth {
+                user: "1001".into(),
+                password: None,
+            }),
+            host_with_port: rsip::HostWithPort {
+                host: "pbx.local".parse().unwrap(),
+                port: None,
+            },
+            params: vec![],
+            headers: vec![],
+        };
+        rsip::Request {
+            method: rsip::Method::Invite,
+            uri,
+            version: rsip::Version::V2,
+            headers: Default::default(),
+            body: vec![],
+        }
+    }
+
+    // ── Dialplan::voicemail_enabled ────────────────────────────────────────
+
+    #[test]
+    fn new_dialplan_has_voicemail_enabled_false_by_default() {
+        // Voicemail routing must be explicitly enabled by the proxy layer after
+        // looking up the callee.  Until then the flag is false so that calls
+        // without a resolvable callee extension are never silently routed to
+        // voicemail.
+        let dp = Dialplan::new(
+            "sess-001".into(),
+            minimal_request(),
+            DialDirection::Internal,
+        );
+        assert!(
+            !dp.voicemail_enabled,
+            "new Dialplan must default voicemail_enabled to false"
+        );
+    }
+
+    #[test]
+    fn dialplan_voicemail_enabled_can_be_set() {
+        let mut dp = Dialplan::new(
+            "sess-002".into(),
+            minimal_request(),
+            DialDirection::Internal,
+        );
+        dp.voicemail_enabled = true;
+        assert!(dp.voicemail_enabled);
+    }
+
+    #[test]
+    fn dialplan_voicemail_enabled_independent_of_call_forwarding() {
+        // voicemail_enabled and call_forwarding are orthogonal: a call can have
+        // forwarding configured AND voicemail enabled simultaneously.
+        let mut dp = Dialplan::new(
+            "sess-003".into(),
+            minimal_request(),
+            DialDirection::Internal,
+        );
+        dp.voicemail_enabled = true;
+        dp.call_forwarding = Some(CallForwardingConfig {
+            mode: CallForwardingMode::WhenNoAnswer,
+            endpoint: TransferEndpoint::Uri("sip:2001@pbx.local".into()),
+            timeout: std::time::Duration::from_secs(20),
+        });
+
+        assert!(dp.voicemail_enabled);
+        assert!(dp.call_forwarding.is_some());
     }
 }
 
