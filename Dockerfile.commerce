@@ -32,6 +32,7 @@ COPY --from=rust-builder /build/src/addons/archive/templates /app/templates/arch
 COPY --from=rust-builder /build/src/addons/queue/templates /app/templates/queue
 COPY --from=rust-builder /build/src/addons/transcript/templates /app/templates/transcript
 COPY --from=rust-builder /build/config/sounds /app/sounds
+COPY --from=rust-builder /build/src/addons/voicemail/sounds/ /app/sounds/
 
 COPY --from=rust-builder /build/src/addons/wholesale/templates /app/templates/wholesale
 COPY --from=rust-builder /build/src/addons/wholesale/static /app/static/wholesale
