@@ -1401,6 +1401,19 @@ impl CallSession {
                             );
 
                             self.media_bridge = Some(bridge);
+
+                            // Start the bridge immediately during early media to prevent
+                            // track buffers from going stale before 200 OK. The start()
+                            // method has a guard that prevents double-starting, so the
+                            // 200 OK start() call will safely no-op.
+                            if let Some(ref bridge) = self.media_bridge {
+                                if let Err(e) = bridge.start().await {
+                                    warn!(
+                                        session_id = %self.context.session_id,
+                                        "Failed to start media bridge during early media: {}", e
+                                    );
+                                }
+                            }
                         }
 
                         if !call_answered && should_play_local {
