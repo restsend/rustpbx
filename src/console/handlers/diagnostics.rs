@@ -621,6 +621,9 @@ fn trunk_config_from_model(model: &sip_trunk::Model) -> Option<routing::TrunkCon
         origin: routing::ConfigOrigin::embedded(),
         country: None,
         policy: None,
+        register_enabled: if model.register_enabled { Some(true) } else { None },
+        register_expires: model.register_expires.map(|v| v as u32),
+        register_extra_headers: model.register_extra_headers.as_ref().and_then(|v| serde_json::from_value(v.clone()).ok()),
     })
 }
 

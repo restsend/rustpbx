@@ -78,6 +78,12 @@ pub struct TrunkConfig {
     pub country: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub policy: Option<crate::models::policy::PolicySpec>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub register_enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub register_expires: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub register_extra_headers: Option<std::collections::HashMap<String, String>>,
     #[serde(skip)]
     pub origin: ConfigOrigin,
 }
@@ -103,6 +109,9 @@ impl Default for TrunkConfig {
             incoming_to_user_prefix: None,
             country: None,
             policy: None,
+            register_enabled: None,
+            register_expires: None,
+            register_extra_headers: None,
             origin: ConfigOrigin::embedded(),
         }
     }

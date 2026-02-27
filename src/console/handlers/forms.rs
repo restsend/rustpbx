@@ -36,6 +36,11 @@ pub struct ResetForm {
 }
 
 #[derive(Deserialize, Default, Clone)]
+pub struct MfaForm {
+    pub code: String,
+}
+
+#[derive(Deserialize, Default, Clone)]
 pub struct ExtensionPayload {
     pub extension: Option<String>,
     pub display_name: Option<String>,
@@ -81,6 +86,9 @@ pub struct SipTrunkForm {
     pub incoming_to_user_prefix: Option<String>,
     pub metadata: Option<String>,
     pub is_active: Option<bool>,
+    pub register_enabled: Option<bool>,
+    pub register_expires: Option<i32>,
+    pub register_extra_headers: Option<String>,
 }
 
 #[derive(Deserialize, Default, Clone)]

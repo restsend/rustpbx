@@ -126,6 +126,9 @@ pub struct Model {
     pub incoming_from_user_prefix: Option<String>,
     pub incoming_to_user_prefix: Option<String>,
     pub is_active: bool,
+    pub register_enabled: bool,
+    pub register_expires: Option<i32>,
+    pub register_extra_headers: Option<Json>,
     pub metadata: Option<Json>,
     pub created_at: DateTimeUtc,
     pub updated_at: DateTimeUtc,
@@ -191,6 +194,9 @@ impl MigrationTrait for Migration {
                     .col(string_null(Column::IncomingFromUserPrefix).char_len(160))
                     .col(string_null(Column::IncomingToUserPrefix).char_len(160))
                     .col(boolean(Column::IsActive).default(true))
+                    .col(boolean(Column::RegisterEnabled).default(false))
+                    .col(integer_null(Column::RegisterExpires))
+                    .col(json_null(Column::RegisterExtraHeaders))
                     .col(json_null(Column::Metadata))
                     .col(timestamp(Column::CreatedAt).default(Expr::current_timestamp()))
                     .col(timestamp(Column::UpdatedAt).default(Expr::current_timestamp()))

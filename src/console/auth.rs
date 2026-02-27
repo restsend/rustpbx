@@ -21,8 +21,10 @@ use std::time::Duration;
 use tracing::warn;
 
 pub(super) const SESSION_COOKIE_NAME: &str = "rustpbx_session";
+pub(super) const MFA_SESSION_COOKIE_NAME: &str = "rustpbx_mfa";
 const SESSION_TTL_HOURS: u64 = 12;
 const RESET_TOKEN_VALID_MINUTES: u64 = 30;
+const MFA_SESSION_TTL_SECS: u64 = 300; // 5 minutes for MFA verification
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -117,6 +119,83 @@ impl ConsoleState {
         // Always scope the session cookie to the site root so AMI requests outside the
         // console base path still receive it.
         "/"
+    }
+
+    /// Generate a temporary MFA verification session token
+    pub fn generate_mfa_session_token(&self, user_id: i64) -> Option<String> {
+        let expires_at = Utc::now() + Duration::from_secs(MFA_SESSION_TTL_SECS);
+        let payload = format!("{}:{}:mfa", user_id, expires_at.timestamp());
+        let signature = match self.sign(&payload) {
+            Some(sig) => sig,
+            None => {
+                warn!("failed to sign MFA session payload");
+                return None;
+            }
+        };
+        Some(format!("{}:{}", payload, signature))
+    }
+
+    /// Verify MFA session token and return user_id if valid
+    pub fn verify_mfa_session_token(&self, cookie_value: Option<&str>) -> Option<i64> {
+        let value = cookie_value?;
+        let mut segments = value.split(':');
+        let user_id: i64 = segments.next()?.parse().ok()?;
+        let expires: i64 = segments.next()?.parse().ok()?;
+        let _mfa_flag = segments.next()?;
+        let signature = segments.next()?;
+        if segments.next().is_some() {
+            return None;
+        }
+        if expires <= Utc::now().timestamp() {
+            return None;
+        }
+        let payload = format!("{}:{}:mfa", user_id, expires);
+        let expected = self.sign(&payload)?;
+        if expected != signature {
+            return None;
+        }
+        Some(user_id)
+    }
+
+    /// Create MFA session cookie for temporary verification
+    pub fn mfa_session_cookie_header(&self, user_id: i64, request_secure: bool) -> Option<HeaderValue> {
+        let value = self.generate_mfa_session_token(user_id)?;
+        let _is_secure = self.config.secure_cookie || request_secure;
+        let secure_attr = "";
+        let cookie = format!(
+            "{}={}; Path={}; HttpOnly; Max-Age={}{}",
+            MFA_SESSION_COOKIE_NAME,
+            value,
+            self.cookie_path(),
+            MFA_SESSION_TTL_SECS,
+            secure_attr
+        );
+        match HeaderValue::from_str(&cookie) {
+            Ok(header) => Some(header),
+            Err(err) => {
+                warn!("failed to build MFA session cookie header: {}", err);
+                None
+            }
+        }
+    }
+
+    /// Clear MFA session cookie
+    pub fn clear_mfa_session_cookie(&self, request_secure: bool) -> Option<HeaderValue> {
+        let secure_attr = "";
+        let cookie = format!(
+            "{}={}; Path={}; HttpOnly; Max-Age=0{}",
+            MFA_SESSION_COOKIE_NAME,
+            "",
+            self.cookie_path(),
+            secure_attr
+        );
+        match HeaderValue::from_str(&cookie) {
+            Ok(header) => Some(header),
+            Err(err) => {
+                warn!("failed to build clear-MFA-session cookie header: {}", err);
+                None
+            }
+        }
     }
 
     pub async fn registration_policy(&self) -> Result<RegistrationPolicy> {
@@ -341,6 +420,86 @@ impl ConsoleState {
         } else {
             Ok(None)
         }
+    }
+
+    /// Enable MFA for a user with the provided secret and verify the first code
+    pub async fn enable_mfa(
+        &self,
+        user: &UserModel,
+        secret: &str,
+        code: &str,
+    ) -> Result<bool> {
+        use totp_rs::{Algorithm, Secret, TOTP};
+
+        let secret_bytes = match Secret::Encoded(secret.to_string()).to_bytes() {
+            Ok(s) => s,
+            Err(_) => return Ok(false),
+        };
+
+        let totp = match TOTP::new(
+            Algorithm::SHA1,
+            6,
+            1,
+            30,
+            secret_bytes,
+            Some("RustPBX".to_string()),
+            user.email.clone(),
+        ) {
+            Ok(t) => t,
+            Err(_) => return Ok(false),
+        };
+
+        if !totp.check_current(code).unwrap_or(false) {
+            return Ok(false);
+        }
+
+        // Save the secret and enable MFA
+        let mut model: UserActiveModel = user.clone().into();
+        model.mfa_enabled = Set(true);
+        model.mfa_secret = Set(Some(secret.to_string()));
+        model.updated_at = Set(Utc::now());
+        model.update(&self.db).await?;
+
+        Ok(true)
+    }
+
+    /// Disable MFA for a user
+    pub async fn disable_mfa(&self, user: &UserModel) -> Result<UserModel> {
+        let mut model: UserActiveModel = user.clone().into();
+        model.mfa_enabled = Set(false);
+        model.mfa_secret = Set(None);
+        model.updated_at = Set(Utc::now());
+        model.update(&self.db).await.context("failed to disable MFA")
+    }
+
+    /// Verify an MFA code for a user
+    pub fn verify_mfa_code(user: &UserModel, code: &str) -> bool {
+        use totp_rs::{Algorithm, Secret, TOTP};
+
+        let secret = match &user.mfa_secret {
+            Some(s) => s,
+            None => return false,
+        };
+
+        let secret_bytes = match Secret::Encoded(secret.to_string()).to_bytes() {
+            Ok(s) => s,
+            Err(_) => return false,
+        };
+
+        let totp = match TOTP::new(
+            Algorithm::SHA1,
+            6,
+            1,
+            30,
+            secret_bytes,
+            Some("RustPBX".to_string()),
+            user.email.clone(),
+        ) {
+            Ok(t) => t,
+            Err(_) => return false,
+        };
+
+        totp.check_current(code).unwrap_or(false)
     }
 }
 

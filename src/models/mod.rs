@@ -5,6 +5,8 @@ use sqlx::Connection;
 use url::Url;
 
 pub mod add_rewrite_columns;
+pub mod add_sip_trunk_register_columns;
+pub mod add_user_mfa_columns;
 pub mod call_record;
 pub mod call_record_dashboard_index;
 pub mod call_record_from_number_index;
@@ -19,6 +21,7 @@ pub mod policy;
 pub mod presence;
 pub mod routing;
 pub mod sip_trunk;
+pub mod system_notification;
 pub mod user;
 
 pub fn prepare_sqlite_database(database_url: &str) -> Result<()> {

@@ -18,7 +18,7 @@ addon-acme = ["instant-acme"]
 addon-wholesale = ["flate2", "async-compression"]
 addon-archive = ["flate2"]
 addon-endpoint-manager = []
-addon-enterprise-auth = []
+addon-enterprise-auth = ["dep:ldap3", "flate2"]
 addon-transcript = []
 addon-voicemail = []
 addon-observability = ["metrics-exporter-prometheus"]
@@ -160,6 +160,7 @@ hound = "3.5"
 minimp3 = "0.6.1"
 aws-lc-rs = { version = "1", optional = true }
 totp-rs = { version = "5.7.0", features = ["qr", "gen_secret"] }
+ldap3 = { version = "0.11", optional = true }
 
 [dev-dependencies]
 tempfile = "3.24.0"

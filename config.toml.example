@@ -144,3 +144,18 @@ root = "./config/cdr"
 # "to.host" = "123.456.789.00:1234"
 # "from.user" = "12345"
 # "from.host" = "123.456.789.00:1234"
+
+# ── Commercial Addon Licenses ─────────────────────────────────────────────────
+# Map each commercial addon to a named license key, then supply the actual key
+# values under [licenses.keys].  The UI's "Verify" button on the Addon detail
+# page will write these sections automatically.
+#
+# [licenses]
+# [licenses.addons]
+# wholesale         = "enterprise"   # addon id -> key name
+# endpoint-manager  = "enterprise"
+# voicemail         = "basic"
+#
+# [licenses.keys]
+# enterprise = "LICENSE-KEY-XXXX-XXXX-XXXX"
+# basic      = "LICENSE-KEY-YYYY-YYYY-YYYY"

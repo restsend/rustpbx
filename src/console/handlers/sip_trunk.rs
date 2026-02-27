@@ -638,6 +638,20 @@ fn apply_form_to_active_model(
         active.metadata = Set(metadata);
     }
 
+    if !is_update {
+        active.register_enabled = Set(form.register_enabled.unwrap_or(false));
+    } else if let Some(enabled) = form.register_enabled {
+        active.register_enabled = Set(enabled);
+    }
+    if !is_update || form.register_expires.is_some() {
+        active.register_expires = Set(form.register_expires);
+    }
+    if !is_update || form.register_extra_headers.is_some() {
+        let register_extra_headers =
+            parse_json_field(&form.register_extra_headers, "register_extra_headers")?;
+        active.register_extra_headers = Set(register_extra_headers);
+    }
+
     active.updated_at = Set(now);
 
     Ok(())

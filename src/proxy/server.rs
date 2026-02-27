@@ -522,6 +522,11 @@ impl SipServerBuilder {
             )
         };
 
+        // Wire up the SIP endpoint for trunk registration.
+        data_context
+            .trunk_registrar()
+            .set_endpoint(endpoint.inner.clone());
+
         let active_call_registry = Arc::new(ActiveProxyCallRegistry::new());
         let presence_manager = Arc::new(PresenceManager::new(database.clone()));
         presence_manager.load_from_db().await.ok();

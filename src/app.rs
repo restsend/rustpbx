@@ -379,6 +379,10 @@ impl AppStateBuilder {
             tracing::error!("Failed to initialize addons: {}", e);
         }
 
+        // Spawn background update checker (checks miuda.ai/api/check_update daily).
+        #[cfg(feature = "console")]
+        crate::version::spawn_update_checker(db_conn.clone(), token.clone());
+
         #[cfg(feature = "console")]
         {
             if let Some(ref console_state) = app_state.console {

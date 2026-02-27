@@ -1,4 +1,4 @@
-use crate::addons::Addon;
+use crate::addons::{Addon, AddonCategory};
 use crate::app::AppState;
 use std::sync::Arc;
 
@@ -64,18 +64,90 @@ impl AddonRegistry {
 
     pub async fn initialize_all(&self, state: AppState) -> anyhow::Result<()> {
         let config = state.config();
+
+        // Check licenses for all commercial addons at startup
+        #[cfg(feature = "commerce")]
+        {
+            self.check_all_licenses(config).await;
+        }
+
         for addon in &self.addons {
             if !self.is_enabled(addon.id(), &config) {
                 tracing::info!("Addon {} is disabled", addon.name());
                 continue;
             }
+
+            // Check license for commercial addons
+            #[cfg(feature = "commerce")]
+            {
+                if addon.category() == AddonCategory::Commercial {
+                    let can_run =
+                        crate::license::can_enable_addon(addon.id(), true, &config.licenses).await;
+                    if !can_run {
+                        tracing::error!(
+                            "Cannot enable addon {}: license is invalid or expired",
+                            addon.name()
+                        );
+                        continue;
+                    }
+                }
+            }
+
             tracing::info!("Initializing addon: {}", addon.name());
-            // Commercial addons would check license here
             if let Err(e) = addon.initialize(state.clone()).await {
                 tracing::error!("Failed to initialize addon {}: {}", addon.name(), e);
             }
         }
         Ok(())
+    }
+
+    /// Check all licenses at startup and log any issues.
+    #[cfg(feature = "commerce")]
+    async fn check_all_licenses(&self, config: &crate::config::Config) {
+        let commercial_addons: Vec<String> = self
+            .addons
+            .iter()
+            .filter(|a| a.category() == AddonCategory::Commercial)
+            .filter(|a| self.is_enabled(a.id(), config))
+            .map(|a| a.id().to_string())
+            .collect();
+
+        if commercial_addons.is_empty() {
+            return;
+        }
+
+        let results =
+            crate::license::check_all_addon_licenses(&commercial_addons, &config.licenses).await;
+
+        for (addon_id, status) in results {
+            if !status.valid {
+                if status.key_name.is_empty() {
+                    tracing::error!(
+                        "Addon '{}' is commercial but no license key is configured",
+                        addon_id
+                    );
+                } else if status.expired {
+                    tracing::error!(
+                        "Addon '{}' license has expired (key: {})",
+                        addon_id,
+                        status.key_name
+                    );
+                } else {
+                    tracing::error!(
+                        "Addon '{}' license is invalid (key: {})",
+                        addon_id,
+                        status.key_name
+                    );
+                }
+            } else {
+                tracing::info!(
+                    "Addon '{}' license is valid (key: {}, expires: {:?})",
+                    addon_id,
+                    status.key_name,
+                    status.expiry
+                );
+            }
+        }
     }
 
     pub async fn seed_all_fixtures(&self, state: AppState) -> anyhow::Result<()> {
@@ -167,6 +239,7 @@ impl AddonRegistry {
                     restart_required: false, // Caller should set this
                     license_status: None,
                     license_expiry: None,
+                    license_plan: None,
                 }
             })
             .collect()

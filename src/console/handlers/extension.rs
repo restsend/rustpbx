@@ -777,6 +777,9 @@ mod tests {
             is_active: true,
             is_staff: true,
             is_superuser: true,
+            mfa_enabled: false,
+            mfa_secret: None,
+            auth_source: "local".into(),
         }
     }
 

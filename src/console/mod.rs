@@ -154,6 +154,28 @@ impl ConsoleState {
             },
         );
 
+        let base_path_for_fn = self.base_path().to_string();
+        tmpl_env.add_function(
+            "url_for",
+            move |suffix: &str| -> Result<String, minijinja::Error> {
+                let trimmed = suffix.trim();
+                if trimmed.is_empty() || trimmed == "/" {
+                    return Ok(format!("{}/", base_path_for_fn));
+                }
+                if trimmed.starts_with('/') {
+                    if base_path_for_fn == "/" {
+                        Ok(trimmed.to_string())
+                    } else {
+                        Ok(format!("{}{}", base_path_for_fn, trimmed))
+                    }
+                } else if base_path_for_fn == "/" {
+                    Ok(format!("/{}", trimmed))
+                } else {
+                    Ok(format!("{}/{}", base_path_for_fn, trimmed))
+                }
+            },
+        );
+
         let mut paths = vec!["templates".to_string()];
         if let Some(app_state) = self.app_state() {
             paths.extend(

@@ -25,6 +25,7 @@ pub fn ami_router(app_state: AppState) -> Router<AppState> {
         .route("/transactions", get(list_transactions))
         .route("/shutdown", post(shutdown_handler))
         .route("/reload/trunks", post(reload_trunks_handler))
+        .route("/trunk_registrations", get(trunk_registrations_handler))
         .route("/reload/routes", post(reload_routes_handler))
         .route("/reload/acl", post(reload_acl_handler))
         .route("/reload/app", post(reload_app_handler))
@@ -195,6 +196,19 @@ async fn reload_trunks_handler(State(state): State<AppState>, client_ip: ClientA
                 .into_response()
         }
     }
+}
+
+async fn trunk_registrations_handler(State(state): State<AppState>) -> Response {
+    let statuses = state
+        .sip_server()
+        .inner
+        .data_context
+        .trunk_registrar()
+        .get_statuses();
+    Json(serde_json::json!({
+        "registrations": statuses,
+    }))
+    .into_response()
 }
 
 async fn reload_routes_handler(State(state): State<AppState>, client_ip: ClientAddr) -> Response {
