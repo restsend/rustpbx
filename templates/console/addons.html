@@ -53,6 +53,13 @@
                                 {% if addon.license_status == "Valid" %}
                                 <span
                                     class="inline-flex items-center rounded-md bg-green-50 px-2 py-1 text-xs font-medium text-green-700 ring-1 ring-inset ring-green-600/20">Valid</span>
+                                {% elif addon.license_status == "Expired" %}
+                                <span
+                                    class="inline-flex items-center rounded-md bg-red-50 px-2 py-1 text-xs font-medium text-red-700 ring-1 ring-inset ring-red-600/10">Expired</span>
+                                {% elif addon.license_status == "Not Licensed" %}
+                                <span
+                                    class="inline-flex items-center rounded-md bg-yellow-50 px-2 py-1 text-xs font-medium text-yellow-700 ring-1 ring-inset ring-yellow-600/10">Not
+                                    Licensed</span>
                                 {% else %}
                                 <span
                                     class="inline-flex items-center rounded-md bg-red-50 px-2 py-1 text-xs font-medium text-red-700 ring-1 ring-inset ring-red-600/10">Invalid</span>
@@ -79,12 +86,24 @@
                                         :class="{{ addon.enabled|lower }} ? 'translate-x-5' : 'translate-x-0'"></span>
                                 </button>
                             </td>
-                            <td class="px-4 py-2">
+                            <td class="px-4 py-2 whitespace-nowrap">
                                 {% if addon.config_url %}
                                 <a href="{{ addon.config_url }}"
-                                    class="text-sky-600 hover:text-sky-900 font-medium">Configure</a>
+                                    class="text-sky-600 hover:text-sky-900 text-sm font-medium">Configure</a>
+                                {% endif %}
+                                {% if addon.category == "Commercial" %}
+                                {% if addon.license_status == "Valid" %}
+                                <a href="/console/addons/{{ addon.id }}"
+                                    class="ml-2 text-green-600 hover:text-green-800 text-xs font-medium">Licensed ✓</a>
+                                {% elif addon.license_status == "Expired" %}
+                                <a href="/console/addons/{{ addon.id }}"
+                                    class="text-red-600 hover:text-red-800 text-xs font-medium">Renew License</a>
                                 {% else %}
-                                <span class="text-slate-400 text-xs">No configuration</span>
+                                <a href="/console/addons/{{ addon.id }}"
+                                    class="text-sky-600 hover:text-sky-800 text-xs font-medium">Add License</a>
+                                {% endif %}
+                                {% elif not addon.config_url %}
+                                <span class="text-slate-400 text-xs">—</span>
                                 {% endif %}
                             </td>
                         </tr>

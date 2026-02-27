@@ -20,6 +20,9 @@ impl MigratorTrait for Migrator {
             Box::new(super::call_record_dashboard_index::Migration),
             Box::new(super::call_record_from_number_index::Migration),
             Box::new(super::add_rewrite_columns::Migration),
+            Box::new(super::system_notification::Migration),
+            Box::new(super::add_user_mfa_columns::Migration),
+            Box::new(super::add_sip_trunk_register_columns::Migration),
         ]
     }
 }

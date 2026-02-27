@@ -12,6 +12,7 @@ pub mod diagnostics;
 pub mod extension;
 pub mod forms;
 pub mod metrics;
+pub mod notifications;
 pub mod presence;
 pub mod routing;
 pub mod setting;
@@ -54,7 +55,8 @@ pub fn router(state: Arc<ConsoleState>) -> Router {
         .merge(presence::urls())
         .merge(addons::urls())
         .merge(sipflow::urls())
-        .merge(metrics::urls());
+        .merge(metrics::urls())
+        .merge(notifications::urls());
 
     Router::new()
         .route(&format!("{base_path}/"), get(self::dashboard::dashboard))

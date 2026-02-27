@@ -11,12 +11,13 @@ use serde::Deserialize;
 use serde_json::json;
 use std::fs;
 use std::sync::Arc;
-use toml_edit::{Array, DocumentMut, Item, Table, Value};
+use toml_edit::{Array, DocumentMut, Item, Table, Value, value};
 
 pub fn urls() -> Router<Arc<ConsoleState>> {
     Router::new()
         .route("/addons", get(index))
         .route("/addons/toggle", post(toggle_addon))
+        .route("/addons/verify", post(verify_addon))
         .route("/addons/{id}", get(detail))
 }
 
@@ -43,19 +44,41 @@ pub async fn index(State(state): State<Arc<ConsoleState>>) -> impl IntoResponse 
             addon.enabled = enabled_in_disk;
             addon.restart_required = enabled_in_disk != enabled_in_mem;
 
+            // Check license status for commercial addons
+            #[cfg(feature = "commerce")]
             if addon.category == crate::addons::AddonCategory::Commercial {
-                if let Some(addon_config) = config.addons.get(&addon.id) {
-                    if let Some(key) = addon_config.get("license_key") {
-                        if let Ok(info) = crate::license::verify_license(key).await {
-                            addon.license_status = Some(if info.valid {
+                let license_config = &config.licenses;
+                if let Some((key_name, _key_value)) = license_config
+                    .as_ref()
+                    .and_then(|c| c.get_license_for_addon(&addon.id))
+                {
+                    // We have a license key configured, verify it
+                    match crate::license::verify_addon_license(&addon.id, license_config).await {
+                        Ok(info) => {
+                            let expired = crate::license::is_expired(&info);
+                            addon.license_status = Some(if expired {
+                                "Expired".to_string()
+                            } else if info.valid {
                                 "Valid".to_string()
                             } else {
                                 "Invalid".to_string()
                             });
                             addon.license_expiry =
                                 info.expiry.map(|d| d.format("%Y-%m-%d").to_string());
+                            addon.license_plan = if info.plan.is_empty() {
+                                None
+                            } else {
+                                Some(info.plan)
+                            };
+                        }
+                        Err(e) => {
+                            addon.license_status = Some("Invalid".to_string());
+                            tracing::warn!("License verification failed for {}: {}", addon.id, e);
                         }
                     }
+                } else {
+                    // No license key configured
+                    addon.license_status = Some("Not Licensed".to_string());
                 }
             }
         }
@@ -72,6 +95,115 @@ pub async fn index(State(state): State<Arc<ConsoleState>>) -> impl IntoResponse 
             "nav_active": "addons"
         }),
     )
+}
+
+#[derive(Deserialize)]
+pub struct VerifyAddonPayload {
+    id: String,
+    license_key: String,
+}
+
+/// `POST /addons/verify` — verify a license key and persist it to the config file.
+///
+/// The key is first validated against the upstream license server. If valid it is
+/// written into `[licenses]` so that the addon will be recognised as licensed on
+/// the next start (no restart required for the status to show in the UI).
+pub async fn verify_addon(
+    State(state): State<Arc<ConsoleState>>,
+    Json(payload): Json<VerifyAddonPayload>,
+) -> Response {
+    // ── 1. Basic input validation ──────────────────────────────────────────
+    let license_key = payload.license_key.trim().to_string();
+    if license_key.is_empty() {
+        return json_error(StatusCode::BAD_REQUEST, "License key cannot be empty.").into_response();
+    }
+
+    // ── 2. Remote / cached verification ───────────────────────────────────
+    let info = match crate::license::verify_license(&license_key).await {
+        Ok(i) => i,
+        Err(e) => {
+            return json_error(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                format!("License verification failed: {e}"),
+            )
+            .into_response();
+        }
+    };
+
+    if !info.valid {
+        return json_error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "License key is not valid.",
+        )
+        .into_response();
+    }
+    if crate::license::is_expired(&info) {
+        return json_error(StatusCode::UNPROCESSABLE_ENTITY, "License key has expired.")
+            .into_response();
+    }
+
+    // ── 3. Persist to config file (commerce builds only) ─────────────────
+    #[cfg(feature = "commerce")]
+    {
+        let config_path = match get_config_path(&state) {
+            Ok(p) => p,
+            Err(resp) => return resp,
+        };
+        let mut doc = match load_document(&config_path) {
+            Ok(d) => d,
+            Err(resp) => return resp,
+        };
+
+        // Ensure top-level [licenses] table exists.
+        if !doc.contains_key("licenses") || !doc["licenses"].is_table() {
+            doc["licenses"] = Item::Table(Table::new());
+        }
+
+        {
+            let licenses_table = doc["licenses"]
+                .as_table_mut()
+                .expect("[licenses] is a table");
+
+            // [licenses.addons] – addon_id -> key_name (we use addon_id as the key name).
+            if !licenses_table.contains_key("addons") || !licenses_table["addons"].is_table() {
+                licenses_table["addons"] = Item::Table(Table::new());
+            }
+            if let Some(t) = licenses_table["addons"].as_table_mut() {
+                t[payload.id.as_str()] = value(payload.id.clone());
+            }
+
+            // [licenses.keys] – key_name -> actual key value.
+            if !licenses_table.contains_key("keys") || !licenses_table["keys"].is_table() {
+                licenses_table["keys"] = Item::Table(Table::new());
+            }
+            if let Some(t) = licenses_table["keys"].as_table_mut() {
+                t[payload.id.as_str()] = value(license_key.clone());
+            }
+        }
+
+        let doc_text = doc.to_string();
+        if let Err(resp) = parse_config_from_str(&doc_text) {
+            return resp;
+        }
+        if let Err(resp) = persist_document(&config_path, doc_text) {
+            return resp;
+        }
+    }
+
+    let plan = if info.plan.is_empty() {
+        "unknown".to_string()
+    } else {
+        info.plan
+    };
+    let expiry = info.expiry.map(|d| d.format("%Y-%m-%d").to_string());
+
+    Json(json!({
+        "success": true,
+        "message": "License key verified and saved successfully.",
+        "plan": plan,
+        "expiry": expiry,
+    }))
+    .into_response()
 }
 
 #[derive(Deserialize)]
@@ -182,19 +314,41 @@ pub async fn detail(
             addon.enabled = enabled_in_disk;
             addon.restart_required = enabled_in_disk != enabled_in_mem;
 
+            // Check license status for commercial addons
+            #[cfg(feature = "commerce")]
             if addon.category == crate::addons::AddonCategory::Commercial {
-                if let Some(addon_config) = config.addons.get(&addon.id) {
-                    if let Some(key) = addon_config.get("license_key") {
-                        if let Ok(info) = crate::license::verify_license(key).await {
-                            addon.license_status = Some(if info.valid {
+                let license_config = &config.licenses;
+                if let Some((key_name, _key_value)) = license_config
+                    .as_ref()
+                    .and_then(|c| c.get_license_for_addon(&addon.id))
+                {
+                    // We have a license key configured, verify it
+                    match crate::license::verify_addon_license(&addon.id, license_config).await {
+                        Ok(info) => {
+                            let expired = crate::license::is_expired(&info);
+                            addon.license_status = Some(if expired {
+                                "Expired".to_string()
+                            } else if info.valid {
                                 "Valid".to_string()
                             } else {
                                 "Invalid".to_string()
                             });
                             addon.license_expiry =
                                 info.expiry.map(|d| d.format("%Y-%m-%d").to_string());
+                            addon.license_plan = if info.plan.is_empty() {
+                                None
+                            } else {
+                                Some(info.plan)
+                            };
+                        }
+                        Err(e) => {
+                            addon.license_status = Some("Invalid".to_string());
+                            tracing::warn!("License verification failed for {}: {}", addon.id, e);
                         }
                     }
+                } else {
+                    // No license key configured
+                    addon.license_status = Some("Not Licensed".to_string());
                 }
             }
         }

@@ -204,7 +204,12 @@ impl CallSession {
     pub const CALLEE_TRACK_ID: &'static str = "callee-track";
     pub const RINGBACK_TRACK_ID: &'static str = "ringback-track";
 
-    fn check_media_proxy(context: &CallContext, offer_sdp: &str, mode: &MediaProxyMode) -> bool {
+    fn check_media_proxy(
+        context: &CallContext,
+        offer_sdp: &str,
+        mode: &MediaProxyMode,
+        all_webrtc_target: bool,
+    ) -> bool {
         if context.dialplan.recording.enabled {
             return true;
         }
@@ -213,8 +218,13 @@ impl CallSession {
             MediaProxyMode::None => false,
             MediaProxyMode::Nat => false, // TODO: Implement NAT detection
             MediaProxyMode::Auto => {
-                // Check if caller is WebRTC (SAVPF profile in SDP)
-                if offer_sdp.contains("RTP/SAVPF") {
+                // If caller is WebRTC but not all targets are WebRTC, we need media proxy to transcode and bridge
+                // If caller is not WebRTC but all targets are WebRTC, we also need media proxy to transcode and bridge
+                let caller_is_webrtc = Self::is_webrtc_sdp(offer_sdp);
+                if caller_is_webrtc && !all_webrtc_target {
+                    return true;
+                }
+                if !caller_is_webrtc && all_webrtc_target {
                     return true;
                 }
                 false
@@ -3238,9 +3248,7 @@ impl CallSession {
                     "extension": self.context.original_callee,
                     "caller_id": self.context.original_caller,
                 });
-                return self
-                    .run_application("voicemail", Some(params), true)
-                    .await;
+                return self.run_application("voicemail", Some(params), true).await;
             }
         } else if self.failure_is_no_answer() {
             if let Some(config) = self.forwarding_config().cloned() {
@@ -3264,9 +3272,7 @@ impl CallSession {
                     "extension": self.context.original_callee,
                     "caller_id": self.context.original_caller,
                 });
-                return self
-                    .run_application("voicemail", Some(params), true)
-                    .await;
+                return self.run_application("voicemail", Some(params), true).await;
             }
         }
 
@@ -3303,9 +3309,10 @@ impl CallSession {
         let (_event_tx, event_rx) = mpsc::unbounded_channel();
 
         // Get session handle for the controller
-        let handle = self.handle.clone().ok_or_else(|| {
-            anyhow!("CallSessionHandle not available for application")
-        })?;
+        let handle = self
+            .handle
+            .clone()
+            .ok_or_else(|| anyhow!("CallSessionHandle not available for application"))?;
 
         let controller = crate::call::app::CallController {
             session: handle,
@@ -3854,10 +3861,13 @@ impl CallSession {
             }
         }
 
-        let use_media_proxy =
-            Self::check_media_proxy(&context, &offer_sdp, &server.proxy_config.media_proxy);
-
         let all_webrtc_target = context.dialplan.all_webrtc_target();
+        let use_media_proxy = Self::check_media_proxy(
+            &context,
+            &offer_sdp,
+            &server.proxy_config.media_proxy,
+            all_webrtc_target,
+        );
 
         info!(
             session_id = %context.session_id,

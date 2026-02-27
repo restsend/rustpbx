@@ -1,0 +1,39 @@
+{% extends "console/auth_layout.html" %}
+
+{% block title %}Two-Factor Authentication · {{site_name|default('RustPBX')}}{% endblock %}
+
+{% block content %}
+<section class="flex items-center justify-center py-16 px-4">
+    <div class="w-full max-w-md space-y-8 rounded-2xl bg-white/80 p-8 shadow-xl ring-1 ring-black/5 backdrop-blur">
+        <div class="space-y-2 text-center">
+            <div class="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-full bg-sky-100">
+                <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="h-8 w-8 text-sky-600">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75L11.25 15 15 9.75M21 12c0 1.268-.63 2.39-1.593 3.068a3.745 3.745 0 01-1.043 3.296 3.745 3.745 0 01-3.296 1.043A3.745 3.745 0 0112 21c-1.268 0-2.39-.63-3.068-1.593a3.746 3.746 0 01-3.296-1.043 3.745 3.745 0 01-1.043-3.296A3.745 3.745 0 013 12c0-1.268.63-2.39 1.593-3.068a3.745 3.745 0 011.043-3.296 3.746 3.746 0 013.296-1.043A3.746 3.746 0 0112 3c1.268 0 2.39.63 3.068 1.593a3.746 3.746 0 013.296 1.043 3.746 3.746 0 011.043 3.296A3.745 3.745 0 0121 12z" />
+                </svg>
+            </div>
+            <h1 class="text-2xl font-semibold text-slate-900">Two-Factor Authentication</h1>
+            <p class="text-sm text-slate-500">Enter the 6-digit code from your authenticator app</p>
+        </div>
+        {% if error_message %}
+        <div class="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-600">
+            {{ error_message | default("") }}
+        </div>
+        {% endif %}
+        <form action="{{ login_action }}" method="post" class="space-y-6">
+            <div class="space-y-2 text-left">
+                <label for="code" class="block text-sm font-medium text-slate-700">Verification Code</label>
+                <input type="text" name="code" id="code" required maxlength="6" pattern="[0-9]*" inputmode="numeric"
+                    class="w-full rounded-xl border border-slate-200 px-4 py-3 text-center text-2xl tracking-widest font-mono shadow-sm focus:border-sky-400 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                    placeholder="000000" autocomplete="one-time-code" />
+            </div>
+            <button type="submit"
+                class="w-full rounded-xl bg-sky-600 px-4 py-3 text-sm font-semibold text-white shadow-lg shadow-sky-200 transition hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-300">Verify</button>
+        </form>
+        <div class="text-center">
+            <a href="{{ url_for('/login') }}" class="text-sm text-sky-600 hover:text-sky-500">
+                Back to login
+            </a>
+        </div>
+    </div>
+</section>
+{% endblock %}

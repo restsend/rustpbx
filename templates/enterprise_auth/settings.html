@@ -1,0 +1,144 @@
+{% extends "console/layout.html" %}
+
+{% block title %}Enterprise Auth · {{site_name|default('RustPBX')}}{% endblock %}
+
+{% block content %}
+<div class="space-y-6">
+    <div class="flex items-center justify-between">
+        <div>
+            <h1 class="text-2xl font-semibold text-slate-900">Enterprise Auth</h1>
+            <p class="mt-1 text-sm text-slate-500">Configure LDAP/AD authentication and MFA settings</p>
+        </div>
+    </div>
+
+    <div class="grid gap-6 lg:grid-cols-2">
+        <!-- LDAP Settings -->
+        <div class="rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
+            <h2 class="text-lg font-semibold text-slate-900">LDAP/AD Authentication</h2>
+            <p class="mt-1 text-sm text-slate-500">Connect to your corporate directory for user authentication</p>
+
+            <form action="{{ url_for('/console/enterprise-auth/settings') }}" method="post" class="mt-6 space-y-4">
+                <div class="flex items-center gap-2">
+                    <input type="checkbox" id="ldap_enabled" name="ldap_enabled" {% if settings.ldap_enabled %}checked{% endif %}
+                        class="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-500">
+                    <label for="ldap_enabled" class="text-sm font-medium text-slate-700">Enable LDAP Authentication</label>
+                </div>
+
+                <div>
+                    <label for="ldap_url" class="block text-sm font-medium text-slate-700">LDAP Server URL</label>
+                    <input type="text" id="ldap_url" name="ldap_url" value="{{ settings.ldap_url | default('') }}"
+                        class="mt-1 block w-full rounded-xl border border-slate-200 px-4 py-2 text-sm shadow-sm focus:border-sky-400 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                        placeholder="ldap://localhost:389 or ldaps://localhost:636">
+                </div>
+
+                <div>
+                    <label for="ldap_base_dn" class="block text-sm font-medium text-slate-700">Base DN</label>
+                    <input type="text" id="ldap_base_dn" name="ldap_base_dn" value="{{ settings.ldap_base_dn | default('') }}"
+                        class="mt-1 block w-full rounded-xl border border-slate-200 px-4 py-2 text-sm shadow-sm focus:border-sky-400 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                        placeholder="dc=example,dc=com">
+                </div>
+
+                <div>
+                    <label for="ldap_bind_dn" class="block text-sm font-medium text-slate-700">Bind DN (Service Account)</label>
+                    <input type="text" id="ldap_bind_dn" name="ldap_bind_dn" value="{{ settings.ldap_bind_dn | default('') }}"
+                        class="mt-1 block w-full rounded-xl border border-slate-200 px-4 py-2 text-sm shadow-sm focus:border-sky-400 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                        placeholder="cn=admin,dc=example,dc=com">
+                </div>
+
+                <div>
+                    <label for="ldap_bind_password" class="block text-sm font-medium text-slate-700">Bind Password</label>
+                    <input type="password" id="ldap_bind_password" name="ldap_bind_password"
+                        class="mt-1 block w-full rounded-xl border border-slate-200 px-4 py-2 text-sm shadow-sm focus:border-sky-400 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                        placeholder="Leave blank to keep current">
+                </div>
+
+                <div>
+                    <label for="ldap_filter" class="block text-sm font-medium text-slate-700">User Filter</label>
+                    <input type="text" id="ldap_filter" name="ldap_filter" value="{{ settings.ldap_filter | default('(uid={username})') }}"
+                        class="mt-1 block w-full rounded-xl border border-slate-200 px-4 py-2 text-sm shadow-sm focus:border-sky-400 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                        placeholder="(uid={username}) or (sAMAccountName={username})">
+                    <p class="mt-1 text-xs text-slate-500">Use {username} as placeholder</p>
+                </div>
+
+                <div class="flex items-center gap-4 pt-2">
+                    <button type="submit" class="rounded-xl bg-sky-600 px-4 py-2 text-sm font-semibold text-white shadow-lg shadow-sky-200 hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-300">
+                        Save LDAP Settings
+                    </button>
+                    <button type="button" id="test_ldap" class="rounded-xl border border-slate-200 bg-white px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50">
+                        Test Connection
+                    </button>
+                </div>
+            </form>
+        </div>
+
+        <!-- MFA Settings -->
+        <div class="rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
+            <h2 class="text-lg font-semibold text-slate-900">Multi-Factor Authentication</h2>
+            <p class="mt-1 text-sm text-slate-500">Add an extra layer of security with TOTP</p>
+
+            <div class="mt-6 space-y-4">
+                <div class="flex items-center justify-between rounded-lg border border-slate-200 p-4">
+                    <div>
+                        <p class="font-medium text-slate-900">TOTP (Time-based OTP)</p>
+                        <p class="text-sm text-slate-500">Use Google Authenticator, Authy, etc.</p>
+                    </div>
+                    {% if current_user.mfa_enabled %}
+                    <form action="{{ mfa_disable_url }}" method="post">
+                        <button type="submit" class="rounded-lg border border-red-200 bg-white px-3 py-1.5 text-sm font-medium text-red-600 hover:bg-red-50">
+                            Disable
+                        </button>
+                    </form>
+                    {% else %}
+                    <a href="{{ mfa_setup_url }}" class="rounded-lg bg-sky-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-sky-500">
+                        Setup
+                    </a>
+                    {% endif %}
+                </div>
+
+                <div class="rounded-lg bg-slate-50 p-4">
+                    <h3 class="font-medium text-slate-900">Status</h3>
+                    <p class="mt-1 text-sm text-slate-500">
+                        {% if current_user.mfa_enabled %}
+                        <span class="text-green-600 font-medium">MFA is enabled</span>
+                        {% else %}
+                        <span class="text-slate-500">MFA is not enabled for your account</span>
+                        {% endif %}
+                    </p>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+document.getElementById('test_ldap').addEventListener('click', async function() {
+    const url = document.getElementById('ldap_url').value;
+    if (!url) {
+        alert('Please enter an LDAP URL');
+        return;
+    }
+
+    this.textContent = 'Testing...';
+    this.disabled = true;
+
+    try {
+        const response = await fetch('/api/enterprise-auth/ldap/test', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ url })
+        });
+        const result = await response.json();
+        if (result.ok) {
+            alert('Connection successful: ' + result.message);
+        } else {
+            alert('Connection failed: ' + result.message);
+        }
+    } catch (e) {
+        alert('Error: ' + e.message);
+    }
+
+    this.textContent = 'Test Connection';
+    this.disabled = false;
+});
+</script>
+{% endblock %}

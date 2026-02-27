@@ -2,10 +2,11 @@ use crate::{
     console::{
         ConsoleState,
         auth::RegistrationPolicy,
-        handlers::forms::{ForgotForm, LoginForm, LoginQuery, RegisterForm, ResetForm},
+        handlers::forms::{ForgotForm, LoginForm, LoginQuery, MfaForm, RegisterForm, ResetForm},
     },
     handler::middleware::clientaddr::ClientAddr,
 };
+use sea_orm::EntityTrait;
 use axum::{
     Router,
     extract::{Form, Path as AxumPath, Query, State},
@@ -29,6 +30,7 @@ fn is_secure_request(headers: &HeaderMap) -> bool {
 pub fn urls() -> Router<Arc<ConsoleState>> {
     Router::new()
         .route("/login", get(login_page).post(login_post))
+        .route("/login/mfa", get(login_mfa_page).post(login_mfa_post))
         .route("/logout", get(logout))
         .route("/register", get(register_page).post(register_post))
         .route("/forgot", get(forgot_page).post(forgot_post))
@@ -121,6 +123,19 @@ pub async fn login_post(
 
     match state.authenticate(identifier, password).await {
         Ok(Some(user)) => {
+            // Check if MFA is required for this user
+            if user.mfa_enabled {
+                // Create MFA session and redirect to verification
+                let redirect_target = state.url_for("/console/login/mfa");
+                let mut response = Redirect::to(&redirect_target).into_response();
+                if let Some(header) = state.mfa_session_cookie_header(user.id, is_secure_request(&headers))
+                {
+                    response.headers_mut().append(SET_COOKIE, header);
+                }
+                return response;
+            }
+
+            // No MFA required, complete login
             if let Err(err) = state.mark_login(&user, client_addr.ip().to_string()).await {
                 warn!("failed to update last_login: {}", err);
             }
@@ -521,4 +536,103 @@ pub async fn reset_post(
                 .into_response()
         }
     }
+}
+
+// MFA Login Handlers
+
+pub async fn login_mfa_page(
+    State(state): State<Arc<ConsoleState>>,
+    headers: HeaderMap,
+) -> Response {
+    // Check for MFA session cookie
+    let mfa_cookie = headers
+        .get(crate::console::auth::MFA_SESSION_COOKIE_NAME)
+        .and_then(|v| v.to_str().ok());
+
+    let user_id = match state.verify_mfa_session_token(mfa_cookie) {
+        Some(id) => id,
+        None => {
+            // No valid MFA session, redirect to login
+            return Redirect::to(&state.url_for("/login")).into_response();
+        }
+    };
+
+    // Get user from database
+    match crate::models::user::Entity::find_by_id(user_id)
+        .one(&state.db)
+        .await
+    {
+        Ok(Some(user)) => {
+            state.render(
+                "console/login_mfa.html",
+                json!({
+                    "login_action": state.url_for("/login/mfa"),
+                    "error_message": null,
+                }),
+            )
+        }
+        _ => Redirect::to(&state.url_for("/login")).into_response(),
+    }
+}
+
+pub async fn login_mfa_post(
+    client_addr: ClientAddr,
+    headers: HeaderMap,
+    State(state): State<Arc<ConsoleState>>,
+    Form(form): Form<crate::console::handlers::forms::MfaForm>,
+) -> Response {
+    // Check for MFA session cookie
+    let mfa_cookie = headers
+        .get(crate::console::auth::MFA_SESSION_COOKIE_NAME)
+        .and_then(|v| v.to_str().ok());
+
+    let user_id = match state.verify_mfa_session_token(mfa_cookie) {
+        Some(id) => id,
+        None => {
+            return Redirect::to(&state.url_for("/login")).into_response();
+        }
+    };
+
+    // Get user from database
+    let user = match crate::models::user::Entity::find_by_id(user_id)
+        .one(&state.db)
+        .await
+    {
+        Ok(Some(user)) => user,
+        _ => {
+            return Redirect::to(&state.url_for("/login")).into_response();
+        }
+    };
+
+    // Verify MFA code
+    if !ConsoleState::verify_mfa_code(&user, &form.code) {
+        return state.render(
+            "console/login_mfa.html",
+            json!({
+                "login_action": state.url_for("/login/mfa"),
+                "error_message": "Invalid verification code",
+            }),
+        );
+    }
+
+    // MFA verified, complete login
+    if let Err(err) = state.mark_login(&user, client_addr.ip().to_string()).await {
+        warn!("failed to update last_login: {}", err);
+    }
+
+    // Clear MFA session and create full session
+    let redirect_target = state.url_for("/");
+    let mut response = Redirect::to(&redirect_target).into_response();
+
+    // Add session cookie
+    if let Some(header) = state.session_cookie_header(user.id, is_secure_request(&headers)) {
+        response.headers_mut().append(SET_COOKIE, header);
+    }
+
+    // Clear MFA session cookie
+    if let Some(header) = state.clear_mfa_session_cookie(is_secure_request(&headers)) {
+        response.headers_mut().append(SET_COOKIE, header);
+    }
+
+    response
 }

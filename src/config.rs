@@ -209,6 +209,12 @@ pub struct Config {
     #[cfg(feature = "addon-telemetry")]
     #[serde(default)]
     pub otel: Option<OtelConfig>,
+    #[cfg(feature = "addon-enterprise-auth")]
+    #[serde(default)]
+    pub enterprise_auth: Option<EnterpriseAuthConfig>,
+    #[cfg(feature = "commerce")]
+    #[serde(default)]
+    pub licenses: Option<LicenseConfig>,
 }
 
 fn default_storage_dir() -> String {
@@ -297,6 +303,80 @@ pub struct OtelConfig {
 
 fn bool_true() -> bool {
     true
+}
+
+/// Configuration for Enterprise Auth (LDAP/AD + MFA)
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct EnterpriseAuthConfig {
+    /// Enable Enterprise Auth
+    #[serde(default)]
+    pub enabled: bool,
+    /// LDAP server URL (e.g., ldap://localhost:389 or ldaps://localhost:636)
+    pub ldap_url: Option<String>,
+    /// Base DN for LDAP search (e.g., "dc=example,dc=com")
+    pub ldap_base_dn: Option<String>,
+    /// Bind DN for LDAP search (e.g., "cn=admin,dc=example,dc=com")
+    pub ldap_user_dn: Option<String>,
+    /// Bind password for LDAP search
+    pub ldap_password: Option<String>,
+    /// LDAP user filter (e.g., "(sAMAccountName={username})" for AD)
+    pub ldap_user_filter: Option<String>,
+    /// Sync users from LDAP periodically (hours)
+    pub sync_interval_hours: Option<u32>,
+    /// Require MFA for all users
+    #[serde(default)]
+    pub mfa_required: bool,
+}
+
+impl Default for EnterpriseAuthConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            ldap_url: None,
+            ldap_base_dn: None,
+            ldap_user_dn: None,
+            ldap_password: None,
+            ldap_user_filter: None,
+            sync_interval_hours: None,
+            mfa_required: false,
+        }
+    }
+}
+
+/// License configuration for commercial addons.
+/// A license key can be associated with multiple addons.
+#[cfg(feature = "commerce")]
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct LicenseConfig {
+    /// License keys mapped to their associated addons.
+    /// Key is a unique identifier (e.g., "wholesale", "enterprise").
+    /// The actual license key is stored in `keys` map.
+    #[serde(default)]
+    pub addons: HashMap<String, String>,
+    /// License keys (name -> key). The key value is stored here.
+    /// This is kept separate so it won't be exposed in UI.
+    #[serde(default)]
+    pub keys: HashMap<String, String>,
+}
+
+#[cfg(feature = "commerce")]
+impl LicenseConfig {
+    /// Get the license key for a specific addon.
+    /// Returns (key_name, key_value) if found.
+    pub fn get_license_for_addon(&self, addon_id: &str) -> Option<(&str, &str)> {
+        let key_name = self.addons.get(addon_id)?;
+        let key_value = self.keys.get(key_name)?;
+        Some((key_name, key_value))
+    }
+
+    /// Get all addons associated with a specific license key.
+    pub fn get_addons_for_key(&self, key_name: &str) -> Vec<&str> {
+        self.addons
+            .iter()
+            .filter(|(_, v)| *v == key_name)
+            .map(|(k, _)| k.as_str())
+            .collect()
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -877,6 +957,10 @@ impl Default for Config {
             metrics: None,
             #[cfg(feature = "addon-telemetry")]
             otel: None,
+            #[cfg(feature = "addon-enterprise-auth")]
+            enterprise_auth: None,
+            #[cfg(feature = "commerce")]
+            licenses: None,
         }
     }
 }

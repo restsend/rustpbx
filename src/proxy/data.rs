@@ -23,6 +23,7 @@ use crate::{
         ConfigOrigin, DestConfig, MatchConditions, RewriteRules, RouteAction, RouteDirection,
         RouteQueueConfig, RouteRule, TrunkConfig,
     },
+    proxy::trunk_registrar::TrunkRegistrar,
 };
 
 pub struct ProxyDataContext {
@@ -32,6 +33,7 @@ pub struct ProxyDataContext {
     routes: RwLock<Vec<RouteRule>>,
     acl_rules: RwLock<Vec<String>>,
     db: Option<DatabaseConnection>,
+    trunk_registrar: Arc<TrunkRegistrar>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -60,6 +62,8 @@ pub struct GeneratedFileMetrics {
 
 impl ProxyDataContext {
     pub async fn new(config: Arc<ProxyConfig>, db: Option<DatabaseConnection>) -> Result<Self> {
+        let trunk_registrar = Arc::new(TrunkRegistrar::new());
+
         let ctx = Self {
             config: RwLock::new(config.clone()),
             trunks: RwLock::new(HashMap::new()),
@@ -67,12 +71,17 @@ impl ProxyDataContext {
             routes: RwLock::new(Vec::new()),
             acl_rules: RwLock::new(Vec::new()),
             db,
+            trunk_registrar,
         };
         let _ = ctx.reload_trunks(false, None).await?;
         let _ = ctx.reload_queues(false, None).await?;
         let _ = ctx.reload_routes(false, None).await?;
         let _ = ctx.reload_acl_rules(false, None)?;
         Ok(ctx)
+    }
+
+    pub fn trunk_registrar(&self) -> &Arc<TrunkRegistrar> {
+        &self.trunk_registrar
     }
 
     pub fn config(&self) -> Arc<ProxyConfig> {
@@ -252,7 +261,11 @@ impl ProxyDataContext {
         }
 
         let len = trunks.len();
-        *self.trunks.write().unwrap() = trunks;
+        *self.trunks.write().unwrap() = trunks.clone();
+
+        // Reconcile trunk registrations after reload.
+        self.trunk_registrar.reconcile(&trunks).await;
+
         let finished_at = Utc::now();
         let duration_ms = (finished_at - started_at).num_milliseconds();
         info!(
@@ -848,6 +861,15 @@ fn convert_trunk(model: sip_trunk::Model) -> Option<(String, TrunkConfig)> {
         incoming_to_user_prefix: model.incoming_to_user_prefix,
         country: None,
         policy: None,
+        register_enabled: if model.register_enabled {
+            Some(true)
+        } else {
+            None
+        },
+        register_expires: model.register_expires.map(|v| v as u32),
+        register_extra_headers: model
+            .register_extra_headers
+            .and_then(|v| serde_json::from_value(v).ok()),
         origin: ConfigOrigin::embedded(),
     };
 

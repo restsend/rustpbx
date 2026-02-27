@@ -1,0 +1,65 @@
+{% extends "console/layout.html" %}
+
+{% block title %}Setup MFA · {{site_name|default('RustPBX')}}{% endblock %}
+
+{% block content %}
+<div class="mx-auto max-w-lg space-y-6">
+    <div class="text-center">
+        <h1 class="text-2xl font-semibold text-slate-900">Set Up Authenticator App</h1>
+        <p class="mt-2 text-sm text-slate-500">Scan the QR code with your authenticator app</p>
+    </div>
+
+    <div class="rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
+        {% if error == 'invalid_code' %}
+        <div class="mb-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-600">
+            Invalid verification code. Please try again.
+        </div>
+        {% endif %}
+
+        <div class="flex flex-col items-center">
+            {% if qr_code %}
+            <div class="mb-4 rounded-lg bg-white p-4 border border-slate-200">
+                <img src="{{ qr_code }}" alt="QR Code" class="w-48 h-48">
+            </div>
+            {% else %}
+            <div class="mb-4 flex h-48 w-48 items-center justify-center rounded-lg bg-slate-100 text-slate-400">
+                QR Code not available
+            </div>
+            {% endif %}
+
+            <div class="w-full space-y-4">
+                <div class="rounded-lg bg-slate-50 p-4">
+                    <p class="text-sm font-medium text-slate-700">Manual entry key:</p>
+                    <p class="mt-1 font-mono text-sm text-slate-600 break-all">{{ secret }}</p>
+                </div>
+
+                <p class="text-sm text-slate-500">
+                    Enter the 6-digit code from your authenticator app to verify setup.
+                </p>
+
+                <form action="{{ setup_action }}" method="post" class="space-y-4">
+                    <input type="hidden" name="secret" value="{{ secret }}">
+
+                    <div>
+                        <label for="code" class="block text-sm font-medium text-slate-700">Verification Code</label>
+                        <input type="text" id="code" name="code" required maxlength="6" pattern="[0-9]*" inputmode="numeric"
+                            class="mt-1 block w-full rounded-xl border border-slate-200 px-4 py-3 text-center text-2xl tracking-widest font-mono shadow-sm focus:border-sky-400 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                            placeholder="000000" autocomplete="one-time-code">
+                    </div>
+
+                    <button type="submit"
+                        class="w-full rounded-xl bg-sky-600 px-4 py-3 text-sm font-semibold text-white shadow-lg shadow-sky-200 hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-300">
+                        Verify and Enable MFA
+                    </button>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <div class="text-center">
+        <a href="{{ settings_url }}" class="text-sm text-sky-600 hover:text-sky-500">
+            Cancel and go back
+        </a>
+    </div>
+</div>
+{% endblock %}

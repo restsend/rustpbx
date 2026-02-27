@@ -107,6 +107,23 @@ default('RustPBX') }}{% endblock %}
                             </div>
                         </div>
                     </button>
+                    <button type="button" class="flex-1 rounded-md px-4 py-2 text-left transition sm:flex-none"
+                        :class="activeTab === 'registration' ? 'bg-white text-sky-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'"
+                        :aria-selected="activeTab === 'registration'" aria-controls="sip-trunk-tab-registration"
+                        @click="activeTab = 'registration'">
+                        <div class="flex items-center gap-2">
+                            <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                                stroke-width="1.8">
+                                <path stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4" />
+                                <path stroke-linecap="round" stroke-linejoin="round"
+                                    d="M12 2a10 10 0 110 20 10 10 0 010-20z" />
+                            </svg>
+                            <div>
+                                <span class="text-sm">Registration</span>
+                                <span class="block text-[11px] font-normal text-slate-400">Outbound REGISTER</span>
+                            </div>
+                        </div>
+                    </button>
                 </nav>
             </div>
 
@@ -289,6 +306,92 @@ default('RustPBX') }}{% endblock %}
                 </section>
             </div>
 
+            <div class="space-y-6" x-show="activeTab === 'registration'" x-transition.opacity x-cloak
+                id="sip-trunk-tab-registration" role="tabpanel" tabindex="0">
+                <section class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+                    <h2 class="text-sm font-semibold text-slate-900">Outbound registration</h2>
+                    <p class="mt-1 text-sm text-slate-500">
+                        When enabled, RustPBX will periodically send SIP REGISTER requests to the trunk's SIP server
+                        to maintain connectivity and authentication.
+                    </p>
+                    <div class="mt-4 grid gap-4 md:grid-cols-2">
+                        <div class="flex flex-col gap-2">
+                            <span class="text-sm font-medium text-slate-700">Enable registration</span>
+                            <button type="button" @click="form.register_enabled = !form.register_enabled"
+                                class="inline-flex items-center gap-2 rounded-lg px-3 py-1 text-xs font-semibold ring-2 transition"
+                                :class="form.register_enabled ? 'bg-emerald-50 text-emerald-600 ring-emerald-200' : 'bg-slate-100 text-slate-500 ring-slate-200'">
+                                <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="none" stroke="currentColor"
+                                    stroke-width="1.6">
+                                    <path stroke-linecap="round" stroke-linejoin="round" d="M5 10l4 4 6-8"
+                                        x-show="form.register_enabled"></path>
+                                    <path stroke-linecap="round" stroke-linejoin="round" d="M6 6l8 8M6 14l8-8"
+                                        x-show="!form.register_enabled"></path>
+                                </svg>
+                                <span x-text="form.register_enabled ? 'Enabled' : 'Disabled'"></span>
+                            </button>
+                        </div>
+                        <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                            Expires (seconds)
+                            <input type="number" min="60" step="1" x-model="form.register_expires"
+                                :disabled="!form.register_enabled"
+                                class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200 disabled:bg-slate-50 disabled:text-slate-400"
+                                placeholder="300">
+                            <span class="text-xs font-normal text-slate-400">How often the registration is refreshed.
+                                Default: 300.</span>
+                        </label>
+                    </div>
+                    <label class="mt-4 flex flex-col gap-2 text-sm font-medium text-slate-700">
+                        Extra SIP headers (JSON)
+                        <textarea rows="4" x-model="form.register_extra_headers" :disabled="!form.register_enabled"
+                            class="font-mono rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200 disabled:bg-slate-50 disabled:text-slate-400"
+                            placeholder='{"X-Tenant-Id": "abc123"}'></textarea>
+                        <span class="text-xs font-normal text-slate-400">JSON object of header name → value pairs to
+                            include in REGISTER requests.</span>
+                    </label>
+                </section>
+
+                <template x-if="form.register_enabled && mode === 'edit' && regStatus">
+                    <section class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+                        <h2 class="text-sm font-semibold text-slate-900">Registration status</h2>
+                        <dl class="mt-4 grid gap-4 md:grid-cols-2 text-sm">
+                            <div class="flex items-center justify-between gap-6">
+                                <dt class="font-medium text-slate-500">Status</dt>
+                                <dd>
+                                    <span
+                                        class="inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-xs font-semibold"
+                                        :class="regStatus.registered ? 'bg-emerald-50 text-emerald-600' : 'bg-rose-50 text-rose-600'">
+                                        <span class="h-1.5 w-1.5 rounded-full"
+                                            :class="regStatus.registered ? 'bg-emerald-400' : 'bg-rose-400'"></span>
+                                        <span x-text="regStatus.registered ? 'Registered' : 'Not registered'"></span>
+                                    </span>
+                                </dd>
+                            </div>
+                            <div class="flex items-center justify-between gap-6">
+                                <dt class="font-medium text-slate-500">Remote</dt>
+                                <dd class="text-slate-700" x-text="regStatus.remote_addr || '—'"></dd>
+                            </div>
+                            <div class="flex items-center justify-between gap-6">
+                                <dt class="font-medium text-slate-500">Expires</dt>
+                                <dd class="text-slate-700" x-text="regStatus.expires ? regStatus.expires + 's' : '—'">
+                                </dd>
+                            </div>
+                            <div class="flex items-center justify-between gap-6">
+                                <dt class="font-medium text-slate-500">Last register</dt>
+                                <dd class="text-slate-700"
+                                    x-text="regStatus.last_register_at ? new Date(regStatus.last_register_at).toLocaleString() : '—'">
+                                </dd>
+                            </div>
+                            <template x-if="regStatus.error">
+                                <div class="md:col-span-2 flex items-center gap-2">
+                                    <dt class="font-medium text-slate-500">Error</dt>
+                                    <dd class="text-rose-600 text-xs" x-text="regStatus.error"></dd>
+                                </div>
+                            </template>
+                        </dl>
+                    </section>
+                </template>
+            </div>
+
             <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                 <p class="text-xs text-slate-400">Changes are saved via the API without page reloads.</p>
                 <div class="flex items-center gap-3">
@@ -354,7 +457,11 @@ default('RustPBX') }}{% endblock %}
                 incoming_to_user_prefix: '',
                 metadata: '',
                 is_active: true,
+                register_enabled: false,
+                register_expires: '',
+                register_extra_headers: '',
             },
+            regStatus: null,
             success: null,
             error: null,
             saving: false,
@@ -410,6 +517,12 @@ default('RustPBX') }}{% endblock %}
                 this.form.incoming_to_user_prefix = model.incoming_to_user_prefix || '';
                 this.form.metadata = this.formatJson(model.metadata);
                 this.form.is_active = model.is_active !== false;
+                this.form.register_enabled = model.register_enabled === true;
+                this.form.register_expires = model.register_expires != null ? String(model.register_expires) : '';
+                this.form.register_extra_headers = this.formatJson(model.register_extra_headers);
+                if (this.form.register_enabled && this.mode === 'edit') {
+                    this.loadRegStatus();
+                }
             },
             get pageTitle() {
                 if (this.mode === 'edit') {
@@ -447,6 +560,21 @@ default('RustPBX') }}{% endblock %}
             },
             toggleActive() {
                 this.form.is_active = !this.form.is_active;
+            },
+            async loadRegStatus() {
+                try {
+                    const resp = await fetch(`/ami/v1/trunk_registrations`);
+                    if (resp.ok) {
+                        const data = await resp.json();
+                        const regs = data.registrations || {};
+                        const trunkName = this.form.name;
+                        if (regs[trunkName]) {
+                            this.regStatus = regs[trunkName];
+                        }
+                    }
+                } catch (e) {
+                    console.warn('Failed to load registration status', e);
+                }
             },
             formatDate(value) {
                 if (!value) return '—';
@@ -581,6 +709,16 @@ default('RustPBX') }}{% endblock %}
                 params.set('incoming_to_user_prefix', this.form.incoming_to_user_prefix.trim());
                 params.set('metadata', this.form.metadata.trim());
                 params.set('is_active', this.form.is_active ? 'true' : 'false');
+                params.set('register_enabled', this.form.register_enabled ? 'true' : 'false');
+                if (this.form.register_expires !== '' && this.form.register_expires != null) {
+                    const expNum = Number(this.form.register_expires);
+                    if (!Number.isNaN(expNum) && expNum >= 60) {
+                        params.set('register_expires', String(Math.round(expNum)));
+                    }
+                }
+                if (this.form.register_extra_headers.trim()) {
+                    params.set('register_extra_headers', this.form.register_extra_headers.trim());
+                }
 
                 return params;
             },

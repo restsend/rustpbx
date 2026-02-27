@@ -280,6 +280,23 @@
                         </svg>
                         <span x-show="!sidebarCollapsed" x-transition.opacity x-cloak>Addons</span>
                     </a>
+                    <a href="{{ bp }}/notifications"
+                        class="group mt-1 flex items-center gap-3 rounded-lg px-3 py-2 hover:bg-slate-50 transition-all duration-200 {{ 'bg-sky-50 text-sky-700' if nav_active=='notifications' else 'text-slate-700' }}"
+                        :class="{ 'justify-center gap-0 px-2 py-3': sidebarCollapsed }" title="Notifications"
+                        x-data="{ unread: 0 }"
+                        x-init="fetch('{{ bp }}/api/notifications/unread-count').then(r=>r.json()).then(d=>{ unread=d.count; })">
+                        <span class="relative">
+                            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5"
+                                stroke="currentColor" class="size-5">
+                                <path stroke-linecap="round" stroke-linejoin="round"
+                                    d="M14.857 17.082a23.848 23.848 0 005.454-1.31A8.967 8.967 0 0118 9.75v-.7V9A6 6 0 006 9v.75a8.967 8.967 0 01-2.312 6.022c1.733.64 3.56 1.085 5.455 1.31m5.714 0a24.255 24.255 0 01-5.714 0m5.714 0a3 3 0 11-5.714 0" />
+                            </svg>
+                            <span x-show="unread > 0" x-cloak
+                                class="absolute -top-1 -right-1 flex h-4 min-w-4 items-center justify-center rounded-full bg-rose-500 px-0.5 text-[10px] font-bold text-white leading-none"
+                                x-text="unread > 99 ? '99+' : unread"></span>
+                        </span>
+                        <span x-show="!sidebarCollapsed" x-transition.opacity x-cloak>Notifications</span>
+                    </a>
                     <a href="{{ bp }}/settings"
                         class="group mt-1 flex items-center gap-3 rounded-lg px-3 py-2 hover:bg-slate-50 transition-all duration-200 {{ 'bg-sky-50 text-sky-700' if nav_active=='settings' else 'text-slate-700' }}"
                         :class="{ 'justify-center gap-0 px-2 py-3': sidebarCollapsed }" title="Settings">
@@ -341,13 +358,22 @@
                             class="font-semibold text-sky-600 hover:text-sky-500">Commercial Edition &rarr;</a>
                     </div>
                     {% endif %}
-                    <button class="rounded-lg p-2 hover:bg-slate-100" title="Notifications">
+                    <a href="{{ base_path | default('/console') }}/notifications"
+                        class="relative rounded-lg p-2 hover:bg-slate-100" title="Notifications" x-data="{ unread: 0 }"
+                        x-init="
+                            const refresh = () => fetch('{{ base_path | default('/console') }}/api/notifications/unread-count').then(r=>r.json()).then(d=>{ unread=d.count; }).catch(()=>{});
+                            refresh();
+                            window.addEventListener('notifications:refresh', refresh);
+                        ">
                         <svg class="h-5 w-5 text-slate-600" viewBox="0 0 24 24" fill="none" stroke="currentColor"
                             stroke-width="1.8">
                             <path stroke-linecap="round" stroke-linejoin="round"
                                 d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6 6 0 10-12 0v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9" />
                         </svg>
-                    </button>
+                        <span x-show="unread > 0" x-cloak
+                            class="absolute top-0.5 right-0.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-rose-500 px-0.5 text-[10px] font-bold text-white leading-none"
+                            x-text="unread > 99 ? '99+' : unread"></span>
+                    </a>
                     {% if logout_url %}
                     <a href="{{ logout_url }}"
                         class="rounded-lg bg-rose-500 px-3 py-1.5 text-xs font-semibold text-white hover:bg-rose-400">Sign

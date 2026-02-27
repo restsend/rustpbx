@@ -82,143 +82,236 @@
         <!-- License Section (if Commercial) -->
         {% if addon.category == "Commercial" %}
         <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5 mt-6">
-            <div class="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+
+            <!-- Card header -->
+            <div class="flex flex-col gap-2 md:flex-row md:items-start md:justify-between">
                 <div>
                     <h2 class="text-base font-semibold text-slate-900">License</h2>
-                    <p class="text-xs text-slate-500">
-                        This is a commercial addon. You can purchase a license at <a href="https://miuda.ai/buy"
-                            target="_blank" class="text-sky-600 hover:text-sky-500">miuda.ai/buy</a>.
+                    <p class="text-xs text-slate-500 mt-0.5">
+                        Commercial addon &mdash; purchase or renew at
+                        <a href="https://miuda.ai/buy" target="_blank"
+                            class="text-sky-600 hover:text-sky-500 font-medium">miuda.ai/buy</a>.
+                    </p>
+                </div>
+                <!-- Current status badge (server-side) -->
+                {% if addon.license_status %}
+                <div class="flex-shrink-0">
+                    {% if addon.license_status == "Valid" %}
+                    <span
+                        class="inline-flex items-center gap-1.5 rounded-full bg-green-50 px-3 py-1 text-xs font-semibold text-green-700 ring-1 ring-inset ring-green-600/20">
+                        <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor">
+                            <path fill-rule="evenodd"
+                                d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.857-9.809a.75.75 0 00-1.214-.882l-3.483 4.79-1.88-1.88a.75.75 0 10-1.06 1.061l2.5 2.5a.75.75 0 001.137-.089l4-5.5z"
+                                clip-rule="evenodd" />
+                        </svg>
+                        Valid
+                    </span>
+                    {% elif addon.license_status == "Expired" %}
+                    <span
+                        class="inline-flex items-center gap-1.5 rounded-full bg-red-50 px-3 py-1 text-xs font-semibold text-red-700 ring-1 ring-inset ring-red-600/20">
+                        <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor">
+                            <path fill-rule="evenodd"
+                                d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.28 7.22a.75.75 0 00-1.06 1.06L8.94 10l-1.72 1.72a.75.75 0 101.06 1.06L10 11.06l1.72 1.72a.75.75 0 101.06-1.06L11.06 10l1.72-1.72a.75.75 0 00-1.06-1.06L10 8.94 8.28 7.22z"
+                                clip-rule="evenodd" />
+                        </svg>
+                        Expired
+                    </span>
+                    {% else %}
+                    <span
+                        class="inline-flex items-center gap-1.5 rounded-full bg-yellow-50 px-3 py-1 text-xs font-semibold text-yellow-700 ring-1 ring-inset ring-yellow-600/20">
+                        <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor">
+                            <path fill-rule="evenodd"
+                                d="M8.485 2.495c.673-1.167 2.357-1.167 3.03 0l6.28 10.875c.673 1.167-.17 2.625-1.516 2.625H3.72c-1.347 0-2.189-1.458-1.515-2.625L8.485 2.495zM10 5a.75.75 0 01.75.75v3.5a.75.75 0 01-1.5 0v-3.5A.75.75 0 0110 5zm0 9a1 1 0 100-2 1 1 0 000 2z"
+                                clip-rule="evenodd" />
+                        </svg>
+                        Not Licensed
+                    </span>
+                    {% endif %}
+                </div>
+                {% endif %}
+            </div>
+
+            <!-- Validity detail row (plan + expiry) -->
+            {% if addon.license_status == "Valid" %}
+            <dl class="mt-4 grid grid-cols-2 gap-4 sm:grid-cols-3 border-t border-slate-100 pt-4">
+                <div>
+                    <dt class="text-xs font-medium text-slate-500">Plan</dt>
+                    <dd class=\"mt-1 text-sm font-semibold text-slate-800\">{{ addon.license_plan | default('—') }}</dd>
+                </div>
+                {% if addon.license_expiry %}
+                <div>
+                    <dt class="text-xs font-medium text-slate-500">Expires</dt>
+                    <dd class="mt-1 text-sm text-slate-800">{{ addon.license_expiry }}</dd>
+                </div>
+                {% endif %}
+            </dl>
+            {% endif %}
+
+            <!-- Contextual call-to-action banner -->
+            {% if addon.license_status == "Expired" %}
+            <div class="mt-4 rounded-lg bg-red-50 border border-red-200 p-4 flex items-start gap-3">
+                <svg class="h-5 w-5 text-red-500 flex-shrink-0 mt-0.5" viewBox="0 0 20 20" fill="currentColor">
+                    <path fill-rule="evenodd"
+                        d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.28 7.22a.75.75 0 00-1.06 1.06L8.94 10l-1.72 1.72a.75.75 0 101.06 1.06L10 11.06l1.72 1.72a.75.75 0 101.06-1.06L11.06 10l1.72-1.72a.75.75 0 00-1.06-1.06L10 8.94 8.28 7.22z"
+                        clip-rule="evenodd" />
+                </svg>
+                <div class="flex-1">
+                    <p class="text-sm font-medium text-red-800">License expired{% if addon.license_expiry %} on {{
+                        addon.license_expiry }}{% endif %}</p>
+                    <p class="text-xs text-red-700 mt-0.5">Enter your renewed key below or
+                        <a href="https://miuda.ai/buy" target="_blank" class="underline font-medium">purchase a new
+                            license</a>.
                     </p>
                 </div>
             </div>
-
-            <div class="mt-4 space-y-4">
-                <div>
-                    <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">License
-                        Key</label>
-                    <div class="mt-1 flex rounded-md shadow-sm">
-                        <input type="text" x-model="licenseKey"
-                            class="block w-full rounded-none rounded-l-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                            placeholder="Enter your license key">
-                        <button type="button" @click="verifyLicense" :disabled="loading"
-                            class="relative -ml-px inline-flex items-center gap-x-1.5 rounded-r-md px-3 py-2 text-sm font-semibold text-slate-700 ring-1 ring-inset ring-slate-300 hover:bg-slate-50 disabled:opacity-60 disabled:cursor-not-allowed">
-                            <span x-show="!loading">Verify</span>
-                            <span x-show="loading">Verifying...</span>
-                        </button>
-                    </div>
+            {% elif addon.license_status != "Valid" %}
+            <div class="mt-4 rounded-lg bg-sky-50 border border-sky-200 p-4 flex items-start gap-3">
+                <svg class="h-5 w-5 text-sky-500 flex-shrink-0 mt-0.5" viewBox="0 0 20 20" fill="currentColor">
+                    <path fill-rule="evenodd"
+                        d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a.75.75 0 000 1.5h.253a.25.25 0 01.244.304l-.459 2.066A1.75 1.75 0 0010.747 15H11a.75.75 0 000-1.5h-.253a.25.25 0 01-.244-.304l.459-2.066A1.75 1.75 0 009.253 9H9z"
+                        clip-rule="evenodd" />
+                </svg>
+                <div class="flex-1">
+                    <p class="text-sm font-medium text-sky-800">No active license</p>
+                    <p class="text-xs text-sky-700 mt-0.5">Enter your key below or
+                        <a href="https://miuda.ai/buy" target="_blank" class="underline font-medium">buy a license</a>
+                        to unlock this addon.
+                    </p>
                 </div>
+            </div>
+            {% endif %}
 
-                <div x-show="error" class="rounded-md bg-red-50 p-4">
-                    <div class="flex">
-                        <div class="flex-shrink-0">
-                            <svg class="h-5 w-5 text-red-400" viewBox="0 0 20 20" fill="currentColor"
-                                aria-hidden="true">
-                                <path fill-rule="evenodd"
-                                    d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.28 7.22a.75.75 0 00-1.06 1.06L8.94 10l-1.72 1.72a.75.75 0 101.06 1.06L10 11.06l1.72 1.72a.75.75 0 101.06-1.06L11.06 10l1.72-1.72a.75.75 0 00-1.06-1.06L10 8.94 8.28 7.22z"
-                                    clip-rule="evenodd" />
-                            </svg>
-                        </div>
-                        <div class="ml-3">
-                            <h3 class="text-sm font-medium text-red-800" x-text="error"></h3>
+            <!-- ── Enter / update key ── -->
+            <div class="mt-5 border-t border-slate-100 pt-5">
+                <!-- For Valid licenses the input is collapsed by default -->
+                {% if addon.license_status == "Valid" %}
+                <button type="button" @click="showInput = !showInput"
+                    class="text-xs font-medium text-slate-500 hover:text-sky-600 flex items-center gap-1 mb-3">
+                    <svg class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
+                        <path
+                            d="M2.695 14.763l-1.262 3.154a.5.5 0 00.65.65l3.155-1.262a4 4 0 001.343-.885L17.5 5.5a2.121 2.121 0 00-3-3L3.58 13.42a4 4 0 00-.885 1.343z" />
+                    </svg>
+                    <span x-text="showInput ? 'Hide' : 'Update key'"></span>
+                </button>
+                <div x-show="showInput" x-cloak>
+                    {% else %}
+                    <div>
+                        {% endif %}
+                        <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400 mb-1">License
+                            Key</label>
+                        <div class="flex rounded-md shadow-sm">
+                            <input type="text" x-model="licenseKey"
+                                class="block w-full rounded-none rounded-l-md border border-slate-200 px-3 py-2 text-sm text-slate-700 placeholder-slate-400 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                placeholder="LICENSE-XXXX-XXXX-XXXX" @keydown.enter="verifyLicense">
+                            <button type="button" @click="verifyLicense" :disabled="loading"
+                                class="relative -ml-px inline-flex items-center gap-x-1.5 rounded-r-md px-4 py-2 text-sm font-semibold text-white bg-sky-600 hover:bg-sky-500 disabled:opacity-60 disabled:cursor-not-allowed transition-colors">
+                                <svg x-show="loading" class="animate-spin h-4 w-4 text-white"
+                                    xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                                    <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor"
+                                        stroke-width="4"></circle>
+                                    <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z"></path>
+                                </svg>
+                                <span x-show="!loading">Verify &amp; Save</span>
+                                <span x-show="loading">Verifying…</span>
+                            </button>
                         </div>
                     </div>
-                </div>
 
-                <div x-show="success" class="rounded-md bg-green-50 p-4">
-                    <div class="flex">
-                        <div class="flex-shrink-0">
-                            <svg class="h-5 w-5 text-green-400" viewBox="0 0 20 20" fill="currentColor"
-                                aria-hidden="true">
+                    <!-- Inline feedback -->
+                    <div x-show="error" x-cloak
+                        class="mt-3 rounded-md bg-red-50 border border-red-200 p-3 flex items-start gap-2">
+                        <svg class="h-4 w-4 text-red-500 flex-shrink-0 mt-0.5" viewBox="0 0 20 20" fill="currentColor">
+                            <path fill-rule="evenodd"
+                                d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.28 7.22a.75.75 0 00-1.06 1.06L8.94 10l-1.72 1.72a.75.75 0 101.06 1.06L10 11.06l1.72 1.72a.75.75 0 101.06-1.06L11.06 10l1.72-1.72a.75.75 0 00-1.06-1.06L10 8.94 8.28 7.22z"
+                                clip-rule="evenodd" />
+                        </svg>
+                        <p class="text-xs text-red-700" x-text="error"></p>
+                    </div>
+
+                    <div x-show="verifiedPlan" x-cloak class="mt-3 rounded-md bg-green-50 border border-green-200 p-3">
+                        <div class="flex items-start gap-2">
+                            <svg class="h-4 w-4 text-green-600 flex-shrink-0 mt-0.5" viewBox="0 0 20 20"
+                                fill="currentColor">
                                 <path fill-rule="evenodd"
                                     d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.857-9.809a.75.75 0 00-1.214-.882l-3.483 4.79-1.88-1.88a.75.75 0 10-1.06 1.061l2.5 2.5a.75.75 0 001.137-.089l4-5.5z"
                                     clip-rule="evenodd" />
                             </svg>
+                            <div>
+                                <p class="text-xs font-semibold text-green-800">License verified and saved!</p>
+                                <p class="text-xs text-green-700 mt-0.5">
+                                    Plan: <span class="font-medium" x-text="verifiedPlan"></span>
+                                    <template x-if="verifiedExpiry">
+                                        <span> &mdash; expires <span x-text="verifiedExpiry"></span></span>
+                                    </template>
+                                </p>
+                            </div>
                         </div>
-                        <div class="ml-3">
-                            <h3 class="text-sm font-medium text-green-800" x-text="success"></h3>
-                        </div>
+                        <p class="text-xs text-green-600 mt-2">Reloading…</p>
                     </div>
                 </div>
-
-                {% if addon.license_status %}
-                <div class="border-t border-slate-200 pt-4">
-                    <h3 class="text-sm font-medium text-slate-900">Current License Status</h3>
-                    <dl class="mt-2 grid grid-cols-1 gap-x-4 gap-y-4 sm:grid-cols-2">
-                        <div class="sm:col-span-1">
-                            <dt class="text-xs font-medium text-slate-500">Status</dt>
-                            <dd class="mt-1 text-sm text-slate-900">
-                                {% if addon.license_status == "Valid" %}
-                                <span
-                                    class="inline-flex items-center rounded-md bg-green-50 px-2 py-1 text-xs font-medium text-green-700 ring-1 ring-inset ring-green-600/20">Valid</span>
-                                {% else %}
-                                <span
-                                    class="inline-flex items-center rounded-md bg-red-50 px-2 py-1 text-xs font-medium text-red-700 ring-1 ring-inset ring-red-600/10">Invalid</span>
-                                {% endif %}
-                            </dd>
-                        </div>
-                        {% if addon.license_expiry %}
-                        <div class="sm:col-span-1">
-                            <dt class="text-xs font-medium text-slate-500">Expires</dt>
-                            <dd class="mt-1 text-sm text-slate-900">{{ addon.license_expiry }}</dd>
-                        </div>
-                        {% endif %}
-                    </dl>
-                </div>
-                {% endif %}
             </div>
-        </div>
-        {% endif %}
+            {% endif %}
 
-        <!-- Screenshots -->
-        {% if addon.screenshots and addon.screenshots|length > 0 %}
-        <div class="mt-6">
-            <h3 class="text-lg font-medium text-slate-900">Screenshots</h3>
-            <div class="mt-4 flex flex-col gap-6">
-                {% for screenshot in addon.screenshots %}
-                <div class="overflow-hidden rounded-lg shadow-sm ring-1 ring-gray-900/5">
-                    <img src="{{ screenshot }}" alt="Screenshot" class="w-full max-w-4xl object-contain">
+            <!-- Screenshots -->
+            {% if addon.screenshots and addon.screenshots|length > 0 %}
+            <div class="mt-6">
+                <h3 class="text-lg font-medium text-slate-900">Screenshots</h3>
+                <div class="mt-4 flex flex-col gap-6">
+                    {% for screenshot in addon.screenshots %}
+                    <div class="overflow-hidden rounded-lg shadow-sm ring-1 ring-gray-900/5">
+                        <img src="{{ screenshot }}" alt="Screenshot" class="w-full max-w-4xl object-contain">
+                    </div>
+                    {% endfor %}
                 </div>
-                {% endfor %}
             </div>
+            {% endif %}
         </div>
-        {% endif %}
     </div>
-</div>
 
-<script>
-    document.addEventListener('alpine:init', () => {
-        Alpine.data('addonDetail', (id) => ({
-            licenseKey: '',
-            error: '',
-            success: '',
-            loading: false,
+    <script>
+        document.addEventListener('alpine:init', () => {
+            Alpine.data('addonDetail', (id) => ({
+                licenseKey: '',
+                error: '',
+                verifiedPlan: '',
+                verifiedExpiry: '',
+                loading: false,
+                showInput: false,
 
-            async verifyLicense() {
-                this.error = '';
-                this.success = '';
-                this.loading = true;
-
-                try {
-                    const response = await fetch('/console/addons/verify', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ id: id, license_key: this.licenseKey })
-                    });
-
-                    const result = await response.json();
-                    if (response.ok && result.success) {
-                        this.success = 'License verified successfully! Please refresh the page.';
-                        setTimeout(() => window.location.reload(), 1500);
-                    } else {
-                        this.error = result.message || 'Verification failed';
+                async verifyLicense() {
+                    this.error = '';
+                    this.verifiedPlan = '';
+                    this.verifiedExpiry = '';
+                    const key = this.licenseKey.trim();
+                    if (!key) {
+                        this.error = 'Please enter a license key.';
+                        return;
                     }
-                } catch (e) {
-                    this.error = 'Network error';
-                } finally {
-                    this.loading = false;
+                    this.loading = true;
+
+                    try {
+                        const response = await fetch('/console/addons/verify', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ id: id, license_key: key })
+                        });
+
+                        const result = await response.json();
+                        if (response.ok && result.success) {
+                            this.verifiedPlan = result.plan || 'unknown';
+                            this.verifiedExpiry = result.expiry || '';
+                            // Reload after a short delay so user can read the confirmation
+                            setTimeout(() => window.location.reload(), 2200);
+                        } else {
+                            this.error = result.message || 'Verification failed.';
+                        }
+                    } catch (e) {
+                        this.error = 'Network error — please try again.';
+                    } finally {
+                        this.loading = false;
+                    }
                 }
-            }
-        }))
-    })
-</script>
-{% endblock %}
+            }))
+        })
+    </script>
+    {% endblock %}

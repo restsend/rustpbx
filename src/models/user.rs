@@ -36,6 +36,13 @@ pub struct Model {
     pub is_active: bool,
     pub is_staff: bool,
     pub is_superuser: bool,
+    /// MFA/TOTP enabled
+    pub mfa_enabled: bool,
+    /// TOTP secret (Base32 encoded)
+    #[serde(skip_serializing)]
+    pub mfa_secret: Option<String>,
+    /// Auth source: "local", "ldap", "enterprise"
+    pub auth_source: String,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -152,6 +159,9 @@ impl MigrationTrait for Migration {
                     .col(boolean(Column::IsActive).default(true))
                     .col(boolean(Column::IsStaff).default(false))
                     .col(boolean(Column::IsSuperuser).default(false))
+                    .col(boolean(Column::MfaEnabled).default(false))
+                    .col(string_null(Column::MfaSecret).char_len(64))
+                    .col(string(Column::AuthSource).char_len(32).default("local"))
                     .to_owned(),
             )
             .await?;

@@ -28,6 +28,7 @@ pub struct AddonInfo {
     pub restart_required: bool,
     pub license_status: Option<String>,
     pub license_expiry: Option<String>,
+    pub license_plan: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
