@@ -1,366 +1,180 @@
-# RustPBX - Secure Software-Defined PBX
+# RustPBX
 
-[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/restsend/rustpbx)
+![Crates.io License](https://img.shields.io/crates/l/rustpbx)
+ ![GitHub commit activity](https://img.shields.io/github/commit-activity/m/restsend/rustpbx) ![Crates.io Total Downloads](https://img.shields.io/crates/d/rustpbx) ![GitHub Repo stars](https://img.shields.io/github/stars/restsend/rustpbx)
 
-RustPBX is a high-performance, secure software-defined PBX (Private Branch Exchange) system implemented in Rust, designed to support AI-powered communication pipelines and modern voice applications.
+
+A high-performance Software-Defined PBX built in Rust. Designed as a programmable foundation for **AI-powered call centers** — route, record, transcribe, and webhook everything.
+
+Different from Asterisk/FreeSWITCH (C modules), RustPBX exposes all call control via **HTTP/Webhook**, so any language can drive call logic.
 
 > **Note**: The Voice Agent functionality has been moved to a separate repository: [Active Call](https://github.com/restsend/active-call). This repository now focuses on the SIP Proxy and PBX features.
+---
 
-## 🚀 Key Features
+## Editions
 
-### SIP PBX Core
+| | Community | Commerce |
+|---|---|---|
+| License | MIT | Commercial |
+| SIP Proxy + Media | ✅ | ✅ |
+| Queue / ACD | ✅ | ✅ |
+| HTTP Router (dynamic routing) | ✅ | ✅ |
+| Call Recording + SipFlow | ✅ | ✅ |
+| Transcript (SenseVoice offline) | ✅ | ✅ |
+| Web Console | ✅ | ✅ |
+| **Voip Wholesale** (VOS3000 alternative) | ❌ | ✅ |
+| **Voicemail Pro** | ❌ | ✅ |
+| **Enterprise Auth** (LDAP/SAML/MFA) | ❌ | ✅ |
+| **Endpoint Manager** (phone auto-provisioning) | ❌ | ✅ |
 
-- **Full SIP Stack**: Complete SIP proxy server with registration, authentication, and call routing
-- **Media Proxy**: Advanced RTP/RTCP media proxying with NAT traversal support
-- **Multi-Transport**: UDP, TCP, and WebSocket transport support
-- **SipFlow Recording**: 🔥 **Advanced unified SIP+RTP recording system** with superior I/O performance
-  - Two backends: Local (file system + SQLite with date-based organization), Remote (distributed)
-  - Open-write-close pattern to avoid file descriptor exhaustion
-  - Query API for on-demand playback and analysis
-- **Call Recording**: Traditional call recording with multiple storage backends (legacy)
-- **User Management**: Flexible user authentication and registration system
+---
 
-## 📖 Documentation
+## Core Capabilities
 
-For detailed configuration and usage instructions, please refer to:
+- **SIP Proxy** — Full SIP stack (UDP/TCP/WebSocket), registration, auth, B2BUA
+- **HTTP Router** — Every INVITE hits your webhook; you return routing decision in JSON
+- **Queue / ACD** — Sequential or parallel agent ringing, hold music, fallback actions
+- **Media Proxy** — RTP relay, NAT traversal, WebRTC ↔ SIP bridging
+- **SipFlow Recording** — Unified SIP+RTP capture; date-organized, query-on-demand (no file-handle exhaustion)
+- **Transcript** — Post-call transcription via local SenseVoice (offline, no cloud dependency)
+- **CDR Webhooks** — Push call detail records + recordings to your system on hangup
+- **WebRTC Phone** — Built-in browser softphone for testing
 
-- [**Configuration Guide**](docs/configuration.md): Complete reference for platform settings, SIP proxy, auth, routing, and more.
-- [**SipFlow Configuration**](docs/sipflow-config.md): Detailed guide for the unified SIP+RTP recording system.
+---
 
-### 🎯 SipFlow - Advanced Recording System
+## Quick Start (Docker)
 
-SipFlow is a next-generation unified SIP+RTP recording system that provides superior I/O performance compared to traditional call recording:
+```bash
+# Commerce image (includes Wholesale + all commercial plugins)
+docker pull docker.cnb.cool/miuda.ai/rustpbx:latest
 
-**Key Advantages:**
-- **Better I/O Performance**: Open-write-close pattern avoids file descriptor exhaustion in high-concurrency scenarios
-- **Unified Storage**: SIP messages and RTP packets stored together for complete call analysis
-- **Date-Based Organization**: Automatic YYYYMMDD/HH directory structure for efficient archival
-- **Flexible Backends**: Choose between Local (file system + SQLite) or Remote (distributed) based on your needs
-- **Query API**: On-demand media generation from RTP packets, saving storage space
-
-**Comparison with Traditional Call Recording:**
-
-| Feature      | SipFlow (New)                | Call Recording (Legacy) |
-| ------------ | ---------------------------- | ----------------------- |
-| I/O Pattern  | Open-write-close             | Keep file handles open  |
-| Scalability  | High (1000+ concurrent)      | Limited by FD limits    |
-| SIP Messages | ✅ Full capture               | ❌ Not included          |
-| RTP Packets  | ✅ Captured                   | ❌ Only audio            |
-| Query Speed  | Fast (indexed)               | Slow (file scan)        |
-| Storage      | Efficient (on-demand decode) | Full WAV files          |
-
-**Configuration Example:**
-```toml
-[sipflow]
-type = "local"         # Local storage with SQLite indexing
-root = "./config/cdr"
-subdirs = "hourly"     # "hourly" | "daily" | "none" - organize by hour for better archival
+# Community image
+docker pull ghcr.io/restsend/rustpbx:latest
 ```
 
-See [docs/sipflow-config.md](docs/sipflow-config.md) for complete configuration guide.
+**Minimal `config.toml`**:
+```toml
+http_addr = "0.0.0.0:8080"
+database_url = "sqlite://rustpbx.sqlite3"
 
-## 🐳 Docker Deployment
+[console]
+base_path = "/console"
+allow_registration = false
 
-### Quick Start with Docker
+[proxy]
+addr = "0.0.0.0"
+udp_port = 5060
+modules = ["auth", "registrar", "call"]
 
-1. **Pull the Docker Image**
+[[proxy.user_backends]]
+type = "memory"
+users = [{ username = "1001", password = "password" }]
 
-    - **Option 1: Commerce Docker image (With `wholesale` features):**
+[sipflow]
+type = "local"
+root = "./config/cdr"
+subdirs = "hourly"
+```
 
-      ```bash
-      docker pull docker.cnb.cool/miuda.ai/rustpbx:latest
-      ```
+```bash
+docker run -d --name rustpbx --net host \
+  -v $(pwd)/config.toml:/app/config.toml \
+  -v $(pwd)/config:/app/config \
+  ghcr.io/restsend/rustpbx:latest --conf /app/config.toml
 
-    - **Option 2: Community Docker image:**
+# Create first admin
+docker exec rustpbx /app/rustpbx --conf /app/config.toml \
+  --super-username admin --super-password changeme
+```
 
-      ```bash
-        docker pull ghcr.io/restsend/rustpbx:latest
-      ```
+Web console: `http://localhost:8080/console/`  
+SIP proxy: `udp://localhost:5060`
 
-2. **Create config.toml:**
+---
 
-    > Minimal configuration example (save as `config.toml`):
+## Build from Source
 
-    ```toml
-    http_addr = "0.0.0.0:8080"
-    database_url = "sqlite://rustpbx.sqlite3"
-
-    [console]
-    base_path = "/console"
-    # allow self-service administrator signup after the first account
-    allow_registration = false
-    # set to true to force Secure cookie attribute, otherwise it is auto-detected based on request
-    secure_cookie = false
-
-    [proxy]
-    addr = "0.0.0.0"
-    udp_port = 5060
-    # Basic modules: Authentication, Registration, Call handling
-    modules = ["auth", "registrar", "call"]
-
-    # Add a test user in memory
-    [[proxy.user_backends]]
-    type = "memory"
-    users = [
-        { username = "1001", password = "password" }
-    ]
-
-    # SipFlow: Unified SIP+RTP recording (recommended for better I/O performance)
-    [sipflow]
-    type = "local"         # "local" (file system + SQLite) or "remote" (distributed)
-    root = "./config/cdr"
-    subdirs = "hourly"     # "hourly" | "daily" | "none"
-    ```
-
-    > See the [Configuration Guide](docs/configuration.md) for all available options.
-
-3. **Run with Docker:**
-> Default time zone is UTC, run with your time zone with `-e TZ=Asia/Shanghai`.
-
-    ```bash
-    docker run -d \
-      --name rustpbx \
-      --net host \
-      --env-file .env \
-      -v $(pwd)/db:/app/db \
-      -v $(pwd)/config.toml:/app/config.toml \
-      -v $(pwd)/config:/app/config \
-      -v $(pwd)/recorders:/tmp/recorders \
-      ghcr.io/restsend/rustpbx:latest \
-      --conf /app/config.toml
-    ```
-
-    - Create super user via cli(**optional**)
-
-      ```bash
-      docker exec rustpbx /app/rustpbx --conf /app/config.toml --super-username=YOUR --super-password=PASS
-      ```
-
-4. **Access the service:**
-
-    - Web Interface: <http://localhost:8080/console/>
-      - Login via `YOUR` + `PASS`
-    - SIP Proxy: localhost:15060
-
-## 🛠 Quick Start
-
-### Prerequisites
-
-- Rust 1.75 or later
-- Cargo package manager
-- `cmake`, `pkg-config`, `libasound2-dev`, `libssl-dev`, `libopus-dev`
-
-Linux:
-
+**Dependencies** (Linux):
 ```bash
 apt-get install -y cmake pkg-config libasound2-dev libssl-dev libopus-dev
 ```
 
 macOS:
-
 ```bash
 brew install cmake openssl pkg-config
 ```
-
-> **Note**: `libssl-dev` (OpenSSL development headers) is required because several dependencies
-> (`object_store`, `rcgen`, `instant-acme`) transitively pull in `openssl-sys` or `aws-lc-sys`
-> which need OpenSSL or its headers at compile time.
-
-### Install & Build
 
 ```bash
 git clone https://github.com/restsend/rustpbx
 cd rustpbx
 cargo build --release
+cargo run --bin rustpbx -- --conf config.toml.example
 ```
 
-> For a minimal footprint you can disable heavy features:
-> `cargo build -r --no-default-features --features vad_webrtc,console`
-
-### Cross-Compilation (Docker)
-
-The project provides cross-compilation Docker images for `x86_64` and `aarch64` targets via [Cross.toml](Cross.toml):
-
-| File | Target |
-|------|--------|
-| `Dockerfile.cross-x86_64` | `x86_64-unknown-linux-gnu` |
-| `Dockerfile.cross-aarch64` | `aarch64-unknown-linux-gnu` |
-
-Both images include the necessary system libraries (`libssl-dev`, `libopus-dev`, `cmake`, `pkg-config`).
-The `aarch64` image additionally installs the `arm64` architecture variants (`libssl-dev:arm64`, `libopus-dev:arm64`)
-and sets the appropriate `PKG_CONFIG_PATH` / `PKG_CONFIG_SYSROOT_DIR` environment variables for cross-compilation.
-
-To build with cross:
-
+Cross-compilation for `aarch64` / `x86_64` via [cross](https://github.com/cross-rs/cross):
 ```bash
-# Install cross
 cargo install cross
-
-# Build for x86_64
-cross build --release --target x86_64-unknown-linux-gnu
-
-# Build for aarch64
 cross build --release --target aarch64-unknown-linux-gnu
 ```
 
-> The `cross` feature flag enables bindgen for `aws-lc-rs` when cross-compiling:
-> `cross build --release --features cross --target aarch64-unknown-linux-gnu`
+---
 
-### PBX Quick Start (SQLite + console admin)
+## HTTP Router — The Key Extension Point
 
-1. Create a PBX configuration (`config.pbx.toml`) pointing to SQLite and enabling call records:
-
-    ```bash
-    http_addr = "0.0.0.0:8080"
-    log_level = "debug"
-    #log_file = "/tmp/rustpbx.log"
-    database_url = "sqlite://rustpbx.sqlite3"
-
-    [console]
-    #session_secret = "please_change_me_to_a_random_secret"
-    base_path = "/console"
-    # allow self-service administrator signup after the first account
-    allow_registration = false
-    # set to true to force Secure cookie attribute, otherwise it is auto-detected based on request
-    secure_cookie = false
-
-    [proxy]
-    modules = ["acl", "auth", "registrar", "call"]
-    addr = "0.0.0.0"
-    udp_port = 15060
-    registrar_expires = 60
-    ws_handler = "/ws"
-    media_proxy = "auto"
-    # Base directory for generated routing/trunk/ACL files
-    generated_dir = "./config"
-    routes_files = ["config/routes/*.toml"]
-    trunks_files = ["config/trunks/*.toml"]
-
-    # ACL rules
-    acl_rules = [
-      # "allow 10.0.0.0/8",
-      # "deny 0.123.4.0/16",
-      "allow all",
-      "deny all",
-    ]
-    acl_files = ["config/acl/*.toml"]
-
-    # external IP address for SIP signaling and media
-    # if server is behind NAT, set your public IP here (without port)
-    # external_ip = "1.2.3.4"
-
-
-    [[proxy.user_backends]]
-    type = "memory"
-    users = [
-      { username = "bob", password = "123456" },
-      { username = "alice", password = "123456" },
-    ]
-
-    [[proxy.user_backends]]
-    type = "extension"
-    database_url = "sqlite://rustpbx.sqlite3"
-
-    [recording]
-    enabled = true
-    auto_start = true
-
-    [callrecord]
-    type = "local"
-    root = "./config/cdr"
-
-    # SipFlow: Advanced unified SIP+RTP recording (recommended)
-    # Better I/O performance with date-based file organization
-    [sipflow]
-    type = "local"         # "local" (file system + SQLite) | "remote" (distributed)
-    root = "./config/cdr"
-    subdirs = "hourly"     # "hourly" | "daily" | "none"
-    
-    EOF
-    ```
-
-2. Launch the PBX:
-
-    ```bash
-    cargo run --bin rustpbx -- --conf config.pbx.toml
-    ```
-
-3. In a separate shell create your first super admin for the console:
-
-    ```bash
-    cargo run --bin rustpbx -- --conf config.pbx.toml \
-      --super-username admin --super-password change-me-now
-    ```
-
-4. Sign in at `http://localhost:8080/console/`, add extensions, and register your SIP endpoints against `udp://localhost:15060`.
-
-5. Verify call recordings and transcripts under **Call Records** once calls complete.
-
-## Console Screenshots
-
-### extensions
-
-![Console extensions view](./docs/screenshots/extensions.png)
-
-### call records
-
-![Console call logs](./docs/screenshots/call-logs.png)
-
-### settings
-
-![Console settings](./docs/screenshots/settings.png)
-
-### call record with transcript
-
-![Console call detail(transcript)](./docs/screenshots/call-detail-transcript.png)
-
-### call record with message flow
-
-![Console call detail(message flow)](./docs/screenshots/call-detail-sipflow.png)
-
-### route editor
-
-![Console route editor](./docs/screenshots/route-editor.png)
-
-### webrtc phone
-
-![Console webrtc phone](./docs/screenshots/web-dailer.png)
-
-## 🔧 Configuration Features
-
-### SIP Proxy
-
-- Modular proxy architecture with pluggable modules
-- User authentication and registration
-- Call routing and forwarding
-- CDR (Call Detail Records) generation
-
-### Media Proxy
-
-- Automatic NAT detection and media proxying
-- Configurable RTP port ranges
-- Support for multiple codecs
-- Real-time media relay
-
-## 🛠 Troubleshooting
-
-### SIP Registration 401 Unauthorized (Docker/NAT)
-
-If you are running RustPBX in a Docker container or behind NAT and encounter a `401 Unauthorized` error during SIP registration, it may be caused by a mismatch in the SIP realm. You may need to explicitly set `proxy.realms` to the correct IP address and port that your SIP clients are connecting to.
+RustPBX calls your API on every incoming INVITE. You decide what happens:
 
 ```toml
-[proxy]
-realms = ["your-server-ip:15060"]
+[proxy.http_router]
+url = "https://your-api.com/route"
+timeout_ms = 3000
 ```
 
-## 🤝 Contributing
+```json
+// POST to your endpoint:
+{ "call_id": "abc-123", "from": "sip:+861390000@trunk", "to": "sip:400800", "direction": "inbound" }
 
-This project is currently in active development. We welcome contributions and feedback from the community.
+// Your response:
+{ "action": "forward", "targets": ["sip:ai-agent@internal"], "record": true }
+```
 
-## 📄 License
+Actions: `forward` · `reject` · `abort` · `spam`  
+See [API Integration Guide](docs/api_integration_guide.md) for the full webhook and active call control reference.
 
-MIT License - see [LICENSE](LICENSE) file for details.
+---
 
-## 🏗 Project Status
+## Screenshots
 
-**Work in Progress** - Core functionality is implemented and being actively refined. The system is suitable for development and testing environments.
+| Extensions | Call Records | Route Editor |
+|---|---|---|
+| ![](./docs/screenshots/extensions.png) | ![](./docs/screenshots/call-logs.png) | ![](./docs/screenshots/route-editor.png) |
+
+| Transcript | SIP Flow | WebRTC Phone |
+|---|---|---|
+| ![](./docs/screenshots/call-detail-transcript.png) | ![](./docs/screenshots/call-detail-sipflow.png) | ![](./docs/screenshots/web-dailer.png) |
+
+---
+
+## Documentation
+
+| | |
+|---|---|
+| [Configuration Guide](docs/configuration.md) | All config options |
+| [API Integration Guide](docs/api_integration_guide.md) | HTTP Router, Webhooks, Active Call Control |
+| [Product Roadmap](PRODUCT_ROADMAP.md) | Commercial plugins & Q2 2026 plan |
+
+---
+
+## Troubleshooting
+
+**SIP 401 behind NAT/Docker** — set the realm explicitly:
+```toml
+[proxy]
+realms = ["your-public-ip:5060"]
+```
+
+---
+
+## License
+
+Community edition: MIT  
+Commercial edition : [hi@miuda.ai](mailto:hi@miuda.ai)
