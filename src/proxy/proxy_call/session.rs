@@ -503,7 +503,7 @@ impl CallSession {
 
     async fn optimize_caller_codec(&mut self, callee_answer: &str) -> Option<String> {
         // Parse callee's codecs from their answer
-        let (callee_codecs, _) = MediaNegotiator::extract_codec_params(callee_answer);
+        let (callee_codecs, callee_dtmf_pt) = MediaNegotiator::extract_codec_params(callee_answer);
 
         // Select the best codec considering dialplan allow_codecs preference
         let selected_callee_codec = MediaNegotiator::select_best_codec(
@@ -516,44 +516,25 @@ impl CallSession {
         let caller_offer = self.caller_offer.as_ref()?;
         let (caller_codecs, caller_dtmf_pt) = MediaNegotiator::extract_codec_params(caller_offer);
 
-        // Check if caller supports our chosen callee codec
-        let caller_codec_info = caller_codecs.iter().find(|c| c.codec == callee_codec)?;
-
-        let mut optimized_rtp_map = Vec::new();
-        // The first codec in optimized_rtp_map will be the one selected in the handshake
-        optimized_rtp_map.push((
-            caller_codec_info.payload_type,
-            (
-                caller_codec_info.codec,
-                caller_codec_info.clock_rate,
-                caller_codec_info.channels as u32,
-            ),
-        ));
-
-        // Add remaining caller codecs
-        for c in caller_codecs {
-            if c.codec != callee_codec {
-                optimized_rtp_map
-                    .push((c.payload_type, (c.codec, c.clock_rate, c.channels as u32)));
-            }
-        }
-
         let track_id = "caller-track".to_string();
         let orig_offer_sdp =
             String::from_utf8_lossy(self.server_dialog.initial_request().body()).to_string();
+        let mut codec_info = caller_codecs;
 
-        let mut codec_info: Vec<CodecInfo> = optimized_rtp_map
-            .into_iter()
-            .map(|(pt, (codec, clock, channels))| CodecInfo {
-                payload_type: pt,
-                codec,
-                clock_rate: clock,
-                channels: channels as u16,
-            })
-            .collect();
+        // if caller support callees codec, put it at first
+        if let Some(pos) = codec_info
+            .iter()
+            .position(|info| info.codec == callee_codec)
+        {
+            if pos > 0 {
+                let preferred = codec_info.remove(pos);
+                codec_info.insert(0, preferred);
+            }
+        }
 
         // Add TelephoneEvent if caller supports DTMF
-        if let Some(pt) = caller_dtmf_pt {
+        if callee_dtmf_pt.is_some() {
+            if let Some(pt) = caller_dtmf_pt {
             if !codec_info
                 .iter()
                 .any(|c| c.codec == CodecType::TelephoneEvent)
@@ -565,27 +546,13 @@ impl CallSession {
                     channels: 1,
                 });
             }
+            }
         }
 
         let mut track_builder = RtpTrackBuilder::new(track_id.clone())
             .with_cancel_token(self.caller_peer.cancel_token())
             .with_codec_info(codec_info)
             .with_enable_latching(self.context.media_config.enable_latching);
-        if let Some(ref servers) = self.context.media_config.ice_servers {
-            track_builder = track_builder.with_ice_servers(servers.clone());
-        }
-        if let Some(ref servers) = self.context.media_config.ice_servers {
-            track_builder = track_builder.with_ice_servers(servers.clone());
-        }
-        if let Some(ref servers) = self.context.media_config.ice_servers {
-            track_builder = track_builder.with_ice_servers(servers.clone());
-        }
-        if let Some(ref servers) = self.context.media_config.ice_servers {
-            track_builder = track_builder.with_ice_servers(servers.clone());
-        }
-        if let Some(ref servers) = self.context.media_config.ice_servers {
-            track_builder = track_builder.with_ice_servers(servers.clone());
-        }
         if let Some(ref servers) = self.context.media_config.ice_servers {
             track_builder = track_builder.with_ice_servers(servers.clone());
         }
@@ -661,58 +628,34 @@ impl CallSession {
             String::from_utf8_lossy(self.server_dialog.initial_request().body()).to_string();
         let track_id = "caller-track".to_string();
 
-        // Step 1: Extract caller's supported codecs
-        let caller_codecs = if let Some(ref caller_offer) = self.caller_offer {
-            if let Ok(sdp) =
-                rustrtc::SessionDescription::parse(rustrtc::SdpType::Offer, caller_offer)
-            {
-                if let Some(section) = sdp
-                    .media_sections
-                    .iter()
-                    .find(|m| m.kind == rustrtc::MediaKind::Audio)
-                {
-                    MediaNegotiator::parse_rtp_map_from_section(section)
-                        .into_iter()
-                        .map(|(pt, (codec, clock, channels))| CodecInfo {
-                            payload_type: pt,
-                            codec,
-                            clock_rate: clock,
-                            channels,
-                        })
-                        .collect::<Vec<_>>()
-                } else {
-                    Vec::new()
-                }
-            } else {
-                Vec::new()
-            }
-        } else {
-            Vec::new()
-        };
+        let (caller_codecs, _) = self
+            .caller_offer
+            .as_ref()
+            .map(|caller_offer| MediaNegotiator::extract_codec_params(caller_offer))
+            .unwrap_or_default();
 
         // Step 2: Extract callee's supported codecs from answer
         let (callee_codecs, callee_dtmf_pt) = MediaNegotiator::extract_codec_params(callee_answer);
 
         // Step 3: Find intersection based on dialplan priority
-        // Dialplan codecs order is the first priority
-        let mut negotiated_codecs = Vec::new();
         let allow_codecs = &self.context.dialplan.allow_codecs;
-
-        if allow_codecs.is_empty() {
-            // No restriction: use caller's preference but only include what callee supports
-            for caller_codec in &caller_codecs {
-                if callee_codecs.iter().any(|c| c.codec == caller_codec.codec) {
-                    negotiated_codecs.push(caller_codec.clone());
-                }
-            }
+        let mut negotiated_codecs = if allow_codecs.is_empty() {
+            caller_codecs
         } else {
-            // Use dialplan priority
-            for allowed in allow_codecs {
-                // Find matching codec in both caller and callee
-                if let Some(caller_codec) = caller_codecs.iter().find(|c| &c.codec == allowed) {
-                    if callee_codecs.iter().any(|c| &c.codec == allowed) {
-                        negotiated_codecs.push(caller_codec.clone());
-                    }
+            caller_codecs
+                .into_iter()
+                .filter(|c| allow_codecs.contains(&c.codec))
+                .collect()
+        };
+
+        if let Some(prefer) = MediaNegotiator::select_best_codec(&callee_codecs, allow_codecs) {
+            if let Some(i) = negotiated_codecs
+                .iter()
+                .position(|c| c.codec == prefer.codec)
+            {
+                if i > 0 {
+                    let preferred = negotiated_codecs.remove(i);
+                    negotiated_codecs.insert(0, preferred);
                 }
             }
         }
@@ -828,67 +771,20 @@ impl CallSession {
         let orig_offer_sdp =
             String::from_utf8_lossy(self.server_dialog.initial_request().body()).to_string();
         let track_id = "caller-track".to_string();
-        // Parse caller's offer to extract rtp_map for correct payload types
-        let mut caller_rtp_map = Vec::new();
-        if let Some(ref caller_offer) = self.caller_offer {
-            if let Ok(sdp) =
-                rustrtc::SessionDescription::parse(rustrtc::SdpType::Offer, caller_offer)
-            {
-                if let Some(section) = sdp
-                    .media_sections
-                    .iter()
-                    .find(|m| m.kind == rustrtc::MediaKind::Audio)
-                {
-                    caller_rtp_map = MediaNegotiator::parse_rtp_map_from_section(section);
-                }
-            }
-        }
+        let (caller_codecs, caller_dtmf_pt) = self
+            .caller_offer
+            .as_ref()
+            .map(|caller_offer| MediaNegotiator::extract_codec_params(caller_offer))
+            .unwrap_or_default();
+        let mut codec_info = caller_codecs;
 
-        // Extract codec preference from caller RTP map
-        let mut codec_info: Vec<CodecInfo> = caller_rtp_map
-            .into_iter()
-            .map(|(pt, (codec, clock, channels))| CodecInfo {
+        if let Some(pt) = caller_dtmf_pt {
+            codec_info.push(CodecInfo {
                 payload_type: pt,
-                codec,
-                clock_rate: clock,
-                channels,
-            })
-            .collect();
-
-        // If media proxy is enabled and caller is WebRTC, prefer PCMU/PCMA over Opus
-        // to avoid transcoding with traditional RTP endpoints
-        if self.use_media_proxy && Self::is_webrtc_sdp(&orig_offer_sdp) {
-            // Find preferred codec from dialplan or default to PCMU
-            let preferred_codec = MediaNegotiator::select_best_codec(
-                &codec_info,
-                &self.context.dialplan.allow_codecs,
-            )
-            .map(|c| c.codec)
-            .unwrap_or(CodecType::PCMU);
-
-            // Reorder codec_info to put preferred codec first if it's not Opus
-            if preferred_codec != CodecType::Opus {
-                if let Some(pos) = codec_info.iter().position(|c| c.codec == preferred_codec) {
-                    if pos > 0 {
-                        let preferred = codec_info.remove(pos);
-                        let codec_list_before: Vec<String> = codec_info
-                            .iter()
-                            .map(|c| format!("{:?}({})", c.codec, c.payload_type))
-                            .collect();
-                        codec_info.insert(0, preferred);
-                        let codec_list_after: Vec<String> = codec_info
-                            .iter()
-                            .map(|c| format!("{:?}({})", c.codec, c.payload_type))
-                            .collect();
-                        info!(
-                            dialog_id = %self.server_dialog.id(),
-                            before = %codec_list_before.join(", "),
-                            after = %codec_list_after.join(", "),
-                            "Reordered codecs for WebRTC caller to avoid transcoding"
-                        );
-                    }
-                }
-            }
+                codec: CodecType::TelephoneEvent,
+                clock_rate: 8000,
+                channels: 1,
+            });
         }
 
         // Unified track creation using RtpTrackBuilder
@@ -1019,71 +915,69 @@ impl CallSession {
             .remove_track(Self::RINGBACK_TRACK_ID, true)
             .await;
         let track_id = Self::CALLEE_TRACK_ID.to_string();
-        // Parse caller's offer to extract rtp_map for correct payload types
-        let mut caller_rtp_map = Vec::new();
-        if let Some(ref caller_offer) = self.caller_offer {
-            if let Ok(sdp) =
-                rustrtc::SessionDescription::parse(rustrtc::SdpType::Offer, caller_offer)
-            {
-                if let Some(section) = sdp
-                    .media_sections
+        let caller_rtp_map = self
+            .caller_offer
+            .as_ref()
+            .and_then(|caller_offer| {
+                rustrtc::SessionDescription::parse(rustrtc::SdpType::Offer, caller_offer).ok()
+            })
+            .and_then(|sdp| {
+                sdp.media_sections
                     .iter()
                     .find(|m| m.kind == rustrtc::MediaKind::Audio)
-                {
-                    caller_rtp_map = MediaNegotiator::parse_rtp_map_from_section(section);
-                }
-            }
-        }
-
-        let mut rtp_map = Vec::new();
-
-        // 1. Add server codecs with their standard PTs where applicable
-        for s_codec in self.context.dialplan.allow_codecs.iter() {
-            let pt = match s_codec {
-                CodecType::PCMU => 0,
-                CodecType::PCMA => 8,
-                CodecType::G722 => 9,
-                _ => {
-                    // For Opus or others, check if caller has it and use their PT
-                    if let Some((pt, _)) = caller_rtp_map
-                        .iter()
-                        .find(|(_, (c, _, _))| c.payload_type() == s_codec.payload_type())
-                    {
-                        *pt
-                    } else {
-                        let mut next_pt = 96;
-                        while rtp_map.iter().any(|(pt, _)| pt == &next_pt) {
-                            next_pt += 1;
-                        }
-                        next_pt
-                    }
-                }
-            };
-            if !rtp_map.iter().any(|(p, _)| p == &pt) {
-                rtp_map.push((
-                    pt,
-                    (s_codec.clone(), s_codec.clock_rate(), s_codec.channels()),
-                ));
-            }
-        }
-
-        // 2. Add remaining caller codecs that don't conflict with our PTs
-        for (pt, (c, clock, channels)) in caller_rtp_map {
-            if !rtp_map.iter().any(|(p, _)| p == &pt) {
-                rtp_map.push((pt, (c, clock, channels)));
-            }
-        }
-
-        // Extract codec preference from merged RTP map
-        let codec_info: Vec<CodecInfo> = rtp_map
-            .into_iter()
-            .map(|(pt, (codec, clock, channels))| CodecInfo {
-                payload_type: pt,
-                codec,
-                clock_rate: clock,
-                channels,
+                    .map(MediaNegotiator::parse_rtp_map_from_section)
             })
-            .collect();
+            .unwrap_or_default();
+
+        let allow_codecs = &self.context.dialplan.allow_codecs;
+        let mut codec_info = Vec::new();
+        let mut seen_codecs = Vec::new();
+        let mut used_payload_types = std::collections::HashSet::new();
+
+        for (pt, (codec, clock, channels)) in &caller_rtp_map {
+            if (!allow_codecs.is_empty() && !allow_codecs.contains(codec))
+                || seen_codecs.contains(codec)
+            {
+                continue;
+            }
+            seen_codecs.push(*codec);
+            used_payload_types.insert(*pt);
+            codec_info.push(CodecInfo {
+                payload_type: *pt,
+                codec: *codec,
+                clock_rate: *clock,
+                channels: *channels,
+            });
+        }
+
+        if !allow_codecs.is_empty() {
+            let mut next_pt = 96;
+            for codec in allow_codecs {
+                if *codec == CodecType::TelephoneEvent {
+                    continue;
+                }
+                if seen_codecs.contains(codec) {
+                    continue;
+                }
+                seen_codecs.push(*codec);
+
+                let payload_type = if !codec.is_dynamic() {
+                    codec.payload_type()
+                } else {
+                    while used_payload_types.contains(&next_pt) {
+                        next_pt += 1;
+                    }
+                    next_pt
+                };
+                used_payload_types.insert(payload_type);
+                codec_info.push(CodecInfo {
+                    payload_type,
+                    codec: *codec,
+                    clock_rate: codec.clock_rate(),
+                    channels: codec.channels(),
+                });
+            }
+        }
 
         // Unified track creation using RtpTrackBuilder
         let mut track_builder = RtpTrackBuilder::new(track_id.clone())
@@ -1308,62 +1202,51 @@ impl CallSession {
                         answer = answer_for_caller;
 
                         if self.media_bridge.is_none() {
-                            let caller_is_webrtc = self
-                                .caller_offer
-                                .as_ref()
-                                .map(|offer| Self::is_webrtc_sdp(offer))
-                                .unwrap_or(false);
-                            let from_offer = self.caller_offer.as_ref().and_then(|offer| {
-                                let (codecs, dtmf) = MediaNegotiator::extract_codec_params(offer);
-                                let chosen = codecs
-                                    .iter()
-                                    .find(|c| c.codec != CodecType::TelephoneEvent)
-                                    .cloned()?;
-                                Some((chosen.to_params(), dtmf, chosen.codec))
-                            });
-                            let from_answer = self.answer.as_ref().map(|s| {
-                                let (codecs, dtmf) = MediaNegotiator::extract_codec_params(s);
-                                let chosen = codecs
-                                    .iter()
-                                    .find(|c| c.codec != CodecType::TelephoneEvent)
-                                    .cloned()
-                                    .unwrap_or(CodecInfo {
-                                        payload_type: 0,
-                                        codec: CodecType::PCMU,
-                                        clock_rate: 8000,
-                                        channels: 1,
-                                    });
-                                (chosen.to_params(), dtmf, chosen.codec)
-                            });
                             let default_codec = (
+                                CodecType::PCMU,
                                 rustrtc::RtpCodecParameters::default(),
                                 None,
-                                CodecType::PCMU,
                             );
-                            let (params_a, dtmf_pt_a, codec_a) = if caller_is_webrtc {
-                                from_answer.or(from_offer).unwrap_or(default_codec)
-                            } else {
-                                from_offer.or(from_answer).unwrap_or(default_codec)
-                            };
-
-                            // codec_b: use callee's ORIGINAL early media SDP
-                            // (not the overwritten answer_for_caller)
-                            let (params_b, dtmf_pt_b, codec_b) = {
+                            let (codec_b, params_b, dtmf_pt_b) = {
                                 let (codecs, dtmf) =
                                     MediaNegotiator::extract_codec_params(&callee_early_sdp);
-                                let chosen = MediaNegotiator::select_best_codec(
+                                MediaNegotiator::select_best_codec(
                                     &codecs,
                                     &self.context.dialplan.allow_codecs,
                                 )
-                                .or_else(|| codecs.into_iter().next())
-                                .unwrap_or(CodecInfo {
-                                    payload_type: 0,
-                                    codec: CodecType::PCMU,
-                                    clock_rate: 8000,
-                                    channels: 1,
-                                });
-                                (chosen.to_params(), dtmf, chosen.codec)
+                                .map(|c| (c.codec, c.to_params(), dtmf))
+                                .unwrap_or(default_codec.clone())
                             };
+                            let from_answer = self.answer.as_ref().and_then(|s| {
+                                let (codecs, dtmf) = MediaNegotiator::extract_codec_params(s);
+                                codecs
+                                    .iter()
+                                    .find(|info| info.codec == codec_b)
+                                    .cloned()
+                                    .or_else(|| {
+                                        codecs
+                                            .iter()
+                                            .find(|info| info.codec != CodecType::TelephoneEvent)
+                                            .cloned()
+                                    })
+                                    .map(|chosen| (chosen.codec, chosen.to_params(), dtmf))
+                            });
+                            let from_offer = self.caller_offer.as_ref().and_then(|offer| {
+                                let (codecs, dtmf) = MediaNegotiator::extract_codec_params(offer);
+                                codecs
+                                    .iter()
+                                    .find(|info| info.codec == codec_b)
+                                    .cloned()
+                                    .or_else(|| {
+                                        codecs
+                                            .iter()
+                                            .find(|info| info.codec != CodecType::TelephoneEvent)
+                                            .cloned()
+                                    })
+                                    .map(|chosen| (chosen.codec, chosen.to_params(), dtmf))
+                            });
+                            let (codec_a, params_a, dtmf_pt_a) =
+                                from_answer.or(from_offer).unwrap_or(default_codec);
 
                             let ssrc_a = self
                                 .answer
@@ -1629,17 +1512,6 @@ impl CallSession {
         // self.stop_queue_hold().await;
 
         let first_answer = self.answer_time.is_none();
-        if self.answer.is_none() {
-            match self.create_caller_answer_from_offer().await {
-                Ok(answer) => self.set_answer(answer),
-                Err(e) => {
-                    let _ = self
-                        .server_dialog
-                        .reject(Some(StatusCode::BadRequest), None);
-                    return Err(e);
-                }
-            }
-        }
 
         if let Some(callee_addr) = callee {
             let resolved_callee = self.routed_callee.clone().unwrap_or(callee_addr);
@@ -1682,73 +1554,54 @@ impl CallSession {
             let track_id = Self::CALLEE_TRACK_ID.to_string();
 
             if self.media_bridge.is_none() {
-                // First, extract codec from callee's answer (this is the authoritative choice)
-                let (params_b, dtmf_pt_b, codec_b) = callee_answer
+                let default_codec = (
+                    CodecType::PCMU,
+                    rustrtc::RtpCodecParameters::default(),
+                    None,
+                );
+                let (codec_b, params_b, dtmf_pt_b) = callee_answer
                     .as_ref()
                     .map(|s| {
                         let (codecs, dtmf) = MediaNegotiator::extract_codec_params(s);
-                        let chosen = MediaNegotiator::select_best_codec(
+                        MediaNegotiator::select_best_codec(
                             &codecs,
                             &self.context.dialplan.allow_codecs,
                         )
-                        .or_else(|| codecs.into_iter().next())
-                        .unwrap_or(CodecInfo {
-                            payload_type: 0,
-                            codec: CodecType::PCMU,
-                            clock_rate: 8000,
-                            channels: 1,
-                        });
-                        (chosen.to_params(), dtmf, chosen.codec)
+                        .map(|c| (c.codec, c.to_params(), dtmf))
+                        .unwrap_or(default_codec.clone())
                     })
-                    .unwrap_or((
-                        rustrtc::RtpCodecParameters::default(),
-                        None,
-                        CodecType::PCMU,
-                    ));
-
-                let caller_is_webrtc = self
-                    .caller_offer
-                    .as_ref()
-                    .map(|offer| Self::is_webrtc_sdp(offer))
-                    .unwrap_or(false);
+                    .unwrap_or(default_codec.clone());
                 let from_offer = self.caller_offer.as_ref().and_then(|offer| {
                     let (codecs, dtmf) = MediaNegotiator::extract_codec_params(offer);
-                    let chosen = codecs
+                    codecs
                         .iter()
-                        .find(|c| c.codec != CodecType::TelephoneEvent)
-                        .cloned()?;
-                    Some((chosen.to_params(), dtmf, chosen.codec))
-                });
-                let from_answer = self.answer.as_ref().map(|s| {
-                    let (codecs, dtmf) = MediaNegotiator::extract_codec_params(s);
-                    let chosen = codecs
-                        .iter()
-                        .find(|c| c.codec == codec_b)
+                        .find(|info| info.codec == codec_b)
                         .cloned()
                         .or_else(|| {
                             codecs
                                 .iter()
-                                .find(|c| c.codec != CodecType::TelephoneEvent)
+                                .find(|info| info.codec != CodecType::TelephoneEvent)
                                 .cloned()
                         })
-                        .unwrap_or(CodecInfo {
-                            payload_type: 0,
-                            codec: CodecType::PCMU,
-                            clock_rate: 8000,
-                            channels: 1,
-                        });
-                    (chosen.to_params(), dtmf, chosen.codec)
+                        .map(|chosen| (chosen.codec, chosen.to_params(), dtmf))
                 });
-                let default_codec = (
-                    rustrtc::RtpCodecParameters::default(),
-                    None,
-                    CodecType::PCMU,
-                );
-                let (params_a, dtmf_pt_a, codec_a) = if caller_is_webrtc {
-                    from_answer.or(from_offer).unwrap_or(default_codec)
-                } else {
-                    from_offer.or(from_answer).unwrap_or(default_codec)
-                };
+                let from_answer = self.answer.as_ref().and_then(|s| {
+                    let (codecs, dtmf) = MediaNegotiator::extract_codec_params(s);
+                    codecs
+                        .iter()
+                        .find(|info| info.codec == codec_b)
+                        .cloned()
+                        .or_else(|| {
+                            codecs
+                                .iter()
+                                .find(|info| info.codec != CodecType::TelephoneEvent)
+                                .cloned()
+                        })
+                        .map(|chosen| (chosen.codec, chosen.to_params(), dtmf))
+                });
+
+                let (codec_a, params_a, dtmf_pt_a) =
+                    from_answer.or(from_offer).unwrap_or(default_codec);
 
                 let ssrc_a = self
                     .answer
@@ -3238,9 +3091,7 @@ impl CallSession {
                     "extension": self.context.original_callee,
                     "caller_id": self.context.original_caller,
                 });
-                return self
-                    .run_application("voicemail", Some(params), true)
-                    .await;
+                return self.run_application("voicemail", Some(params), true).await;
             }
         } else if self.failure_is_no_answer() {
             if let Some(config) = self.forwarding_config().cloned() {
@@ -3264,9 +3115,7 @@ impl CallSession {
                     "extension": self.context.original_callee,
                     "caller_id": self.context.original_caller,
                 });
-                return self
-                    .run_application("voicemail", Some(params), true)
-                    .await;
+                return self.run_application("voicemail", Some(params), true).await;
             }
         }
 
@@ -3303,9 +3152,10 @@ impl CallSession {
         let (_event_tx, event_rx) = mpsc::unbounded_channel();
 
         // Get session handle for the controller
-        let handle = self.handle.clone().ok_or_else(|| {
-            anyhow!("CallSessionHandle not available for application")
-        })?;
+        let handle = self
+            .handle
+            .clone()
+            .ok_or_else(|| anyhow!("CallSessionHandle not available for application"))?;
 
         let controller = crate::call::app::CallController {
             session: handle,
@@ -4167,6 +4017,90 @@ mod codec_negotiation_tests {
     use super::*;
     use crate::media::negotiate::MediaNegotiator;
 
+    fn build_callee_offer_codec_info_for_test(
+        caller_rtp_map: &[(u8, (CodecType, u32, u16))],
+        allow_codecs: &[CodecType],
+    ) -> Vec<CodecInfo> {
+        let mut codec_info = Vec::new();
+        let mut seen_codecs = Vec::new();
+        let mut used_payload_types = std::collections::HashSet::new();
+
+        for (pt, (codec, clock, channels)) in caller_rtp_map {
+            if (!allow_codecs.is_empty() && !allow_codecs.contains(codec))
+                || seen_codecs.contains(codec)
+            {
+                continue;
+            }
+            seen_codecs.push(*codec);
+            used_payload_types.insert(*pt);
+            codec_info.push(CodecInfo {
+                payload_type: *pt,
+                codec: *codec,
+                clock_rate: *clock,
+                channels: *channels,
+            });
+        }
+
+        if !allow_codecs.is_empty() {
+            let mut next_pt = 96;
+            for codec in allow_codecs {
+                if *codec == CodecType::TelephoneEvent {
+                    continue;
+                }
+                if seen_codecs.contains(codec) {
+                    continue;
+                }
+                seen_codecs.push(*codec);
+
+                let payload_type = if !codec.is_dynamic() {
+                    codec.payload_type()
+                } else {
+                    while used_payload_types.contains(&next_pt) {
+                        next_pt += 1;
+                    }
+                    next_pt
+                };
+                used_payload_types.insert(payload_type);
+                codec_info.push(CodecInfo {
+                    payload_type,
+                    codec: *codec,
+                    clock_rate: codec.clock_rate(),
+                    channels: codec.channels(),
+                });
+            }
+        }
+
+        codec_info
+    }
+
+    fn build_caller_answer_codec_info_for_test(
+        caller_codecs: &[CodecInfo],
+        caller_dtmf_pt: Option<u8>,
+        preferred_codec: Option<CodecType>,
+    ) -> Vec<CodecInfo> {
+        let mut codec_info = caller_codecs.to_vec();
+
+        if let Some(codec) = preferred_codec {
+            if let Some(pos) = codec_info.iter().position(|info| info.codec == codec) {
+                if pos > 0 {
+                    let preferred = codec_info.remove(pos);
+                    codec_info.insert(0, preferred);
+                }
+            }
+        }
+
+        if let Some(pt) = caller_dtmf_pt {
+            codec_info.push(CodecInfo {
+                payload_type: pt,
+                codec: CodecType::TelephoneEvent,
+                clock_rate: 8000,
+                channels: 1,
+            });
+        }
+
+        codec_info
+    }
+
     #[test]
     fn test_parse_rtp_map_from_sdp() {
         // Test parsing Alice's offer (WebRTC) with multiple codecs
@@ -4323,6 +4257,286 @@ mod codec_negotiation_tests {
         assert!(
             !alice_supports_bob,
             "Alice should not support PCMU in this case, transcoding required"
+        );
+    }
+
+    #[test]
+    fn test_build_callee_offer_preserves_caller_order_then_appends_allow_codecs() {
+        use audio_codec::CodecType;
+
+        let caller_rtp_map = vec![
+            (96, (CodecType::Opus, 48000, 2)),
+            (0, (CodecType::PCMU, 8000, 1)),
+            (8, (CodecType::PCMA, 8000, 1)),
+            (18, (CodecType::G729, 8000, 1)),
+        ];
+        let allow_codecs = vec![
+            CodecType::G729,
+            CodecType::G722,
+            CodecType::PCMU,
+            CodecType::PCMA,
+            CodecType::Opus,
+        ];
+
+        let merged = build_callee_offer_codec_info_for_test(&caller_rtp_map, &allow_codecs);
+        let order: Vec<CodecType> = merged.iter().map(|codec| codec.codec).collect();
+
+        assert_eq!(
+            order,
+            vec![
+                CodecType::Opus,
+                CodecType::PCMU,
+                CodecType::PCMA,
+                CodecType::G729,
+                CodecType::G722,
+            ],
+            "caller-supported codecs should keep caller order, then append extra allow_codecs"
+        );
+        assert_eq!(
+            merged.last().map(|codec| codec.payload_type),
+            Some(9),
+            "extra static codecs should retain their canonical payload type"
+        );
+    }
+
+    #[test]
+    fn test_build_callee_offer_keeps_opus_pt_when_extra_g729_is_appended() {
+        use audio_codec::CodecType;
+
+        let caller_rtp_map = vec![
+            (96, (CodecType::Opus, 48000, 2)),
+            (0, (CodecType::PCMU, 8000, 1)),
+            (8, (CodecType::PCMA, 8000, 1)),
+        ];
+        let allow_codecs = vec![
+            CodecType::G729,
+            CodecType::G722,
+            CodecType::PCMU,
+            CodecType::PCMA,
+            CodecType::Opus,
+        ];
+
+        let merged = build_callee_offer_codec_info_for_test(&caller_rtp_map, &allow_codecs);
+        let order_and_pt: Vec<(CodecType, u8)> = merged
+            .iter()
+            .map(|codec| (codec.codec, codec.payload_type))
+            .collect();
+
+        assert_eq!(
+            order_and_pt,
+            vec![
+                (CodecType::Opus, 96),
+                (CodecType::PCMU, 0),
+                (CodecType::PCMA, 8),
+                (CodecType::G729, 18),
+                (CodecType::G722, 9),
+            ],
+            "caller-supported Opus must keep PT 96; appended static codecs should keep canonical PTs"
+        );
+    }
+
+    #[test]
+    fn test_build_callee_offer_appended_opus_uses_dynamic_pt() {
+        use audio_codec::CodecType;
+
+        let caller_rtp_map = vec![
+            (0, (CodecType::PCMU, 8000, 1)),
+            (8, (CodecType::PCMA, 8000, 1)),
+            (18, (CodecType::G729, 8000, 1)),
+        ];
+        let allow_codecs = vec![
+            CodecType::G729,
+            CodecType::G722,
+            CodecType::PCMU,
+            CodecType::PCMA,
+            CodecType::Opus,
+        ];
+
+        let merged = build_callee_offer_codec_info_for_test(&caller_rtp_map, &allow_codecs);
+        let order_and_pt: Vec<(CodecType, u8)> = merged
+            .iter()
+            .map(|codec| (codec.codec, codec.payload_type))
+            .collect();
+
+        assert_eq!(
+            order_and_pt,
+            vec![
+                (CodecType::PCMU, 0),
+                (CodecType::PCMA, 8),
+                (CodecType::G729, 18),
+                (CodecType::G722, 9),
+                (CodecType::Opus, 96),
+            ],
+            "only Opus should use a dynamically allocated PT when appended"
+        );
+    }
+
+    #[test]
+    fn test_build_callee_offer_does_not_append_telephone_event() {
+        use audio_codec::CodecType;
+
+        let caller_rtp_map = vec![
+            (96, (CodecType::Opus, 48000, 2)),
+            (0, (CodecType::PCMU, 8000, 1)),
+        ];
+        let allow_codecs = vec![
+            CodecType::PCMU,
+            CodecType::Opus,
+            CodecType::TelephoneEvent,
+        ];
+
+        let merged = build_callee_offer_codec_info_for_test(&caller_rtp_map, &allow_codecs);
+
+        assert!(
+            !merged.iter().any(|codec| codec.codec == CodecType::TelephoneEvent),
+            "callee offer should not append TelephoneEvent from allow_codecs"
+        );
+    }
+
+    #[test]
+    fn test_media_proxy_offer_preserves_caller_opus_priority_with_default_allow_codecs() {
+        use crate::media::negotiate::MediaNegotiator;
+        use audio_codec::CodecType;
+
+        // Caller A offers: 96(Opus), 0(PCMU), 8(PCMA), 18(G729)
+        let caller_rtp_map = vec![
+            (96, (CodecType::Opus, 48000, 2)),
+            (0, (CodecType::PCMU, 8000, 1)),
+            (8, (CodecType::PCMA, 8000, 1)),
+            (18, (CodecType::G729, 8000, 1)),
+        ];
+        // Default dialplan priority.
+        let allow_codecs = vec![
+            CodecType::G729,
+            CodecType::G722,
+            CodecType::PCMU,
+            CodecType::PCMA,
+            CodecType::Opus,
+        ];
+
+        let callee_offer = build_callee_offer_codec_info_for_test(&caller_rtp_map, &allow_codecs);
+        let callee_offer_order: Vec<(CodecType, u8)> = callee_offer
+            .iter()
+            .map(|codec| (codec.codec, codec.payload_type))
+            .collect();
+
+        assert_eq!(
+            callee_offer_order,
+            vec![
+                (CodecType::Opus, 96),
+                (CodecType::PCMU, 0),
+                (CodecType::PCMA, 8),
+                (CodecType::G729, 18),
+                (CodecType::G722, 9),
+            ],
+            "media_proxy offer should preserve caller codec order first, so Opus stays ahead of PCMU/PCMA even when allow_codecs starts with G729"
+        );
+
+        // Callee B supports 0/8/96 and answers with Opus first.
+        let callee_answer_sdp = "v=0\r\n\
+            o=- 456 456 IN IP4 192.168.1.20\r\n\
+            s=-\r\n\
+            c=IN IP4 192.168.1.20\r\n\
+            t=0 0\r\n\
+            m=audio 4000 RTP/AVP 96 0 8\r\n\
+            a=rtpmap:96 opus/48000/2\r\n\
+            a=rtpmap:0 PCMU/8000\r\n\
+            a=rtpmap:8 PCMA/8000\r\n";
+
+        let preferred_codec = MediaNegotiator::extract_codec_params(callee_answer_sdp)
+            .0
+            .first()
+            .map(|codec| codec.codec);
+        assert_eq!(
+            preferred_codec,
+            Some(CodecType::Opus),
+            "when B supports Opus and answers with Opus first, rustpbx should treat Opus as the preferred codec"
+        );
+
+        let caller_codecs: Vec<CodecInfo> = caller_rtp_map
+            .iter()
+            .map(|(pt, (codec, clock_rate, channels))| CodecInfo {
+                payload_type: *pt,
+                codec: *codec,
+                clock_rate: *clock_rate,
+                channels: *channels,
+            })
+            .collect();
+        let caller_answer =
+            build_caller_answer_codec_info_for_test(&caller_codecs, Some(97), preferred_codec);
+        let caller_answer_order: Vec<CodecType> =
+            caller_answer.iter().map(|codec| codec.codec).collect();
+
+        assert_eq!(
+            caller_answer_order,
+            vec![
+                CodecType::Opus,
+                CodecType::PCMU,
+                CodecType::PCMA,
+                CodecType::G729,
+                CodecType::TelephoneEvent,
+            ],
+            "caller answer should keep Opus first when callee also selected Opus, avoiding unnecessary 96->0 transcoding"
+        );
+    }
+
+    #[test]
+    fn test_build_caller_answer_prefers_callee_codec_or_keeps_caller_order() {
+        use audio_codec::CodecType;
+
+        let caller_codecs = vec![
+            CodecInfo {
+                payload_type: 96,
+                codec: CodecType::Opus,
+                clock_rate: 48000,
+                channels: 2,
+            },
+            CodecInfo {
+                payload_type: 0,
+                codec: CodecType::PCMU,
+                clock_rate: 8000,
+                channels: 1,
+            },
+            CodecInfo {
+                payload_type: 8,
+                codec: CodecType::PCMA,
+                clock_rate: 8000,
+                channels: 1,
+            },
+        ];
+
+        let preferred = build_caller_answer_codec_info_for_test(
+            &caller_codecs,
+            Some(101),
+            Some(CodecType::PCMU),
+        );
+        let preferred_order: Vec<CodecType> = preferred.iter().map(|codec| codec.codec).collect();
+        assert_eq!(
+            preferred_order,
+            vec![
+                CodecType::PCMU,
+                CodecType::Opus,
+                CodecType::PCMA,
+                CodecType::TelephoneEvent,
+            ],
+            "caller answer should prioritize callee's chosen codec when caller also supports it"
+        );
+
+        let fallback = build_caller_answer_codec_info_for_test(
+            &caller_codecs,
+            Some(101),
+            Some(CodecType::G722),
+        );
+        let fallback_order: Vec<CodecType> = fallback.iter().map(|codec| codec.codec).collect();
+        assert_eq!(
+            fallback_order,
+            vec![
+                CodecType::Opus,
+                CodecType::PCMU,
+                CodecType::PCMA,
+                CodecType::TelephoneEvent,
+            ],
+            "unsupported callee codec should keep caller order and use caller-leg fallback"
         );
     }
 
