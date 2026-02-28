@@ -1,7 +1,7 @@
 use super::{ProxyAction, ProxyModule, server::SipServerRef};
 use crate::call::{
-    CallForwardingConfig, CalleeDisplayName, DialDirection, DialStrategy, Dialplan, Location,
-    MediaConfig, RouteInvite, RoutingState, SipUser, TransactionCookie, TrunkContext,
+    CalleeDisplayName, DialDirection, DialStrategy, Dialplan, Location, MediaConfig, RouteInvite,
+    RoutingState, SipUser, TransactionCookie, TrunkContext,
 };
 use crate::config::{ProxyConfig, RouteResult};
 use crate::media::recorder::RecorderOption;
@@ -457,11 +457,7 @@ impl CallModule {
                 app_params,
                 auto_answer,
                 ..
-            } => (
-                None,
-                Some((app_name, app_params, auto_answer)),
-                None,
-            ),
+            } => (None, Some((app_name, app_params, auto_answer)), None),
         };
 
         let queue_targets = pending_queue

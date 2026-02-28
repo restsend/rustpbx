@@ -11,7 +11,7 @@ use serde::Deserialize;
 use serde_json::json;
 use std::fs;
 use std::sync::Arc;
-use toml_edit::{Array, DocumentMut, Item, Table, Value, value};
+use toml_edit::{Array, DocumentMut, Item, Table, Value};
 
 pub fn urls() -> Router<Arc<ConsoleState>> {
     Router::new()
@@ -44,41 +44,20 @@ pub async fn index(State(state): State<Arc<ConsoleState>>) -> impl IntoResponse 
             addon.enabled = enabled_in_disk;
             addon.restart_required = enabled_in_disk != enabled_in_mem;
 
-            // Check license status for commercial addons
+            // Populate license status from the startup-time cache (no network call).
             #[cfg(feature = "commerce")]
             if addon.category == crate::addons::AddonCategory::Commercial {
-                let license_config = &config.licenses;
-                if let Some((key_name, _key_value)) = license_config
-                    .as_ref()
-                    .and_then(|c| c.get_license_for_addon(&addon.id))
-                {
-                    // We have a license key configured, verify it
-                    match crate::license::verify_addon_license(&addon.id, license_config).await {
-                        Ok(info) => {
-                            let expired = crate::license::is_expired(&info);
-                            addon.license_status = Some(if expired {
-                                "Expired".to_string()
-                            } else if info.valid {
-                                "Valid".to_string()
-                            } else {
-                                "Invalid".to_string()
-                            });
-                            addon.license_expiry =
-                                info.expiry.map(|d| d.format("%Y-%m-%d").to_string());
-                            addon.license_plan = if info.plan.is_empty() {
-                                None
-                            } else {
-                                Some(info.plan)
-                            };
-                        }
-                        Err(e) => {
-                            addon.license_status = Some("Invalid".to_string());
-                            tracing::warn!("License verification failed for {}: {}", addon.id, e);
-                        }
-                    }
+                if let Some(status) = crate::license::get_license_status(&addon.id) {
+                    addon.license_status = Some(license_status_label(&status));
+                    addon.license_expiry = status.expiry.clone();
+                    addon.license_plan = if status.plan.is_empty() {
+                        None
+                    } else {
+                        Some(status.plan.clone())
+                    };
                 } else {
-                    // No license key configured
-                    addon.license_status = Some("Not Licensed".to_string());
+                    // Startup check hasn't run or this addon wasn't checked.
+                    addon.license_status = Some("Unknown".to_string());
                 }
             }
         }
@@ -99,6 +78,7 @@ pub async fn index(State(state): State<Arc<ConsoleState>>) -> impl IntoResponse 
 
 #[derive(Deserialize)]
 pub struct VerifyAddonPayload {
+    #[allow(unused)]
     id: String,
     license_key: String,
 }
@@ -109,7 +89,7 @@ pub struct VerifyAddonPayload {
 /// written into `[licenses]` so that the addon will be recognised as licensed on
 /// the next start (no restart required for the status to show in the UI).
 pub async fn verify_addon(
-    State(state): State<Arc<ConsoleState>>,
+    State(_state): State<Arc<ConsoleState>>,
     Json(payload): Json<VerifyAddonPayload>,
 ) -> Response {
     // ── 1. Basic input validation ──────────────────────────────────────────
@@ -145,7 +125,7 @@ pub async fn verify_addon(
     // ── 3. Persist to config file (commerce builds only) ─────────────────
     #[cfg(feature = "commerce")]
     {
-        let config_path = match get_config_path(&state) {
+        let config_path = match get_config_path(&_state) {
             Ok(p) => p,
             Err(resp) => return resp,
         };
@@ -169,7 +149,7 @@ pub async fn verify_addon(
                 licenses_table["addons"] = Item::Table(Table::new());
             }
             if let Some(t) = licenses_table["addons"].as_table_mut() {
-                t[payload.id.as_str()] = value(payload.id.clone());
+                t[payload.id.as_str()] = toml_edit::value(payload.id.clone());
             }
 
             // [licenses.keys] – key_name -> actual key value.
@@ -177,7 +157,7 @@ pub async fn verify_addon(
                 licenses_table["keys"] = Item::Table(Table::new());
             }
             if let Some(t) = licenses_table["keys"].as_table_mut() {
-                t[payload.id.as_str()] = value(license_key.clone());
+                t[payload.id.as_str()] = toml_edit::value(license_key.clone());
             }
         }
 
@@ -314,41 +294,19 @@ pub async fn detail(
             addon.enabled = enabled_in_disk;
             addon.restart_required = enabled_in_disk != enabled_in_mem;
 
-            // Check license status for commercial addons
+            // Populate license status from the startup-time cache (no network call).
             #[cfg(feature = "commerce")]
             if addon.category == crate::addons::AddonCategory::Commercial {
-                let license_config = &config.licenses;
-                if let Some((key_name, _key_value)) = license_config
-                    .as_ref()
-                    .and_then(|c| c.get_license_for_addon(&addon.id))
-                {
-                    // We have a license key configured, verify it
-                    match crate::license::verify_addon_license(&addon.id, license_config).await {
-                        Ok(info) => {
-                            let expired = crate::license::is_expired(&info);
-                            addon.license_status = Some(if expired {
-                                "Expired".to_string()
-                            } else if info.valid {
-                                "Valid".to_string()
-                            } else {
-                                "Invalid".to_string()
-                            });
-                            addon.license_expiry =
-                                info.expiry.map(|d| d.format("%Y-%m-%d").to_string());
-                            addon.license_plan = if info.plan.is_empty() {
-                                None
-                            } else {
-                                Some(info.plan)
-                            };
-                        }
-                        Err(e) => {
-                            addon.license_status = Some("Invalid".to_string());
-                            tracing::warn!("License verification failed for {}: {}", addon.id, e);
-                        }
-                    }
+                if let Some(status) = crate::license::get_license_status(&addon.id) {
+                    addon.license_status = Some(license_status_label(&status));
+                    addon.license_expiry = status.expiry.clone();
+                    addon.license_plan = if status.plan.is_empty() {
+                        None
+                    } else {
+                        Some(status.plan.clone())
+                    };
                 } else {
-                    // No license key configured
-                    addon.license_status = Some("Not Licensed".to_string());
+                    addon.license_status = Some("Unknown".to_string());
                 }
             }
         }
@@ -435,4 +393,22 @@ fn json_error(status: StatusCode, message: impl Into<String>) -> Response {
         })),
     )
         .into_response()
+}
+
+/// Convert a `LicenseStatus` to a human-readable label for the UI.
+#[cfg(feature = "commerce")]
+fn license_status_label(status: &crate::license::LicenseStatus) -> String {
+    if status.is_trial {
+        if status.valid {
+            format!("Trial ({})", status.plan)
+        } else {
+            "Trial Expired".to_string()
+        }
+    } else if status.expired {
+        "Expired".to_string()
+    } else if status.valid {
+        "Valid".to_string()
+    } else {
+        "Invalid".to_string()
+    }
 }

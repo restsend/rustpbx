@@ -1417,7 +1417,7 @@ async fn test_match_invite_application_inferred_from_app_field() {
         RouteResult::Application { app_name, .. } => {
             assert_eq!(app_name, "voicemail");
         }
-        other => panic!("Expected Application"),
+        _ => panic!("Expected Application"),
     }
 }
 
@@ -1473,7 +1473,7 @@ async fn test_match_invite_application_auto_answer_false() {
             assert_eq!(app_name, "custom_app");
             assert!(!auto_answer);
         }
-        other => panic!("Expected Application"),
+        _ => panic!("Expected Application"),
     }
 }
 

@@ -14,7 +14,7 @@ use std::{
 use tracing::info;
 
 use crate::{
-    call::{DialDirection, RouteContext, RoutingState, policy::PolicyCheckStatus},
+    call::{DialDirection, RoutingState, policy::PolicyCheckStatus},
     config::{DialplanHints, RouteResult},
     proxy::routing::{ActionType, RouteQueueConfig, RouteRule, SourceTrunk, TrunkConfig},
 };

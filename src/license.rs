@@ -11,7 +11,7 @@ use crate::config::LicenseConfig;
 /// stays consistent without gating every call site.
 #[cfg(not(feature = "commerce"))]
 #[derive(Debug, Clone, Default)]
-struct LicenseConfig;
+pub struct LicenseConfig;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LicenseInfo {
@@ -37,10 +37,108 @@ pub struct LicenseStatus {
     pub expired: bool,
     pub expiry: Option<String>,
     pub plan: String,
+    /// True when running under the built-in free-trial window (no key required).
+    #[serde(default)]
+    pub is_trial: bool,
 }
 
 static LICENSE_CACHE: Lazy<Mutex<HashMap<String, LicenseInfo>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
+
+/// Per-addon license results populated once at startup.
+/// All runtime checks read from this map so no network calls happen after boot.
+static STARTUP_LICENSE_RESULTS: Lazy<Mutex<HashMap<String, LicenseStatus>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+
+// ── Free-trial helpers ───────────────────────────────────────────────────────
+
+/// Number of free-trial days counted from the first run (flag-file creation).
+const FREE_TRIAL_DAYS: i64 = 30;
+
+/// Name of the flag file stored inside `storage_dir`.
+const TRIAL_FLAG_FILE: &str = ".free_trial";
+
+/// Storage directory used to locate the trial flag file.
+/// Set once at startup by `set_storage_dir`; defaults to `"storage"`.
+static STORAGE_DIR: Lazy<Mutex<String>> = Lazy::new(|| Mutex::new("storage".to_string()));
+
+/// Call this at startup (before license checks) so the trial flag file ends up
+/// in the right place.  Corresponds to `config.storage_dir`.
+pub fn set_storage_dir(dir: &str) {
+    if let Ok(mut s) = STORAGE_DIR.lock() {
+        *s = dir.to_string();
+    }
+}
+
+/// Full path to the trial flag file.
+fn trial_flag_path() -> std::path::PathBuf {
+    let dir = STORAGE_DIR
+        .lock()
+        .map(|s| s.clone())
+        .unwrap_or_else(|_| "storage".to_string());
+    std::path::PathBuf::from(dir).join(TRIAL_FLAG_FILE)
+}
+
+/// Read the trial-start timestamp from the flag file.
+/// If the file does not yet exist it is created with the current time → first run.
+/// Returns `None` only on an unrecoverable I/O error (directory missing, etc.).
+fn trial_start_time() -> Option<DateTime<Utc>> {
+    let path = trial_flag_path();
+
+    if path.exists() {
+        let raw = std::fs::read_to_string(&path).ok()?;
+        let ts: i64 = raw.trim().parse().ok()?;
+        return DateTime::<Utc>::from_timestamp(ts, 0);
+    }
+
+    // First run: stamp the current time.
+    let now = Utc::now();
+    let ts = now.timestamp().to_string();
+    // Create parent dirs if needed (best-effort).
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    std::fs::write(&path, &ts)
+        .map_err(|e| tracing::warn!("Could not create trial flag file {:?}: {}", path, e))
+        .ok()?;
+    tracing::info!("Free-trial started; flag file created at {:?}", path);
+    Some(now)
+}
+
+/// How many days remain in the free-trial window (negative when expired).
+pub fn free_trial_days_remaining() -> i64 {
+    match trial_start_time() {
+        Some(start) => {
+            let trial_end = start + chrono::Duration::days(FREE_TRIAL_DAYS);
+            (trial_end - Utc::now()).num_days()
+        }
+        // Can't create/read flag file → treat as expired to be safe.
+        None => -1,
+    }
+}
+
+/// Returns `true` while the installation is within its free-trial window.
+pub fn is_in_free_trial() -> bool {
+    free_trial_days_remaining() > 0
+}
+
+// ── Startup-cache helpers ─────────────────────────────────────────────────────
+
+/// Store per-addon license results that were resolved at startup.
+/// Called once by the addon registry after `check_all_addon_licenses`.
+pub fn record_startup_results(results: HashMap<String, LicenseStatus>) {
+    if let Ok(mut cache) = STARTUP_LICENSE_RESULTS.lock() {
+        *cache = results;
+    }
+}
+
+/// Return the startup-time license status for an addon.
+/// `None` means the addon was not a commercial addon (or startup hasn't run yet).
+pub fn get_license_status(addon_id: &str) -> Option<LicenseStatus> {
+    STARTUP_LICENSE_RESULTS.lock().ok()?.get(addon_id).cloned()
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 
 /// Verify a license key against the license server.
 pub async fn verify_license(key: &str) -> anyhow::Result<LicenseInfo> {
@@ -115,9 +213,9 @@ pub async fn verify_addon_license(
     addon_id: &str,
     license_config: &Option<LicenseConfig>,
 ) -> anyhow::Result<LicenseInfo> {
-    let config = license_config.as_ref().ok_or_else(|| {
-        anyhow::anyhow!("No license configuration found")
-    })?;
+    let config = license_config
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("No license configuration found"))?;
 
     let (key_name, key_value) = config
         .get_license_for_addon(addon_id)
@@ -156,18 +254,9 @@ pub async fn check_all_addon_licenses(
     let config = match license_config {
         Some(c) => c,
         None => {
-            // No license config - all commercial addons are unlicensed
+            // No license config – fall back to the free-trial window for every addon.
             for addon_id in addon_ids {
-                results.insert(
-                    addon_id.clone(),
-                    LicenseStatus {
-                        key_name: "".to_string(),
-                        valid: false,
-                        expired: false,
-                        expiry: None,
-                        plan: "".to_string(),
-                    },
-                );
+                results.insert(addon_id.clone(), make_trial_status());
             }
             return results;
         }
@@ -175,39 +264,32 @@ pub async fn check_all_addon_licenses(
 
     for addon_id in addon_ids {
         let status = match config.get_license_for_addon(addon_id) {
-            Some((key_name, key_value)) => {
-                match verify_license(key_value).await {
-                    Ok(info) => {
-                        let expired = is_expired(&info);
-                        LicenseStatus {
-                            key_name: key_name.to_string(),
-                            valid: info.valid && !expired,
-                            expired,
-                            expiry: info.expiry.map(|d| d.format("%Y-%m-%d").to_string()),
-                            plan: info.plan,
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!("Failed to verify license for {}: {}", addon_id, e);
-                        LicenseStatus {
-                            key_name: key_name.to_string(),
-                            valid: false,
-                            expired: false,
-                            expiry: None,
-                            plan: "".to_string(),
-                        }
+            Some((key_name, key_value)) => match verify_license(key_value).await {
+                Ok(info) => {
+                    let expired = is_expired(&info);
+                    LicenseStatus {
+                        key_name: key_name.to_string(),
+                        valid: info.valid && !expired,
+                        expired,
+                        expiry: info.expiry.map(|d| d.format("%Y-%m-%d").to_string()),
+                        plan: info.plan,
+                        is_trial: false,
                     }
                 }
-            }
-            None => {
-                LicenseStatus {
-                    key_name: "".to_string(),
-                    valid: false,
-                    expired: false,
-                    expiry: None,
-                    plan: "".to_string(),
+                Err(e) => {
+                    tracing::warn!("Failed to verify license for {}: {}", addon_id, e);
+                    LicenseStatus {
+                        key_name: key_name.to_string(),
+                        valid: false,
+                        expired: false,
+                        expiry: None,
+                        plan: "".to_string(),
+                        is_trial: false,
+                    }
                 }
-            }
+            },
+            // No key configured for this addon – fall back to the free-trial window.
+            None => make_trial_status(),
         };
         results.insert(addon_id.clone(), status);
     }
@@ -215,26 +297,51 @@ pub async fn check_all_addon_licenses(
     results
 }
 
+#[cfg(feature = "commerce")]
+/// Build a `LicenseStatus` reflecting the current free-trial state.
+fn make_trial_status() -> LicenseStatus {
+    let days = free_trial_days_remaining();
+    let in_trial = days > 0;
+    LicenseStatus {
+        key_name: "free-trial".to_string(),
+        valid: in_trial,
+        expired: !in_trial,
+        expiry: None,
+        plan: if in_trial {
+            format!("trial ({} days left)", days)
+        } else {
+            "trial expired".to_string()
+        },
+        is_trial: true,
+    }
+}
+
 /// Check if an addon is allowed to run (valid license or community addon).
+///
+/// At runtime this reads exclusively from the startup cache so no network calls
+/// are made – avoiding any risk of interrupting a running service.
 #[cfg(feature = "commerce")]
 pub async fn can_enable_addon(
     addon_id: &str,
     is_commercial: bool,
-    license_config: &Option<LicenseConfig>,
+    _license_config: &Option<LicenseConfig>,
 ) -> bool {
     if !is_commercial {
-        // Community addons don't need license
+        // Community addons don't need a license.
         return true;
     }
 
-    match verify_addon_license(addon_id, license_config).await {
-        Ok(info) => info.valid && !is_expired(&info),
-        Err(_) => false,
+    // Prefer the startup-verified result (populated by check_all_addon_licenses).
+    if let Some(status) = get_license_status(addon_id) {
+        return status.valid;
     }
+
+    // Startup cache miss (called before initialize_all) – allow if in trial.
+    is_in_free_trial()
 }
 
-#[cfg(not(feature = "commerce"))]
 /// Check if an addon is allowed to run (always true without commerce feature).
+#[cfg(not(feature = "commerce"))]
 pub async fn can_enable_addon(
     _addon_id: &str,
     _is_commercial: bool,
@@ -314,15 +421,17 @@ mod tests {
 
     #[cfg(feature = "commerce")]
     mod commerce_tests {
-        use super::*;
         use crate::config::LicenseConfig;
-        use std::collections::HashMap;
 
         #[test]
         fn test_license_config_get_license_for_addon() {
             let mut config = LicenseConfig::default();
-            config.addons.insert("wholesale".to_string(), "enterprise".to_string());
-            config.keys.insert("enterprise".to_string(), "test-key-123".to_string());
+            config
+                .addons
+                .insert("wholesale".to_string(), "enterprise".to_string());
+            config
+                .keys
+                .insert("enterprise".to_string(), "test-key-123".to_string());
 
             let result = config.get_license_for_addon("wholesale");
             assert!(result.is_some());
@@ -341,9 +450,15 @@ mod tests {
         #[test]
         fn test_license_config_get_addons_for_key() {
             let mut config = LicenseConfig::default();
-            config.addons.insert("wholesale".to_string(), "enterprise".to_string());
-            config.addons.insert("endpoint-manager".to_string(), "enterprise".to_string());
-            config.addons.insert("voicemail".to_string(), "basic".to_string());
+            config
+                .addons
+                .insert("wholesale".to_string(), "enterprise".to_string());
+            config
+                .addons
+                .insert("endpoint-manager".to_string(), "enterprise".to_string());
+            config
+                .addons
+                .insert("voicemail".to_string(), "basic".to_string());
 
             let addons = config.get_addons_for_key("enterprise");
             assert_eq!(addons.len(), 2);
