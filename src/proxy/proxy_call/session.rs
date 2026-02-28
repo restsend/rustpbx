@@ -3314,10 +3314,7 @@ impl CallSession {
             .clone()
             .ok_or_else(|| anyhow!("CallSessionHandle not available for application"))?;
 
-        let controller = crate::call::app::CallController {
-            session: handle,
-            event_rx,
-        };
+        let (controller, timer_rx) = crate::call::app::CallController::new(handle, event_rx);
 
         // Build ApplicationContext from server resources
         let db = self
@@ -3381,8 +3378,13 @@ impl CallSession {
 
         // Run the event loop
         let cancel_token = self.cancel_token.child_token();
-        let event_loop =
-            crate::call::app::AppEventLoop::new(app, controller, app_context, cancel_token);
+        let event_loop = crate::call::app::AppEventLoop::new(
+            app,
+            controller,
+            app_context,
+            cancel_token,
+            timer_rx,
+        );
 
         match event_loop.run().await {
             Ok(()) => {
@@ -3400,8 +3402,9 @@ impl CallSession {
     async fn build_call_app(
         &self,
         app_name: &str,
-        app_params: &Option<serde_json::Value>,
+        _app_params: &Option<serde_json::Value>,
     ) -> Result<Box<dyn crate::call::app::CallApp>> {
+        #[allow(unused)]
         let registry = self
             .server
             .addon_registry
@@ -3419,12 +3422,12 @@ impl CallSession {
                     .downcast_ref::<crate::voicemail::VoicemailAddon>()
                     .ok_or_else(|| anyhow!("Failed to downcast to VoicemailAddon"))?;
 
-                let extension = app_params
+                let extension = _app_params
                     .as_ref()
                     .and_then(|p| p.get("extension"))
                     .and_then(|v| v.as_str())
                     .unwrap_or(&self.context.original_callee);
-                let caller_id = app_params
+                let caller_id = _app_params
                     .as_ref()
                     .and_then(|p| p.get("caller_id"))
                     .and_then(|v| v.as_str())

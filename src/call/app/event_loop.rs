@@ -1,6 +1,7 @@
 use super::app_context::ApplicationContext;
 use super::controller::ControllerEvent;
 use super::{AppAction, AppEvent, CallApp, CallController, ExitReason};
+use tokio::sync::mpsc;
 use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 
@@ -11,6 +12,8 @@ pub struct AppEventLoop {
     controller: CallController,
     context: ApplicationContext,
     cancel_token: CancellationToken,
+    /// Receives timer IDs fired by `CallController::set_timeout`.
+    fired_timer_rx: mpsc::UnboundedReceiver<String>,
 }
 
 impl AppEventLoop {
@@ -19,12 +22,14 @@ impl AppEventLoop {
         controller: CallController,
         context: ApplicationContext,
         cancel_token: CancellationToken,
+        fired_timer_rx: mpsc::UnboundedReceiver<String>,
     ) -> Self {
         Self {
             app,
             controller,
             context,
             cancel_token,
+            fired_timer_rx,
         }
     }
 
@@ -100,8 +105,10 @@ impl AppEventLoop {
                     }
                     Some(ControllerEvent::Hangup(reason)) => {
                         self.app.on_exit(ExitReason::RemoteHangup(reason)).await?;
-                        // Force exit loop
                         Ok(AppAction::Exit)
+                    }
+                    Some(ControllerEvent::Timeout(id)) => {
+                        self.app.on_timeout(id, &mut self.controller, &self.context).await
                     }
                     Some(ControllerEvent::Custom(name, data)) => {
                         self.app.on_external_event(
@@ -110,11 +117,11 @@ impl AppEventLoop {
                             &self.context
                         ).await
                     }
-                    None => {
-                        // Channel closed
-                        Ok(AppAction::Exit)
-                    }
+                    None => Ok(AppAction::Exit),
                 }
+            }
+            Some(timer_id) = self.fired_timer_rx.recv() => {
+                self.app.on_timeout(timer_id, &mut self.controller, &self.context).await
             }
             _ = self.cancel_token.cancelled() => {
                 self.app.on_exit(ExitReason::Cancelled).await?;

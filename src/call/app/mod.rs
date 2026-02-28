@@ -83,10 +83,18 @@ mod app_context;
 mod controller;
 mod event_loop;
 
+/// Test helpers: build a mock call stack without a real SIP session.
+/// Only compiled in test builds.
+#[cfg(test)]
+pub mod testing;
+
+#[cfg(test)]
+mod app_test;
+
 pub use app_context::{AppSharedState, ApplicationContext, CallInfo};
 pub use controller::{
-    CallController, ControllerEvent, DtmfCollectConfig, PlaybackHandle, RecordingHandle,
-    RecordingInfo,
+    CallController, ControllerEvent, DtmfCollectConfig, HangupDuringCollection,
+    PlaybackHandle, RecordingHandle, RecordingInfo,
 };
 pub use event_loop::AppEventLoop;
 

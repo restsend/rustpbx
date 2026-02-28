@@ -2,11 +2,10 @@ use crate::{
     console::{
         ConsoleState,
         auth::RegistrationPolicy,
-        handlers::forms::{ForgotForm, LoginForm, LoginQuery, MfaForm, RegisterForm, ResetForm},
+        handlers::forms::{ForgotForm, LoginForm, LoginQuery, RegisterForm, ResetForm},
     },
     handler::middleware::clientaddr::ClientAddr,
 };
-use sea_orm::EntityTrait;
 use axum::{
     Router,
     extract::{Form, Path as AxumPath, Query, State},
@@ -14,6 +13,7 @@ use axum::{
     response::{IntoResponse, Redirect, Response},
     routing::get,
 };
+use sea_orm::EntityTrait;
 use serde_json::json;
 use std::sync::Arc;
 use tracing::{info, warn};
@@ -128,7 +128,8 @@ pub async fn login_post(
                 // Create MFA session and redirect to verification
                 let redirect_target = state.url_for("/console/login/mfa");
                 let mut response = Redirect::to(&redirect_target).into_response();
-                if let Some(header) = state.mfa_session_cookie_header(user.id, is_secure_request(&headers))
+                if let Some(header) =
+                    state.mfa_session_cookie_header(user.id, is_secure_request(&headers))
                 {
                     response.headers_mut().append(SET_COOKIE, header);
                 }
@@ -562,15 +563,13 @@ pub async fn login_mfa_page(
         .one(&state.db)
         .await
     {
-        Ok(Some(user)) => {
-            state.render(
-                "console/login_mfa.html",
-                json!({
-                    "login_action": state.url_for("/login/mfa"),
-                    "error_message": null,
-                }),
-            )
-        }
+        Ok(Some(_user)) => state.render(
+            "console/login_mfa.html",
+            json!({
+                "login_action": state.url_for("/login/mfa"),
+                "error_message": null,
+            }),
+        ),
         _ => Redirect::to(&state.url_for("/login")).into_response(),
     }
 }

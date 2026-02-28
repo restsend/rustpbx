@@ -158,7 +158,11 @@ impl ConsoleState {
     }
 
     /// Create MFA session cookie for temporary verification
-    pub fn mfa_session_cookie_header(&self, user_id: i64, request_secure: bool) -> Option<HeaderValue> {
+    pub fn mfa_session_cookie_header(
+        &self,
+        user_id: i64,
+        request_secure: bool,
+    ) -> Option<HeaderValue> {
         let value = self.generate_mfa_session_token(user_id)?;
         let _is_secure = self.config.secure_cookie || request_secure;
         let secure_attr = "";
@@ -180,7 +184,7 @@ impl ConsoleState {
     }
 
     /// Clear MFA session cookie
-    pub fn clear_mfa_session_cookie(&self, request_secure: bool) -> Option<HeaderValue> {
+    pub fn clear_mfa_session_cookie(&self, _request_secure: bool) -> Option<HeaderValue> {
         let secure_attr = "";
         let cookie = format!(
             "{}={}; Path={}; HttpOnly; Max-Age=0{}",
@@ -423,12 +427,7 @@ impl ConsoleState {
     }
 
     /// Enable MFA for a user with the provided secret and verify the first code
-    pub async fn enable_mfa(
-        &self,
-        user: &UserModel,
-        secret: &str,
-        code: &str,
-    ) -> Result<bool> {
+    pub async fn enable_mfa(&self, user: &UserModel, secret: &str, code: &str) -> Result<bool> {
         use totp_rs::{Algorithm, Secret, TOTP};
 
         let secret_bytes = match Secret::Encoded(secret.to_string()).to_bytes() {
@@ -469,7 +468,10 @@ impl ConsoleState {
         model.mfa_enabled = Set(false);
         model.mfa_secret = Set(None);
         model.updated_at = Set(Utc::now());
-        model.update(&self.db).await.context("failed to disable MFA")
+        model
+            .update(&self.db)
+            .await
+            .context("failed to disable MFA")
     }
 
     /// Verify an MFA code for a user
