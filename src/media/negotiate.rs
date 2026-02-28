@@ -162,28 +162,11 @@ impl MediaNegotiator {
         remote_codecs: &[CodecInfo],
         allowed_codecs: &[CodecType],
     ) -> Option<CodecInfo> {
-        if remote_codecs.is_empty() {
-            return None;
-        }
-
-        if allowed_codecs.is_empty() {
-            // No restriction: pick the first audio codec from remote (skip TelephoneEvent)
-            return remote_codecs
-                .iter()
-                .find(|c| c.codec != CodecType::TelephoneEvent)
-                .cloned();
-        }
-
-        // RFC 3264: When remote_codecs is from an Answer, respect the answerer's preference
-        // Select the first audio codec from remote_codecs that is in our allowed list
-        // Skip TelephoneEvent as it's not an audio codec
-        for remote in remote_codecs {
-            if remote.codec != CodecType::TelephoneEvent && allowed_codecs.contains(&remote.codec) {
-                return Some(remote.clone());
-            }
-        }
-
-        None
+        remote_codecs
+            .iter()
+            .find(|c| c.codec != CodecType::TelephoneEvent)
+            .filter(|c| allowed_codecs.is_empty() || allowed_codecs.contains(&c.codec))
+            .cloned()
     }
 
     /// Extract all codec information from SDP
