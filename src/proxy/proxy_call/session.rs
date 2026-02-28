@@ -933,8 +933,14 @@ impl CallSession {
         let mut codec_info = Vec::new();
         let mut seen_codecs = Vec::new();
         let mut used_payload_types = std::collections::HashSet::new();
+        let caller_dtmf_pt_8000 = caller_rtp_map.iter().find_map(|(pt, (codec, clock, _))| {
+            (*codec == CodecType::TelephoneEvent && *clock == 8000).then_some(*pt)
+        });
 
         for (pt, (codec, clock, channels)) in &caller_rtp_map {
+            if *codec == CodecType::TelephoneEvent {
+                continue;
+            }
             if (!allow_codecs.is_empty() && !allow_codecs.contains(codec))
                 || seen_codecs.contains(codec)
             {
@@ -977,6 +983,16 @@ impl CallSession {
                     channels: codec.channels(),
                 });
             }
+        }
+
+        if let Some(pt) = caller_dtmf_pt_8000 {
+            used_payload_types.insert(pt);
+            codec_info.push(CodecInfo {
+                payload_type: pt,
+                codec: CodecType::TelephoneEvent,
+                clock_rate: 8000,
+                channels: 1,
+            });
         }
 
         // Unified track creation using RtpTrackBuilder
@@ -4024,8 +4040,14 @@ mod codec_negotiation_tests {
         let mut codec_info = Vec::new();
         let mut seen_codecs = Vec::new();
         let mut used_payload_types = std::collections::HashSet::new();
+        let caller_dtmf_pt_8000 = caller_rtp_map.iter().find_map(|(pt, (codec, clock, _))| {
+            (*codec == CodecType::TelephoneEvent && *clock == 8000).then_some(*pt)
+        });
 
         for (pt, (codec, clock, channels)) in caller_rtp_map {
+            if *codec == CodecType::TelephoneEvent {
+                continue;
+            }
             if (!allow_codecs.is_empty() && !allow_codecs.contains(codec))
                 || seen_codecs.contains(codec)
             {
@@ -4068,6 +4090,16 @@ mod codec_negotiation_tests {
                     channels: codec.channels(),
                 });
             }
+        }
+
+        if let Some(pt) = caller_dtmf_pt_8000 {
+            used_payload_types.insert(pt);
+            codec_info.push(CodecInfo {
+                payload_type: pt,
+                codec: CodecType::TelephoneEvent,
+                clock_rate: 8000,
+                channels: 1,
+            });
         }
 
         codec_info
@@ -4390,6 +4422,38 @@ mod codec_negotiation_tests {
         assert!(
             !merged.iter().any(|codec| codec.codec == CodecType::TelephoneEvent),
             "callee offer should not append TelephoneEvent from allow_codecs"
+        );
+    }
+
+    #[test]
+    fn test_build_callee_offer_preserves_caller_telephone_event_8000() {
+        use audio_codec::CodecType;
+
+        let caller_rtp_map = vec![
+            (96, (CodecType::Opus, 48000, 2)),
+            (0, (CodecType::PCMU, 8000, 1)),
+            (101, (CodecType::TelephoneEvent, 48000, 1)),
+            (97, (CodecType::TelephoneEvent, 8000, 1)),
+        ];
+        let allow_codecs = vec![CodecType::Opus, CodecType::PCMU, CodecType::PCMA];
+
+        let merged = build_callee_offer_codec_info_for_test(&caller_rtp_map, &allow_codecs);
+
+        assert!(
+            merged.iter().any(|codec| {
+                codec.codec == CodecType::TelephoneEvent
+                    && codec.payload_type == 97
+                    && codec.clock_rate == 8000
+            }),
+            "callee offer should preserve caller's telephone-event/8000 payload type"
+        );
+        assert!(
+            !merged.iter().any(|codec| {
+                codec.codec == CodecType::TelephoneEvent
+                    && codec.payload_type == 101
+                    && codec.clock_rate == 48000
+            }),
+            "callee offer should ignore telephone-event/48000 in the minimal DTMF path"
         );
     }
 
