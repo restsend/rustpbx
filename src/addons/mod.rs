@@ -143,22 +143,16 @@ pub trait Addon: Send + Sync {
 
 pub mod registry;
 
-#[cfg(all(feature = "addon-observability", not(feature = "addon-telemetry")))]
-pub mod observability;
-
-// Commercial: TelemetryAddon (copied from rustpbx-addons/telemetry/ by build script)
-#[cfg(feature = "addon-telemetry")]
-pub mod telemetry;
-
 #[cfg(feature = "addon-acme")]
 pub mod acme;
 #[cfg(feature = "addon-archive")]
 pub mod archive;
-pub mod queue;
 #[cfg(feature = "addon-transcript")]
 pub mod transcript;
 #[cfg(feature = "addon-wholesale")]
 pub mod wholesale;
+
+pub mod queue;
 
 #[cfg(feature = "addon-endpoint-manager")]
 pub mod endpoint_manager;
@@ -167,4 +161,7 @@ pub mod endpoint_manager;
 pub mod enterprise_auth;
 
 #[cfg(feature = "addon-voicemail")]
-pub use crate::voicemail::VoicemailAddon;
+pub mod voicemail;
+
+#[cfg(feature = "addon-telemetry")]
+pub mod telemetry;

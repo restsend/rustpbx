@@ -57,7 +57,7 @@ mod tests {
             _ctrl: &mut CallController,
             _ctx: &ApplicationContext,
         ) -> Result<AppAction> {
-            Ok(AppAction::Hangup { reason: None })
+            Ok(AppAction::Hangup { reason: None, code: None })
         }
     }
 
@@ -116,7 +116,7 @@ mod tests {
         ) -> Result<AppAction> {
             match digit.as_str() {
                 "1" => Ok(AppAction::Transfer("sip:sales@pbx".to_string())),
-                "9" => Ok(AppAction::Hangup { reason: None }),
+                "9" => Ok(AppAction::Hangup { reason: None, code: None }),
                 _ => Ok(AppAction::Continue),
             }
         }
@@ -245,7 +245,7 @@ mod tests {
             ctrl: &mut CallController,
             _ctx: &ApplicationContext,
         ) -> Result<AppAction> {
-            ctrl.hangup(None).await?;
+            ctrl.hangup(None, None).await?;
             Ok(AppAction::Exit)
         }
     }
@@ -306,7 +306,7 @@ mod tests {
             self.log.lock().unwrap().push(format!("timeout:{id}"));
             self.fired_count += 1;
             if self.fired_count >= 1 {
-                Ok(AppAction::Hangup { reason: None })
+                Ok(AppAction::Hangup { reason: None, code: None })
             } else {
                 Ok(AppAction::Continue)
             }
@@ -373,7 +373,7 @@ mod tests {
             _ctx: &ApplicationContext,
         ) -> Result<AppAction> {
             self.log.lock().unwrap().push(format!("timeout:{id}"));
-            Ok(AppAction::Hangup { reason: None })
+            Ok(AppAction::Hangup { reason: None, code: None })
         }
     }
 
@@ -437,7 +437,7 @@ mod tests {
                 })
                 .await?;
             self.log.lock().unwrap().push(format!("collected:{digits}"));
-            Ok(AppAction::Hangup { reason: None })
+            Ok(AppAction::Hangup { reason: None, code: None })
         }
     }
 
@@ -486,5 +486,244 @@ mod tests {
             .join()
             .await
             .expect("cancelled loop should exit without error");
+    }
+
+    // ── 9. Transfer sends TransferTarget ─────────────────────────────────────
+
+    struct TransferApp;
+
+    #[async_trait]
+    impl CallApp for TransferApp {
+        fn app_type(&self) -> CallAppType {
+            CallAppType::Ivr
+        }
+        fn name(&self) -> &str {
+            "transfer"
+        }
+
+        async fn on_enter(
+            &mut self,
+            ctrl: &mut CallController,
+            _ctx: &ApplicationContext,
+        ) -> Result<AppAction> {
+            ctrl.answer().await?;
+            Ok(AppAction::Continue)
+        }
+
+        async fn on_dtmf(
+            &mut self,
+            digit: String,
+            _ctrl: &mut CallController,
+            _ctx: &ApplicationContext,
+        ) -> Result<AppAction> {
+            if digit == "1" {
+                Ok(AppAction::Transfer("sip:2001@pbx".to_string()))
+            } else {
+                Ok(AppAction::Continue)
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_transfer_sends_transfer_target() {
+        let mut stack = MockCallStack::run(Box::new(TransferApp), "1001", "8000");
+        stack
+            .assert_cmd(100, "AcceptCall", |c| {
+                matches!(c, SessionAction::AcceptCall { .. })
+            })
+            .await;
+
+        stack.dtmf("1");
+
+        stack
+            .assert_cmd(
+                200,
+                "TransferTarget",
+                |c| matches!(c, SessionAction::TransferTarget(t) if t == "sip:2001@pbx"),
+            )
+            .await;
+
+        stack.join().await.expect("loop exits after transfer");
+    }
+
+    // ── 10. collect_dtmf with terminator ──────────────────────────────────────
+
+    struct CollectTerminatorApp {
+        log: EventLog,
+    }
+
+    #[async_trait]
+    impl CallApp for CollectTerminatorApp {
+        fn app_type(&self) -> CallAppType {
+            CallAppType::Ivr
+        }
+        fn name(&self) -> &str {
+            "collect-term"
+        }
+
+        async fn on_enter(
+            &mut self,
+            ctrl: &mut CallController,
+            _ctx: &ApplicationContext,
+        ) -> Result<AppAction> {
+            ctrl.answer().await?;
+            let digits = ctrl
+                .collect_dtmf(DtmfCollectConfig {
+                    min_digits: 1,
+                    max_digits: 8,
+                    timeout: Duration::from_millis(500),
+                    terminator: Some('#'),
+                    play_prompt: None,
+                    inter_digit_timeout: None,
+                })
+                .await?;
+            self.log.lock().unwrap().push(format!("collected:{digits}"));
+            Ok(AppAction::Hangup { reason: None, code: None })
+        }
+    }
+
+    #[tokio::test]
+    async fn test_collect_dtmf_terminator_stops_collection() {
+        let log = new_log();
+        let app = CollectTerminatorApp { log: log.clone() };
+        let mut stack = MockCallStack::run(Box::new(app), "1001", "4001");
+
+        stack
+            .assert_cmd(200, "AcceptCall", |c| {
+                matches!(c, SessionAction::AcceptCall { .. })
+            })
+            .await;
+
+        stack.dtmf("4").dtmf("2").dtmf("#");
+
+        stack
+            .assert_cmd(300, "Hangup", |c| matches!(c, SessionAction::Hangup { .. }))
+            .await;
+
+        assert!(
+            logged(&log).contains(&"collected:42".to_string()),
+            "terminator should stop collection and exclude '#': {:?}",
+            logged(&log)
+        );
+    }
+
+    // ── 11. collect_dtmf hangup during collection ──────────────────────────────
+
+    struct CollectHangupApp;
+
+    #[async_trait]
+    impl CallApp for CollectHangupApp {
+        fn app_type(&self) -> CallAppType {
+            CallAppType::Ivr
+        }
+        fn name(&self) -> &str {
+            "collect-hangup"
+        }
+
+        async fn on_enter(
+            &mut self,
+            ctrl: &mut CallController,
+            _ctx: &ApplicationContext,
+        ) -> Result<AppAction> {
+            ctrl.answer().await?;
+            let _digits = ctrl
+                .collect_dtmf(DtmfCollectConfig {
+                    min_digits: 1,
+                    max_digits: 4,
+                    timeout: Duration::from_secs(10),
+                    terminator: None,
+                    play_prompt: None,
+                    inter_digit_timeout: None,
+                })
+                .await?;
+            Ok(AppAction::Exit)
+        }
+    }
+
+    #[tokio::test]
+    async fn test_collect_dtmf_exits_on_remote_hangup() {
+        let mut stack = MockCallStack::run(Box::new(CollectHangupApp), "1001", "5001");
+
+        stack
+            .assert_cmd(100, "AcceptCall", |c| {
+                matches!(c, SessionAction::AcceptCall { .. })
+            })
+            .await;
+
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        stack.remote_hangup();
+
+        let result = stack.join().await;
+        assert!(
+            result.is_err(),
+            "hangup during collection should propagate as error"
+        );
+    }
+
+    // ── 12. play_audio prompt before collect_dtmf ────────────────────────────
+
+    struct CollectWithPromptApp {
+        log: EventLog,
+    }
+
+    #[async_trait]
+    impl CallApp for CollectWithPromptApp {
+        fn app_type(&self) -> CallAppType {
+            CallAppType::Ivr
+        }
+        fn name(&self) -> &str {
+            "collect-prompt"
+        }
+
+        async fn on_enter(
+            &mut self,
+            ctrl: &mut CallController,
+            _ctx: &ApplicationContext,
+        ) -> Result<AppAction> {
+            ctrl.answer().await?;
+            let digits = ctrl
+                .collect_dtmf(DtmfCollectConfig {
+                    min_digits: 1,
+                    max_digits: 3,
+                    timeout: Duration::from_millis(500),
+                    terminator: Some('#'),
+                    play_prompt: Some("sounds/enter_pin.wav".to_string()),
+                    inter_digit_timeout: Some(Duration::from_millis(50)),
+                })
+                .await?;
+            self.log.lock().unwrap().push(format!("pin:{digits}"));
+            Ok(AppAction::Hangup { reason: None, code: None })
+        }
+    }
+
+    #[tokio::test]
+    async fn test_collect_dtmf_plays_prompt_then_collects() {
+        let log = new_log();
+        let app = CollectWithPromptApp { log: log.clone() };
+        let mut stack = MockCallStack::run(Box::new(app), "1001", "6001");
+
+        stack
+            .assert_cmd(100, "AcceptCall", |c| {
+                matches!(c, SessionAction::AcceptCall { .. })
+            })
+            .await;
+
+        stack
+            .assert_cmd(200, "PlayPrompt-pin", |c| {
+                matches!(c, SessionAction::PlayPrompt { audio_file, .. } if audio_file == "sounds/enter_pin.wav")
+            })
+            .await;
+
+        stack.dtmf("7").dtmf("8").dtmf("9");
+
+        stack
+            .assert_cmd(300, "Hangup", |c| matches!(c, SessionAction::Hangup { .. }))
+            .await;
+
+        assert!(
+            logged(&log).contains(&"pin:789".to_string()),
+            "expected digits 789: {:?}",
+            logged(&log)
+        );
     }
 }

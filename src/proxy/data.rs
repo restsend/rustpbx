@@ -913,6 +913,8 @@ struct RouteMetadataAction {
     target_type: Option<String>,
     #[serde(default)]
     queue_file: Option<String>,
+    #[serde(default)]
+    voicemail_extension: Option<String>,
 }
 
 fn convert_route(
@@ -1029,6 +1031,11 @@ fn apply_route_metadata(action: &mut RouteAction, meta: RouteMetadataAction) {
                 action.queue = Some(queue_path);
             }
         }
+        "voicemail" => {
+            let ext = sanitize_metadata_string(meta.voicemail_extension).unwrap_or_default();
+            action.app = Some("voicemail".to_string());
+            action.app_params = Some(serde_json::json!({ "extension": ext }));
+        }
         _ => {}
     }
 }
@@ -1053,9 +1060,24 @@ mod tests {
         let meta = RouteMetadataAction {
             target_type: Some("queue".to_string()),
             queue_file: Some("queues/support.toml".to_string()),
+            voicemail_extension: None,
         };
         apply_route_metadata(&mut action, meta);
         assert_eq!(action.queue.as_deref(), Some("queues/support.toml"));
+    }
+
+    #[test]
+    fn route_metadata_sets_voicemail_fields() {
+        let mut action = RouteAction::default();
+        let meta = RouteMetadataAction {
+            target_type: Some("voicemail".to_string()),
+            queue_file: None,
+            voicemail_extension: Some("1001".to_string()),
+        };
+        apply_route_metadata(&mut action, meta);
+        assert_eq!(action.app.as_deref(), Some("voicemail"));
+        let params = action.app_params.unwrap();
+        assert_eq!(params["extension"], "1001");
     }
 }
 

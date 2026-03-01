@@ -691,6 +691,24 @@
                             </div>
                         </div>
 
+                        <div class="rounded-xl border border-slate-200 bg-slate-50 p-4" x-show="isVoicemailTarget"
+                            x-cloak>
+                            <div>
+                                <h3 class="text-sm font-semibold text-slate-800">Voicemail destination</h3>
+                                <p class="text-xs text-slate-500">Calls matched by this rule will be forwarded to the
+                                    specified extension's voicemail inbox.</p>
+                            </div>
+                            <div class="mt-4 space-y-2">
+                                <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">Target
+                                    extension</label>
+                                <input type="text" x-model="route.action.voicemail_extension" maxlength="50"
+                                    class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                    placeholder="e.g. 1001">
+                                <p class="text-[11px] text-slate-500">Enter the extension number whose voicemail mailbox
+                                    should receive the call.</p>
+                            </div>
+                        </div>
+
                         <div class="grid gap-4 md:grid-cols-2">
                             <div class="space-y-2">
                                 <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">Source
@@ -816,6 +834,7 @@
             destinationOptions: [
                 { value: 'sip_trunk', label: 'SIP trunks' },
                 ...(window.queueAddonEnabled ? [{ value: 'queue', label: 'Queue' }] : []),
+                ...(window.voicemailAddonEnabled ? [{ value: 'voicemail', label: 'Voicemail' }] : []),
             ],
             selectionOptionAliases: {
                 rr: 'rr',
@@ -847,6 +866,7 @@
                     trunks: [],
                     target_type: 'sip_trunk',
                     queue_file: '',
+                    voicemail_extension: '',
                 },
                 policy: {
                     frequency_limit: { max_calls: null, duration: null },
@@ -1001,13 +1021,14 @@
                 const normalizeTargetType = (value) => {
                     if (typeof value === 'string') {
                         const trimmed = value.trim().toLowerCase();
-                        if (trimmed === 'queue') {
+                        if (trimmed === 'queue' || trimmed === 'voicemail') {
                             return trimmed;
                         }
                     }
                     return 'sip_trunk';
                 };
                 const queueFile = this.trimString(raw?.action?.queue_file || '');
+                const voicemailExtension = this.trimString(raw?.action?.voicemail_extension || '');
                 const normalizeSelection = (value) => this.normalizeSelectionOption(value);
                 const route = {
                     id: raw?.id ?? null,
@@ -1045,6 +1066,7 @@
                             : [],
                         target_type: normalizeTargetType(raw?.action?.target_type),
                         queue_file: queueFile,
+                        voicemail_extension: voicemailExtension,
                     },
                     policy: {
                         frequency_limit: {
@@ -1104,7 +1126,7 @@
             normalizeTargetType(value) {
                 if (typeof value === 'string') {
                     const trimmed = value.trim().toLowerCase();
-                    if (trimmed === 'queue') {
+                    if (trimmed === 'queue' || trimmed === 'voicemail') {
                         return trimmed;
                     }
                 }
@@ -1238,12 +1260,18 @@
                 if (!this.isQueueTarget) {
                     this.route.action.queue_file = '';
                 }
+                if (!this.isVoicemailTarget) {
+                    this.route.action.voicemail_extension = '';
+                }
             },
             get isSipTrunkTarget() {
                 return this.normalizeTargetType(this.route.action?.target_type) === 'sip_trunk';
             },
             get isQueueTarget() {
                 return this.normalizeTargetType(this.route.action?.target_type) === 'queue';
+            },
+            get isVoicemailTarget() {
+                return this.normalizeTargetType(this.route.action?.target_type) === 'voicemail';
             },
             get routeSummary() {
                 const direction = this.trimString(this.route.direction) || 'direction pending';
@@ -1283,6 +1311,12 @@
                     const queueFile = this.trimString(this.route.action.queue_file);
                     if (!queueFile.length) {
                         throw new Error('Queue destination requires a queue file path.');
+                    }
+                }
+                if (targetType === 'voicemail') {
+                    const ext = this.trimString(this.route.action.voicemail_extension);
+                    if (!ext.length) {
+                        throw new Error('Voicemail destination requires an extension.');
                     }
                 }
             },
@@ -1340,6 +1374,9 @@
                 if (targetType === 'queue') {
                     const queueFile = this.trimString(this.route.action.queue_file);
                     actionPayload.queue_file = queueFile || null;
+                }
+                if (targetType === 'voicemail') {
+                    actionPayload.voicemail_extension = this.trimString(this.route.action.voicemail_extension) || null;
                 }
 
                 const description = this.trimString(this.route.description);
