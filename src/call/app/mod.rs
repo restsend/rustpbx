@@ -57,7 +57,7 @@
 //!     ) -> anyhow::Result<AppAction> {
 //!         match digit.as_str() {
 //!             "1" => Ok(AppAction::Transfer("sip:sales@local".to_string())),
-//!             "#" => Ok(AppAction::Hangup { reason: None }),
+//!             "#" => Ok(AppAction::Hangup { reason: None, code: None }),
 //!             _   => Ok(AppAction::Continue),
 //!         }
 //!     }
@@ -83,6 +83,9 @@ mod app_context;
 mod controller;
 mod event_loop;
 
+pub mod ivr;
+pub mod ivr_config;
+
 /// Test helpers: build a mock call stack without a real SIP session.
 /// Only compiled in test builds.
 #[cfg(test)]
@@ -90,6 +93,9 @@ pub mod testing;
 
 #[cfg(test)]
 mod app_test;
+
+#[cfg(test)]
+mod ivr_test;
 
 pub use app_context::{AppSharedState, ApplicationContext, CallInfo};
 pub use controller::{
@@ -139,7 +145,7 @@ impl fmt::Display for CallAppType {
 /// Ok(AppAction::Exit)
 ///
 /// // Hang up the call
-/// Ok(AppAction::Hangup { reason: None })
+/// Ok(AppAction::Hangup { reason: None, code: None })
 ///
 /// // Transfer to another destination
 /// Ok(AppAction::Transfer("sip:1002@local".to_string()))
@@ -164,6 +170,8 @@ pub enum AppAction {
     /// Hang up the call.
     Hangup {
         reason: Option<CallRecordHangupReason>,
+        /// Optional SIP status code to send (e.g. 486, 603). None → 200.
+        code: Option<u16>,
     },
 
     /// Sleep for a duration, then re-enter the application.
@@ -265,7 +273,7 @@ pub enum AppEvent {
 ///         &mut self, _track_id: String,
 ///         _ctrl: &mut CallController, _ctx: &ApplicationContext,
 ///     ) -> anyhow::Result<AppAction> {
-///         Ok(AppAction::Hangup { reason: None })
+///         Ok(AppAction::Hangup { reason: None, code: None })
 ///     }
 /// }
 /// ```

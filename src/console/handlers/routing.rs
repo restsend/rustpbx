@@ -107,6 +107,7 @@ impl Default for RouteDocument {
 pub(crate) enum RouteTargetKind {
     SipTrunk,
     Queue,
+    Voicemail,
 }
 
 impl Default for RouteTargetKind {
@@ -126,6 +127,8 @@ pub(crate) struct RouteActionDocument {
     target_type: RouteTargetKind,
     #[serde(default)]
     queue_file: Option<String>,
+    #[serde(default)]
+    voicemail_extension: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -173,6 +176,7 @@ impl Default for RouteActionDocument {
             trunks: Vec::new(),
             target_type: RouteTargetKind::SipTrunk,
             queue_file: None,
+            voicemail_extension: None,
         }
     }
 }
@@ -264,6 +268,18 @@ impl RouteDocument {
                     ));
                 }
             }
+            RouteTargetKind::Voicemail => {
+                let has_ext = self
+                    .action
+                    .voicemail_extension
+                    .as_ref()
+                    .and_then(|value| sanitize_optional_string(Some(value.clone())));
+                if has_ext.is_none() {
+                    return Err(RouteError::new(
+                        "Voicemail destination requires an extension",
+                    ));
+                }
+            }
         }
         Ok(())
     }
@@ -274,15 +290,25 @@ impl RouteDocument {
         }
 
         self.action.queue_file = sanitize_optional_string(self.action.queue_file.take());
+        self.action.voicemail_extension =
+            sanitize_optional_string(self.action.voicemail_extension.take());
 
         match self.action.target_type {
             RouteTargetKind::SipTrunk => {
                 self.action.queue_file = None;
+                self.action.voicemail_extension = None;
             }
             RouteTargetKind::Queue => {
                 self.action.trunks.clear();
                 self.action.select = DEFAULT_SELECTION;
                 self.action.hash_key = None;
+                self.action.voicemail_extension = None;
+            }
+            RouteTargetKind::Voicemail => {
+                self.action.trunks.clear();
+                self.action.select = DEFAULT_SELECTION;
+                self.action.hash_key = None;
+                self.action.queue_file = None;
             }
         }
 
@@ -580,6 +606,7 @@ fn build_route_console_payload(
             "trunks": doc.action.trunks.clone(),
             "target_type": doc.action.target_type,
             "queue_file": doc.action.queue_file.clone(),
+            "voicemail_extension": doc.action.voicemail_extension.clone(),
         },
         "source_trunk": doc.source_trunk.clone(),
         "target_trunks": doc.action.trunks.iter().map(|t| t.name.clone()).collect::<Vec<_>>(),

@@ -133,13 +133,19 @@ impl CallController {
         Ok(())
     }
 
-    /// Hang up the call.
-    pub async fn hangup(&self, reason: Option<CallRecordHangupReason>) -> anyhow::Result<()> {
+    pub async fn hangup(&self, reason: Option<CallRecordHangupReason>, code: Option<u16>) -> anyhow::Result<()> {
         self.session.send_command(SessionAction::Hangup {
             reason,
-            code: None,
+            code,
             initiator: Some("app".to_string()),
         })?;
+        Ok(())
+    }
+
+    pub async fn transfer(&self, target: impl Into<String>) -> anyhow::Result<()> {
+        let target = target.into();
+        self.session
+            .send_command(SessionAction::from_transfer_target(&target))?;
         Ok(())
     }
 

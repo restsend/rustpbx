@@ -10,22 +10,6 @@ impl AddonRegistry {
     pub fn new() -> Self {
         let mut addons: Vec<Box<dyn Addon>> = Vec::new();
 
-        #[cfg(all(feature = "addon-observability", not(feature = "addon-telemetry")))]
-        {
-            if let Err(e) = super::observability::ObservabilityAddon::install_recorder() {
-                tracing::warn!("Prometheus recorder not installed: {}", e);
-            }
-            addons.push(Box::new(super::observability::ObservabilityAddon::new()));
-        }
-
-        #[cfg(feature = "addon-telemetry")]
-        {
-            if let Err(e) = crate::addons::telemetry::TelemetryAddon::install_recorder() {
-                tracing::warn!("Prometheus recorder not installed (commercial): {}", e);
-            }
-            addons.push(Box::new(crate::addons::telemetry::TelemetryAddon::new()));
-        }
-
         // ACME Addon (Free/Built-in for now as per request)
         #[cfg(feature = "addon-acme")]
         addons.push(Box::new(super::acme::AcmeAddon::new()));
@@ -52,9 +36,9 @@ impl AddonRegistry {
         #[cfg(feature = "addon-enterprise-auth")]
         addons.push(Box::new(super::enterprise_auth::EnterpriseAuthAddon::new()));
 
-        // Voicemail Addon
+        // Voicemail Addon (Commercial)
         #[cfg(feature = "addon-voicemail")]
-        addons.push(Box::new(crate::voicemail::VoicemailAddon::new()));
+        addons.push(Box::new(super::voicemail::VoicemailAddon::new()));
 
         // Queue Addon
         addons.push(Box::new(super::queue::QueueAddon::new()));
@@ -64,108 +48,18 @@ impl AddonRegistry {
 
     pub async fn initialize_all(&self, state: AppState) -> anyhow::Result<()> {
         let config = state.config();
-
-        // Tell the license module where the storage directory lives so the
-        // free-trial flag file lands in the right place.
-        crate::license::set_storage_dir(&config.storage_dir);
-
-        // Check licenses for all commercial addons at startup
-        #[cfg(feature = "commerce")]
-        {
-            self.check_all_licenses(config).await;
-        }
-
         for addon in &self.addons {
             if !self.is_enabled(addon.id(), &config) {
                 tracing::info!("Addon {} is disabled", addon.name());
                 continue;
             }
-
-            // Check license for commercial addons
-            #[cfg(feature = "commerce")]
-            {
-                if addon.category() == crate::addons::AddonCategory::Commercial {
-                    let can_run =
-                        crate::license::can_enable_addon(addon.id(), true, &config.licenses).await;
-                    if !can_run {
-                        tracing::error!(
-                            "Cannot enable addon {}: license is invalid or expired",
-                            addon.name()
-                        );
-                        continue;
-                    }
-                }
-            }
-
             tracing::info!("Initializing addon: {}", addon.name());
+            // Commercial addons would check license here
             if let Err(e) = addon.initialize(state.clone()).await {
                 tracing::error!("Failed to initialize addon {}: {}", addon.name(), e);
             }
         }
         Ok(())
-    }
-
-    /// Check all licenses at startup and log any issues.
-    #[cfg(feature = "commerce")]
-    async fn check_all_licenses(&self, config: &crate::config::Config) {
-        let commercial_addons: Vec<String> = self
-            .addons
-            .iter()
-            .filter(|a| a.category() == crate::addons::AddonCategory::Commercial)
-            .filter(|a| self.is_enabled(a.id(), config))
-            .map(|a| a.id().to_string())
-            .collect();
-
-        if commercial_addons.is_empty() {
-            return;
-        }
-
-        let results =
-            crate::license::check_all_addon_licenses(&commercial_addons, &config.licenses).await;
-
-        // Populate the in-process cache so runtime checks never hit the network.
-        crate::license::record_startup_results(results.clone());
-
-        for (addon_id, status) in results {
-            if status.is_trial && status.valid {
-                tracing::info!(
-                    "Addon '{}' running under free-trial ({})",
-                    addon_id,
-                    status.plan
-                );
-            } else if !status.valid {
-                if status.is_trial {
-                    tracing::error!(
-                        "Addon '{}' free-trial has expired; a valid license key is required",
-                        addon_id
-                    );
-                } else if status.key_name.is_empty() {
-                    tracing::error!(
-                        "Addon '{}' is commercial but no license key is configured",
-                        addon_id
-                    );
-                } else if status.expired {
-                    tracing::error!(
-                        "Addon '{}' license has expired (key: {})",
-                        addon_id,
-                        status.key_name
-                    );
-                } else {
-                    tracing::error!(
-                        "Addon '{}' license is invalid (key: {})",
-                        addon_id,
-                        status.key_name
-                    );
-                }
-            } else {
-                tracing::info!(
-                    "Addon '{}' license is valid (key: {}, expires: {:?})",
-                    addon_id,
-                    status.key_name,
-                    status.expiry
-                );
-            }
-        }
     }
 
     pub async fn seed_all_fixtures(&self, state: AppState) -> anyhow::Result<()> {
@@ -227,9 +121,8 @@ impl AddonRegistry {
             .iter()
             .filter(|a| self.is_enabled(a.id(), config))
             .flat_map(|a| {
-                vec![
+                [
                     format!("src/addons/{}/templates", a.id()),
-                    format!("src/{}/templates", a.id()),
                     format!("templates/{}", a.id()),
                 ]
             })

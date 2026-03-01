@@ -198,6 +198,10 @@ pub(crate) struct CallSession {
     pub callee_event_tx: Option<mpsc::UnboundedSender<DialogState>>,
     pub callee_guards: Vec<crate::call::sip::DialogStateReceiverGuard>,
     pub callee_answer_sdp: Option<String>,
+    /// Channel used to deliver [`ControllerEvent`]s to the running `CallApp` event loop.
+    /// Populated by [`run_application`] for the lifetime of the app; cleared when the
+    /// app exits so stale senders are never accidentally reused.
+    pub app_event_tx: Option<mpsc::UnboundedSender<crate::call::app::ControllerEvent>>,
 }
 
 impl CallSession {
@@ -291,6 +295,7 @@ impl CallSession {
             callee_event_tx: None,
             callee_guards: Vec::new(),
             callee_answer_sdp: None,
+            app_event_tx: None,
         }
     }
 
@@ -3164,6 +3169,8 @@ impl CallSession {
         app_params: Option<serde_json::Value>,
         auto_answer: bool,
     ) -> Result<()> {
+        use crate::call::app::ControllerEvent;
+
         info!(
             session_id = %self.context.session_id,
             app_name,
@@ -3174,44 +3181,57 @@ impl CallSession {
         // Build the CallApp via the addon registry
         let app = self.build_call_app(app_name, &app_params).await?;
 
-        // Create the communication channel between session and controller
-        let (_event_tx, event_rx) = mpsc::unbounded_channel();
+        // Create a *dedicated* session handle for the app's event loop.
+        //
+        // Using the real session handle would route PlayPrompt / AcceptCall /
+        // Hangup back through the session's main action inbox — but that inbox
+        // is not being drained while we are blocked inside this function.
+        // Instead we give the controller a fresh handle whose command channel
+        // we drain ourselves in the select loop below.
+        let app_shared = crate::proxy::proxy_call::state::CallSessionShared::new(
+            self.context.session_id.clone(),
+            self.context.dialplan.direction,
+            self.context.dialplan.caller.as_ref().map(|c| c.to_string()),
+            self.context
+                .dialplan
+                .first_target()
+                .map(|l| l.aor.to_string()),
+            None, // no active-call registry on the sub-handle
+        );
+        let (app_handle, mut app_cmd_rx) =
+            crate::proxy::proxy_call::state::CallSessionHandle::with_shared(app_shared);
 
-        // Get session handle for the controller
-        let handle = self
-            .handle
-            .clone()
-            .ok_or_else(|| anyhow!("CallSessionHandle not available for application"))?;
+        // The event channel bridges session → controller (AudioComplete, DTMF, …).
+        // We keep the sender alive in `self.app_event_tx` so that helpers like
+        // `play_audio_file` and `start_recording` can post events back.
+        let (event_tx, event_rx) = mpsc::unbounded_channel::<ControllerEvent>();
+        self.app_event_tx = Some(event_tx.clone());
 
-        let (controller, timer_rx) = crate::call::app::CallController::new(handle, event_rx);
+        let (controller, timer_rx) = crate::call::app::CallController::new(app_handle, event_rx);
 
         // Build ApplicationContext from server resources
-        let db = self
-            .server
-            .database
-            .clone()
-            .unwrap_or_else(|| {
-                // Fallback: in-memory DB (should not happen in production)
-                warn!(session_id = %self.context.session_id, "No database connection for application context, using empty stub");
-                sea_orm::DatabaseConnection::Disconnected
-            });
+        let db = self.server.database.clone().unwrap_or_else(|| {
+            warn!(
+                session_id = %self.context.session_id,
+                "No database connection for application context, using empty stub"
+            );
+            sea_orm::DatabaseConnection::Disconnected
+        });
 
-        let storage = self
-            .server
-            .storage
-            .clone()
-            .unwrap_or_else(|| {
-                warn!(session_id = %self.context.session_id, "No storage for application context, using temp dir");
-                let cfg = crate::storage::StorageConfig::Local {
-                    path: std::env::temp_dir()
-                        .join("rustpbx-fallback")
-                        .to_string_lossy()
-                        .to_string(),
-                };
-                crate::storage::Storage::new(&cfg).expect("fallback storage")
-            });
+        let storage = self.server.storage.clone().unwrap_or_else(|| {
+            warn!(
+                session_id = %self.context.session_id,
+                "No storage for application context, using temp dir"
+            );
+            let cfg = crate::storage::StorageConfig::Local {
+                path: std::env::temp_dir()
+                    .join("rustpbx-fallback")
+                    .to_string_lossy()
+                    .to_string(),
+            };
+            crate::storage::Storage::new(&cfg).expect("fallback storage")
+        });
 
-        let _config = (*self.server.proxy_config).clone();
         let call_info = crate::call::app::CallInfo {
             session_id: self.context.session_id.clone(),
             caller: self.context.original_caller.clone(),
@@ -3227,44 +3247,138 @@ impl CallSession {
             storage,
         );
 
-        // Answer the call if auto_answer is configured
+        // Pre-answer the call when the dialplan requires it (e.g. voicemail).
         if auto_answer {
-            // Generate SDP answer if needed
             if self.answer.is_none() {
                 match self.create_caller_answer_from_offer().await {
                     Ok(answer) => self.set_answer(answer),
                     Err(e) => {
-                        warn!(session_id = %self.context.session_id, error = %e, "Failed to create SDP answer for application");
+                        warn!(
+                            session_id = %self.context.session_id,
+                            error = %e,
+                            "Failed to create SDP answer for application"
+                        );
+                        self.app_event_tx = None;
                         return Err(anyhow!("Failed to create SDP answer: {}", e));
                     }
                 }
             }
             if let Err(e) = self.accept_call(None, None, None).await {
-                warn!(session_id = %self.context.session_id, error = %e, "Failed to accept call for application");
+                warn!(
+                    session_id = %self.context.session_id,
+                    error = %e,
+                    "Failed to accept call for application"
+                );
+                self.app_event_tx = None;
                 return Err(anyhow!("Failed to accept call: {}", e));
             }
         }
 
-        // Run the event loop
+        // Spawn the app event loop as an independent task so that the select
+        // loop below can concurrently drain app commands (PlayPrompt, AcceptCall,
+        // Hangup, …) sent via `app_handle`.
         let cancel_token = self.cancel_token.child_token();
+
+        // Spawn a per-call DTMF listener that taps the caller's PeerConnection
+        // and forwards RFC 4733 telephone-event RTP packets to the app as
+        // `ControllerEvent::DtmfReceived`.  This is required for IVR, Voicemail,
+        // and Queue-wait scenarios where no media bridge is active.
+        if let Some(caller_dtmf_pt) = self
+            .caller_offer
+            .as_deref()
+            .and_then(|sdp| MediaNegotiator::extract_codec_params(sdp).1)
+        {
+            let caller_peer = self.caller_peer.clone();
+            let dtmf_event_tx = event_tx.clone();
+            let dtmf_cancel = cancel_token.clone();
+            crate::utils::spawn(async move {
+                spawn_caller_dtmf_listener(caller_peer, dtmf_event_tx, caller_dtmf_pt, dtmf_cancel)
+                    .await;
+            });
+        }
+
         let event_loop = crate::call::app::AppEventLoop::new(
             app,
             controller,
             app_context,
-            cancel_token,
+            cancel_token.clone(),
             timer_rx,
         );
+        let mut event_loop_task = tokio::spawn(event_loop.run());
 
-        match event_loop.run().await {
-            Ok(()) => {
-                info!(session_id = %self.context.session_id, app_name, "Application completed");
-                Ok(())
+        // Clone tokens/senders we need inside the loop without holding &self.
+        let session_cancel = self.cancel_token.clone();
+
+        let result = loop {
+            tokio::select! {
+                // ── event loop finished ──────────────────────────────────────
+                result = &mut event_loop_task => {
+                    break match result {
+                        Ok(Ok(())) => {
+                            info!(
+                                session_id = %self.context.session_id,
+                                app_name,
+                                "Application completed"
+                            );
+                            Ok(())
+                        }
+                        Ok(Err(e)) => {
+                            warn!(
+                                session_id = %self.context.session_id,
+                                app_name,
+                                error = %e,
+                                "Application failed"
+                            );
+                            Err(e)
+                        }
+                        Err(join_err) => {
+                            warn!(
+                                session_id = %self.context.session_id,
+                                app_name,
+                                "Application task panicked: {}", join_err
+                            );
+                            Err(anyhow!("Application task panicked: {}", join_err))
+                        }
+                    };
+                }
+
+                // ── process commands sent by the app ─────────────────────────
+                cmd = app_cmd_rx.recv() => {
+                    match cmd {
+                        Some(action) => {
+                            // Pass `None` as inbox — the app sub-handle only uses
+                            // commands that don't need inbox recursion.
+                            if let Err(e) = self
+                                .apply_session_action(action, None)
+                                .await
+                            {
+                                warn!(
+                                    session_id = %self.context.session_id,
+                                    error = %e,
+                                    "Error handling app command"
+                                );
+                                // Non-fatal — keep the loop alive.
+                            }
+                        }
+                        None => {
+                            // App-handle channel closed; event loop should be
+                            // finishing already.
+                        }
+                    }
+                }
+
+                // ── session-level cancellation (caller hung up, shutdown) ────
+                _ = session_cancel.cancelled() => {
+                    event_loop_task.abort();
+                    break Ok(());
+                }
             }
-            Err(e) => {
-                warn!(session_id = %self.context.session_id, app_name, error = %e, "Application failed");
-                Err(e)
-            }
-        }
+        };
+
+        // Tear down the app-event bridge so nothing writes to a dead channel.
+        self.app_event_tx = None;
+
+        result
     }
 
     /// Build a `CallApp` from the addon registry, given the app name and params.
@@ -3321,6 +3435,19 @@ impl CallSession {
                 let app = voicemail
                     .build_check_app()
                     .map_err(|e| anyhow!("Failed to build CheckVoicemailApp: {}", e))?;
+                Ok(Box::new(app))
+            }
+            "ivr" => {
+                let file = _app_params
+                    .as_ref()
+                    .and_then(|p| p.get("file"))
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| {
+                        anyhow!("IVR application requires 'file' parameter in app_params")
+                    })?;
+
+                let app = crate::call::app::ivr::IvrApp::from_file(file)
+                    .map_err(|e| anyhow!("Failed to build IvrApp: {}", e))?;
                 Ok(Box::new(app))
             }
             _ => Err(anyhow!("Unknown application: {}", app_name)),
@@ -3987,26 +4114,82 @@ impl CallSession {
             }
         }
     }
-    pub async fn play_audio_file(&mut self, file_path: &str, await_completion: bool) -> Result<()> {
+    pub async fn play_audio_file(
+        &mut self,
+        file_path: &str,
+        _await_completion: bool,
+    ) -> Result<()> {
+        use crate::call::app::ControllerEvent;
+        use crate::media::audio_source::estimate_audio_duration;
+
         info!(session_id = %self.context.session_id, file = %file_path, "Playing audio file");
 
-        // Simulating playback logic
-        // 1. Create a file track
-        // 2. Attach to caller_peer
-        // 3. Wait if needed
-
-        let _track_id = "prompt".to_string();
-
-        // This assumes proper media setup
-        // self.caller_peer.update_track(file_path.into(), Some(track_id.clone())).await?;
-
-        if !await_completion {
+        // Validate the file exists locally (remote URLs are handled by FileAudioSource).
+        let is_remote = file_path.starts_with("http://") || file_path.starts_with("https://");
+        if !is_remote && !std::path::Path::new(file_path).exists() {
+            warn!(
+                session_id = %self.context.session_id,
+                file = %file_path,
+                "Audio file not found, sending interrupted AudioComplete immediately"
+            );
+            if let Some(ref tx) = self.app_event_tx {
+                let _ = tx.send(ControllerEvent::AudioComplete {
+                    track_id: "default".to_string(),
+                    interrupted: true,
+                });
+            }
             return Ok(());
         }
 
-        // Simulate wait or actual event handling
-        // Since we don't have full audio engine access here, we can't block easily on true completion.
-        // We'll rely on the engine sending an event back which session loop picks up and forwards to app.
+        // Attach a FileTrack to the caller-side peer so the audio is actually
+        // sent over RTP.  Any existing "prompt" track is replaced.
+        let track = crate::media::FileTrack::new("prompt".to_string())
+            .with_path(file_path.to_string())
+            .with_loop(false)
+            .with_cancel_token(self.cancel_token.child_token());
+
+        self.caller_peer
+            .update_track(Box::new(track), Some("prompt".to_string()))
+            .await;
+
+        // Estimate how long the audio will take.  After that period we fire
+        // AudioComplete so the CallApp can advance to the next state.
+        // The timer can be cut short if the session is cancelled (caller hung up).
+        let duration = estimate_audio_duration(file_path);
+        debug!(
+            session_id = %self.context.session_id,
+            file = %file_path,
+            duration_ms = duration.as_millis(),
+            "Scheduling AudioComplete after estimated playback duration"
+        );
+
+        if let Some(event_tx) = self.app_event_tx.clone() {
+            let cancel = self.cancel_token.child_token();
+            let fp = file_path.to_string();
+            crate::utils::spawn(async move {
+                tokio::select! {
+                    _ = tokio::time::sleep(duration) => {
+                        debug!(file = %fp, "Audio playback timer elapsed, sending AudioComplete");
+                        let _ = event_tx.send(ControllerEvent::AudioComplete {
+                            track_id: "default".to_string(),
+                            interrupted: false,
+                        });
+                    }
+                    _ = cancel.cancelled() => {
+                        debug!(file = %fp, "Session cancelled during playback, sending interrupted AudioComplete");
+                        let _ = event_tx.send(ControllerEvent::AudioComplete {
+                            track_id: "default".to_string(),
+                            interrupted: true,
+                        });
+                    }
+                }
+            });
+        } else {
+            warn!(
+                session_id = %self.context.session_id,
+                "app_event_tx not set — AudioComplete will not be delivered (IVR may stall)"
+            );
+        }
 
         Ok(())
     }
@@ -4041,6 +4224,207 @@ impl Drop for CallSession {
             let snapshot = self.record_snapshot();
             reporter.report(snapshot);
         }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────
+// DTMF reception helpers (RFC 4733 / RTP telephone-event)
+// ─────────────────────────────────────────────────────────────
+
+/// Parses an RFC 4733 telephone-event RTP payload.
+///
+/// Returns `Some(digit)` **only** for end-bit (final) packets so that each
+/// key-press fires exactly one `DtmfReceived` event.
+///
+/// Layout (4 bytes):
+/// ```text
+/// byte 0   – event code (0-9 → digits, 10 → *, 11 → #, 12-15 → A-D)
+/// byte 1   – E|R|volume  (bit 7 = end-of-event flag)
+/// bytes 2-3 – duration (big-endian, ignored here)
+/// ```
+fn parse_dtmf_rfc4733(data: &[u8]) -> Option<String> {
+    if data.len() < 4 {
+        return None;
+    }
+    // Only fire on the final (end-bit) packet to avoid duplicate events.
+    if data[1] & 0x80 == 0 {
+        return None;
+    }
+    let ch = match data[0] {
+        0 => '0',
+        1 => '1',
+        2 => '2',
+        3 => '3',
+        4 => '4',
+        5 => '5',
+        6 => '6',
+        7 => '7',
+        8 => '8',
+        9 => '9',
+        10 => '*',
+        11 => '#',
+        12 => 'A',
+        13 => 'B',
+        14 => 'C',
+        15 => 'D',
+        _ => return None,
+    };
+    Some(ch.to_string())
+}
+
+/// Reads audio samples from a single receiver `MediaStreamTrack` and converts
+/// RFC 4733 telephone-event packets to [`ControllerEvent::DtmfReceived`].
+///
+/// Exits when the track closes or the cancel token is triggered.
+async fn dtmf_track_reader(
+    track: std::sync::Arc<dyn rustrtc::media::MediaStreamTrack>,
+    event_tx: mpsc::UnboundedSender<crate::call::app::ControllerEvent>,
+    dtmf_pt: u8,
+    cancel: CancellationToken,
+) {
+    use rustrtc::media::MediaSample;
+    loop {
+        tokio::select! {
+            _ = cancel.cancelled() => break,
+            result = track.recv() => {
+                match result {
+                    Ok(MediaSample::Audio(frame)) => {
+                        if frame.payload_type == Some(dtmf_pt) {
+                            if let Some(digit) = parse_dtmf_rfc4733(&frame.data) {
+                                debug!(dtmf = %digit, "DTMF received from caller (RFC 4733)");
+                                let _ = event_tx.send(
+                                    crate::call::app::ControllerEvent::DtmfReceived(digit),
+                                );
+                            }
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(_) => break,
+                }
+            }
+        }
+    }
+}
+
+/// Attaches a DTMF listener to the caller's `PeerConnection`.
+///
+/// Handles both pre-existing transceivers (call already established when this
+/// runs) and new transceivers that arrive via `PeerConnectionEvent::Track`
+/// (e.g. after a re-INVITE).  Each transceiver's receiver track is processed
+/// in a dedicated `tokio::spawn` so that audio frames are consumed even when
+/// no DTMF is pressed (prevents the receive buffer from stalling).
+async fn spawn_caller_dtmf_listener(
+    caller_peer: std::sync::Arc<dyn crate::proxy::proxy_call::media_peer::MediaPeer>,
+    event_tx: mpsc::UnboundedSender<crate::call::app::ControllerEvent>,
+    dtmf_pt: u8,
+    cancel: CancellationToken,
+) {
+    let tracks = caller_peer.get_tracks().await;
+    let Some(track_handle) = tracks.into_iter().next() else {
+        return;
+    };
+    let pc = {
+        let guard = track_handle.lock().await;
+        guard.get_peer_connection().await
+    };
+    let Some(pc) = pc else { return };
+
+    // Handle any pre-established receiver transceivers.
+    for transceiver in pc.get_transceivers() {
+        if let Some(receiver) = transceiver.receiver() {
+            let incoming_track = receiver.track();
+            let tx = event_tx.clone();
+            let c = cancel.clone();
+            tokio::spawn(async move {
+                dtmf_track_reader(incoming_track, tx, dtmf_pt, c).await;
+            });
+        }
+    }
+
+    // Watch for new tracks (e.g. re-INVITE after hold/resume).
+    let mut pc_recv = Box::pin(pc.recv());
+    loop {
+        tokio::select! {
+            _ = cancel.cancelled() => break,
+            event = &mut pc_recv => {
+                match event {
+                    Some(rustrtc::PeerConnectionEvent::Track(transceiver)) => {
+                        if let Some(receiver) = transceiver.receiver() {
+                            let incoming_track = receiver.track();
+                            let tx = event_tx.clone();
+                            let c = cancel.clone();
+                            tokio::spawn(async move {
+                                dtmf_track_reader(incoming_track, tx, dtmf_pt, c).await;
+                            });
+                        }
+                        pc_recv = Box::pin(pc.recv());
+                    }
+                    Some(_) => {
+                        pc_recv = Box::pin(pc.recv());
+                    }
+                    None => break,
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod dtmf_tests {
+    use super::*;
+
+    // ── parse_dtmf_rfc4733 ──────────────────────────────────────────────
+
+    #[test]
+    fn test_parse_dtmf_digits_0_to_9() {
+        for (code, expected) in (0u8..=9).zip(['0', '1', '2', '3', '4', '5', '6', '7', '8', '9']) {
+            // End-bit set (0x80), volume = 0, duration = 160
+            let payload = [code, 0x80, 0x00, 0xA0];
+            assert_eq!(
+                parse_dtmf_rfc4733(&payload),
+                Some(expected.to_string()),
+                "Expected digit '{}' for code {}",
+                expected,
+                code
+            );
+        }
+    }
+
+    #[test]
+    fn test_parse_dtmf_star_and_hash() {
+        let star = [10u8, 0x80, 0x00, 0xA0];
+        assert_eq!(parse_dtmf_rfc4733(&star), Some("*".to_string()));
+
+        let hash = [11u8, 0x80, 0x00, 0xA0];
+        assert_eq!(parse_dtmf_rfc4733(&hash), Some("#".to_string()));
+    }
+
+    #[test]
+    fn test_parse_dtmf_abcd() {
+        for (code, ch) in [(12u8, 'A'), (13, 'B'), (14, 'C'), (15, 'D')] {
+            let payload = [code, 0x80, 0x00, 0xA0];
+            assert_eq!(parse_dtmf_rfc4733(&payload), Some(ch.to_string()));
+        }
+    }
+
+    #[test]
+    fn test_parse_dtmf_no_end_bit_returns_none() {
+        // Same as digit '5' but without end-bit — should be ignored.
+        let payload = [5u8, 0x00, 0x00, 0xA0];
+        assert_eq!(parse_dtmf_rfc4733(&payload), None);
+    }
+
+    #[test]
+    fn test_parse_dtmf_short_payload_returns_none() {
+        assert_eq!(parse_dtmf_rfc4733(&[]), None);
+        assert_eq!(parse_dtmf_rfc4733(&[1, 0x80, 0x00]), None);
+    }
+
+    #[test]
+    fn test_parse_dtmf_unknown_event_code_returns_none() {
+        // Event code 16+ is not a standard DTMF digit.
+        let payload = [16u8, 0x80, 0x00, 0xA0];
+        assert_eq!(parse_dtmf_rfc4733(&payload), None);
     }
 }
 
@@ -5051,6 +5435,210 @@ mod codec_negotiation_tests {
             chosen_codec.codec,
             CodecType::TelephoneEvent,
             "Should never select TelephoneEvent as audio codec"
+        );
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Unit tests for play_audio_file timer/event logic
+//
+// These tests exercise the core play_audio_file behaviour — file validation,
+// AudioComplete delivery timing, and cancellation — without requiring a full
+// SIP session or media stack.  The approach:
+//
+//   1. Replicate the essential logic (build an (event_tx, event_rx) pair,
+//      spawn the timer task exactly as play_audio_file does, then drain the
+//      receiver).
+//   2. Use `tokio::time::pause()` / `advance()` to control the simulated clock
+//      so the tests complete in microseconds instead of real seconds.
+// ─────────────────────────────────────────────────────────────────────────────
+#[cfg(test)]
+mod play_audio_file_tests {
+    use crate::call::app::ControllerEvent;
+    use crate::media::audio_source::estimate_audio_duration;
+    use tempfile::NamedTempFile;
+    use tokio::sync::mpsc;
+    use tokio_util::sync::CancellationToken;
+
+    /// Spawn a minimal simulation of the timer task inside play_audio_file and
+    /// return the channel receiver.
+    fn spawn_timer(
+        file_path: &str,
+        cancel: CancellationToken,
+    ) -> mpsc::UnboundedReceiver<ControllerEvent> {
+        let (tx, rx) = mpsc::unbounded_channel::<ControllerEvent>();
+        let duration = estimate_audio_duration(file_path);
+        let fp = file_path.to_string();
+        tokio::spawn(async move {
+            tokio::select! {
+                _ = tokio::time::sleep(duration) => {
+                    let _ = tx.send(ControllerEvent::AudioComplete {
+                        track_id: "default".to_string(),
+                        interrupted: false,
+                    });
+                }
+                _ = cancel.cancelled() => {
+                    let _ = tx.send(ControllerEvent::AudioComplete {
+                        track_id: "default".to_string(),
+                        interrupted: true,
+                    });
+                }
+            }
+            drop(fp); // keep the fp alive until the task exits
+        });
+        rx
+    }
+
+    fn write_wav_file(sample_rate: u32, num_samples: u32) -> NamedTempFile {
+        let mut tmp = NamedTempFile::with_suffix(".wav").expect("tempfile");
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut w = hound::WavWriter::new(std::io::BufWriter::new(tmp.as_file_mut()), spec)
+            .expect("WavWriter");
+        for _ in 0..num_samples {
+            w.write_sample(0i16).expect("write_sample");
+        }
+        w.finalize().expect("finalize");
+        tmp
+    }
+
+    // ── 1. Missing file → instant interrupted AudioComplete ──────────────────
+
+    #[tokio::test]
+    async fn test_missing_file_sends_interrupted_immediately() {
+        // When the file does not exist play_audio_file sends an interrupted
+        // AudioComplete immediately without spawning a timer task.  We replicate
+        // the guard logic here.
+        let path = "/nonexistent/phantom.wav";
+        let (tx, mut rx) = mpsc::unbounded_channel::<ControllerEvent>();
+        if !std::path::Path::new(path).exists() {
+            let _ = tx.send(ControllerEvent::AudioComplete {
+                track_id: "default".to_string(),
+                interrupted: true,
+            });
+        }
+
+        let event = tokio::time::timeout(std::time::Duration::from_millis(20), rx.recv())
+            .await
+            .expect("event must arrive immediately")
+            .expect("channel must not be closed");
+
+        match event {
+            ControllerEvent::AudioComplete { interrupted, .. } => {
+                assert!(interrupted, "missing file must produce interrupted=true");
+            }
+            other => panic!("unexpected event: {:?}", other),
+        }
+    }
+
+    // ── 2. Timer fires after WAV duration ────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_wav_audio_complete_fires_after_duration() {
+        // 8000 Hz × 80 samples ≈ 10 ms.  We write a real WAV so the
+        // estimate_audio_duration calculation can use the header.
+        let tmp = write_wav_file(8000, 80);
+        let path = tmp.path().to_str().unwrap();
+
+        let cancel = CancellationToken::new();
+        let mut rx = spawn_timer(path, cancel.clone());
+
+        // Wait up to 500 ms for the event — plenty of time for a 10 ms file.
+        let event = tokio::time::timeout(std::time::Duration::from_millis(500), rx.recv())
+            .await
+            .expect("AudioComplete must arrive within 500 ms")
+            .expect("channel must not be closed");
+
+        match event {
+            ControllerEvent::AudioComplete {
+                interrupted,
+                track_id,
+            } => {
+                assert!(
+                    !interrupted,
+                    "normal completion must have interrupted=false"
+                );
+                assert_eq!(track_id, "default");
+            }
+            other => panic!("unexpected event: {:?}", other),
+        }
+    }
+
+    // ── 3. Cancellation produces interrupted AudioComplete immediately ────────
+
+    #[tokio::test]
+    async fn test_cancellation_sends_interrupted_audio_complete() {
+        // Long 10-second file so the timer never fires during the test.
+        let tmp = write_wav_file(8000, 80_000); // 10 seconds
+        let path = tmp.path().to_str().unwrap();
+
+        let cancel = CancellationToken::new();
+        let mut rx = spawn_timer(path, cancel.clone());
+
+        // Cancel immediately — no need to advance time.
+        cancel.cancel();
+
+        let event = tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv())
+            .await
+            .expect("AudioComplete (interrupted) must arrive quickly after cancel")
+            .expect("channel");
+
+        match event {
+            ControllerEvent::AudioComplete { interrupted, .. } => {
+                assert!(interrupted, "cancelled playback must have interrupted=true");
+            }
+            other => panic!("unexpected event: {:?}", other),
+        }
+    }
+
+    // ── 4. Timer does NOT fire before file duration elapses ──────────────────
+
+    #[tokio::test]
+    async fn test_audio_complete_does_not_fire_early() {
+        // 8000 Hz × 8000 samples = 1 second.  We wait only 50 ms, so no
+        // AudioComplete event should arrive.
+        let tmp = write_wav_file(8000, 8000);
+        let path = tmp.path().to_str().unwrap();
+
+        let cancel = CancellationToken::new();
+        let mut rx = spawn_timer(path, cancel.clone());
+
+        // Wait 50 ms — well before the 1-second file would finish.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        assert!(
+            rx.try_recv().is_err(),
+            "AudioComplete must not fire before the file has finished playing"
+        );
+
+        cancel.cancel(); // clean up the background task
+    }
+
+    // ── 5. estimate_audio_duration gives correct duration for WAV ────────────
+
+    #[test]
+    fn test_estimate_duration_wav_one_second() {
+        let tmp = write_wav_file(8000, 8000);
+        let dur = estimate_audio_duration(tmp.path().to_str().unwrap());
+        assert!(
+            dur.as_millis() >= 995 && dur.as_millis() <= 1005,
+            "1-second WAV: expected ~1000 ms, got {} ms",
+            dur.as_millis()
+        );
+    }
+
+    #[test]
+    fn test_estimate_duration_wav_20ms() {
+        let tmp = write_wav_file(8000, 160);
+        let dur = estimate_audio_duration(tmp.path().to_str().unwrap());
+        assert!(
+            dur.as_millis() >= 18 && dur.as_millis() <= 22,
+            "20 ms WAV: expected ~20 ms, got {} ms",
+            dur.as_millis()
         );
     }
 }

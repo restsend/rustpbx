@@ -57,15 +57,14 @@ impl AppEventLoop {
                     self.app.on_exit(ExitReason::Normal).await?;
                     break;
                 }
-                AppAction::Hangup { reason } => {
+                AppAction::Hangup { reason, code } => {
                     // Send hangup command
-                    self.controller.hangup(reason.clone()).await?;
+                    self.controller.hangup(reason.clone(), code).await?;
                     self.app.on_exit(ExitReason::Hangup).await?;
                     break;
                 }
-                AppAction::Transfer(_target) => {
-                    // Send transfer command
-                    // TODO: self.controller.blind_transfer(target).await?;
+                AppAction::Transfer(target) => {
+                    self.controller.transfer(target).await?;
                     self.app.on_exit(ExitReason::Transferred).await?;
                     break;
                 }

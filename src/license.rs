@@ -4,14 +4,26 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Mutex;
 
+/// Re-export the real LicenseConfig from config for commerce builds.
 #[cfg(feature = "commerce")]
-use crate::config::LicenseConfig;
+pub use crate::config::LicenseConfig;
 
-/// Stub used in non-commerce builds so the `can_enable_addon` signature
-/// stays consistent without gating every call site.
+/// Stub used so the `can_enable_addon` signature stays consistent in
+/// non-commerce builds.
 #[cfg(not(feature = "commerce"))]
 #[derive(Debug, Clone, Default)]
 pub struct LicenseConfig;
+
+#[cfg(not(feature = "commerce"))]
+impl LicenseConfig {
+    pub fn get_license_for_addon(&self, _addon_id: &str) -> Option<(String, String)> {
+        None
+    }
+
+    pub fn get_addons_for_key(&self, _key_name: &str) -> Vec<&str> {
+        Vec::new()
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LicenseInfo {
@@ -221,7 +233,7 @@ pub async fn verify_addon_license(
         .get_license_for_addon(addon_id)
         .ok_or_else(|| anyhow::anyhow!("No license key configured for addon: {}", addon_id))?;
 
-    let info = verify_license(key_value).await?;
+    let info = verify_license(&key_value).await?;
 
     if !info.valid {
         anyhow::bail!("License is invalid for addon: {}", addon_id);
@@ -264,7 +276,7 @@ pub async fn check_all_addon_licenses(
 
     for addon_id in addon_ids {
         let status = match config.get_license_for_addon(addon_id) {
-            Some((key_name, key_value)) => match verify_license(key_value).await {
+            Some((key_name, key_value)) => match verify_license(&key_value).await {
                 Ok(info) => {
                     let expired = is_expired(&info);
                     LicenseStatus {

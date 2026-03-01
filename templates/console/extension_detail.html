@@ -288,6 +288,14 @@
                                                 @change="setForwardingTargetType('queue')">
                                             <span>Queue</span>
                                         </label>
+                                        <label x-show="voicemailAddonEnabled"
+                                            class="inline-flex items-center gap-2 rounded-lg border px-3 py-1.5 text-slate-600 transition"
+                                            :class="forwardingTargetType === 'voicemail' ? 'border-sky-200 bg-sky-50 text-sky-700 shadow-sm' : 'border-slate-200 hover:border-slate-300'">
+                                            <input type="radio" class="h-4 w-4 border-slate-300 text-sky-600"
+                                                :checked="forwardingTargetType === 'voicemail'"
+                                                @change="setForwardingTargetType('voicemail')">
+                                            <span>Voicemail</span>
+                                        </label>
                                     </div>
                                 </div>
                                 <div x-show="forwardingTargetType === 'uri'" x-cloak>
@@ -326,6 +334,20 @@
                                             No queues available. Please create a queue first.
                                         </div>
                                     </template>
+                                </div>
+                                <div x-show="forwardingTargetType === 'voicemail'" x-cloak class="space-y-2">
+                                    <label class="flex flex-col gap-1 text-sm font-medium text-slate-700">
+                                        Voicemail extension
+                                        <input type="text" maxlength="50" x-model.trim="forwardingTargetValue"
+                                            @input="syncForwardingDestination()"
+                                            :disabled="form.call_forwarding_mode === 'none'"
+                                            :class="form.call_forwarding_mode === 'none' ? 'border-slate-200 bg-slate-50 text-slate-400 cursor-not-allowed' : 'border-slate-200 focus:border-sky-300 focus:ring-2 focus:ring-sky-200'"
+                                            class="rounded-lg border px-3 py-2 text-sm text-slate-700"
+                                            :placeholder="form.extension || '1001'">
+                                        <span class="text-xs font-normal text-slate-400">Extension whose voicemail inbox
+                                            will receive the call. Leave empty to use this extension's own
+                                            mailbox.</span>
+                                    </label>
                                 </div>
                             </div>
                             <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
@@ -637,6 +659,7 @@
                 activeTab: 'profile',
                 forwardingCatalog: normalizeForwardingCatalog(options.forwardingCatalog || {}),
                 queueEnabled: window.queueAddonEnabled || false,
+                voicemailAddonEnabled: window.voicemailAddonEnabled || false,
                 tabs: [
                     { id: 'profile', label: 'Profile', description: 'Extension details' },
                     { id: 'access', label: 'Access & Departments', description: 'Departments and access permissions' },
@@ -1009,24 +1032,31 @@
                     if (lower.startsWith('queue:')) {
                         this.forwardingTargetType = 'queue';
                         this.forwardingTargetValue = destination.slice(6);
+                    } else if (lower.startsWith('voicemail:')) {
+                        this.forwardingTargetType = 'voicemail';
+                        this.forwardingTargetValue = destination.slice(10);
                     } else {
                         this.forwardingTargetType = 'uri';
                         this.forwardingTargetValue = destination;
                     }
                 },
                 setForwardingTargetType(type) {
-                    const allowed = ['uri', 'queue'];
+                    const allowed = ['uri', 'queue', 'voicemail'];
                     const normalized = allowed.includes(type) ? type : 'uri';
                     if (this.forwardingTargetType === normalized) {
                         return;
                     }
                     this.forwardingTargetType = normalized;
-                    if (!this.form.call_forwarding_destination) {
+                    const dest = this.form.call_forwarding_destination || '';
+                    const lower = dest.toLowerCase();
+                    if (!dest) {
                         this.forwardingTargetValue = '';
-                    } else if (normalized === 'queue' && this.form.call_forwarding_destination.toLowerCase().startsWith('queue:')) {
-                        this.forwardingTargetValue = this.form.call_forwarding_destination.slice(6);
-                    } else if (normalized === 'uri' && !this.form.call_forwarding_destination.toLowerCase().startsWith('queue:')) {
-                        this.forwardingTargetValue = this.form.call_forwarding_destination;
+                    } else if (normalized === 'queue' && lower.startsWith('queue:')) {
+                        this.forwardingTargetValue = dest.slice(6);
+                    } else if (normalized === 'voicemail' && lower.startsWith('voicemail:')) {
+                        this.forwardingTargetValue = dest.slice(10);
+                    } else if (normalized === 'uri' && !lower.startsWith('queue:') && !lower.startsWith('voicemail:')) {
+                        this.forwardingTargetValue = dest;
                     } else {
                         this.forwardingTargetValue = '';
                     }
@@ -1034,12 +1064,12 @@
                 },
                 syncForwardingDestination() {
                     const value = this.forwardingTargetValue.trim();
-                    if (!value) {
-                        this.form.call_forwarding_destination = '';
-                        return;
-                    }
                     if (this.forwardingTargetType === 'queue') {
-                        this.form.call_forwarding_destination = `queue:${value}`;
+                        this.form.call_forwarding_destination = value ? `queue:${value}` : '';
+                    } else if (this.forwardingTargetType === 'voicemail') {
+                        // Default to own extension's mailbox when the field is left empty
+                        const ext = value || this.form.extension || '';
+                        this.form.call_forwarding_destination = ext ? `voicemail:${ext}` : '';
                     } else {
                         this.form.call_forwarding_destination = value;
                     }
