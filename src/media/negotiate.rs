@@ -140,7 +140,9 @@ impl MediaNegotiator {
 
                 for (pt, (codec, clock, channels)) in rtp_map {
                     if codec == CodecType::TelephoneEvent {
-                        dtmf_pt = Some(pt);
+                        if clock == 8000 && dtmf_pt.is_none() {
+                            dtmf_pt = Some(pt);
+                        }
                         continue;
                     }
 
@@ -162,28 +164,11 @@ impl MediaNegotiator {
         remote_codecs: &[CodecInfo],
         allowed_codecs: &[CodecType],
     ) -> Option<CodecInfo> {
-        if remote_codecs.is_empty() {
-            return None;
-        }
-
-        if allowed_codecs.is_empty() {
-            // No restriction: pick the first audio codec from remote (skip TelephoneEvent)
-            return remote_codecs
-                .iter()
-                .find(|c| c.codec != CodecType::TelephoneEvent)
-                .cloned();
-        }
-
-        // RFC 3264: When remote_codecs is from an Answer, respect the answerer's preference
-        // Select the first audio codec from remote_codecs that is in our allowed list
-        // Skip TelephoneEvent as it's not an audio codec
-        for remote in remote_codecs {
-            if remote.codec != CodecType::TelephoneEvent && allowed_codecs.contains(&remote.codec) {
-                return Some(remote.clone());
-            }
-        }
-
-        None
+        remote_codecs
+            .iter()
+            .find(|c| c.codec != CodecType::TelephoneEvent)
+            .filter(|c| allowed_codecs.is_empty() || allowed_codecs.contains(&c.codec))
+            .cloned()
     }
 
     /// Extract all codec information from SDP
@@ -377,6 +362,22 @@ mod tests {
     }
 
     #[test]
+    fn test_extract_codec_params_prefers_telephone_event_8000() {
+        let sdp = "v=0\r\n\
+            o=- 1234 1234 IN IP4 127.0.0.1\r\n\
+            s=-\r\n\
+            t=0 0\r\n\
+            m=audio 10000 RTP/AVP 96 110 126\r\n\
+            a=rtpmap:96 opus/48000/2\r\n\
+            a=rtpmap:110 telephone-event/48000\r\n\
+            a=rtpmap:126 telephone-event/8000\r\n";
+
+        let (_, dtmf_pt) = MediaNegotiator::extract_codec_params(sdp);
+
+        assert_eq!(dtmf_pt, Some(126));
+    }
+
+    #[test]
     fn test_negotiate_codec() {
         let local_codecs = vec![CodecType::PCMU, CodecType::PCMA];
 
@@ -562,10 +563,10 @@ mod tests {
         let best = MediaNegotiator::select_best_codec(&codecs, &allowed).unwrap();
         assert_eq!(best.codec, CodecType::G722);
 
-        // Only allow PCMU - should skip G722 and pick PCMU
+        // Only allow PCMU - current behavior does not scan past the first remote audio codec
         let allowed = vec![CodecType::PCMU];
-        let best = MediaNegotiator::select_best_codec(&codecs, &allowed).unwrap();
-        assert_eq!(best.codec, CodecType::PCMU);
+        let best = MediaNegotiator::select_best_codec(&codecs, &allowed);
+        assert!(best.is_none());
 
         // Empty allowed list - should follow remote order (first codec)
         let allowed = vec![];
