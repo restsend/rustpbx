@@ -6,14 +6,12 @@ use crate::config::ProxyConfig;
 use anyhow::{Error, Result};
 use async_trait::async_trait;
 use rsip::Header;
-use rsip::Uri;
 use rsip::headers::UntypedHeader;
-use rsip::headers::auth::Algorithm;
 use rsip::headers::{ProxyAuthenticate, WwwAuthenticate};
 use rsip::prelude::HeadersExt;
 use rsip::prelude::ToTypedHeader;
-use rsip::services::DigestGenerator;
 use rsip::typed::Authorization;
+use rsipstack::dialog::authenticate::verify_digest;
 use rsipstack::transaction::transaction::Transaction;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
@@ -85,22 +83,22 @@ impl AuthModule {
         &self,
         tx: &Transaction,
     ) -> Result<Option<SipUser>, AuthError> {
-        let mut auth_inner: Option<Authorization> = None;
+        let mut auth_inner: Option<(Authorization, &str)> = None;
         for header in tx.original.headers.iter() {
             match header {
                 Header::Authorization(h) => {
-                    auth_inner = h.typed().ok();
+                    auth_inner = h.typed().ok().map(|auth| (auth, h.value()));
                     break;
                 }
                 Header::ProxyAuthorization(h) => {
-                    auth_inner = h.typed().ok().map(|a| a.0);
+                    auth_inner = h.typed().ok().map(|auth| (auth.0, h.value()));
                     break;
                 }
                 _ => {}
             }
         }
-        let auth_inner = match auth_inner {
-            Some(a) => a,
+        let (auth_inner, raw_auth_header) = match auth_inner {
+            Some(auth) => auth,
             None => {
                 return Ok(None);
             }
@@ -127,9 +125,9 @@ impl AuthModule {
                 stored_user.merge_with(&user);
                 match self.verify_credentials(
                     &stored_user,
-                    &tx.original.uri,
                     &tx.original.method,
                     &auth_inner,
+                    raw_auth_header,
                 ) {
                     true => Ok(Some(stored_user)),
                     false => Ok(None),
@@ -145,28 +143,14 @@ impl AuthModule {
     fn verify_credentials(
         &self,
         user: &SipUser,
-        uri: &Uri,
         method: &rsip::Method,
         auth: &Authorization,
+        raw_auth_header: &str,
     ) -> bool {
-        // Use the same approach as common.rs
         let empty_string = "".to_string();
         let password = user.password.as_ref().unwrap_or(&empty_string);
 
-        // Create a digest generator to compute the expected response
-        let expected_response = DigestGenerator {
-            username: &user.username,
-            password,
-            algorithm: auth.algorithm.unwrap_or(Algorithm::Md5),
-            nonce: &auth.nonce,
-            method,
-            qop: auth.qop.as_ref(),
-            uri,
-            realm: &auth.realm,
-        }
-        .compute();
-
-        expected_response == auth.response
+        verify_digest(auth, password, method, raw_auth_header)
     }
 
     pub fn create_proxy_auth_challenge(&self, realm: &str) -> Result<ProxyAuthenticate> {
