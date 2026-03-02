@@ -3,7 +3,8 @@ use std::{sync::Arc, time::Duration};
 
 use super::common::{
     create_auth_request, create_proxy_auth_request_with_nonce, create_test_request,
-    create_test_server, create_transaction, extract_nonce_from_proxy_authenticate,
+    create_test_server, create_test_server_with_config, create_transaction,
+    extract_nonce_from_proxy_authenticate,
 };
 use crate::call::{SipUser, TransactionCookie};
 use crate::config::{ProxyConfig, RtpConfig};
@@ -628,6 +629,107 @@ fn create_sip_request(method: rsip::Method, username: &str, realm: &str) -> rsip
     }
 
     request
+}
+
+async fn create_issue_146_server() -> Arc<SipServerInner> {
+    let mut config = ProxyConfig::default();
+    config.realms = Some(vec![
+        "pbx.e36".to_string(),
+        "pbx.e36:5060".to_string(),
+        "pbx.e36:5061".to_string(),
+    ]);
+
+    let (server, _) = create_test_server_with_config(config).await;
+    server
+        .user_backend
+        .create_user(SipUser {
+            id: 111,
+            username: "111".to_string(),
+            password: Some("111".to_string()),
+            enabled: true,
+            realm: Some("pbx.e36".to_string()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    server
+}
+
+fn create_issue_146_register_request(request_uri: &str, authorization: &str) -> rsip::Request {
+    let request_uri = rsip::Uri::try_from(request_uri).unwrap();
+    let aor_uri = rsip::Uri::try_from("sip:111@pbx.e36").unwrap();
+    let contact_uri = rsip::Uri::try_from("sip:111@192.168.20.169:5060;transport=tls").unwrap();
+
+    let headers = vec![
+        rsip::typed::From {
+            display_name: Some("Deskphone".into()),
+            uri: aor_uri.clone(),
+            params: vec![rsip::Param::Tag(rsip::param::Tag::new("a1a3406102"))],
+        }
+        .into(),
+        rsip::typed::To {
+            display_name: None,
+            uri: aor_uri,
+            params: vec![],
+        }
+        .into(),
+        rsip::headers::Via::new(
+            "SIP/2.0/TLS 192.168.20.169:5060;branch=z9hG4bK64964f4e5cad27a81".to_string(),
+        )
+        .into(),
+        rsip::headers::CallId::new("fd9623914bbc79b9").into(),
+        rsip::headers::typed::CSeq {
+            seq: 873199510u32.into(),
+            method: rsip::Method::Register,
+        }
+        .into(),
+        rsip::typed::Contact {
+            display_name: Some("Deskphone".into()),
+            uri: contact_uri,
+            params: vec![rsip::Param::Expires(rsip::param::Expires::from("3600"))],
+        }
+        .into(),
+        rsip::headers::Authorization::new(authorization.to_string()).into(),
+    ];
+
+    rsip::Request {
+        method: rsip::Method::Register,
+        uri: request_uri,
+        version: rsip::Version::V2,
+        headers: headers.into(),
+        body: vec![],
+    }
+}
+
+#[tokio::test]
+async fn test_authenticate_request_accepts_authorization_uri_when_request_uri_differs() {
+    let server = create_issue_146_server().await;
+    let module = AuthModule::new(server);
+    let auth_header_value = r#"Digest username="111",realm="pbx.e36",nonce="MoLk0nzBonitjdoo",uri="sip:pbx.e36:5060;transport=udp",response="5a832a648a56b95f905b8db1d28d8f5b",algorithm=MD5"#;
+
+    let request = create_issue_146_register_request("sip:pbx.e36:5060", auth_header_value);
+    let (tx, _) = create_transaction(request).await;
+
+    let result = module.authenticate_request(&tx).await.unwrap();
+    assert!(
+        result.is_some(),
+        "authentication should succeed when the digest matches the Authorization uri from issue #146"
+    );
+}
+
+#[tokio::test]
+async fn test_authenticate_request_preserves_authorization_uri_transport_case() {
+    let server = create_issue_146_server().await;
+    let module = AuthModule::new(server);
+    let auth_header_value = r#"Digest username="111",realm="pbx.e36",nonce="K1KmT96onZZVMvBB",uri="sip:pbx.e36:5061;transport=tls",response="0c9ba3a13fbcc4f342fd7eb9c2be6a83",algorithm=MD5"#;
+    let request = create_issue_146_register_request("sip:pbx.e36:5061;transport=tls", auth_header_value);
+    let (tx, _) = create_transaction(request).await;
+
+    let result = module.authenticate_request(&tx).await.unwrap();
+    assert!(
+        result.is_some(),
+        "authentication should preserve the exact Authorization uri bytes from issue #146"
+    );
 }
 
 #[tokio::test]
