@@ -402,6 +402,7 @@ impl SipServerBuilder {
                                 client_cert: None,
                                 client_key: None,
                                 ca_certs: None,
+                                sni_hostname: None
                             };
                             match TlsListenerConnection::new(
                                 local_addr.into(),
