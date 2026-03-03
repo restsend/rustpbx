@@ -183,11 +183,11 @@ mod recorder_advanced_tests {
 
         // Write samples from both legs
         recorder
-            .write_sample(Leg::A, &MediaSample::Audio(frame_a), None)
+            .write_sample(Leg::A, &MediaSample::Audio(frame_a), None, None)
             .expect("Should write Leg A sample");
 
         recorder
-            .write_sample(Leg::B, &MediaSample::Audio(frame_b), None)
+            .write_sample(Leg::B, &MediaSample::Audio(frame_b), None, None)
             .expect("Should write Leg B sample");
 
         // Force flush
@@ -223,7 +223,7 @@ mod recorder_advanced_tests {
         };
 
         recorder
-            .write_sample(Leg::A, &MediaSample::Audio(frame), None)
+            .write_sample(Leg::A, &MediaSample::Audio(frame), None, None)
             .expect("Should write sample");
 
         recorder.finalize().expect("Should finalize recorder");
@@ -388,7 +388,7 @@ mod recorder_advanced_tests {
         };
 
         recorder
-            .write_sample(Leg::A, &MediaSample::Audio(frame), None)
+            .write_sample(Leg::A, &MediaSample::Audio(frame), None, None)
             .expect("Should write PCMA sample to PCMU recorder");
 
         recorder.finalize().expect("Should finalize");
@@ -431,11 +431,11 @@ mod recorder_advanced_tests {
         };
 
         recorder
-            .write_sample(Leg::A, &MediaSample::Audio(frame_a), None)
+            .write_sample(Leg::A, &MediaSample::Audio(frame_a), None, None)
             .unwrap();
 
         recorder
-            .write_sample(Leg::B, &MediaSample::Audio(frame_b), None)
+            .write_sample(Leg::B, &MediaSample::Audio(frame_b), None, None)
             .unwrap();
 
         recorder.finalize().unwrap();
@@ -476,10 +476,10 @@ mod recorder_advanced_tests {
         };
 
         recorder
-            .write_sample(Leg::A, &MediaSample::Audio(frame_a), None)
+            .write_sample(Leg::A, &MediaSample::Audio(frame_a), None, None)
             .unwrap();
         recorder
-            .write_sample(Leg::B, &MediaSample::Audio(frame_b), None)
+            .write_sample(Leg::B, &MediaSample::Audio(frame_b), None, None)
             .unwrap();
 
         recorder.finalize().unwrap();
@@ -505,6 +505,39 @@ mod recorder_advanced_tests {
         );
 
         rec.finalize().ok();
+        let _ = std::fs::remove_file(temp_path);
+    }
+
+    #[test]
+    fn test_dynamic_opus_payload_type_uses_codec_hint() {
+        use audio_codec::create_encoder;
+        use bytes::Bytes;
+
+        let temp_path = "/tmp/test_dynamic_opus_pt.wav";
+        let mut recorder = Recorder::new(temp_path, CodecType::PCMU).unwrap();
+        let mut encoder = create_encoder(CodecType::Opus);
+        let pcm_samples = vec![100i16; 960 * 2];
+        let encoded = encoder.encode(&pcm_samples);
+
+        let frame = MediaSample::Audio(AudioFrame {
+            data: Bytes::from(encoded),
+            rtp_timestamp: 0,
+            sequence_number: Some(1),
+            payload_type: Some(96),
+            clock_rate: 48000,
+            marker: false,
+            raw_packet: None,
+            source_addr: None,
+        });
+
+        recorder
+            .write_sample(Leg::A, &frame, None, Some(CodecType::Opus))
+            .expect("Should write Opus sample with dynamic payload type");
+        recorder.finalize().expect("Should finalize recorder");
+
+        let metadata = std::fs::metadata(temp_path).unwrap();
+        assert!(metadata.len() > 44, "WAV file should have audio data");
+
         let _ = std::fs::remove_file(temp_path);
     }
 
@@ -552,7 +585,7 @@ mod recorder_advanced_tests {
                 raw_packet: None,
                 source_addr: None,
             });
-            recorder.write_sample(Leg::A, &frame, None).ok();
+            recorder.write_sample(Leg::A, &frame, None, None).ok();
         }
 
         // Leg B: callee (5 packets)
@@ -568,7 +601,7 @@ mod recorder_advanced_tests {
                 raw_packet: None,
                 source_addr: None,
             });
-            recorder.write_sample(Leg::B, &frame, None).ok();
+            recorder.write_sample(Leg::B, &frame, None, None).ok();
         }
 
         recorder.finalize().ok();
@@ -611,7 +644,7 @@ mod recorder_advanced_tests {
             source_addr: None,
         });
 
-        recorder.write_sample(Leg::A, &frame, Some(101)).ok();
+        recorder.write_sample(Leg::A, &frame, Some(101), None).ok();
         recorder.finalize().ok();
 
         // Verify file was created
