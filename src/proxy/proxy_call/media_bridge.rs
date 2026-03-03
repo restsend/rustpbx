@@ -491,7 +491,6 @@ impl MediaBridge {
             }
 
             let mut is_dtmf = false;
-            let mut pt_for_recorder = None;
 
             packets_since_last_stat += 1;
             if let MediaSample::Audio(ref f) = sample {
@@ -572,7 +571,6 @@ impl MediaBridge {
                 if let Some(pt) = frame.payload_type {
                     if Some(pt) == source_dtmf_pt {
                         is_dtmf = true;
-                        pt_for_recorder = target_dtmf_pt;
                         if let Some(t_dtmf) = target_dtmf_pt {
                             frame.payload_type = Some(t_dtmf);
                         }
@@ -580,6 +578,17 @@ impl MediaBridge {
                         // If not transcoding, rewrite audio PT to target PT
                         frame.payload_type = Some(target_pt);
                     }
+                }
+
+                if let Some(ref mut r) = *recorder.lock().unwrap() {
+                    let recorder_dtmf_pt = if is_dtmf { frame.payload_type } else { None };
+                    let recorder_codec = if recorder_dtmf_pt.is_some() {
+                        None
+                    } else {
+                        Some(source_codec)
+                    };
+                    let recorder_sample = MediaSample::Audio(frame.clone());
+                    let _ = r.write_sample(leg, &recorder_sample, recorder_dtmf_pt, recorder_codec);
                 }
 
                 if let Some(ref mut t) = transcoder {
@@ -594,20 +603,6 @@ impl MediaBridge {
                     } else {
                         t.update_dtmf_timestamp(frame);
                     }
-                }
-            }
-
-            // Send to recorder if configured
-            {
-                if let Some(ref mut r) = *recorder.lock().unwrap() {
-                    let codec_for_recorder = if is_dtmf {
-                        None
-                    } else if needs_transcoding {
-                        Some(target_codec)
-                    } else {
-                        Some(source_codec)
-                    };
-                    let _ = r.write_sample(leg, &sample, pt_for_recorder, codec_for_recorder);
                 }
             }
 
