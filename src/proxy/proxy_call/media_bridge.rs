@@ -600,7 +600,14 @@ impl MediaBridge {
             // Send to recorder if configured
             {
                 if let Some(ref mut r) = *recorder.lock().unwrap() {
-                    let _ = r.write_sample(leg, &sample, pt_for_recorder);
+                    let codec_for_recorder = if is_dtmf {
+                        None
+                    } else if needs_transcoding {
+                        Some(target_codec)
+                    } else {
+                        Some(source_codec)
+                    };
+                    let _ = r.write_sample(leg, &sample, pt_for_recorder, codec_for_recorder);
                 }
             }
 
