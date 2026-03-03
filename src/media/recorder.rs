@@ -138,6 +138,7 @@ impl Recorder {
         leg: Leg,
         sample: &MediaSample,
         dtmf_pt: Option<u8>,
+        codec_hint: Option<CodecType>,
     ) -> Result<()> {
         let frame = match sample {
             MediaSample::Audio(frame) => frame,
@@ -154,7 +155,10 @@ impl Recorder {
             MediaSample::Audio(frame) => frame.data.clone(),
             _ => return Ok(()),
         };
-        let decoder_type = CodecType::try_from(frame.payload_type.unwrap_or(0))?;
+        let decoder_type = match codec_hint {
+            Some(codec) => codec,
+            None => CodecType::try_from(frame.payload_type.unwrap_or(0))?,
+        };
         let decoder_clockrate = decoder_type.clock_rate();
 
         if decoder_type != self.codec {
