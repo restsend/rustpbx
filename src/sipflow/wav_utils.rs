@@ -107,7 +107,7 @@ pub fn generate_wav_from_packets_ex(
             8 => CodecType::PCMA,
             9 => CodecType::G722,
             18 => CodecType::G729,
-            97 | 111 => CodecType::Opus,
+            96 | 111 => CodecType::Opus,
             _ => CodecType::PCMU,
         };
         legs_codecs.entry(*leg).or_default().push(codec);
@@ -173,7 +173,7 @@ pub fn generate_wav_from_packets_ex(
             8 => CodecType::PCMA,
             9 => CodecType::G722,
             18 => CodecType::G729,
-            97 | 111 => CodecType::Opus,
+            96 | 111 => CodecType::Opus,
             _ => CodecType::PCMU,
         };
 
