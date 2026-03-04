@@ -32,8 +32,8 @@ use futures::{FutureExt, future::BoxFuture};
 use rsip::StatusCode;
 use rsip::Uri;
 use rsipstack::dialog::{
-    DialogId, dialog::DialogState, dialog_layer::DialogLayer, invitation::InviteOption,
-    server_dialog::ServerInviteDialog,
+    DialogId, dialog::DialogState, dialog::TransactionHandle, dialog_layer::DialogLayer,
+    invitation::InviteOption, server_dialog::ServerInviteDialog,
 };
 use rsipstack::rsip_ext::RsipResponseExt;
 use rsipstack::transaction::key::TransactionRole;
@@ -172,6 +172,7 @@ pub(crate) struct CallSession {
     pub last_error: Option<(StatusCode, Option<String>)>,
     pub connected_callee: Option<String>,
     pub connected_dialog_id: Option<DialogId>,
+    pub connected_target: Option<Location>,
     pub ring_time: Option<Instant>,
     pub answer_time: Option<Instant>,
     pub caller_offer: Option<String>,
@@ -198,6 +199,7 @@ pub(crate) struct CallSession {
     pub callee_event_tx: Option<mpsc::UnboundedSender<DialogState>>,
     pub callee_guards: Vec<crate::call::sip::DialogStateReceiverGuard>,
     pub callee_answer_sdp: Option<String>,
+    pub pending_server_reinvite: Arc<AsyncMutex<Option<TransactionHandle>>>,
     /// Channel used to deliver [`ControllerEvent`]s to the running `CallApp` event loop.
     /// Populated by [`run_application`] for the lifetime of the app; cleared when the
     /// app exits so stale senders are never accidentally reused.
@@ -269,6 +271,7 @@ impl CallSession {
             last_error: None,
             connected_callee: None,
             connected_dialog_id: None,
+            connected_target: None,
             ring_time: None,
             answer_time: None,
             caller_offer,
@@ -295,6 +298,7 @@ impl CallSession {
             callee_event_tx: None,
             callee_guards: Vec::new(),
             callee_answer_sdp: None,
+            pending_server_reinvite: Arc::new(AsyncMutex::new(None)),
             app_event_tx: None,
         }
     }
@@ -550,17 +554,17 @@ impl CallSession {
         // Add TelephoneEvent if caller supports DTMF
         if callee_dtmf_pt.is_some() {
             if let Some(pt) = caller_dtmf_pt {
-            if !codec_info
-                .iter()
-                .any(|c| c.codec == CodecType::TelephoneEvent)
-            {
-                codec_info.push(CodecInfo {
-                    payload_type: pt,
-                    codec: CodecType::TelephoneEvent,
-                    clock_rate: 8000,
-                    channels: 1,
-                });
-            }
+                if !codec_info
+                    .iter()
+                    .any(|c| c.codec == CodecType::TelephoneEvent)
+                {
+                    codec_info.push(CodecInfo {
+                        payload_type: pt,
+                        codec: CodecType::TelephoneEvent,
+                        clock_rate: 8000,
+                        channels: 1,
+                    });
+                }
             }
         }
 
@@ -1419,6 +1423,7 @@ impl CallSession {
         if let Some(offer) = sdp {
             debug!(?method, "Received Re-invite/UPDATE with SDP (Offer)");
             self.negotiation_state = NegotiationState::RemoteOfferReceived;
+            self.caller_offer = Some(offer.clone());
 
             // Update caller peer with the new offer
             if let Err(e) = self
@@ -1440,7 +1445,16 @@ impl CallSession {
                         debug!(%callee_dialog_id, "Forwarding re-INVITE/UPDATE offer to callee");
                         let headers = vec![rsip::Header::ContentType("application/sdp".into())];
                         let method_clone = method.clone();
-                        let offer_clone = offer.clone();
+                        let offer_clone = if self.use_media_proxy
+                            && let Some(target) = self.connected_target.clone()
+                            && target.supports_webrtc
+                            && let Some(bytes) = self.create_offer_for_target(&target).await
+                            && let Ok(translated) = String::from_utf8(bytes)
+                        {
+                            translated
+                        } else {
+                            offer.clone()
+                        };
 
                         // Spawn this so we don't block the session event loop
                         crate::utils::spawn(async move {
@@ -1458,30 +1472,30 @@ impl CallSession {
                 }
             }
 
-            // For re-INVITE, we reply with current answer SDP using server_dialog.accept()
-            // Note: If CallModule already replied to the transaction, this will just fail gracefully
             if method == rsip::Method::Invite {
-                if let Some(sdp) = &self.answer {
-                    let headers = vec![rsip::Header::ContentType("application/sdp".into())];
-                    if let Err(e) = self
-                        .server_dialog
-                        .accept(Some(headers), Some(sdp.clone().into_bytes()))
-                    {
-                        debug!(
-                            ?method,
-                            "Failed to reply to re-INVITE with SDP (likely handled by CallModule): {}",
-                            e
-                        );
+                if let Some(tx_handle) = self.pending_server_reinvite.lock().await.take() {
+                    if let Some(sdp) = &self.answer {
+                        let headers =
+                            Some(vec![rsip::Header::ContentType("application/sdp".into())]);
+                        let body = Some(sdp.as_bytes().to_vec());
+                        if let Err(e) = tx_handle.respond(StatusCode::OK, headers, body).await {
+                            debug!(
+                                ?method,
+                                "Failed to reply to re-INVITE with SDP (likely handled by CallModule): {}",
+                                e
+                            );
+                        } else {
+                            info!(?method, "Replied to re-INVITE with current SDP");
+                            self.negotiation_state = NegotiationState::Stable;
+                        }
                     } else {
-                        info!(?method, "Replied to re-INVITE with current SDP");
+                        println!("DEBUG: Received re-INVITE but no answer SDP available");
+                        let _ = tx_handle
+                            .respond(StatusCode::NotAcceptableHere, None, None)
+                            .await;
+
                         self.negotiation_state = NegotiationState::Stable;
                     }
-                } else {
-                    println!("DEBUG: Received re-INVITE but no answer SDP available");
-                    let _ = self
-                        .server_dialog
-                        .reject(Some(StatusCode::NotAcceptableHere), None);
-                    self.negotiation_state = NegotiationState::Stable;
                 }
             } else {
                 // For UPDATE, we just update the state
@@ -2714,6 +2728,7 @@ impl CallSession {
                             self.routed_callee = Some(callee_uri.clone());
                             self.routed_contact = Some(contact.clone());
                             self.routed_destination = destination.clone();
+                            self.connected_target = Some(targets[idx].clone());
                             if accepted_idx.is_none() {
                                 if let Err(e) = self
                                     .apply_session_action(
@@ -3082,6 +3097,7 @@ impl CallSession {
                 "Client dialog established after 200 OK from callee"
             );
 
+            self.connected_target = Some(target.clone());
             self.add_callee_dialog(dialog_id_val.clone());
             let _ = self
                 .apply_session_action(
@@ -3498,6 +3514,7 @@ impl CallSession {
         callee_dialogs: Arc<Mutex<HashSet<DialogId>>>,
         server_dialog: ServerInviteDialog,
         handle: CallSessionHandle,
+        pending_server_reinvite: Arc<AsyncMutex<Option<TransactionHandle>>>,
         cancel_token: CancellationToken,
         pending_hangup: Arc<Mutex<Option<PendingHangup>>>,
         _shared: CallSessionShared,
@@ -3538,6 +3555,11 @@ impl CallSession {
                                     // Handle Re-INVITE or UPDATE with SDP
                                     if (is_reinvite || is_update) && has_sdp {
                                         let sdp = String::from_utf8_lossy(&request.body).to_string();
+
+                                        if is_reinvite {
+                                            let mut pending = pending_server_reinvite.lock().await;
+                                            *pending = Some(tx_handle.clone());
+                                        }
 
                                         // Send command to update media
                                         let _ = handle.send_command(SessionAction::HandleReInvite(request.method.to_string(), sdp));
@@ -3631,7 +3653,7 @@ impl CallSession {
                                         debug!(session_id = %context.session_id, %dialog_id, "Inactive callee dialog terminated, ignoring");
                                     }
                                 }
-                                DialogState::Updated(dialog_id, _request, _) => {
+                                DialogState::Updated(dialog_id, request, tx_handle) => {
                                     debug!(session_id = %context.session_id, %dialog_id, "Received UPDATE/INVITE on callee dialog");
                                     {
                                         let mut timer = client_timer.lock().unwrap();
@@ -3639,6 +3661,9 @@ impl CallSession {
                                             timer.update_refresh();
                                             debug!(session_id = %context.session_id, "Client session timer refreshed by incoming request from callee");
                                         }
+                                    }
+                                    if request.method == rsip::Method::Update && request.body.is_empty() {
+                                        tx_handle.reply(rsip::StatusCode::OK).await.ok();
                                     }
                                 }
                                 _ => {}
@@ -4026,6 +4051,7 @@ impl CallSession {
         let cancel_token_for_select = self.cancel_token.clone();
         let cancel_token_for_max_duration = self.cancel_token.clone();
         let cancel_token_for_loop = self.cancel_token.clone();
+        let pending_server_reinvite = self.pending_server_reinvite.clone();
         let pending_hangup = self.pending_hangup.clone();
         let session_id_for_max_duration = self.context.session_id.clone();
         let max_duration = self
@@ -4089,6 +4115,7 @@ impl CallSession {
                 callee_dialogs.clone(),
                 server_dialog_clone.clone(),
                 handle_for_events,
+                pending_server_reinvite,
                 cancel_token_for_loop,
                 pending_hangup,
                 shared_for_loop
@@ -4811,16 +4838,14 @@ mod codec_negotiation_tests {
             (96, (CodecType::Opus, 48000, 2)),
             (0, (CodecType::PCMU, 8000, 1)),
         ];
-        let allow_codecs = vec![
-            CodecType::PCMU,
-            CodecType::Opus,
-            CodecType::TelephoneEvent,
-        ];
+        let allow_codecs = vec![CodecType::PCMU, CodecType::Opus, CodecType::TelephoneEvent];
 
         let merged = build_callee_offer_codec_info_for_test(&caller_rtp_map, &allow_codecs);
 
         assert!(
-            !merged.iter().any(|codec| codec.codec == CodecType::TelephoneEvent),
+            !merged
+                .iter()
+                .any(|codec| codec.codec == CodecType::TelephoneEvent),
             "callee offer should not append TelephoneEvent from allow_codecs"
         );
     }

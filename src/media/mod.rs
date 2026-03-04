@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use audio_codec::CodecType;
 use rustrtc::{
     Attribute, IceServer, MediaKind, PeerConnection, RtcConfiguration, RtpCodecParameters, SdpType,
-    SessionDescription, TransceiverDirection, TransportMode,
+    SessionDescription, SignalingState, TransceiverDirection, TransportMode,
 };
 use std::{
     collections::{HashMap, HashSet},
@@ -298,7 +298,12 @@ impl Track for RtcTrack {
 
     async fn set_remote_description(&self, remote: &str) -> Result<()> {
         self.pc.wait_for_gathering_complete().await;
-        self.set_remote(&self.pc, remote, SdpType::Answer).await
+        let sdp_type = if self.pc.remote_description().is_some() && self.pc.signaling_state() == SignalingState::Stable {
+            SdpType::Offer // re-invite
+        }else{
+            SdpType::Answer
+        };
+        self.set_remote(&self.pc, remote, sdp_type).await
     }
 
     async fn stop(&self) {
