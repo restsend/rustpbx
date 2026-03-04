@@ -107,6 +107,7 @@ impl Default for PresenceState {
     }
 }
 
+/// A SIP subscription record for PRESENCE (RFC 3856).
 #[derive(Clone, Debug)]
 pub struct Subscriber {
     pub aor: rsip::Uri,
@@ -114,12 +115,39 @@ pub struct Subscriber {
     pub expires: std::time::Instant,
 }
 
+/// A SIP subscription record for MWI / message-summary (RFC 3842).
+#[derive(Clone, Debug)]
+pub struct MwiSubscriber {
+    /// Address of the subscriber (used as To: in NOTIFY).
+    pub aor: rsip::Uri,
+    pub dialog_id: DialogId,
+    /// Account URI for the `Message-Account:` header (e.g. "sip:1001@pbx").
+    pub account_uri: String,
+    pub expires: std::time::Instant,
+}
+
+/// Internal message used to trigger an MWI NOTIFY from the voicemail layer.
+#[derive(Clone, Debug)]
+pub struct MwiTrigger {
+    /// SIP extension / mailbox owner (e.g. "1001").
+    pub extension: String,
+    /// Number of new (unheard) voicemail messages.
+    pub new_messages: u32,
+    /// Number of old (heard) voicemail messages.
+    pub old_messages: u32,
+}
+
 #[derive(Clone)]
 pub struct PresenceManager {
     states: Arc<RwLock<HashMap<String, PresenceState>>>,
+    /// PRESENCE (RFC 3856) subscriptions keyed by subscribed-to identity.
     subscribers: Arc<RwLock<HashMap<String, Vec<Subscriber>>>>,
+    /// MWI (RFC 3842) subscriptions keyed by mailbox extension.
+    mwi_subscribers: Arc<RwLock<HashMap<String, Vec<MwiSubscriber>>>>,
     database: Option<DatabaseConnection>,
     notify_tx: Arc<RwLock<Option<tokio::sync::mpsc::Sender<String>>>>,
+    /// Channel used by the voicemail layer to request MWI NOTIFY delivery.
+    mwi_tx: Arc<RwLock<Option<tokio::sync::mpsc::Sender<MwiTrigger>>>>,
 }
 
 impl PresenceManager {
@@ -127,8 +155,10 @@ impl PresenceManager {
         Self {
             states: Arc::new(RwLock::new(HashMap::new())),
             subscribers: Arc::new(RwLock::new(HashMap::new())),
+            mwi_subscribers: Arc::new(RwLock::new(HashMap::new())),
             database,
             notify_tx: Arc::new(RwLock::new(None)),
+            mwi_tx: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -231,6 +261,60 @@ impl PresenceManager {
         }
     }
 
+    // ── MWI (RFC 3842 message-summary) ────────────────────────────────────────
+
+    /// Set the channel used by the MWI dispatch task.
+    pub fn set_mwi_tx(&self, tx: tokio::sync::mpsc::Sender<MwiTrigger>) {
+        let mut lock = self.mwi_tx.write().unwrap();
+        *lock = Some(tx);
+    }
+
+    /// Add (or refresh) an MWI subscription for `extension`.
+    pub fn add_mwi_subscriber(&self, extension: &str, sub: MwiSubscriber) {
+        let mut map = self.mwi_subscribers.write().unwrap();
+        let subs = map.entry(extension.to_string()).or_default();
+        subs.retain(|s| s.dialog_id != sub.dialog_id);
+        subs.push(sub);
+    }
+
+    /// Return all live MWI subscribers for `extension`.
+    pub fn get_mwi_subscribers(&self, extension: &str) -> Vec<MwiSubscriber> {
+        let map = self.mwi_subscribers.read().unwrap();
+        map.get(extension).cloned().unwrap_or_default()
+    }
+
+    /// Remove expired MWI subscriptions.
+    pub fn cleanup_expired_mwi(&self) {
+        let mut map = self.mwi_subscribers.write().unwrap();
+        let now = std::time::Instant::now();
+        for subs in map.values_mut() {
+            subs.retain(|s| s.expires > now);
+        }
+    }
+
+    /// Enqueue an MWI trigger so the SIP layer sends NOTIFY to all subscribers
+    /// of `extension`.  This is called from the voicemail notifier.
+    pub async fn trigger_mwi(&self, extension: &str, new_messages: u32, old_messages: u32) {
+        let tx = {
+            let lock = self.mwi_tx.read().unwrap();
+            lock.clone()
+        };
+        if let Some(tx) = tx {
+            let _ = tx
+                .send(MwiTrigger {
+                    extension: extension.to_string(),
+                    new_messages,
+                    old_messages,
+                })
+                .await;
+        } else {
+            debug!(
+                extension = %extension,
+                "MWI trigger: no SIP stack attached, skipping NOTIFY"
+            );
+        }
+    }
+
     fn get_user(loc: &Location) -> Option<String> {
         loc.aor.user().map(|u| u.to_string())
     }
@@ -328,6 +412,23 @@ impl ProxyModule for PresenceModule {
             }
         });
 
+        // Spawn MWI dispatch task (RFC 3842 message-summary)
+        let (mwi_tx, mut mwi_rx) = tokio::sync::mpsc::channel::<MwiTrigger>(100);
+        self.manager.set_mwi_tx(mwi_tx);
+        let mwi_module = self.clone();
+        crate::utils::spawn(async move {
+            while let Some(trigger) = mwi_rx.recv().await {
+                let subscribers = mwi_module
+                    .manager
+                    .get_mwi_subscribers(&trigger.extension);
+                for sub in subscribers {
+                    let _ = mwi_module
+                        .send_mwi_notify(&trigger, &sub)
+                        .await;
+                }
+            }
+        });
+
         // Spawn listener for locator events
         let manager = self.manager.clone();
         if let Some(mut rx) = self.server.locator_events.as_ref().map(|tx| tx.subscribe()) {
@@ -338,13 +439,14 @@ impl ProxyModule for PresenceModule {
             });
         }
 
-        // Spawn background cleanup for expired subscriptions
+        // Spawn background cleanup for expired subscriptions (presence + MWI)
         let manager_cleanup = self.manager.clone();
         crate::utils::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
             loop {
                 interval.tick().await;
                 manager_cleanup.cleanup_expired();
+                manager_cleanup.cleanup_expired_mwi();
             }
         });
 
@@ -362,7 +464,25 @@ impl ProxyModule for PresenceModule {
     ) -> Result<ProxyAction> {
         match tx.original.method {
             rsip::Method::Subscribe => {
-                self.handle_subscribe(tx, &cookie).await?;
+                // Dispatch based on the Event header value.
+                let event_val = tx
+                    .original
+                    .headers
+                    .iter()
+                    .find_map(|h| {
+                        if let rsip::Header::Event(ev) = h {
+                            Some(ev.value().to_ascii_lowercase())
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or_default();
+
+                if event_val.starts_with("message-summary") {
+                    self.handle_mwi_subscribe(tx, &cookie).await?;
+                } else {
+                    self.handle_subscribe(tx, &cookie).await?;
+                }
                 Ok(ProxyAction::Abort)
             }
             rsip::Method::Publish => {
@@ -587,6 +707,116 @@ impl PresenceModule {
                 expires_left
             ))),
             rsip::Header::ContentType(rsip::headers::ContentType::from("application/pidf+xml")),
+        ];
+
+        dialog
+            .request(rsip::Method::Notify, Some(headers), Some(body.into_bytes()))
+            .await
+            .map_err(|e| anyhow!("{:?}", e))?;
+
+        Ok(())
+    }
+
+    // ── MWI (RFC 3842 message-summary) ────────────────────────────────────────
+
+    /// Handle a SUBSCRIBE for `Event: message-summary`.
+    ///
+    /// Accepts the subscription, stores it in `PresenceManager`, replies 200 OK,
+    /// and immediately sends the current MWI state (zero messages as a safe
+    /// default — the voicemail layer will push the real count via `trigger_mwi`).
+    async fn handle_mwi_subscribe(
+        &self,
+        tx: &mut Transaction,
+        _cookie: &TransactionCookie,
+    ) -> Result<()> {
+        let from = tx.original.from_header()?.typed()?;
+        let to = tx.original.to_header()?.typed()?;
+
+        // Extension being subscribed to (the mailbox owner).
+        let extension = match to.uri.user() {
+            Some(u) => u.to_string(),
+            None => to.uri.host().to_string(),
+        };
+        let domain = to.uri.host().to_string();
+        let account_uri = format!("sip:{}@{}", extension, domain);
+
+        debug!("Handle MWI SUBSCRIBE for extension {}", extension);
+
+        let expires = tx
+            .original
+            .expires_header()
+            .and_then(|h| h.seconds().ok())
+            .unwrap_or(3600);
+
+        let (state_tx, _) = tokio::sync::mpsc::unbounded_channel();
+        let dialog = self
+            .server
+            .dialog_layer
+            .get_or_create_server_subscription(tx, state_tx, None, None)
+            .map_err(|e| anyhow!("{:?}", e))?;
+
+        let sub = MwiSubscriber {
+            aor: from.uri.clone(),
+            dialog_id: dialog.id().clone(),
+            account_uri: account_uri.clone(),
+            expires: std::time::Instant::now() + std::time::Duration::from_secs(expires as u64),
+        };
+
+        self.manager.add_mwi_subscriber(&extension, sub.clone());
+
+        // Send 200 OK then an immediate NOTIFY with 0 new messages.
+        tx.reply(rsip::StatusCode::OK).await.ok();
+
+        let initial_trigger = MwiTrigger {
+            extension: extension.clone(),
+            new_messages: 0,
+            old_messages: 0,
+        };
+        let _ = self.send_mwi_notify(&initial_trigger, &sub).await;
+
+        Ok(())
+    }
+
+    /// Build and send a SIP NOTIFY for `Event: message-summary` (RFC 3842).
+    ///
+    /// The body follows the `application/simple-message-summary` format.
+    async fn send_mwi_notify(&self, trigger: &MwiTrigger, sub: &MwiSubscriber) -> Result<()> {
+        debug!(
+            extension = %trigger.extension,
+            new = trigger.new_messages,
+            old = trigger.old_messages,
+            "Sending MWI NOTIFY"
+        );
+
+        let waiting = if trigger.new_messages > 0 { "yes" } else { "no" };
+        let body = format!(
+            "Messages-Waiting: {}\r\nMessage-Account: {}\r\nVoice-Message: {}/{} (0/0)\r\n",
+            waiting,
+            sub.account_uri,
+            trigger.new_messages,
+            trigger.old_messages,
+        );
+
+        let dialog = self
+            .server
+            .dialog_layer
+            .get_dialog(&sub.dialog_id)
+            .ok_or_else(|| anyhow!("MWI dialog not found for {}", trigger.extension))?;
+
+        let expires_left = sub
+            .expires
+            .saturating_duration_since(std::time::Instant::now())
+            .as_secs();
+
+        let headers = vec![
+            rsip::Header::Event(rsip::headers::Event::new("message-summary")),
+            rsip::Header::SubscriptionState(rsip::headers::SubscriptionState::new(format!(
+                "active;expires={}",
+                expires_left
+            ))),
+            rsip::Header::ContentType(rsip::headers::ContentType::from(
+                "application/simple-message-summary",
+            )),
         ];
 
         dialog

@@ -915,6 +915,8 @@ struct RouteMetadataAction {
     queue_file: Option<String>,
     #[serde(default)]
     voicemail_extension: Option<String>,
+    #[serde(default)]
+    ivr_file: Option<String>,
 }
 
 fn convert_route(
@@ -1036,6 +1038,12 @@ fn apply_route_metadata(action: &mut RouteAction, meta: RouteMetadataAction) {
             action.app = Some("voicemail".to_string());
             action.app_params = Some(serde_json::json!({ "extension": ext }));
         }
+        "ivr" => {
+            if let Some(file) = sanitize_metadata_string(meta.ivr_file) {
+                action.app = Some("ivr".to_string());
+                action.app_params = Some(serde_json::json!({ "file": file }));
+            }
+        }
         _ => {}
     }
 }
@@ -1061,6 +1069,7 @@ mod tests {
             target_type: Some("queue".to_string()),
             queue_file: Some("queues/support.toml".to_string()),
             voicemail_extension: None,
+            ivr_file: None,
         };
         apply_route_metadata(&mut action, meta);
         assert_eq!(action.queue.as_deref(), Some("queues/support.toml"));
@@ -1073,11 +1082,27 @@ mod tests {
             target_type: Some("voicemail".to_string()),
             queue_file: None,
             voicemail_extension: Some("1001".to_string()),
+            ivr_file: None,
         };
         apply_route_metadata(&mut action, meta);
         assert_eq!(action.app.as_deref(), Some("voicemail"));
         let params = action.app_params.unwrap();
         assert_eq!(params["extension"], "1001");
+    }
+
+    #[test]
+    fn route_metadata_sets_ivr_fields() {
+        let mut action = RouteAction::default();
+        let meta = RouteMetadataAction {
+            target_type: Some("ivr".to_string()),
+            queue_file: None,
+            voicemail_extension: None,
+            ivr_file: Some("config/ivr/main.toml".to_string()),
+        };
+        apply_route_metadata(&mut action, meta);
+        assert_eq!(action.app.as_deref(), Some("ivr"));
+        let params = action.app_params.unwrap();
+        assert_eq!(params["file"], "config/ivr/main.toml");
     }
 }
 

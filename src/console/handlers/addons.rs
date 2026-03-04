@@ -66,10 +66,17 @@ pub async fn index(State(state): State<Arc<ConsoleState>>) -> impl IntoResponse 
         vec![]
     };
 
+    // Pre-compute banner flag: true when at least one commercial addon lacks a valid license.
+    let has_unlicensed_commercial = addons.iter().any(|a| {
+        a.category == crate::addons::AddonCategory::Commercial
+            && a.license_status.as_deref() != Some("Valid")
+    });
+
     state.render(
         "console/addons.html",
         serde_json::json!({
             "addons": addons,
+            "has_unlicensed_commercial": has_unlicensed_commercial,
             "page_title": "Addons",
             "nav_active": "addons"
         }),

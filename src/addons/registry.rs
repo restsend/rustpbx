@@ -40,6 +40,10 @@ impl AddonRegistry {
         #[cfg(feature = "addon-voicemail")]
         addons.push(Box::new(super::voicemail::VoicemailAddon::new()));
 
+        // IVR Editor Addon (Commercial)
+        #[cfg(feature = "addon-ivr-editor")]
+        addons.push(Box::new(super::ivr_editor::IvrEditorAddon::new()));
+
         // Queue Addon
         addons.push(Box::new(super::queue::QueueAddon::new()));
 

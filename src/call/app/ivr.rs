@@ -21,6 +21,7 @@ use super::{
     AppAction, ApplicationContext, CallApp, CallAppType, CallController, DtmfCollectConfig,
 };
 use crate::call::app::ivr_config::{EntryAction, IvrDefinition, WebhookResponse};
+use crate::callrecord::CallRecordHangupReason;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
@@ -64,6 +65,9 @@ pub struct WebhookPayload {
     pub ivr_name: String,
     /// Current menu key.
     pub menu: String,
+    /// Collected variables from Collect actions.
+    #[serde(default)]
+    pub variables: std::collections::HashMap<String, String>,
 }
 
 /// A built-in IVR application driven by TOML configuration.
@@ -80,6 +84,10 @@ pub struct IvrApp {
     /// Retry count carried across greeting replay (since `PlayingGreeting`
     /// state itself doesn't track retries).
     pending_retry_count: u32,
+    /// Variables collected via Collect actions.
+    collected_variables: std::collections::HashMap<String, String>,
+    /// First digit collected for unknown_key_action (direct dial scenario).
+    pending_unknown_digit: Option<String>,
 }
 
 impl IvrApp {
@@ -90,6 +98,8 @@ impl IvrApp {
             state: IvrState::Init,
             menu_stack: vec!["root".to_string()],
             pending_retry_count: 0,
+            collected_variables: std::collections::HashMap::new(),
+            pending_unknown_digit: None,
         }
     }
 
@@ -104,6 +114,61 @@ impl IvrApp {
             .validate()
             .map_err(|e| anyhow::anyhow!("IVR config validation failed '{}': {}", path, e))?;
         Ok(Self::new(file_config.ivr))
+    }
+
+    /// Check if the current time falls within business hours.
+    fn is_within_business_hours(&self, bh: &crate::call::app::ivr_config::BusinessHours) -> bool {
+        use chrono::{Datelike, Utc};
+
+        let tz: chrono_tz::Tz = match bh.timezone.parse() {
+            Ok(tz) => tz,
+            Err(_) => {
+                warn!(
+                    ivr = %self.definition.name,
+                    timezone = %bh.timezone,
+                    "Invalid timezone, defaulting to UTC"
+                );
+                chrono_tz::UTC
+            }
+        };
+
+        let now = Utc::now().with_timezone(&tz);
+        let weekday = match now.weekday() {
+            chrono::Weekday::Mon => "mon",
+            chrono::Weekday::Tue => "tue",
+            chrono::Weekday::Wed => "wed",
+            chrono::Weekday::Thu => "thu",
+            chrono::Weekday::Fri => "fri",
+            chrono::Weekday::Sat => "sat",
+            chrono::Weekday::Sun => "sun",
+        };
+
+        for schedule in &bh.schedules {
+            if !schedule
+                .days
+                .iter()
+                .any(|d| d.eq_ignore_ascii_case(weekday))
+            {
+                continue;
+            }
+
+            let start = match chrono::NaiveTime::parse_from_str(&schedule.start, "%H:%M") {
+                Ok(t) => t,
+                Err(_) => continue,
+            };
+            let end = match chrono::NaiveTime::parse_from_str(&schedule.end, "%H:%M") {
+                Ok(t) => t,
+                Err(_) => continue,
+            };
+
+            let current_time = now.time();
+            if current_time >= start && current_time <= end {
+                return true;
+            }
+        }
+
+        // If no schedules defined, always open
+        bh.schedules.is_empty()
     }
 
     /// Get the current menu key (top of stack).
@@ -213,7 +278,10 @@ impl IvrApp {
                 } else {
                     info!(ivr = %self.definition.name, "IVR hanging up");
                     self.state = IvrState::Done;
-                    Ok(AppAction::Hangup { reason: None, code: None })
+                    Ok(AppAction::Hangup {
+                        reason: None,
+                        code: None,
+                    })
                 }
             }
             EntryAction::PlayAndHangup { prompt, code } => {
@@ -226,7 +294,10 @@ impl IvrApp {
                     // No prompt — hang up immediately with the given code
                     info!(ivr = %self.definition.name, code = ?code, "IVR hanging up immediately with code (no prompt)");
                     self.state = IvrState::Done;
-                    Ok(AppAction::Hangup { reason: None, code: *code })
+                    Ok(AppAction::Hangup {
+                        reason: None,
+                        code: *code,
+                    })
                 }
             }
             EntryAction::CollectExtension {
@@ -241,8 +312,32 @@ impl IvrApp {
                     prompt, min_digits, max_digits, inter_digit_timeout_ms,
                     "Collecting extension digits"
                 );
-                let digits = ctrl
-                    .collect_dtmf(DtmfCollectConfig {
+
+                // Check if we have a pending digit from unknown_key_action
+                let initial_digit = self.pending_unknown_digit.take();
+                let digits = if let Some(first) = initial_digit {
+                    // Already have first digit, collect more if needed
+                    if first.len() >= *min_digits {
+                        first.clone()
+                    } else {
+                        let mut combined = first;
+                        let more = ctrl
+                            .collect_dtmf(DtmfCollectConfig {
+                                min_digits: 1,
+                                max_digits: max_digits.saturating_sub(combined.len()),
+                                timeout: Duration::from_millis(
+                                    *inter_digit_timeout_ms * (*max_digits as u64 + 1),
+                                ),
+                                terminator: Some('#'),
+                                play_prompt: Some(prompt.clone()),
+                                inter_digit_timeout: Some(Duration::from_millis(*inter_digit_timeout_ms)),
+                            })
+                            .await?;
+                        combined.push_str(&more);
+                        combined
+                    }
+                } else {
+                    ctrl.collect_dtmf(DtmfCollectConfig {
                         min_digits: *min_digits,
                         max_digits: *max_digits,
                         timeout: Duration::from_millis(
@@ -252,7 +347,8 @@ impl IvrApp {
                         play_prompt: Some(prompt.clone()),
                         inter_digit_timeout: Some(Duration::from_millis(*inter_digit_timeout_ms)),
                     })
-                    .await?;
+                    .await?
+                };
 
                 if digits.is_empty() {
                     // No digits collected, go back to current menu
@@ -264,7 +360,79 @@ impl IvrApp {
                     Ok(AppAction::Transfer(digits))
                 }
             }
-            EntryAction::Webhook { url, method, headers } => {
+            EntryAction::Collect {
+                variable,
+                prompt,
+                min_digits,
+                max_digits,
+                end_key,
+                inter_digit_timeout_ms,
+            } => {
+                debug!(
+                    ivr = %self.definition.name,
+                    variable, min_digits, max_digits, inter_digit_timeout_ms,
+                    "Collecting digits into variable"
+                );
+                let terminator = end_key.as_ref().and_then(|k| k.chars().next());
+                let prompt_str = prompt.as_deref().unwrap_or("");
+
+                // Check if we have a pending digit from unknown_key_action
+                let initial_digit = self.pending_unknown_digit.take();
+                let digits = if let Some(first) = initial_digit {
+                    // Already have first digit, collect more if needed
+                    if first.len() >= *min_digits {
+                        // Already have enough digits
+                        first.clone()
+                    } else {
+                        // Collect more digits, starting with what we have
+                        let mut combined = first;
+                        let more = ctrl
+                            .collect_dtmf(DtmfCollectConfig {
+                                min_digits: 1,
+                                max_digits: max_digits.saturating_sub(combined.len()),
+                                timeout: Duration::from_millis(
+                                    *inter_digit_timeout_ms * (*max_digits as u64 + 1),
+                                ),
+                                terminator,
+                                play_prompt: if prompt_str.is_empty() { None } else { Some(prompt_str.to_string()) },
+                                inter_digit_timeout: Some(Duration::from_millis(*inter_digit_timeout_ms)),
+                            })
+                            .await?;
+                        combined.push_str(&more);
+                        combined
+                    }
+                } else {
+                    ctrl.collect_dtmf(DtmfCollectConfig {
+                        min_digits: *min_digits,
+                        max_digits: *max_digits,
+                        timeout: Duration::from_millis(
+                            *inter_digit_timeout_ms * (*max_digits as u64 + 1),
+                        ),
+                        terminator,
+                        play_prompt: if prompt_str.is_empty() { None } else { Some(prompt_str.to_string()) },
+                        inter_digit_timeout: Some(Duration::from_millis(*inter_digit_timeout_ms)),
+                    })
+                    .await?
+                };
+
+                if digits.is_empty() {
+                    debug!(ivr = %self.definition.name, variable, "No digits collected for variable");
+                } else {
+                    info!(ivr = %self.definition.name, variable, digits, "Collected digits into variable");
+                    self.collected_variables.insert(variable.clone(), digits);
+                }
+
+                // Return to current menu after collecting
+                let current = self.current_menu_key().to_string();
+                self.enter_menu(&current, ctrl).await
+            }
+            EntryAction::Webhook {
+                url,
+                method,
+                headers,
+                variables,
+                timeout,
+            } => {
                 let method_str = method.as_deref().unwrap_or("POST");
                 info!(
                     ivr = %self.definition.name,
@@ -272,9 +440,7 @@ impl IvrApp {
                     "IVR calling webhook"
                 );
 
-                let webhook_response = self
-                    .call_webhook(url, method_str, headers, ctx)
-                    .await;
+                let webhook_response = self.call_webhook(url, method_str, headers, variables.as_deref(), *timeout, ctx).await;
 
                 match webhook_response {
                     Ok(response) => {
@@ -313,13 +479,31 @@ impl IvrApp {
         url: &str,
         method: &str,
         headers: &std::collections::HashMap<String, String>,
+        variables_filter: Option<&str>,
+        timeout_secs: u64,
         ctx: &ApplicationContext,
     ) -> anyhow::Result<WebhookResponse> {
+        // Filter variables if a filter is specified
+        let filtered_vars = if let Some(filter) = variables_filter {
+            let filter_set: std::collections::HashSet<&str> = filter
+                .split(',')
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .collect();
+            self.collected_variables
+                .iter()
+                .filter(|(k, _)| filter_set.contains(k.as_str()))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect()
+        } else {
+            self.collected_variables.clone()
+        };
+
         // Build the request with custom headers.
         // For GET: send context as query params to avoid a JSON body.
         // For POST (and everything else): serialize the full payload as JSON.
         let mut req_builder = if method.eq_ignore_ascii_case("GET") {
-            let params = [
+            let mut params = vec![
                 ("session_id", ctx.call_info.session_id.as_str()),
                 ("caller", ctx.call_info.caller.as_str()),
                 ("callee", ctx.call_info.callee.as_str()),
@@ -327,6 +511,10 @@ impl IvrApp {
                 ("ivr_name", self.definition.name.as_str()),
                 ("menu", self.current_menu_key()),
             ];
+            // Add collected variables as query params
+            for (k, v) in &filtered_vars {
+                params.push((Box::leak(k.clone().into_boxed_str()) as &str, v.as_str()));
+            }
             ctx.http_client.get(url).query(&params)
         } else {
             let payload = WebhookPayload {
@@ -336,6 +524,7 @@ impl IvrApp {
                 direction: ctx.call_info.direction.clone(),
                 ivr_name: self.definition.name.clone(),
                 menu: self.current_menu_key().to_string(),
+                variables: filtered_vars,
             };
             ctx.http_client.post(url).json(&payload)
         };
@@ -344,13 +533,10 @@ impl IvrApp {
             req_builder = req_builder.header(key, value);
         }
 
-        let response = tokio::time::timeout(
-            Duration::from_secs(10),
-            req_builder.send(),
-        )
-        .await
-        .map_err(|_| anyhow::anyhow!("Webhook request timed out after 10 seconds"))?
-        .map_err(|e| anyhow::anyhow!("Webhook request failed: {}", e))?;
+        let response = tokio::time::timeout(Duration::from_secs(timeout_secs), req_builder.send())
+            .await
+            .map_err(|_| anyhow::anyhow!("Webhook request timed out after {} seconds", timeout_secs))?
+            .map_err(|e| anyhow::anyhow!("Webhook request failed: {}", e))?;
 
         let status = response.status();
         if !status.is_success() {
@@ -408,7 +594,10 @@ impl IvrApp {
                     "Max retries exceeded, no fallback — hanging up"
                 );
                 self.state = IvrState::Done;
-                return Ok(AppAction::Hangup { reason: None, code: None });
+                return Ok(AppAction::Hangup {
+                    reason: None,
+                    code: None,
+                });
             }
         }
 
@@ -486,7 +675,10 @@ impl IvrApp {
                 return self.execute_action(&action, ctrl, ctx).await;
             } else {
                 self.state = IvrState::Done;
-                return Ok(AppAction::Hangup { reason: None, code: None });
+                return Ok(AppAction::Hangup {
+                    reason: None,
+                    code: None,
+                });
             }
         }
 
@@ -522,6 +714,37 @@ impl CallApp for IvrApp {
     ) -> anyhow::Result<AppAction> {
         info!(ivr = %self.definition.name, "IVR application started");
         ctrl.answer().await?;
+
+        // Check business hours
+        let closed_action = if let Some(bh) = &self.definition.business_hours {
+            if bh.enabled && !self.is_within_business_hours(bh) {
+                info!(ivr = %self.definition.name, "Outside business hours");
+                if let Some(greeting) = &bh.closed_greeting {
+                    self.state = IvrState::PlayingHangup;
+                    ctrl.play_audio(greeting, false).await?;
+                    // After playing, the on_audio_complete will handle closed_action
+                    return Ok(AppAction::Continue);
+                }
+                Some(bh.closed_action.clone())
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        if let Some(action) = closed_action {
+            if let Some(action) = action {
+                return self.execute_action(&action, ctrl, _ctx).await;
+            }
+            // Default: hang up
+            self.state = IvrState::Done;
+            return Ok(AppAction::Hangup {
+                reason: Some(CallRecordHangupReason::Other("closed".to_string())),
+                code: None,
+            });
+        }
+
         self.enter_menu("root", ctrl).await
     }
 
@@ -534,9 +757,10 @@ impl CallApp for IvrApp {
         // Extract state data we need before the mutable calls below.
         // We only clone the String fields, not the full IvrState enum.
         let state_snapshot = match &self.state {
-            IvrState::WaitingDtmf { menu_key, retry_count } => {
-                Some((*retry_count, menu_key.clone(), false))
-            }
+            IvrState::WaitingDtmf {
+                menu_key,
+                retry_count,
+            } => Some((*retry_count, menu_key.clone(), false)),
             IvrState::PlayingGreeting { menu_key } => Some((0, menu_key.clone(), true)),
             _ => None,
         };
@@ -576,7 +800,7 @@ impl CallApp for IvrApp {
             }
         } else {
             // WaitingDtmf — look up the entry for this digit
-            let action = self
+            let entry_action = self
                 .definition
                 .get_menu(&menu_key)
                 .and_then(|m| m.entries.iter().find(|e| e.key == digit))
@@ -591,15 +815,32 @@ impl CallApp for IvrApp {
                     e.action.clone()
                 });
 
-            if let Some(action) = action {
+            if let Some(action) = entry_action {
                 self.execute_action(&action, ctrl, ctx).await
-            } else if self.definition.get_menu(&menu_key).is_some() {
-                self.handle_invalid_key(&menu_key, retry_count, &digit, ctrl, ctx)
-                    .await
+            } else if let Some(menu) = self.definition.get_menu(&menu_key) {
+                // Check for unknown_key_action (e.g., direct extension dial)
+                let unknown_action = menu.unknown_key_action.clone();
+                if let Some(unknown_action) = unknown_action {
+                    debug!(
+                        ivr = %self.definition.name,
+                        menu = %menu_key,
+                        digit = %digit,
+                        "DTMF not matched, executing unknown_key_action"
+                    );
+                    // Store the first digit for Collect actions
+                    self.pending_unknown_digit = Some(digit.to_string());
+                    self.execute_action(&unknown_action, ctrl, ctx).await
+                } else {
+                    self.handle_invalid_key(&menu_key, retry_count, &digit, ctrl, ctx)
+                        .await
+                }
             } else {
                 warn!(ivr = %self.definition.name, menu = %menu_key, "Menu not found during DTMF handling");
                 self.state = IvrState::Done;
-                Ok(AppAction::Hangup { reason: None, code: None })
+                Ok(AppAction::Hangup {
+                    reason: None,
+                    code: None,
+                })
             }
         }
     }
@@ -621,16 +862,19 @@ impl CallApp for IvrApp {
         }
 
         let done = match &self.state {
-            IvrState::PlayingGreeting { menu_key } => {
-                AudioDone::Greeting { menu_key: menu_key.clone() }
-            }
-            IvrState::PlayingInvalid { menu_key, retry_count } => AudioDone::Invalid {
+            IvrState::PlayingGreeting { menu_key } => AudioDone::Greeting {
+                menu_key: menu_key.clone(),
+            },
+            IvrState::PlayingInvalid {
+                menu_key,
+                retry_count,
+            } => AudioDone::Invalid {
                 menu_key: menu_key.clone(),
                 retry_count: *retry_count,
             },
-            IvrState::PlayingAnnouncement { return_menu } => {
-                AudioDone::Announcement { return_menu: return_menu.clone() }
-            }
+            IvrState::PlayingAnnouncement { return_menu } => AudioDone::Announcement {
+                return_menu: return_menu.clone(),
+            },
             IvrState::PlayingHangup => AudioDone::Hangup,
             IvrState::PlayingAndHangup { code } => AudioDone::AndHangup { code: *code },
             _ => AudioDone::Other,
@@ -643,7 +887,10 @@ impl CallApp for IvrApp {
                 self.start_waiting_dtmf(&menu_key, retry_count, ctrl);
                 Ok(AppAction::Continue)
             }
-            AudioDone::Invalid { menu_key, retry_count } => {
+            AudioDone::Invalid {
+                menu_key,
+                retry_count,
+            } => {
                 // Invalid prompt finished → re-play greeting
                 let greeting = self
                     .definition
@@ -658,12 +905,13 @@ impl CallApp for IvrApp {
                 }
                 Ok(AppAction::Continue)
             }
-            AudioDone::Announcement { return_menu } => {
-                self.enter_menu(&return_menu, ctrl).await
-            }
+            AudioDone::Announcement { return_menu } => self.enter_menu(&return_menu, ctrl).await,
             AudioDone::Hangup => {
                 self.state = IvrState::Done;
-                Ok(AppAction::Hangup { reason: None, code: None })
+                Ok(AppAction::Hangup {
+                    reason: None,
+                    code: None,
+                })
             }
             AudioDone::AndHangup { code } => {
                 self.state = IvrState::Done;
@@ -684,9 +932,10 @@ impl CallApp for IvrApp {
         }
 
         let waiting = match &self.state {
-            IvrState::WaitingDtmf { menu_key, retry_count } => {
-                Some((menu_key.clone(), *retry_count))
-            }
+            IvrState::WaitingDtmf {
+                menu_key,
+                retry_count,
+            } => Some((menu_key.clone(), *retry_count)),
             _ => None,
         };
 

@@ -7,6 +7,7 @@
             route: {{ route_data | tojson }},
             trunks: {{ trunk_options | tojson }},
             queues: {{ queue_options | tojson }},
+            ivrProjects: {{ ivr_options | tojson }},
             algorithms: {{ selection_algorithms | tojson }},
             directionOptions: {{ direction_options | tojson }},
             statusOptions: {{ status_options | tojson }},
@@ -709,6 +710,79 @@
                             </div>
                         </div>
 
+                        <div class="rounded-xl border border-slate-200 bg-slate-50 p-4" x-show="isIvrTarget" x-cloak>
+                            <div class="flex items-center justify-between">
+                                <div>
+                                    <h3 class="text-sm font-semibold text-slate-800">IVR destination</h3>
+                                    <p class="text-xs text-slate-500">Calls matched by this rule will be handled by
+                                        an IVR flow.</p>
+                                </div>
+                                <a :href="ivrEditorUrl()"
+                                    class="text-xs font-semibold text-sky-600 underline-offset-2 hover:underline">
+                                    Manage IVR flows
+                                </a>
+                            </div>
+                            <div class="mt-4 space-y-2">
+                                <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">IVR file
+                                    path</label>
+                                <input type="text" x-model="route.action.ivr_file" maxlength="200"
+                                    class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                    placeholder="config/ivr/main.toml">
+                                <p class="text-[11px] text-slate-500">Path to the IVR TOML configuration file
+                                    (relative to the working directory).</p>
+                            </div>
+                            <div class="mt-4 space-y-3">
+                                <div class="flex items-center justify-between">
+                                    <h4 class="text-xs font-semibold uppercase tracking-wide text-slate-500">Published
+                                        IVR flows</h4>
+                                    <span class="text-[11px] text-slate-400"
+                                        x-text="ivrOptions.length + ' available'"></span>
+                                </div>
+                                <template x-if="ivrOptions.length">
+                                    <ul class="space-y-2 text-xs text-slate-600">
+                                        <template x-for="option in ivrOptions" :key="option.id">
+                                            <li class="rounded-lg border border-slate-200 bg-white p-3">
+                                                <div class="flex flex-wrap items-center justify-between gap-2">
+                                                    <div>
+                                                        <div class="text-sm font-semibold text-slate-800"
+                                                            x-text="option.name"></div>
+                                                        <div class="text-[11px] text-slate-500"
+                                                            x-text="option.description || 'No description provided.'">
+                                                        </div>
+                                                    </div>
+                                                    <div class="inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-[11px] font-semibold"
+                                                        :class="option.status === 'active' ? 'bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200' : 'bg-rose-50 text-rose-600 ring-1 ring-rose-200'">
+                                                        <span
+                                                            x-text="option.status === 'active' ? 'Active' : 'Disabled'"></span>
+                                                    </div>
+                                                </div>
+                                                <div class="mt-2 flex flex-wrap items-center gap-2 text-[11px]">
+                                                    <span class="rounded bg-slate-100 px-2 py-1 font-mono"
+                                                        x-text="option.file"></span>
+                                                    <button type="button" @click="route.action.ivr_file = option.file"
+                                                        class="rounded border border-slate-200 px-2 py-0.5 text-xs font-semibold text-slate-600 hover:bg-slate-50">
+                                                        Use path
+                                                    </button>
+                                                    <template x-if="option.published_at">
+                                                        <span class="text-slate-400"
+                                                            x-text="'Published ' + formatTimestamp(option.published_at)"></span>
+                                                    </template>
+                                                    <template x-if="!option.published_at">
+                                                        <span class="text-amber-500">Not yet published</span>
+                                                    </template>
+                                                </div>
+                                            </li>
+                                        </template>
+                                    </ul>
+                                </template>
+                                <template x-if="!ivrOptions.length">
+                                    <p class="text-xs text-rose-500">No IVR flows available.
+                                        <a :href="ivrEditorUrl()" class="underline">Create an IVR flow first</a>.
+                                    </p>
+                                </template>
+                            </div>
+                        </div>
+
                         <div class="grid gap-4 md:grid-cols-2">
                             <div class="space-y-2">
                                 <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">Source
@@ -830,11 +904,13 @@
             statusOptions: Array.isArray(options.statusOptions) ? options.statusOptions : [],
             trunkOptions: [],
             queueOptions: [],
+            ivrOptions: [],
             algorithmOptions: [],
             destinationOptions: [
                 { value: 'sip_trunk', label: 'SIP trunks' },
                 ...(window.queueAddonEnabled ? [{ value: 'queue', label: 'Queue' }] : []),
                 ...(window.voicemailAddonEnabled ? [{ value: 'voicemail', label: 'Voicemail' }] : []),
+                ...(window.ivrEditorAddonEnabled ? [{ value: 'ivr', label: 'IVR' }] : []),
             ],
             selectionOptionAliases: {
                 rr: 'rr',
@@ -867,6 +943,7 @@
                     target_type: 'sip_trunk',
                     queue_file: '',
                     voicemail_extension: '',
+                    ivr_file: '',
                 },
                 policy: {
                     frequency_limit: { max_calls: null, duration: null },
@@ -906,6 +983,13 @@
                 this.trunkOptions = Array.isArray(trunksData) ? trunksData : (trunksData?.trunks || []);
                 const queuesData = options.queues;
                 this.queueOptions = Array.isArray(queuesData) ? queuesData : (queuesData?.queues || []);
+                const ivrData = options.ivrProjects;
+                this.ivrOptions = Array.isArray(ivrData) ? ivrData : [];
+                if (typeof window.__ivrProjectsLoader === 'function') {
+                    window.__ivrProjectsLoader()
+                        .then(data => { if (Array.isArray(data)) this.ivrOptions = data; })
+                        .catch(() => { });
+                }
                 const normalised = this.normaliseRoute(options.route || {});
                 this.route = normalised.route;
                 this.matchHeaders = normalised.matchHeaders;
@@ -1021,7 +1105,7 @@
                 const normalizeTargetType = (value) => {
                     if (typeof value === 'string') {
                         const trimmed = value.trim().toLowerCase();
-                        if (trimmed === 'queue' || trimmed === 'voicemail') {
+                        if (trimmed === 'queue' || trimmed === 'voicemail' || trimmed === 'ivr') {
                             return trimmed;
                         }
                     }
@@ -1029,6 +1113,7 @@
                 };
                 const queueFile = this.trimString(raw?.action?.queue_file || '');
                 const voicemailExtension = this.trimString(raw?.action?.voicemail_extension || '');
+                const ivrFile = this.trimString(raw?.action?.ivr_file || '');
                 const normalizeSelection = (value) => this.normalizeSelectionOption(value);
                 const route = {
                     id: raw?.id ?? null,
@@ -1067,6 +1152,7 @@
                         target_type: normalizeTargetType(raw?.action?.target_type),
                         queue_file: queueFile,
                         voicemail_extension: voicemailExtension,
+                        ivr_file: ivrFile,
                     },
                     policy: {
                         frequency_limit: {
@@ -1126,7 +1212,7 @@
             normalizeTargetType(value) {
                 if (typeof value === 'string') {
                     const trimmed = value.trim().toLowerCase();
-                    if (trimmed === 'queue' || trimmed === 'voicemail') {
+                    if (trimmed === 'queue' || trimmed === 'voicemail' || trimmed === 'ivr') {
                         return trimmed;
                     }
                 }
@@ -1263,6 +1349,9 @@
                 if (!this.isVoicemailTarget) {
                     this.route.action.voicemail_extension = '';
                 }
+                if (!this.isIvrTarget) {
+                    this.route.action.ivr_file = '';
+                }
             },
             get isSipTrunkTarget() {
                 return this.normalizeTargetType(this.route.action?.target_type) === 'sip_trunk';
@@ -1273,6 +1362,9 @@
             get isVoicemailTarget() {
                 return this.normalizeTargetType(this.route.action?.target_type) === 'voicemail';
             },
+            get isIvrTarget() {
+                return this.normalizeTargetType(this.route.action?.target_type) === 'ivr';
+            },
             get routeSummary() {
                 const direction = this.trimString(this.route.direction) || 'direction pending';
                 return `${direction} · priority ${this.route.priority}`;
@@ -1280,6 +1372,10 @@
             queuesUrl() {
                 const base = (this.listUrl || '/console/routing').replace(/\/routing$/, '');
                 return `${base}/queues`;
+            },
+            ivrEditorUrl() {
+                const base = (this.listUrl || '/console/routing').replace(/\/routing$/, '');
+                return `${base}/ivr_editor`;
             },
             submitUrl() {
                 return this.formAction || this.listUrl;
@@ -1317,6 +1413,12 @@
                     const ext = this.trimString(this.route.action.voicemail_extension);
                     if (!ext.length) {
                         throw new Error('Voicemail destination requires an extension.');
+                    }
+                }
+                if (targetType === 'ivr') {
+                    const ivrFile = this.trimString(this.route.action.ivr_file);
+                    if (!ivrFile.length) {
+                        throw new Error('IVR destination requires an IVR project.');
                     }
                 }
             },
@@ -1377,6 +1479,9 @@
                 }
                 if (targetType === 'voicemail') {
                     actionPayload.voicemail_extension = this.trimString(this.route.action.voicemail_extension) || null;
+                }
+                if (targetType === 'ivr') {
+                    actionPayload.ivr_file = this.trimString(this.route.action.ivr_file) || null;
                 }
 
                 const description = this.trimString(this.route.description);

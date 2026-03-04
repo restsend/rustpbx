@@ -1,0 +1,150 @@
+# Demo IVR configuration — covers every EntryAction type.
+#
+# To activate, add a route pointing to this file, e.g. in config/routes/ivr.toml:
+#
+#   [[routes]]
+#   name = "demo_ivr"
+#   [routes.match_conditions]
+#   to_user = "^1100$"
+#   [routes.action]
+#   app = "ivr"
+#   auto_answer = true
+#   [routes.action.app_params]
+#   file = "config/ivr/demo.toml"
+
+[ivr]
+name = "demo"
+description = "Demo IVR covering every action type"
+lang = "en"
+
+# ── Business hours ─────────────────────────────────────────────────────────────
+# closed_action → PlayAndHangup (SIP 503)
+[ivr.business_hours]
+enabled = true
+timezone = "Asia/Shanghai"
+work_days = [0, 1, 2, 3, 4]                                                                        # Mon-Fri
+work_start = "09:00"
+work_end = "18:00"
+break_start = "12:00"
+break_end = "13:00"
+closed_text = "Our office is currently closed. Business hours are Monday to Friday, 9 AM to 6 PM."
+closed_greeting = "sounds/ivr/closed.wav"
+closed_action = { type = "play_and_hangup", prompt = "sounds/ivr/closed.wav", code = 503 }
+
+[[ivr.business_hours.schedules]]
+days = ["mon", "tue", "wed", "thu", "fri"]
+start = "09:00"
+end = "18:00"
+
+# ── Root menu ──────────────────────────────────────────────────────────────────
+[ivr.root]
+greeting = "sounds/ivr/welcome.wav"
+timeout_ms = 5000
+max_retries = 3
+invalid_prompt = "sounds/ivr/invalid.wav"
+
+# Repeat on timeout (action: repeat)
+timeout_action = { type = "repeat" }
+
+# PlayAndHangup after max retries (action: play_and_hangup)
+max_retries_action = { type = "play_and_hangup", prompt = "sounds/ivr/goodbye.wav", code = 200 }
+
+# action: transfer — blind-transfer to extension 1001
+[[ivr.root.entries]]
+key = "1"
+label = "Sales (transfer)"
+action = { type = "transfer", target = "1001" }
+
+# action: queue — send caller into ACD queue
+[[ivr.root.entries]]
+key = "2"
+label = "Technical Support (queue)"
+action = { type = "queue", target = "support_queue" }
+
+# action: menu — navigate to "services" sub-menu
+[[ivr.root.entries]]
+key = "3"
+label = "More Services (menu)"
+action = { type = "menu", menu = "services" }
+
+# action: play — play an audio file and return to this menu
+[[ivr.root.entries]]
+key = "4"
+label = "Company Address (play)"
+action = { type = "play", prompt = "sounds/ivr/address.wav" }
+
+# action: collect_extension — multi-digit direct extension dial
+[[ivr.root.entries]]
+key = "5"
+label = "Dial Extension (collect_extension)"
+action = { type = "collect_extension", prompt = "sounds/ivr/enter_ext.wav", min_digits = 3, max_digits = 4, inter_digit_timeout_ms = 3000 }
+
+# action: collect — store arbitrary digits in a named variable
+[[ivr.root.entries]]
+key = "6"
+label = "Enter Account Number (collect)"
+action = { type = "collect", variable = "account_number", prompt = "sounds/ivr/enter_account.wav", min_digits = 6, max_digits = 12, end_key = "#", inter_digit_timeout_ms = 5000 }
+
+# action: webhook — call external HTTP endpoint to decide next action
+[[ivr.root.entries]]
+key = "7"
+label = "Smart Routing (webhook)"
+[ivr.root.entries.action]
+type = "webhook"
+url = "https://example.com/ivr/route"
+method = "POST"
+variables = "account_number"
+timeout = 10
+[ivr.root.entries.action.headers]
+X-Api-Key = "demo-key"
+
+# action: transfer — transfer to operator
+[[ivr.root.entries]]
+key = "0"
+label = "Operator"
+action = { type = "transfer", target = "operator" }
+
+# action: repeat — replay the current menu greeting
+[[ivr.root.entries]]
+key = "*"
+label = "Repeat (repeat)"
+action = { type = "repeat" }
+
+# action: hangup — play goodbye and disconnect
+[[ivr.root.entries]]
+key = "#"
+label = "Hang Up (hangup)"
+action = { type = "hangup", prompt = "sounds/ivr/goodbye.wav" }
+
+# ── Sub-menu: services ─────────────────────────────────────────────────────────
+[ivr.menus.services]
+greeting = "sounds/ivr/services_menu.wav"
+timeout_ms = 5000
+max_retries = 2
+
+# Back to root on timeout (action: menu)
+timeout_action = { type = "menu", menu = "root" }
+
+# Hangup on max retries (action: hangup)
+max_retries_action = { type = "hangup" }
+
+# Repeat on any unrecognised key (action: repeat via unknown_key_action)
+unknown_key_action = { type = "repeat" }
+
+# action: voicemail — leave a message for extension 1001
+[[ivr.menus.services.entries]]
+key = "1"
+label = "Voicemail (voicemail)"
+action = { type = "voicemail", target = "1001" }
+
+# action: play_and_hangup — "此号码暂停服务" + SIP 404
+[[ivr.menus.services.entries]]
+key = "2"
+label = "Number Not in Service (play_and_hangup)"
+action = { type = "play_and_hangup", prompt = "sounds/ivr/not_in_service.wav", code = 404 }
+
+# action: menu — back to root
+[[ivr.menus.services.entries]]
+key = "9"
+label = "Back to Main Menu"
+action = { type = "menu", menu = "root" }

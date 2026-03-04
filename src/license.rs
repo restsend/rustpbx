@@ -257,24 +257,23 @@ pub async fn verify_addon_license(
 #[cfg(feature = "commerce")]
 /// Check all commercial addons and return their license status.
 /// Returns a HashMap of addon_id -> LicenseStatus.
+/// Addons without a configured key are omitted from the map so the UI can
+/// show a "get a license" prompt without blocking the addon from running.
 pub async fn check_all_addon_licenses(
     addon_ids: &[String],
     license_config: &Option<LicenseConfig>,
 ) -> HashMap<String, LicenseStatus> {
     let mut results = HashMap::new();
 
+    // If there is no license section at all, leave every addon out of the map.
+    // The UI will show the "get a license" call-to-action for commercial addons.
     let config = match license_config {
         Some(c) => c,
-        None => {
-            // No license config – fall back to the free-trial window for every addon.
-            for addon_id in addon_ids {
-                results.insert(addon_id.clone(), make_trial_status());
-            }
-            return results;
-        }
+        None => return results,
     };
 
     for addon_id in addon_ids {
+        // Only record status when a key is explicitly configured.
         let status = match config.get_license_for_addon(addon_id) {
             Some((key_name, key_value)) => match verify_license(&key_value).await {
                 Ok(info) => {
@@ -300,8 +299,8 @@ pub async fn check_all_addon_licenses(
                     }
                 }
             },
-            // No key configured for this addon – fall back to the free-trial window.
-            None => make_trial_status(),
+            // No key configured – skip; UI will prompt the user to obtain one.
+            None => continue,
         };
         results.insert(addon_id.clone(), status);
     }
@@ -309,47 +308,17 @@ pub async fn check_all_addon_licenses(
     results
 }
 
-#[cfg(feature = "commerce")]
-/// Build a `LicenseStatus` reflecting the current free-trial state.
-fn make_trial_status() -> LicenseStatus {
-    let days = free_trial_days_remaining();
-    let in_trial = days > 0;
-    LicenseStatus {
-        key_name: "free-trial".to_string(),
-        valid: in_trial,
-        expired: !in_trial,
-        expiry: None,
-        plan: if in_trial {
-            format!("trial ({} days left)", days)
-        } else {
-            "trial expired".to_string()
-        },
-        is_trial: true,
-    }
-}
-
-/// Check if an addon is allowed to run (valid license or community addon).
+/// Check if an addon is allowed to run.
 ///
-/// At runtime this reads exclusively from the startup cache so no network calls
-/// are made – avoiding any risk of interrupting a running service.
+/// Addons are never blocked at runtime regardless of license state;
+/// license expiry / absence is surfaced to the user through the UI only.
 #[cfg(feature = "commerce")]
 pub async fn can_enable_addon(
-    addon_id: &str,
-    is_commercial: bool,
+    _addon_id: &str,
+    _is_commercial: bool,
     _license_config: &Option<LicenseConfig>,
 ) -> bool {
-    if !is_commercial {
-        // Community addons don't need a license.
-        return true;
-    }
-
-    // Prefer the startup-verified result (populated by check_all_addon_licenses).
-    if let Some(status) = get_license_status(addon_id) {
-        return status.valid;
-    }
-
-    // Startup cache miss (called before initialize_all) – allow if in trial.
-    is_in_free_trial()
+    true
 }
 
 /// Check if an addon is allowed to run (always true without commerce feature).

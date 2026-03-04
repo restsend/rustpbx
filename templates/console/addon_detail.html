@@ -1,7 +1,64 @@
 {% extends "console/layout.html" %}
 {% block title %}{{ addon.name }} · Addons{% endblock %}
 {% block content %}
-<div class="p-4 sm:p-6" x-data="addonDetail('{{ addon.id }}')">
+<div class="p-4 sm:p-6"
+    x-data="addonDetail('{{ addon.id }}', {{ 'true' if addon.license_status == 'Expired' else 'false' }}, {{ 'true' if (addon.enabled and addon.license_status and addon.license_status != 'Valid') else 'false' }})">
+    <!-- License Expired Modal -->
+    <div x-show="showExpiredModal" x-cloak class="fixed inset-0 z-50 flex items-center justify-center bg-black/40"
+        @keydown.escape.window="showExpiredModal = false">
+        <div class="relative w-full max-w-md rounded-2xl bg-white p-6 shadow-xl ring-1 ring-black/5"
+            @click.outside="showExpiredModal = false">
+            <!-- Close button -->
+            <button type="button" @click="showExpiredModal = false"
+                class="absolute right-4 top-4 rounded-md p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-600 transition-colors">
+                <svg class="h-5 w-5" viewBox="0 0 20 20" fill="currentColor">
+                    <path
+                        d="M6.28 5.22a.75.75 0 00-1.06 1.06L8.94 10l-3.72 3.72a.75.75 0 101.06 1.06L10 11.06l3.72 3.72a.75.75 0 101.06-1.06L11.06 10l3.72-3.72a.75.75 0 00-1.06-1.06L10 8.94 6.28 5.22z" />
+                </svg>
+                <span class="sr-only">Close</span>
+            </button>
+
+            <!-- Icon -->
+            <div class="flex h-12 w-12 items-center justify-center rounded-full bg-amber-100">
+                <svg class="h-6 w-6 text-amber-600" viewBox="0 0 20 20" fill="currentColor">
+                    <path fill-rule="evenodd"
+                        d="M8.485 2.495c.673-1.167 2.357-1.167 3.03 0l6.28 10.875c.673 1.167-.17 2.625-1.516 2.625H3.72c-1.347 0-2.189-1.458-1.515-2.625L8.485 2.495zM10 5a.75.75 0 01.75.75v3.5a.75.75 0 01-1.5 0v-3.5A.75.75 0 0110 5zm0 9a1 1 0 100-2 1 1 0 000 2z"
+                        clip-rule="evenodd" />
+                </svg>
+            </div>
+
+            <!-- Title + body change based on expired vs unlicensed -->
+            <template x-if="licenseExpired">
+                <div>
+                    <h3 class="mt-4 text-base font-semibold text-slate-900">License Expired</h3>
+                    <p class="mt-2 text-sm text-slate-600">
+                        The license for this addon has expired. The addon continues to work normally, but please renew
+                        your subscription to ensure uninterrupted access and updates.
+                    </p>
+                </div>
+            </template>
+            <template x-if="!licenseExpired">
+                <div>
+                    <h3 class="mt-4 text-base font-semibold text-slate-900">No Active License</h3>
+                    <p class="mt-2 text-sm text-slate-600">
+                        This addon is running without a valid license. Please add a license key to ensure
+                        continued access and support.
+                    </p>
+                </div>
+            </template>
+
+            <div class="mt-5 flex flex-col gap-2 sm:flex-row-reverse">
+                <a href="https://miuda.ai/try" target="_blank"
+                    class="inline-flex w-full items-center justify-center rounded-md bg-sky-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-sky-500 transition-colors sm:w-auto"
+                    x-text="licenseExpired ? 'Renew License' : 'Get License'">
+                </a>
+                <button type="button" @click="showExpiredModal = false"
+                    class="inline-flex w-full items-center justify-center rounded-md bg-white px-4 py-2 text-sm font-medium text-slate-700 ring-1 ring-inset ring-slate-300 hover:bg-slate-50 transition-colors sm:w-auto">
+                    Dismiss
+                </button>
+            </div>
+        </div>
+    </div>
     <div class="mx-auto max-w-7xl space-y-6">
         <!-- Breadcrumbs -->
         <nav class="flex" aria-label="Breadcrumb">
@@ -74,6 +131,31 @@
         </div>
         {% endif %}
 
+        <!-- Enabled-but-unlicensed banner (persistent, shown even after modal is dismissed) -->
+        {% if addon.enabled and addon.category == "Commercial" and addon.license_status and addon.license_status !=
+        "Valid" %}
+        <div class="rounded-lg bg-amber-50 border border-amber-200 p-4 flex items-start gap-3">
+            <svg class="h-5 w-5 text-amber-500 flex-shrink-0 mt-0.5" viewBox="0 0 20 20" fill="currentColor">
+                <path fill-rule="evenodd"
+                    d="M8.485 2.495c.673-1.167 2.357-1.167 3.03 0l6.28 10.875c.673 1.167-.17 2.625-1.516 2.625H3.72c-1.347 0-2.189-1.458-1.515-2.625L8.485 2.495zM10 5a.75.75 0 01.75.75v3.5a.75.75 0 01-1.5 0v-3.5A.75.75 0 0110 5zm0 9a1 1 0 100-2 1 1 0 000 2z"
+                    clip-rule="evenodd" />
+            </svg>
+            <div class="flex-1 min-w-0">
+                {% if addon.license_status == "Expired" %}
+                <p class="text-sm font-medium text-amber-800">License expired — addon is running without a valid license
+                </p>
+                <p class="text-xs text-amber-700 mt-0.5">Renew at <a href="https://miuda.ai/try" target="_blank"
+                        class="underline font-medium">miuda.ai/try</a> or enter your new key below.</p>
+                {% else %}
+                <p class="text-sm font-medium text-amber-800">This addon is enabled but has no valid license</p>
+                <p class="text-xs text-amber-700 mt-0.5">The addon works normally. Add a license key below or <a
+                        href="https://miuda.ai/try" target="_blank" class="underline font-medium">get one at
+                        miuda.ai/try</a>.</p>
+                {% endif %}
+            </div>
+        </div>
+        {% endif %}
+
         <!-- Description -->
         <div class="prose prose-slate max-w-none">
             <p>{{ addon.description }}</p>
@@ -88,9 +170,9 @@
                 <div>
                     <h2 class="text-base font-semibold text-slate-900">License</h2>
                     <p class="text-xs text-slate-500 mt-0.5">
-                        Commercial addon &mdash; purchase or renew at
-                        <a href="https://miuda.ai/buy" target="_blank"
-                            class="text-sky-600 hover:text-sky-500 font-medium">miuda.ai/buy</a>.
+                        Commercial addon &mdash; get or renew a license at
+                        <a href="https://miuda.ai/try" target="_blank"
+                            class="text-sky-600 hover:text-sky-500 font-medium">miuda.ai/try</a>.
                     </p>
                 </div>
                 <!-- Current status badge (server-side) -->
@@ -159,8 +241,7 @@
                     <p class="text-sm font-medium text-red-800">License expired{% if addon.license_expiry %} on {{
                         addon.license_expiry }}{% endif %}</p>
                     <p class="text-xs text-red-700 mt-0.5">Enter your renewed key below or
-                        <a href="https://miuda.ai/buy" target="_blank" class="underline font-medium">purchase a new
-                            license</a>.
+                        <a href="https://miuda.ai/try" target="_blank" class="underline font-medium">renew online</a>.
                     </p>
                 </div>
             </div>
@@ -174,7 +255,8 @@
                 <div class="flex-1">
                     <p class="text-sm font-medium text-sky-800">No active license</p>
                     <p class="text-xs text-sky-700 mt-0.5">Enter your key below or
-                        <a href="https://miuda.ai/buy" target="_blank" class="underline font-medium">buy a license</a>
+                        <a href="https://miuda.ai/try" target="_blank" class="underline font-medium">get a free
+                            license</a>
                         to unlock this addon.
                     </p>
                 </div>
@@ -270,13 +352,15 @@
 
     <script>
         document.addEventListener('alpine:init', () => {
-            Alpine.data('addonDetail', (id) => ({
+            Alpine.data('addonDetail', (id, licenseExpired, licenseUnlicensed) => ({
                 licenseKey: '',
                 error: '',
                 verifiedPlan: '',
                 verifiedExpiry: '',
                 loading: false,
                 showInput: false,
+                licenseExpired: licenseExpired,
+                showExpiredModal: licenseExpired || licenseUnlicensed,
 
                 async verifyLicense() {
                     this.error = '';

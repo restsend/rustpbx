@@ -1,0 +1,38 @@
+[ivr]
+name = "ad"
+description = ""
+
+[ivr.business_hours]
+enabled = false
+timezone = "Asia/Shanghai"
+work_days = [
+    0,
+    1,
+    2,
+    3,
+    4,
+]
+work_start = "09:00"
+work_end = "18:00"
+break_start = "12:00"
+break_end = "13:00"
+closed_text = ""
+
+[[ivr.business_hours.schedules]]
+days = [
+    "mon",
+    "tue",
+    "wed",
+    "thu",
+    "fri",
+]
+start = "09:00"
+end = "18:00"
+
+[ivr.root]
+greeting = "sounds/ivr/welcome.wav"
+timeout_ms = 5000
+max_retries = 3
+entries = []
+
+[ivr.menus]
