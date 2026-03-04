@@ -717,11 +717,14 @@
                                     <p class="text-xs text-slate-500">Calls matched by this rule will be handled by
                                         an IVR flow.</p>
                                 </div>
+                                <!-- "Manage IVR flows" link only available with the IVR Editor addon -->
                                 <a :href="ivrEditorUrl()"
-                                    class="text-xs font-semibold text-sky-600 underline-offset-2 hover:underline">
+                                    class="text-xs font-semibold text-sky-600 underline-offset-2 hover:underline"
+                                    x-show="window.ivrEditorAddonEnabled" x-cloak>
                                     Manage IVR flows
                                 </a>
                             </div>
+                            <!-- File-path input — always available, no addon required -->
                             <div class="mt-4 space-y-2">
                                 <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">IVR file
                                     path</label>
@@ -731,7 +734,8 @@
                                 <p class="text-[11px] text-slate-500">Path to the IVR TOML configuration file
                                     (relative to the working directory).</p>
                             </div>
-                            <div class="mt-4 space-y-3">
+                            <!-- Published project picker — only available with the IVR Editor addon -->
+                            <div class="mt-4 space-y-3" x-show="window.ivrEditorAddonEnabled" x-cloak>
                                 <div class="flex items-center justify-between">
                                     <h4 class="text-xs font-semibold uppercase tracking-wide text-slate-500">Published
                                         IVR flows</h4>
@@ -910,7 +914,8 @@
                 { value: 'sip_trunk', label: 'SIP trunks' },
                 ...(window.queueAddonEnabled ? [{ value: 'queue', label: 'Queue' }] : []),
                 ...(window.voicemailAddonEnabled ? [{ value: 'voicemail', label: 'Voicemail' }] : []),
-                ...(window.ivrEditorAddonEnabled ? [{ value: 'ivr', label: 'IVR' }] : []),
+                // IVR is always available via file path; the IVR Editor addon adds the project-picker.
+                { value: 'ivr', label: 'IVR' },
             ],
             selectionOptionAliases: {
                 rr: 'rr',
