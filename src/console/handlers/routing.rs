@@ -108,6 +108,7 @@ pub(crate) enum RouteTargetKind {
     SipTrunk,
     Queue,
     Voicemail,
+    Ivr,
 }
 
 impl Default for RouteTargetKind {
@@ -129,6 +130,8 @@ pub(crate) struct RouteActionDocument {
     queue_file: Option<String>,
     #[serde(default)]
     voicemail_extension: Option<String>,
+    #[serde(default)]
+    ivr_file: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -177,6 +180,7 @@ impl Default for RouteActionDocument {
             target_type: RouteTargetKind::SipTrunk,
             queue_file: None,
             voicemail_extension: None,
+            ivr_file: None,
         }
     }
 }
@@ -280,6 +284,18 @@ impl RouteDocument {
                     ));
                 }
             }
+            RouteTargetKind::Ivr => {
+                let has_file = self
+                    .action
+                    .ivr_file
+                    .as_ref()
+                    .and_then(|value| sanitize_optional_string(Some(value.clone())));
+                if has_file.is_none() {
+                    return Err(RouteError::new(
+                        "IVR destination requires an IVR project file",
+                    ));
+                }
+            }
         }
         Ok(())
     }
@@ -292,23 +308,34 @@ impl RouteDocument {
         self.action.queue_file = sanitize_optional_string(self.action.queue_file.take());
         self.action.voicemail_extension =
             sanitize_optional_string(self.action.voicemail_extension.take());
+        self.action.ivr_file = sanitize_optional_string(self.action.ivr_file.take());
 
         match self.action.target_type {
             RouteTargetKind::SipTrunk => {
                 self.action.queue_file = None;
                 self.action.voicemail_extension = None;
+                self.action.ivr_file = None;
             }
             RouteTargetKind::Queue => {
                 self.action.trunks.clear();
                 self.action.select = DEFAULT_SELECTION;
                 self.action.hash_key = None;
                 self.action.voicemail_extension = None;
+                self.action.ivr_file = None;
             }
             RouteTargetKind::Voicemail => {
                 self.action.trunks.clear();
                 self.action.select = DEFAULT_SELECTION;
                 self.action.hash_key = None;
                 self.action.queue_file = None;
+                self.action.ivr_file = None;
+            }
+            RouteTargetKind::Ivr => {
+                self.action.trunks.clear();
+                self.action.select = DEFAULT_SELECTION;
+                self.action.hash_key = None;
+                self.action.queue_file = None;
+                self.action.voicemail_extension = None;
             }
         }
 
@@ -607,6 +634,7 @@ fn build_route_console_payload(
             "target_type": doc.action.target_type,
             "queue_file": doc.action.queue_file.clone(),
             "voicemail_extension": doc.action.voicemail_extension.clone(),
+            "ivr_file": doc.action.ivr_file.clone(),
         },
         "source_trunk": doc.source_trunk.clone(),
         "target_trunks": doc.action.trunks.iter().map(|t| t.name.clone()).collect::<Vec<_>>(),
@@ -680,6 +708,7 @@ fn render_route_form(
     doc: &RouteDocument,
     trunks: &[SipTrunkModel],
     queues: &[QueueModel],
+    ivr_options: Value,
     error_message: Option<String>,
     form_action: String,
 ) -> Response {
@@ -720,6 +749,7 @@ fn render_route_form(
             "route_data": route_value,
             "trunk_options": trunk_options,
             "queue_options": queue_options,
+            "ivr_options": ivr_options,
             "selection_algorithms": selection_algorithms,
             "direction_options": direction_options,
             "status_options": status_options,
@@ -940,6 +970,8 @@ pub async fn page_routing_create(
         }
     };
 
+    let ivr_options = Value::Array(vec![]);
+
     let doc = RouteDocument::default();
     render_route_form(
         state.as_ref(),
@@ -947,6 +979,7 @@ pub async fn page_routing_create(
         &doc,
         &trunks,
         &queues,
+        ivr_options,
         None,
         state.url_for("/routing"),
     )
@@ -1001,6 +1034,8 @@ pub async fn page_routing_edit(
         }
     };
 
+    let ivr_options = Value::Array(vec![]);
+
     let mut doc = RouteDocument::from_model(&model);
     doc.apply_trunk_context(&model, &trunk_map);
 
@@ -1010,6 +1045,7 @@ pub async fn page_routing_edit(
         &doc,
         &trunks,
         &queues,
+        ivr_options,
         None,
         state.url_for(&format!("/routing/{}", id)),
     )
@@ -1064,6 +1100,8 @@ pub async fn route_detail_data(
         }
     };
 
+    let ivr_options = Value::Array(vec![]);
+
     let trunk_map: HashMap<i64, SipTrunkModel> =
         trunks.iter().cloned().map(|t| (t.id, t)).collect();
     let mut doc = RouteDocument::from_model(&model);
@@ -1073,6 +1111,7 @@ pub async fn route_detail_data(
         "route": doc,
         "trunk_options": build_trunk_options(&trunks),
         "queue_options": build_queue_options(&queues),
+        "ivr_options": ivr_options,
         "selection_algorithms": selection_algorithms(),
         "direction_options": direction_options_value(),
         "status_options": status_options_value(),

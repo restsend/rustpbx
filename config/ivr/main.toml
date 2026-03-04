@@ -1,0 +1,79 @@
+# Example IVR configuration: Main menu with sub-menus
+#
+# Route configuration (in config/routes/ivr.toml):
+#
+#   [[routes]]
+#   name = "main_ivr"
+#   [routes.match_conditions]
+#   to_user = "^1000$"
+#   [routes.action]
+#   app = "ivr"
+#   auto_answer = true
+#   [routes.action.app_params]
+#   file = "config/ivr/main.toml"
+
+[ivr]
+name = "main"
+description = "主菜单"
+lang = "zh"
+
+# ── Root menu ──
+[ivr.root]
+greeting = "sounds/ivr/welcome.wav"
+timeout_ms = 5000
+max_retries = 3
+invalid_prompt = "sounds/ivr/invalid.wav"
+timeout_action = { type = "repeat" }
+max_retries_action = { type = "transfer", target = "operator" }
+
+[[ivr.root.entries]]
+key = "1"
+label = "销售部"
+action = { type = "menu", menu = "sales" }
+
+[[ivr.root.entries]]
+key = "2"
+label = "技术支持"
+action = { type = "queue", target = "support_queue" }
+
+[[ivr.root.entries]]
+key = "3"
+label = "公司地址"
+action = { type = "play", prompt = "sounds/ivr/address.wav" }
+
+[[ivr.root.entries]]
+key = "0"
+label = "转人工"
+action = { type = "transfer", target = "1000" }
+
+[[ivr.root.entries]]
+key = "#"
+label = "输入分机号"
+action = { type = "collect_extension", prompt = "sounds/ivr/enter_ext.wav", min_digits = 3, max_digits = 4, inter_digit_timeout_ms = 3000 }
+
+[[ivr.root.entries]]
+key = "*"
+label = "重听"
+action = { type = "repeat" }
+
+# ── Sub-menu: Sales ──
+[ivr.menus.sales]
+greeting = "sounds/ivr/sales_menu.wav"
+timeout_ms = 5000
+max_retries = 2
+timeout_action = { type = "transfer", target = "2000" }
+
+[[ivr.menus.sales.entries]]
+key = "1"
+label = "华东区"
+action = { type = "transfer", target = "2001" }
+
+[[ivr.menus.sales.entries]]
+key = "2"
+label = "华南区"
+action = { type = "transfer", target = "2002" }
+
+[[ivr.menus.sales.entries]]
+key = "9"
+label = "返回主菜单"
+action = { type = "menu", menu = "root" }

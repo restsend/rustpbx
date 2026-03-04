@@ -11,6 +11,25 @@
             </div>
         </div>
 
+        {# Banner: shown when at least one commercial addon has no valid license #}
+        {% if has_unlicensed_commercial %}
+        <div class="rounded-lg bg-amber-50 border border-amber-200 p-4 flex items-start gap-3">
+            <svg class="h-5 w-5 text-amber-500 flex-shrink-0 mt-0.5" viewBox="0 0 20 20" fill="currentColor">
+                <path fill-rule="evenodd"
+                    d="M8.485 2.495c.673-1.167 2.357-1.167 3.03 0l6.28 10.875c.673 1.167-.17 2.625-1.516 2.625H3.72c-1.347 0-2.189-1.458-1.515-2.625L8.485 2.495zM10 5a.75.75 0 01.75.75v3.5a.75.75 0 01-1.5 0v-3.5A.75.75 0 0110 5zm0 9a1 1 0 100-2 1 1 0 000 2z"
+                    clip-rule="evenodd" />
+            </svg>
+            <div class="flex-1">
+                <p class="text-sm font-medium text-amber-800">Some commercial addons are not licensed</p>
+                <p class="text-xs text-amber-700 mt-0.5">
+                    Addons continue to work, but a valid license ensures uninterrupted access and updates.
+                    <a href="https://miuda.ai/try" target="_blank" class="underline font-medium">Get a license at
+                        miuda.ai/try &rarr;</a>
+                </p>
+            </div>
+        </div>
+        {% endif %}
+
         <section class="overflow-hidden rounded-xl bg-white ring-1 ring-black/5">
             <div class="overflow-x-auto">
                 <table class="min-w-full divide-y divide-slate-200 text-left text-sm">
@@ -69,7 +88,15 @@
                                 {% endif %}
                                 {% else %}
                                 {% if addon.category == "Commercial" %}
-                                <span class="text-slate-400 text-xs">Not Licensed</span>
+                                <a href="https://miuda.ai/try" target="_blank"
+                                    class="inline-flex items-center gap-1 text-sky-600 hover:text-sky-800 text-xs font-medium">
+                                    <svg class="h-3 w-3" viewBox="0 0 20 20" fill="currentColor">
+                                        <path fill-rule="evenodd"
+                                            d="M10 18a8 8 0 100-16 8 8 0 000 16zm1-11H9v2H7v2h2v2h2v-2h2v-2h-2V7z"
+                                            clip-rule="evenodd" />
+                                    </svg>
+                                    Get License
+                                </a>
                                 {% else %}
                                 <span class="text-slate-400 text-xs">Free</span>
                                 {% endif %}
@@ -99,8 +126,8 @@
                                 <a href="/console/addons/{{ addon.id }}"
                                     class="text-red-600 hover:text-red-800 text-xs font-medium">Renew License</a>
                                 {% else %}
-                                <a href="/console/addons/{{ addon.id }}"
-                                    class="text-sky-600 hover:text-sky-800 text-xs font-medium">Add License</a>
+                                <a href="https://miuda.ai/try" target="_blank"
+                                    class="text-sky-600 hover:text-sky-800 text-xs font-medium">Get License</a>
                                 {% endif %}
                                 {% elif not addon.config_url %}
                                 <span class="text-slate-400 text-xs">—</span>

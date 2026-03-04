@@ -20,6 +20,7 @@ mod tests {
             name: "test-ivr".to_string(),
             description: Some("Test IVR".to_string()),
             lang: Some("en".to_string()),
+            business_hours: None,
             root: MenuNode {
                 greeting: "sounds/welcome.wav".to_string(),
                 timeout_ms: 200, // short for tests
@@ -62,6 +63,7 @@ mod tests {
                         },
                     },
                 ],
+                ..Default::default()
             },
             menus: {
                 let mut m = HashMap::new();
@@ -94,6 +96,7 @@ mod tests {
                                 },
                             },
                         ],
+                    ..Default::default()
                     },
                 );
                 m
@@ -556,6 +559,7 @@ action = { type = "transfer", target = "100" }
             name: "test-collect".to_string(),
             description: None,
             lang: None,
+            business_hours: None,
             root: MenuNode {
                 greeting: "sounds/collect_menu.wav".to_string(),
                 timeout_ms: 200,
@@ -589,6 +593,7 @@ action = { type = "transfer", target = "100" }
                         },
                     },
                 ],
+                ..Default::default()
             },
             menus: HashMap::new(),
         }
@@ -778,6 +783,7 @@ action = { type = "transfer", target = "100" }
             name: "webhook-ivr".to_string(),
             description: None,
             lang: None,
+            business_hours: None,
             root: MenuNode {
                 greeting: "sounds/welcome.wav".to_string(),
                 timeout_ms: 200,
@@ -792,8 +798,11 @@ action = { type = "transfer", target = "100" }
                         url: url.into(),
                         method: method.map(|s| s.to_string()),
                         headers: HashMap::new(),
+                        variables: None,
+                        timeout: 10,
                     },
                 }],
+                ..Default::default()
             },
             menus: HashMap::new(),
         }
@@ -978,6 +987,7 @@ action = { type = "transfer", target = "100" }
                     label: Some("Billing".to_string()),
                     action: EntryAction::Transfer { target: "3001".to_string() },
                 }],
+                ..Default::default()
             },
         );
 
@@ -1275,6 +1285,7 @@ action = { type = "transfer", target = "100" }
             name: "play-and-hangup-ivr".to_string(),
             description: None,
             lang: None,
+            business_hours: None,
             root: MenuNode {
                 greeting: "sounds/welcome.wav".to_string(),
                 timeout_ms: 200,
@@ -1300,6 +1311,7 @@ action = { type = "transfer", target = "100" }
                         },
                     },
                 ],
+                ..Default::default()
             },
             menus: HashMap::new(),
         }

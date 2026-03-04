@@ -18,9 +18,10 @@ addon-acme = ["instant-acme"]
 addon-wholesale = ["flate2", "async-compression"]
 addon-archive = ["flate2"]
 addon-endpoint-manager = []
-addon-enterprise-auth = ["dep:ldap3", "flate2"]
+addon-enterprise-auth = ["dep:ldap3", "flate2", "dep:ring"]
 addon-transcript = []
 addon-voicemail = []
+addon-ivr-editor = []
 addon-observability = ["metrics-exporter-prometheus"]
 addon-telemetry = [
     "addon-observability",
@@ -34,6 +35,7 @@ commerce = [
     "addon-endpoint-manager",
     "addon-enterprise-auth",
     "addon-voicemail",
+    "addon-ivr-editor",
     "addon-telemetry",
 ]
 default = [
@@ -161,6 +163,7 @@ minimp3 = "0.6.1"
 aws-lc-rs = { version = "1", optional = true }
 totp-rs = { version = "5.7.0", features = ["qr", "gen_secret"] }
 ldap3 = { version = "0.11", optional = true }
+ring = { version = "0.17", optional = true }
 
 [dev-dependencies]
 tempfile = "3.24.0"
