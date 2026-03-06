@@ -6,8 +6,7 @@ use rustpbx::{
     app::{AppStateBuilder, create_router},
     config::Config,
     handler::middleware::request_log::AccessLogEventFormat,
-    observability,
-    preflight, version,
+    observability, preflight, version,
 };
 use std::net::SocketAddr;
 #[cfg(unix)]
@@ -173,8 +172,6 @@ async fn main() -> Result<()> {
     {
         env_filter = env_filter.add_directive(level.into());
     }
-
-    env_filter = env_filter.add_directive("sqlx=info".parse().unwrap());
 
     // Install the hot-swappable reload layer BEFORE the subscriber is built.
     // The commercial TelemetryAddon will inject an OTel layer into this slot
