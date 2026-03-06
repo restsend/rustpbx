@@ -3,7 +3,8 @@
 {% block content %}
 <div class="p-4 sm:p-6"
     x-data="addonDetail('{{ addon.id }}', {{ 'true' if addon.license_status == 'Expired' else 'false' }}, {{ 'true' if (addon.enabled and addon.license_status and addon.license_status != 'Valid') else 'false' }})">
-    <!-- License Expired Modal -->
+    <!-- License Expired Modal (commerce only) -->
+    {% if commerce_enabled %}
     <div x-show="showExpiredModal" x-cloak class="fixed inset-0 z-50 flex items-center justify-center bg-black/40"
         @keydown.escape.window="showExpiredModal = false">
         <div class="relative w-full max-w-md rounded-2xl bg-white p-6 shadow-xl ring-1 ring-black/5"
@@ -59,6 +60,7 @@
             </div>
         </div>
     </div>
+    {% endif %}{# commerce_enabled #}
     <div class="mx-auto max-w-7xl space-y-6">
         <!-- Breadcrumbs -->
         <nav class="flex" aria-label="Breadcrumb">
@@ -131,8 +133,8 @@
         </div>
         {% endif %}
 
-        <!-- Enabled-but-unlicensed banner (persistent, shown even after modal is dismissed) -->
-        {% if addon.enabled and addon.category == "Commercial" and addon.license_status and addon.license_status !=
+        <!-- Enabled-but-unlicensed banner (persistent, commerce only) -->
+        {% if commerce_enabled and addon.enabled and addon.category == "Commercial" and addon.license_status and addon.license_status !=
         "Valid" %}
         <div class="rounded-lg bg-amber-50 border border-amber-200 p-4 flex items-start gap-3">
             <svg class="h-5 w-5 text-amber-500 flex-shrink-0 mt-0.5" viewBox="0 0 20 20" fill="currentColor">
@@ -161,8 +163,8 @@
             <p>{{ addon.description }}</p>
         </div>
 
-        <!-- License Section (if Commercial) -->
-        {% if addon.category == "Commercial" %}
+        <!-- License Section (commerce only) -->
+        {% if commerce_enabled and addon.category == "Commercial" %}
         <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5 mt-6">
 
             <!-- Card header -->
@@ -326,6 +328,15 @@
                                         <span> &mdash; expires <span x-text="verifiedExpiry"></span></span>
                                     </template>
                                 </p>
+                                <template x-if="verifiedScope && verifiedScope.length > 0">
+                                    <p class="text-xs text-green-700 mt-0.5">
+                                        Covers: <span class="font-medium" x-text="verifiedScope.join(', ')"></span>
+                                    </p>
+                                </template>
+                                <template x-if="!verifiedScope || verifiedScope.length === 0">
+                                    <p class="text-xs text-green-700 mt-0.5">Covers: <span class="font-medium">all
+                                            addons</span></p>
+                                </template>
                             </div>
                         </div>
                         <p class="text-xs text-green-600 mt-2">Reloading…</p>
@@ -357,6 +368,7 @@
                 error: '',
                 verifiedPlan: '',
                 verifiedExpiry: '',
+                verifiedScope: null,
                 loading: false,
                 showInput: false,
                 licenseExpired: licenseExpired,
@@ -366,6 +378,7 @@
                     this.error = '';
                     this.verifiedPlan = '';
                     this.verifiedExpiry = '';
+                    this.verifiedScope = null;
                     const key = this.licenseKey.trim();
                     if (!key) {
                         this.error = 'Please enter a license key.';
@@ -384,6 +397,7 @@
                         if (response.ok && result.success) {
                             this.verifiedPlan = result.plan || 'unknown';
                             this.verifiedExpiry = result.expiry || '';
+                            this.verifiedScope = result.scope || null;
                             // Reload after a short delay so user can read the confirmation
                             setTimeout(() => window.location.reload(), 2200);
                         } else {

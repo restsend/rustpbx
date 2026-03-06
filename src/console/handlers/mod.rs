@@ -11,6 +11,7 @@ pub mod dashboard;
 pub mod diagnostics;
 pub mod extension;
 pub mod forms;
+pub mod licenses;
 pub mod metrics;
 pub mod notifications;
 pub mod presence;
@@ -54,6 +55,7 @@ pub fn router(state: Arc<ConsoleState>) -> Router {
         .merge(call_control::urls())
         .merge(presence::urls())
         .merge(addons::urls())
+        .merge(licenses::urls())
         .merge(sipflow::urls())
         .merge(metrics::urls())
         .merge(notifications::urls());

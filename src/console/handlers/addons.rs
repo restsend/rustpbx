@@ -14,11 +14,16 @@ use std::sync::Arc;
 use toml_edit::{Array, DocumentMut, Item, Table, Value};
 
 pub fn urls() -> Router<Arc<ConsoleState>> {
-    Router::new()
+    let router = Router::new()
         .route("/addons", get(index))
         .route("/addons/toggle", post(toggle_addon))
-        .route("/addons/verify", post(verify_addon))
-        .route("/addons/{id}", get(detail))
+        .route("/addons/{id}", get(detail));
+
+    // License verification endpoint is commerce-only.
+    #[cfg(feature = "commerce")]
+    let router = router.route("/addons/verify", post(verify_addon));
+
+    router
 }
 
 pub async fn index(State(state): State<Arc<ConsoleState>>) -> impl IntoResponse {
@@ -66,131 +71,56 @@ pub async fn index(State(state): State<Arc<ConsoleState>>) -> impl IntoResponse 
         vec![]
     };
 
-    // Pre-compute banner flag: true when at least one commercial addon lacks a valid license.
+    // Commerce-only: license banner and license rows.
+    #[cfg(feature = "commerce")]
     let has_unlicensed_commercial = addons.iter().any(|a| {
         a.category == crate::addons::AddonCategory::Commercial
             && a.license_status.as_deref() != Some("Valid")
     });
+    #[cfg(not(feature = "commerce"))]
+    let has_unlicensed_commercial = false;
+
+    #[cfg(feature = "commerce")]
+    let licenses = super::licenses::build_license_rows(&state);
+    #[cfg(not(feature = "commerce"))]
+    let licenses: Vec<super::licenses::LicenseRow> = vec![];
+
+    // Tell the template whether commerce features are available.
+    #[cfg(feature = "commerce")]
+    let commerce_enabled = true;
+    #[cfg(not(feature = "commerce"))]
+    let commerce_enabled = false;
 
     state.render(
         "console/addons.html",
         serde_json::json!({
             "addons": addons,
             "has_unlicensed_commercial": has_unlicensed_commercial,
+            "licenses": licenses,
+            "commerce_enabled": commerce_enabled,
             "page_title": "Addons",
             "nav_active": "addons"
         }),
     )
 }
 
-#[derive(Deserialize)]
-pub struct VerifyAddonPayload {
-    #[allow(unused)]
-    id: String,
-    license_key: String,
-}
-
-/// `POST /addons/verify` — verify a license key and persist it to the config file.
-///
-/// The key is first validated against the upstream license server. If valid it is
-/// written into `[licenses]` so that the addon will be recognised as licensed on
-/// the next start (no restart required for the status to show in the UI).
+/// `POST /addons/verify` — kept for backward compatibility; delegates to the
+/// licenses verify handler which no longer requires an addon ID.
+#[cfg(feature = "commerce")]
 pub async fn verify_addon(
-    State(_state): State<Arc<ConsoleState>>,
-    Json(payload): Json<VerifyAddonPayload>,
+    State(state): State<Arc<ConsoleState>>,
+    Json(payload): Json<serde_json::Value>,
 ) -> Response {
-    // ── 1. Basic input validation ──────────────────────────────────────────
-    let license_key = payload.license_key.trim().to_string();
-    if license_key.is_empty() {
-        return json_error(StatusCode::BAD_REQUEST, "License key cannot be empty.").into_response();
-    }
+    // Extract license_key from the payload regardless of whether the caller
+    // also sent an `id` field (old clients may still send it; we ignore it).
+    let license_key = payload
+        .get("license_key")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
 
-    // ── 2. Remote / cached verification ───────────────────────────────────
-    let info = match crate::license::verify_license(&license_key).await {
-        Ok(i) => i,
-        Err(e) => {
-            return json_error(
-                StatusCode::UNPROCESSABLE_ENTITY,
-                format!("License verification failed: {e}"),
-            )
-            .into_response();
-        }
-    };
-
-    if !info.valid {
-        return json_error(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "License key is not valid.",
-        )
-        .into_response();
-    }
-    if crate::license::is_expired(&info) {
-        return json_error(StatusCode::UNPROCESSABLE_ENTITY, "License key has expired.")
-            .into_response();
-    }
-
-    // ── 3. Persist to config file (commerce builds only) ─────────────────
-    #[cfg(feature = "commerce")]
-    {
-        let config_path = match get_config_path(&_state) {
-            Ok(p) => p,
-            Err(resp) => return resp,
-        };
-        let mut doc = match load_document(&config_path) {
-            Ok(d) => d,
-            Err(resp) => return resp,
-        };
-
-        // Ensure top-level [licenses] table exists.
-        if !doc.contains_key("licenses") || !doc["licenses"].is_table() {
-            doc["licenses"] = Item::Table(Table::new());
-        }
-
-        {
-            let licenses_table = doc["licenses"]
-                .as_table_mut()
-                .expect("[licenses] is a table");
-
-            // [licenses.addons] – addon_id -> key_name (we use addon_id as the key name).
-            if !licenses_table.contains_key("addons") || !licenses_table["addons"].is_table() {
-                licenses_table["addons"] = Item::Table(Table::new());
-            }
-            if let Some(t) = licenses_table["addons"].as_table_mut() {
-                t[payload.id.as_str()] = toml_edit::value(payload.id.clone());
-            }
-
-            // [licenses.keys] – key_name -> actual key value.
-            if !licenses_table.contains_key("keys") || !licenses_table["keys"].is_table() {
-                licenses_table["keys"] = Item::Table(Table::new());
-            }
-            if let Some(t) = licenses_table["keys"].as_table_mut() {
-                t[payload.id.as_str()] = toml_edit::value(license_key.clone());
-            }
-        }
-
-        let doc_text = doc.to_string();
-        if let Err(resp) = parse_config_from_str(&doc_text) {
-            return resp;
-        }
-        if let Err(resp) = persist_document(&config_path, doc_text) {
-            return resp;
-        }
-    }
-
-    let plan = if info.plan.is_empty() {
-        "unknown".to_string()
-    } else {
-        info.plan
-    };
-    let expiry = info.expiry.map(|d| d.format("%Y-%m-%d").to_string());
-
-    Json(json!({
-        "success": true,
-        "message": "License key verified and saved successfully.",
-        "plan": plan,
-        "expiry": expiry,
-    }))
-    .into_response()
+    super::licenses::verify_license_key(state, license_key).await
 }
 
 #[derive(Deserialize)]
@@ -323,7 +253,8 @@ pub async fn detail(
             serde_json::json!({
                 "addon": addon,
                 "page_title": format!("Addon: {}", addon.name),
-                "nav_active": "addons"
+                "nav_active": "addons",
+                "commerce_enabled": cfg!(feature = "commerce"),
             }),
         )
     } else {
@@ -331,7 +262,7 @@ pub async fn detail(
     }
 }
 
-fn get_config_path(state: &ConsoleState) -> Result<String, Response> {
+pub(super) fn get_config_path(state: &ConsoleState) -> Result<String, Response> {
     let Some(app_state) = state.app_state() else {
         return Err(json_error(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -347,7 +278,7 @@ fn get_config_path(state: &ConsoleState) -> Result<String, Response> {
     Ok(path)
 }
 
-fn load_document(path: &str) -> Result<DocumentMut, Response> {
+pub(super) fn load_document(path: &str) -> Result<DocumentMut, Response> {
     let contents = match fs::read_to_string(path) {
         Ok(raw) => raw,
         Err(err) => {
@@ -366,7 +297,7 @@ fn load_document(path: &str) -> Result<DocumentMut, Response> {
     })
 }
 
-fn persist_document(path: &str, contents: String) -> Result<(), Response> {
+pub(super) fn persist_document(path: &str, contents: String) -> Result<(), Response> {
     fs::write(path, contents).map_err(|err| {
         json_error(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -375,7 +306,7 @@ fn persist_document(path: &str, contents: String) -> Result<(), Response> {
     })
 }
 
-fn parse_config_from_str(contents: &str) -> Result<Config, Response> {
+pub(super) fn parse_config_from_str(contents: &str) -> Result<Config, Response> {
     toml::from_str::<Config>(contents).map_err(|err| {
         json_error(
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -391,7 +322,7 @@ fn ensure_table_mut<'doc>(doc: &'doc mut DocumentMut, key: &str) -> &'doc mut Ta
     doc[key].as_table_mut().expect("table")
 }
 
-fn json_error(status: StatusCode, message: impl Into<String>) -> Response {
+pub(super) fn json_error(status: StatusCode, message: impl Into<String>) -> Response {
     (
         status,
         Json(json!({
