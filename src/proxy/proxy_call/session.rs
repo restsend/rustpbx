@@ -3402,7 +3402,7 @@ impl CallSession {
                     .ok_or_else(|| anyhow!("Voicemail addon not found"))?;
                 let voicemail = addon
                     .as_any()
-                    .downcast_ref::<crate::voicemail::VoicemailAddon>()
+                    .downcast_ref::<crate::addons::voicemail::VoicemailAddon>()
                     .ok_or_else(|| anyhow!("Failed to downcast to VoicemailAddon"))?;
 
                 let extension = _app_params
@@ -3429,7 +3429,7 @@ impl CallSession {
                     .ok_or_else(|| anyhow!("Voicemail addon not found"))?;
                 let voicemail = addon
                     .as_any()
-                    .downcast_ref::<crate::voicemail::VoicemailAddon>()
+                    .downcast_ref::<crate::addons::voicemail::VoicemailAddon>()
                     .ok_or_else(|| anyhow!("Failed to downcast to VoicemailAddon"))?;
 
                 let app = voicemail

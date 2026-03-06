@@ -152,8 +152,11 @@ impl AddonRegistry {
                     cost: a.cost().to_string(),
                     screenshots: a.screenshots().iter().map(|s| s.to_string()).collect(),
                     restart_required: false, // Caller should set this
+                    #[cfg(feature = "commerce")]
                     license_status: None,
+                    #[cfg(feature = "commerce")]
                     license_expiry: None,
+                    #[cfg(feature = "commerce")]
                     license_plan: None,
                 }
             })

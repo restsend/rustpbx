@@ -21,5 +21,3 @@ pub mod sipflow;
 pub mod storage;
 pub mod utils;
 pub mod version;
-#[cfg(feature = "addon-voicemail")]
-pub mod voicemail;
