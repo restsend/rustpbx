@@ -42,6 +42,7 @@ const SUPERUSER_NOTICE: &str =
 
 pub async fn login_page(
     State(state): State<Arc<ConsoleState>>,
+    headers: HeaderMap,
     Query(query): Query<LoginQuery>,
 ) -> Response {
     let policy = match state.registration_policy().await {
@@ -61,7 +62,7 @@ pub async fn login_page(
 
     let demo_mode = state.config().demo_mode;
 
-    state.render(
+    state.render_with_headers(
         "console/login.html",
         json!({
             "login_action": login_action,
@@ -72,6 +73,7 @@ pub async fn login_page(
             "identifier": "",
             "next": query.next.clone(),
         }),
+        &headers,
     )
 }
 
@@ -107,7 +109,7 @@ pub async fn login_post(
     };
     let demo_mode = state.config().demo_mode;
     if identifier.is_empty() || password.is_empty() {
-        return state.render(
+        return state.render_with_headers(
             "console/login.html",
             json!({
                 "login_action": state.login_url(next.clone()),
@@ -118,6 +120,7 @@ pub async fn login_post(
                 "identifier": identifier,
                 "next": next.clone(),
             }),
+            &headers,
         );
     }
 
@@ -148,7 +151,7 @@ pub async fn login_post(
             }
             response
         }
-        Ok(None) => state.render(
+        Ok(None) => state.render_with_headers(
             "console/login.html",
             json!({
                 "login_action": state.login_url(next.clone()),
@@ -159,6 +162,7 @@ pub async fn login_post(
                 "identifier": identifier,
                 "next": next,
             }),
+            &headers,
         ),
         Err(err) => {
             warn!("login error: {}", err);
@@ -198,7 +202,10 @@ pub async fn logout(
     response
 }
 
-pub async fn register_page(State(state): State<Arc<ConsoleState>>) -> Response {
+pub async fn register_page(
+    State(state): State<Arc<ConsoleState>>,
+    headers: HeaderMap,
+) -> Response {
     let policy = match state.registration_policy().await {
         Ok(policy) => policy,
         Err(err) => {
@@ -217,7 +224,7 @@ pub async fn register_page(State(state): State<Arc<ConsoleState>>) -> Response {
         None
     };
 
-    let mut response = state.render(
+    let mut response = state.render_with_headers(
         "console/register.html",
         json!({
             "register_action": state.url_for("/register"),
@@ -228,6 +235,7 @@ pub async fn register_page(State(state): State<Arc<ConsoleState>>) -> Response {
             "registration_closed": !policy.allowed,
             "superuser_notice": superuser_notice,
         }),
+        &headers,
     );
 
     if !policy.allowed {
@@ -251,7 +259,7 @@ pub async fn register_post(
     };
 
     if !policy.allowed {
-        let mut response = state.render(
+        let mut response = state.render_with_headers(
             "console/register.html",
             json!({
                 "register_action": state.url_for("/register"),
@@ -262,6 +270,7 @@ pub async fn register_post(
                 "registration_closed": true,
                 "superuser_notice": None::<String>,
             }),
+            &headers,
         );
         *response.status_mut() = StatusCode::FORBIDDEN;
         return response;
@@ -306,7 +315,7 @@ pub async fn register_post(
     }
 
     if let Some(error) = error_message {
-        return state.render(
+        return state.render_with_headers(
             "console/register.html",
             json!({
                 "register_action": state.url_for("/register"),
@@ -321,6 +330,7 @@ pub async fn register_post(
                     None
                 },
             }),
+            &headers,
         );
     }
 
@@ -343,31 +353,37 @@ pub async fn register_post(
     }
 }
 
-pub async fn forgot_page(State(state): State<Arc<ConsoleState>>) -> Response {
-    state.render(
+pub async fn forgot_page(
+    State(state): State<Arc<ConsoleState>>,
+    headers: HeaderMap,
+) -> Response {
+    state.render_with_headers(
         "console/forgot.html",
         json!({
             "info_message": null,
             "error_message": null,
             "reset_link": null,
         }),
+        &headers,
     )
 }
 
 pub async fn forgot_post(
     State(state): State<Arc<ConsoleState>>,
+    headers: HeaderMap,
     Form(form): Form<ForgotForm>,
 ) -> Response {
     let email = form.email.trim().to_lowercase();
 
     if email.is_empty() {
-        return state.render(
+        return state.render_with_headers(
             "console/forgot.html",
             json!({
                 "info_message": null,
                 "error_message": "Please enter your registered email address",
                 "reset_link": null,
             }),
+            &headers,
         );
     }
 
@@ -399,7 +415,7 @@ pub async fn forgot_post(
         }
     }
 
-    state.render(
+    state.render_with_headers(
         "console/forgot.html",
         json!({
             "forgot_action": state.url_for("/forgot"),
@@ -407,17 +423,19 @@ pub async fn forgot_post(
             "error_message": null,
             "reset_link": reset_link,
         }),
+        &headers,
     )
 }
 
 pub async fn reset_page(
     State(state): State<Arc<ConsoleState>>,
+    headers: HeaderMap,
     AxumPath(token): AxumPath<String>,
 ) -> Response {
     match state.find_by_reset_token(&token).await {
         Ok(Some(user)) => {
             if user.token_expired() {
-                state.render(
+                state.render_with_headers(
                     "console/forgot.html",
                     json!({
                         "forgot_action": state.url_for("/forgot"),
@@ -425,19 +443,21 @@ pub async fn reset_page(
                         "error_message": "Reset link has expired. Please request a new one.",
                         "reset_link": null,
                     }),
+                    &headers,
                 )
             } else {
-                state.render(
+                state.render_with_headers(
                     "console/reset.html",
                     json!({
                         "reset_action": state.url_for(&format!("/reset/{}", token)),
                         "token": token,
                         "error_message": null,
                     }),
+                    &headers,
                 )
             }
         }
-        Ok(None) => state.render(
+        Ok(None) => state.render_with_headers(
             "console/forgot.html",
             json!({
                 "forgot_action": state.url_for("/forgot"),
@@ -445,6 +465,7 @@ pub async fn reset_page(
                 "error_message": "Reset link is invalid",
                 "reset_link": null,
             }),
+            &headers,
         ),
         Err(err) => {
             warn!("failed to verify reset token: {}", err);
@@ -466,7 +487,7 @@ pub async fn reset_post(
     match state.find_by_reset_token(&token).await {
         Ok(Some(user)) => {
             if user.token_expired() {
-                return state.render(
+                return state.render_with_headers(
                     "console/forgot.html",
                     json!({
                         "forgot_action": state.url_for("/forgot"),
@@ -474,28 +495,31 @@ pub async fn reset_post(
                         "error_message": "Reset link has expired. Please request a new one.",
                         "reset_link": null,
                     }),
+                    &headers,
                 );
             }
             let password = form.password.trim();
             let confirm = form.confirm_password.trim();
             if password.len() < 8 {
-                return state.render(
+                return state.render_with_headers(
                     "console/reset.html",
                     json!({
                         "reset_action": state.url_for(&format!("/reset/{}", token)),
                         "token": token,
                         "error_message": "Password must be at least 8 characters",
                     }),
+                    &headers,
                 );
             }
             if password != confirm {
-                return state.render(
+                return state.render_with_headers(
                     "console/reset.html",
                     json!({
                         "reset_action": state.url_for(&format!("/reset/{}", token)),
                         "token": token,
                         "error_message": "Passwords do not match",
                     }),
+                    &headers,
                 );
             }
 
@@ -519,7 +543,7 @@ pub async fn reset_post(
                 }
             }
         }
-        Ok(None) => state.render(
+        Ok(None) => state.render_with_headers(
             "console/forgot.html",
             json!({
                 "forgot_action": state.url_for("/forgot"),
@@ -527,6 +551,7 @@ pub async fn reset_post(
                 "error_message": "Reset link is invalid",
                 "reset_link": null,
             }),
+            &headers,
         ),
         Err(err) => {
             warn!("failed to reset password: {}", err);
@@ -563,12 +588,13 @@ pub async fn login_mfa_page(
         .one(&state.db)
         .await
     {
-        Ok(Some(_user)) => state.render(
+        Ok(Some(_user)) => state.render_with_headers(
             "console/login_mfa.html",
             json!({
                 "login_action": state.url_for("/login/mfa"),
                 "error_message": null,
             }),
+            &headers,
         ),
         _ => Redirect::to(&state.url_for("/login")).into_response(),
     }
@@ -605,12 +631,13 @@ pub async fn login_mfa_post(
 
     // Verify MFA code
     if !ConsoleState::verify_mfa_code(&user, &form.code) {
-        return state.render(
+        return state.render_with_headers(
             "console/login_mfa.html",
             json!({
                 "login_action": state.url_for("/login/mfa"),
                 "error_message": "Invalid verification code",
             }),
+            &headers,
         );
     }
 

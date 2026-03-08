@@ -565,6 +565,7 @@ async fn download_call_record_metadata(
 
 async fn page_call_records(
     State(state): State<Arc<ConsoleState>>,
+    headers: HeaderMap,
     AuthRequired(_): AuthRequired,
 ) -> Response {
     let filters = match load_filters(state.db()).await {
@@ -579,7 +580,7 @@ async fn page_call_records(
         }
     };
 
-    state.render(
+    state.render_with_headers(
         "console/call_records.html",
         json!({
             "nav_active": "call-records",
@@ -588,6 +589,7 @@ async fn page_call_records(
             "list_url": state.url_for("/call-records"),
             "page_size_options": vec![10, 25, 50],
         }),
+        &headers,
     )
 }
 
@@ -698,6 +700,7 @@ async fn query_call_records(
 async fn page_call_record_detail(
     AxumPath(id_param): AxumPath<String>,
     State(state): State<Arc<ConsoleState>>,
+    headers: HeaderMap,
     AuthRequired(_): AuthRequired,
 ) -> Response {
     let db = state.db();
@@ -747,7 +750,7 @@ async fn page_call_record_detail(
     let cdr_data = load_cdr_data(&state, &model).await;
     let payload = build_detail_payload(&model, &related, &state, cdr_data.as_ref());
 
-    state.render(
+    state.render_with_headers(
         "console/call_record_detail.html",
         json!({
             "nav_active": "call-records",
@@ -757,6 +760,7 @@ async fn page_call_record_detail(
 
             "addon_scripts": state.get_injected_scripts(&format!("/console/call-records/{}", model.id)),
         }),
+        &headers,
     )
 }
 
@@ -1617,6 +1621,7 @@ mod tests {
                 alpine_js: None,
                 tailwind_js: None,
                 chart_js: None,
+                ..Default::default()
             },
         )
         .await

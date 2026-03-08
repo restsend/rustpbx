@@ -251,8 +251,19 @@ impl ArchiveAddon {
         use crate::models::call_record;
         use flate2::Compression;
 
-        let retention_days = config.retention_days as i64;
-        let cutoff_date = Utc::now() - Duration::days(retention_days);
+        let archive_after_days = config.archive_after_days as i64;
+
+        // Determine the cutoff date for archiving:
+        // - If archive_after_days > 0: archive records older than that many days
+        // - If archive_after_days == 0: archive records from yesterday (previous day)
+        let cutoff_date = if archive_after_days > 0 {
+            Utc::now() - Duration::days(archive_after_days)
+        } else {
+            // Archive yesterday's records (from midnight yesterday to midnight today)
+            let today = Utc::now().date_naive();
+            let yesterday = today - chrono::Duration::days(1);
+            DateTime::from_naive_utc_and_offset(yesterday.and_hms_opt(0, 0, 0).unwrap(), Utc)
+        };
 
         // Find records to archive
         // We want to archive records strictly older than retention_days

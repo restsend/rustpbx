@@ -17,7 +17,7 @@ use axum::routing::get;
 use axum::{Json, Router};
 use axum::{
     extract::{Path as AxumPath, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
 use chrono::{DateTime, NaiveDateTime, Utc};
@@ -334,21 +334,24 @@ async fn build_forwarding_catalog(state: Arc<ConsoleState>) -> ForwardingCatalog
 
 async fn page_extensions(
     State(state): State<Arc<ConsoleState>>,
+    headers: HeaderMap,
     AuthRequired(_): AuthRequired,
 ) -> Response {
-    state.render(
+    state.render_with_headers(
         "console/extensions.html",
         json!({
             "nav_active": "extensions",
             "filters": build_filters(state.clone()).await,
             "create_url": state.url_for("/extensions/new"),
         }),
+        &headers,
     )
 }
 
 async fn page_extension_detail(
     AxumPath(id): AxumPath<i64>,
     State(state): State<Arc<ConsoleState>>,
+    headers: HeaderMap,
     AuthRequired(_): AuthRequired,
 ) -> Response {
     let db = state.db();
@@ -377,7 +380,7 @@ async fn page_extension_detail(
         fetch_extension_locator_summary(state.sip_server(), &realm, &model.extension).await;
     let forwarding_catalog = build_forwarding_catalog(state.clone()).await;
 
-    state.render(
+    state.render_with_headers(
         "console/extension_detail.html",
         json!({
             "nav_active": "extensions",
@@ -389,15 +392,17 @@ async fn page_extension_detail(
             "forwarding_catalog": forwarding_catalog,
             "addon_scripts": state.get_injected_scripts(&format!("/console/extensions/{}", model.id)),
         }),
+        &headers,
     )
 }
 
 async fn page_extension_create(
     State(state): State<Arc<ConsoleState>>,
+    headers: HeaderMap,
     AuthRequired(_): AuthRequired,
 ) -> Response {
     let forwarding_catalog = build_forwarding_catalog(state.clone()).await;
-    state.render(
+    state.render_with_headers(
         "console/extension_detail.html",
         json!({
             "nav_active": "extensions",
@@ -407,6 +412,7 @@ async fn page_extension_create(
             "forwarding_catalog": forwarding_catalog,
             "addon_scripts": state.get_injected_scripts("/console/extensions/new"),
         }),
+        &headers,
     )
 }
 

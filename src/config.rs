@@ -218,6 +218,9 @@ pub struct ArchiveConfig {
     pub archive_time: String,
     pub timezone: Option<String>,
     pub retention_days: u32,
+    /// Archive records older than this many days. If 0, archives records from the previous day.
+    #[serde(default)]
+    pub archive_after_days: u32,
     #[serde(default)]
     pub archive_dir: Option<String>,
 }
@@ -332,6 +335,16 @@ fn default_sample_ratio() -> f64 {
     0.1
 }
 
+fn default_locale() -> String {
+    "en".to_string()
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct LocaleInfo {
+    pub name: String,
+    pub native_name: String,
+}
+
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ConsoleConfig {
     #[serde(default = "default_console_session_secret")]
@@ -345,6 +358,31 @@ pub struct ConsoleConfig {
     pub alpine_js: Option<String>,
     pub tailwind_js: Option<String>,
     pub chart_js: Option<String>,
+    /// Default locale code, e.g. "en" or "zh"
+    #[serde(default = "default_locale")]
+    pub locale_default: String,
+    /// Supported locales map: code -> LocaleInfo
+    #[serde(default = "default_locales")]
+    pub locales: std::collections::HashMap<String, LocaleInfo>,
+}
+
+fn default_locales() -> std::collections::HashMap<String, LocaleInfo> {
+    let mut m = std::collections::HashMap::new();
+    m.insert(
+        "en".to_string(),
+        LocaleInfo {
+            name: "English".to_string(),
+            native_name: "English".to_string(),
+        },
+    );
+    m.insert(
+        "zh".to_string(),
+        LocaleInfo {
+            name: "Chinese".to_string(),
+            native_name: "中文".to_string(),
+        },
+    );
+    m
 }
 
 impl Default for ConsoleConfig {
@@ -357,6 +395,8 @@ impl Default for ConsoleConfig {
             alpine_js: None,
             tailwind_js: None,
             chart_js: None,
+            locale_default: default_locale(),
+            locales: default_locales(),
         }
     }
 }

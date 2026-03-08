@@ -1,6 +1,6 @@
 {% extends "console/layout.html" %}
 
-{% block title %}Dashboard · {{site_name|default('RustPBX')}}{% endblock %}
+{% block title %}{{ "dashboard.title" | t }} · {{site_name|default('RustPBX')}}{% endblock %}
 
 {% block content %}
 <div class="min-h-[70vh] py-6">
@@ -9,18 +9,17 @@
         <div class="mb-6 rounded-2xl bg-white p-5 shadow-sm ring-1 ring-black/5">
             <div class="flex flex-col gap-4 md:flex-row md:items-center md:justify-end">
                 <div class="flex items-center gap-3">
-                    <label for="time-range" class="text-xs font-medium uppercase tracking-wide text-slate-500">Time
-                        range</label>
+                    <label for="time-range" class="text-xs font-medium uppercase tracking-wide text-slate-500">{{ "dashboard.time_range" | t }}
                     <div class="relative w-48">
                         <select id="time-range" name="time-range"
                             class="block w-full appearance-none rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 focus:border-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-200">
-                            <option value="10m" {% if range.key=='10m' %} selected{% endif %}>Last 10 minutes</option>
-                            <option value="today" {% if range.key=='today' %} selected{% endif %}>Today</option>
-                            <option value="yesterday" {% if range.key=='yesterday' %} selected{% endif %}>Yesterday
+                            <option value="10m" {% if range.key=='10m' %} selected{% endif %}>{{ "dashboard.last_10_minutes" | t }}</option>
+                            <option value="today" {% if range.key=='today' %} selected{% endif %}>{{ "dashboard.today" | t }}</option>
+                            <option value="yesterday" {% if range.key=='yesterday' %} selected{% endif %}>{{ "dashboard.yesterday" | t }}
                             </option>
-                            <option value="week" {% if range.key=='week' %} selected{% endif %}>This week</option>
-                            <option value="7days" {% if range.key=='7days' %} selected{% endif %}>Last 7 days</option>
-                            <option value="30days" {% if range.key=='30days' %} selected{% endif %}>Last 30 days
+                            <option value="week" {% if range.key=='week' %} selected{% endif %}>{{ "dashboard.this_week" | t }}</option>
+                            <option value="7days" {% if range.key=='7days' %} selected{% endif %}>{{ "dashboard.last_7_days" | t }}</option>
+                            <option value="30days" {% if range.key=='30days' %} selected{% endif %}>{{ "dashboard.last_30_days" | t }}
                             </option>
                         </select>
                         <span class="pointer-events-none absolute inset-y-0 right-3 flex items-center text-slate-400">
@@ -39,8 +38,8 @@
         <!-- Metrics with emphasis on last 10 minutes -->
         <section class="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
             <div class="rounded-xl bg-white p-5 ring-1 ring-black/5">
-                <div class="text-xs text-slate-500">Calls in <span data-range-label>{{ range.period_label_short |
-                        default('last 10 minutes') }}</span></div>
+                <div class="text-xs text-slate-500">{{ "dashboard.calls_in" | t }} <span data-range-label>{{ range.period_label_short |
+                        default("dashboard.last_10_minutes" | t) }}</span></div>
                 <div class="mt-2 flex items-end justify-between">
                     <div id="metric-total" class="text-3xl font-semibold">{{ metrics.recent10.total | default(0) }}
                     </div>
@@ -53,8 +52,8 @@
                 </div>
             </div>
             <div class="rounded-xl bg-white p-5 ring-1 ring-black/5">
-                <div class="text-xs text-slate-500">Answered in <span data-range-label>{{ range.period_label_short |
-                        default('last 10 minutes') }}</span></div>
+                <div class="text-xs text-slate-500">{{ "dashboard.answered_in" | t }} <span data-range-label>{{ range.period_label_short |
+                        default("dashboard.last_10_minutes" | t) }}</span></div>
                 <div class="mt-2 flex items-end justify-between">
                     <div id="metric-answered" class="text-3xl font-semibold">{{ metrics.recent10.answered | default(0)
                         }}</div>
@@ -67,12 +66,12 @@
                 </div>
             </div>
             <div class="rounded-xl bg-white p-5 ring-1 ring-black/5">
-                <div class="text-xs text-slate-500">Avg call duration (<span data-range-label>{{
-                        range.period_label_short | default('last 10 minutes') }}</span>)</div>
+                <div class="text-xs text-slate-500">{{ "dashboard.avg_call_duration" | t }} (<span data-range-label>{{
+                        range.period_label_short | default("dashboard.last_10_minutes" | t) }}</span>)</div>
                 <div class="mt-2 flex items-end justify-between">
                     <div id="metric-acd" class="text-3xl font-semibold">{{ metrics.recent10.acd | default('0s') }}</div>
                     <div class="text-xs text-slate-500"><span id="metric-today-acd">{{ metrics.today.acd | default('0s')
-                            }}</span> today</div>
+                            }}</span> {{ "dashboard.today" | t }}</div>
                 </div>
                 <div class="mt-3 h-2 w-full overflow-hidden rounded bg-slate-100">
                     <div id="metric-acd-util-bar" class="h-full bg-indigo-500"
@@ -80,10 +79,10 @@
                 </div>
             </div>
             <div class="rounded-xl bg-white p-5 ring-1 ring-black/5">
-                <div class="text-xs text-slate-500">Active calls</div>
+                <div class="text-xs text-slate-500">{{ "dashboard.active" | t }} {{ "dashboard.calls_in" | t }}</div>
                 <div class="mt-2 flex items-end justify-between">
                     <div id="metric-active" class="text-3xl font-semibold">{{ metrics.active | default(0) }}</div>
-                    <div class="text-xs text-slate-500">capacity <span id="metric-capacity">{{ metrics.capacity |
+                    <div class="text-xs text-slate-500">{{ "dashboard.capacity" | t }} <span id="metric-capacity">{{ metrics.capacity |
                             default(0) }}</span></div>
                 </div>
                 <div class="mt-3 h-2 w-full overflow-hidden rounded bg-slate-100">
@@ -98,7 +97,7 @@
             <div class="lg:col-span-2 rounded-2xl bg-white p-6 ring-1 ring-black/5">
                 <div class="flex items-center justify-between">
                     <h2 id="timeline-title" class="text-sm font-semibold text-slate-600">{{ range.timeline_title |
-                        default('Last 10 minutes timeline') }}</h2>
+                        default("dashboard.last_10_minutes_timeline" | t) }}</h2>
                 </div>
                 <div class="mt-4">
                     <canvas id="timelineChart" class="h-40 w-full"></canvas>
@@ -106,7 +105,7 @@
             </div>
             <div class="rounded-2xl bg-white p-6 ring-1 ring-black/5">
                 <div class="flex items-center justify-between">
-                    <h2 class="text-sm font-semibold text-slate-600">Call direction</h2>
+                    <h2 class="text-sm font-semibold text-slate-600">{{ "dashboard.call_direction" | t }}</h2>
                 </div>
                 <div class="mt-4">
                     <canvas id="callDirectionChart" class="h-44 w-full"></canvas>
@@ -118,21 +117,21 @@
         <section class="mt-6 rounded-2xl bg-white p-6 shadow-sm ring-1 ring-black/5">
             <div class="flex flex-col gap-2 sm:flex-row sm:items-baseline sm:justify-between">
                 <div>
-                    <h2 class="text-sm font-semibold text-slate-600">Active calls · latest 10</h2>
-                    <p class="text-xs text-slate-500">Live preview of up to 10 concurrent calls.</p>
+                    <h2 class="text-sm font-semibold text-slate-600">{{ "dashboard.active_calls_title" | t }} · {{ "dashboard.latest_10" | t }}</h2>
+                    <p class="text-xs text-slate-500">{{ "dashboard.live_preview" | t }}</p>
                 </div>
-                <span id="active-updated" class="text-xs text-slate-400">Updated just now</span>
+                <span id="active-updated" class="text-xs text-slate-400">{{ "dashboard.updated_just_now" | t }}</span>
             </div>
             <div class="mt-4 overflow-x-auto">
                 <table class="min-w-full divide-y divide-slate-100 text-sm">
                     <thead class="bg-slate-50">
                         <tr>
-                            <th scope="col" class="px-3 py-2 text-left font-medium text-slate-500">Caller</th>
-                            <th scope="col" class="px-3 py-2 text-left font-medium text-slate-500">Callee</th>
-                            <th scope="col" class="px-3 py-2 text-left font-medium text-slate-500">Status</th>
-                            <th scope="col" class="px-3 py-2 text-left font-medium text-slate-500">Started</th>
-                            <th scope="col" class="px-3 py-2 text-left font-medium text-slate-500">Duration</th>
-                            <th scope="col" class="px-3 py-2 text-left font-medium text-slate-500">Action</th>
+                            <th scope="col" class="px-3 py-2 text-left font-medium text-slate-500">{{ "dashboard.caller" | t }}</th>
+                            <th scope="col" class="px-3 py-2 text-left font-medium text-slate-500">{{ "dashboard.callee" | t }}</th>
+                            <th scope="col" class="px-3 py-2 text-left font-medium text-slate-500">{{ "dashboard.status" | t }}</th>
+                            <th scope="col" class="px-3 py-2 text-left font-medium text-slate-500">{{ "dashboard.started" | t }}</th>
+                            <th scope="col" class="px-3 py-2 text-left font-medium text-slate-500">{{ "dashboard.duration" | t }}</th>
+                            <th scope="col" class="px-3 py-2 text-left font-medium text-slate-500">{{ "dashboard.action" | t }}</th>
                         </tr>
                     </thead>
                     <tbody id="active-calls-body" class="divide-y divide-slate-100">
@@ -152,14 +151,13 @@
                             <td class="px-3 py-2 text-slate-500">
                                 <button onclick="hangupCall('{{ call.session_id }}')"
                                     class="rounded bg-red-50 px-2 py-1 text-xs font-medium text-red-600 hover:bg-red-100">
-                                    Hangup
+                                    {{ "dashboard.hangup" | t }}
                                 </button>
                             </td>
                         </tr>
                         {% else %}
                         <tr>
-                            <td colspan="6" class="px-3 py-6 text-center text-sm text-slate-400">No active calls at the
-                                moment.</td>
+                            <td colspan="6" class="px-3 py-6 text-center text-sm text-slate-400">{{ "dashboard.no_active_calls" | t }}</td>
                         </tr>
                         {% endfor %}
                     </tbody>

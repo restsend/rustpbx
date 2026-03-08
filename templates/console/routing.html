@@ -1,5 +1,5 @@
 {% extends "console/layout.html" %}
-{% block title %}Routing · {{site_name|default('RustPBX')}}{% endblock %}
+{% block title %}{{ "routing.title" | t }} · {{site_name|default('RustPBX')}}{% endblock %}
 {% block content %}
 <div class="p-6">
     <div class="mx-auto max-w-7xl space-y-6" x-data='routingConsole({
@@ -9,9 +9,8 @@
     })' x-init="init()">
         <div class="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
             <div>
-                <h1 class="text-2xl font-semibold text-slate-900">Routing control</h1>
-                <p class="mt-2 text-sm text-slate-500">Prioritise trunks, match calls with regex, and rewrite or
-                    forward traffic based on your voice policies.</p>
+                <h1 class="text-2xl font-semibold text-slate-900">{{ "routing.title" | t }}</h1>
+                <p class="mt-2 text-sm text-slate-500">{{ "routing.prioritise_trunks" | t }}</p>
             </div>
             <div class="flex flex-wrap gap-3">
                 <button type="button"
@@ -31,7 +30,7 @@
                                 d="M12 3v3m6.364 1.636-2.121 2.121M21 12h-3m-1.636 6.364-2.121-2.121M12 21v-3m-6.364-1.636 2.121-2.121M3 12h3m1.636-6.364 2.121 2.121" />
                         </svg>
                     </template>
-                    Reload routes
+                    {{ "routing.reload_routes" | t }}
                 </button>
                 <button type="button"
                     class="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-600 transition hover:border-indigo-300 hover:text-indigo-700 focus:outline-none focus:ring-2 focus:ring-indigo-200 focus:ring-offset-2"
@@ -41,40 +40,40 @@
                             d="M4 9a6 6 0 0 1 12 0c0 1.657-1.567 3.286-4.7 4.878l-.32.161a1 1 0 0 1-.96 0l-.32-.161C5.567 12.286 4 10.657 4 9Z" />
                         <path stroke-linecap="round" stroke-linejoin="round" d="M10 13v3m-2 0h4" />
                     </svg>
-                    Routing validation
+                    {{ "routing.routing_validation" | t }}
                 </button>
                 <a :href="createUrl"
                     class="inline-flex items-center gap-2 rounded-lg bg-sky-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-offset-2">
                     <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8">
                         <path stroke-linecap="round" stroke-linejoin="round" d="M10 4v12m6-6H4" />
                     </svg>
-                    New route
+                    {{ "routing.new_route" | t }}
                 </a>
             </div>
         </div>
 
         <section class="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
             <div class="rounded-xl bg-white p-4 shadow-sm ring-1 ring-black/5">
-                <div class="text-xs font-semibold uppercase tracking-wide text-slate-400">Total routes</div>
+                <div class="text-xs font-semibold uppercase tracking-wide text-slate-400">{{ "routing.total_routes" | t }}</div>
                 <div class="mt-2 flex items-baseline gap-2">
                     <span class="text-2xl font-semibold text-slate-900" x-text="summary.total_routes"></span>
-                    <span class="text-xs text-slate-500">rules</span>
+                    <span class="text-xs text-slate-500">{{ "routing.rules" | t }}</span>
                 </div>
             </div>
             <div class="rounded-xl bg-white p-4 shadow-sm ring-1 ring-black/5">
-                <div class="text-xs font-semibold uppercase tracking-wide text-slate-400">Active routes</div>
+                <div class="text-xs font-semibold uppercase tracking-wide text-slate-400">{{ "routing.active_routes" | t }}</div>
                 <div class="mt-2 text-2xl font-semibold text-emerald-600" x-text="summary.active_routes"></div>
-                <div class="text-xs text-slate-500">Enabled for real-time traffic</div>
+                <div class="text-xs text-slate-500">{{ "routing.enabled_for_realtime" | t }}</div>
             </div>
             <div class="rounded-xl bg-white p-4 shadow-sm ring-1 ring-black/5">
-                <div class="text-xs font-semibold uppercase tracking-wide text-slate-400">Paused routes</div>
+                <div class="text-xs font-semibold uppercase tracking-wide text-slate-400">{{ "routing.paused_routes" | t }}</div>
                 <div class="mt-2 text-2xl font-semibold text-amber-600" x-text="pausedRoutes"></div>
-                <div class="text-xs text-slate-500">Temporarily disabled for maintenance</div>
+                <div class="text-xs text-slate-500">{{ "routing.temporarily_disabled" | t }}</div>
             </div>
             <div class="rounded-xl bg-white p-4 shadow-sm ring-1 ring-black/5">
-                <div class="text-xs font-semibold uppercase tracking-wide text-slate-400">Last deploy</div>
+                <div class="text-xs font-semibold uppercase tracking-wide text-slate-400">{{ "routing.last_deploy" | t }}</div>
                 <div class="mt-2 text-base font-semibold text-slate-900" x-text="formatDate(summary.last_deploy)"></div>
-                <div class="text-xs text-slate-500">Across the cluster</div>
+                <div class="text-xs text-slate-500">{{ "routing.across_cluster" | t }}</div>
             </div>
         </section>
 
@@ -91,24 +90,24 @@
             <div class="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600">
                 <div class="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
                     <div>
-                        <span class="font-semibold text-slate-800">Latest reload</span>
+                        <span class="font-semibold text-slate-800">{{ "routing.latest_reload" | t }}</span>
                         <span class="ml-2" x-text="buildReloadSummary(lastReload)"></span>
                     </div>
                     <div class="text-xs text-slate-500">
-                        <span>Finished </span>
+                        <span>{{ "routing.finished" | t }} </span>
                         <span x-text="formatDate(lastReload.finished_at)"></span>
                     </div>
                 </div>
                 <div class="mt-2 text-xs text-slate-500">
-                    <span>Sources:</span>
-                    <span> embedded
+                    <span>{{ "routing.sources" | t }}:</span>
+                    <span> {{ "routing.embedded" | t }}
                         <span class="font-semibold text-slate-700" x-text="Number(lastReload.config_count) || 0"></span>
                     </span>,
-                    <span> include files
+                    <span> {{ "routing.include_files" | t }}
                         <span class="font-semibold text-slate-700" x-text="Number(lastReload.file_count) || 0"></span>
                     </span>
                     <template x-if="lastReload.generated">
-                        <span>, generated file
+                        <span>, {{ "routing.generated_file" | t }}
                             <span class="font-semibold text-slate-700"
                                 x-text="Number(lastReload.generated.entries) || 0"></span>
                         </span>
@@ -118,13 +117,13 @@
                     <div class="mt-2 text-xs text-slate-500">
                         <template x-if="lastReload.generated.path">
                             <div>
-                                <span class="font-semibold text-slate-600">Generated file</span>
+                                <span class="font-semibold text-slate-600">{{ "routing.generated_file" | t }}</span>
                                 <span class="ml-1 break-all" x-text="lastReload.generated.path"></span>
                             </div>
                         </template>
                         <template x-if="lastReload.generated.backup">
                             <div class="mt-1">
-                                <span class="font-semibold text-slate-600">Previous backup</span>
+                                <span class="font-semibold text-slate-600">{{ "routing.previous_backup" | t }}</span>
                                 <span class="ml-1 break-all" x-text="lastReload.generated.backup"></span>
                             </div>
                         </template>
@@ -132,7 +131,7 @@
                 </template>
                 <template x-if="lastReload.patterns && lastReload.patterns.length">
                     <div class="mt-2 text-xs text-slate-500">
-                        <div class="font-semibold text-slate-600">Include patterns</div>
+                        <div class="font-semibold text-slate-600">{{ "routing.include_patterns" | t }}</div>
                         <ul class="mt-1 list-disc space-y-0.5 pl-5">
                             <template x-for="pattern in lastReload.patterns" :key="pattern">
                                 <li class="break-all" x-text="pattern"></li>
@@ -142,7 +141,7 @@
                 </template>
                 <template x-if="lastReload.files && lastReload.files.length">
                     <div class="mt-2 text-xs text-slate-500">
-                        <div class="font-semibold text-slate-600">Include files</div>
+                        <div class="font-semibold text-slate-600">{{ "routing.include_files_label" | t }}</div>
                         <ul class="mt-1 list-disc space-y-0.5 pl-5">
                             <template x-for="file in lastReload.files" :key="file">
                                 <li class="break-all" x-text="file"></li>
@@ -159,7 +158,7 @@
                     <div class="relative">
                         <input type="search" x-model.debounce.300ms="search" @input.debounce.400ms="applyFilters()"
                             class="w-72 rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                            placeholder="Search routes, regex, trunks...">
+                            placeholder="{{ "routing.search_routes_placeholder" | t }}">
                         <svg class="pointer-events-none absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400"
                             viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6">
                             <path stroke-linecap="round" stroke-linejoin="round"
@@ -169,24 +168,24 @@
                     <div class="flex gap-1 rounded-lg border border-slate-200 p-1 text-xs font-medium text-slate-600">
                         <button type="button" class="rounded-md px-3 py-1 transition"
                             :class="directionFilter === 'all' ? 'bg-sky-100 text-sky-700' : 'hover:bg-slate-100'"
-                            @click="setDirection('all')">All</button>
+                            @click="setDirection('all')">{{ "routing.filter_all" | t }}</button>
                         <button type="button" class="rounded-md px-3 py-1 transition"
                             :class="directionFilter === 'inbound' ? 'bg-sky-100 text-sky-700' : 'hover:bg-slate-100'"
-                            @click="setDirection('inbound')">Inbound</button>
+                            @click="setDirection('inbound')">{{ "routing.filter_inbound" | t }}</button>
                         <button type="button" class="rounded-md px-3 py-1 transition"
                             :class="directionFilter === 'outbound' ? 'bg-sky-100 text-sky-700' : 'hover:bg-slate-100'"
-                            @click="setDirection('outbound')">Outbound</button>
+                            @click="setDirection('outbound')">{{ "routing.filter_outbound" | t }}</button>
                     </div>
                     <div class="flex gap-1 rounded-lg border border-slate-200 p-1 text-xs font-medium text-slate-600">
                         <button type="button" class="rounded-md px-3 py-1 transition"
                             :class="statusFilter === 'all' ? 'bg-emerald-100 text-emerald-700' : 'hover:bg-slate-100'"
-                            @click="setStatus('all')">Any status</button>
+                            @click="setStatus('all')">{{ "routing.filter_any_status" | t }}</button>
                         <button type="button" class="rounded-md px-3 py-1 transition"
                             :class="statusFilter === 'active' ? 'bg-emerald-100 text-emerald-700' : 'hover:bg-slate-100'"
-                            @click="setStatus('active')">Active</button>
+                            @click="setStatus('active')">{{ "routing.filter_active" | t }}</button>
                         <button type="button" class="rounded-md px-3 py-1 transition"
                             :class="statusFilter === 'disabled' ? 'bg-rose-100 text-rose-700' : 'hover:bg-slate-100'"
-                            @click="setStatus('disabled')">Paused</button>
+                            @click="setStatus('disabled')">{{ "routing.filter_paused" | t }}</button>
                     </div>
                     <div class="flex gap-1 text-xs">
                         <template x-for="option in algorithmOptions" :key="option.value">
@@ -206,11 +205,11 @@
                     <table class="min-w-full divide-y divide-slate-200">
                         <thead class="bg-slate-50 text-xs font-semibold uppercase tracking-wide text-slate-500">
                             <tr>
-                                <th scope="col" class="px-4 py-3 text-left">Route</th>
-                                <th scope="col" class="px-4 py-3 text-left">Match</th>
-                                <th scope="col" class="px-4 py-3 text-left">Rewrite</th>
-                                <th scope="col" class="px-4 py-3 text-left">Source · Target</th>
-                                <th scope="col" class="px-4 py-3 text-left">Actions</th>
+                                <th scope="col" class="px-4 py-3 text-left">{{ "routing.col_route" | t }}</th>
+                                <th scope="col" class="px-4 py-3 text-left">{{ "routing.col_match" | t }}</th>
+                                <th scope="col" class="px-4 py-3 text-left">{{ "routing.col_rewrite" | t }}</th>
+                                <th scope="col" class="px-4 py-3 text-left">{{ "routing.col_source_target" | t }}</th>
+                                <th scope="col" class="px-4 py-3 text-left">{{ "routing.col_actions" | t }}</th>
                             </tr>
                         </thead>
                         <tbody class="divide-y divide-slate-100 text-sm text-slate-700">
@@ -223,7 +222,7 @@
                                                 <path stroke-linecap="round" stroke-linejoin="round"
                                                     d="M12 3v3m6.364 1.636-2.121 2.121M21 12h-3m-1.636 6.364-2.121-2.121M12 21v-3m-6.364-1.636 2.121-2.121M3 12h3m1.636-6.364 2.121 2.121" />
                                             </svg>
-                                            <div>Loading routes…</div>
+                                            <div>{{ "routing.loading_routes" | t }}</div>
                                         </div>
                                     </td>
                                 </tr>
@@ -231,7 +230,7 @@
                             <template x-if="!loading && !filteredRoutes.length">
                                 <tr>
                                     <td colspan="5" class="px-4 py-12 text-center text-sm text-slate-400">
-                                        No routes found for the current filters.
+                                        {{ "routing.no_routes_found" | t }}
                                     </td>
                                 </tr>
                             </template>
@@ -251,13 +250,13 @@
                                                 </span>
                                                 <span
                                                     class="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2.5 py-0.5 text-[11px] font-medium text-slate-600 ring-1 ring-slate-200">
-                                                    Priority
+                                                    {{ "routing.priority_badge" | t }}
                                                     <span class="font-semibold" x-text="route.priority"></span>
                                                 </span>
                                                 <template x-if="route.disabled">
                                                     <span
                                                         class="inline-flex items-center gap-1 rounded-full bg-amber-50 px-2.5 py-0.5 text-[11px] font-semibold text-amber-600 ring-1 ring-amber-200">
-                                                        Paused
+                                                        {{ "routing.paused_badge" | t }}
                                                     </span>
                                                 </template>
                                             </div>
@@ -285,8 +284,8 @@
                                             <template x-if="matchPreview(route).remaining">
                                                 <button type="button"
                                                     class="w-fit text-sky-600 transition hover:text-sky-700 focus:outline-none"
-                                                    @click="toggleMatch(route)">
-                                                    +<span x-text="matchPreview(route).remaining"></span> more
+                                                    @click="toggleMatch(route)"
+                                                    x-text="'+' + matchPreview(route).remaining + ' {{ "routing.show_more" | t }}'">
                                                 </button>
                                             </template>
                                             <template
@@ -294,7 +293,7 @@
                                                 <button type="button"
                                                     class="w-fit text-sky-600 transition hover:text-sky-700 focus:outline-none"
                                                     @click="toggleMatch(route)">
-                                                    Show less
+                                                    {{ "routing.show_less" | t }}
                                                 </button>
                                             </template>
                                             <template x-if="!matchPreview(route).items.length">
@@ -313,8 +312,8 @@
                                             <template x-if="rewritePreview(route).remaining">
                                                 <button type="button"
                                                     class="w-fit text-sky-600 transition hover:text-sky-700 focus:outline-none"
-                                                    @click="toggleRewrite(route)">
-                                                    +<span x-text="rewritePreview(route).remaining"></span> more
+                                                    @click="toggleRewrite(route)"
+                                                    x-text="'+' + rewritePreview(route).remaining + ' {{ "routing.show_more" | t }}'">
                                                 </button>
                                             </template>
                                             <template
@@ -322,7 +321,7 @@
                                                 <button type="button"
                                                     class="w-fit text-sky-600 transition hover:text-sky-700 focus:outline-none"
                                                     @click="toggleRewrite(route)">
-                                                    Show less
+                                                    {{ "routing.show_less" | t }}
                                                 </button>
                                             </template>
                                             <template x-if="!rewritePreview(route).items.length">
@@ -332,11 +331,11 @@
                                     </td>
                                     <td class="px-4 py-3 text-xs text-slate-600">
                                         <div>
-                                            <span class="font-semibold">Source:</span>
+                                            <span class="font-semibold">{{ "routing.col_source" | t }}:</span>
                                             <span x-text="sourceTrunkLabel(route)"></span>
                                         </div>
                                         <div class="mt-1">
-                                            <span class="font-semibold">Target:</span>
+                                            <span class="font-semibold">{{ "routing.col_target" | t }}:</span>
                                             <span x-text="targetTrunksLabel(route)"></span>
                                         </div>
                                         <template x-if="trunkPreview(route).items.length">
@@ -349,8 +348,8 @@
                                                     </span>
                                                 </template>
                                                 <template x-if="trunkPreview(route).remaining">
-                                                    <span class="text-slate-400">
-                                                        +<span x-text="trunkPreview(route).remaining"></span> more
+                                                    <span class="text-slate-400"
+                                                        x-text="'+' + trunkPreview(route).remaining + ' {{ "routing.show_more" | t }}'">
                                                     </span>
                                                 </template>
                                             </div>
@@ -359,7 +358,7 @@
                                     <td class="px-4 py-3">
                                         <div class="flex flex-col items-end gap-3">
                                             <div class="text-xs text-slate-500">
-                                                Last updated
+                                                {{ "routing.last_updated" | t }}
                                                 <span class="font-semibold"
                                                     x-text="formatDate(route.last_modified)"></span>
                                             </div>
@@ -386,7 +385,7 @@
                                                                 d="M5 4h2v12H5zM13 4h2v12h-2z" />
                                                         </svg>
                                                     </template>
-                                                    <span x-text="route.disabled ? 'Resume' : 'Pause'"></span>
+                                                    <span x-text="route.disabled ? '{{ "routing.btn_resume" | t }}' : '{{ "routing.btn_pause" | t }}'"></span>
                                                 </button>
                                                 <button type="button"
                                                     class="inline-flex items-center gap-1 rounded-lg border border-slate-200 px-2.5 py-1 text-xs font-semibold text-slate-600 transition hover:border-sky-300 hover:text-sky-700"
@@ -409,7 +408,7 @@
                                                                 d="M8 4v4h4" />
                                                         </svg>
                                                     </template>
-                                                    Clone
+                                                    {{ "routing.btn_clone" | t }}
                                                 </button>
                                                 <button type="button"
                                                     class="inline-flex items-center gap-1 rounded-lg border border-rose-200 px-2.5 py-1 text-xs font-semibold text-rose-600 transition hover:bg-rose-50"
@@ -430,7 +429,7 @@
                                                                 d="m14.74 9-.346 9m-4.788 0L9.26 9m9.968-3.21c.342.052.682.107 1.022.166m-1.022-.165L18.16 19.673a2.25 2.25 0 0 1-2.244 2.077H8.084a2.25 2.25 0 0 1-2.244-2.077L4.772 5.79m14.456 0a48.108 48.108 0 0 0-3.478-.397m-12 .562c.34-.059.68-.114 1.022-.165m0 0a48.11 48.11 0 0 1 3.478-.397m7.5 0v-.916c0-1.18-.91-2.164-2.09-2.201a51.964 51.964 0 0 0-3.32 0c-1.18.037-2.09 1.022-2.09 2.201v.916m7.5 0a48.667 48.667 0 0 0-7.5 0" />
                                                         </svg>
                                                     </template>
-                                                    Delete
+                                                    {{ "routing.btn_delete" | t }}
                                                 </button>
                                             </div>
                                         </div>
@@ -444,27 +443,25 @@
                 <template x-if="pagination && filteredRoutes.length">
                     <div
                         class="flex flex-col gap-3 border-t border-slate-100 px-4 py-3 text-xs text-slate-500 sm:flex-row sm:items-center sm:justify-between">
-                        <div>
-                            Showing <span class="font-semibold" x-text="pagination.showing_from"></span>
-                            – <span class="font-semibold" x-text="pagination.showing_to"></span>
-                            of <span class="font-semibold" x-text="pagination.total_items"></span>
+                        <div
+                            x-text="`{{ "routing.pagination_showing" | t }}`.replace('{from}', pagination.showing_from).replace('{to}', pagination.showing_to).replace('{total}', pagination.total_items)">
                         </div>
                         <div class="flex items-center gap-2">
                             <button type="button"
                                 class="inline-flex items-center gap-1 rounded-lg border border-slate-200 px-3 py-1.5 font-semibold transition"
                                 :class="pagination.has_prev ? 'text-slate-600 hover:border-sky-300 hover:text-sky-700' : 'cursor-not-allowed text-slate-300'"
                                 :disabled="!pagination.has_prev" @click="prevPage()">
-                                Prev
+                                {{ "routing.pagination_prev" | t }}
                             </button>
                             <div class="text-sm font-semibold text-slate-600">
-                                Page <span x-text="pagination.current_page"></span> / <span
+                                {{ "routing.pagination_page" | t }} <span x-text="pagination.current_page"></span> / <span
                                     x-text="pagination.total_pages"></span>
                             </div>
                             <button type="button"
                                 class="inline-flex items-center gap-1 rounded-lg border border-slate-200 px-3 py-1.5 font-semibold transition"
                                 :class="pagination.has_next ? 'text-slate-600 hover:border-sky-300 hover:text-sky-700' : 'cursor-not-allowed text-slate-300'"
                                 :disabled="!pagination.has_next" @click="nextPage()">
-                                Next
+                                {{ "routing.pagination_next" | t }}
                             </button>
                         </div>
                     </div>
@@ -479,9 +476,8 @@
                 x-transition.scale.duration.150ms @keydown.escape.window="closeValidation()">
                 <div class="flex items-start justify-between gap-4 border-b border-slate-100 px-6 py-4">
                     <div>
-                        <h2 class="text-base font-semibold text-slate-900">Routing validation</h2>
-                        <p class="text-xs text-slate-500">Evaluate a dialled number against the current routing table
-                            without leaving this view.</p>
+                        <h2 class="text-base font-semibold text-slate-900">{{ "routing.validation_modal_title" | t }}</h2>
+                        <p class="text-xs text-slate-500">{{ "routing.validation_modal_subtitle" | t }}</p>
                     </div>
                     <button type="button"
                         class="rounded-lg border border-slate-200 p-2 text-slate-500 transition hover:bg-slate-100 hover:text-slate-700"
@@ -494,55 +490,50 @@
                 <form class="space-y-5 px-6 py-5" @submit.prevent="runValidation()">
                     <div class="grid gap-4 md:grid-cols-2">
                         <label class="flex flex-col gap-2">
-                            <span class="text-xs font-semibold uppercase tracking-wide text-slate-400">Dialled
-                                number</span>
+                            <span class="text-xs font-semibold uppercase tracking-wide text-slate-400">{{ "routing.validation_dialled_number" | t }}</span>
                             <input type="text" x-model.trim="validationInput" x-ref="validationInput"
                                 class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                placeholder="e.g. +14155550123" required>
+                                placeholder="{{ "routing.validation_dialled_placeholder" | t }}" required>
                         </label>
                         <label class="flex flex-col gap-2">
-                            <span class="text-xs font-semibold uppercase tracking-wide text-slate-400">Direction</span>
+                            <span class="text-xs font-semibold uppercase tracking-wide text-slate-400">{{ "routing.validation_direction" | t }}</span>
                             <select x-model="validationDirection"
                                 class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
-                                <option value="outbound">Outbound</option>
-                                <option value="inbound">Inbound</option>
-                                <option value="internal">Internal</option>
+                                <option value="outbound">{{ "routing.filter_outbound" | t }}</option>
+                                <option value="inbound">{{ "routing.filter_inbound" | t }}</option>
+                                <option value="internal">{{ "routing.filter_internal" | t }}</option>
                             </select>
                         </label>
                         <label class="flex flex-col gap-2">
-                            <span class="text-xs font-semibold uppercase tracking-wide text-slate-400">Caller SIP
-                                URI</span>
+                            <span class="text-xs font-semibold uppercase tracking-wide text-slate-400">{{ "routing.validation_caller_uri" | t }}</span>
                             <input type="text" x-model.trim="validationCaller"
                                 class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                placeholder="sip:caller@rustpbx.com">
+                                placeholder="{{ "routing.validation_caller_placeholder" | t }}">
                         </label>
                         <label class="flex flex-col gap-2">
-                            <span class="text-xs font-semibold uppercase tracking-wide text-slate-400">Source
-                                address</span>
+                            <span class="text-xs font-semibold uppercase tracking-wide text-slate-400">{{ "routing.validation_source_address" | t }}</span>
                             <input type="text" x-model.trim="validationSourceIp"
                                 class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                placeholder="203.0.113.10">
+                                placeholder="{{ "routing.validation_source_address_placeholder" | t }}">
                         </label>
                     </div>
                     <div class="space-y-2">
-                        <span class="text-xs font-semibold uppercase tracking-wide text-slate-400">Data
-                            source</span>
+                        <span class="text-xs font-semibold uppercase tracking-wide text-slate-400">{{ "routing.validation_data_source" | t }}</span>
                         <div class="flex flex-wrap gap-4 text-sm text-slate-600">
                             <label class="inline-flex items-center gap-2">
                                 <input type="radio" name="validation-dataset" value="runtime"
                                     x-model="validationDataset"
                                     class="h-4 w-4 border-slate-300 text-sky-600 focus:ring-sky-500">
-                                <span>Runtime</span>
+                                <span>{{ "routing.validation_runtime" | t }}</span>
                             </label>
                             <label class="inline-flex items-center gap-2">
                                 <input type="radio" name="validation-dataset" value="database"
                                     x-model="validationDataset"
                                     class="h-4 w-4 border-slate-300 text-sky-600 focus:ring-sky-500">
-                                <span>Database</span>
+                                <span>{{ "routing.validation_database" | t }}</span>
                             </label>
                         </div>
-                        <p class="text-xs text-slate-400">The default checks the routes in the database (inactive
-                            configuration).</p>
+                        <p class="text-xs text-slate-400">{{ "routing.validation_data_source_hint" | t }}</p>
                     </div>
                     <button type="button"
                         class="inline-flex items-center gap-2 text-xs font-semibold text-slate-500 transition hover:text-slate-700"
@@ -551,23 +542,21 @@
                             stroke-width="1.6">
                             <path stroke-linecap="round" stroke-linejoin="round" d="M10 4v12m6-6H4" />
                         </svg>
-                        <span x-text="validationAdvanced ? 'Hide advanced options' : 'Advanced options'"></span>
+                        <span x-text="validationAdvanced ? '{{ "routing.validation_hide_advanced" | t }}' : '{{ "routing.validation_advanced_options" | t }}'"></span>
                     </button>
                     <template x-if="validationAdvanced">
                         <div class="grid gap-4 md:grid-cols-2" x-transition>
                             <label class="flex flex-col gap-2">
-                                <span class="text-xs font-semibold uppercase tracking-wide text-slate-400">Request
-                                    URI</span>
+                                <span class="text-xs font-semibold uppercase tracking-wide text-slate-400">{{ "routing.validation_request_uri" | t }}</span>
                                 <input type="text" x-model.trim="validationRequestUri"
                                     class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                    placeholder="sip:destination@rustpbx.com">
+                                    placeholder="{{ "routing.validation_request_uri_placeholder" | t }}">
                             </label>
                             <label class="flex flex-col gap-2">
-                                <span class="text-xs font-semibold uppercase tracking-wide text-slate-400">Source
-                                    trunk</span>
+                                <span class="text-xs font-semibold uppercase tracking-wide text-slate-400">{{ "routing.validation_source_trunk" | t }}</span>
                                 <select x-model="validationSourceTrunk"
                                     class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
-                                    <option value="">Auto detect</option>
+                                    <option value="">{{ "routing.validation_auto_detect" | t }}</option>
                                     <template x-for="option in trunkOptions" :key="option.value">
                                         <option :value="option.value" x-text="option.label"></option>
                                     </template>
@@ -577,7 +566,7 @@
                     </template>
                     <div class="flex flex-wrap items-center justify-between gap-3">
                         <div class="text-xs text-slate-400" x-show="validationLatencyMs && !validationLoading">
-                            Evaluated in
+                            {{ "routing.validation_evaluated_in" | t }}
                             <span class="font-semibold text-slate-600"
                                 x-text="formatDuration(validationLatencyMs)"></span>
                         </div>
@@ -585,7 +574,7 @@
                             <button type="button"
                                 class="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-600 transition hover:bg-slate-100"
                                 @click="resetValidation()" :disabled="validationLoading">
-                                Reset
+                                {{ "routing.btn_reset" | t }}
                             </button>
                             <button type="submit" :disabled="validationLoading"
                                 class="inline-flex items-center gap-2 rounded-lg bg-sky-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60">
@@ -596,7 +585,7 @@
                                             <path stroke-linecap="round" stroke-linejoin="round" d="M10 4v12" />
                                             <path stroke-linecap="round" stroke-linejoin="round" d="M4 10h12" />
                                         </svg>
-                                        Evaluate
+                                        {{ "routing.btn_evaluate" | t }}
                                     </span>
                                 </template>
                                 <template x-if="validationLoading">
@@ -606,7 +595,7 @@
                                             <path stroke-linecap="round" stroke-linejoin="round"
                                                 d="M4 10a6 6 0 0 1 6-6m0-2a8 8 0 1 0 8 8" />
                                         </svg>
-                                        Evaluating…
+                                        {{ "routing.btn_evaluating" | t }}
                                     </span>
                                 </template>
                             </button>
@@ -614,7 +603,7 @@
                     </div>
                     <template x-if="validationLoading">
                         <div class="rounded-lg border border-sky-200 bg-sky-50 px-4 py-3 text-xs text-sky-700">
-                            Evaluating routing…
+                            {{ "routing.validation_evaluating" | t }}
                         </div>
                     </template>
                     <template x-if="validationError && !validationLoading">
@@ -625,8 +614,8 @@
                         <div
                             class="space-y-3 rounded-lg border border-slate-200 bg-white px-4 py-3 text-xs text-slate-600">
                             <div class="flex flex-wrap items-center gap-2">
-                                <span class="font-semibold text-slate-700">Rule:</span>
-                                <span x-text="validationResult.rule || 'None'"></span>
+                                <span class="font-semibold text-slate-700">{{ "routing.validation_result_rule" | t }}:</span>
+                                <span x-text="validationResult.rule || '{{ "routing.validation_result_none" | t }}'"></span>
                                 <span
                                     class="inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-semibold"
                                     :class="validationResult.badgeClass">
@@ -636,56 +625,56 @@
                                 </span>
                             </div>
                             <div class="grid gap-1 sm:grid-cols-2">
-                                <div><span class="font-semibold text-slate-700">Direction:</span>
+                                <div><span class="font-semibold text-slate-700">{{ "routing.validation_result_direction" | t }}:</span>
                                     <span class="uppercase" x-text="validationResult.direction || '—'"></span>
                                 </div>
-                                <div><span class="font-semibold text-slate-700">Dialled:</span>
+                                <div><span class="font-semibold text-slate-700">{{ "routing.validation_result_dialled" | t }}:</span>
                                     <span x-text="validationResult.input || '—'"></span>
                                 </div>
-                                <div><span class="font-semibold text-slate-700">Trunk:</span>
+                                <div><span class="font-semibold text-slate-700">{{ "routing.validation_result_trunk" | t }}:</span>
                                     <span x-text="validationResult.trunk || '—'"></span>
                                 </div>
-                                <div><span class="font-semibold text-slate-700">Destination:</span>
+                                <div><span class="font-semibold text-slate-700">{{ "routing.validation_result_destination" | t }}:</span>
                                     <span x-text="displayValue(validationResult.destination)"></span>
                                 </div>
-                                <div><span class="font-semibold text-slate-700">Caller:</span>
+                                <div><span class="font-semibold text-slate-700">{{ "routing.validation_result_caller" | t }}:</span>
                                     <span x-text="displayValue(validationResult.caller)"></span>
                                 </div>
-                                <div><span class="font-semibold text-slate-700">Request URI:</span>
+                                <div><span class="font-semibold text-slate-700">{{ "routing.validation_result_request_uri" | t }}:</span>
                                     <span x-text="displayValue(validationResult.requestUri)"></span>
                                 </div>
-                                <div><span class="font-semibold text-slate-700">Source IP:</span>
+                                <div><span class="font-semibold text-slate-700">{{ "routing.validation_result_source_ip" | t }}:</span>
                                     <span x-text="displayValue(validationResult.sourceIp)"></span>
                                 </div>
                                 <template x-if="validationResult.sourceTrunk">
-                                    <div><span class="font-semibold text-slate-700">Provided source trunk:</span>
+                                    <div><span class="font-semibold text-slate-700">{{ "routing.validation_result_source_trunk" | t }}:</span>
                                         <span x-text="validationResult.sourceTrunk"></span>
                                     </div>
                                 </template>
                                 <template x-if="validationResult.detectedTrunk">
-                                    <div><span class="font-semibold text-slate-700">Detected source trunk:</span>
+                                    <div><span class="font-semibold text-slate-700">{{ "routing.validation_result_detected_trunk" | t }}:</span>
                                         <span x-text="validationResult.detectedTrunk"></span>
                                     </div>
                                 </template>
                             </div>
                             <div class="text-[11px] text-slate-500">
-                                <span class="font-semibold text-slate-700">Outcome:</span>
+                                <span class="font-semibold text-slate-700">{{ "routing.validation_result_outcome" | t }}:</span>
                                 <span x-text="validationResult.outcomeLabel"></span>
                                 <template x-if="validationResult.defaultRoute">
-                                    <span> · used default route</span>
+                                    <span>{{ "routing.validation_used_default_route" | t }}</span>
                                 </template>
                             </div>
                             <div class="text-[11px] text-slate-500">
-                                <span class="font-semibold text-slate-700">Rewrites:</span>
+                                <span class="font-semibold text-slate-700">{{ "routing.validation_result_rewrites" | t }}:</span>
                                 <span x-text="validationResult.rewritesText"></span>
                             </div>
                             <div class="text-[11px] text-slate-400">
-                                Evaluated <span x-text="formatDate(validationResult.createdAt)"></span>
+                                {{ "routing.validation_result_evaluated" | t }} <span x-text="formatDate(validationResult.createdAt)"></span>
                             </div>
                             <template x-if="validationResult.rewritesDiff?.length">
                                 <div class="rounded-lg border border-slate-200 bg-slate-50 p-3">
                                     <div class="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
-                                        Field changes
+                                        {{ "routing.validation_field_changes" | t }}
                                     </div>
                                     <div class="mt-2 grid gap-2">
                                         <template x-for="item in validationResult.rewritesDiff"
@@ -694,11 +683,11 @@
                                                 <div class="text-[11px] font-semibold text-slate-700"
                                                     x-text="item.field"></div>
                                                 <div class="text-[11px] text-slate-500"><span
-                                                        class="font-semibold">Before:</span>
+                                                        class="font-semibold">{{ "routing.validation_before" | t }}:</span>
                                                     <span x-text="displayValue(item.before)"></span>
                                                 </div>
                                                 <div class="text-[11px] text-slate-500"><span
-                                                        class="font-semibold">After:</span>
+                                                        class="font-semibold">{{ "routing.validation_after" | t }}:</span>
                                                     <span x-text="displayValue(item.after)"></span>
                                                 </div>
                                             </div>
@@ -709,13 +698,13 @@
                             <template x-if="validationResult.abort">
                                 <div
                                     class="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-[11px] text-rose-700">
-                                    <span class="font-semibold">Rejected:</span>
+                                    <span class="font-semibold">{{ "routing.validation_rejected" | t }}:</span>
                                     <span x-text="displayValue(validationResult.abort)"></span>
                                 </div>
                             </template>
                             <template x-if="validationResult.headers && validationResult.headers.length">
                                 <div class="text-[11px] text-slate-500">
-                                    <span class="font-semibold text-slate-700">Headers:</span>
+                                    <span class="font-semibold text-slate-700">{{ "routing.validation_result_headers" | t }}:</span>
                                     <span x-text="validationResult.headers.join(', ')"></span>
                                 </div>
                             </template>
@@ -772,6 +761,51 @@
             validationLatencyMs: null,
             expandedMatch: {},
             expandedRewrite: {},
+
+            translations: {
+                failed_load: '{{ "routing.failed_load" | t }}',
+                unable_load: '{{ "routing.unable_load" | t }}',
+                failed_delete: '{{ "routing.failed_delete" | t }}',
+                failed_clone: '{{ "routing.failed_clone" | t }}',
+                failed_toggle: '{{ "routing.failed_toggle" | t }}',
+                failed_reload: '{{ "routing.failed_reload" | t }}',
+                reload_complete: '{{ "routing.reload_complete" | t }}',
+                reload_summary: '{{ "routing.reload_summary" | t }}',
+                reload_summary_count: '{{ "routing.reload_summary_count" | t }}',
+                reload_summary_duration: '{{ "routing.reload_summary_duration" | t }}',
+                confirm_delete_title: '{{ "routing.confirm_delete_title" | t }}',
+                confirm_delete_message: '{{ "routing.confirm_delete_message" | t }}',
+                confirm_clone_title: '{{ "routing.confirm_clone_title" | t }}',
+                confirm_clone_message: '{{ "routing.confirm_clone_message" | t }}',
+                confirm_reload_title: '{{ "routing.confirm_reload_title" | t }}',
+                confirm_reload_message: '{{ "routing.confirm_reload_message" | t }}',
+                confirm_label_delete: '{{ "routing.confirm_label_delete" | t }}',
+                confirm_label_clone: '{{ "routing.confirm_label_clone" | t }}',
+                confirm_label_reload: '{{ "routing.confirm_label_reload" | t }}',
+                confirm_label_cancel: '{{ "routing.confirm_label_cancel" | t }}',
+                flash_deleted: '{{ "routing.flash_deleted" | t }}',
+                flash_cloned: '{{ "routing.flash_cloned" | t }}',
+                flash_paused: '{{ "routing.flash_paused" | t }}',
+                flash_resumed: '{{ "routing.flash_resumed" | t }}',
+                source_any: '{{ "routing.source_any" | t }}',
+                target_queue: '{{ "routing.target_queue" | t }}',
+                target_default: '{{ "routing.target_default" | t }}',
+                route_unnamed: '{{ "routing.route_unnamed" | t }}',
+                status_not_handled: '{{ "routing.status_not_handled" | t }}',
+                status_forwarded: '{{ "routing.status_forwarded" | t }}',
+                status_rejected: '{{ "routing.status_rejected" | t }}',
+                outcome_no_match: '{{ "routing.outcome_no_match" | t }}',
+                outcome_forwarded: '{{ "routing.outcome_forwarded" | t }}',
+                outcome_rejected: '{{ "routing.outcome_rejected" | t }}',
+                no_rewrite_changes: '{{ "routing.no_rewrite_changes" | t }}',
+                default_route_label: '{{ "routing.default_route_label" | t }}',
+                validation_provide_number: '{{ "routing.validation_provide_number" | t }}',
+                validation_eval_failed: '{{ "routing.validation_eval_failed" | t }}',
+                sel_queue_handoff: '{{ "routing.sel_queue_handoff" | t }}',
+                sel_round_robin_balancing: '{{ "routing.sel_round_robin_balancing" | t }}',
+                sel_weighted_distribution: '{{ "routing.sel_weighted_distribution" | t }}',
+                sel_hash_based: '{{ "routing.sel_hash_based" | t }}',
+            },
 
             init() {
                 this.basePath = this.normalizeBasePath(options.basePath);
@@ -920,7 +954,7 @@
                     });
                     const data = await response.json().catch(() => ({}));
                     if (!response.ok) {
-                        throw new Error(data?.message || 'Failed to load routing rules');
+                        throw new Error(data?.message || this.translations.failed_load);
                     }
                     const items = Array.isArray(data?.items) ? data.items : [];
                     this.routes = items.map((item) => ({
@@ -943,7 +977,7 @@
                     this.updatePagination(data);
                 } catch (err) {
                     console.error(err);
-                    this.error = err?.message || 'Unable to load routing rules';
+                    this.error = err?.message || this.translations.unable_load;
                 } finally {
                     this.loading = false;
                 }
@@ -1098,23 +1132,25 @@
             },
             buildReloadSummary(details) {
                 if (!details || typeof details !== 'object') {
-                    return 'Reload complete.';
+                    return this.translations.reload_complete;
                 }
                 const total = Number(details.total);
                 const duration = this.formatDuration(details.duration_ms);
                 const totalText = Number.isFinite(total) && total >= 0
-                    ? `${total} routing rule${total === 1 ? '' : 's'}`
+                    ? String(total)
                     : null;
                 if (totalText && duration) {
-                    return `${totalText} in ${duration}`;
+                    return this.translations.reload_summary
+                        .replace('{n}', totalText)
+                        .replace('{duration}', duration);
                 }
                 if (totalText) {
-                    return totalText;
+                    return this.translations.reload_summary_count.replace('{n}', totalText);
                 }
                 if (duration) {
-                    return `Completed in ${duration}`;
+                    return this.translations.reload_summary_duration.replace('{duration}', duration);
                 }
-                return 'Reload complete.';
+                return this.translations.reload_complete;
             },
             routeKey(route) {
                 if (!route || typeof route !== 'object') {
@@ -1268,13 +1304,13 @@
             selectionLabel(route) {
                 const targetType = (route?.action?.target_type || 'sip_trunk').toLowerCase();
                 if (targetType === 'queue') {
-                    return 'Queue handoff';
+                    return this.translations.sel_queue_handoff;
                 }
                 const select = (route?.action?.select || 'rr').toLowerCase();
                 const map = {
-                    rr: 'Round robin balancing',
-                    weight: 'Weighted distribution',
-                    hash: 'Deterministic hash-based',
+                    rr: this.translations.sel_round_robin_balancing,
+                    weight: this.translations.sel_weighted_distribution,
+                    hash: this.translations.sel_hash_based,
                 };
                 return map[select] || select;
             },
@@ -1301,34 +1337,34 @@
                         return trimmed;
                     }
                 }
-                return 'Default (any)';
+                return this.translations.source_any;
             },
             targetTrunksLabel(route) {
                 const targetType = (route?.action?.target_type || 'sip_trunk').toLowerCase();
                 if (targetType === 'queue') {
                     const queueRef = (route?.action?.queue_ref || '').trim();
-                    return queueRef.length ? `Queue · ${queueRef}` : 'Queue destination';
+                    return queueRef.length ? `${this.translations.target_queue.split(' ')[0]} · ${queueRef}` : this.translations.target_queue;
                 }
                 const targets = Array.isArray(route?.target_trunks)
                     ? route.target_trunks.filter((item) => typeof item === 'string' && item.trim().length)
                     : [];
                 if (!targets.length) {
-                    return 'Default destination';
+                    return this.translations.target_default;
                 }
                 return targets.join(', ');
             },
             routeLabel(route) {
                 if (!route) {
-                    return 'Route';
+                    return this.translations.route_unnamed;
                 }
                 const name = (route.name || '').trim();
                 if (name.length) {
                     return name;
                 }
                 if (route.id !== undefined && route.id !== null) {
-                    return `Route #${route.id}`;
+                    return `${this.translations.route_unnamed} #${route.id}`;
                 }
-                return 'Route';
+                return this.translations.route_unnamed;
             },
             toggleEndpoint(route) {
                 if (!route || !route.id) {
@@ -1363,10 +1399,10 @@
                 }
                 window.dispatchEvent(new CustomEvent('console:confirm', {
                     detail: {
-                        title: 'Delete routing rule',
-                        message: `Delete ${this.routeLabel(route)}? This action cannot be undone.`,
-                        confirmLabel: 'Delete',
-                        cancelLabel: 'Cancel',
+                        title: this.translations.confirm_delete_title,
+                        message: this.translations.confirm_delete_message.replace('{name}', this.routeLabel(route)),
+                        confirmLabel: this.translations.confirm_label_delete,
+                        cancelLabel: this.translations.confirm_label_cancel,
                         destructive: true,
                         onConfirm: () => this.deleteRoute(route),
                     },
@@ -1387,15 +1423,15 @@
                     });
                     const data = await response.json().catch(() => ({}));
                     if (!response.ok) {
-                        throw new Error(data?.message || 'Failed to delete routing rule');
+                        throw new Error(data?.message || this.translations.failed_delete);
                     }
                     const label = this.routeLabel(route);
                     await this.fetchRoutes();
                     this.error = null;
-                    this.flash = `Deleted ${label}.`;
+                    this.flash = this.translations.flash_deleted.replace('{name}', label);
                 } catch (err) {
                     console.error(err);
-                    this.error = err?.message || 'Failed to delete routing rule';
+                    this.error = err?.message || this.translations.failed_delete;
                 } finally {
                     this.processingDelete = null;
                 }
@@ -1406,10 +1442,10 @@
                 }
                 window.dispatchEvent(new CustomEvent('console:confirm', {
                     detail: {
-                        title: 'Clone routing rule',
-                        message: `Clone ${this.routeLabel(route)}?`,
-                        confirmLabel: 'Clone',
-                        cancelLabel: 'Cancel',
+                        title: this.translations.confirm_clone_title,
+                        message: this.translations.confirm_clone_message.replace('{name}', this.routeLabel(route)),
+                        confirmLabel: this.translations.confirm_label_clone,
+                        cancelLabel: this.translations.confirm_label_cancel,
                         destructive: false,
                         onConfirm: () => this.cloneRoute(route),
                     },
@@ -1430,15 +1466,15 @@
                     });
                     const data = await response.json().catch(() => ({}));
                     if (!response.ok) {
-                        throw new Error(data?.message || 'Failed to clone routing rule');
+                        throw new Error(data?.message || this.translations.failed_clone);
                     }
                     const label = this.routeLabel(route);
                     await this.fetchRoutes();
                     this.error = null;
-                    this.flash = `Cloned ${label}.`;
+                    this.flash = this.translations.flash_cloned.replace('{name}', label);
                 } catch (err) {
                     console.error(err);
-                    this.error = err?.message || 'Failed to clone routing rule';
+                    this.error = err?.message || this.translations.failed_clone;
                 } finally {
                     this.processingClone = null;
                 }
@@ -1461,16 +1497,18 @@
                     });
                     const data = await response.json().catch(() => ({}));
                     if (!response.ok) {
-                        throw new Error(data?.message || 'Failed to update routing rule status');
+                        throw new Error(data?.message || this.translations.failed_toggle);
                     }
                     const label = this.routeLabel(route);
                     await this.fetchRoutes();
                     this.error = null;
                     const disabled = Boolean(data?.disabled);
-                    this.flash = disabled ? `Paused ${label}.` : `Resumed ${label}.`;
+                    this.flash = disabled
+                        ? this.translations.flash_paused.replace('{name}', label)
+                        : this.translations.flash_resumed.replace('{name}', label);
                 } catch (err) {
                     console.error(err);
-                    this.error = err?.message || 'Failed to update routing rule status';
+                    this.error = err?.message || this.translations.failed_toggle;
                 } finally {
                     this.processingToggle = null;
                 }
@@ -1481,10 +1519,10 @@
                 }
                 window.dispatchEvent(new CustomEvent('console:confirm', {
                     detail: {
-                        title: 'Reload routing rules',
-                        message: 'Reload routing definitions from configuration and database? Existing calls will continue but new transactions use updated rules.',
-                        confirmLabel: 'Reload',
-                        cancelLabel: 'Cancel',
+                        title: this.translations.confirm_reload_title,
+                        message: this.translations.confirm_reload_message,
+                        confirmLabel: this.translations.confirm_label_reload,
+                        cancelLabel: this.translations.confirm_label_cancel,
                         destructive: false,
                         onConfirm: () => this.reloadRoutes(),
                     },
@@ -1508,27 +1546,17 @@
                     });
                     const data = await response.json().catch(() => ({}));
                     if (!response.ok) {
-                        throw new Error(data?.message || data?.error || 'Failed to reload routing rules');
+                        throw new Error(data?.message || data?.error || this.translations.failed_reload);
                     }
                     const count = Number.isFinite(Number(data?.routes_reloaded)) ? Number(data.routes_reloaded) : null;
                     const metrics = this.normalizeReloadMetrics(data?.metrics);
                     this.lastReload = metrics;
-                    if (metrics && count !== null) {
-                        const durationText = this.formatDuration(metrics.duration_ms);
-                        if (durationText) {
-                            successMessage = `Reloaded ${count} routing rule${count === 1 ? '' : 's'} in ${durationText}.`;
-                        }
-                    }
-                    if (!successMessage) {
-                        successMessage = count !== null
-                            ? `Reloaded ${count} routing rule${count === 1 ? '' : 's'}.`
-                            : 'Routing rules reloaded.';
-                    }
+                    successMessage = this.buildReloadSummary(metrics || (count !== null ? { total: count } : null));
                     await this.fetchRoutes();
                     this.flash = successMessage;
                 } catch (err) {
                     console.error(err);
-                    this.error = err?.message || 'Failed to reload routing rules';
+                    this.error = err?.message || this.translations.failed_reload;
                 } finally {
                     this.reloading = false;
                 }
@@ -1563,7 +1591,7 @@
             async runValidation() {
                 const callee = (this.validationInput || '').trim();
                 if (!callee) {
-                    this.validationError = 'Provide a dialled number to continue.';
+                    this.validationError = this.translations.validation_provide_number;
                     return;
                 }
                 const payload = {
@@ -1610,7 +1638,7 @@
                     const latencyMs = Math.max(1, Math.round(ended - started));
                     this.validationLatencyMs = latencyMs;
                 } catch (err) {
-                    this.validationError = err?.message || 'Routing evaluation failed.';
+                    this.validationError = err?.message || this.translations.validation_eval_failed;
                 } finally {
                     this.validationLoading = false;
                 }
@@ -1619,26 +1647,27 @@
                 const outcome = data?.outcome || {};
                 const type = (outcome.type || 'not_handled').toLowerCase();
                 let status = 'warning';
-                let statusLabel = 'Not handled';
+                let statusLabel = this.translations.status_not_handled;
                 let badgeClass = 'bg-amber-50 text-amber-600 ring-1 ring-amber-200';
-                let outcomeLabel = 'No matching route';
-                let historyDetails = 'No matched route';
+                let outcomeLabel = this.translations.outcome_no_match;
+                let historyDetails = this.translations.outcome_no_match;
                 let defaultRoute = Boolean(data?.default_route);
 
                 if (type === 'forward') {
                     status = 'success';
-                    statusLabel = 'Forwarded';
+                    statusLabel = this.translations.status_forwarded;
                     badgeClass = 'bg-emerald-50 text-emerald-600 ring-1 ring-emerald-200';
                     const destination = outcome.destination || 'destination not set';
-                    outcomeLabel = `Forwarded to ${destination}`;
+                    outcomeLabel = this.translations.outcome_forwarded.replace('{destination}', destination);
                     historyDetails = outcomeLabel;
                 } else if (type === 'abort') {
                     status = 'error';
-                    statusLabel = 'Rejected';
+                    statusLabel = this.translations.status_rejected;
                     badgeClass = 'bg-rose-50 text-rose-600 ring-1 ring-rose-200';
                     const code = outcome.code ? ` ${outcome.code}` : '';
                     const reason = outcome.reason ? ` ${outcome.reason}` : '';
-                    outcomeLabel = `Rejected${code}${reason}`.trim();
+                    const detail = `${code}${reason}`.trim();
+                    outcomeLabel = this.translations.outcome_rejected.replace('{detail}', detail);
                     historyDetails = outcomeLabel;
                 }
 
@@ -1648,7 +1677,7 @@
                 const rewritesDiff = Array.isArray(data?.rewrites) ? data.rewrites : [];
 
                 return {
-                    rule: data?.matched_rule || (defaultRoute ? 'Default route' : null),
+                    rule: data?.matched_rule || (defaultRoute ? this.translations.default_route_label : null),
                     status,
                     statusLabel,
                     badgeClass,
@@ -1669,7 +1698,7 @@
                     rewritesDiff,
                     rewritesText: rewriteOperations.length
                         ? rewriteOperations.join(', ')
-                        : 'No rewrite changes',
+                        : this.translations.no_rewrite_changes,
                     headers: Array.isArray(outcome.headers) ? outcome.headers : [],
                     credential: outcome.credential || null,
                     abort: type === 'abort'

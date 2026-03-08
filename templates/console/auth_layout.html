@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en" x-data="{ darkMode: false }" :class="{ 'dark': darkMode }" class="bg-slate-100 text-sm">
+<html lang="{{ locale | default('en') }}" x-data="{ darkMode: false }" :class="{ 'dark': darkMode }" class="bg-slate-100 text-sm">
 
 <head>
     <meta charset="utf-8" />
@@ -9,6 +9,34 @@
     <link rel="icon" href="{{favicon_url|default('/static/favicon.ico')}}" />
     <title>{% block title %}{{page_title|default('RustPBX Admin')}}{% endblock %}</title>
     {% block js_head %}
+    <script>
+        document.addEventListener('alpine:init', () => {
+            Alpine.data('localeSwitcher', () => ({
+                open: false,
+                current: '{{ locale | default("en") }}',
+                locales: {{ available_locales | json | safe }},
+                flags: {
+                    'en': '🇺🇸', 'en-US': '🇺🇸', 'en-GB': '🇬🇧',
+                    'zh': '🇨🇳', 'zh-CN': '🇨🇳', 'zh-TW': '🇹🇼', 'zh-HK': '🇭🇰',
+                    'ja': '🇯🇵', 'ko': '🇰🇷',
+                    'fr': '🇫🇷', 'de': '🇩🇪', 'es': '🇪🇸',
+                    'pt': '🇧🇷', 'pt-BR': '🇧🇷', 'pt-PT': '🇵🇹',
+                    'it': '🇮🇹', 'ru': '🇷🇺', 'ar': '🇸🇦',
+                    'tr': '🇹🇷', 'pl': '🇵🇱', 'nl': '🇳🇱',
+                    'sv': '🇸🇪', 'da': '🇩🇰', 'fi': '🇫🇮', 'nb': '🇳🇴',
+                    'cs': '🇨🇿', 'sk': '🇸🇰', 'hu': '🇭🇺', 'ro': '🇷🇴',
+                    'uk': '🇺🇦', 'vi': '🇻🇳', 'th': '🇹🇭', 'id': '🇮🇩',
+                    'ms': '🇲🇾', 'he': '🇮🇱', 'el': '🇬🇷', 'hr': '🇭🇷',
+                },
+                flag(code) { return this.flags[code] || '🌐'; },
+                label(locale) { return locale.native_name || locale.name || locale.code; },
+                select(code) {
+                    document.cookie = `locale=${code}; path=/; max-age=31536000; SameSite=Lax`;
+                    window.location.reload();
+                },
+            }));
+        });
+    </script>
     <script defer
         src="{{alpine_js|default('https://cdnjs.cloudflare.com/ajax/libs/alpinejs/3.15.0/cdn.min.js')}}"></script>
     <script
@@ -37,6 +65,50 @@
 
 <body class="min-h-screen bg-slate-100 text-slate-900">
     <div class="min-h-screen">
+        <!-- Top bar with locale switcher -->
+        {% if available_locales and available_locales | length > 1 %}
+        <div class="flex justify-end px-4 pt-4">
+            <div x-data="localeSwitcher()" class="relative" @keydown.escape.window="open=false">
+                <button @click="open=!open" @click.outside="open=false" type="button"
+                    class="flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-sm bg-white/70 hover:bg-white shadow-sm ring-1 ring-black/5 transition-colors"
+                    :aria-expanded="open" aria-haspopup="listbox">
+                    <span x-text="flag(current)" class="text-base leading-none"></span>
+                    <span x-text="current.toUpperCase()" class="hidden sm:inline text-xs font-medium text-slate-600 uppercase tracking-wide"></span>
+                    <svg class="h-3.5 w-3.5 text-slate-400 transition-transform duration-150" :class="{'rotate-180': open}"
+                        xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
+                        <path fill-rule="evenodd"
+                            d="M5.293 7.293a1 1 0 011.414 0L10 10.586l3.293-3.293a1 1 0 111.414 1.414l-4 4a1 1 0 01-1.414 0l-4-4a1 1 0 010-1.414z"
+                            clip-rule="evenodd" />
+                    </svg>
+                </button>
+                <div x-show="open" x-cloak
+                    x-transition:enter="transition ease-out duration-100"
+                    x-transition:enter-start="opacity-0 scale-95"
+                    x-transition:enter-end="opacity-100 scale-100"
+                    x-transition:leave="transition ease-in duration-75"
+                    x-transition:leave-start="opacity-100 scale-100"
+                    x-transition:leave-end="opacity-0 scale-95"
+                    class="absolute right-0 mt-1 w-44 origin-top-right rounded-xl bg-white py-1 shadow-lg ring-1 ring-black/8 z-50"
+                    role="listbox">
+                    <template x-for="loc in locales" :key="loc.code">
+                        <button @click="select(loc.code)" type="button" role="option"
+                            :aria-selected="loc.code === current"
+                            class="flex w-full items-center gap-2.5 px-3 py-2 text-sm transition-colors"
+                            :class="loc.code === current ? 'bg-sky-50 text-sky-700 font-medium' : 'text-slate-700 hover:bg-slate-50'">
+                            <span x-text="flag(loc.code)" class="text-base leading-none w-6 text-center"></span>
+                            <span x-text="label(loc)"></span>
+                            <svg x-show="loc.code === current" class="ml-auto h-4 w-4 text-sky-600 shrink-0"
+                                xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor">
+                                <path fill-rule="evenodd"
+                                    d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z"
+                                    clip-rule="evenodd" />
+                            </svg>
+                        </button>
+                    </template>
+                </div>
+            </div>
+        </div>
+        {% endif %}
         <!-- Main area -->
         <div class="transition-all duration-300 ease-in-out">
             <main class="min-h-[calc(100vh-64px)] bg-slate-50">

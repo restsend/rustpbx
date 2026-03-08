@@ -529,6 +529,7 @@ mod tests {
                 alpine_js: None,
                 tailwind_js: None,
                 chart_js: None,
+                ..Default::default()
             },
         )
         .await

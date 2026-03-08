@@ -5,6 +5,7 @@ use crate::models::system_notification::{
 use axum::{
     Json, Router,
     extract::{Path as AxumPath, State},
+    http::HeaderMap,
     response::{IntoResponse, Response},
     routing::{get, post},
 };
@@ -30,6 +31,7 @@ pub fn urls() -> Router<Arc<ConsoleState>> {
 /// Console page: list all system notifications.
 pub async fn list_notifications(
     State(state): State<Arc<ConsoleState>>,
+    headers: HeaderMap,
     AuthRequired(_): AuthRequired,
 ) -> Response {
     let notifications = Entity::find()
@@ -38,12 +40,13 @@ pub async fn list_notifications(
         .await
         .unwrap_or_default();
 
-    state.render(
+    state.render_with_headers(
         "console/notifications.html",
         json!({
             "nav_active": "notifications",
             "notifications": notifications,
         }),
+        &headers,
     )
 }
 

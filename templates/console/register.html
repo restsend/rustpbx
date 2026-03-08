@@ -1,41 +1,40 @@
 {% extends "console/auth_layout.html" %}
 
-{% block title %}Sign up · {{site_name|default('RustPBX')}}{% endblock %}
+{% block title %}{{ "auth.register" | t }} · {{site_name|default('RustPBX')}}{% endblock %}
 
 {% block content %}
 <section class="flex items-center justify-center py-16 px-4">
     <div class="w-full max-w-2xl overflow-hidden rounded-2xl bg-white/90 shadow-xl ring-1 ring-black/5 backdrop-blur">
         <div class="grid gap-0 md:grid-cols-2">
             <div class="hidden bg-gradient-to-br from-sky-500 via-blue-500 to-indigo-500 p-8 text-white md:block">
-                <h2 class="text-2xl font-semibold">RustPBX Admin</h2>
+                <h2 class="text-2xl font-semibold">{{ "auth.register_admin_title" | t }}</h2>
                 <p class="mt-4 text-sm text-sky-50/90">
-                    Manage SIP endpoints, routing policies, users, and voice services through a modern web console
-                    powered by Tailwind CSS and Alpine.js.
+                    {{ "auth.register_admin_subtitle" | t }}
                 </p>
                 <ul class="mt-6 space-y-3 text-sm text-sky-50/90">
                     <li class="flex items-start gap-3">
                         <span
                             class="mt-1 inline-flex h-6 w-6 items-center justify-center rounded-full bg-white/20 text-xs font-semibold">1</span>
-                        <span>Create an administrator account with your email and username.</span>
+                        <span>{{ "auth.register_step1" | t }}</span>
                     </li>
                     <li class="flex items-start gap-3">
                         <span
                             class="mt-1 inline-flex h-6 w-6 items-center justify-center rounded-full bg-white/20 text-xs font-semibold">2</span>
-                        <span>Access call routing, user management, and media configuration after signing in.</span>
+                        <span>{{ "auth.register_step2" | t }}</span>
                     </li>
                     <li class="flex items-start gap-3">
                         <span
                             class="mt-1 inline-flex h-6 w-6 items-center justify-center rounded-full bg-white/20 text-xs font-semibold">3</span>
-                        <span>Enjoy a responsive interface that works well across devices.</span>
+                        <span>{{ "auth.register_step3" | t }}</span>
                     </li>
                 </ul>
             </div>
             <div class="space-y-6 p-8">
                 <div>
-                    <h1 class="text-2xl font-semibold text-slate-900">Create your administrator account</h1>
+                    <h1 class="text-2xl font-semibold text-slate-900">{{ "auth.register_heading" | t }}</h1>
                     <p class="mt-1 text-sm text-slate-500">
-                        Already registered? <a href="{{ login_url }}"
-                            class="font-medium text-sky-600 hover:text-sky-500">Sign in instead</a>
+                        {{ "auth.register_already" | t }} <a href="{{ login_url }}"
+                            class="font-medium text-sky-600 hover:text-sky-500">{{ "auth.register_sign_in" | t }}</a>
                     </p>
                 </div>
                 {% set registration_closed = registration_closed | default(false) %}
@@ -51,56 +50,55 @@
                 {% endif %}
                 {% if registration_closed %}
                 <div class="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600">
-                    Registration is currently disabled. Please contact your administrator for assistance.
+                    {{ "auth.register_closed" | t }}
                     <p>
-                        Change the configuration <b>console.allow_registration</b> to
-                        <b>true</b> to enable self-service registration.
+                        {{ "auth.register_closed_config" | t }}
                     </p>
                 </div>
                 <div class="text-sm text-slate-500">
-                    <a href="{{ login_url }}" class="font-medium text-sky-600 hover:text-sky-500">Return to sign in</a>
+                    <a href="{{ login_url }}" class="font-medium text-sky-600 hover:text-sky-500">{{ "auth.register_return" | t }}</a>
                 </div>
                 {% else %}
                 <form action="{{ register_action }}" method="post" class="space-y-5">
                     <div class="space-y-2">
-                        <label class="block text-sm font-medium text-slate-700">Email</label>
+                        <label class="block text-sm font-medium text-slate-700">{{ "auth.email" | t }}</label>
                         <input type="email" name="email" value="{{ email }}" required
                             class="w-full rounded-xl border border-slate-200 px-4 py-3 text-sm shadow-sm focus:border-sky-400 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                            placeholder="you@rustpbx.com" />
+                            placeholder="{{ 'auth.email_placeholder' | t }}" />
                     </div>
                     <div class="space-y-2">
-                        <label class="block text-sm font-medium text-slate-700">Username</label>
+                        <label class="block text-sm font-medium text-slate-700">{{ "auth.username" | t }}</label>
                         <input type="text" name="username" value="{{ username }}" minlength="3" required
                             class="w-full rounded-xl border border-slate-200 px-4 py-3 text-sm shadow-sm focus:border-sky-400 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                            placeholder="Choose a username" />
+                            placeholder="{{ 'auth.username_placeholder' | t }}" />
                     </div>
                     {% if invite_required %}
                     <div class="space-y-2">
-                        <label class="block text-sm font-medium text-slate-700">Invite code</label>
+                        <label class="block text-sm font-medium text-slate-700">{{ "auth.invite_code" | t }}</label>
                         <input type="text" name="invite_code" value="{{ invite_value }}" required
                             class="w-full rounded-xl border border-slate-200 px-4 py-3 text-sm shadow-sm focus:border-sky-400 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                            placeholder="Enter the invite code provided by an administrator" />
+                            placeholder="{{ 'auth.invite_placeholder' | t }}" />
                     </div>
                     {% endif %}
                     <div class="space-y-2" x-data="{ reveal: false }">
-                        <label class="block text-sm font-medium text-slate-700">Password</label>
+                        <label class="block text-sm font-medium text-slate-700">{{ "auth.password" | t }}</label>
                         <div class="relative flex items-center">
                             <input :type="reveal ? 'text' : 'password'" name="password" minlength="8" required
                                 class="w-full rounded-xl border border-slate-200 px-4 py-3 pr-12 text-sm shadow-sm focus:border-sky-400 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                placeholder="Use at least 8 characters" />
-                            <button type="button" @click="reveal = !reveal" x-text="reveal ? 'Hide' : 'Show'"
+                                placeholder="{{ 'auth.password_placeholder_new' | t }}" />
+                            <button type="button" @click="reveal = !reveal"
+                                x-text="reveal ? '{{ 'auth.hide' | t }}' : '{{ 'auth.show' | t }}'"
                                 class="absolute right-3 text-xs font-medium text-slate-500"></button>
                         </div>
                     </div>
                     <div class="space-y-2">
-                        <label class="block text-sm font-medium text-slate-700">Confirm password</label>
+                        <label class="block text-sm font-medium text-slate-700">{{ "auth.confirm_password" | t }}</label>
                         <input type="password" name="confirm_password" minlength="8" required
                             class="w-full rounded-xl border border-slate-200 px-4 py-3 text-sm shadow-sm focus:border-sky-400 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                            placeholder="Type the password again" />
+                            placeholder="{{ 'auth.password_placeholder_confirm' | t }}" />
                     </div>
                     <button type="submit"
-                        class="w-full rounded-xl bg-sky-600 px-4 py-3 text-sm font-semibold text-white shadow-lg shadow-sky-200 transition hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-300">Create
-                        account</button>
+                        class="w-full rounded-xl bg-sky-600 px-4 py-3 text-sm font-semibold text-white shadow-lg shadow-sky-200 transition hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-300">{{ "auth.register_button" | t }}</button>
                 </form>
                 {% endif %}
             </div>

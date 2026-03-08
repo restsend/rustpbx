@@ -20,6 +20,7 @@ ENV LANG=C.UTF-8
 
 WORKDIR /app
 COPY --from=rust-builder /build/static /app/static
+COPY --from=rust-builder /build/locales /app/locales
 COPY --from=rust-builder /build/src/addons/acme/static /app/static/acme
 COPY --from=rust-builder /build/src/addons/transcript/static /app/static/transcript
 COPY --from=rust-builder /build/src/addons/queue/static /app/static/queue

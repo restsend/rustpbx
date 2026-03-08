@@ -1,11 +1,12 @@
 {% extends "console/layout.html" %}
-{% block title %}Settings · {{site_name|default('RustPBX')}}{% endblock %}
+{% block title %}{{ "settings.title" | t }} · {{site_name|default('RustPBX')}}{% endblock %}
 {% block content %}
 <div class="p-6">
     <div class="mx-auto max-w-7xl space-y-6" x-data='settingsConsole({
         basePath: {{ (base_path | default("/console")) | tojson }},
         settings: {{ settings | default({}) | tojson }},
-        currentUser: {{ current_user | default({}) | tojson }}
+        currentUser: {{ current_user | default({}) | tojson }},
+        t: {{ t | json | safe }}
     })' x-init="init()">
         <div x-show="appReloadModal.open" x-cloak
             class="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 px-4 py-6"
@@ -13,12 +14,12 @@
             <div class="w-full max-w-3xl rounded-2xl bg-white shadow-2xl ring-1 ring-black/10">
                 <div class="flex items-center justify-between border-b border-slate-200 px-6 py-4">
                     <div>
-                        <h3 class="text-base font-semibold text-slate-900">Reload application</h3>
-                        <p class="text-xs text-slate-500">Validate configuration and restart services safely.</p>
+                        <h3 class="text-base font-semibold text-slate-900">{{ "settings.reload_application" | t }}</h3>
+                        <p class="text-xs text-slate-500">{{ "settings.validate_config_and_restart" | t }}</p>
                     </div>
                     <button type="button" class="rounded-md p-2 text-slate-400 transition hover:text-slate-600"
                         @click="closeReloadModal()" :disabled="appReloading">
-                        <span class="sr-only">Close</span>
+                        <span class="sr-only">{{ "common.close" | t }}</span>
                         <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6">
                             <path stroke-linecap="round" stroke-linejoin="round" d="M6 6l8 8M14 6l-8 8" />
                         </svg>
@@ -26,8 +27,7 @@
                 </div>
                 <div class="px-6 py-4">
                     <div class="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-xs text-slate-600">
-                        <p>This action restarts SIP proxy, user agent, and console services. Active calls will drop and
-                            new requests queue until the restart completes.</p>
+                        <p>{{ "settings.reload_application_desc" | t }}</p>
                     </div>
                     <ul class="mt-4 space-y-3">
                         <template x-for="check in appReloadModal.checks" :key="check.id">
@@ -73,7 +73,7 @@
                         <button type="button"
                             class="inline-flex items-center justify-center rounded-lg border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-600 transition hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-60"
                             @click="closeReloadModal()" :disabled="appReloading && appReloadModal.status === 'running'">
-                            Cancel
+                            {{ "settings.cancel" | t }}
                         </button>
                         <button type="button"
                             class="inline-flex items-center justify-center gap-2 rounded-lg border border-sky-200 bg-white px-5 py-2 text-sm font-semibold text-sky-600 shadow-sm transition hover:border-sky-300 hover:bg-sky-50 focus:outline-none focus:ring-2 focus:ring-sky-200 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60"
@@ -108,13 +108,13 @@
             <div class="w-full max-w-md rounded-2xl bg-white shadow-2xl ring-1 ring-black/10">
                 <div class="flex items-center justify-between border-b border-slate-200 px-6 py-4">
                     <div>
-                        <h3 class="text-base font-semibold text-slate-900">Reload ACL rules</h3>
-                        <p class="text-xs text-slate-500">Apply updated allow/deny lists without restarting the proxy.
+                        <h3 class="text-base font-semibold text-slate-900">{{ "settings.reload_acl_rules" | t }}</h3>
+                        <p class="text-xs text-slate-500">{{ "settings.reload_acl_rules_desc" | t }}
                         </p>
                     </div>
                     <button type="button" class="rounded-md p-2 text-slate-400 transition hover:text-slate-600"
                         @click="closeAclReloadModal()" :disabled="aclReloading">
-                        <span class="sr-only">Close</span>
+                        <span class="sr-only">{{ "common.close" | t }}</span>
                         <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6">
                             <path stroke-linecap="round" stroke-linejoin="round" d="M6 6l8 8M14 6l-8 8" />
                         </svg>
@@ -122,7 +122,7 @@
                 </div>
                 <div class="px-6 py-4">
                     <div class="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-xs text-slate-600">
-                        <p>Live reload updates call admission immediately. Existing calls continue, but new sessions
+                        <p>{{ "settings.live_reload_updates" | t }}</p>
                             follow the refreshed rules.</p>
                     </div>
                     <ul class="mt-4 space-y-3 text-sm text-slate-600">
@@ -130,23 +130,23 @@
                             <span class="mt-1 flex h-2.5 w-2.5 flex-none rounded-full"
                                 :class="aclReloadModal.status === 'success' ? 'bg-emerald-500' : (aclReloadModal.status === 'running' ? 'bg-sky-400 animate-pulse' : 'bg-slate-300')"></span>
                             <div>
-                                <div class="font-semibold text-slate-800">Refresh proxy filters</div>
-                                <div class="text-xs text-slate-500">Send reload command to the SIP proxy.</div>
+                                <div class="font-semibold text-slate-800">{{ "settings.refresh_proxy_filters" | t }}</div>
+                                <div class="text-xs text-slate-500">{{ "settings.refresh_proxy_filters_desc" | t }}</div>
                             </div>
                         </li>
                         <li class="flex items-start gap-3">
                             <span class="mt-1 flex h-2.5 w-2.5 flex-none rounded-full"
                                 :class="aclReloadModal.status === 'success' ? 'bg-emerald-500' : (aclReloadModal.status === 'running' ? 'bg-sky-400 animate-pulse' : 'bg-slate-300')"></span>
                             <div>
-                                <div class="font-semibold text-slate-800">Confirm rule summary</div>
-                                <div class="text-xs text-slate-500">Review new totals and metrics in the panel.</div>
+                                <div class="font-semibold text-slate-800">{{ "settings.confirm_rule_summary" | t }}</div>
+                                <div class="text-xs text-slate-500">{{ "settings.confirm_rule_summary_desc" | t }}</div>
                             </div>
                         </li>
                     </ul>
 
                     <template x-if="aclReloadModal.error">
                         <div class="mt-4 rounded-lg border border-rose-200 bg-rose-50 px-4 py-3 text-xs text-rose-700">
-                            <div class="font-semibold">Reload failed</div>
+                            <div class="font-semibold">{{ "settings.reload_failed_msg" | t }}</div>
                             <p class="mt-1" x-text="aclReloadModal.error"></p>
                         </div>
                     </template>
@@ -190,9 +190,9 @@
 
         <div class="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
             <div>
-                <p class="text-[11px] font-semibold uppercase tracking-wide text-sky-600">Control plane</p>
-                <h1 class="text-2xl font-semibold text-slate-900">Settings</h1>
-                <p class="text-sm text-slate-500">Configure platform behavior, storage, security, and team access.</p>
+                <p class="text-[11px] font-semibold uppercase tracking-wide text-sky-600">{{ "settings.control_plane" | t }}</p>
+                <h1 class="text-2xl font-semibold text-slate-900">{{ "settings.title" | t }}</h1>
+                <p class="text-sm text-slate-500">{{ "settings_page.subtitle" | t }}</p>
             </div>
             <div class="flex flex-wrap items-center gap-2">
                 <template x-if="lastOperation">
@@ -235,53 +235,53 @@
                 <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
                     <div class="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
                         <div>
-                            <h2 class="text-base font-semibold text-slate-900">Runtime overview</h2>
-                            <p class="text-xs text-slate-500">Snapshot of core services and configuration provenance.
+                            <h2 class="text-base font-semibold text-slate-900">{{ "settings_page.runtime_overview" | t }}</h2>
+                            <p class="text-xs text-slate-500">{{ "settings_page.runtime_overview_desc" | t }}
                             </p>
                         </div>
                     </div>
                     <div class="mt-4 space-y-3 text-sm text-slate-600">
                         <div class="flex items-baseline justify-between">
-                            <span class="text-xs uppercase tracking-wide text-slate-400">Address</span>
+                            <span class="text-xs uppercase tracking-wide text-slate-400">{{ "settings_page.address" | t }}</span>
                             <span class="font-mono" x-text="proxyConfig.addr || '—'"></span>
                         </div>
                         <div class="flex items-baseline justify-between">
-                            <span class="text-xs uppercase tracking-wide text-slate-400">Ports</span>
+                            <span class="text-xs uppercase tracking-wide text-slate-400">{{ "settings_page.ports" | t }}</span>
                             <span class="font-mono"
                                 x-text="(proxyConfig.ports || []).map(port => `${port.label}:${port.value}`).join(', ') || '—'"></span>
                         </div>
                         <div class="flex items-baseline justify-between">
-                            <span class="text-xs uppercase tracking-wide text-slate-400">Modules</span>
+                            <span class="text-xs uppercase tracking-wide text-slate-400">{{ "settings_page.modules" | t }}</span>
                             <span
                                 x-text="(proxyConfig.modules || []).length ? proxyConfig.modules.join(', ') : '—'"></span>
                         </div>
                         <div class="flex items-baseline justify-between">
-                            <span class="text-xs uppercase tracking-wide text-slate-400">Realms</span>
+                            <span class="text-xs uppercase tracking-wide text-slate-400">{{ "settings_page.realms" | t }}</span>
                             <span
                                 x-text="(proxyConfig.realms || []).length ? proxyConfig.realms.join(', ') : '—'"></span>
                         </div>
                         <div class="flex items-baseline justify-between">
-                            <span class="text-xs uppercase tracking-wide text-slate-400">Data sources</span>
+                            <span class="text-xs uppercase tracking-wide text-slate-400">{{ "settings_page.data_sources" | t }}</span>
                             <span
                                 x-text="proxyConfig.data_sources ? `Routes · ${proxyConfig.data_sources.routes}, Trunks · ${proxyConfig.data_sources.trunks}` : '—'"></span>
                         </div>
                     </div>
                     <div class="mt-4 rounded-lg border border-slate-200 bg-slate-50 px-4 py-3">
-                        <div class="text-[11px] font-semibold uppercase tracking-wide text-slate-400">Transactions
+                        <div class="text-[11px] font-semibold uppercase tracking-wide text-slate-400">{{ "settings_page.transactions" | t }}
                         </div>
                         <div class="mt-3 grid grid-cols-3 gap-3 text-sm text-slate-700">
                             <div>
-                                <div class="text-xs uppercase tracking-wide text-slate-400">Running</div>
+                                <div class="text-xs uppercase tracking-wide text-slate-400">{{ "settings_page.running" | t }}</div>
                                 <div class="mt-1 font-semibold text-slate-900"
                                     x-text="displayMetric(stats.proxy?.transactions?.running)"></div>
                             </div>
                             <div>
-                                <div class="text-xs uppercase tracking-wide text-slate-400">Finished</div>
+                                <div class="text-xs uppercase tracking-wide text-slate-400">{{ "settings_page.finished" | t }}</div>
                                 <div class="mt-1 font-semibold text-slate-900"
                                     x-text="displayMetric(stats.proxy?.transactions?.finished)"></div>
                             </div>
                             <div>
-                                <div class="text-xs uppercase tracking-wide text-slate-400">Waiting ACK</div>
+                                <div class="text-xs uppercase tracking-wide text-slate-400">{{ "settings_page.waiting_ack" | t }}</div>
                                 <div class="mt-1 font-semibold text-slate-900"
                                     x-text="displayMetric(stats.proxy?.transactions?.waiting_ack)"></div>
                             </div>
@@ -295,19 +295,18 @@
                 <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
                     <div class="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
                         <div>
-                            <h2 class="text-base font-semibold text-slate-900">Platform settings</h2>
-                            <p class="text-xs text-slate-500">Update logging and RTP configuration. Restart required.
+                            <h2 class="text-base font-semibold text-slate-900">{{ "settings_page.platform_settings" | t }}</h2>
+                            <p class="text-xs text-slate-500">{{ "settings_page.platform_settings_desc" | t }}
                             </p>
                         </div>
                     </div>
                     <form class="mt-4 space-y-4" @submit.prevent="savePlatformSettings">
                         <div class="grid gap-4 md:grid-cols-2">
                             <div>
-                                <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Log
-                                    level</label>
+                                <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">{{ "settings_page.log_level" | t }}</label>
                                 <select x-model="platformDraft.log_level" :disabled="platformProcessing"
                                     class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
-                                    <option value="">Default</option>
+                                    <option value="">{{ "common.default" | t }}</option>
                                     <option value="trace">Trace</option>
                                     <option value="debug">Debug</option>
                                     <option value="info">Info</option>
@@ -316,32 +315,28 @@
                                 </select>
                             </div>
                             <div>
-                                <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Log
-                                    file</label>
+                                <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">{{ "settings_page.log_file" | t }}</label>
                                 <input type="text" x-model="platformDraft.log_file" :disabled="platformProcessing"
                                     class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                                     placeholder="/var/log/rustpbx.log" />
                             </div>
                         </div>
                         <div>
-                            <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">External
-                                IP</label>
+                            <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">{{ "settings_page.external_ip" | t }}</label>
                             <input type="text" x-model="platformDraft.external_ip" :disabled="platformProcessing"
                                 class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                                 placeholder="1.2.3.4" />
                         </div>
                         <div class="grid gap-4 sm:grid-cols-2">
                             <div>
-                                <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">RTP
-                                    start port</label>
+                                <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">{{ "settings_page.rtp_start_port" | t }}</label>
                                 <input type="number" min="1" max="65535" x-model="platformDraft.rtp_start_port"
                                     :disabled="platformProcessing"
                                     class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                                     placeholder="12000" />
                             </div>
                             <div>
-                                <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">RTP
-                                    end port</label>
+                                <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">{{ "settings_page.rtp_end_port" | t }}</label>
                                 <input type="number" min="1" max="65535" x-model="platformDraft.rtp_end_port"
                                     :disabled="platformProcessing"
                                     class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
@@ -350,17 +345,17 @@
                         </div>
                         <div
                             class="flex items-center justify-between gap-2 border-t border-slate-200 pt-3 text-xs text-slate-500">
-                            <span>Changes apply after a restart.</span>
+                            <span>{{ "settings_page.changes_apply_restart" | t }}</span>
                             <div class="flex gap-2">
                                 <button type="button"
                                     class="inline-flex items-center justify-center rounded-md border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-600 transition hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-60"
                                     @click="resetPlatformDraft" :disabled="platformProcessing">
-                                    Reset
+                                    {{ "common.reset" | t }}
                                 </button>
                                 <button type="submit"
                                     class="inline-flex items-center justify-center rounded-md bg-sky-600 px-3 py-2 text-xs font-semibold text-white shadow-sm transition hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60"
                                     :disabled="platformProcessing">
-                                    <span x-text="platformProcessing ? 'Saving…' : 'Save changes'"></span>
+                                    <span x-text="platformProcessing ? tt('common.saving') : tt('common.save_changes')"></span>
                                 </button>
                             </div>
                         </div>
@@ -371,8 +366,8 @@
             <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
                 <div class="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
                     <div>
-                        <h2 class="text-base font-semibold text-slate-900">Key configuration</h2>
-                        <p class="text-xs text-slate-500">Selected settings from the active configuration file.</p>
+                        <h2 class="text-base font-semibold text-slate-900">{{ "settings_page.key_config" | t }}</h2>
+                        <p class="text-xs text-slate-500">{{ "settings_page.key_config_desc" | t }}</p>
                     </div>
                 </div>
                 <div class="mt-4 overflow-x-auto">
@@ -380,15 +375,14 @@
                         <thead
                             class="bg-slate-50 text-left text-xs font-semibold uppercase tracking-wide text-slate-500">
                             <tr>
-                                <th class="px-4 py-2">Key</th>
-                                <th class="px-4 py-2">Value</th>
+                                <th class="px-4 py-2">{{ "settings_page.key" | t }}</th>
+                                <th class="px-4 py-2">{{ "settings_page.value" | t }}</th>
                             </tr>
                         </thead>
                         <tbody class="divide-y divide-slate-100">
                             <template x-if="!keyConfigRows().length">
                                 <tr>
-                                    <td class="px-4 py-3 text-xs text-slate-400" colspan="2">No configuration
-                                        metadata available.</td>
+                                    <td class="px-4 py-3 text-xs text-slate-400" colspan="2">{{ "settings_page.no_config" | t }}</td>
                                 </tr>
                             </template>
                             <template x-for="item in keyConfigRows()" :key="item.label">
@@ -415,19 +409,16 @@
                 <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
                     <div class="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
                         <div>
-                            <h2 class="text-base font-semibold text-slate-900">Proxy configuration</h2>
-                            <p class="text-xs text-slate-500">Configure realms, user backends, and external routing
-                                integrations.</p>
+                            <h2 class="text-base font-semibold text-slate-900">{{ "settings_page.proxy_config" | t }}</h2>
+                            <p class="text-xs text-slate-500">{{ "settings_page.proxy_config_desc" | t }}</p>
                         </div>
                     </div>
                     <form class="mt-6 space-y-8" @submit.prevent="saveProxySettings">
                         <!-- Realms Section -->
                         <div class="space-y-4">
                             <div>
-                                <label class="block text-sm font-semibold text-slate-900">Realms</label>
-                                <p class="mt-1 text-xs text-slate-500">Realms are used to partition the SIP namespace.
-                                    They determine which domain names the proxy will accept and how users are challenged
-                                    for authentication. Each line is a realm (e.g., example.com).</p>
+                                <label class="block text-sm font-semibold text-slate-900">{{ "settings_page.realms_label" | t }}</label>
+                                <p class="mt-1 text-xs text-slate-500">{{ "settings_page.realms_desc" | t }}</p>
                                 <textarea x-model="proxyDraft.realms" :disabled="proxyProcessing" rows="3"
                                     class="mt-2 block w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                                     placeholder="localhost&#10;example.com"></textarea>
@@ -439,15 +430,13 @@
                         <!-- Locator Webhook -->
                         <div class="space-y-4">
                             <div>
-                                <h3 class="text-sm font-semibold text-slate-900">Locator webhook</h3>
-                                <p class="text-xs text-slate-500">Receive real-time notifications when users register,
-                                    unregister, or go offline.</p>
+                                <h3 class="text-sm font-semibold text-slate-900">{{ "settings_page.locator_webhook" | t }}</h3>
+                                <p class="text-xs text-slate-500">{{ "settings_page.locator_webhook_desc" | t }}</p>
                             </div>
                             <div class="grid gap-4 md:grid-cols-2">
                                 <div class="md:col-span-1">
                                     <label
-                                        class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Webhook
-                                        URL</label>
+                                        class="block text-xs font-semibold uppercase tracking-wide text-slate-400">{{ "settings_page.webhook_url" | t }}</label>
                                     <input type="url" x-model="proxyDraft.locator_webhook.url"
                                         :disabled="proxyProcessing"
                                         class="mt-1 block w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
@@ -455,8 +444,7 @@
                                 </div>
                                 <div class="md:col-span-1">
                                     <label
-                                        class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Timeout
-                                        (ms)</label>
+                                        class="block text-xs font-semibold uppercase tracking-wide text-slate-400">{{ "settings_page.timeout_ms" | t }}</label>
                                     <input type="number" x-model="proxyDraft.locator_webhook.timeout_ms"
                                         :disabled="proxyProcessing"
                                         class="mt-1 block w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
@@ -464,8 +452,7 @@
                                 </div>
                                 <div class="md:col-span-2">
                                     <label
-                                        class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Custom
-                                        Headers</label>
+                                        class="block text-xs font-semibold uppercase tracking-wide text-slate-400">{{ "settings_page.custom_headers" | t }}</label>
                                     <textarea x-model="proxyDraft.locator_webhook.headers" :disabled="proxyProcessing"
                                         rows="2"
                                         class="mt-1 block w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
@@ -494,14 +481,13 @@
                         <div class="space-y-4">
                             <div class="flex items-center justify-between">
                                 <div>
-                                    <h3 class="text-sm font-semibold text-slate-900">User backends</h3>
-                                    <p class="text-xs text-slate-500">Configure how users are authenticated and
-                                        retrieved.</p>
+                                    <h3 class="text-sm font-semibold text-slate-900">{{ "settings_page.user_backends" | t }}</h3>
+                                    <p class="text-xs text-slate-500">{{ "settings_page.user_backends_desc" | t }}</p>
                                 </div>
                                 <div class="relative" x-data="{ open: false }" @click.away="open = false">
                                     <button type="button" @click="open = !open"
                                         class="inline-flex items-center gap-2 rounded-md bg-white px-3 py-1.5 text-xs font-semibold text-sky-600 shadow-sm ring-1 ring-inset ring-sky-200 hover:bg-sky-50">
-                                        Add backend
+                                        {{ "settings_page.add_backend" | t }}
                                         <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="currentColor">
                                             <path fill-rule="evenodd"
                                                 d="M5.23 7.21a.75.75 0 011.06.02L10 11.168l3.71-3.938a.75.75 0 111.08 1.04l-4.25 4.5a.75.75 0 01-1.08 0l-4.25-4.5a.75.75 0 01.02-1.06z"
@@ -513,19 +499,19 @@
                                         <div class="py-1" role="menu">
                                             <button type="button" @click="addUserBackend('memory'); open = false"
                                                 class="block w-full px-4 py-2 text-left text-xs text-slate-700 hover:bg-slate-100"
-                                                role="menuitem">Memory (Config file)</button>
+                                                role="menuitem">{{ "settings_page.memory_config" | t }}</button>
                                             <button type="button" @click="addUserBackend('http'); open = false"
                                                 class="block w-full px-4 py-2 text-left text-xs text-slate-700 hover:bg-slate-100"
-                                                role="menuitem">HTTP Webhook</button>
+                                                role="menuitem">{{ "settings_page.http_webhook" | t }}</button>
                                             <button type="button" @click="addUserBackend('database'); open = false"
                                                 class="block w-full px-4 py-2 text-left text-xs text-slate-700 hover:bg-slate-100"
-                                                role="menuitem">Database</button>
+                                                role="menuitem">{{ "settings_page.database" | t }}</button>
                                             <button type="button" @click="addUserBackend('plain'); open = false"
                                                 class="block w-full px-4 py-2 text-left text-xs text-slate-700 hover:bg-slate-100"
-                                                role="menuitem">Plain file</button>
+                                                role="menuitem">{{ "settings_page.plain_file" | t }}</button>
                                             <button type="button" @click="addUserBackend('extension'); open = false"
                                                 class="block w-full px-4 py-2 text-left text-xs text-slate-700 hover:bg-slate-100"
-                                                role="menuitem">Extension (Internal DB)</button>
+                                                role="menuitem">{{ "settings_page.extension_db" | t }}</button>
                                         </div>
                                     </div>
                                 </div>
@@ -638,23 +624,20 @@
                         <!-- HTTP Call Router -->
                         <div class="space-y-4">
                             <div>
-                                <h3 class="text-sm font-semibold text-slate-900">HTTP call router</h3>
-                                <p class="text-xs text-slate-500">Determine call destinations dynamically by querying an
-                                    external HTTP service.</p>
+                                <h3 class="text-sm font-semibold text-slate-900">{{ "settings_page.router_backend" | t }}</h3>
+                                <p class="text-xs text-slate-500">{{ "settings_page.router_backend_desc" | t }}</p>
                             </div>
                             <div class="grid gap-4 md:grid-cols-2">
                                 <div class="md:col-span-1">
                                     <label
-                                        class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Router
-                                        URL</label>
+                                        class="block text-xs font-semibold uppercase tracking-wide text-slate-400">{{ "settings_page.router_url" | t }}</label>
                                     <input type="url" x-model="proxyDraft.http_router.url" :disabled="proxyProcessing"
                                         class="mt-1 block w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                                         placeholder="https://api.example.com/route-call">
                                 </div>
                                 <div class="md:col-span-1">
                                     <label
-                                        class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Timeout
-                                        (ms)</label>
+                                        class="block text-xs font-semibold uppercase tracking-wide text-slate-400">{{ "settings_page.router_timeout" | t }}</label>
                                     <input type="number" x-model="proxyDraft.http_router.timeout_ms"
                                         :disabled="proxyProcessing"
                                         class="mt-1 block w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
@@ -693,7 +676,7 @@
                             </button>
                             <button type="submit" :disabled="proxyProcessing"
                                 class="rounded-md bg-sky-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-offset-2">
-                                <span x-text="proxyProcessing ? 'Saving…' : 'Save proxy settings'"></span>
+                                <span x-text="proxyProcessing ? tt('common.saving') : tt('settings_page.save_proxy_settings')"></span>
                             </button>
                         </div>
                     </form>
@@ -707,23 +690,21 @@
                 <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
                     <div class="flex flex-col gap-2 md:flex-row md:items-end md:justify-between">
                         <div>
-                            <h2 class="text-base font-semibold text-slate-900">Storage destinations</h2>
-                            <p class="text-xs text-slate-500">Choose between local disk and S3-compatible buckets
-                                for recordings and diagnostics.</p>
+                            <h2 class="text-base font-semibold text-slate-900">{{ "settings_page.storage_destinations" | t }}</h2>
+                            <p class="text-xs text-slate-500">{{ "settings_page.storage_destinations_desc" | t }}</p>
                         </div>
                         <span class="text-xs font-semibold uppercase tracking-wide text-slate-400">
-                            Active profile · <span class="text-sky-600"
+                            {{ "common.active" | t }} · <span class="text-sky-600"
                                 x-text="selectedStorageProfileData?.label || storageModeLabel(server.storage?.mode)"></span>
                         </span>
                     </div>
                     <form class="mt-4 space-y-4" @submit.prevent="saveStorageSettings">
                         <div>
-                            <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Storage
-                                Mode</label>
+                            <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">{{ "settings_page.storage_backend" | t }}</label>
                             <select x-model="storageDraft.callrecord_mode" :disabled="storageProcessing"
                                 class="mt-1 block w-full rounded-md border-slate-200 py-2 pl-3 pr-10 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
-                                <option value="disabled">Disabled</option>
-                                <option value="local">Local Filesystem</option>
+                                <option value="disabled">{{ "settings_page.disabled" | t }}</option>
+                                <option value="local">{{ "settings_page.local_filesystem" | t }}</option>
                                 <option value="s3">S3 Compatible Object Store</option>
                             </select>
                         </div>
@@ -810,14 +791,14 @@
                                             class="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-500"
                                             x-model="storageDraft.callrecord_s3_with_media"
                                             :disabled="storageProcessing">
-                                        <span>Upload media files</span>
+                                        <span>{{ "settings_page.upload_media" | t }}</span>
                                     </label>
                                     <label class="flex items-center gap-2 text-sm font-semibold text-slate-600">
                                         <input type="checkbox"
                                             class="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-500"
                                             x-model="storageDraft.callrecord_s3_keep_media_copy"
                                             :disabled="storageProcessing">
-                                        <span>Keep local copy</span>
+                                        <span>{{ "settings_page.keep_local_copy" | t }}</span>
                                     </label>
                                 </div>
                             </div>
@@ -830,7 +811,7 @@
                                         <path stroke-linecap="round" stroke-linejoin="round"
                                             d="M13 10V3L4 14h7v7l9-11h-7z" />
                                     </svg>
-                                    <span>Test Connection</span>
+                                    <span>{{ "settings_page.test_connection_btn" | t }}</span>
                                 </button>
                             </div>
                         </div>
@@ -838,12 +819,12 @@
                             <button type="button"
                                 class="inline-flex items-center justify-center rounded-lg border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-600 transition hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-60"
                                 @click="resetStorageDraft()" :disabled="storageProcessing">
-                                Reset
+                                {{ "common.reset" | t }}
                             </button>
                             <button type="submit"
                                 class="inline-flex items-center justify-center rounded-lg bg-sky-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60"
                                 :disabled="storageProcessing">
-                                Save Changes
+                                {{ "common.save" | t }}
                             </button>
                         </div>
                     </form>
@@ -857,12 +838,11 @@
             <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
                 <div class="flex flex-col gap-2 md:flex-row md:items-end md:justify-between">
                     <div>
-                        <h2 class="text-base font-semibold text-slate-900">SipFlow - Advanced Recording System</h2>
-                        <p class="text-xs text-slate-500">Unified SIP+RTP recording with optimized I/O pattern for 1000+
-                            concurrent calls.</p>
+                        <h2 class="text-base font-semibold text-slate-900">{{ "settings_page.sipflow_title" | t }}</h2>
+                        <p class="text-xs text-slate-500">{{ "settings_page.sipflow_desc" | t }}</p>
                     </div>
                     <span class="text-xs font-semibold uppercase tracking-wide text-slate-400">
-                        Backend · <span
+                        {{ "settings_page.recording_backend" | t }} · <span
                             :class="sipflowSettings.backend_type !== 'none' ? 'text-emerald-600' : 'text-slate-400'"
                             x-text="sipflowSettings.backend_type || 'none'"></span>
                     </span>
@@ -874,19 +854,17 @@
                                 d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
                         </svg>
                         <div>
-                            <p class="font-semibold">Better I/O performance than legacy call recording</p>
-                            <p class="mt-1">Open-write-close pattern avoids FD exhaustion. Supports 1000+ concurrent
-                                calls with hourly file organization.</p>
+                            <p class="font-semibold">{{ "settings_page.better_io_performance" | t }}</p>
+                            <p class="mt-1">{{ "settings_page.concurrent_calls_support" | t }}</p>
                         </div>
                     </div>
                 </div>
                 <form class="mt-4 space-y-4" @submit.prevent="saveSipFlowSettings">
                     <div>
-                        <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Backend
-                            Type</label>
+                        <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">{{ "settings_page.recording_backend" | t }}</label>
                         <select x-model="sipflowDraft.backend_type" :disabled="sipflowProcessing"
                             class="mt-1 block w-full rounded-md border-slate-200 py-2 pl-3 pr-10 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
-                            <option value="none">Disabled</option>
+                            <option value="none">{{ "settings_page.disabled" | t }}</option>
                             <option value="local">Local SQLite + Structured files</option>
                             <option value="remote">Remote via UDP/HTTP</option>
                         </select>
@@ -982,7 +960,7 @@
 
                     <div
                         class="flex items-center justify-between gap-2 border-t border-slate-200 pt-3 text-xs text-slate-500">
-                        <span>Restart required to apply changes.</span>
+                        <span>{{ "settings_page.restart_required_apply" | t }}</span>
                         <div class="flex gap-2">
                             <button type="button"
                                 class="inline-flex items-center justify-center rounded-md border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-600 transition hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-60"
@@ -992,7 +970,7 @@
                             <button type="submit"
                                 class="inline-flex items-center justify-center rounded-md bg-sky-600 px-3 py-2 text-xs font-semibold text-white shadow-sm transition hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60"
                                 :disabled="sipflowProcessing">
-                                <span x-text="sipflowProcessing ? 'Saving…' : 'Save changes'"></span>
+                                <span x-text="sipflowProcessing ? tt('common.saving') : tt('common.save_changes')"></span>
                             </button>
                         </div>
                     </div>
@@ -1005,16 +983,14 @@
             <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
                 <div class="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
                     <div>
-                        <h2 class="text-base font-semibold text-slate-900">Recording policy</h2>
-                        <p class="text-xs text-slate-500">Enable automatic media capture based on caller and callee
-                            rules.</p>
+                        <h2 class="text-base font-semibold text-slate-900">{{ "settings_page.recording_policy" | t }}</h2>
+                        <p class="text-xs text-slate-500">{{ "settings_page.recording_policy_desc" | t }}</p>
                     </div>
                 </div>
                 <form class="mt-4 space-y-4" @submit.prevent="saveStorageSettings">
                     <div class="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
                         <div>
-                            <label class="text-xs font-semibold uppercase tracking-wide text-slate-400">Policy
-                                status</label>
+                            <label class="text-xs font-semibold uppercase tracking-wide text-slate-400">{{ "settings_page.policy_enabled" | t }}</label>
                             <p class="text-xs text-slate-500">Toggle recording and adjust rules for directions,
                                 identities, and output format.</p>
                         </div>
@@ -1022,7 +998,7 @@
                             <input type="checkbox"
                                 class="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-500"
                                 x-model="storageDraft.recording_enabled" :disabled="storageProcessing">
-                            <span>Enable</span>
+                            <span>{{ "settings_page.enable_recording" | t }}</span>
                         </label>
                     </div>
                     <div x-show="storageDraft.recording_enabled" x-cloak
@@ -1181,7 +1157,7 @@
                     </div>
                     <div
                         class="flex items-center justify-between gap-2 border-t border-slate-200 pt-3 text-xs text-slate-500">
-                        <span>Restart required to apply.</span>
+                        <span>{{ "settings_page.restart_required_apply" | t }}</span>
                         <div class="flex gap-2">
                             <button type="button"
                                 class="inline-flex items-center justify-center rounded-md border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-600 transition hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-60"
@@ -1191,7 +1167,7 @@
                             <button type="submit"
                                 class="inline-flex items-center justify-center rounded-md bg-sky-600 px-3 py-2 text-xs font-semibold text-white shadow-sm transition hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60"
                                 :disabled="storageProcessing">
-                                <span x-text="storageProcessing ? 'Saving…' : 'Save changes'"></span>
+                                <span x-text="storageProcessing ? tt('common.saving') : tt('common.save_changes')"></span>
                             </button>
                         </div>
                     </div>
@@ -1206,39 +1182,36 @@
                     <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
                         <div class="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
                             <div>
-                                <h2 class="text-base font-semibold text-slate-900">Access control lists</h2>
-                                <p class="text-xs text-slate-500">Network admission rules from config files and embedded
-                                    sets.</p>
+                                <h2 class="text-base font-semibold text-slate-900">{{ "settings_page.acl_title" | t }}</h2>
+                                <p class="text-xs text-slate-500">{{ "settings_page.acl_desc" | t }}</p>
                             </div>
                             <div class="text-right text-xs text-slate-500">
                                 <div class="text-sm font-semibold text-slate-800"
-                                    x-text="acl.active_rules.length ? acl.active_rules.length + ' active' : 'No rules'">
+                                    x-text="acl.active_rules.length ? acl.active_rules.length + ' ' + tt('settings_page.acl_active') : tt('settings_page.acl_no_rules')">
                                 </div>
-                                <div class="text-[11px] uppercase tracking-wide">Rule status</div>
+                                <div class="text-[11px] uppercase tracking-wide">{{ "settings_page.rule_status" | t }}</div>
                             </div>
                         </div>
                         <div class="mt-4 grid gap-3 sm:grid-cols-3">
                             <div class="rounded-lg border border-slate-200 px-4 py-3">
-                                <div class="text-[11px] font-semibold uppercase tracking-wide text-slate-400">Embedded
-                                    definitions</div>
+                                <div class="text-[11px] font-semibold uppercase tracking-wide text-slate-400">{{ "settings_page.embedded_rules" | t }}</div>
                                 <div class="mt-1 text-sm font-semibold text-slate-800" x-text="acl.embedded_count || 0">
                                 </div>
-                                <div class="text-xs text-slate-500">Rules baked into config.</div>
+                                <div class="text-xs text-slate-500">{{ "settings_page.embedded_rules_desc" | t }}</div>
                             </div>
                             <div class="rounded-lg border border-slate-200 px-4 py-3">
-                                <div class="text-[11px] font-semibold uppercase tracking-wide text-slate-400">File
-                                    sources</div>
+                                <div class="text-[11px] font-semibold uppercase tracking-wide text-slate-400">{{ "settings_page.file_rules" | t }}</div>
                                 <div class="mt-1 text-sm font-semibold text-slate-800"
-                                    x-text="acl.file_patterns.length ? acl.file_patterns.join(', ') : 'Inline only'">
+                                    x-text="acl.file_patterns.length ? acl.file_patterns.join(', ') : tt('settings_page.acl_inline_only')">
                                 </div>
-                                <div class="text-xs text-slate-500">Glob patterns watched for ACL files.</div>
+                                <div class="text-xs text-slate-500">{{ "settings_page.file_rules_desc" | t }}</div>
                             </div>
                             <div class="rounded-lg border border-slate-200 px-4 py-3">
                                 <div class="text-[11px] font-semibold uppercase tracking-wide text-slate-400">Reload
                                     support</div>
                                 <div class="mt-1 text-sm font-semibold"
                                     :class="acl.reload_supported ? 'text-emerald-600' : 'text-rose-600'"
-                                    x-text="acl.reload_supported ? 'Available' : 'Proxy offline'"></div>
+                                    x-text="acl.reload_supported ? tt('settings_page.acl_available') : tt('settings_page.acl_proxy_offline')"></div>
                                 <div class="text-xs text-slate-500">Live reload requires the SIP proxy.</div>
                             </div>
                         </div>
@@ -1363,7 +1336,7 @@
                             </div>
                             <div
                                 class="flex items-center justify-between gap-2 border-t border-slate-200 pt-3 text-xs text-slate-500">
-                                <span>Restart required to apply.</span>
+                                <span>{{ "settings_page.restart_required_apply" | t }}</span>
                                 <div class="flex gap-2">
                                     <button type="button"
                                         class="inline-flex items-center justify-center rounded-md border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-600 transition hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-60"
@@ -1373,7 +1346,7 @@
                                     <button type="submit"
                                         class="inline-flex items-center justify-center rounded-md bg-sky-600 px-3 py-2 text-xs font-semibold text-white shadow-sm transition hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60"
                                         :disabled="securityProcessing">
-                                        <span x-text="securityProcessing ? 'Saving…' : 'Save changes'"></span>
+                                        <span x-text="securityProcessing ? tt('common.saving') : tt('common.save_changes')"></span>
                                     </button>
                                 </div>
                             </div>
@@ -1389,9 +1362,8 @@
                     <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
                         <div class="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
                             <div>
-                                <h2 class="text-base font-semibold text-slate-900">Departments</h2>
-                                <p class="text-xs text-slate-500">Manage contact metadata and escalation notes for each
-                                    business unit.</p>
+                                <h2 class="text-base font-semibold text-slate-900">{{ "settings_page.departments" | t }}</h2>
+                                <p class="text-xs text-slate-500">{{ "settings_page.departments_desc" | t }}</p>
                             </div>
                             <div class="flex flex-wrap items-center gap-2 text-xs font-semibold text-slate-500">
                                 <span class="rounded-full bg-slate-100 px-2 py-0.5 text-slate-600"
@@ -1462,7 +1434,7 @@
                                                 <div class="flex flex-col items-end gap-1 text-right">
                                                     <span
                                                         class="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-semibold text-slate-600"
-                                                        x-text="dept.manager_contact || 'No contact'"></span>
+                                                        x-text="dept.manager_contact || tt('settings_page.no_contact')"></span>
                                                     <span class="text-[11px] text-slate-400"
                                                         x-text="'Updated · ' + formatDateTime(dept.updated_at)"></span>
                                                 </div>
@@ -1489,7 +1461,7 @@
                                                     <div class="flex flex-col items-end gap-2 text-xs">
                                                         <span
                                                             class="rounded-full bg-slate-100 px-2 py-0.5 font-semibold text-slate-600"
-                                                            x-text="selectedDepartment.color || 'No color'"></span>
+                                                            x-text="selectedDepartment.color || tt('settings_page.no_color')"></span>
                                                         <div class="flex items-center gap-2">
                                                             <button type="button"
                                                                 class="inline-flex items-center gap-1 rounded-md border border-slate-200 px-2 py-1 font-semibold text-slate-600 transition hover:border-slate-300 hover:text-slate-800"
@@ -1521,9 +1493,9 @@
                                                             x-text="selectedDepartment.slug || '—'"></span>
                                                     </div>
                                                     <div class="flex items-center justify-between">
-                                                        <span>Manager contact</span>
+                                                        <span>{{ "settings_page.department_manager_contact" | t }}</span>
                                                         <span class="font-semibold text-slate-700"
-                                                            x-text="selectedDepartment.manager_contact || 'Not set'"></span>
+                                                            x-text="selectedDepartment.manager_contact || tt('settings_page.not_set')"></span>
                                                     </div>
                                                     <div class="flex items-center justify-between">
                                                         <span>Created</span>
@@ -1544,7 +1516,7 @@
                                                     </p>
                                                 </div>
                                                 <div>
-                                                    <div class="text-xs uppercase tracking-wide text-slate-400">Metadata
+                                                    <div class="text-xs uppercase tracking-wide text-slate-400">{{ "settings_page.department_metadata" | t }}
                                                     </div>
                                                     <pre class="mt-1 max-h-40 overflow-auto rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600"
                                                         x-text="formatMetadata(selectedDepartment.metadata)"></pre>
@@ -1559,55 +1531,55 @@
                                                 <header class="flex items-center justify-between">
                                                     <div>
                                                         <div class="text-xs uppercase tracking-wide text-slate-400"
-                                                            x-text="departmentFormMode === 'edit' ? 'Update department' : 'Create department'">
+                                                            x-text="departmentFormMode === 'edit' ? tt('settings_page.update_department') : tt('settings_page.create_department')">
                                                         </div>
                                                         <h3 class="text-base font-semibold text-slate-900"
-                                                            x-text="departmentFormMode === 'edit' ? 'Edit department' : 'New department'">
+                                                            x-text="departmentFormMode === 'edit' ? tt('settings_page.edit_department') : tt('settings_page.new_department')">
                                                         </h3>
                                                     </div>
                                                     <button type="button"
                                                         class="text-xs font-semibold text-slate-400 transition hover:text-slate-600"
-                                                        @click="cancelDepartmentForm()">Cancel</button>
+                                                        @click="cancelDepartmentForm()">{{ "common.cancel" | t }}</button>
                                                 </header>
                                                 <div class="grid gap-4 md:grid-cols-2">
                                                     <label
                                                         class="flex flex-col gap-1 text-sm font-medium text-slate-700">
-                                                        Name
+                                                        {{ "settings_page.department_name" | t }}
                                                         <input type="text" x-model="departmentDraft.name" required
                                                             class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                                                             placeholder="e.g. Customer success">
                                                     </label>
                                                     <label
                                                         class="flex flex-col gap-1 text-sm font-medium text-slate-700">
-                                                        Display label
+                                                        {{ "settings_page.department_display_label" | t }}
                                                         <input type="text" x-model="departmentDraft.display_label"
                                                             class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                                                             placeholder="Optional friendly name">
                                                     </label>
                                                     <label
                                                         class="flex flex-col gap-1 text-sm font-medium text-slate-700">
-                                                        Slug
+                                                        {{ "settings_page.department_slug" | t }}
                                                         <input type="text" x-model="departmentDraft.slug"
                                                             class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                                                             placeholder="auto-generated if left blank">
                                                     </label>
                                                     <label
                                                         class="flex flex-col gap-1 text-sm font-medium text-slate-700">
-                                                        Color
+                                                        {{ "settings_page.department_color" | t }}
                                                         <input type="text" x-model="departmentDraft.color"
                                                             class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                                                             placeholder="#0EA5E9">
                                                     </label>
                                                     <label
                                                         class="flex flex-col gap-1 text-sm font-medium text-slate-700 md:col-span-2">
-                                                        Manager contact
+                                                        {{ "settings_page.department_manager_contact" | t }}
                                                         <input type="text" x-model="departmentDraft.manager_contact"
                                                             class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                                                             placeholder="Name or email">
                                                     </label>
                                                 </div>
                                                 <label class="flex flex-col gap-1 text-sm font-medium text-slate-700">
-                                                    Description
+                                                    {{ "settings_page.department_description" | t }}
                                                     <textarea rows="3" x-model="departmentDraft.description"
                                                         class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                                                         placeholder="Purpose, responsibilities, or escalation details."></textarea>
@@ -1623,7 +1595,7 @@
                                                 <div class="flex items-center justify-end gap-3">
                                                     <button type="button"
                                                         class="inline-flex items-center justify-center rounded-lg border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-600 transition hover:bg-slate-100"
-                                                        @click="cancelDepartmentForm()">Cancel</button>
+                                                        @click="cancelDepartmentForm()">{{ "common.cancel" | t }}</button>
                                                     <button type="submit"
                                                         class="inline-flex items-center justify-center gap-2 rounded-lg bg-sky-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-offset-2"
                                                         :disabled="departmentProcessing.save">
@@ -1633,7 +1605,7 @@
                                                                 d="M5 10l3 3 7-7" />
                                                         </svg>
                                                         <span
-                                                            x-text="departmentProcessing.save ? 'Saving…' : 'Save department'"></span>
+                                                            x-text="departmentProcessing.save ? tt('common.saving') : tt('settings_page.save_department')"></span>
                                                     </button>
                                                 </div>
                                             </form>
@@ -1654,9 +1626,8 @@
                     <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
                         <div class="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
                             <div>
-                                <h2 class="text-base font-semibold text-slate-900">Users</h2>
-                                <p class="text-xs text-slate-500">Provision console access and enforce privileged
-                                    account policies.</p>
+                                <h2 class="text-base font-semibold text-slate-900">{{ "settings_page.users_title" | t }}</h2>
+                                <p class="text-xs text-slate-500">{{ "settings_page.users_desc" | t }}</p>
                             </div>
                             <div class="flex flex-wrap items-center gap-2 text-xs font-semibold text-slate-500">
                                 <span class="rounded-full bg-slate-100 px-2 py-0.5 text-slate-600"
@@ -1810,13 +1781,13 @@
                                                 <div class="flex flex-wrap gap-2 text-[11px]">
                                                     <span class="rounded-full px-2 py-0.5 font-semibold"
                                                         :class="selectedUser.is_active ? 'bg-emerald-50 text-emerald-600 ring-1 ring-emerald-100' : 'bg-amber-50 text-amber-600 ring-1 ring-amber-100'"
-                                                        x-text="selectedUser.is_active ? 'Login enabled' : 'Login disabled'"></span>
+                                                        x-text="selectedUser.is_active ? tt('settings_page.login_enabled') : tt('settings_page.login_disabled')"></span>
                                                     <span class="rounded-full px-2 py-0.5 font-semibold"
                                                         :class="selectedUser.is_staff ? 'bg-sky-50 text-sky-600 ring-1 ring-sky-100' : 'bg-slate-100 text-slate-600 ring-1 ring-slate-200'"
-                                                        x-text="selectedUser.is_staff ? 'Staff privileges' : 'Standard user'"></span>
+                                                        x-text="selectedUser.is_staff ? tt('settings_page.staff_privileges') : tt('settings_page.standard_user')"></span>
                                                     <span class="rounded-full px-2 py-0.5 font-semibold"
                                                         :class="selectedUser.is_superuser ? 'bg-purple-50 text-purple-600 ring-1 ring-purple-100' : 'bg-slate-100 text-slate-600 ring-1 ring-slate-200'"
-                                                        x-text="selectedUser.is_superuser ? 'Superuser' : 'Limited'"></span>
+                                                        x-text="selectedUser.is_superuser ? tt('common.superadmin') : tt('settings_page.user_limited')"></span>
                                                 </div>
                                             </div>
                                         </template>
@@ -1828,39 +1799,39 @@
                                                 <header class="flex items-center justify-between">
                                                     <div>
                                                         <div class="text-xs uppercase tracking-wide text-slate-400"
-                                                            x-text="userFormMode === 'edit' ? 'Update teammate' : 'Invite teammate'">
+                                                            x-text="userFormMode === 'edit' ? tt('settings_page.update_teammate') : tt('settings_page.invite_teammate')">
                                                         </div>
                                                         <h3 class="text-base font-semibold text-slate-900"
-                                                            x-text="userFormMode === 'edit' ? 'Edit user' : 'New user'">
+                                                            x-text="userFormMode === 'edit' ? tt('settings_page.edit_user') : tt('settings_page.new_user')">
                                                         </h3>
                                                     </div>
                                                     <button type="button"
                                                         class="text-xs font-semibold text-slate-400 transition hover:text-slate-600"
-                                                        @click="cancelUserForm()">Cancel</button>
+                                                        @click="cancelUserForm()">{{ "common.cancel" | t }}</button>
                                                 </header>
                                                 <div class="grid gap-4 md:grid-cols-2">
                                                     <label
                                                         class="flex flex-col gap-1 text-sm font-medium text-slate-700">
-                                                        Email
+                                                        {{ "settings_page.user_email_field" | t }}
                                                         <input type="email" x-model="userDraft.email" required
                                                             class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                                                             placeholder="name@rustpbx.com">
                                                     </label>
                                                     <label
                                                         class="flex flex-col gap-1 text-sm font-medium text-slate-700">
-                                                        Username
+                                                        {{ "settings_page.user_username_field" | t }}
                                                         <input type="text" x-model="userDraft.username" required
                                                             class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                                                             placeholder="short-handle">
                                                     </label>
                                                 </div>
                                                 <label class="flex flex-col gap-1 text-sm font-medium text-slate-700">
-                                                    Password
+                                                    {{ "settings_page.user_password" | t }}
                                                     <input type="password" x-model="userDraft.password"
                                                         class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                                        :placeholder="userFormMode === 'edit' ? 'Leave blank to keep current password' : 'Set an initial password'">
+                                                        :placeholder="userFormMode === 'edit' ? tt('settings_page.leave_blank_password') : tt('settings_page.set_initial_password')">
                                                     <span class="text-xs font-normal text-slate-400"
-                                                        x-text="userFormMode === 'edit' ? 'Only fill this field to rotate the password.' : 'Password is required for new users.'"></span>
+                                                        x-text="userFormMode === 'edit' ? tt('settings_page.rotate_password') : tt('settings_page.password_required')"></span>
                                                 </label>
                                                 <div class="grid gap-3 md:grid-cols-3">
                                                     <label
@@ -1868,27 +1839,27 @@
                                                         <input type="checkbox"
                                                             class="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-400"
                                                             x-model="userDraft.is_active">
-                                                        Active
+                                                        {{ "settings_page.user_active" | t }}
                                                     </label>
                                                     <label
                                                         class="flex items-center gap-2 text-xs font-semibold text-slate-600">
                                                         <input type="checkbox"
                                                             class="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-400"
                                                             x-model="userDraft.is_staff">
-                                                        Staff access
+                                                        {{ "settings_page.user_staff_access" | t }}
                                                     </label>
                                                     <label
                                                         class="flex items-center gap-2 text-xs font-semibold text-slate-600">
                                                         <input type="checkbox"
                                                             class="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-400"
                                                             x-model="userDraft.is_superuser">
-                                                        Superuser
+                                                        {{ "settings_page.user_superuser_access" | t }}
                                                     </label>
                                                 </div>
                                                 <div class="flex items-center justify-end gap-3">
                                                     <button type="button"
                                                         class="inline-flex items-center justify-center rounded-lg border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-600 transition hover:bg-slate-100"
-                                                        @click="cancelUserForm()">Cancel</button>
+                                                        @click="cancelUserForm()">{{ "common.cancel" | t }}</button>
                                                     <button type="submit"
                                                         class="inline-flex items-center justify-center gap-2 rounded-lg bg-sky-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-offset-2"
                                                         :disabled="userProcessing.save">
@@ -1898,7 +1869,7 @@
                                                                 d="M5 10l3 3 7-7" />
                                                         </svg>
                                                         <span
-                                                            x-text="userProcessing.save ? 'Saving…' : 'Save user'"></span>
+                                                            x-text="userProcessing.save ? tt('common.saving') : tt('settings_page.save_user')"></span>
                                                     </button>
                                                 </div>
                                             </form>
@@ -1921,15 +1892,19 @@
             rawSettings: options?.settings || {},
             amiEndpoint: options?.amiEndpoint || '/ami/v1',
             currentUser: options?.currentUser || null,
-            tabs: [
-                { id: 'platform', label: 'Platform overview' },
-                { id: 'proxy', label: 'Proxy settings' },
-                { id: 'sipflow', label: 'SipFlow recording' },
-                { id: 'recording', label: 'Recording policy' },
-                { id: 'security', label: 'Security posture' },
-                { id: 'departments', label: 'Departments' },
-                { id: 'users', label: 'Users', requiresSuperuser: true },
-            ],
+            t: options?.t || {},
+            tabs: (() => {
+                const tt = options?.t || {};
+                return [
+                    { id: 'platform', label: tt['settings_page.platform_overview'] || 'Platform overview' },
+                    { id: 'proxy', label: tt['settings_page.proxy_settings'] || 'Proxy settings' },
+                    { id: 'sipflow', label: tt['settings_page.sipflow_recording'] || 'SipFlow recording' },
+                    { id: 'recording', label: tt['settings_page.recording_policy'] || 'Recording policy' },
+                    { id: 'security', label: tt['settings_page.security_posture'] || 'Security posture' },
+                    { id: 'departments', label: tt['settings_page.departments'] || 'Departments' },
+                    { id: 'users', label: tt['settings_page.users_title'] || 'Users', requiresSuperuser: true },
+                ];
+            })(),
             activeTab: 'platform',
             platform: {},
             proxyConfig: {},
@@ -2291,6 +2266,9 @@
                 }
                 const label = user.last_login_at ? this.formatDateTime(user.last_login_at) : '—';
                 return `Last login · ${label}`;
+            },
+            tt(key) {
+                return this.t[key] || key;
             },
             formatDateTime(value) {
                 if (!value) {
@@ -3032,7 +3010,7 @@
                 }
                 if (action.id === 'reload-acl') {
                     if (!this.acl.reload_supported) {
-                        return 'Proxy offline';
+                        return this.tt('settings_page.acl_proxy_offline');
                     }
                     if (this.aclReloading) {
                         return 'Reloading...';

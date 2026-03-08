@@ -4,6 +4,7 @@ use anyhow::Result;
 use axum::{
     Json,
     extract::{Query, State},
+    http::HeaderMap,
     response::Response,
 };
 use chrono::{DateTime, Datelike, Duration, TimeZone, Timelike, Utc};
@@ -19,6 +20,7 @@ use tracing::warn;
 
 pub async fn dashboard(
     State(state): State<Arc<ConsoleState>>,
+    headers: HeaderMap,
     AuthRequired(_): AuthRequired,
 ) -> Response {
     let range = resolve_time_range(None);
@@ -30,7 +32,7 @@ pub async fn dashboard(
         }
     };
 
-    state.render(
+    state.render_with_headers(
         "console/dashboard.html",
         json!({
             "nav_active": "dashboard",
@@ -39,6 +41,7 @@ pub async fn dashboard(
             "active_calls": payload.active_calls,
             "range": payload.range,
         }),
+        &headers,
     )
 }
 

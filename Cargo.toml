@@ -182,3 +182,7 @@ path = "src/bin/rustpbx.rs"
 name = "sipflow"
 path = "src/bin/sipflow.rs"
 required-features = ["opus"]
+
+[[bin]]
+name = "verify-i18n"
+path = "tools/verify_i18n.rs"

@@ -1,8 +1,10 @@
 use crate::config::ConsoleConfig;
+use crate::console::i18n::{I18n, LocaleConfig, LocaleInfo, detect_locale};
 use crate::console::middleware::RenderTemplate;
 use crate::proxy::server::SipServerRef;
 use crate::{app::AppStateInner, callrecord::CallRecordFormatter};
 use anyhow::Result;
+use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
 use minijinja::Environment;
 use sea_orm::DatabaseConnection;
@@ -11,6 +13,7 @@ use std::sync::{Arc, RwLock, Weak};
 
 pub mod auth;
 pub mod handlers;
+pub mod i18n;
 pub mod middleware;
 pub use handlers::router;
 
@@ -22,6 +25,8 @@ pub struct ConsoleState {
     sip_server: Arc<RwLock<Option<SipServerRef>>>,
     app_state: Arc<RwLock<Option<Weak<AppStateInner>>>>,
     callrecord_formatter: Arc<dyn CallRecordFormatter>,
+    /// Shared i18n manager
+    i18n: Arc<I18n>,
 }
 
 impl ConsoleState {
@@ -34,6 +39,22 @@ impl ConsoleState {
         let session_key = key_material.to_vec();
         let mut config = config;
         config.base_path = normalize_base_path(&config.base_path);
+
+        // Build LocaleConfig from ConsoleConfig
+        let locale_config = LocaleConfig {
+            default: config.locale_default.clone(),
+            available: config
+                .locales
+                .iter()
+                .map(|(code, info)| LocaleInfo {
+                    code: code.clone(),
+                    name: info.name.clone(),
+                    native_name: info.native_name.clone(),
+                })
+                .collect(),
+        };
+        let i18n = Arc::new(I18n::new(locale_config));
+
         Ok(Arc::new(Self {
             db,
             config,
@@ -41,10 +62,37 @@ impl ConsoleState {
             sip_server: Arc::new(RwLock::new(None)),
             app_state: Arc::new(RwLock::new(None)),
             callrecord_formatter,
+            i18n,
         }))
     }
 
+    // ------------------------------------------------------------------
+    // Rendering
+    // ------------------------------------------------------------------
+
+    /// Render a template using the default locale.
+    ///
+    /// Existing call-sites that don't need i18n can keep using this signature
+    /// unchanged.  For locale-aware rendering use `render_with_headers` or
+    /// `render_with_locale`.
     pub fn render(&self, template: &str, ctx: serde_json::Value) -> Response {
+        let locale = self.i18n.default_locale().to_string();
+        self.render_with_locale(template, ctx, &locale)
+    }
+
+    /// Detect the request locale from cookie / Accept-Language and render.
+    pub fn render_with_headers(
+        &self,
+        template: &str,
+        ctx: serde_json::Value,
+        headers: &HeaderMap,
+    ) -> Response {
+        let locale = detect_locale(headers, self.i18n.available_locales(), self.i18n.default_locale());
+        self.render_with_locale(template, ctx, &locale)
+    }
+
+    /// Render a template with a specific locale.
+    pub fn render_with_locale(&self, template: &str, ctx: serde_json::Value, locale: &str) -> Response {
         let mut ctx = ctx;
         if ctx.is_object() {
             if let Some(map) = ctx.as_object_mut() {
@@ -116,6 +164,16 @@ impl ConsoleState {
                     map.entry("chart_js")
                         .or_insert_with(|| serde_json::Value::String(chart_js.clone()));
                 }
+
+                // ── i18n context injection ──────────────────────────────
+                map.entry("locale")
+                    .or_insert_with(|| serde_json::Value::String(locale.to_string()));
+                map.entry("t")
+                    .or_insert_with(|| self.i18n.get_translations_json(locale));
+                map.entry("available_locales").or_insert_with(|| {
+                    serde_json::to_value(self.i18n.available_locales())
+                        .unwrap_or(serde_json::Value::Array(vec![]))
+                });
             }
         }
 
@@ -151,6 +209,40 @@ impl ConsoleState {
                         format!("failed to serialize to json: {}", e),
                     )
                 })
+            },
+        );
+
+        // ── t filter: {{ "nav.dashboard" | t }} ──────────────────────────
+        let i18n_t = self.i18n.clone();
+        let locale_t = locale.to_string();
+        tmpl_env.add_filter(
+            "t",
+            move |key: &str| -> String { i18n_t.t(&locale_t, key) },
+        );
+
+        // ── tvars filter: {{ "messages.saved" | tvars({"name": ext.name}) }} ─
+        let i18n_tv = self.i18n.clone();
+        let locale_tv = locale.to_string();
+        tmpl_env.add_filter(
+            "tvars",
+            move |key: &str,
+                  vars: minijinja::Value|
+                  -> Result<String, minijinja::Error> {
+                let vars_map: std::collections::HashMap<String, String> =
+                    if let Ok(obj) = serde_json::from_str::<serde_json::Value>(
+                        &serde_json::to_string(&vars).unwrap_or_default(),
+                    ) {
+                        if let serde_json::Value::Object(m) = obj {
+                            m.into_iter()
+                                .filter_map(|(k, v)| v.as_str().map(|s| (k, s.to_string())))
+                                .collect()
+                        } else {
+                            Default::default()
+                        }
+                    } else {
+                        Default::default()
+                    };
+                Ok(i18n_tv.t_with_vars(&locale_tv, key, &vars_map))
             },
         );
 
@@ -206,6 +298,14 @@ impl ConsoleState {
             context: &ctx,
         }
         .into_response()
+    }
+
+    // ------------------------------------------------------------------
+    // Accessors
+    // ------------------------------------------------------------------
+
+    pub fn i18n(&self) -> &Arc<I18n> {
+        &self.i18n
     }
 
     pub fn db(&self) -> &DatabaseConnection {

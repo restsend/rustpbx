@@ -27,7 +27,7 @@
                         <div class="flex items-center gap-1">
                             <button type="button"
                                 class="inline-flex h-5 w-5 items-center justify-center rounded border border-slate-200 text-slate-400 transition hover:border-slate-300 hover:text-slate-600"
-                                title="Copy call ID" aria-label="Copy call ID" @click="copyCallId(record.call_id)">
+                                title="{{ "call_record.copy_call_id" | t }}" aria-label="{{ "call_record.copy_call_id" | t }}" @click="copyCallId(record.call_id)">
                                 <svg class="h-3 w-3" viewBox="0 0 20 20" fill="none" stroke="currentColor"
                                     stroke-width="1.6">
                                     <path stroke-linecap="round" stroke-linejoin="round" d="M6 6h8v8H6z" />

@@ -61,6 +61,15 @@
                     </div>
 
                     <div>
+                        <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Archive After
+                            Days</label>
+                        <input type="number" x-model.number="config.archive_after_days" min="0"
+                            class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                            placeholder="0">
+                        <p class="mt-1 text-xs text-slate-400">Archive records older than this many days. If 0, archives yesterday's records.</p>
+                    </div>
+
+                    <div>
                         <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Archive
                             Directory</label>
                         <input type="text" x-model="config.archive_dir"
@@ -201,7 +210,7 @@
     function archiveManager(archives, config) {
         return {
             archives: archives || [],
-            config: config || { enabled: false, archive_time: '03:00', timezone: 'UTC', retention_days: 30, archive_dir: '' },
+            config: config || { enabled: false, archive_time: '03:00', timezone: 'UTC', retention_days: 30, archive_after_days: 0, archive_dir: '' },
             saving: false,
             configMsg: '',
             configStatus: '',

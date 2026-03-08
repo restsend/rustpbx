@@ -15,7 +15,7 @@ use argon2::Argon2;
 use argon2::password_hash::rand_core::OsRng;
 use argon2::password_hash::{PasswordHasher, SaltString};
 use axum::extract::{Path as AxumPath, State};
-use axum::http::StatusCode;
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, patch, post};
 use axum::{Json, Router};
@@ -166,11 +166,12 @@ pub fn urls() -> Router<Arc<ConsoleState>> {
 
 pub async fn page_settings(
     State(state): State<Arc<ConsoleState>>,
+    headers: HeaderMap,
     AuthRequired(user): AuthRequired,
 ) -> Response {
     let settings = build_settings_payload(&state).await;
 
-    state.render(
+    state.render_with_headers(
         "console/settings.html",
         json!({
             "nav_active": "settings",
@@ -188,6 +189,7 @@ pub async fn page_settings(
             },
             "user_is_superuser": user.is_superuser,
         }),
+        &headers,
     )
 }
 

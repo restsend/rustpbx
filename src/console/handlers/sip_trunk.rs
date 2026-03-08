@@ -18,7 +18,7 @@ use crate::{
 use axum::{
     Json, Router,
     extract::{Form, Path as AxumPath, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::get,
 };
@@ -66,25 +66,28 @@ pub fn urls() -> Router<Arc<ConsoleState>> {
 
 async fn page_sip_trunks(
     State(state): State<Arc<ConsoleState>>,
+    headers: HeaderMap,
     AuthRequired(_): AuthRequired,
 ) -> Response {
     let (filters, _) = build_filters_payload(state.db()).await;
-    state.render(
+    state.render_with_headers(
         "console/sip_trunk.html",
         json!({
             "nav_active": "sip-trunk",
             "filters": filters,
             "create_url": state.url_for("/sip-trunk/new"),
         }),
+        &headers,
     )
 }
 
 async fn page_sip_trunk_create(
     State(state): State<Arc<ConsoleState>>,
+    headers: HeaderMap,
     AuthRequired(_): AuthRequired,
 ) -> Response {
     let (filters, tenants) = build_filters_payload(state.db()).await;
-    state.render(
+    state.render_with_headers(
         "console/sip_trunk_detail.html",
         json!({
             "nav_active": "sip-trunk",
@@ -93,12 +96,14 @@ async fn page_sip_trunk_create(
             "mode": "create",
             "create_url": state.url_for("/sip-trunk"),
         }),
+        &headers,
     )
 }
 
 async fn page_sip_trunk_detail(
     AxumPath(id): AxumPath<i64>,
     State(state): State<Arc<ConsoleState>>,
+    headers: HeaderMap,
     AuthRequired(_): AuthRequired,
 ) -> Response {
     let db = state.db();
@@ -150,7 +155,7 @@ async fn page_sip_trunk_detail(
                 let _ = tenant_link;
             }
 
-            state.render(
+            state.render_with_headers(
                 "console/sip_trunk_detail.html",
                 json!({
                     "nav_active": "sip-trunk",
@@ -160,6 +165,7 @@ async fn page_sip_trunk_detail(
                     "mode": "edit",
                     "update_url": state.url_for(&format!("/sip-trunk/{id}")),
                 }),
+                &headers,
             )
         }
         Ok(None) => (

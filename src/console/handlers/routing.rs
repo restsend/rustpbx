@@ -14,7 +14,7 @@ use crate::models::{
 use axum::{
     Router,
     extract::{Json, Path as AxumPath, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
@@ -711,6 +711,7 @@ fn render_route_form(
     ivr_options: Value,
     error_message: Option<String>,
     form_action: String,
+    headers: &HeaderMap,
 ) -> Response {
     let route_value = serde_json::to_value(doc).unwrap_or(Value::Null);
     let trunk_options = Value::Array(build_trunk_options(trunks));
@@ -739,7 +740,7 @@ fn render_route_form(
         "/console/routing/new".to_string()
     };
 
-    state.render(
+    state.render_with_headers(
         "console/routing_form.html",
         json!({
             "nav_active": "routing",
@@ -758,6 +759,7 @@ fn render_route_form(
             "error_message": error_message,
             "addon_scripts": state.get_injected_scripts(&script_path),
         }),
+        headers,
     )
 }
 
@@ -793,6 +795,7 @@ fn apply_document_to_active(
 
 pub async fn page_routing(
     State(state): State<Arc<ConsoleState>>,
+    headers: HeaderMap,
     AuthRequired(_): AuthRequired,
 ) -> Response {
     let db = state.db();
@@ -804,7 +807,7 @@ pub async fn page_routing(
         }
     };
 
-    state.render(
+    state.render_with_headers(
         "console/routing.html",
         json!({
             "nav_active": "routing",
@@ -816,6 +819,7 @@ pub async fn page_routing(
             },
             "create_url": state.url_for("/routing/new"),
         }),
+        &headers,
     )
 }
 
@@ -944,6 +948,7 @@ pub(crate) async fn query_routing(
 
 pub async fn page_routing_create(
     State(state): State<Arc<ConsoleState>>,
+    headers: HeaderMap,
     AuthRequired(_): AuthRequired,
 ) -> Response {
     let db = state.db();
@@ -982,12 +987,14 @@ pub async fn page_routing_create(
         ivr_options,
         None,
         state.url_for("/routing"),
+        &headers,
     )
 }
 
 pub async fn page_routing_edit(
     AxumPath(id): AxumPath<i64>,
     State(state): State<Arc<ConsoleState>>,
+    headers: HeaderMap,
     AuthRequired(_): AuthRequired,
 ) -> Response {
     let db = state.db();
@@ -1048,6 +1055,7 @@ pub async fn page_routing_edit(
         ivr_options,
         None,
         state.url_for(&format!("/routing/{}", id)),
+        &headers,
     )
 }
 

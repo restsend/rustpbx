@@ -1,5 +1,5 @@
 {% extends "console/layout.html" %}
-{% block title %}SIP Trunks · {{ site_name | default('RustPBX') }}{% endblock %}
+{% block title %}{{ "sip_trunk.title" | t }} · {{ site_name | default('RustPBX') }}{% endblock %}
 {% block content %}
 {% set base_url = base_path | default('/console') %}
 <div class="p-6" x-data='sipTrunkPage({
@@ -10,10 +10,9 @@
     <div class="mx-auto max-w-7xl space-y-6">
         <header class="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
             <div class="space-y-1">
-                <p class="text-xs font-semibold uppercase tracking-wide text-sky-600">Carrier connectivity</p>
-                <h1 class="text-2xl font-semibold text-slate-900">SIP trunks</h1>
-                <p class="text-sm text-slate-500">Review carrier endpoints, capacity limits, and billing policy in one
-                    place.</p>
+                <p class="text-xs font-semibold uppercase tracking-wide text-sky-600">{{ "sip_trunk.carrier_connectivity" | t }}</p>
+                <h1 class="text-2xl font-semibold text-slate-900">{{ "sip_trunk.title" | t }}</h1>
+                <p class="text-sm text-slate-500">{{ "sip_trunk.review_carrier" | t }}</p>
             </div>
             <div class="flex flex-wrap items-center gap-3">
                 <button type="button"
@@ -33,7 +32,7 @@
                                 d="M12 3v3m6.364 1.636-2.121 2.121M21 12h-3m-1.636 6.364-2.121-2.121M12 21v-3m-6.364-1.636 2.121-2.121M3 12h3m1.636-6.364 2.121 2.121" />
                         </svg>
                     </template>
-                    Reload trunks
+                    {{ "sip_trunk.reload_trunks" | t }}
                 </button>
 
                 <a :href="createUrl"
@@ -41,7 +40,7 @@
                     <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8">
                         <path stroke-linecap="round" stroke-linejoin="round" d="M10 4v12m6-6H4" />
                     </svg>
-                    New SIP trunk
+                    {{ "sip_trunk.new_sip_trunk" | t }}
                 </a>
             </div>
         </header>
@@ -59,24 +58,24 @@
             <div class="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600">
                 <div class="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
                     <div>
-                        <span class="font-semibold text-slate-800">Latest reload</span>
+                        <span class="font-semibold text-slate-800">{{ "sip_trunk.latest_reload" | t }}</span>
                         <span class="ml-2" x-text="buildReloadSummary(lastReload)"></span>
                     </div>
                     <div class="text-xs text-slate-500">
-                        <span>Finished </span>
+                        <span>{{ "sip_trunk.finished" | t }} </span>
                         <span x-text="formatDate(lastReload.finished_at)"></span>
                     </div>
                 </div>
                 <div class="mt-2 text-xs text-slate-500">
-                    <span>Sources:</span>
-                    <span> embedded
+                    <span>{{ "sip_trunk.sources" | t }}:</span>
+                    <span> {{ "sip_trunk.embedded" | t }}
                         <span class="font-semibold text-slate-700" x-text="Number(lastReload.config_count) || 0"></span>
                     </span>,
-                    <span> include files
+                    <span> {{ "sip_trunk.include_files" | t }}
                         <span class="font-semibold text-slate-700" x-text="Number(lastReload.file_count) || 0"></span>
                     </span>
                     <template x-if="lastReload.generated">
-                        <span>, generated file
+                        <span>, {{ "sip_trunk.generated_file" | t }}
                             <span class="font-semibold text-slate-700"
                                 x-text="Number(lastReload.generated.entries) || 0"></span>
                         </span>
@@ -143,7 +142,7 @@
                     </div>
                     <div
                         class="flex w-full flex-col gap-3 lg:w-auto lg:flex-row lg:items-center lg:justify-end lg:gap-3">
-                        <label class="relative flex-1 lg:min-w-[18rem]" aria-label="Search SIP trunks">
+                        <label class="relative flex-1 lg:min-w-[18rem]" aria-label="{{ "sip_trunk.search_sip_trunks" | t }}">
                             <svg class="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400"
                                 viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6">
                                 <path stroke-linecap="round" stroke-linejoin="round"
@@ -151,19 +150,19 @@
                             </svg>
                             <input type="search" x-model.trim="keyword" @input.debounce.400ms="applyFilters()"
                                 class="w-full rounded-lg border border-slate-200 px-3 py-2 pl-9 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                placeholder="Name, carrier, DID…">
+                                placeholder="{{ "sip_trunk.search_placeholder" | t }}">
                         </label>
                         <div class="flex flex-wrap items-center gap-2">
-                            <select aria-label="Add filter"
+                            <select aria-label="{{ "sip_trunk.add_filter" | t }}"
                                 class="rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-600 transition hover:border-sky-300 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                                 @change="addFilter($event)">
-                                <option value="">+ Add filter</option>
+                                <option value="">{{ "call_record.add_filter" | t }}</option>
                                 <template x-for="option in filterOptions" :key="option.key">
                                     <option :value="option.key" :disabled="activeFilters.includes(option.key)"
                                         x-text="option.label"></option>
                                 </template>
                             </select>
-                            <select aria-label="Sort SIP trunks" x-model="sortOrder" @change="applySorting()"
+                            <select aria-label="{{ "sip_trunk.sort_sip_trunks" | t }}" x-model="sortOrder" @change="applySorting()"
                                 class="rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-600 transition hover:border-sky-300 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
                                 <template x-for="option in sortOptions" :key="option.value">
                                     <option :value="option.value" x-text="option.label"></option>

@@ -2,19 +2,18 @@
 {% block js_ext %}
 <script src="{{jssip_js|default('//jssip.net/download/releases/jssip-3.10.0.js')}}"></script>
 {% endblock %}
-{% block title %}Testing · {{site_name|default('RustPBX')}}{% endblock %}
+{% block title %}{{ "diagnostics.title" | t }} · {{site_name|default('RustPBX')}}{% endblock %}
 {% block content %}
 <div class="p-6">
     <div class="mx-auto max-w-7xl space-y-6" x-data='testingConsole({{ test_data | tojson }})'>
         <header class="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
             <div class="space-y-1">
-                <p class="text-xs font-semibold uppercase tracking-wide text-sky-600">Operational validation</p>
-                <h1 class="text-2xl font-semibold text-slate-900">Testing & diagnostics</h1>
-                <p class="text-sm text-slate-500">Verify trunk reachability, routing decisions, and place synthetic
-                    calls without leaving the console.</p>
+                <p class="text-xs font-semibold uppercase tracking-wide text-sky-600">{{ "diagnostics.operational_validation" | t }}</p>
+                <h1 class="text-2xl font-semibold text-slate-900">{{ "diagnostics.title" | t }}</h1>
+                <p class="text-sm text-slate-500">{{ "diagnostics.subtitle" | t }}</p>
             </div>
             <div class="text-xs text-slate-500">
-                Last audit:
+                {{ "diagnostics.last_audit" | t }}:
                 <span class="font-semibold text-slate-700" x-text="formatDateTime(lastAudit)"></span>
             </div>
         </header>
@@ -32,9 +31,8 @@
             <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
                 <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                     <div>
-                        <h2 class="text-base font-semibold text-slate-900">Connect endpoints quickly</h2>
-                        <p class="text-xs text-slate-500">Copy realm, transports, and working credentials to register
-                            softphones or WebRTC clients.</p>
+                        <h2 class="text-base font-semibold text-slate-900">{{ "diagnostics.connect_endpoints" | t }}</h2>
+                        <p class="text-xs text-slate-500">{{ "diagnostics.connect_endpoints_desc" | t }}</p>
                     </div>
                     <div class="flex flex-wrap items-center gap-2 text-xs text-slate-500">
                         <span
@@ -51,24 +49,24 @@
                 </div>
                 <div class="mt-4 grid gap-4 md:grid-cols-3">
                     <div class="space-y-3">
-                        <h3 class="text-sm font-semibold text-slate-800">Server identity</h3>
+                        <h3 class="text-sm font-semibold text-slate-800">{{ "diagnostics.server_identity" | t }}</h3>
                         <dl class="space-y-2 text-xs text-slate-600">
                             <div class="flex items-center justify-between gap-2">
-                                <dt class="text-slate-500">Realm</dt>
+                                <dt class="text-slate-500">{{ "diagnostics.realm" | t }}</dt>
                                 <dd class="font-mono text-slate-700" x-text="connection.realm || '—'"></dd>
                             </div>
                             <div class="flex items-center justify-between gap-2">
-                                <dt class="text-slate-500">Host</dt>
+                                <dt class="text-slate-500">{{ "diagnostics.host" | t }}</dt>
                                 <dd class="font-mono text-slate-700" x-text="connection.host || '—'"></dd>
                             </div>
                             <div class="flex items-center justify-between gap-2" x-show="connectionAccounts.length">
-                                <dt class="text-slate-500">Sample URI</dt>
+                                <dt class="text-slate-500">{{ "diagnostics.sample_uri" | t }}</dt>
                                 <dd class="font-mono text-slate-700" x-text="connectionAccounts[0]?.uri || '—'"></dd>
                             </div>
                         </dl>
                     </div>
                     <div class="space-y-3">
-                        <h3 class="text-sm font-semibold text-slate-800">Transports</h3>
+                        <h3 class="text-sm font-semibold text-slate-800">{{ "diagnostics.transports" | t }}</h3>
                         <template x-if="connectionTransports.length">
                             <ul class="space-y-2 text-xs text-slate-600">
                                 <template x-for="item in connectionTransports"
@@ -98,7 +96,7 @@
                         </template>
                     </div>
                     <div class="space-y-3">
-                        <h3 class="text-sm font-semibold text-slate-800">Sample accounts</h3>
+                        <h3 class="text-sm font-semibold text-slate-800">{{ "diagnostics.sample_accounts" | t }}</h3>
                         <template x-if="connectionAccounts.length">
                             <ul class="space-y-2 text-xs text-slate-600">
                                 <template x-for="account in connectionAccounts"
@@ -141,9 +139,8 @@
                 <div class="mt-6 rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
                     <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                         <div>
-                            <h3 class="text-sm font-semibold text-slate-900">WebRTC connectivity probe</h3>
-                            <p class="text-xs text-slate-500">Gather ICE candidates to verify browser reachability to
-                                the PBX WebRTC edge.</p>
+                            <h3 class="text-sm font-semibold text-slate-900">{{ "diagnostics.webrtc_probe" | t }}</h3>
+                            <p class="text-xs text-slate-500">{{ "diagnostics.webrtc_probe_desc" | t }}</p>
                         </div>
                         <div class="flex flex-wrap items-center gap-3 text-[11px]">
                             <label class="inline-flex items-center gap-1 text-slate-500">
@@ -334,9 +331,8 @@
             <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
                 <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                     <div>
-                        <h2 class="text-base font-semibold text-slate-900">Routing validation</h2>
-                        <p class="text-xs text-slate-500">Predict how dialled numbers are normalised and which trunk or
-                            route they match.</p>
+                        <h2 class="text-base font-semibold text-slate-900">{{ "diagnostics.routing_validation" | t }}</h2>
+                        <p class="text-xs text-slate-500">{{ "diagnostics.routing_validation_desc" | t }}</p>
                     </div>
                     <div class="flex flex-wrap items-center gap-2">
                         <button type="button" @click="loadSampleRouting" :disabled="!routingChecks.length"
@@ -595,9 +591,8 @@
             <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
                 <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
                     <div>
-                        <h2 class="text-base font-semibold text-slate-900">Active SIP dialogs</h2>
-                        <p class="text-xs text-slate-500">Inspect INVITE dialogs currently tracked by the SIP
-                            server.</p>
+                        <h2 class="text-base font-semibold text-slate-900">{{ "diagnostics.active_sip_dialogs" | t }}</h2>
+                        <p class="text-xs text-slate-500">{{ "diagnostics.active_sip_dialogs_desc" | t }}</p>
                     </div>
                     <div class="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-end">
                         <div class="flex items-center gap-2">
@@ -741,12 +736,12 @@
 
             <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
                 <div class="space-y-1">
-                    <h2 class="text-base font-semibold text-slate-900">Locator registry</h2>
-                    <p class="text-xs text-slate-500">Lookup registration bindings or clear stale records.</p>
+                    <h2 class="text-base font-semibold text-slate-900">{{ "diagnostics.locator_registry" | t }}</h2>
+                    <p class="text-xs text-slate-500">{{ "diagnostics.locator_registry_desc" | t }}</p>
                 </div>
                 <form class="mt-4 grid gap-4 md:grid-cols-2" @submit.prevent="performLocatorLookup()">
                     <label class="flex flex-col gap-2">
-                        <span class="text-xs font-semibold uppercase tracking-wide text-slate-400">User</span>
+                        <span class="text-xs font-semibold uppercase tracking-wide text-slate-400">{{ "diagnostics.user" | t }}</span>
                         <input type="text" x-model.trim="locatorUser"
                             class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                             placeholder="e.g. 1001 or 1001@rustpbx.com">
@@ -952,9 +947,8 @@
                 <div class="space-y-6">
                     <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
                         <div class="space-y-1">
-                            <h2 class="text-base font-semibold text-slate-900">Web Dialer (JsSIP)</h2>
-                            <p class="text-xs text-slate-500">Use the embedded JsSIP client to register over WebSocket
-                                and place quick diagnostic calls.</p>
+                            <h2 class="text-base font-semibold text-slate-900">{{ "diagnostics.web_dialer" | t }}</h2>
+                            <p class="text-xs text-slate-500">{{ "diagnostics.web_dialer_desc" | t }}</p>
                         </div>
                         <div class="mt-4 space-y-4">
                             <div>
@@ -1043,14 +1037,13 @@
 
                     <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
                         <div class="space-y-1">
-                            <h3 class="text-sm font-semibold text-slate-900">Call Controls</h3>
-                            <p class="text-xs text-slate-500">Enter a destination number or URI, then place a live
-                                INVITE directly from the browser.</p>
+                            <h3 class="text-sm font-semibold text-slate-900">{{ "diagnostics.call_controls" | t }}</h3>
+                            <p class="text-xs text-slate-500">{{ "diagnostics.call_controls_desc" | t }}</p>
                         </div>
                         <div class="mt-4 space-y-4">
                             <label class="flex flex-col gap-2">
                                 <span
-                                    class="text-xs font-semibold uppercase tracking-wide text-slate-400">Destination</span>
+                                    class="text-xs font-semibold uppercase tracking-wide text-slate-400">{{ "diagnostics.destination" | t }}</span>
                                 <div class="flex gap-2">
                                     <input type="text" x-model.trim="sipForm.target"
                                         class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
@@ -1165,8 +1158,8 @@
                     <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
                         <div class="flex flex-wrap items-center justify-between gap-3">
                             <div>
-                                <h3 class="text-sm font-semibold text-slate-900">SIP Requests / Responses</h3>
-                                <p class="text-xs text-slate-500">Latest 80 WebSocket messages captured from JsSIP.</p>
+                                <h3 class="text-sm font-semibold text-slate-900">{{ "diagnostics.sip_requests_responses" | t }}</h3>
+                                <p class="text-xs text-slate-500">{{ "diagnostics.sip_requests_responses_desc" | t }}</p>
                             </div>
                             <div class="flex items-center gap-3 text-[11px]">
                                 <label class="inline-flex items-center gap-1 text-slate-500">
@@ -1225,9 +1218,8 @@
                     <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
                         <div class="flex items-center justify-between gap-3">
                             <div>
-                                <h3 class="text-sm font-semibold text-slate-900">Registration & call events</h3>
-                                <p class="text-xs text-slate-500">Newest entries appear first to simplify
-                                    troubleshooting.</p>
+                                <h3 class="text-sm font-semibold text-slate-900">{{ "diagnostics.registration_call_events" | t }}</h3>
+                                <p class="text-xs text-slate-500">{{ "diagnostics.registration_call_events_desc" | t }}</p>
                             </div>
                             <button type="button" @click="clearSipEvents" :disabled="!sipEvents.length"
                                 class="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-1.5 text-[11px] font-semibold text-slate-600 transition hover:border-slate-300 hover:text-slate-700 disabled:cursor-not-allowed disabled:opacity-60">

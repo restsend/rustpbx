@@ -1,13 +1,13 @@
 {% extends "console/auth_layout.html" %}
 
-{% block title %}Sign in · {{site_name|default('RustPBX')}}{% endblock %}
+{% block title %}{{ "auth.login" | t }} · {{site_name|default('RustPBX')}}{% endblock %}
 
 {% block content %}
 <section class="flex items-center justify-center py-16 px-4">
     <div class="w-full max-w-md space-y-8 rounded-2xl bg-white/80 p-8 shadow-xl ring-1 ring-black/5 backdrop-blur">
         <div class="space-y-2 text-center">
-            <h1 class="text-2xl font-semibold text-slate-900">Welcome back</h1>
-            <p class="text-sm text-slate-500">Sign in to manage your RustPBX instance.</p>
+            <h1 class="text-2xl font-semibold text-slate-900">{{ "auth.login_welcome" | t }}</h1>
+            <p class="text-sm text-slate-500">{{ "auth.login_subtitle" | t }}</p>
             {% if demo_mode %}
             <div
                 class="mt-6 rounded-xl bg-amber-50 p-4 text-sm text-amber-800 border-2 border-amber-200 shadow-sm text-left">
@@ -17,22 +17,22 @@
                             d="M18 10a8 8 0 11-16 0 8 8 0 0116 0zm-7-4a1 1 0 11-2 0 1 1 0 012 0zM9 9a1 1 0 000 2v3a1 1 0 001 2h1a1 1 0 100-2v-3a1 1 0 00-1-1H9z"
                             clip-rule="evenodd" />
                     </svg>
-                    Demo Mode Credentials
+                    {{ "auth.demo_title" | t }}
                 </div>
                 <div class="space-y-2 font-mono">
                     <div
                         class="flex justify-between items-center bg-white/60 px-3 py-2 rounded-lg border border-amber-100">
-                        <span class="text-xs text-amber-600 font-sans font-medium uppercase tracking-wider">User</span>
+                        <span class="text-xs text-amber-600 font-sans font-medium uppercase tracking-wider">{{ "auth.user" | t }}</span>
                         <span class="select-all font-bold text-amber-900">demo@miuda.ai</span>
                     </div>
                     <div
                         class="flex justify-between items-center bg-white/60 px-3 py-2 rounded-lg border border-amber-100">
-                        <span class="text-xs text-amber-600 font-sans font-medium uppercase tracking-wider">Pass</span>
+                        <span class="text-xs text-amber-600 font-sans font-medium uppercase tracking-wider">{{ "auth.pass" | t }}</span>
                         <span class="select-all font-bold text-amber-900">hello@miuda.ai</span>
                     </div>
                 </div>
                 <p class="mt-3 text-[11px] text-amber-600 font-sans italic text-center text-balance leading-tight">
-                    Notice: System data is automatically reset every hour.</p>
+                    {{ "auth.demo_notice" | t }}</p>
             </div>
             {% endif %}
         </div>
@@ -44,33 +44,32 @@
         <form action="{{ login_action }}" method="post" class="space-y-6">
             <input type="hidden" name="next" value="{{ next | default('') }}" />
             <div class="space-y-2 text-left">
-                <label class="block text-sm font-medium text-slate-700">Email or username</label>
+                <label class="block text-sm font-medium text-slate-700">{{ "auth.email_or_username" | t }}</label>
                 <input type="text" name="identifier" value="{{ identifier }}" required
                     class="w-full rounded-xl border border-slate-200 px-4 py-3 text-sm shadow-sm focus:border-sky-400 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                    placeholder="you@rustpbx.com or username" />
+                    placeholder="{{ 'auth.identifier_placeholder' | t }}" />
             </div>
             <div class="space-y-2 text-left" x-data="{ reveal: false }">
-                <label class="block text-sm font-medium text-slate-700">Password</label>
+                <label class="block text-sm font-medium text-slate-700">{{ "auth.password" | t }}</label>
                 <div class="relative flex items-center">
                     <input :type="reveal ? 'text' : 'password'" name="password" required
                         class="w-full rounded-xl border border-slate-200 px-4 py-3 pr-12 text-sm shadow-sm focus:border-sky-400 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                        placeholder="Enter your password" />
-                    <button type="button" @click="reveal = !reveal" x-text="reveal ? 'Hide' : 'Show'"
+                        placeholder="{{ 'auth.password_placeholder' | t }}" />
+                    <button type="button" @click="reveal = !reveal"
+                        x-text="reveal ? '{{ 'auth.hide' | t }}' : '{{ 'auth.show' | t }}'"
                         class="absolute right-3 text-xs font-medium text-slate-500"></button>
                 </div>
             </div>
             <div class="flex items-center justify-between text-sm">
-                <a href="{{ forgot_url }}" class="font-medium text-sky-600 hover:text-sky-500">Forgot password?</a>
+                <a href="{{ forgot_url }}" class="font-medium text-sky-600 hover:text-sky-500">{{ "auth.forgot_password" | t }}</a>
                 {% if register_url %}
-                <a href="{{ register_url }}" class="text-slate-500 hover:text-slate-700">Create account</a>
+                <a href="{{ register_url }}" class="text-slate-500 hover:text-slate-700">{{ "auth.register" | t }}</a>
                 {% else %}
-                <span class="text-slate-400" title="Registration is disabled by the administrator">Registration
-                    disabled</span>
+                <span class="text-slate-400" title="{{ 'auth.registration_disabled_title' | t }}">{{ "auth.registration_disabled" | t }}</span>
                 {% endif %}
             </div>
             <button type="submit"
-                class="w-full rounded-xl bg-sky-600 px-4 py-3 text-sm font-semibold text-white shadow-lg shadow-sky-200 transition hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-300">Sign
-                in</button>
+                class="w-full rounded-xl bg-sky-600 px-4 py-3 text-sm font-semibold text-white shadow-lg shadow-sky-200 transition hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-300">{{ "auth.login_button" | t }}</button>
         </form>
     </div>
 </section>
