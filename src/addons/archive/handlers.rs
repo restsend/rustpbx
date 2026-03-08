@@ -3,6 +3,7 @@ use crate::app::AppState;
 use axum::{
     Extension,
     extract::{Json, Path, Query, State},
+    http::HeaderMap,
     response::IntoResponse,
 };
 use chrono::NaiveDate;
@@ -32,6 +33,9 @@ pub struct UpdateConfigPayload {
     archive_time: String,
     timezone: String,
     retention_days: u32,
+    /// Archive records older than this many days. If 0, archives records from the previous day.
+    #[serde(default)]
+    archive_after_days: u32,
     /// Empty string means "use default"; omitted/None also means default.
     #[serde(default)]
     archive_dir: Option<String>,
@@ -39,6 +43,7 @@ pub struct UpdateConfigPayload {
 
 pub async fn ui_index(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Extension(archive_state): Extension<ArchiveState>,
 ) -> impl IntoResponse {
     #[cfg(feature = "console")]
@@ -48,7 +53,7 @@ pub async fn ui_index(
             let archives = list_archive_files(&archive_dir).await.unwrap_or_default();
             let config = archive_state.config.read().unwrap().clone();
             let effective_archive_dir = state.config().archive_dir();
-            return console.render(
+            return console.render_with_headers(
                 "archive/archive_index.html",
                 serde_json::json!({
                     "archives": archives,
@@ -56,6 +61,7 @@ pub async fn ui_index(
                     "effective_archive_dir": effective_archive_dir,
                     "nav_active": "Archive"
                 }),
+                &headers,
             );
         }
     }
@@ -133,6 +139,7 @@ pub async fn update_config(
         archive["archive_time"] = value(payload.archive_time.trim());
         archive["timezone"] = value(tz_str);
         archive["retention_days"] = value(payload.retention_days as i64);
+        archive["archive_after_days"] = value(payload.archive_after_days as i64);
         match payload.archive_dir.as_deref() {
             Some(d) if !d.trim().is_empty() => {
                 archive["archive_dir"] = value(d.trim());
@@ -164,6 +171,7 @@ pub async fn update_config(
                 archive_time: payload.archive_time.trim().to_string(),
                 timezone: Some(tz_str.to_string()),
                 retention_days: payload.retention_days,
+                archive_after_days: payload.archive_after_days,
                 archive_dir: new_archive_dir,
             });
             Json(serde_json::json!({"success": true})).into_response()

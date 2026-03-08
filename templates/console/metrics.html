@@ -1,14 +1,14 @@
 {% extends "console/layout.html" %}
 
-{% block title %}Runtime Metrics · {{site_name|default('RustPBX')}}{% endblock %}
+{% block title %}{{ "metrics.title" | t }} · {{site_name|default('RustPBX')}}{% endblock %}
 
 {% block content %}
 <div class="min-h-[70vh] py-6">
     <div class="mx-auto max-w-7xl px-4">
         <!-- Header -->
         <div class="mb-6">
-            <h1 class="text-2xl font-semibold text-slate-800">Runtime Metrics</h1>
-            <p class="mt-1 text-sm text-slate-500">Real-time system and call metrics from the running server.</p>
+            <h1 class="text-2xl font-semibold text-slate-800">{{ "metrics.title" | t }}</h1>
+            <p class="mt-1 text-sm text-slate-500">{{ "metrics.subtitle" | t }}</p>
         </div>
 
         <!-- Prometheus Metrics Endpoint Guide -->
@@ -23,11 +23,9 @@
                     </svg>
                 </div>
                 <div class="flex-1">
-                    <h3 class="text-sm font-semibold text-slate-800">Prometheus Metrics Endpoint</h3>
+                    <h3 class="text-sm font-semibold text-slate-800">{{ "metrics.prometheus_title" | t }}</h3>
                     <p class="mt-1 text-sm text-slate-600">
-                        Scrape metrics from <code
-                            class="rounded bg-sky-100 px-1.5 py-0.5 text-sky-700">{{ prometheus.path }}</code> for
-                        Prometheus, Grafana, or other monitoring systems.
+                        {{ "metrics.prometheus_scrape" | tvars({"path": prometheus.path}) | safe }}
                         {% if prometheus.auth_required %}
                         <span class="ml-1 inline-flex items-center gap-1 text-amber-700">
                             <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20" fill="currentColor"
@@ -36,7 +34,7 @@
                                     d="M10 1a4.5 4.5 0 00-4.5 4.5V9H5a2 2 0 00-2 2v6a2 2 0 002 2h10a2 2 0 002-2v-6a2 2 0 00-2-2h-.5V5.5A4.5 4.5 0 0010 1zm3 8V5.5a3 3 0 10-6 0V9h6z"
                                     clip-rule="evenodd"></path>
                             </svg>
-                            Requires Bearer token authentication
+                            {{ "metrics.prometheus_auth_required" | t }}
                         </span>
                         {% endif %}
                     </p>
@@ -50,7 +48,7 @@
                                     d="M.664 10.59a1.651 1.651 0 010-1.186A10.004 10.004 0 0110 2c4.257 0 7.893 2.66 9.336 6.41.147.381.146.804 0 1.186A10.004 10.004 0 0110 18c-4.257 0-7.893-2.66-9.336-6.41zM14 10a4 4 0 11-8 0 4 4 0 018 0z"
                                     clip-rule="evenodd"></path>
                             </svg>
-                            Open Endpoint
+                            {{ "metrics.open_endpoint" | t }}
                         </a>
                         <button type="button" onclick="copyMetricsUrl()"
                             class="inline-flex items-center gap-1.5 rounded-lg border border-sky-200 bg-white px-3 py-1.5 text-xs font-medium text-sky-700 hover:bg-sky-50">
@@ -63,7 +61,7 @@
                                     d="M4.5 6A1.5 1.5 0 003 7.5v9A1.5 1.5 0 004.5 18h7a1.5 1.5 0 001.5-1.5v-5.879a1.5 1.5 0 00-.44-1.06L9.44 6.439A1.5 1.5 0 008.378 6H4.5z">
                                 </path>
                             </svg>
-                            Copy URL
+                            {{ "metrics.copy_url" | t }}
                         </button>
                     </div>
                 </div>
@@ -80,10 +78,9 @@
                     </svg>
                 </div>
                 <div class="flex-1">
-                    <h3 class="text-sm font-semibold text-slate-700">Prometheus Metrics Disabled</h3>
+                    <h3 class="text-sm font-semibold text-slate-700">{{ "metrics.prometheus_disabled_title" | t }}</h3>
                     <p class="mt-1 text-sm text-slate-500">
-                        Enable the observability addon to expose Prometheus metrics. Add the following to your <code
-                            class="rounded bg-slate-200 px-1 py-0.5">config.toml</code>:
+                        {{ "metrics.prometheus_disabled_desc" | t }}
                     </p>
                     <pre class="mt-2 rounded-lg bg-slate-800 p-3 text-xs text-slate-200 overflow-x-auto"><code>[metrics]
 enabled = true
@@ -97,24 +94,24 @@ path = "/metrics"
         <!-- System Info -->
         <section class="mb-6 rounded-2xl bg-white p-6 shadow-sm ring-1 ring-black/5">
             <div class="flex items-center justify-between">
-                <h2 class="text-sm font-semibold text-slate-600">System Information</h2>
+                <h2 class="text-sm font-semibold text-slate-600">{{ "metrics.system_info" | t }}</h2>
                 <span id="collected-at" class="text-xs text-slate-400">{{ metrics.collected_at | default('—') }}</span>
             </div>
             <div class="mt-4 grid gap-4 sm:grid-cols-3">
                 <div class="rounded-lg bg-slate-50 p-4">
-                    <div class="text-xs text-slate-500">Uptime</div>
+                    <div class="text-xs text-slate-500">{{ "metrics.uptime" | t }}</div>
                     <div id="uptime" class="mt-1 text-lg font-semibold text-slate-700">{{ metrics.system.uptime_seconds
                         | default(0) }}s</div>
                 </div>
                 <div class="rounded-lg bg-slate-50 p-4">
-                    <div class="text-xs text-slate-500">Version</div>
+                    <div class="text-xs text-slate-500">{{ "metrics.version" | t }}</div>
                     <div id="version" class="mt-1 text-lg font-semibold text-slate-700">{{ metrics.system.version |
-                        default('unknown') }}</div>
+                        default("metrics.unknown" | t) }}</div>
                 </div>
                 <div class="rounded-lg bg-slate-50 p-4">
-                    <div class="text-xs text-slate-500">Edition</div>
+                    <div class="text-xs text-slate-500">{{ "metrics.edition" | t }}</div>
                     <div id="edition" class="mt-1 text-lg font-semibold text-slate-700">{{ metrics.system.edition |
-                        default('community') }}</div>
+                        default("metrics.edition_community" | t) }}</div>
                 </div>
             </div>
         </section>
@@ -122,7 +119,7 @@ path = "/metrics"
         <!-- Call Metrics -->
         <section class="mb-6 grid gap-4 md:grid-cols-3">
             <div class="rounded-xl bg-white p-5 ring-1 ring-black/5">
-                <div class="text-xs text-slate-500">Active Calls</div>
+                <div class="text-xs text-slate-500">{{ "metrics.active_calls" | t }}</div>
                 <div class="mt-2 flex items-end justify-between">
                     <div id="calls-active" class="text-3xl font-semibold">{{ metrics.calls.active | default(0) }}</div>
                 </div>
@@ -130,11 +127,11 @@ path = "/metrics"
                     <div id="calls-util-bar" class="h-full bg-amber-500"
                         data-utilization="{{ metrics.calls.utilization | default(0) }}"></div>
                 </div>
-                <div class="mt-2 text-xs text-slate-500">Capacity: <span id="calls-capacity">{{ metrics.calls.capacity |
+                <div class="mt-2 text-xs text-slate-500">{{ "metrics.capacity" | t }}: <span id="calls-capacity">{{ metrics.calls.capacity |
                         default(0) }}</span></div>
             </div>
             <div class="rounded-xl bg-white p-5 ring-1 ring-black/5">
-                <div class="text-xs text-slate-500">Active SIP Dialogs</div>
+                <div class="text-xs text-slate-500">{{ "metrics.active_sip_dialogs" | t }}</div>
                 <div class="mt-2">
                     <div id="sip-dialogs" class="text-3xl font-semibold">{{ metrics.sip.dialogs_active | default(0) }}
                     </div>
@@ -144,7 +141,7 @@ path = "/metrics"
                 </div>
             </div>
             <div class="rounded-xl bg-white p-5 ring-1 ring-black/5">
-                <div class="text-xs text-slate-500">Call Utilization</div>
+                <div class="text-xs text-slate-500">{{ "metrics.call_utilization" | t }}</div>
                 <div class="mt-2">
                     <div id="calls-utilization" class="text-3xl font-semibold">{{ metrics.calls.utilization | default(0)
                         }}%</div>
@@ -158,44 +155,44 @@ path = "/metrics"
 
         <!-- SIP Metrics -->
         <section class="mb-6 rounded-2xl bg-white p-6 shadow-sm ring-1 ring-black/5">
-            <h2 class="text-sm font-semibold text-slate-600">SIP Layer</h2>
+            <h2 class="text-sm font-semibold text-slate-600">{{ "metrics.sip_layer" | t }}</h2>
             <div class="mt-4 overflow-x-auto">
                 <table class="min-w-full divide-y divide-slate-100 text-sm">
                     <thead class="bg-slate-50">
                         <tr>
-                            <th scope="col" class="px-4 py-3 text-left font-medium text-slate-500">Metric</th>
-                            <th scope="col" class="px-4 py-3 text-left font-medium text-slate-500">Value</th>
-                            <th scope="col" class="px-4 py-3 text-left font-medium text-slate-500">Description</th>
+                            <th scope="col" class="px-4 py-3 text-left font-medium text-slate-500">{{ "metrics.metric" | t }}</th>
+                            <th scope="col" class="px-4 py-3 text-left font-medium text-slate-500">{{ "metrics.value" | t }}</th>
+                            <th scope="col" class="px-4 py-3 text-left font-medium text-slate-500">{{ "metrics.description" | t }}</th>
                         </tr>
                     </thead>
                     <tbody class="divide-y divide-slate-100">
                         <tr class="hover:bg-slate-50">
-                            <td class="px-4 py-3 font-medium text-slate-700">dialogs_active</td>
+                            <td class="px-4 py-3 font-medium text-slate-700">{{ "metrics.dialogs_active" | t }}</td>
                             <td class="px-4 py-3 text-slate-600">{{ metrics.sip.dialogs_active | default(0) }}</td>
-                            <td class="px-4 py-3 text-slate-500">Active SIP dialogs currently tracked</td>
+                            <td class="px-4 py-3 text-slate-500">{{ "metrics.dialogs_active_desc" | t }}</td>
                         </tr>
                         <tr class="hover:bg-slate-50">
-                            <td class="px-4 py-3 font-medium text-slate-700">registrations_active</td>
+                            <td class="px-4 py-3 font-medium text-slate-700">{{ "metrics.registrations_active" | t }}</td>
                             <td class="px-4 py-3 text-slate-600">{{ metrics.sip.registrations_active | default(0) }}
                             </td>
-                            <td class="px-4 py-3 text-slate-500">Currently registered SIP endpoints</td>
+                            <td class="px-4 py-3 text-slate-500">{{ "metrics.registrations_active_desc" | t }}</td>
                         </tr>
                         <tr class="hover:bg-slate-50">
-                            <td class="px-4 py-3 font-medium text-slate-700">registrations_total</td>
+                            <td class="px-4 py-3 font-medium text-slate-700">{{ "metrics.registrations_total" | t }}</td>
                             <td class="px-4 py-3 text-slate-600">{{ metrics.sip.registrations_total | default(0) }}</td>
-                            <td class="px-4 py-3 text-slate-500">Total registration attempts since startup</td>
+                            <td class="px-4 py-3 text-slate-500">{{ "metrics.registrations_total_desc" | t }}</td>
                         </tr>
                         <tr class="hover:bg-slate-50">
-                            <td class="px-4 py-3 font-medium text-slate-700">registrations_succeeded</td>
+                            <td class="px-4 py-3 font-medium text-slate-700">{{ "metrics.registrations_succeeded" | t }}</td>
                             <td class="px-4 py-3 text-slate-600">{{ metrics.sip.registrations_succeeded | default(0) }}
                             </td>
-                            <td class="px-4 py-3 text-slate-500">Successful registrations since startup</td>
+                            <td class="px-4 py-3 text-slate-500">{{ "metrics.registrations_succeeded_desc" | t }}</td>
                         </tr>
                         <tr class="hover:bg-slate-50">
-                            <td class="px-4 py-3 font-medium text-slate-700">registrations_failed</td>
+                            <td class="px-4 py-3 font-medium text-slate-700">{{ "metrics.registrations_failed" | t }}</td>
                             <td class="px-4 py-3 text-slate-600">{{ metrics.sip.registrations_failed | default(0) }}
                             </td>
-                            <td class="px-4 py-3 text-slate-500">Failed registrations since startup</td>
+                            <td class="px-4 py-3 text-slate-500">{{ "metrics.registrations_failed_desc" | t }}</td>
                         </tr>
                     </tbody>
                 </table>
@@ -204,31 +201,31 @@ path = "/metrics"
 
         <!-- Call Metrics Table -->
         <section class="mb-6 rounded-2xl bg-white p-6 shadow-sm ring-1 ring-black/5">
-            <h2 class="text-sm font-semibold text-slate-600">Call Metrics</h2>
+            <h2 class="text-sm font-semibold text-slate-600">{{ "metrics.call_metrics" | t }}</h2>
             <div class="mt-4 overflow-x-auto">
                 <table class="min-w-full divide-y divide-slate-100 text-sm">
                     <thead class="bg-slate-50">
                         <tr>
-                            <th scope="col" class="px-4 py-3 text-left font-medium text-slate-500">Metric</th>
-                            <th scope="col" class="px-4 py-3 text-left font-medium text-slate-500">Value</th>
-                            <th scope="col" class="px-4 py-3 text-left font-medium text-slate-500">Description</th>
+                            <th scope="col" class="px-4 py-3 text-left font-medium text-slate-500">{{ "metrics.metric" | t }}</th>
+                            <th scope="col" class="px-4 py-3 text-left font-medium text-slate-500">{{ "metrics.value" | t }}</th>
+                            <th scope="col" class="px-4 py-3 text-left font-medium text-slate-500">{{ "metrics.description" | t }}</th>
                         </tr>
                     </thead>
                     <tbody class="divide-y divide-slate-100">
                         <tr class="hover:bg-slate-50">
-                            <td class="px-4 py-3 font-medium text-slate-700">active</td>
+                            <td class="px-4 py-3 font-medium text-slate-700">{{ "metrics.active" | t }}</td>
                             <td class="px-4 py-3 text-slate-600">{{ metrics.calls.active | default(0) }}</td>
-                            <td class="px-4 py-3 text-slate-500">Current active calls</td>
+                            <td class="px-4 py-3 text-slate-500">{{ "metrics.active_desc" | t }}</td>
                         </tr>
                         <tr class="hover:bg-slate-50">
-                            <td class="px-4 py-3 font-medium text-slate-700">capacity</td>
+                            <td class="px-4 py-3 font-medium text-slate-700">{{ "metrics.call_capacity" | t }}</td>
                             <td class="px-4 py-3 text-slate-600">{{ metrics.calls.capacity | default(0) }}</td>
-                            <td class="px-4 py-3 text-slate-500">Maximum concurrent calls configured</td>
+                            <td class="px-4 py-3 text-slate-500">{{ "metrics.call_capacity_desc" | t }}</td>
                         </tr>
                         <tr class="hover:bg-slate-50">
-                            <td class="px-4 py-3 font-medium text-slate-700">utilization</td>
+                            <td class="px-4 py-3 font-medium text-slate-700">{{ "metrics.utilization" | t }}</td>
                             <td class="px-4 py-3 text-slate-600">{{ metrics.calls.utilization | default(0) }}%</td>
-                            <td class="px-4 py-3 text-slate-500">Active calls as percentage of capacity</td>
+                            <td class="px-4 py-3 text-slate-500">{{ "metrics.utilization_desc" | t }}</td>
                         </tr>
                     </tbody>
                 </table>
@@ -238,16 +235,16 @@ path = "/metrics"
         <!-- Media & Voicemail Metrics (placeholder) -->
         <section class="grid gap-6 lg:grid-cols-2">
             <div class="rounded-2xl bg-white p-6 shadow-sm ring-1 ring-black/5">
-                <h2 class="text-sm font-semibold text-slate-600">Media</h2>
+                <h2 class="text-sm font-semibold text-slate-600">{{ "metrics.media" | t }}</h2>
                 <div class="mt-4 text-sm text-slate-500">
-                    <p>WebRTC connections: {{ metrics.media.webrtc_connections | default(0) }}</p>
+                    <p>{{ "metrics.webrtc_connections" | t }}: {{ metrics.media.webrtc_connections | default(0) }}</p>
                 </div>
             </div>
             <div class="rounded-2xl bg-white p-6 shadow-sm ring-1 ring-black/5">
-                <h2 class="text-sm font-semibold text-slate-600">Voicemail</h2>
+                <h2 class="text-sm font-semibold text-slate-600">{{ "metrics.voicemail" | t }}</h2>
                 <div class="mt-4 text-sm text-slate-500">
-                    <p>Messages today: {{ metrics.voicemail.messages_today | default(0) }}</p>
-                    <p>Active mailboxes: {{ metrics.voicemail.active_mailboxes | default(0) }}</p>
+                    <p>{{ "metrics.messages_today" | t }}: {{ metrics.voicemail.messages_today | default(0) }}</p>
+                    <p>{{ "metrics.active_mailboxes" | t }}: {{ metrics.voicemail.active_mailboxes | default(0) }}</p>
                 </div>
             </div>
         </section>
@@ -261,7 +258,7 @@ path = "/metrics"
                         d="M15.312 11.424a5.5 5.5 0 01-9.201 2.466l-.312-.311h2.433a.75.75 0 000-1.5H3.989a.75.75 0 00-.75.75v4.242a.75.75 0 001.5 0v-2.43l.31.31a7 7 0 0011.712-3.138.75.75 0 00-1.449-.39zm1.23-3.723a.75.75 0 00.219-.53V2.927a.75.75 0 00-1.5 0V5.36l-.31-.31A7 7 0 003.239 8.188a.75.75 0 101.448.389A5.5 5.5 0 0113.89 6.11l.311.31h-2.432a.75.75 0 000 1.5h4.243a.75.75 0 00.53-.219z"
                         clip-rule="evenodd"></path>
                 </svg>
-                Refresh
+                {{ "metrics.refresh" | t }}
             </button>
         </div>
     </div>

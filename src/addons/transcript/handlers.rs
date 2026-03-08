@@ -16,7 +16,7 @@ use anyhow::{Context as AnyhowContext, Result as AnyResult};
 use axum::{
     Json,
     extract::{Path as AxumPath, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
 };
 use chrono::{Local, Utc};
@@ -767,6 +767,7 @@ fn build_transcript_payload_value(
 
 pub async fn get_settings(
     State(state): State<Arc<ConsoleState>>,
+    headers: HeaderMap,
     AuthRequired(user): AuthRequired,
 ) -> Response {
     let app_state = match state.app_state() {
@@ -795,7 +796,7 @@ pub async fn get_settings(
         "base_path": state.base_path(),
         "nav_active": "Call Transcription",
     });
-    state.render("settings.html", ctx)
+    state.render_with_headers("settings.html", ctx, &headers)
 }
 
 pub async fn update_settings(

@@ -16,7 +16,7 @@
                     <path
                         d="M6.28 5.22a.75.75 0 00-1.06 1.06L8.94 10l-3.72 3.72a.75.75 0 101.06 1.06L10 11.06l3.72 3.72a.75.75 0 101.06-1.06L11.06 10l3.72-3.72a.75.75 0 00-1.06-1.06L10 8.94 6.28 5.22z" />
                 </svg>
-                <span class="sr-only">Close</span>
+                <span class="sr-only">{{ "addon_detail.close" | t }}</span>
             </button>
 
             <!-- Icon -->
@@ -31,19 +31,17 @@
             <!-- Title + body change based on expired vs unlicensed -->
             <template x-if="licenseExpired">
                 <div>
-                    <h3 class="mt-4 text-base font-semibold text-slate-900">License Expired</h3>
+                    <h3 class="mt-4 text-base font-semibold text-slate-900">{{ "addon_detail.license_expired" | t }}</h3>
                     <p class="mt-2 text-sm text-slate-600">
-                        The license for this addon has expired. The addon continues to work normally, but please renew
-                        your subscription to ensure uninterrupted access and updates.
+                        {{ "addon_detail.license_expired_desc" | t }}
                     </p>
                 </div>
             </template>
             <template x-if="!licenseExpired">
                 <div>
-                    <h3 class="mt-4 text-base font-semibold text-slate-900">No Active License</h3>
+                    <h3 class="mt-4 text-base font-semibold text-slate-900">{{ "addon_detail.no_active_license" | t }}</h3>
                     <p class="mt-2 text-sm text-slate-600">
-                        This addon is running without a valid license. Please add a license key to ensure
-                        continued access and support.
+                        {{ "addon_detail.no_active_license_desc" | t }}
                     </p>
                 </div>
             </template>
@@ -51,11 +49,11 @@
             <div class="mt-5 flex flex-col gap-2 sm:flex-row-reverse">
                 <a href="https://miuda.ai/try" target="_blank"
                     class="inline-flex w-full items-center justify-center rounded-md bg-sky-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-sky-500 transition-colors sm:w-auto"
-                    x-text="licenseExpired ? 'Renew License' : 'Get License'">
+                    x-text="licenseExpired ? '{{ "addon_detail.renew_license" | t }}' : '{{ "addon_detail.get_license" | t }}'">
                 </a>
                 <button type="button" @click="showExpiredModal = false"
                     class="inline-flex w-full items-center justify-center rounded-md bg-white px-4 py-2 text-sm font-medium text-slate-700 ring-1 ring-inset ring-slate-300 hover:bg-slate-50 transition-colors sm:w-auto">
-                    Dismiss
+                    {{ "addon_detail.dismiss" | t }}
                 </button>
             </div>
         </div>
@@ -74,7 +72,7 @@
                                     d="M9.293 2.293a1 1 0 011.414 0l7 7A1 1 0 0117 11h-1v6a1 1 0 01-1 1h-2a1 1 0 01-1-1v-3a1 1 0 00-1-1H9a1 1 0 00-1 1v3a1 1 0 01-1 1H5a1 1 0 01-1-1v-6H3a1 1 0 01-.707-1.707l7-7z"
                                     clip-rule="evenodd" />
                             </svg>
-                            <span class="sr-only">Home</span>
+                            <span class="sr-only">{{ "addon_detail.home" | t }}</span>
                         </a>
                     </div>
                 </li>
@@ -105,7 +103,7 @@
         <div class="flex items-center justify-between">
             <div>
                 <h1 class="text-2xl font-semibold text-slate-900">{{ addon.name }}</h1>
-                <p class="text-sm text-slate-500">by {{ addon.developer }}</p>
+                <p class="text-sm text-slate-500">{{ "addon_detail.by_developer" | t }} {{ addon.developer }}</p>
             </div>
             <div class="flex items-center gap-3">
                 <span class="text-sm font-medium text-slate-900">{{ addon.cost }}</span>
@@ -124,9 +122,9 @@
                     </svg>
                 </div>
                 <div class="ml-3">
-                    <h3 class="text-sm font-medium text-yellow-800">Restart Required</h3>
+                    <h3 class="text-sm font-medium text-yellow-800">{{ "addon_detail.restart_required" | t }}</h3>
                     <div class="mt-2 text-sm text-yellow-700">
-                        <p>You need to restart the server for changes to take effect.</p>
+                        <p>{{ "addon_detail.restart_required_desc" | t }}</p>
                     </div>
                 </div>
             </div>
@@ -144,15 +142,12 @@
             </svg>
             <div class="flex-1 min-w-0">
                 {% if addon.license_status == "Expired" %}
-                <p class="text-sm font-medium text-amber-800">License expired — addon is running without a valid license
+                <p class="text-sm font-medium text-amber-800">{{ "addon_detail.license_expired_banner" | t }}
                 </p>
-                <p class="text-xs text-amber-700 mt-0.5">Renew at <a href="https://miuda.ai/try" target="_blank"
-                        class="underline font-medium">miuda.ai/try</a> or enter your new key below.</p>
+                <p class="text-xs text-amber-700 mt-0.5">{{ "addon_detail.renew_at_online" | t }}</p>
                 {% else %}
-                <p class="text-sm font-medium text-amber-800">This addon is enabled but has no valid license</p>
-                <p class="text-xs text-amber-700 mt-0.5">The addon works normally. Add a license key below or <a
-                        href="https://miuda.ai/try" target="_blank" class="underline font-medium">get one at
-                        miuda.ai/try</a>.</p>
+                <p class="text-sm font-medium text-amber-800">{{ "addon_detail.no_valid_license_banner" | t }}</p>
+                <p class="text-xs text-amber-700 mt-0.5">{{ "addon_detail.works_normally" | t }}</p>
                 {% endif %}
             </div>
         </div>
@@ -170,11 +165,9 @@
             <!-- Card header -->
             <div class="flex flex-col gap-2 md:flex-row md:items-start md:justify-between">
                 <div>
-                    <h2 class="text-base font-semibold text-slate-900">License</h2>
+                    <h2 class="text-base font-semibold text-slate-900">{{ "addon_detail.license_section" | t }}</h2>
                     <p class="text-xs text-slate-500 mt-0.5">
-                        Commercial addon &mdash; get or renew a license at
-                        <a href="https://miuda.ai/try" target="_blank"
-                            class="text-sky-600 hover:text-sky-500 font-medium">miuda.ai/try</a>.
+                        {{ "addon_detail.commercial_addon_desc" | t }}
                     </p>
                 </div>
                 <!-- Current status badge (server-side) -->
@@ -188,7 +181,7 @@
                                 d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.857-9.809a.75.75 0 00-1.214-.882l-3.483 4.79-1.88-1.88a.75.75 0 10-1.06 1.061l2.5 2.5a.75.75 0 001.137-.089l4-5.5z"
                                 clip-rule="evenodd" />
                         </svg>
-                        Valid
+                        {{ "addon_detail.valid" | t }}
                     </span>
                     {% elif addon.license_status == "Expired" %}
                     <span
@@ -198,7 +191,7 @@
                                 d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.28 7.22a.75.75 0 00-1.06 1.06L8.94 10l-1.72 1.72a.75.75 0 101.06 1.06L10 11.06l1.72 1.72a.75.75 0 101.06-1.06L11.06 10l1.72-1.72a.75.75 0 00-1.06-1.06L10 8.94 8.28 7.22z"
                                 clip-rule="evenodd" />
                         </svg>
-                        Expired
+                        {{ "addons.expired" | t }}
                     </span>
                     {% else %}
                     <span
@@ -208,7 +201,7 @@
                                 d="M8.485 2.495c.673-1.167 2.357-1.167 3.03 0l6.28 10.875c.673 1.167-.17 2.625-1.516 2.625H3.72c-1.347 0-2.189-1.458-1.515-2.625L8.485 2.495zM10 5a.75.75 0 01.75.75v3.5a.75.75 0 01-1.5 0v-3.5A.75.75 0 0110 5zm0 9a1 1 0 100-2 1 1 0 000 2z"
                                 clip-rule="evenodd" />
                         </svg>
-                        Not Licensed
+                        {{ "addon_detail.not_licensed" | t }}
                     </span>
                     {% endif %}
                 </div>
@@ -219,12 +212,12 @@
             {% if addon.license_status == "Valid" %}
             <dl class="mt-4 grid grid-cols-2 gap-4 sm:grid-cols-3 border-t border-slate-100 pt-4">
                 <div>
-                    <dt class="text-xs font-medium text-slate-500">Plan</dt>
+                    <dt class="text-xs font-medium text-slate-500">{{ "addon_detail.plan" | t }}</dt>
                     <dd class=\"mt-1 text-sm font-semibold text-slate-800\">{{ addon.license_plan | default('—') }}</dd>
                 </div>
                 {% if addon.license_expiry %}
                 <div>
-                    <dt class="text-xs font-medium text-slate-500">Expires</dt>
+                    <dt class="text-xs font-medium text-slate-500">{{ "addon_detail.expires" | t }}</dt>
                     <dd class="mt-1 text-sm text-slate-800">{{ addon.license_expiry }}</dd>
                 </div>
                 {% endif %}
@@ -240,11 +233,8 @@
                         clip-rule="evenodd" />
                 </svg>
                 <div class="flex-1">
-                    <p class="text-sm font-medium text-red-800">License expired{% if addon.license_expiry %} on {{
-                        addon.license_expiry }}{% endif %}</p>
-                    <p class="text-xs text-red-700 mt-0.5">Enter your renewed key below or
-                        <a href="https://miuda.ai/try" target="_blank" class="underline font-medium">renew online</a>.
-                    </p>
+                    <p class="text-sm font-medium text-red-800">{% if addon.license_expiry %}{{ "addon_detail.license_expired_on" | tvars({"expiry": addon.license_expiry}) }}{% else %}{{ "addon_detail.license_expired" | t }}{% endif %}</p>
+                    <p class="text-xs text-red-700 mt-0.5">{{ "addon_detail.enter_renewed_key" | t }}</p>
                 </div>
             </div>
             {% elif addon.license_status != "Valid" %}
@@ -255,12 +245,8 @@
                         clip-rule="evenodd" />
                 </svg>
                 <div class="flex-1">
-                    <p class="text-sm font-medium text-sky-800">No active license</p>
-                    <p class="text-xs text-sky-700 mt-0.5">Enter your key below or
-                        <a href="https://miuda.ai/try" target="_blank" class="underline font-medium">get a free
-                            license</a>
-                        to unlock this addon.
-                    </p>
+                    <p class="text-sm font-medium text-sky-800">{{ "addon_detail.no_active_license_cta" | t }}</p>
+                    <p class="text-xs text-sky-700 mt-0.5">{{ "addon_detail.enter_key_below" | t }}</p>
                 </div>
             </div>
             {% endif %}
@@ -275,18 +261,17 @@
                         <path
                             d="M2.695 14.763l-1.262 3.154a.5.5 0 00.65.65l3.155-1.262a4 4 0 001.343-.885L17.5 5.5a2.121 2.121 0 00-3-3L3.58 13.42a4 4 0 00-.885 1.343z" />
                     </svg>
-                    <span x-text="showInput ? 'Hide' : 'Update key'"></span>
+                    <span x-text="showInput ? '{{ "addon_detail.hide" | t }}' : '{{ "addon_detail.update_key" | t }}'"></span>
                 </button>
                 <div x-show="showInput" x-cloak>
                     {% else %}
                     <div>
                         {% endif %}
-                        <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400 mb-1">License
-                            Key</label>
+                        <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400 mb-1">{{ "addon_detail.license_key_label" | t }}</label>
                         <div class="flex rounded-md shadow-sm">
                             <input type="text" x-model="licenseKey"
                                 class="block w-full rounded-none rounded-l-md border border-slate-200 px-3 py-2 text-sm text-slate-700 placeholder-slate-400 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                placeholder="LICENSE-XXXX-XXXX-XXXX" @keydown.enter="verifyLicense">
+                                placeholder="{{ "addon_detail.license_key_placeholder" | t }}" @keydown.enter="verifyLicense">
                             <button type="button" @click="verifyLicense" :disabled="loading"
                                 class="relative -ml-px inline-flex items-center gap-x-1.5 rounded-r-md px-4 py-2 text-sm font-semibold text-white bg-sky-600 hover:bg-sky-500 disabled:opacity-60 disabled:cursor-not-allowed transition-colors">
                                 <svg x-show="loading" class="animate-spin h-4 w-4 text-white"
@@ -295,8 +280,8 @@
                                         stroke-width="4"></circle>
                                     <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z"></path>
                                 </svg>
-                                <span x-show="!loading">Verify &amp; Save</span>
-                                <span x-show="loading">Verifying…</span>
+                                <span x-show="!loading">{{ "addon_detail.verify_save" | t }}</span>
+                                <span x-show="loading">{{ "addon_detail.verifying" | t }}</span>
                             </button>
                         </div>
                     </div>
@@ -321,25 +306,24 @@
                                     clip-rule="evenodd" />
                             </svg>
                             <div>
-                                <p class="text-xs font-semibold text-green-800">License verified and saved!</p>
+                                <p class="text-xs font-semibold text-green-800" x-text="translations['addon_detail.license_verified']"></p>
                                 <p class="text-xs text-green-700 mt-0.5">
-                                    Plan: <span class="font-medium" x-text="verifiedPlan"></span>
+                                    <span x-text="translations['addon_detail.plan_label']"></span> <span class="font-medium" x-text="verifiedPlan"></span>
                                     <template x-if="verifiedExpiry">
-                                        <span> &mdash; expires <span x-text="verifiedExpiry"></span></span>
+                                        <span> &mdash; <span x-text="translations['addon_detail.expires_on']"></span> <span x-text="verifiedExpiry"></span></span>
                                     </template>
                                 </p>
                                 <template x-if="verifiedScope && verifiedScope.length > 0">
                                     <p class="text-xs text-green-700 mt-0.5">
-                                        Covers: <span class="font-medium" x-text="verifiedScope.join(', ')"></span>
+                                        <span x-text="translations['addon_detail.covers_label']"></span> <span class="font-medium" x-text="verifiedScope.join(', ')"></span>
                                     </p>
                                 </template>
                                 <template x-if="!verifiedScope || verifiedScope.length === 0">
-                                    <p class="text-xs text-green-700 mt-0.5">Covers: <span class="font-medium">all
-                                            addons</span></p>
+                                    <p class="text-xs text-green-700 mt-0.5"><span x-text="translations['addon_detail.covers_label']"></span> <span class="font-medium" x-text="translations['addon_detail.covers_all']"></span></p>
                                 </template>
                             </div>
                         </div>
-                        <p class="text-xs text-green-600 mt-2">Reloading…</p>
+                        <p class="text-xs text-green-600 mt-2" x-text="translations['addon_detail.reloading']"></p>
                     </div>
                 </div>
             </div>
@@ -348,7 +332,7 @@
             <!-- Screenshots -->
             {% if addon.screenshots and addon.screenshots|length > 0 %}
             <div class="mt-6">
-                <h3 class="text-lg font-medium text-slate-900">Screenshots</h3>
+                <h3 class="text-lg font-medium text-slate-900">{{ "addon_detail.screenshots" | t }}</h3>
                 <div class="mt-4 flex flex-col gap-6">
                     {% for screenshot in addon.screenshots %}
                     <div class="overflow-hidden rounded-lg shadow-sm ring-1 ring-gray-900/5">
@@ -363,6 +347,9 @@
 
     <script>
         document.addEventListener('alpine:init', () => {
+            const translations = {{ t | json | safe }};
+            const i18n = (key) => translations[key] || key;
+
             Alpine.data('addonDetail', (id, licenseExpired, licenseUnlicensed) => ({
                 licenseKey: '',
                 error: '',
@@ -373,6 +360,7 @@
                 showInput: false,
                 licenseExpired: licenseExpired,
                 showExpiredModal: licenseExpired || licenseUnlicensed,
+                translations: translations,
 
                 async verifyLicense() {
                     this.error = '';
@@ -381,7 +369,7 @@
                     this.verifiedScope = null;
                     const key = this.licenseKey.trim();
                     if (!key) {
-                        this.error = 'Please enter a license key.';
+                        this.error = i18n('addon_detail.please_enter_key');
                         return;
                     }
                     this.loading = true;
@@ -401,10 +389,10 @@
                             // Reload after a short delay so user can read the confirmation
                             setTimeout(() => window.location.reload(), 2200);
                         } else {
-                            this.error = result.message || 'Verification failed.';
+                            this.error = result.message || i18n('addon_detail.verification_failed');
                         }
                     } catch (e) {
-                        this.error = 'Network error — please try again.';
+                        this.error = i18n('addon_detail.network_error');
                     } finally {
                         this.loading = false;
                     }

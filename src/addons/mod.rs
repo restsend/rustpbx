@@ -111,6 +111,21 @@ pub trait Addon: Send + Sync {
         vec![]
     }
 
+    /// Return the path to this addon's locale directory, if any.
+    ///
+    /// Translation files in this directory (e.g. `en.toml`, `zh.toml`) will
+    /// be merged into the global i18n cache under the addon's own namespace.
+    /// Conventionally the keys should be prefixed with the addon id, e.g.:
+    ///
+    /// ```toml
+    /// # src/addons/queue/locales/en.toml
+    /// [queue]
+    /// title = "Call Queues"
+    /// ```
+    fn locales_dir(&self) -> Option<String> {
+        None
+    }
+
     /// Return a hook for call record processing
     fn call_record_hook(
         &self,

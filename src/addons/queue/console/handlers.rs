@@ -10,7 +10,7 @@ use crate::proxy::routing::RouteQueueConfig;
 use axum::{
     Json, Router,
     extract::{Path as AxumPath, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
@@ -51,9 +51,10 @@ pub struct QueueListFilters {
 
 pub async fn page_queues(
     State(state): State<Arc<ConsoleState>>,
+    headers: HeaderMap,
     AuthRequired(_): AuthRequired,
 ) -> Response {
-    state.render(
+    state.render_with_headers(
         "queue.html",
         json!({
             "nav_active": "queues",
@@ -66,6 +67,7 @@ pub async fn page_queues(
             },
             "create_url": state.url_for("/queues/new"),
         }),
+        &headers,
     )
 }
 
@@ -161,9 +163,10 @@ pub async fn query_queues(
 
 pub async fn page_queue_create(
     State(state): State<Arc<ConsoleState>>,
+    headers: HeaderMap,
     AuthRequired(_): AuthRequired,
 ) -> Response {
-    state.render(
+    state.render_with_headers(
         "queue_detail.html",
         json!({
             "nav_active": "queue-detail",
@@ -178,12 +181,14 @@ pub async fn page_queue_create(
             "update_url": Value::Null,
             "list_url": state.url_for("/queues"),
         }),
+        &headers,
     )
 }
 
 pub async fn page_queue_edit(
     AxumPath(id): AxumPath<i64>,
     State(state): State<Arc<ConsoleState>>,
+    headers: HeaderMap,
     AuthRequired(_): AuthRequired,
 ) -> Response {
     let db = state.db();
@@ -200,7 +205,7 @@ pub async fn page_queue_edit(
     let metadata_text = format_metadata_text(&model.metadata);
     let tags = queue_tags(model.metadata.as_ref());
 
-    state.render(
+    state.render_with_headers(
         "queue_detail.html",
         json!({
             "nav_active": "queue-detail",
@@ -219,6 +224,7 @@ pub async fn page_queue_edit(
             "update_url": state.url_for(&format!("/queues/{}", model.id)),
             "list_url": state.url_for("/queues"),
         }),
+        &headers,
     )
 }
 

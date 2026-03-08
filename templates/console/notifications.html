@@ -1,13 +1,13 @@
 {% extends "console/layout.html" %}
-{% block title %}Notifications · {{site_name|default('RustPBX')}}{% endblock %}
+{% block title %}{{ "notifications.title" | t }} · {{site_name|default('RustPBX')}}{% endblock %}
 {% block content %}
 <div class="p-6" x-data="notificationsPage()" x-init="init()">
     <div class="mx-auto max-w-4xl space-y-6">
         <header class="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
             <div class="space-y-1">
-                <p class="text-xs font-semibold uppercase tracking-wide text-sky-600">System</p>
-                <h1 class="text-2xl font-semibold text-slate-900">Notifications</h1>
-                <p class="text-sm text-slate-500">System messages, update notices, and alerts from RustPBX.</p>
+                <p class="text-xs font-semibold uppercase tracking-wide text-sky-600">{{ "notifications_page.system_notifications" | t }}</p>
+                <h1 class="text-2xl font-semibold text-slate-900">{{ "notifications.title" | t }}</h1>
+                <p class="text-sm text-slate-500">{{ "notifications_page.system_notifications" | t }}</p>
             </div>
             <button type="button" @click="markAllRead()"
                 class="inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-4 py-2 text-sm font-semibold text-slate-600 shadow-sm hover:bg-slate-50 transition">
@@ -16,7 +16,7 @@
                     <path stroke-linecap="round" stroke-linejoin="round"
                         d="M9 12.75L11.25 15 15 9.75M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
                 </svg>
-                Mark all as read
+                {{ "notifications_page.mark_all_read" | t }}
             </button>
         </header>
 
@@ -52,7 +52,7 @@
                         <div class="flex items-center gap-2">
                             <p class="text-sm font-semibold text-slate-900">{{ n.title }}</p>
                             {% if not n.read %}
-                            <span class="inline-block h-2 w-2 rounded-full bg-sky-500" title="Unread"></span>
+                            <span class="inline-block h-2 w-2 rounded-full bg-sky-500" title="{{ "notifications_page.unread" | t }}"></span>
                             {% endif %}
                         </div>
                         <time class="shrink-0 text-xs text-slate-400">{{ n.created_at }}</time>
@@ -61,9 +61,9 @@
                     <p class="mt-1 text-sm text-slate-600">{{ n.body }}</p>
                     {% endif %}
                     {% if not n.read %}
-                    <button type="button" @click="markRead({{ n.id }})"
+                    <button type="button" @click="markRead({{ n.id }})" data-mark-read
                         class="mt-2 text-xs font-semibold text-sky-600 hover:text-sky-500 transition">
-                        Mark as read
+                        {{ "notifications_page.mark_as_read" | t }}
                     </button>
                     {% endif %}
                 </div>
@@ -78,8 +78,8 @@
                 <path stroke-linecap="round" stroke-linejoin="round"
                     d="M14.857 17.082a23.848 23.848 0 005.454-1.31A8.967 8.967 0 0118 9.75v-.7V9A6 6 0 006 9v.75a8.967 8.967 0 01-2.312 6.022c1.733.64 3.56 1.085 5.455 1.31m5.714 0a24.255 24.255 0 01-5.714 0m5.714 0a3 3 0 11-5.714 0" />
             </svg>
-            <p class="mt-4 text-sm font-semibold text-slate-700">No notifications</p>
-            <p class="mt-1 text-xs text-slate-400">You're all caught up. System alerts will appear here.</p>
+            <p class="mt-4 text-sm font-semibold text-slate-700">{{ "notifications_page.no_notifications" | t }}</p>
+            <p class="mt-1 text-xs text-slate-400">{{ "notifications_page.all_caught_up" | t }}</p>
         </div>
         {% endif %}
     </div>
@@ -98,9 +98,7 @@
                         el.classList.remove('ring-sky-200', 'bg-sky-50/40');
                         el.classList.add('ring-black/5');
                         el.querySelectorAll('[title="Unread"]').forEach(e => e.remove());
-                        el.querySelectorAll('button').forEach(b => {
-                            if (b.textContent.trim() === 'Mark as read') b.remove();
-                        });
+                        el.querySelectorAll('[data-mark-read]').forEach(b => b.remove());
                     }
                     window.dispatchEvent(new CustomEvent('notifications:refresh'));
                 }

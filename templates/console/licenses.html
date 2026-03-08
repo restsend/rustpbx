@@ -1,5 +1,5 @@
 {% extends "console/layout.html" %}
-{% block title %}Licenses · {{ site_name | default('RustPBX') }}{% endblock %}
+{% block title %}{{ "licenses.title" | t }} · {{ site_name | default('RustPBX') }}{% endblock %}
 {% block content %}
 <div class="p-4 sm:p-6" x-data="licenseForm()">
     <div class="mx-auto max-w-7xl space-y-6">
@@ -7,10 +7,9 @@
         <!-- Page header -->
         <div class="flex items-center justify-between">
             <div>
-                <h1 class="text-2xl font-semibold text-slate-900">Licenses</h1>
+                <h1 class="text-2xl font-semibold text-slate-900">{{ "licenses.title" | t }}</h1>
                 <p class="text-sm text-slate-500 mt-1">
-                    Configured license keys and their current status.
-                    Keys are verified once at startup; restart to re-check.
+                    {{ "licenses.subtitle" | t }}
                 </p>
             </div>
             <a href="https://miuda.ai/try" target="_blank"
@@ -20,7 +19,7 @@
                     <path stroke-linecap="round" stroke-linejoin="round"
                         d="M13.5 6H5.25A2.25 2.25 0 0 0 3 8.25v10.5A2.25 2.25 0 0 0 5.25 21h10.5A2.25 2.25 0 0 0 18 18.75V10.5m-10.5 6L21 3m0 0h-5.25M21 3v5.25" />
                 </svg>
-                Get / Renew at miuda.ai
+                {{ "licenses.get_renew" | t }}
             </a>
         </div>
 
@@ -32,10 +31,10 @@
                     <path stroke-linecap="round" stroke-linejoin="round"
                         d="M15.75 5.25a3 3 0 0 1 3 3m3 0a6 6 0 0 1-7.029 5.912c-.563-.097-1.159.026-1.563.43L10.5 17.25H8.25v2.25H6v2.25H2.25v-2.818c0-.597.237-1.17.659-1.591l6.499-6.499c.404-.404.527-1 .43-1.563A6 6 0 1 1 21.75 8.25Z" />
                 </svg>
-                Add / Update a License Key
+                {{ "licenses.add_update_license" | t }}
             </h2>
             <div>
-                <label class="block text-xs font-medium text-slate-500 mb-1">License Key</label>
+                <label class="block text-xs font-medium text-slate-500 mb-1">{{ "licenses.license_key" | t }}</label>
                 <div class="flex rounded-md shadow-sm">
                     <input type="text" x-model="licenseKey"
                         class="block w-full rounded-none rounded-l-md border border-slate-200 px-3 py-2 text-sm text-slate-700 placeholder-slate-400 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
@@ -48,8 +47,8 @@
                             </circle>
                             <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8z"></path>
                         </svg>
-                        <span x-show="!loading">Verify &amp; Save</span>
-                        <span x-show="loading" x-cloak>Verifying…</span>
+                        <span x-show="!loading">{{ "licenses.verify_save" | t }}</span>
+                        <span x-show="loading" x-cloak>{{ "licenses.verifying" | t }}</span>
                     </button>
                 </div>
             </div>
@@ -73,7 +72,7 @@
                             clip-rule="evenodd" />
                     </svg>
                     <div>
-                        <p class="text-xs font-semibold text-green-800">License verified and saved!</p>
+                        <p class="text-xs font-semibold text-green-800">{{ "licenses.license_verified" | t }}</p>
                         <p class="text-xs text-green-700 mt-0.5">
                             Plan: <span class="font-medium" x-text="verifiedPlan"></span>
                             <template x-if="verifiedExpiry">
@@ -109,18 +108,18 @@
                         d="M15.75 5.25a3 3 0 0 1 3 3m3 0a6 6 0 0 1-7.029 5.912c-.563-.097-1.159.026-1.563.43L10.5 17.25H8.25v2.25H6v2.25H2.25v-2.818c0-.597.237-1.17.659-1.591l6.499-6.499c.404-.404.527-1 .43-1.563A6 6 0 1 1 21.75 8.25Z" />
                 </svg>
             </div>
-            <h3 class="mt-4 text-base font-semibold text-slate-900">No license keys configured</h3>
+            <h3 class="mt-4 text-base font-semibold text-slate-900">{{ "licenses.no_licenses" | t }}</h3>
             <p class="mt-1 text-sm text-slate-500">
                 Enter an addon ID and your license key above, or get one at miuda.ai.
             </p>
             <div class="mt-6 flex items-center justify-center gap-3">
                 <a href="{{ bp }}/addons"
                     class="inline-flex items-center gap-2 rounded-md bg-white px-4 py-2 text-sm font-medium text-slate-700 ring-1 ring-inset ring-slate-300 hover:bg-slate-50 transition-colors">
-                    Go to Addons
+                    {{ "licenses.go_to_addons" | t }}
                 </a>
                 <a href="https://miuda.ai/try" target="_blank"
                     class="inline-flex items-center gap-2 rounded-md bg-sky-600 px-4 py-2 text-sm font-semibold text-white hover:bg-sky-500 transition-colors">
-                    Get a License
+                    {{ "licenses.get_license" | t }}
                 </a>
             </div>
         </div>
@@ -134,7 +133,7 @@
                 <!-- Header row: key name + status badge -->
                 <div class="flex items-start justify-between gap-2">
                     <div class="min-w-0">
-                        <p class="text-xs font-medium text-slate-500 uppercase tracking-wide">Key</p>
+                        <p class="text-xs font-medium text-slate-500 uppercase tracking-wide">{{ "licenses.key" | t }}</p>
                         <p class="mt-0.5 text-sm font-semibold text-slate-900 truncate font-mono">{{ lic.key_name }}</p>
                     </div>
                     {% if lic.status == "Valid" %}
@@ -145,7 +144,7 @@
                                 d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.857-9.809a.75.75 0 00-1.214-.882l-3.483 4.79-1.88-1.88a.75.75 0 10-1.06 1.061l2.5 2.5a.75.75 0 001.137-.089l4-5.5z"
                                 clip-rule="evenodd" />
                         </svg>
-                        Valid
+                        {{ "licenses.valid" | t }}
                     </span>
                     {% elif lic.status == "Expired" or lic.status == "Trial Expired" %}
                     <span
@@ -179,19 +178,19 @@
                 <dl class="grid grid-cols-2 gap-x-4 gap-y-2 text-xs">
                     {% if lic.plan %}
                     <div>
-                        <dt class="font-medium text-slate-500">Plan</dt>
+                        <dt class="font-medium text-slate-500">{{ "licenses.plan" | t }}</dt>
                         <dd class="mt-0.5 text-slate-800 font-semibold">{{ lic.plan }}</dd>
                     </div>
                     {% endif %}
                     <div>
-                        <dt class="font-medium text-slate-500">Expires</dt>
+                        <dt class="font-medium text-slate-500">{{ "licenses.expires" | t }}</dt>
                         <dd class="mt-0.5 text-slate-800">{{ lic.expiry | default('Lifetime') }}</dd>
                     </div>
                 </dl>
 
                 <!-- Scope -->
                 <div>
-                    <p class="text-xs font-medium text-slate-500">Covers</p>
+                    <p class="text-xs font-medium text-slate-500">{{ "licenses.covers" | t }}</p>
                     {% if lic.scope %}
                     <div class="mt-1 flex flex-wrap gap-1">
                         {% for addon_id in lic.scope %}
@@ -201,13 +200,13 @@
                         {% endfor %}
                     </div>
                     {% else %}
-                    <p class="mt-0.5 text-xs text-slate-600 font-medium">All addons</p>
+                    <p class="mt-0.5 text-xs text-slate-600 font-medium">{{ "licenses.all_addons" | t }}</p>
                     {% endif %}
                 </div>
 
                 <!-- Assigned addons (from config) -->
                 <div class="border-t border-slate-100 pt-3">
-                    <p class="text-xs font-medium text-slate-500">Assigned to</p>
+                    <p class="text-xs font-medium text-slate-500">{{ "licenses.assigned_to" | t }}</p>
                     <div class="mt-1 flex flex-wrap gap-1">
                         {% for addon_id in lic.addon_ids %}
                         <a href="{{ bp }}/addons/{{ addon_id }}"
@@ -230,16 +229,8 @@
                     d="m11.25 11.25.041-.02a.75.75 0 0 1 1.063.852l-.708 2.836a.75.75 0 0 0 1.063.853l.041-.021M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0Zm-9-3.75h.008v.008H12V8.25Z" />
             </svg>
             <div class="text-xs text-slate-600">
-                <p class="font-medium text-slate-700">How to configure a license</p>
-                <p class="mt-1">Use the form above to verify and save a key directly on this page.
-                    For keys that require an authorized email, add <code
-                        class="bg-slate-200 px-1 py-0.5 rounded">email = "you@example.com"</code>
-                    under <code class="bg-slate-200 px-1 py-0.5 rounded">[licenses]</code> in your
-                    <code class="bg-slate-200 px-1 py-0.5 rounded">config.toml</code>.
-                    You can also enter a key from any <a href="{{ bp }}/addons"
-                        class="underline font-medium text-sky-600">addon
-                        detail page</a>.
-                </p>
+                <p class="font-medium text-slate-700">{{ "licenses.how_to_configure" | t }}</p>
+                <p class="mt-1">{{ "licenses.how_to_configure_desc" | t }}</p>
             </div>
         </div>
 

@@ -1,17 +1,17 @@
 {% extends "console/layout.html" %}
-{% block title %}Addons · {{ site_name | default('RustPBX') }}{% endblock %}
+{% block title %}{{ "addons.title" | t }} · {{ site_name | default('RustPBX') }}{% endblock %}
 {% block content %}
 <div class="p-4 sm:p-6" x-data="addonsPage()">
     <div class="mx-auto max-w-7xl space-y-6">
         <div class="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
             <div class="space-y-0.5">
-                <p class="text-[11px] font-semibold uppercase tracking-wide text-sky-600">System</p>
+                <p class="text-[11px] font-semibold uppercase tracking-wide text-sky-600">{{ "notifications.system" | t }}</p>
                 {% if commerce_enabled %}
-                <h1 class="text-2xl font-semibold text-slate-900">Addons &amp; Licenses</h1>
-                <p class="text-sm text-slate-500 sm:max-w-xl">Manage installed addons and license keys.</p>
+                <h1 class="text-2xl font-semibold text-slate-900">{{ "addons.title" | t }} &amp; {{ "licenses.title" | t }}</h1>
+                <p class="text-sm text-slate-500 sm:max-w-xl">{{ "addons.manage_addons_licenses" | t }}</p>
                 {% else %}
-                <h1 class="text-2xl font-semibold text-slate-900">Addons</h1>
-                <p class="text-sm text-slate-500 sm:max-w-xl">Manage installed addons.</p>
+                <h1 class="text-2xl font-semibold text-slate-900">{{ "addons.title" | t }}</h1>
+                <p class="text-sm text-slate-500 sm:max-w-xl">{{ "addons.manage_addons" | t }}</p>
                 {% endif %}
             </div>
             {% if commerce_enabled %}
@@ -22,7 +22,7 @@
                     <path stroke-linecap="round" stroke-linejoin="round"
                         d="M13.5 6H5.25A2.25 2.25 0 0 0 3 8.25v10.5A2.25 2.25 0 0 0 5.25 21h10.5A2.25 2.25 0 0 0 18 18.75V10.5m-10.5 6L21 3m0 0h-5.25M21 3v5.25" />
                 </svg>
-                Get / Renew at miuda.ai
+                {{ "addons.get_renew" | t }}
             </a>
             {% endif %}
         </div>
@@ -36,11 +36,10 @@
                     clip-rule="evenodd" />
             </svg>
             <div class="flex-1">
-                <p class="text-sm font-medium text-amber-800">Some commercial addons are not licensed</p>
+                <p class="text-sm font-medium text-amber-800">{{ "addons.unlicensed_title" | t }}</p>
                 <p class="text-xs text-amber-700 mt-0.5">
-                    Addons continue to work, but a valid license ensures uninterrupted access and updates.
-                    <a href="https://miuda.ai/try" target="_blank" class="underline font-medium">Get a license at
-                        miuda.ai/try &rarr;</a>
+                    {{ "addons.unlicensed_desc" | t }}
+                    <a href="https://miuda.ai/try" target="_blank" class="underline font-medium">{{ "addons.get_license_at" | t }}</a>
                 </p>
             </div>
         </div>
@@ -54,7 +53,7 @@
                         ? 'border-sky-600 text-sky-600'
                         : 'border-transparent text-slate-500 hover:text-slate-700 hover:border-slate-300'"
                     @click="setTab('addons')">
-                    Addons
+                    {{ "addons.addons_tab" | t }}
                 </button>
                 {% if commerce_enabled %}
                 <button type="button"
@@ -62,7 +61,7 @@
                         ? 'border-sky-600 text-sky-600'
                         : 'border-transparent text-slate-500 hover:text-slate-700 hover:border-slate-300'"
                     @click="setTab('licenses')">
-                    Licenses
+                    {{ "addons.licenses_tab" | t }}
                 </button>
                 {% endif %}
             </nav>
@@ -75,13 +74,13 @@
                     <table class="min-w-full divide-y divide-slate-200 text-left text-sm">
                         <thead class="bg-slate-50 text-xs font-semibold uppercase tracking-wide text-slate-500">
                             <tr>
-                                <th scope="col" class="px-4 py-2">Name</th>
-                                <th scope="col" class="px-4 py-2">Description</th>
+                                <th scope="col" class="px-4 py-2">{{ "addons.name" | t }}</th>
+                                <th scope="col" class="px-4 py-2">{{ "addons.description" | t }}</th>
                                 {% if commerce_enabled %}
-                                <th scope="col" class="px-4 py-2">License</th>
+                                <th scope="col" class="px-4 py-2">{{ "addons.license" | t }}</th>
                                 {% endif %}
-                                <th scope="col" class="px-4 py-2">Status</th>
-                                <th scope="col" class="px-4 py-2">Actions</th>
+                                <th scope="col" class="px-4 py-2">{{ "addons.status" | t }}</th>
+                                <th scope="col" class="px-4 py-2">{{ "addons.actions" | t }}</th>
                             </tr>
                         </thead>
                         <tbody class="divide-y divide-slate-100 bg-white text-sm text-slate-600">
@@ -95,8 +94,7 @@
                                     <div class="text-xs text-slate-400">{{ addon.id }}</div>
                                     {% if addon.restart_required %}
                                     <span
-                                        class="inline-flex items-center rounded-md bg-yellow-50 px-2 py-1 text-xs font-medium text-yellow-800 ring-1 ring-inset ring-yellow-600/20 mt-1">Restart
-                                        Required</span>
+                                        class="inline-flex items-center rounded-md bg-yellow-50 px-2 py-1 text-xs font-medium text-yellow-800 ring-1 ring-inset ring-yellow-600/20 mt-1">{{ "addons.restart_required" | t }}</span>
                                     {% endif %}
                                 </td>
                                 <td class="px-4 py-2">
@@ -420,6 +418,9 @@
 </div>
 
 <script>
+    const addonsTranslations = {{ t | json | safe }};
+    const i18n = (key) => addonsTranslations[key] || key;
+
     document.addEventListener('alpine:init', () => {
         Alpine.data('addonsPage', () => ({
             activeTab: 'addons',
@@ -442,7 +443,7 @@
                 const event = new CustomEvent('console:confirm', {
                     detail: {
                         title: `${action.charAt(0).toUpperCase() + action.slice(1)} Addon?`,
-                        message: `Are you sure you want to ${action} the "${id}" addon? You will need to restart the server for changes to take effect.`,
+                        message: i18n('addons.confirm_message').replace('{action}', action).replace('{id}', id),
                         confirmLabel: action.charAt(0).toUpperCase() + action.slice(1),
                         destructive: currentState,
                         onConfirm: () => this.performToggle(id, !currentState)
@@ -462,10 +463,10 @@
                     if (result.success) {
                         window.location.reload();
                     } else {
-                        alert('Failed to toggle addon: ' + (result.message || 'Unknown error'));
+                        alert(i18n('addons.failed_toggle') + ': ' + (result.message || i18n('common.unknown_error')));
                     }
                 } catch (e) {
-                    alert('Error: ' + e.message);
+                    alert(i18n('common.error') + ': ' + e.message);
                 }
             }
         }));

@@ -19,7 +19,7 @@ use crate::{
 use axum::{
     Router,
     extract::{Json, Query, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
@@ -114,16 +114,18 @@ impl From<Transport> for ProbeTransport {
 
 pub async fn page_diagnostics(
     State(state): State<Arc<ConsoleState>>,
+    headers: HeaderMap,
     AuthRequired(_): AuthRequired,
 ) -> Response {
     let bootstrap = diagnostics_bootstrap(&state).await;
-    state.render(
+    state.render_with_headers(
         "console/diagnostics.html",
         json!({
             "nav_active": "diagnostics",
             "test_data": bootstrap,
             "addon_scripts": state.get_injected_scripts("/console/diagnostics"),
         }),
+        &headers,
     )
 }
 

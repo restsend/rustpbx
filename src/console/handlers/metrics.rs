@@ -1,12 +1,13 @@
 use crate::console::ConsoleState;
 use crate::console::middleware::AuthRequired;
-use axum::{Json, extract::State, response::Response};
+use axum::{Json, extract::State, http::HeaderMap, response::Response};
 use serde_json::json;
 use std::sync::Arc;
 
 /// Render the metrics dashboard page.
 pub async fn metrics_page(
     State(state): State<Arc<ConsoleState>>,
+    headers: HeaderMap,
     AuthRequired(_): AuthRequired,
 ) -> Response {
     let runtime_metrics = collect_runtime_metrics(&state);
@@ -14,13 +15,14 @@ pub async fn metrics_page(
     // Get Prometheus metrics endpoint configuration
     let prometheus_config = get_prometheus_config(&state);
 
-    state.render(
+    state.render_with_headers(
         "console/metrics.html",
         json!({
             "nav_active": "metrics",
             "metrics": runtime_metrics,
             "prometheus": prometheus_config,
         }),
+        &headers,
     )
 }
 

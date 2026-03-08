@@ -3,7 +3,7 @@ use crate::app::AppState;
 use axum::{
     Extension,
     extract::{Json, Path, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::{Html, IntoResponse},
 };
 use serde::{Deserialize, Serialize};
@@ -33,6 +33,7 @@ pub async fn status(Extension(acme_state): Extension<AcmeState>) -> impl IntoRes
 
 pub async fn ui_index(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Extension(acme_state): Extension<AcmeState>,
 ) -> impl IntoResponse {
     #[cfg(feature = "console")]
@@ -40,13 +41,14 @@ pub async fn ui_index(
         if let Some(console) = &state.console {
             let certs = list_certificates().unwrap_or_default();
             let status = acme_state.status.read().unwrap().clone();
-            return console.render(
+            return console.render_with_headers(
                 "acme/acme_index.html",
                 serde_json::json!({
                     "certs": certs,
                     "status": status,
                     "nav_active": "SSL Certificates"
                 }),
+                &headers,
             );
         }
     }

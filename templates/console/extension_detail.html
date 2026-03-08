@@ -2,7 +2,7 @@
 {% set has_model = model is defined and model is not none %}
 {% set mode_text = '"edit"' if has_model else '"create"' %}
 {% set model_data = model if has_model else {} %}
-{% block title %}{{ model_data.extension | default("New extension") }} · {{ site_name | default('RustPBX') }}{% endblock
+{% block title %}{{ model_data.extension | default("extension_detail.new_extension" | t) }} · {{ site_name | default('RustPBX') }}{% endblock
 %}
 {% block content %}
 {% set base_url = base_path | default('/console') %}
@@ -23,18 +23,18 @@
                     <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2">
                         <path stroke-linecap="round" stroke-linejoin="round" d="M12 5l-4 5 4 5" />
                     </svg>
-                    Back to list
+                    {{ "extension_detail.back_to_list" | t }}
                 </a>
                 <div>
                     <h1 class="text-2xl font-semibold text-slate-900" x-text="pageTitle"></h1>
                     <p class="mt-2 text-sm text-slate-500"
-                        x-text="mode === 'create' ? 'Define credentials, departments, and availability for the new extension.' : 'Update profile, credentials, routing, and access controls for this extension.'">
+                        x-text="mode === 'create' ? '{{ "extension_detail.define_credentials" | t }}' : '{{ "extension_detail.update_profile" | t }}'">
                     </p>
                 </div>
             </div>
             <div class="rounded-xl bg-white p-5 text-sm text-slate-600 shadow-sm ring-1 ring-black/5">
                 <div class="flex items-center justify-between">
-                    <div class="font-semibold text-slate-900">Extension summary</div>
+                    <div class="font-semibold text-slate-900">{{ "extension_detail.extension_summary" | t }}</div>
                     <template x-if="mode === 'edit'">
                         <span class="inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-xs font-semibold"
                             :class="hasActiveRegistration()
@@ -45,21 +45,21 @@
                             <span class="h-1.5 w-1.5 rounded-full"
                                 :class="hasActiveRegistration() ? 'bg-emerald-400' : locator.error ? 'bg-rose-400' : 'bg-slate-300'"></span>
                             <span
-                                x-text="hasActiveRegistration() ? 'Active' : locator.error ? 'Unavailable' : 'Pending'"></span>
+                                x-text="hasActiveRegistration() ? '{{ "extension_detail.active" | t }}' : locator.error ? '{{ "extension_detail.unavailable" | t }}' : '{{ "extension_detail.pending" | t }}'"></span>
                         </span>
                     </template>
                 </div>
                 <dl class="mt-4 space-y-3 text-xs text-slate-500">
                     <div class="flex items-center justify-between gap-6">
-                        <dt class="uppercase tracking-wide">Extension</dt>
+                        <dt class="uppercase tracking-wide">{{ "extension_detail.extension_col" | t }}</dt>
                         <dd class="text-sm text-slate-700" x-text="form.extension || '—'"></dd>
                     </div>
                     <div class="flex items-center justify-between gap-6">
-                        <dt class="uppercase tracking-wide">Created</dt>
+                        <dt class="uppercase tracking-wide">{{ "extension_detail.created" | t }}</dt>
                         <dd class="text-sm text-slate-700" x-text="formatDate(model?.created_at)"></dd>
                     </div>
                     <div class="flex items-center justify-between gap-6">
-                        <dt class="uppercase tracking-wide">Last registered</dt>
+                        <dt class="uppercase tracking-wide">{{ "extension_detail.last_registered" | t }}</dt>
                         <dd class="text-sm text-slate-700">
                             <div x-text="registrationStatusText()"></div>
                             <template x-if="locator.error">
@@ -68,8 +68,8 @@
                         </dd>
                     </div>
                     <div class="flex items-center justify-between gap-6">
-                        <dt class="uppercase tracking-wide">Public access</dt>
-                        <dd class="text-sm text-slate-700" x-text="form.public_call_allowed ? 'Allowed' : 'Restricted'">
+                        <dt class="uppercase tracking-wide">{{ "extension_detail.public_access" | t }}</dt>
+                        <dd class="text-sm text-slate-700" x-text="form.public_call_allowed ? '{{ "extension_detail.allowed" | t }}' : '{{ "extension_detail.restricted" | t }}'">
                         </dd>
                     </div>
                 </dl>
@@ -89,7 +89,7 @@
             <div class="space-y-6">
                 <div class="rounded-xl bg-white p-3 shadow-sm ring-1 ring-black/5">
                     <nav class="inline-flex w-full flex-wrap gap-2 rounded-lg border border-slate-200 bg-slate-50 p-1 text-xs font-semibold text-slate-600"
-                        role="tablist" aria-label="Extension configuration sections">
+                        role="tablist" aria-label="{{ "extension_detail.config_sections_label" | t }}">
                         <template x-for="tab in tabs" :key="tab.id">
                             <button type="button" @click="setActiveTab(tab.id)"
                                 class="flex-1 rounded-md px-4 py-2 text-left transition sm:flex-none"
@@ -109,43 +109,39 @@
                     :id="`tab-panel-profile`" role="tabpanel" tabindex="0" class="space-y-6">
                     <div class="grid gap-6 md:grid-cols-2">
                         <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
-                            Extension number
+                            {{ "extension_detail.extension_number" | t }}
                             <input type="text" x-model.trim="form.extension" required maxlength="32"
                                 class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                placeholder="e.g. 1007">
-                            <span class="text-xs font-normal text-slate-400">Numbers only. This becomes the SIP user ID
-                                for
-                                clients.</span>
+                                placeholder="{{ "extension_detail.extension_number_placeholder" | t }}">
+                            <span class="text-xs font-normal text-slate-400">{{ "extension_detail.extension_number_hint" | t }}</span>
                         </label>
                         <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
-                            Display name
+                            {{ "extension_detail.display_name" | t }}
                             <input type="text" x-model.trim="form.display_name" maxlength="160"
                                 class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                placeholder="Visible to teammates and call logs">
+                                placeholder="{{ "extension_detail.display_name_placeholder" | t }}">
                         </label>
                         <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
-                            Email (optional)
+                            {{ "extension_detail.email_optional" | t }}
                             <input type="email" x-model.trim="form.email" maxlength="160"
                                 class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                placeholder="name@rustpbx.com">
+                                placeholder="{{ "extension_detail.email_placeholder" | t }}">
                         </label>
                         <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
-                            SIP password
+                            {{ "extension_detail.sip_password" | t }}
                             <div class="relative">
                                 <input
                                     :type="sipPasswordVisible ? 'text' : (hasExistingSipPassword() ? 'text' : 'password')"
                                     :readonly="!sipPasswordVisible && hasExistingSipPassword()"
                                     x-model="sipPasswordInput" @input="onSipPasswordInput" maxlength="160"
                                     class="w-full rounded-lg border border-slate-200 px-3 py-2 pr-20 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                    placeholder="Leave blank to keep current or auto-generate">
+                                    placeholder="{{ "extension_detail.sip_password_placeholder" | t }}">
                                 <button type="button"
                                     class="absolute inset-y-0 right-2 inline-flex items-center text-xs font-semibold uppercase tracking-wide text-slate-500 transition hover:text-slate-700"
-                                    @click="toggleSipPasswordVisibility" x-text="sipPasswordVisible ? 'Hide' : 'Show'"
+                                    @click="toggleSipPasswordVisibility" x-text="sipPasswordVisible ? '{{ "extension_detail.hide" | t }}' : '{{ "extension_detail.show" | t }}'"
                                     :aria-pressed="sipPasswordVisible"></button>
                             </div>
-                            <span class="text-xs font-normal text-slate-400">Provide a strong password. Leave blank to
-                                keep
-                                the existing secret.</span>
+                            <span class="text-xs font-normal text-slate-400">{{ "extension_detail.sip_password_hint" | t }}</span>
                         </label>
                     </div>
                 </div>
@@ -153,13 +149,11 @@
                 <div x-cloak x-show="activeTab === 'access'" x-transition.opacity.duration.200ms
                     :id="`tab-panel-access`" role="tabpanel" tabindex="0" class="space-y-6">
                     <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
-                        <h2 class="text-sm font-semibold text-slate-900">Departments</h2>
-                        <p class="mt-1 text-xs text-slate-500">Assignments load once and remain available while editing.
-                        </p>
+                        <h2 class="text-sm font-semibold text-slate-900">{{ "extension_detail.departments" | t }}</h2>
+                        <p class="mt-1 text-xs text-slate-500">{{ "extension_detail.departments_hint" | t }}</p>
                         <div class="mt-4 flex flex-wrap gap-2">
                             <template x-if="!availableDepartments.length">
-                                <span class="rounded-full border border-slate-200 px-3 py-1 text-xs text-slate-400">No
-                                    departments configured.</span>
+                                <span class="rounded-full border border-slate-200 px-3 py-1 text-xs text-slate-400">{{ "extension_detail.no_departments" | t }}</span>
                             </template>
                             <template x-for="dept in availableDepartments" :key="dept.id">
                                 <label
@@ -177,10 +171,8 @@
                         <div class="space-y-3 rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
                             <div class="flex items-start justify-between">
                                 <div>
-                                    <h2 class="text-sm font-semibold text-slate-900">Portal login</h2>
-                                    <p class="text-xs text-slate-500">Controls whether softphone or web clients can sign
-                                        in.
-                                    </p>
+                                    <h2 class="text-sm font-semibold text-slate-900">{{ "extension_detail.portal_login" | t }}</h2>
+                                    <p class="text-xs text-slate-500">{{ "extension_detail.portal_login_hint" | t }}</p>
                                 </div>
                                 <button type="button" @click="form.login_allowed = !form.login_allowed"
                                     :class="form.login_allowed ? 'bg-emerald-100 text-emerald-600 ring-emerald-200' : 'bg-slate-100 text-slate-500 ring-slate-200'"
@@ -190,16 +182,15 @@
                                         <path stroke-linecap="round" stroke-linejoin="round"
                                             d="M9 12.75 11.25 15 15 9.75m-3-7.036A11.959 11.959 0 0 1 3.598 6 11.99 11.99 0 0 0 3 9.749c0 5.592 3.824 10.29 9 11.623 5.176-1.332 9-6.03 9-11.622 0-1.31-.21-2.571-.598-3.751h-.152c-3.196 0-6.1-1.248-8.25-3.285Z" />
                                     </svg>
-                                    <span x-text="form.login_allowed ? 'Enabled' : 'Disabled'"></span>
+                                    <span x-text="form.login_allowed ? '{{ "extension_detail.enabled" | t }}' : '{{ "extension_detail.disabled" | t }}'"></span>
                                 </button>
                             </div>
                         </div>
                         <div class="space-y-3 rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
                             <div class="flex items-start justify-between">
                                 <div>
-                                    <h2 class="text-sm font-semibold text-slate-900">Voicemail inbox</h2>
-                                    <p class="text-xs text-slate-500">Allow unanswered calls to drop voicemail messages.
-                                    </p>
+                                    <h2 class="text-sm font-semibold text-slate-900">{{ "extension_detail.voicemail_inbox" | t }}</h2>
+                                    <p class="text-xs text-slate-500">{{ "extension_detail.voicemail_hint" | t }}</p>
                                 </div>
                                 <button type="button" @click="form.voicemail_enabled = !form.voicemail_enabled"
                                     :class="form.voicemail_enabled ? 'bg-sky-100 text-sky-600 ring-sky-200' : 'bg-slate-100 text-slate-500 ring-slate-200'"
@@ -209,16 +200,15 @@
                                         <path stroke-linecap="round" stroke-linejoin="round"
                                             d="M2.25 13.5h3.86a2.25 2.25 0 0 1 2.012 1.244l.256.512a2.25 2.25 0 0 0 2.013 1.244h3.218a2.25 2.25 0 0 0 2.013-1.244l.256-.512a2.25 2.25 0 0 1 2.013-1.244h3.859m-19.5.338V18a2.25 2.25 0 0 0 2.25 2.25h15A2.25 2.25 0 0 0 21.75 18v-4.162c0-.224-.034-.447-.1-.661L19.24 5.338a2.25 2.25 0 0 0-2.15-1.588H6.911a2.25 2.25 0 0 0-2.15 1.588L2.35 13.177a2.25 2.25 0 0 0-.1.661Z" />
                                     </svg>
-                                    <span x-text="form.voicemail_enabled ? 'Enabled' : 'Disabled'"></span>
+                                    <span x-text="form.voicemail_enabled ? '{{ "extension_detail.enabled" | t }}' : '{{ "extension_detail.disabled" | t }}'"></span>
                                 </button>
                             </div>
                         </div>
                         <div class="space-y-3 rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
                             <div class="flex items-start justify-between">
                                 <div>
-                                    <h2 class="text-sm font-semibold text-slate-900">Public inbound calls</h2>
-                                    <p class="text-xs text-slate-500">Allow anonymous SIP INVITEs to reach this
-                                        extension.</p>
+                                    <h2 class="text-sm font-semibold text-slate-900">{{ "extension_detail.public_inbound_calls" | t }}</h2>
+                                    <p class="text-xs text-slate-500">{{ "extension_detail.public_calls_hint" | t }}</p>
                                 </div>
                                 <button type="button" @click="form.public_call_allowed = !form.public_call_allowed"
                                     :class="form.public_call_allowed ? 'bg-emerald-100 text-emerald-600 ring-emerald-200' : 'bg-slate-100 text-slate-500 ring-slate-200'"
@@ -228,11 +218,10 @@
                                         <path stroke-linecap="round" stroke-linejoin="round"
                                             d="M4.75 3.75h2.5l1 3-1.5.75a7 7 0 0 0 4.5 4.5l.75-1.5 3 1v2.5a1 1 0 0 1-1 1c-6.351 0-11.5-5.149-11.5-11.5a1 1 0 0 1 1-1Z" />
                                     </svg>
-                                    <span x-text="form.public_call_allowed ? 'Allowed' : 'Restricted'"></span>
+                                    <span x-text="form.public_call_allowed ? '{{ "extension_detail.allowed" | t }}' : '{{ "extension_detail.restricted" | t }}'"></span>
                                 </button>
                             </div>
-                            <p class="text-xs text-slate-500">Registration still requires credentials even when public
-                                calling is enabled.</p>
+                            <p class="text-xs text-slate-500">{{ "extension_detail.public_calls_note" | t }}</p>
                         </div>
                     </div>
                 </div>
@@ -241,10 +230,8 @@
                     :id="`tab-panel-routing`" role="tabpanel" tabindex="0" class="space-y-6">
                     <div class="space-y-4 rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
                         <header class="flex flex-col gap-1">
-                            <h2 class="text-sm font-semibold text-slate-900">Call forwarding</h2>
-                            <p class="text-xs text-slate-500">Configure destination and timeout. Disabled fields are
-                                ignored
-                                when forwarding is off.</p>
+                            <h2 class="text-sm font-semibold text-slate-900">{{ "extension_detail.call_forwarding" | t }}</h2>
+                            <p class="text-xs text-slate-500">{{ "extension_detail.forwarding_configure_hint" | t }}</p>
                         </header>
                         <div class="grid gap-3 md:grid-cols-2">
                             <template x-for="option in forwardingModes" :key="option.value">
@@ -264,13 +251,13 @@
                         <template x-if="form.call_forwarding_mode === 'none'">
                             <div
                                 class="rounded-lg border border-dashed border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-500">
-                                Enable a forwarding mode above to configure destinations.
+                                {{ "extension_detail.forwarding_disabled_hint" | t }}
                             </div>
                         </template>
                         <div class="grid gap-5 md:grid-cols-2" x-show="form.call_forwarding_mode !== 'none'" x-cloak>
                             <div class="space-y-3 text-sm font-medium text-slate-700">
                                 <div class="flex flex-col gap-2">
-                                    <span>Destination type</span>
+                                    <span>{{ "extension_detail.destination_type" | t }}</span>
                                     <div class="flex flex-wrap gap-2 text-xs font-semibold">
                                         <label
                                             class="inline-flex items-center gap-2 rounded-lg border px-3 py-1.5 text-slate-600 transition"
@@ -278,7 +265,7 @@
                                             <input type="radio" class="h-4 w-4 border-slate-300 text-sky-600"
                                                 :checked="forwardingTargetType === 'uri'"
                                                 @change="setForwardingTargetType('uri')">
-                                            <span>Standard URI</span>
+                                            <span>{{ "extension_detail.standard_uri" | t }}</span>
                                         </label>
                                         <label x-show="queueEnabled"
                                             class="inline-flex items-center gap-2 rounded-lg border px-3 py-1.5 text-slate-600 transition"
@@ -286,7 +273,7 @@
                                             <input type="radio" class="h-4 w-4 border-slate-300 text-sky-600"
                                                 :checked="forwardingTargetType === 'queue'"
                                                 @change="setForwardingTargetType('queue')">
-                                            <span>Queue</span>
+                                            <span>{{ "extension_detail.queue" | t }}</span>
                                         </label>
                                         <label x-show="voicemailAddonEnabled"
                                             class="inline-flex items-center gap-2 rounded-lg border px-3 py-1.5 text-slate-600 transition"
@@ -294,79 +281,76 @@
                                             <input type="radio" class="h-4 w-4 border-slate-300 text-sky-600"
                                                 :checked="forwardingTargetType === 'voicemail'"
                                                 @change="setForwardingTargetType('voicemail')">
-                                            <span>Voicemail</span>
+                                            <span>{{ "extension_detail.voicemail" | t }}</span>
                                         </label>
                                     </div>
                                 </div>
                                 <div x-show="forwardingTargetType === 'uri'" x-cloak>
                                     <label class="flex flex-col gap-2">
-                                        Forward destination
+                                        {{ "extension_detail.forward_destination" | t }}
                                         <input type="text" maxlength="160" x-model.trim="forwardingTargetValue"
                                             @input="syncForwardingDestination()"
                                             :disabled="form.call_forwarding_mode === 'none'"
                                             :class="form.call_forwarding_mode === 'none' ? 'border-slate-200 bg-slate-50 text-slate-400 cursor-not-allowed' : 'border-slate-200 focus:border-sky-300 focus:ring-2 focus:ring-sky-200'"
                                             class="rounded-lg border px-3 py-2 text-sm text-slate-700"
-                                            placeholder="SIP URI, PSTN number, or internal extension">
-                                        <span class="text-xs font-normal text-slate-400">Required whenever forwarding is
-                                            enabled.</span>
+                                            placeholder="{{ "extension_detail.forward_destination_placeholder" | t }}">
+                                        <span class="text-xs font-normal text-slate-400">{{ "extension_detail.forward_destination_hint" | t }}</span>
                                     </label>
                                 </div>
                                 <div x-show="forwardingTargetType === 'queue'" x-cloak class="space-y-3">
                                     <template x-if="queueTargets.length">
                                         <label class="flex flex-col gap-1 text-sm font-medium text-slate-700">
-                                            Select Queue
+                                            {{ "extension_detail.select_queue_label" | t }}
                                             <select
                                                 class="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                                                 :disabled="form.call_forwarding_mode === 'none'"
                                                 x-model="forwardingTargetValue" @change="syncForwardingDestination()">
-                                                <option value="">Select queue…</option>
+                                                <option value="">{{ "extension_detail.select_queue" | t }}</option>
                                                 <template x-for="queue in queueTargets" :key="queue.reference">
                                                     <option :value="queue.reference" x-text="queue.name"></option>
                                                 </template>
                                             </select>
-                                            <span class="text-xs font-normal text-slate-400">Saved as <code
-                                                    class="font-mono text-[11px]">queue:&lt;id&gt;</code>.</span>
+                                            <span class="text-xs font-normal text-slate-400">{{ "extension_detail.saved_as" | t }} <code
+                                                    class="font-mono text-[11px]">{{ "extension_detail.queue_id" | t }}</code>.</span>
                                         </label>
                                     </template>
                                     <template x-if="!queueTargets.length">
                                         <div
                                             class="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-500">
-                                            No queues available. Please create a queue first.
+                                            {{ "extension_detail.no_queues" | t }}
                                         </div>
                                     </template>
                                 </div>
                                 <div x-show="forwardingTargetType === 'voicemail'" x-cloak class="space-y-2">
                                     <label class="flex flex-col gap-1 text-sm font-medium text-slate-700">
-                                        Voicemail extension
+                                        {{ "extension_detail.voicemail_extension" | t }}
                                         <input type="text" maxlength="50" x-model.trim="forwardingTargetValue"
                                             @input="syncForwardingDestination()"
                                             :disabled="form.call_forwarding_mode === 'none'"
                                             :class="form.call_forwarding_mode === 'none' ? 'border-slate-200 bg-slate-50 text-slate-400 cursor-not-allowed' : 'border-slate-200 focus:border-sky-300 focus:ring-2 focus:ring-sky-200'"
                                             class="rounded-lg border px-3 py-2 text-sm text-slate-700"
                                             :placeholder="form.extension || '1001'">
-                                        <span class="text-xs font-normal text-slate-400">Extension whose voicemail inbox
-                                            will receive the call. Leave empty to use this extension's own
-                                            mailbox.</span>
+                                        <span class="text-xs font-normal text-slate-400">{{ "extension_detail.voicemail_extension_hint" | t }}</span>
                                     </label>
                                 </div>
                             </div>
                             <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
-                                Ring timeout (seconds)
+                                {{ "extension_detail.ring_timeout" | t }}
                                 <input type="number" min="5" max="120" step="1"
                                     x-model.number="form.call_forwarding_timeout"
                                     :disabled="form.call_forwarding_mode === 'none'"
                                     :class="form.call_forwarding_mode === 'none' ? 'border-slate-200 bg-slate-50 text-slate-400 cursor-not-allowed' : 'border-slate-200 focus:border-sky-300 focus:ring-2 focus:ring-sky-200'"
                                     class="rounded-lg border px-3 py-2 text-sm text-slate-700">
-                                <span class="text-xs font-normal text-slate-400">Accepted range: 5–120 seconds.</span>
+                                <span class="text-xs font-normal text-slate-400">{{ "extension_detail.accepted_range" | t }}</span>
                             </label>
                         </div>
                     </div>
 
                     <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
-                        <h2 class="text-sm font-semibold text-slate-900">Internal notes</h2>
+                        <h2 class="text-sm font-semibold text-slate-900">{{ "extension_detail.internal_notes" | t }}</h2>
                         <textarea rows="4" x-model="form.notes"
                             class="mt-3 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                            placeholder="Optional notes for provisioning or troubleshooting."></textarea>
+                            placeholder="{{ "extension_detail.notes_placeholder" | t }}"></textarea>
                     </div>
                 </div>
 
@@ -375,14 +359,13 @@
                     <div class="space-y-4 rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
                         <div class="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
                             <div>
-                                <h2 class="text-sm font-semibold text-slate-900">Active registrations</h2>
-                                <p class="text-xs text-slate-500">Locator bindings currently associated with this
-                                    extension.</p>
+                                <h2 class="text-sm font-semibold text-slate-900">{{ "extension_detail.active_registrations" | t }}</h2>
+                                <p class="text-xs text-slate-500">{{ "extension_detail.locator_bindings_hint" | t }}</p>
                             </div>
                             <template x-if="locator.query_uri">
                                 <div
                                     class="inline-flex items-center gap-2 rounded-md bg-slate-100 px-2.5 py-1 text-[11px] font-medium text-slate-600 ring-1 ring-slate-200">
-                                    <span class="uppercase tracking-wide text-slate-400">AoR</span>
+                                    <span class="uppercase tracking-wide text-slate-400">{{ "extension_detail.aor" | t }}</span>
                                     <span x-text="locator.query_uri"></span>
                                 </div>
                             </template>
@@ -399,13 +382,13 @@
                                     <thead
                                         class="bg-slate-50 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
                                         <tr>
-                                            <th scope="col" class="px-3 py-2">Contact</th>
-                                            <th scope="col" class="px-3 py-2">Destination</th>
-                                            <th scope="col" class="px-3 py-2">Transport</th>
-                                            <th scope="col" class="px-3 py-2">TTL</th>
-                                            <th scope="col" class="px-3 py-2">Updated</th>
-                                            <th scope="col" class="px-3 py-2">Flags</th>
-                                            <th scope="col" class="px-3 py-2">User agent</th>
+                                            <th scope="col" class="px-3 py-2">{{ "extension_detail.contact" | t }}</th>
+                                            <th scope="col" class="px-3 py-2">{{ "extension_detail.destination" | t }}</th>
+                                            <th scope="col" class="px-3 py-2">{{ "extension_detail.transport" | t }}</th>
+                                            <th scope="col" class="px-3 py-2">{{ "extension_detail.ttl" | t }}</th>
+                                            <th scope="col" class="px-3 py-2">{{ "extension_detail.updated" | t }}</th>
+                                            <th scope="col" class="px-3 py-2">{{ "extension_detail.flags" | t }}</th>
+                                            <th scope="col" class="px-3 py-2">{{ "extension_detail.user_agent" | t }}</th>
                                         </tr>
                                     </thead>
                                     <tbody class="divide-y divide-slate-100 text-slate-600">
@@ -437,7 +420,7 @@
                                                 <td class="px-3 py-2 align-top">
                                                     <div class="font-semibold text-slate-900"
                                                         x-text="formatDuration(remainingTtl(record))"></div>
-                                                    <div class="text-[11px] text-slate-400">Max
+                                                    <div class="text-[11px] text-slate-400">{{ "extension_detail.ttl_max" | t }}
                                                         <span x-text="formatDuration(record.expires)"></span>
                                                     </div>
                                                 </td>
@@ -472,15 +455,14 @@
                         <template x-if="locator.available && !locator.records.length && !locator.error">
                             <div
                                 class="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-xs text-slate-500">
-                                No active registrations found for this extension.
+                                {{ "extension_detail.no_registrations" | t }}
                             </div>
                         </template>
 
                         <template x-if="!locator.available && !locator.error">
                             <div
                                 class="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-xs text-slate-500">
-                                Registration data will appear when the SIP server is connected and this extension has an
-                                active binding.
+                                {{ "extension_detail.no_registration_data" | t }}
                             </div>
                         </template>
                     </div>
@@ -491,9 +473,8 @@
                     <div class="space-y-4 rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
                         <div class="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
                             <div>
-                                <h2 class="text-sm font-semibold text-slate-900">Current presence</h2>
-                                <p class="text-xs text-slate-500">Real-time status aggregated from endpoints and manual
-                                    settings.</p>
+                                <h2 class="text-sm font-semibold text-slate-900">{{ "extension_detail.current_presence" | t }}</h2>
+                                <p class="text-xs text-slate-500">{{ "extension_detail.presence_hint" | t }}</p>
                             </div>
                             <div class="flex items-center gap-2">
                                 <span
@@ -511,15 +492,14 @@
                                             'bg-slate-300': presence.status === 'offline'
                                         }"></span>
                                     <span
-                                        x-text="presence.status.charAt(0).toUpperCase() + presence.status.slice(1)"></span>
+                                        x-text="presenceLabel(presence.status)"></span>
                                 </span>
                             </div>
                         </div>
 
                         <div class="grid gap-6 md:grid-cols-2">
                             <div class="space-y-4">
-                                <h3 class="text-xs font-semibold uppercase tracking-wide text-slate-500">Manual Override
-                                </h3>
+                                <h3 class="text-xs font-semibold uppercase tracking-wide text-slate-500">{{ "extension_detail.manual_override" | t }}</h3>
                                 <div class="flex flex-wrap gap-2">
                                     <template x-for="status in ['available', 'busy', 'away', 'offline']">
                                         <button type="button" @click="updateManualPresence(status)"
@@ -532,34 +512,31 @@
                                                     'bg-amber-400': status === 'away',
                                                     'bg-slate-300': status === 'offline'
                                                 }"></span>
-                                            <span x-text="status.charAt(0).toUpperCase() + status.slice(1)"></span>
+                                            <span x-text="presenceLabel(status)"></span>
                                         </button>
                                     </template>
                                 </div>
                                 <div class="space-y-2">
-                                    <label class="text-xs font-medium text-slate-700">Status note</label>
+                                    <label class="text-xs font-medium text-slate-700">{{ "extension_detail.status_note" | t }}</label>
                                     <input type="text" x-model="presence.note"
                                         class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none"
-                                        placeholder="e.g. In a meeting">
+                                        placeholder="{{ "extension_detail.presence_note_placeholder" | t }}">
                                     <button type="button" @click="updateManualPresence(presence.status)"
-                                        class="text-xs font-semibold text-sky-600 hover:text-sky-700">Save note</button>
+                                        class="text-xs font-semibold text-sky-600 hover:text-sky-700">{{ "extension_detail.save_note" | t }}</button>
                                 </div>
                             </div>
 
                             <div class="rounded-lg bg-slate-50 p-4 text-xs text-slate-500">
-                                <h3 class="font-semibold text-slate-700">How it works</h3>
+                                <h3 class="font-semibold text-slate-700">{{ "extension_detail.how_it_works" | t }}</h3>
                                 <ul class="mt-2 list-disc space-y-1 pl-4">
-                                    <li><strong>Aggregated:</strong> Available if registered and not manually set to
-                                        busy/away.</li>
-                                    <li><strong>SIP PUBLISH:</strong> Endpoints can update status automatically via SIP.
-                                    </li>
-                                    <li><strong>Manual:</strong> Setting status here overrides SIP endpoint updates.
-                                    </li>
+                                    <li><strong>{{ "extension_detail.aggregated_presence" | t }}:</strong> {{ "extension_detail.aggregated_presence_desc" | t }}</li>
+                                    <li><strong>{{ "extension_detail.sip_publish" | t }}:</strong> {{ "extension_detail.sip_publish_desc" | t }}</li>
+                                    <li><strong>{{ "extension_detail.manual_override" | t }}:</strong> {{ "extension_detail.manual_override_desc" | t }}</li>
                                 </ul>
                                 <template x-if="presence.updated_at">
                                     <div
                                         class="mt-4 pt-4 border-t border-slate-200 text-[10px] text-slate-400 uppercase tracking-widest">
-                                        Last updated: <span
+                                        {{ "extension_detail.last_updated" | t }} <span
                                             x-text="new Date(presence.updated_at * 1000).toLocaleString()"></span>
                                     </div>
                                 </template>
@@ -571,13 +548,12 @@
 
             <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                 <div class="text-xs text-slate-400">
-                    Submissions update immediately through the API. All actions run via AJAX—no full page reloads
-                    required.
+                    {{ "extension_detail.api_note" | t }}
                 </div>
                 <div class="flex items-center gap-3">
                     <a :href="listUrl"
                         class="inline-flex items-center justify-center rounded-lg border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-600 transition hover:bg-slate-100">
-                        Cancel
+                        {{ "common.cancel" | t }}
                     </a>
                     <button type="submit"
                         class="inline-flex items-center justify-center gap-2 rounded-lg bg-sky-600 px-5 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-offset-2"
@@ -587,7 +563,7 @@
                             <path stroke-linecap="round" stroke-linejoin="round"
                                 d="M4 10a6 6 0 0 1 6-6m0-3v3m6 6a6 6 0 0 1-6 6m0 3v-3m9-6h-3M1 10h3m10.95 4.95-2.12-2.12M4.05 5.05l2.12 2.12m0 5.66-2.12 2.12m9.9-9.9 2.12-2.12" />
                         </svg>
-                        <span x-text="mode === 'create' ? 'Create extension' : 'Save changes'"></span>
+                        <span x-text="mode === 'create' ? '{{ "extension_detail.create_extension" | t }}' : '{{ "extension_detail.save_changes" | t }}'"></span>
                     </button>
                 </div>
             </div>
@@ -631,7 +607,7 @@
                                 : '';
                             return {
                                 id: queue.id,
-                                name: queue.name || 'Unnamed queue',
+                                name: queue.name || '{{ "extension_detail.unnamed_queue" | t }}',
                                 reference,
                                 description: queue.description || null,
                             };
@@ -660,10 +636,53 @@
                 forwardingCatalog: normalizeForwardingCatalog(options.forwardingCatalog || {}),
                 queueEnabled: window.queueAddonEnabled || false,
                 voicemailAddonEnabled: window.voicemailAddonEnabled || false,
+                translations: {
+                    profile: '{{ "extension_detail.profile" | t }}',
+                    extension_details: '{{ "extension_detail.extension_details" | t }}',
+                    access_departments: '{{ "extension_detail.access_departments" | t }}',
+                    departments_access: '{{ "extension_detail.departments_access" | t }}',
+                    call_forwarding: '{{ "extension_detail.call_forwarding" | t }}',
+                    call_forwarding_desc: '{{ "extension_detail.call_forwarding_desc" | t }}',
+                    registrations: '{{ "extension_detail.registrations" | t }}',
+                    locator_bindings: '{{ "extension_detail.locator_bindings" | t }}',
+                    presence: '{{ "extension_detail.presence" | t }}',
+                    sip_presence: '{{ "extension_detail.sip_presence" | t }}',
+                    no_forwarding: '{{ "extension_detail.no_forwarding" | t }}',
+                    ring_this_extension: '{{ "extension_detail.ring_this_extension" | t }}',
+                    always_forward: '{{ "extension_detail.always_forward" | t }}',
+                    forward_every_call: '{{ "extension_detail.forward_every_call" | t }}',
+                    when_busy: '{{ "extension_detail.when_busy" | t }}',
+                    forward_only_when_busy: '{{ "extension_detail.forward_only_when_busy" | t }}',
+                    when_not_answered: '{{ "extension_detail.when_not_answered" | t }}',
+                    forward_if_unanswered: '{{ "extension_detail.forward_if_unanswered" | t }}',
+                    unnamed_queue: '{{ "extension_detail.unnamed_queue" | t }}',
+                    create_extension: '{{ "extension_detail.create_extension" | t }}',
+                    edit_extension: '{{ "extension_detail.edit_extension" | t }}',
+                    active: '{{ "extension_detail.active" | t }}',
+                    unavailable: '{{ "extension_detail.unavailable" | t }}',
+                    pending: '{{ "extension_detail.pending" | t }}',
+                    allowed: '{{ "extension_detail.allowed" | t }}',
+                    restricted: '{{ "extension_detail.restricted" | t }}',
+                    awaiting_registration: '{{ "extension_detail.awaiting_registration" | t }}',
+                    extension_required: '{{ "extension_detail.extension_required" | t }}',
+                    forwarding_required: '{{ "extension_detail.forwarding_required" | t }}',
+                    failed_save: '{{ "extension_detail.failed_save" | t }}',
+                    created_successfully: '{{ "extension_detail.created_successfully" | t }}',
+                    changes_saved: '{{ "extension_detail.changes_saved" | t }}',
+                    failed_submit: '{{ "extension_detail.failed_submit" | t }}',
+                    show: '{{ "extension_detail.show" | t }}',
+                    hide: '{{ "extension_detail.hide" | t }}',
+                    enabled: '{{ "extension_detail.enabled" | t }}',
+                    disabled: '{{ "extension_detail.disabled" | t }}',
+                    status_available: '{{ "extension_detail.status_available" | t }}',
+                    status_busy: '{{ "extension_detail.status_busy" | t }}',
+                    status_away: '{{ "extension_detail.status_away" | t }}',
+                    status_offline: '{{ "extension_detail.status_offline" | t }}',
+                },
                 tabs: [
-                    { id: 'profile', label: 'Profile', description: 'Extension details' },
-                    { id: 'access', label: 'Access & Departments', description: 'Departments and access permissions' },
-                    { id: 'routing', label: 'Call forwarding', description: 'Call forwarding and internal notes' },
+                    { id: 'profile', label: '{{ "extension_detail.profile" | t }}', description: '{{ "extension_detail.extension_details" | t }}' },
+                    { id: 'access', label: '{{ "extension_detail.access_departments" | t }}', description: '{{ "extension_detail.departments_access" | t }}' },
+                    { id: 'routing', label: '{{ "extension_detail.call_forwarding" | t }}', description: '{{ "extension_detail.call_forwarding_desc" | t }}' },
                 ],
                 form: {
                     extension: options.model?.extension || '',
@@ -693,10 +712,10 @@
                 sipPasswordInput: existingSipPassword && (options.mode || 'create') === 'edit' ? '****' : '',
                 selectedDepartments: [],
                 forwardingModes: [
-                    { value: 'none', label: 'No forwarding', description: 'Ring this extension only.' },
-                    { value: 'always', label: 'Always forward', description: 'Forward every call immediately.' },
-                    { value: 'when_busy', label: 'When busy', description: 'Forward only when already on a call.' },
-                    { value: 'when_not_answered', label: 'When not answered', description: 'Forward if unanswered within the timeout.' },
+                    { value: 'none', label: '{{ "extension_detail.no_forwarding" | t }}', description: '{{ "extension_detail.ring_this_extension" | t }}' },
+                    { value: 'always', label: '{{ "extension_detail.always_forward" | t }}', description: '{{ "extension_detail.forward_every_call" | t }}' },
+                    { value: 'when_busy', label: '{{ "extension_detail.when_busy" | t }}', description: '{{ "extension_detail.forward_only_when_busy" | t }}' },
+                    { value: 'when_not_answered', label: '{{ "extension_detail.when_not_answered" | t }}', description: '{{ "extension_detail.forward_if_unanswered" | t }}' },
                 ],
                 get queueTargets() {
                     return this.forwardingCatalog.queues;
@@ -716,8 +735,8 @@
                 },
                 get pageTitle() {
                     return this.mode === 'edit'
-                        ? `Edit ${this.form.display_name || this.form.extension || 'extension'}`
-                        : 'Create extension';
+                        ? `${this.translations.edit_extension} ${this.form.display_name || this.form.extension || ''}`
+                        : this.translations.create_extension;
                 },
                 submitUrl() {
                     if (this.mode === 'edit' && this.model?.id) {
@@ -737,13 +756,13 @@
                     if (this.mode === 'edit' && !this.tabs.some((tab) => tab.id === 'registrations')) {
                         this.tabs.push({
                             id: 'registrations',
-                            label: 'Registrations',
-                            description: 'Locator bindings and device presence',
+                            label: this.translations.registrations,
+                            description: this.translations.locator_bindings,
                         });
                         this.tabs.push({
                             id: 'presence',
-                            label: 'Presence',
-                            description: 'SIP presence status and manual override',
+                            label: this.translations.presence,
+                            description: this.translations.sip_presence,
                         });
                         this.fetchPresence();
                     }
@@ -778,10 +797,10 @@
                             await this.fetchPresence();
                         } else {
                             const data = await response.json();
-                            this.error = data.message || 'Failed to update presence';
+                            this.error = data.message || '{{ "extension_detail.failed_update_presence" | t }}';
                         }
                     } catch (err) {
-                        this.error = 'Network error while updating presence';
+                        this.error = '{{ "extension_detail.network_error" | t }}';
                     } finally {
                         this.presence.saving_manual = false;
                     }
@@ -812,54 +831,63 @@
                     return Math.max(expires - age, 0);
                 },
                 formatDuration(value) {
+                    const sAbbr = '{{ "extension_detail.time_seconds_abbr" | t }}';
+                    const mAbbr = '{{ "extension_detail.time_minutes_abbr" | t }}';
+                    const hAbbr = '{{ "extension_detail.time_hours_abbr" | t }}';
+                    const dAbbr = '{{ "extension_detail.time_days_abbr" | t }}';
                     const seconds = Math.max(Number(value) || 0, 0);
                     if (seconds < 1) {
-                        return '0s';
+                        return `0${sAbbr}`;
                     }
                     if (seconds < 60) {
-                        return `${Math.round(seconds)}s`;
+                        return `${Math.round(seconds)}${sAbbr}`;
                     }
                     const minutes = Math.floor(seconds / 60);
                     const remSeconds = Math.round(seconds % 60);
                     if (minutes < 60) {
                         return remSeconds
-                            ? `${minutes}m ${remSeconds}s`
-                            : `${minutes}m`;
+                            ? `${minutes}${mAbbr} ${remSeconds}${sAbbr}`
+                            : `${minutes}${mAbbr}`;
                     }
                     const hours = Math.floor(minutes / 60);
                     const remMinutes = minutes % 60;
                     if (hours < 24) {
                         return remMinutes
-                            ? `${hours}h ${remMinutes}m`
-                            : `${hours}h`;
+                            ? `${hours}${hAbbr} ${remMinutes}${mAbbr}`
+                            : `${hours}${hAbbr}`;
                     }
                     const days = Math.floor(hours / 24);
                     const remHours = hours % 24;
                     return remHours
-                        ? `${days}d ${remHours}h`
-                        : `${days}d`;
+                        ? `${days}${dAbbr} ${remHours}${hAbbr}`
+                        : `${days}${dAbbr}`;
                 },
                 formatRelativeSeconds(value) {
+                    const s = '{{ "extension_detail.time_seconds_abbr" | t }}';
+                    const m = '{{ "extension_detail.time_minutes_abbr" | t }}';
+                    const h = '{{ "extension_detail.time_hours_abbr" | t }}';
+                    const d = '{{ "extension_detail.time_days_abbr" | t }}';
+                    const ago = '{{ "extension_detail.time_ago_suffix" | t }}';
                     const seconds = Number(value);
                     if (!Number.isFinite(seconds) || seconds <= 0) {
-                        return 'moments ago';
+                        return '{{ "extension_detail.moments_ago" | t }}';
                     }
                     if (seconds < 60) {
-                        return `${Math.round(seconds)}s ago`;
+                        return `${Math.round(seconds)}${s} ${ago}`;
                     }
                     if (seconds < 3600) {
                         const minutes = Math.floor(seconds / 60);
                         const rem = Math.round(seconds % 60);
-                        return rem ? `${minutes}m ${rem}s ago` : `${minutes}m ago`;
+                        return rem ? `${minutes}${m} ${rem}${s} ${ago}` : `${minutes}${m} ${ago}`;
                     }
                     if (seconds < 86400) {
                         const hours = Math.floor(seconds / 3600);
                         const remMinutes = Math.floor((seconds % 3600) / 60);
-                        return remMinutes ? `${hours}h ${remMinutes}m ago` : `${hours}h ago`;
+                        return remMinutes ? `${hours}${h} ${remMinutes}${m} ${ago}` : `${hours}${h} ${ago}`;
                     }
                     const days = Math.floor(seconds / 86400);
                     const remHours = Math.floor((seconds % 86400) / 3600);
-                    return remHours ? `${days}d ${remHours}h ago` : `${days}d ago`;
+                    return remHours ? `${days}${d} ${remHours}${h} ${ago}` : `${days}${d} ${ago}`;
                 },
                 recordFlags(record) {
                     if (!record || typeof record !== 'object') {
@@ -889,6 +917,15 @@
                 hasActiveRegistration() {
                     return !!(this.locator?.available && Array.isArray(this.locator.records) && this.locator.records.length);
                 },
+                presenceLabel(status) {
+                    const map = {
+                        available: this.translations.status_available,
+                        busy: this.translations.status_busy,
+                        away: this.translations.status_away,
+                        offline: this.translations.status_offline,
+                    };
+                    return map[status] || (status ? status.charAt(0).toUpperCase() + status.slice(1) : '');
+                },
                 firstRegistration() {
                     if (!this.hasActiveRegistration()) {
                         return null;
@@ -899,9 +936,9 @@
                     const record = this.firstRegistration();
                     if (!record) {
                         if (this.model?.registered_at) {
-                            return `Last seen ${this.formatDate(this.model.registered_at)}`;
+                            return `{{ "extension_detail.last_seen" | t }} ${this.formatDate(this.model.registered_at)}`;
                         }
-                        return 'Awaiting registration';
+                        return '{{ "extension_detail.awaiting_registration" | t }}';
                     }
                     const ttl = this.formatDuration(this.remainingTtl(record));
                     const seen = this.formatRelativeSeconds(record.age_seconds);
@@ -929,11 +966,11 @@
                 },
                 async submit() {
                     if (!this.form.extension.trim()) {
-                        this.error = 'Extension number is required.';
+                        this.error = '{{ "extension_detail.extension_required" | t }}';
                         return;
                     }
                     if (this.form.call_forwarding_mode !== 'none' && !this.form.call_forwarding_destination.trim()) {
-                        this.error = 'Forwarding destination is required when call forwarding is enabled.';
+                        this.error = '{{ "extension_detail.forwarding_required" | t }}';
                         return;
                     }
 
@@ -952,18 +989,18 @@
                         });
                         const data = await response.json().catch(() => ({}));
                         if (!response.ok) {
-                            throw new Error(data?.message || 'Failed to save extension');
+                            throw new Error(data?.message || '{{ "extension_detail.failed_save" | t }}');
                         }
 
                         this.success = this.mode === 'create'
-                            ? 'Extension created successfully. Returning to the list...'
-                            : 'Changes saved. Returning to the list...';
+                            ? '{{ "extension_detail.created_successfully" | t }}'
+                            : '{{ "extension_detail.changes_saved" | t }}';
                         setTimeout(() => {
                             window.location.href = this.listUrl;
                         }, 600);
                     } catch (err) {
                         console.error(err);
-                        this.error = err.message || 'Failed to submit form';
+                        this.error = err.message || '{{ "extension_detail.failed_submit" | t }}';
                     } finally {
                         this.saving = false;
                     }

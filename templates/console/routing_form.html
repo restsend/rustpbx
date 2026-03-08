@@ -17,19 +17,18 @@
         <div class="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
             <div>
                 <nav class="text-xs font-medium text-slate-400">
-                    <a href="{{ back_url }}" class="hover:text-slate-600">Routing</a>
+                    <a href="{{ back_url }}" class="hover:text-slate-600">{{ "routing_form.routing" | t }}</a>
                     <span class="mx-1">/</span>
-                    <span class="text-slate-600" x-text="mode === 'edit' ? 'Edit rule' : 'Create rule'"></span>
+                    <span class="text-slate-600" x-text="mode === 'edit' ? '{{ "routing_form.edit_rule" | t }}' : '{{ "routing_form.create_rule" | t }}'"></span>
                 </nav>
                 <h1 class="text-2xl font-semibold text-slate-900"
-                    x-text="mode === 'edit' ? 'Edit routing rule' : 'Create routing rule'"></h1>
-                <p class="mt-2 text-sm text-slate-500">Define match expressions, rewrite rules, and trunk strategy
-                    for this route.</p>
+                    x-text="mode === 'edit' ? '{{ "routing_form.edit_routing_rule" | t }}' : '{{ "routing_form.create_routing_rule" | t }}'"></h1>
+                <p class="mt-2 text-sm text-slate-500">{{ "routing_form.define_match" | t }}</p>
             </div>
             <div class="flex gap-3">
                 <a href="{{ back_url }}"
                     class="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-600 transition hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-offset-2">
-                    Cancel
+                    {{ "common.cancel" | t }}
                 </a>
                 <button type="submit" form="routing-form"
                     class="inline-flex items-center gap-2 rounded-lg bg-sky-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-offset-2"
@@ -40,7 +39,7 @@
                             d="M4 10a6 6 0 0 1 6-6m0-3v3m6 6a6 6 0 0 1-6 6m0 3v-3m9-6h-3M1 10h3m10.95 4.95-2.12-2.12M4.05 5.05l2.12 2.12m0 5.66-2.12 2.12m9.9-9.9 2.12-2.12" />
                     </svg>
                     <span x-show="!saving" x-cloak>{{ submit_label }}</span>
-                    <span x-show="saving" x-cloak>Saving…</span>
+                    <span x-show="saving" x-cloak>{{ "routing_form.saving" | t }}</span>
                 </button>
             </div>
         </div>
@@ -63,14 +62,14 @@
 
             <div class="rounded-xl bg-white p-3 shadow-sm ring-1 ring-black/5">
                 <nav class="inline-flex w-full flex-wrap gap-2 rounded-lg border border-slate-200 bg-slate-50 p-1 text-xs font-semibold text-slate-600"
-                    role="tablist" aria-label="Routing configuration tabs">
+                    role="tablist" aria-label="{{ "routing_form.routing_config_tabs_label" | t }}">
                     <button type="button" class="flex-1 rounded-md px-4 py-2 text-left transition sm:flex-none"
                         :class="activeTab === 'overview' ? 'bg-white text-sky-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'"
                         :aria-selected="activeTab === 'overview'" aria-controls="routing-tab-overview"
                         @click="activeTab = 'overview'">
                         <div class="flex flex-col">
-                            <span class="text-sm">Overview</span>
-                            <span class="text-[11px] font-normal text-slate-400">Summary & status</span>
+                            <span class="text-sm">{{ "routing_form.overview" | t }}</span>
+                            <span class="text-[11px] font-normal text-slate-400">{{ "routing_form.summary_status" | t }}</span>
                         </div>
                     </button>
                     <button type="button" class="flex-1 rounded-md px-4 py-2 text-left transition sm:flex-none"
@@ -78,8 +77,8 @@
                         :aria-selected="activeTab === 'matching'" aria-controls="routing-tab-matching"
                         @click="activeTab = 'matching'">
                         <div class="flex flex-col">
-                            <span class="text-sm">Match</span>
-                            <span class="text-[11px] font-normal text-slate-400">Patterns applied before routing</span>
+                            <span class="text-sm">{{ "routing_form.match" | t }}</span>
+                            <span class="text-[11px] font-normal text-slate-400">{{ "routing_form.patterns_before_routing" | t }}</span>
                         </div>
                     </button>
                     <button type="button" class="flex-1 rounded-md px-4 py-2 text-left transition sm:flex-none"
@@ -87,8 +86,8 @@
                         :aria-selected="activeTab === 'rewrite'" aria-controls="routing-tab-rewrite"
                         @click="activeTab = 'rewrite'">
                         <div class="flex flex-col">
-                            <span class="text-sm">Rewrite</span>
-                            <span class="text-[11px] font-normal text-slate-400">Transforms and header updates</span>
+                            <span class="text-sm">{{ "routing_form.rewrite" | t }}</span>
+                            <span class="text-[11px] font-normal text-slate-400">{{ "routing_form.transforms_header" | t }}</span>
                         </div>
                     </button>
                     <button type="button" class="flex-1 rounded-md px-4 py-2 text-left transition sm:flex-none"
@@ -96,8 +95,8 @@
                         :aria-selected="activeTab === 'delivery'" aria-controls="routing-tab-delivery"
                         @click="activeTab = 'delivery'">
                         <div class="flex flex-col">
-                            <span class="text-sm">Trunks & delivery</span>
-                            <span class="text-[11px] font-normal text-slate-400">Selection strategy & weights</span>
+                            <span class="text-sm">{{ "routing_form.trunks_delivery" | t }}</span>
+                            <span class="text-[11px] font-normal text-slate-400">{{ "routing_form.selection_strategy" | t }}</span>
                         </div>
                     </button>
                     <button type="button" class="flex-1 rounded-md px-4 py-2 text-left transition sm:flex-none"
@@ -105,8 +104,8 @@
                         :aria-selected="activeTab === 'policy'" aria-controls="routing-tab-policy"
                         @click="activeTab = 'policy'">
                         <div class="flex flex-col">
-                            <span class="text-sm">Policy</span>
-                            <span class="text-[11px] font-normal text-slate-400">Limits & restrictions</span>
+                            <span class="text-sm">{{ "routing_form.policy" | t }}</span>
+                            <span class="text-[11px] font-normal text-slate-400">{{ "routing_form.limits_restrictions" | t }}</span>
                         </div>
                     </button>
                 </nav>
@@ -117,36 +116,36 @@
                 <section class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
                     <div class="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
                         <div>
-                            <h2 class="text-base font-semibold text-slate-900">Basics</h2>
-                            <p class="text-xs text-slate-500">Set the identity, priority, and rollout status.</p>
+                            <h2 class="text-base font-semibold text-slate-900">{{ "routing_form.basics" | t }}</h2>
+                            <p class="text-xs text-slate-500">{{ "routing_form.set_identity" | t }}</p>
                         </div>
                         <div class="flex items-center gap-2 text-xs font-medium text-slate-600">
                             <span class="rounded-full border border-slate-200 px-2 py-1"
-                                x-text="route.id ? 'Rule ID: ' + route.id : 'New rule'"></span>
+                                x-text="route.id ? '{{ "routing_form.rule_id" | t }}: ' + route.id : '{{ "routing_form.new_rule" | t }}'"></span>
                             <span class="rounded-full border border-slate-200 px-2 py-1" x-text="routeSummary"></span>
                         </div>
                     </div>
 
                     <div class="mt-6 grid gap-4 md:grid-cols-2">
                         <div class="space-y-2">
-                            <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">Name</label>
+                            <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">{{ "routing_form.name" | t }}</label>
                             <input type="text" name="name" x-model="route.name"
                                 class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                placeholder="Outbound Hong Kong" required>
+                                placeholder='{{ "routing_form.name_placeholder" | t }}' required>
                         </div>
                         <div class="space-y-2">
-                            <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">Owner</label>
+                            <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">{{ "routing_form.owner" | t }}</label>
                             <input type="text" name="owner" x-model="route.owner"
                                 class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                placeholder="Voice Ops">
+                                placeholder='{{ "routing_form.owner_placeholder" | t }}'>
                         </div>
                         <div class="space-y-2">
                             <label
-                                class="text-xs font-semibold uppercase tracking-wide text-slate-500">Direction</label>
+                                class="text-xs font-semibold uppercase tracking-wide text-slate-500">{{ "routing_form.direction" | t }}</label>
                             <select name="direction" x-model="route.direction"
                                 class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
                                 <option value="" x-bind:selected="!route.direction" :disabled="!!route.direction"
-                                    hidden>Select direction</option>
+                                    hidden>{{ "routing_form.select_direction" | t }}</option>
                                 <template x-for="direction in directionOptions" :key="direction">
                                     <option :value="direction" :selected="route.direction === direction"
                                         x-text="direction"></option>
@@ -154,12 +153,12 @@
                             </select>
                         </div>
                         <div class="space-y-2">
-                            <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">Priority</label>
+                            <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">{{ "routing_form.priority" | t }}</label>
                             <input type="number" min="0" name="priority" x-model.number="route.priority"
                                 class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
                         </div>
                         <div class="space-y-2">
-                            <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">Status</label>
+                            <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">{{ "routing_form.status" | t }}</label>
                             <div class="flex gap-2">
                                 <template x-for="option in statusOptions" :key="option.value">
                                     <button type="button"
@@ -173,11 +172,11 @@
                         </div>
                         <div class="space-y-2 md:col-span-2">
                             <label
-                                class="text-xs font-semibold uppercase tracking-wide text-slate-500">Description</label>
+                                class="text-xs font-semibold uppercase tracking-wide text-slate-500">{{ "routing_form.description" | t }}</label>
                             <textarea name="description" x-model="route.description"
                                 class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                                 rows="3"
-                                placeholder="Explain what this route handles and key rollout context."></textarea>
+                                placeholder='{{ "routing_form.description_placeholder" | t }}'></textarea>
                         </div>
                     </div>
                 </section>
@@ -187,10 +186,8 @@
                 id="routing-tab-matching" role="tabpanel" tabindex="0">
                 <section class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
                     <div class="flex flex-col gap-2">
-                        <h2 class="text-base font-semibold text-slate-900">Match expressions</h2>
-                        <p class="text-xs text-slate-500">Regular expressions applied to SIP headers before routing
-                            takes
-                            effect.</p>
+                        <h2 class="text-base font-semibold text-slate-900">{{ "routing_form.match_expressions" | t }}</h2>
+                        <p class="text-xs text-slate-500">{{ "routing_form.regex_applied_detail" | t }}</p>
                     </div>
 
                     <div class="mt-6 grid gap-4 md:grid-cols-2">
@@ -206,7 +203,7 @@
 
                                     <button type="button" @click.prevent="openRegexPanel(field.key)"
                                         class="absolute right-1 top-1/2 -translate-y-1/2 rounded-md border border-slate-200 bg-white px-2 py-1 text-xs text-slate-600 hover:bg-slate-50">
-                                        Regex
+                                        {{ "routing_form.regex" | t }}
                                     </button>
 
                                     <!-- Regex helper panel -->
@@ -214,43 +211,39 @@
                                         @click.outside="closeRegexPanel()"
                                         class="absolute z-50 right-0 mt-10 w-[28rem] rounded-lg border border-slate-200 bg-white p-3 shadow-lg">
                                         <div class="flex items-center justify-between gap-2">
-                                            <div class="text-sm font-semibold text-slate-700">Regex helper</div>
-                                            <div class="text-xs text-slate-400">Presets & tester</div>
+                                            <div class="text-sm font-semibold text-slate-700">{{ "routing_form.regex_helper" | t }}</div>
+                                            <div class="text-xs text-slate-400">{{ "routing_form.presets_tester" | t }}</div>
                                         </div>
                                         <div class="mt-2 space-y-2">
                                             <div class="rounded-md bg-slate-50 px-2 py-2 text-[11px] text-slate-500">
-                                                Use parentheses <code>()</code> to create capture groups so rewrite
-                                                rules can reference them with <code>{1}</code>, <code>{2}</code>, and so
-                                                on.
+                                                {{ "routing_form.capture_groups_help" | t }}
                                             </div>
                                             <div class="flex flex-col gap-2">
                                                 <input type="text" x-model="regexPanel.builder"
-                                                    placeholder="Literal text"
+                                                    placeholder='{{ "routing_form.literal_text" | t }}'
                                                     class="w-full rounded-lg border border-slate-200 px-2 py-1 text-sm text-slate-700 focus:border-sky-300 focus:outline-none">
                                                 <div class="flex flex-wrap gap-2">
                                                     <button type="button" @click="buildPreset('starts_with')"
-                                                        class="rounded-md border border-slate-200 px-2 py-1 text-xs text-slate-600 hover:bg-slate-50">Start
-                                                        With</button>
+                                                        class="rounded-md border border-slate-200 px-2 py-1 text-xs text-slate-600 hover:bg-slate-50">{{ "routing_form.start_with" | t }}</button>
                                                     <button type="button" @click="buildPreset('ends_with')"
-                                                        class="rounded-md border border-slate-200 px-2 py-1 text-xs text-slate-600 hover:bg-slate-50">End
-                                                        With</button>
+                                                        class="rounded-md border border-slate-200 px-2 py-1 text-xs text-slate-600 hover:bg-slate-50">{{ "routing_form.end_with" | t }}</button>
                                                     <button type="button" @click="buildPreset('equals')"
-                                                        class="rounded-md border border-slate-200 px-2 py-1 text-xs text-slate-600 hover:bg-slate-50">Equals</button>
+                                                        class="rounded-md border border-slate-200 px-2 py-1 text-xs text-slate-600 hover:bg-slate-50">{{ "routing_form.equals" | t }}</button>
                                                 </div>
                                             </div>
 
                                             <div>
-                                                <div class="text-xs text-slate-500">Pattern</div>
+                                                <div class="text-xs text-slate-500">{{ "routing_form.pattern" | t }}</div>
                                                 <input type="text" x-model="regexPanel.pattern"
                                                     class="w-full rounded-lg border border-slate-200 px-2 py-1 text-sm text-slate-700 focus:border-sky-300 focus:outline-none">
                                             </div>
 
                                             <div class="grid grid-cols-3 gap-2">
                                                 <input type="text" x-model="regexPanel.testInput"
-                                                    placeholder="Test input"
+                                                    placeholder='{{ "routing_form.test_input" | t }}'
                                                     class="col-span-2 rounded-lg border border-slate-200 px-2 py-1 text-sm text-slate-700 focus:border-sky-300 focus:outline-none">
                                                 <button type="button" @click="testRegex()"
-                                                    class="rounded-md border border-slate-200 px-2 py-1 text-sm text-sky-600 hover:bg-slate-50">Test</button>
+                                                    class="rounded-md border border-slate-200 px-2 py-1 text-sm text-sky-600 hover:bg-slate-50">{{ "routing_form.test" | t }}</button>
                                             </div>
 
                                             <div class="mt-2 space-y-2 text-xs">
@@ -260,23 +253,22 @@
                                                 </template>
                                                 <template x-if="regexPanel.lastMatch === null && !regexPanel.error">
                                                     <div class="rounded-md bg-slate-50 px-2 py-1 text-slate-500">
-                                                        Use Test to see whether the pattern matches and which capture
-                                                        groups are extracted.
+                                                        {{ "routing_form.use_test_hint" | t }}
                                                     </div>
                                                 </template>
                                                 <template x-if="regexPanel.lastMatch !== null">
                                                     <div class="rounded-md border border-slate-200 px-2 py-2 text-sm">
                                                         <div
                                                             class="text-xs font-semibold uppercase tracking-wide text-slate-500">
-                                                            Test result
+                                                            {{ "routing_form.test_result" | t }}
                                                         </div>
                                                         <div class="mt-1 text-sm"
                                                             :class="regexPanel.lastMatch ? 'text-emerald-600' : 'text-rose-600'"
-                                                            x-text="regexPanel.lastMatch ? 'Matched' : 'No match'">
+                                                            x-text="regexPanel.lastMatch ? '{{ "routing_form.matched" | t }}' : '{{ "routing_form.no_match" | t }}'">
                                                         </div>
                                                         <template x-if="regexPanel.groups && regexPanel.groups.length">
                                                             <div class="mt-2">
-                                                                <div class="text-xs text-slate-500">Capture groups</div>
+                                                                <div class="text-xs text-slate-500">{{ "routing_form.capture_groups_detected" | t }}</div>
                                                                 <ul class="mt-1 list-disc pl-5 text-xs text-slate-700">
                                                                     <template x-for="(g, i) in regexPanel.groups"
                                                                         :key="i">
@@ -293,8 +285,7 @@
                                                         <template
                                                             x-if="regexPanel.lastMatch && (!regexPanel.groups || !regexPanel.groups.length)">
                                                             <div class="mt-2 text-xs text-slate-400">
-                                                                No capture groups detected. Wrap parts of your pattern
-                                                                in parentheses to populate {1}, {2}, and so on.
+                                                                {{ "routing_form.no_capture_groups_hint" | t }}
                                                             </div>
                                                         </template>
                                                     </div>
@@ -303,9 +294,9 @@
 
                                             <div class="mt-3 flex justify-end gap-2">
                                                 <button type="button" @click="closeRegexPanel()"
-                                                    class="rounded-md border border-slate-200 px-3 py-1 text-xs text-slate-600 hover:bg-slate-50">Cancel</button>
+                                                    class="rounded-md border border-slate-200 px-3 py-1 text-xs text-slate-600 hover:bg-slate-50">{{ "common.cancel" | t }}</button>
                                                 <button type="button" @click="applyRegexPanel()"
-                                                    class="rounded-md bg-sky-600 px-3 py-1 text-xs text-white hover:bg-sky-500">Apply</button>
+                                                    class="rounded-md bg-sky-600 px-3 py-1 text-xs text-white hover:bg-sky-500">{{ "routing_form.apply" | t }}</button>
                                             </div>
                                         </div>
                                     </div>
@@ -316,15 +307,15 @@
 
                     <div class="mt-6 space-y-3">
                         <div class="flex items-center justify-between">
-                            <h3 class="text-xs font-semibold uppercase tracking-wide text-slate-500">Header matchers
+                            <h3 class="text-xs font-semibold uppercase tracking-wide text-slate-500">{{ "routing_form.header_matchers" | t }}
                             </h3>
                             <button type="button" @click="addMatchHeader()"
                                 class="inline-flex items-center gap-1 rounded-lg border border-slate-200 px-2 py-1 text-xs font-semibold text-slate-600 hover:bg-slate-50">
-                                Add header
+                                {{ "routing_form.btn_add_header" | t }}
                             </button>
                         </div>
                         <template x-if="!matchHeaders.length">
-                            <p class="text-xs text-slate-400">No header-based regex. Add one if needed.</p>
+                            <p class="text-xs text-slate-400">{{ "routing_form.no_header_matchers" | t }}</p>
                         </template>
                         <div class="space-y-2">
                             <template x-for="(header, index) in matchHeaders" :key="index">
@@ -341,48 +332,44 @@
                                             placeholder="^sales-.*$">
                                         <button type="button" @click.prevent="openRegexPanel('header', index)"
                                             class="absolute right-1 top-1/2 -translate-y-1/2 rounded-md border border-slate-200 bg-white px-2 py-1 text-xs text-slate-600 hover:bg-slate-50">
-                                            Regex
+                                            {{ "routing_form.regex" | t }}
                                         </button>
                                         <div x-show="regexPanel.open && regexPanel.field === 'header' && regexPanel.headerIndex === index"
                                             x-cloak @click.outside="closeRegexPanel()"
                                             class="absolute z-50 right-0 mt-10 w-[28rem] rounded-lg border border-slate-200 bg-white p-3 shadow-lg">
                                             <div class="flex items-center justify-between gap-2">
-                                                <div class="text-sm font-semibold text-slate-700">Regex helper</div>
-                                                <div class="text-xs text-slate-400">Presets & tester</div>
+                                                <div class="text-sm font-semibold text-slate-700">{{ "routing_form.regex_helper" | t }}</div>
+                                                <div class="text-xs text-slate-400">{{ "routing_form.presets_tester" | t }}</div>
                                             </div>
                                             <div class="mt-2 space-y-2">
                                                 <div
                                                     class="rounded-md bg-slate-50 px-2 py-2 text-[11px] text-slate-500">
-                                                    Use parentheses <code>()</code> to create capture groups so rewrite
-                                                    rules can reference them with <code>{1}</code>, <code>{2}</code>,
-                                                    and so on.
+                                                    {{ "routing_form.capture_groups_help" | t }}
                                                 </div>
                                                 <div class="flex flex-col gap-2">
                                                     <input type="text" x-model="regexPanel.builder"
-                                                        placeholder="Literal text"
+                                                        placeholder='{{ "routing_form.literal_text" | t }}'
                                                         class="w-full rounded-lg border border-slate-200 px-2 py-1 text-sm text-slate-700 focus:border-sky-300 focus:outline-none">
                                                     <div class="flex flex-wrap gap-2">
                                                         <button type="button" @click="buildPreset('starts_with')"
-                                                            class="rounded-md border border-slate-200 px-2 py-1 text-xs text-slate-600 hover:bg-slate-50">Start
-                                                            With</button>
+                                                            class="rounded-md border border-slate-200 px-2 py-1 text-xs text-slate-600 hover:bg-slate-50">{{ "routing_form.start_with" | t }}</button>
                                                         <button type="button" @click="buildPreset('ends_with')"
-                                                            class="rounded-md border border-slate-200 px-2 py-1 text-xs text-slate-600 hover:bg-slate-50">End
-                                                            With</button>
+                                                            class="rounded-md border border-slate-200 px-2 py-1 text-xs text-slate-600 hover:bg-slate-50">{{ "routing_form.end_with" | t }}</button>
                                                         <button type="button" @click="buildPreset('equals')"
-                                                            class="rounded-md border border-slate-200 px-2 py-1 text-xs text-slate-600 hover:bg-slate-50">Equals</button>
+                                                            class="rounded-md border border-slate-200 px-2 py-1 text-xs text-slate-600 hover:bg-slate-50">{{ "routing_form.equals" | t }}</button>
                                                     </div>
                                                 </div>
                                                 <div>
-                                                    <div class="text-xs text-slate-500">Pattern</div>
+                                                    <div class="text-xs text-slate-500">{{ "routing_form.pattern" | t }}</div>
                                                     <input type="text" x-model="regexPanel.pattern"
                                                         class="w-full rounded-lg border border-slate-200 px-2 py-1 text-sm text-slate-700 focus:border-sky-300 focus:outline-none">
                                                 </div>
                                                 <div class="grid grid-cols-3 gap-2">
                                                     <input type="text" x-model="regexPanel.testInput"
-                                                        placeholder="Test input"
+                                                        placeholder='{{ "routing_form.test_input" | t }}'
                                                         class="col-span-2 rounded-lg border border-slate-200 px-2 py-1 text-sm text-slate-700 focus:border-sky-300 focus:outline-none">
                                                     <button type="button" @click="testRegex()"
-                                                        class="rounded-md border border-slate-200 px-2 py-1 text-sm text-sky-600 hover:bg-slate-50">Test</button>
+                                                        class="rounded-md border border-slate-200 px-2 py-1 text-sm text-sky-600 hover:bg-slate-50">{{ "routing_form.test" | t }}</button>
                                                 </div>
                                                 <div class="mt-2 space-y-2 text-xs">
                                                     <template x-if="regexPanel.error">
@@ -391,8 +378,7 @@
                                                     </template>
                                                     <template x-if="regexPanel.lastMatch === null && !regexPanel.error">
                                                         <div class="rounded-md bg-slate-50 px-2 py-1 text-slate-500">
-                                                            Use Test to see whether the pattern matches and which
-                                                            capture groups are extracted.
+                                                            {{ "routing_form.use_test_hint" | t }}
                                                         </div>
                                                     </template>
                                                     <template x-if="regexPanel.lastMatch !== null">
@@ -400,16 +386,16 @@
                                                             class="rounded-md border border-slate-200 px-2 py-2 text-sm">
                                                             <div
                                                                 class="text-xs font-semibold uppercase tracking-wide text-slate-500">
-                                                                Test result
+                                                                {{ "routing_form.test_result" | t }}
                                                             </div>
                                                             <div class="mt-1 text-sm"
                                                                 :class="regexPanel.lastMatch ? 'text-emerald-600' : 'text-rose-600'"
-                                                                x-text="regexPanel.lastMatch ? 'Matched' : 'No match'">
+                                                                x-text="regexPanel.lastMatch ? '{{ "routing_form.matched" | t }}' : '{{ "routing_form.no_match" | t }}'">
                                                             </div>
                                                             <template
                                                                 x-if="regexPanel.groups && regexPanel.groups.length">
                                                                 <div class="mt-2">
-                                                                    <div class="text-xs text-slate-500">Capture groups
+                                                                    <div class="text-xs text-slate-500">{{ "routing_form.capture_groups_detected" | t }}
                                                                     </div>
                                                                     <ul
                                                                         class="mt-1 list-disc pl-5 text-xs text-slate-700">
@@ -428,9 +414,7 @@
                                                             <template
                                                                 x-if="regexPanel.lastMatch && (!regexPanel.groups || !regexPanel.groups.length)">
                                                                 <div class="mt-2 text-xs text-slate-400">
-                                                                    No capture groups detected. Wrap parts of your
-                                                                    pattern in parentheses to populate {1}, {2}, and so
-                                                                    on.
+                                                                    {{ "routing_form.no_capture_groups_hint" | t }}
                                                                 </div>
                                                             </template>
                                                         </div>
@@ -438,16 +422,16 @@
                                                 </div>
                                                 <div class="mt-3 flex justify-end gap-2">
                                                     <button type="button" @click="closeRegexPanel()"
-                                                        class="rounded-md border border-slate-200 px-3 py-1 text-xs text-slate-600 hover:bg-slate-50">Cancel</button>
+                                                        class="rounded-md border border-slate-200 px-3 py-1 text-xs text-slate-600 hover:bg-slate-50">{{ "common.cancel" | t }}</button>
                                                     <button type="button" @click="applyRegexPanel()"
-                                                        class="rounded-md bg-sky-600 px-3 py-1 text-xs text-white hover:bg-sky-500">Apply</button>
+                                                        class="rounded-md bg-sky-600 px-3 py-1 text-xs text-white hover:bg-sky-500">{{ "routing_form.apply" | t }}</button>
                                                 </div>
                                             </div>
                                         </div>
                                     </div>
                                     <button type="button" @click="removeMatchHeader(index)"
                                         class="rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-500 hover:bg-slate-50">
-                                        Remove
+                                        {{ "routing_form.btn_remove" | t }}
                                     </button>
                                 </div>
                             </template>
@@ -461,9 +445,8 @@
                 id="routing-tab-rewrite" role="tabpanel" tabindex="0">
                 <section class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
                     <div class="flex flex-col gap-2">
-                        <h2 class="text-base font-semibold text-slate-900">Rewrite rules</h2>
-                        <p class="text-xs text-slate-500">Rewrite portions of the SIP request before it reaches the
-                            destination.</p>
+                        <h2 class="text-base font-semibold text-slate-900">{{ "routing_form.rewrite_rules_title" | t }}</h2>
+                        <p class="text-xs text-slate-500">{{ "routing_form.rewrite_rules_desc" | t }}</p>
                     </div>
 
                     <div class="mt-6 grid gap-4 md:grid-cols-2">
@@ -472,7 +455,7 @@
                                 <label class="text-xs font-semibold uppercase tracking-wide text-slate-500"
                                     x-text="field.label"></label>
                                 <div class="text-[11px] text-slate-400">
-                                    Matching regex:
+                                    {{ "routing_form.matching_regex_label" | t }}
                                     <code class="font-mono text-[11px]"
                                         x-text="trimString(route.match[field.key] || '') || '—'"></code>
                                 </div>
@@ -486,14 +469,14 @@
 
                     <div class="mt-6 space-y-3">
                         <div class="flex items-center justify-between">
-                            <h3 class="text-xs font-semibold uppercase tracking-wide text-slate-500">Set headers</h3>
+                            <h3 class="text-xs font-semibold uppercase tracking-wide text-slate-500">{{ "routing_form.set_headers_title" | t }}</h3>
                             <button type="button" @click="addRewriteHeader()"
                                 class="inline-flex items-center gap-1 rounded-lg border border-slate-200 px-2 py-1 text-xs font-semibold text-slate-600 hover:bg-slate-50">
-                                Add header
+                                {{ "routing_form.btn_add_header" | t }}
                             </button>
                         </div>
                         <template x-if="!rewriteHeaders.length">
-                            <p class="text-xs text-slate-400">No header rewrites defined.</p>
+                            <p class="text-xs text-slate-400">{{ "routing_form.no_header_rewrites" | t }}</p>
                         </template>
                         <div class="space-y-2">
                             <template x-for="(header, index) in rewriteHeaders" :key="index">
@@ -509,7 +492,7 @@
                                         placeholder="sales-apac">
                                     <button type="button" @click="removeRewriteHeader(index)"
                                         class="rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-500 hover:bg-slate-50">
-                                        Remove
+                                        {{ "routing_form.btn_remove" | t }}
                                     </button>
                                 </div>
                             </template>
@@ -522,15 +505,13 @@
                 id="routing-tab-delivery" role="tabpanel" tabindex="0">
                 <section class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
                     <div class="flex flex-col gap-2">
-                        <h2 class="text-base font-semibold text-slate-900">Action & trunks</h2>
-                        <p class="text-xs text-slate-500">Choose how destinations are selected and how weights are
-                            distributed across trunks.</p>
+                        <h2 class="text-base font-semibold text-slate-900">{{ "routing_form.action_trunks_title" | t }}</h2>
+                        <p class="text-xs text-slate-500">{{ "routing_form.action_trunks_desc" | t }}</p>
                     </div>
 
                     <div class="mt-6 space-y-6">
                         <div class="space-y-2">
-                            <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">Destination
-                                type</label>
+                            <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">{{ "routing_form.dest_type_label" | t }}</label>
                             <div class="grid gap-2 md:grid-cols-3">
                                 <template x-for="option in destinationOptions" :key="option.value">
                                     <button type="button"
@@ -545,8 +526,7 @@
 
                         <div class="space-y-6" x-show="isSipTrunkTarget" x-cloak>
                             <div class="space-y-2">
-                                <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">Selection
-                                    algorithm</label>
+                                <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">{{ "routing_form.selection_algorithm_label" | t }}</label>
                                 <div class="flex flex-wrap gap-2">
                                     <template x-for="option in algorithmOptions" :key="option.value">
                                         <button type="button"
@@ -559,8 +539,7 @@
                                 </div>
                                 <template x-if="route.action.select === 'hash'">
                                     <div class="mt-3 space-y-2">
-                                        <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">Hash
-                                            key</label>
+                                        <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">{{ "routing_form.hash_key_label" | t }}</label>
                                         <input type="text" name="hash_key" x-model="route.action.hash_key"
                                             class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                                             placeholder="caller">
@@ -570,16 +549,14 @@
 
                             <div class="space-y-3">
                                 <div class="flex items-center justify-between">
-                                    <h3 class="text-xs font-semibold uppercase tracking-wide text-slate-500">Trunk
-                                        pool</h3>
+                                    <h3 class="text-xs font-semibold uppercase tracking-wide text-slate-500">{{ "routing_form.trunk_pool_label" | t }}</h3>
                                     <button type="button" @click="addTrunkAssignment()"
                                         class="inline-flex items-center gap-1 rounded-lg border border-slate-200 px-2 py-1 text-xs font-semibold text-slate-600 hover:bg-slate-50">
-                                        Add trunk
+                                        {{ "routing_form.btn_add_trunk" | t }}
                                     </button>
                                 </div>
                                 <template x-if="!route.action.trunks.length">
-                                    <p class="text-xs text-slate-400">No dedicated trunk weights. The default route or
-                                        fallback will be used.</p>
+                                    <p class="text-xs text-slate-400">{{ "routing_form.no_trunks_hint" | t }}</p>
                                 </template>
                                 <div class="space-y-3">
                                     <template x-for="(trunk, index) in route.action.trunks" :key="index">
@@ -587,7 +564,7 @@
                                             class="grid gap-2 rounded-lg border border-slate-200 p-3 md:grid-cols-[minmax(0,1fr)_120px_auto]">
                                             <select x-model="trunk.name"
                                                 class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
-                                                <option value="">Select trunk</option>
+                                                <option value="">{{ "routing_form.select_trunk_placeholder" | t }}</option>
                                                 <template x-for="option in trunkOptions" :key="option.name">
                                                     <option :value="option.name"
                                                         x-text="option.display_name || option.name">
@@ -596,20 +573,20 @@
                                             </select>
                                             <input type="number" min="0" step="1" x-model.number="trunk.weight"
                                                 class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                                placeholder="Weight">
+                                                placeholder='{{ "routing_form.weight_placeholder" | t }}'>
                                             <button type="button" @click="removeTrunkAssignment(index)"
                                                 class="rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-500 hover:bg-slate-50">
-                                                Remove
+                                                {{ "routing_form.btn_remove" | t }}
                                             </button>
                                         </div>
                                     </template>
                                 </div>
                                 <div class="rounded-lg bg-slate-50 p-3 text-xs text-slate-500">
                                     <div class="flex flex-wrap items-center gap-3">
-                                        <span>Total weight:</span>
+                                        <span>{{ "routing_form.total_weight_label" | t }}</span>
                                         <span class="rounded-full bg-white px-2 py-1 font-semibold text-slate-700"
                                             x-text="totalWeight"></span>
-                                        <span>Normalized distribution preview:</span>
+                                        <span>{{ "routing_form.distribution_preview" | t }}</span>
                                         <div class="flex flex-wrap gap-2 text-[11px]">
                                             <template x-for="item in normalizedWeights" :key="item.name">
                                                 <span
@@ -627,31 +604,26 @@
                         <div class="rounded-xl border border-slate-200 bg-slate-50 p-4" x-show="isQueueTarget" x-cloak>
                             <div class="flex items-center justify-between">
                                 <div>
-                                    <h3 class="text-sm font-semibold text-slate-800">Queue destination</h3>
-                                    <p class="text-xs text-slate-500">Provide the queue TOML file that should handle
-                                        matched calls.</p>
+                                    <h3 class="text-sm font-semibold text-slate-800">{{ "routing_form.queue_dest_title" | t }}</h3>
+                                    <p class="text-xs text-slate-500">{{ "routing_form.queue_dest_desc" | t }}</p>
                                 </div>
                                 <a :href="queuesUrl()"
                                     class="text-xs font-semibold text-sky-600 underline-offset-2 hover:underline">
-                                    Manage queues
+                                    {{ "routing_form.manage_queues" | t }}
                                 </a>
                             </div>
                             <div class="mt-4 space-y-2">
-                                <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">Queue
-                                    file path</label>
+                                <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">{{ "routing_form.queue_file_path_label" | t }}</label>
                                 <input type="text" x-model="route.action.queue_file" maxlength="200"
                                     class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                    placeholder="3-support.generated.toml">
-                                <p class="text-[11px] text-slate-500">Relative paths resolve from
-                                    <code class="font-mono text-[11px]">config/queue</code> by default.
-                                </p>
+                                    placeholder='{{ "routing_form.queue_file_placeholder" | t }}'>
+                                <p class="text-[11px] text-slate-500">{{ "routing_form.queue_file_hint" | t }}</p>
                             </div>
                             <div class="mt-4 space-y-3">
                                 <div class="flex items-center justify-between">
-                                    <h4 class="text-xs font-semibold uppercase tracking-wide text-slate-500">Saved
-                                        queues</h4>
+                                    <h4 class="text-xs font-semibold uppercase tracking-wide text-slate-500">{{ "routing_form.saved_queues_label" | t }}</h4>
                                     <span class="text-[11px] text-slate-400"
-                                        x-text="queueOptions.length + ' available'"></span>
+                                        x-text="'{{ "routing_form.n_available" | t }}'.replace('{n}', queueOptions.length)"></span>
                                 </div>
                                 <template x-if="queueOptions.length">
                                     <ul class="space-y-2 text-xs text-slate-600">
@@ -662,12 +634,12 @@
                                                         <div class="text-sm font-semibold text-slate-800"
                                                             x-text="option.name"></div>
                                                         <div class="text-[11px] text-slate-500"
-                                                            x-text="option.description || 'No description provided.'">
+                                                            x-text="option.description || '{{ "routing_form.no_description" | t }}'">
                                                         </div>
                                                     </div>
                                                     <div class="inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-[11px] font-semibold"
                                                         :class="option.is_active ? 'bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200' : 'bg-rose-50 text-rose-600 ring-1 ring-rose-200'">
-                                                        <span x-text="option.is_active ? 'Active' : 'Disabled'"></span>
+                                                        <span x-text="option.is_active ? '{{ "routing_form.queue_active" | t }}' : '{{ "routing_form.queue_disabled" | t }}'"></span>
                                                     </div>
                                                 </div>
                                                 <div class="mt-2 flex flex-wrap items-center gap-2 text-[11px]">
@@ -675,19 +647,17 @@
                                                         x-text="queueSuggestion(option)"></span>
                                                     <button type="button" @click="applyQueueSuggestion(option)"
                                                         class="rounded border border-slate-200 px-2 py-0.5 text-xs font-semibold text-slate-600 hover:bg-slate-50">
-                                                        Use path
+                                                        {{ "routing_form.use_path" | t }}
                                                     </button>
                                                     <span class="text-slate-400"
-                                                        x-text="'Updated ' + formatTimestamp(option.updated_at)"></span>
+                                                        x-text="'{{ "routing_form.updated_at_label" | t }}'.replace('{time}', formatTimestamp(option.updated_at))"></span>
                                                 </div>
                                             </li>
                                         </template>
                                     </ul>
                                 </template>
                                 <template x-if="!queueOptions.length">
-                                    <p class="text-xs text-rose-500">No queues available.
-                                        <a :href="queuesUrl()" class="underline">Create a queue first</a>.
-                                    </p>
+                                    <p class="text-xs text-rose-500">{{ "routing_form.no_queues_available" | t }}</p>
                                 </template>
                             </div>
                         </div>
@@ -695,52 +665,45 @@
                         <div class="rounded-xl border border-slate-200 bg-slate-50 p-4" x-show="isVoicemailTarget"
                             x-cloak>
                             <div>
-                                <h3 class="text-sm font-semibold text-slate-800">Voicemail destination</h3>
-                                <p class="text-xs text-slate-500">Calls matched by this rule will be forwarded to the
-                                    specified extension's voicemail inbox.</p>
+                                <h3 class="text-sm font-semibold text-slate-800">{{ "routing_form.voicemail_dest_title" | t }}</h3>
+                                <p class="text-xs text-slate-500">{{ "routing_form.voicemail_dest_desc" | t }}</p>
                             </div>
                             <div class="mt-4 space-y-2">
-                                <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">Target
-                                    extension</label>
+                                <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">{{ "routing_form.voicemail_target_ext_label" | t }}</label>
                                 <input type="text" x-model="route.action.voicemail_extension" maxlength="50"
                                     class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                    placeholder="e.g. 1001">
-                                <p class="text-[11px] text-slate-500">Enter the extension number whose voicemail mailbox
-                                    should receive the call.</p>
+                                    placeholder='{{ "routing_form.voicemail_ext_placeholder" | t }}'>
+                                <p class="text-[11px] text-slate-500">{{ "routing_form.voicemail_ext_hint" | t }}</p>
                             </div>
                         </div>
 
                         <div class="rounded-xl border border-slate-200 bg-slate-50 p-4" x-show="isIvrTarget" x-cloak>
                             <div class="flex items-center justify-between">
                                 <div>
-                                    <h3 class="text-sm font-semibold text-slate-800">IVR destination</h3>
-                                    <p class="text-xs text-slate-500">Calls matched by this rule will be handled by
-                                        an IVR flow.</p>
+                                    <h3 class="text-sm font-semibold text-slate-800">{{ "routing_form.ivr_dest_title" | t }}</h3>
+                                    <p class="text-xs text-slate-500">{{ "routing_form.ivr_dest_desc" | t }}</p>
                                 </div>
                                 <!-- "Manage IVR flows" link only available with the IVR Editor addon -->
                                 <a :href="ivrEditorUrl()"
                                     class="text-xs font-semibold text-sky-600 underline-offset-2 hover:underline"
                                     x-show="window.ivrEditorAddonEnabled" x-cloak>
-                                    Manage IVR flows
+                                    {{ "routing_form.manage_ivr_flows" | t }}
                                 </a>
                             </div>
                             <!-- File-path input — always available, no addon required -->
                             <div class="mt-4 space-y-2">
-                                <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">IVR file
-                                    path</label>
+                                <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">{{ "routing_form.ivr_file_path_label" | t }}</label>
                                 <input type="text" x-model="route.action.ivr_file" maxlength="200"
                                     class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                    placeholder="config/ivr/main.toml">
-                                <p class="text-[11px] text-slate-500">Path to the IVR TOML configuration file
-                                    (relative to the working directory).</p>
+                                    placeholder='{{ "routing_form.ivr_file_placeholder" | t }}'>
+                                <p class="text-[11px] text-slate-500">{{ "routing_form.ivr_file_hint" | t }}</p>
                             </div>
                             <!-- Published project picker — only available with the IVR Editor addon -->
                             <div class="mt-4 space-y-3" x-show="window.ivrEditorAddonEnabled" x-cloak>
                                 <div class="flex items-center justify-between">
-                                    <h4 class="text-xs font-semibold uppercase tracking-wide text-slate-500">Published
-                                        IVR flows</h4>
+                                    <h4 class="text-xs font-semibold uppercase tracking-wide text-slate-500">{{ "routing_form.published_ivr_flows" | t }}</h4>
                                     <span class="text-[11px] text-slate-400"
-                                        x-text="ivrOptions.length + ' available'"></span>
+                                        x-text="'{{ "routing_form.n_available" | t }}'.replace('{n}', ivrOptions.length)"></span>
                                 </div>
                                 <template x-if="ivrOptions.length">
                                     <ul class="space-y-2 text-xs text-slate-600">
@@ -751,13 +714,13 @@
                                                         <div class="text-sm font-semibold text-slate-800"
                                                             x-text="option.name"></div>
                                                         <div class="text-[11px] text-slate-500"
-                                                            x-text="option.description || 'No description provided.'">
+                                                            x-text="option.description || '{{ "routing_form.no_description" | t }}'">
                                                         </div>
                                                     </div>
                                                     <div class="inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-[11px] font-semibold"
                                                         :class="option.status === 'active' ? 'bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200' : 'bg-rose-50 text-rose-600 ring-1 ring-rose-200'">
                                                         <span
-                                                            x-text="option.status === 'active' ? 'Active' : 'Disabled'"></span>
+                                                            x-text="option.status === 'active' ? '{{ "routing_form.queue_active" | t }}' : '{{ "routing_form.queue_disabled" | t }}'"></span>
                                                     </div>
                                                 </div>
                                                 <div class="mt-2 flex flex-wrap items-center gap-2 text-[11px]">
@@ -765,14 +728,14 @@
                                                         x-text="option.file"></span>
                                                     <button type="button" @click="route.action.ivr_file = option.file"
                                                         class="rounded border border-slate-200 px-2 py-0.5 text-xs font-semibold text-slate-600 hover:bg-slate-50">
-                                                        Use path
+                                                        {{ "routing_form.use_path" | t }}
                                                     </button>
                                                     <template x-if="option.published_at">
                                                         <span class="text-slate-400"
-                                                            x-text="'Published ' + formatTimestamp(option.published_at)"></span>
+                                                            x-text="'{{ "routing_form.published_at" | t }}'.replace('{time}', formatTimestamp(option.published_at))"></span>
                                                     </template>
                                                     <template x-if="!option.published_at">
-                                                        <span class="text-amber-500">Not yet published</span>
+                                                        <span class="text-amber-500">{{ "routing_form.not_yet_published" | t }}</span>
                                                     </template>
                                                 </div>
                                             </li>
@@ -780,20 +743,17 @@
                                     </ul>
                                 </template>
                                 <template x-if="!ivrOptions.length">
-                                    <p class="text-xs text-rose-500">No IVR flows available.
-                                        <a :href="ivrEditorUrl()" class="underline">Create an IVR flow first</a>.
-                                    </p>
+                                    <p class="text-xs text-rose-500">{{ "routing_form.no_ivr_available" | t }}</p>
                                 </template>
                             </div>
                         </div>
 
                         <div class="grid gap-4 md:grid-cols-2">
                             <div class="space-y-2">
-                                <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">Source
-                                    trunk (optional)</label>
+                                <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">{{ "routing_form.source_trunk_label" | t }}</label>
                                 <select name="source_trunk" x-model="route.source_trunk"
                                     class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
-                                    <option value="">Select source trunk</option>
+                                    <option value="">{{ "routing_form.select_source_trunk" | t }}</option>
                                     <template x-for="option in trunkOptions" :key="'source-' + option.name">
                                         <option :value="option.name" x-text="option.display_name || option.name">
                                         </option>
@@ -809,73 +769,65 @@
                 role="tabpanel" tabindex="0">
                 <section class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
                     <div class="flex flex-col gap-2">
-                        <h2 class="text-base font-semibold text-slate-900">Call Policy</h2>
-                        <p class="text-xs text-slate-500">Configure frequency limits, concurrency, and time windows for
-                            this route.</p>
+                        <h2 class="text-base font-semibold text-slate-900">{{ "routing_form.call_policy_title" | t }}</h2>
+                        <p class="text-xs text-slate-500">{{ "routing_form.call_policy_desc" | t }}</p>
                     </div>
 
                     <div class="mt-6 grid gap-6 md:grid-cols-2">
                         <!-- Frequency Limit -->
                         <div class="space-y-4 rounded-lg border border-slate-200 p-4">
-                            <h3 class="text-sm font-semibold text-slate-800">Frequency Limit</h3>
+                            <h3 class="text-sm font-semibold text-slate-800">{{ "routing_form.freq_limit_title" | t }}</h3>
                             <div class="grid gap-4">
                                 <div class="space-y-2">
-                                    <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">Max
-                                        Calls</label>
+                                    <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">{{ "routing_form.max_calls_label" | t }}</label>
                                     <input type="number" min="0" x-model.number="route.policy.frequency_limit.max_calls"
                                         class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                        placeholder="e.g. 100">
+                                        placeholder='{{ "routing_form.max_calls_placeholder" | t }}'>
                                 </div>
                                 <div class="space-y-2">
-                                    <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">Duration
-                                        (seconds)</label>
+                                    <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">{{ "routing_form.duration_seconds_label" | t }}</label>
                                     <input type="number" min="0" x-model.number="route.policy.frequency_limit.duration"
                                         class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                        placeholder="e.g. 60">
+                                        placeholder='{{ "routing_form.duration_seconds_placeholder" | t }}'>
                                 </div>
                             </div>
                         </div>
 
                         <!-- Concurrency & Daily Limit -->
                         <div class="space-y-4 rounded-lg border border-slate-200 p-4">
-                            <h3 class="text-sm font-semibold text-slate-800">Limits</h3>
+                            <h3 class="text-sm font-semibold text-slate-800">{{ "routing_form.limits_title" | t }}</h3>
                             <div class="grid gap-4">
                                 <div class="space-y-2">
-                                    <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">Max
-                                        Concurrency</label>
+                                    <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">{{ "routing_form.max_concurrency_label" | t }}</label>
                                     <input type="number" min="0" x-model.number="route.policy.concurrency"
                                         class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                        placeholder="e.g. 10">
+                                        placeholder='{{ "routing_form.max_concurrency_placeholder" | t }}'>
                                 </div>
                                 <div class="space-y-2">
-                                    <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">Daily
-                                        Limit</label>
+                                    <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">{{ "routing_form.daily_limit_label" | t }}</label>
                                     <input type="number" min="0" x-model.number="route.policy.daily_limit"
                                         class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                        placeholder="e.g. 1000">
+                                        placeholder='{{ "routing_form.daily_limit_placeholder" | t }}'>
                                 </div>
                             </div>
                         </div>
 
                         <!-- Time Window -->
                         <div class="md:col-span-2 space-y-4 rounded-lg border border-slate-200 p-4">
-                            <h3 class="text-sm font-semibold text-slate-800">Time Window</h3>
+                            <h3 class="text-sm font-semibold text-slate-800">{{ "routing_form.time_window_title" | t }}</h3>
                             <div class="grid gap-4 md:grid-cols-2">
                                 <div class="space-y-2">
-                                    <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">Start
-                                        Time (HH:MM)</label>
+                                    <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">{{ "routing_form.start_time_label" | t }}</label>
                                     <input type="time" x-model="route.policy.time_window.start_time"
                                         class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
                                 </div>
                                 <div class="space-y-2">
-                                    <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">End Time
-                                        (HH:MM)</label>
+                                    <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">{{ "routing_form.end_time_label" | t }}</label>
                                     <input type="time" x-model="route.policy.time_window.end_time"
                                         class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
                                 </div>
                                 <div class="md:col-span-2 space-y-2">
-                                    <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">Active
-                                        Days</label>
+                                    <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">{{ "routing_form.active_days_label" | t }}</label>
                                     <div class="flex flex-wrap gap-3">
                                         <template x-for="day in ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']"
                                             :key="day">
@@ -896,10 +848,10 @@
         </form>
     </div>
 </div>
-
 <script>
-    document.addEventListener('alpine:init', () => {
-        Alpine.data('routingForm', (options = {}) => ({
+    (function() {
+        function registerRoutingForm() {
+            Alpine.data('routingForm', (options = {}) => ({
             mode: options.mode || 'create',
             activeTab: 'overview',
             listUrl: options.listUrl || '/console/routing',
@@ -911,11 +863,11 @@
             ivrOptions: [],
             algorithmOptions: [],
             destinationOptions: [
-                { value: 'sip_trunk', label: 'SIP trunks' },
-                ...(window.queueAddonEnabled ? [{ value: 'queue', label: 'Queue' }] : []),
-                ...(window.voicemailAddonEnabled ? [{ value: 'voicemail', label: 'Voicemail' }] : []),
+                { value: 'sip_trunk', label: '{{ "routing_form.dest_sip_trunks" | t }}' },
+                ...(window.queueAddonEnabled ? [{ value: 'queue', label: '{{ "routing_form.dest_queue" | t }}' }] : []),
+                ...(window.voicemailAddonEnabled ? [{ value: 'voicemail', label: '{{ "routing_form.dest_voicemail" | t }}' }] : []),
                 // IVR is always available via file path; the IVR Editor addon adds the project-picker.
-                { value: 'ivr', label: 'IVR' },
+                { value: 'ivr', label: '{{ "routing_form.dest_ivr" | t }}' },
             ],
             selectionOptionAliases: {
                 rr: 'rr',
@@ -976,14 +928,54 @@
             saving: false,
             error: null,
             success: null,
+            translations: {
+                err_name_required: '{{ "routing_form.err_name_required" | t }}',
+                err_direction_required: '{{ "routing_form.err_direction_required" | t }}',
+                err_source_trunk_unavailable: '{{ "routing_form.err_source_trunk_unavailable" | t }}',
+                err_queue_file_required: '{{ "routing_form.err_queue_file_required" | t }}',
+                err_voicemail_ext_required: '{{ "routing_form.err_voicemail_ext_required" | t }}',
+                err_ivr_file_required: '{{ "routing_form.err_ivr_file_required" | t }}',
+                err_failed_save: '{{ "routing_form.err_failed_save" | t }}',
+                err_validation_failed: '{{ "routing_form.err_validation_failed" | t }}',
+                saved_successfully: '{{ "routing_form.saved_successfully" | t }}',
+                direction_pending: '{{ "routing_form.direction_pending" | t }}',
+                route_summary: '{{ "routing_form.route_summary" | t }}',
+                match_from_user: '{{ "routing_form.match_from_user" | t }}',
+                match_from_host: '{{ "routing_form.match_from_host" | t }}',
+                match_to_user: '{{ "routing_form.match_to_user" | t }}',
+                match_to_host: '{{ "routing_form.match_to_host" | t }}',
+                match_request_uri_user: '{{ "routing_form.match_request_uri_user" | t }}',
+                match_request_uri_host: '{{ "routing_form.match_request_uri_host" | t }}',
+                match_request_uri_port: '{{ "routing_form.match_request_uri_port" | t }}',
+                rewrite_from_user: '{{ "routing_form.rewrite_from_user" | t }}',
+                rewrite_from_host: '{{ "routing_form.rewrite_from_host" | t }}',
+                rewrite_to_user: '{{ "routing_form.rewrite_to_user" | t }}',
+                rewrite_to_host: '{{ "routing_form.rewrite_to_host" | t }}',
+                rewrite_request_uri_host: '{{ "routing_form.rewrite_request_uri_host" | t }}',
+                sel_round_robin: '{{ "routing_form.sel_round_robin" | t }}',
+                sel_weighted: '{{ "routing_form.sel_weighted" | t }}',
+                sel_hash: '{{ "routing_form.sel_hash" | t }}',
+                status_active: '{{ "routing_form.queue_active" | t }}',
+                status_paused: '{{ "routing_form.queue_disabled" | t }}',
+                timestamp_recently: '{{ "routing_form.timestamp_recently" | t }}',
+            },
             init() {
                 this.listUrl = (this.listUrl || '').replace(/\/$/, '') || '/console/routing';
                 this.formAction = (this.formAction || this.listUrl || '/console/routing').replace(/\/$/, '');
-                this.algorithmOptions = Array.isArray(options.algorithms) ? options.algorithms : [];
+                // Translate algorithm option labels
+                this.algorithmOptions = (Array.isArray(options.algorithms) ? options.algorithms : []).map(opt => ({
+                    value: opt.value,
+                    label: this.getAlgorithmLabel(opt.value, opt.label)
+                }));
                 this.directionOptions = (Array.isArray(options.directionOptions) ? options.directionOptions : [])
                     .map((value) => this.trimString(value))
                     .filter((value) => value.length);
                 this.statusOptions = Array.isArray(options.statusOptions) ? options.statusOptions : [];
+                // Translate status option labels
+                this.statusOptions = this.statusOptions.map(opt => ({
+                    value: opt.value,
+                    label: opt.value === false ? this.translations.status_active : this.translations.status_paused
+                }));
                 const trunksData = options.trunks;
                 this.trunkOptions = Array.isArray(trunksData) ? trunksData : (trunksData?.trunks || []);
                 const queuesData = options.queues;
@@ -1057,12 +1049,12 @@
                 this.regexPanel.lastMatch = null;
                 const rawPattern = this.regexPanel.pattern || '';
                 if (!rawPattern.length) {
-                    this.regexPanel.error = 'Empty pattern';
+                    this.regexPanel.error = '{{ "routing_form.regex_empty_pattern" | t }}';
                     return;
                 }
                 const input = String(this.regexPanel.testInput ?? '');
                 if (!input.length) {
-                    this.regexPanel.error = 'Enter test input before running the test.';
+                    this.regexPanel.error = '{{ "routing_form.regex_enter_test_input" | t }}';
                     return;
                 }
                 try {
@@ -1076,7 +1068,7 @@
                         this.regexPanel.lastMatch = false;
                     }
                 } catch (err) {
-                    this.regexPanel.error = 'Invalid regex: ' + (err && err.message ? err.message : err);
+                    this.regexPanel.error = '{{ "routing_form.regex_invalid_prefix" | t }}' + (err && err.message ? err.message : err);
                 }
             },
             applyRegexPanel() {
@@ -1223,24 +1215,35 @@
                 }
                 return 'sip_trunk';
             },
+            getAlgorithmLabel(value, fallback) {
+                const map = {
+                    'rr': this.translations.sel_round_robin,
+                    'roundrobin': this.translations.sel_round_robin,
+                    'weight': this.translations.sel_weighted,
+                    'weighted': this.translations.sel_weighted,
+                    'hash': this.translations.sel_hash,
+                };
+                const key = (value || '').toLowerCase();
+                return map[key] || fallback || value;
+            },
             get matchFields() {
                 return [
-                    { key: 'from_user', label: 'From user regex', placeholder: '^20(0[1-9]|[1-9][0-9])$' },
-                    { key: 'from_host', label: 'From host regex', placeholder: '^sip\\.example\\.com$' },
-                    { key: 'to_user', label: 'To user regex', placeholder: '^(852|853)\\d{7,8}$' },
-                    { key: 'to_host', label: 'To host regex', placeholder: '^carrier\\.provider\\.net$' },
-                    { key: 'request_uri_user', label: 'Request-URI user regex', placeholder: '^(400|800)\\d{6}$' },
-                    { key: 'request_uri_host', label: 'Request-URI host regex', placeholder: '.*' },
-                    { key: 'request_uri_port', label: 'Request-URI port', placeholder: '5061' },
+                    { key: 'from_user', label: this.translations.match_from_user, placeholder: '^20(0[1-9]|[1-9][0-9])$' },
+                    { key: 'from_host', label: this.translations.match_from_host, placeholder: '^sip\\.example\\.com$' },
+                    { key: 'to_user', label: this.translations.match_to_user, placeholder: '^(852|853)\\d{7,8}$' },
+                    { key: 'to_host', label: this.translations.match_to_host, placeholder: '^carrier\\.provider\\.net$' },
+                    { key: 'request_uri_user', label: this.translations.match_request_uri_user, placeholder: '^(400|800)\\d{6}$' },
+                    { key: 'request_uri_host', label: this.translations.match_request_uri_host, placeholder: '.*' },
+                    { key: 'request_uri_port', label: this.translations.match_request_uri_port, placeholder: '5061' },
                 ];
             },
             get rewriteFields() {
                 return [
-                    { key: 'from_user', label: 'Rewrite From user', placeholder: '{1}' },
-                    { key: 'from_host', label: 'Rewrite From host', placeholder: 'sip.internal' },
-                    { key: 'to_user', label: 'Rewrite To user', placeholder: '00{1}' },
-                    { key: 'to_host', label: 'Rewrite To host', placeholder: 'carrier.provider.net' },
-                    { key: 'request_uri_host', label: 'Rewrite Request-URI host', placeholder: 'rtp.provider.net' },
+                    { key: 'from_user', label: this.translations.rewrite_from_user, placeholder: '{1}' },
+                    { key: 'from_host', label: this.translations.rewrite_from_host, placeholder: 'sip.internal' },
+                    { key: 'to_user', label: this.translations.rewrite_to_user, placeholder: '00{1}' },
+                    { key: 'to_host', label: this.translations.rewrite_to_host, placeholder: 'carrier.provider.net' },
+                    { key: 'request_uri_host', label: this.translations.rewrite_request_uri_host, placeholder: 'rtp.provider.net' },
                 ];
             },
             addMatchHeader() {
@@ -1332,10 +1335,10 @@
                 return chars.replace(/-+/g, '-').replace(/^-|-$/g, '');
             },
             formatTimestamp(value) {
-                if (!value) return 'recently';
+                if (!value) return '{{ "routing_form.timestamp_recently" | t }}';
                 const date = new Date(value);
                 if (Number.isNaN(date.getTime())) {
-                    return 'recently';
+                    return '{{ "routing_form.timestamp_recently" | t }}';
                 }
                 return date.toLocaleString();
             },
@@ -1371,8 +1374,10 @@
                 return this.normalizeTargetType(this.route.action?.target_type) === 'ivr';
             },
             get routeSummary() {
-                const direction = this.trimString(this.route.direction) || 'direction pending';
-                return `${direction} · priority ${this.route.priority}`;
+                const direction = this.trimString(this.route.direction) || this.translations.direction_pending;
+                return this.translations.route_summary
+                    .replace('{direction}', direction)
+                    .replace('{priority}', this.route.priority);
             },
             queuesUrl() {
                 const base = (this.listUrl || '/console/routing').replace(/\/routing$/, '');
@@ -1391,11 +1396,11 @@
             validate() {
                 const name = this.trimString(this.route.name);
                 if (!name.length) {
-                    throw new Error('Route name is required.');
+                    throw new Error(this.translations.err_name_required);
                 }
                 const direction = this.trimString(this.route.direction);
                 if (!direction.length) {
-                    throw new Error('Direction is required.');
+                    throw new Error(this.translations.err_direction_required);
                 }
                 const source = this.trimString(this.route.source_trunk);
                 if (source.length) {
@@ -1404,26 +1409,26 @@
                         return candidate.length && candidate.toLowerCase() === source.toLowerCase();
                     });
                     if (!exists) {
-                        throw new Error(`Source trunk "${source}" is not available.`);
+                        throw new Error(this.translations.err_source_trunk_unavailable.replace('{name}', source));
                     }
                 }
                 const targetType = this.normalizeTargetType(this.route.action?.target_type);
                 if (targetType === 'queue') {
                     const queueFile = this.trimString(this.route.action.queue_file);
                     if (!queueFile.length) {
-                        throw new Error('Queue destination requires a queue file path.');
+                        throw new Error(this.translations.err_queue_file_required);
                     }
                 }
                 if (targetType === 'voicemail') {
                     const ext = this.trimString(this.route.action.voicemail_extension);
                     if (!ext.length) {
-                        throw new Error('Voicemail destination requires an extension.');
+                        throw new Error(this.translations.err_voicemail_ext_required);
                     }
                 }
                 if (targetType === 'ivr') {
                     const ivrFile = this.trimString(this.route.action.ivr_file);
                     if (!ivrFile.length) {
-                        throw new Error('IVR destination requires an IVR project.');
+                        throw new Error(this.translations.err_ivr_file_required);
                     }
                 }
             },
@@ -1536,7 +1541,7 @@
                 try {
                     this.validate();
                 } catch (err) {
-                    this.error = err?.message || 'Validation failed.';
+                    this.error = err?.message || this.translations.err_validation_failed;
                     this.success = null;
                     return;
                 }
@@ -1555,17 +1560,17 @@
                     });
                     const data = await response.json().catch(() => ({}));
                     if (!response.ok) {
-                        throw new Error(data?.message || 'Failed to save routing rule');
+                        throw new Error(data?.message || this.translations.err_failed_save);
                     }
                     if (this.mode === 'create' && data?.id) {
                         window.location.href = `${this.listUrl}/${data.id}`;
                         return;
                     }
                     this.mode = 'edit';
-                    this.success = 'Changes saved successfully.';
+                    this.success = this.translations.saved_successfully;
                 } catch (err) {
                     console.error(err);
-                    this.error = err?.message || 'Failed to save routing rule';
+                    this.error = err?.message || this.translations.err_failed_save;
                 } finally {
                     this.saving = false;
                 }
@@ -1579,6 +1584,8 @@
                 return this.selectionCanonicalMap[option] || 'roundrobin';
             },
         }));
-    });
+        }
+        document.addEventListener('alpine:init', registerRoutingForm);
+    })();
 </script>
 {% endblock %}

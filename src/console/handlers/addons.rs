@@ -3,7 +3,7 @@ use crate::console::ConsoleState;
 use axum::{
     Router,
     extract::{Json, Path, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
@@ -26,7 +26,7 @@ pub fn urls() -> Router<Arc<ConsoleState>> {
     router
 }
 
-pub async fn index(State(state): State<Arc<ConsoleState>>) -> impl IntoResponse {
+pub async fn index(State(state): State<Arc<ConsoleState>>, headers: HeaderMap) -> impl IntoResponse {
     let addons = if let Some(app_state) = state.app_state() {
         // Try to load config from disk to get the latest state
         let config = if let Some(path) = &app_state.config_path {
@@ -91,7 +91,7 @@ pub async fn index(State(state): State<Arc<ConsoleState>>) -> impl IntoResponse 
     #[cfg(not(feature = "commerce"))]
     let commerce_enabled = false;
 
-    state.render(
+    state.render_with_headers(
         "console/addons.html",
         serde_json::json!({
             "addons": addons,
@@ -101,6 +101,7 @@ pub async fn index(State(state): State<Arc<ConsoleState>>) -> impl IntoResponse 
             "page_title": "Addons",
             "nav_active": "addons"
         }),
+        &headers,
     )
 }
 
@@ -204,6 +205,7 @@ pub async fn toggle_addon(
 pub async fn detail(
     State(state): State<Arc<ConsoleState>>,
     Path(id): Path<String>,
+    headers: HeaderMap,
 ) -> impl IntoResponse {
     let addon = if let Some(app_state) = state.app_state() {
         let list = app_state.addon_registry.list_addons(app_state.clone());
@@ -248,7 +250,7 @@ pub async fn detail(
             }
         }
 
-        state.render(
+        state.render_with_headers(
             "console/addon_detail.html",
             serde_json::json!({
                 "addon": addon,
@@ -256,6 +258,7 @@ pub async fn detail(
                 "nav_active": "addons",
                 "commerce_enabled": cfg!(feature = "commerce"),
             }),
+            &headers,
         )
     } else {
         (StatusCode::NOT_FOUND, "Addon not found").into_response()

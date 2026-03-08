@@ -133,6 +133,16 @@ impl AddonRegistry {
             .collect()
     }
 
+    /// Return locale directories for all enabled addons that provide translations.
+    pub fn get_locale_dirs(&self, state: AppState) -> Vec<(String, String)> {
+        let config = state.config();
+        self.addons
+            .iter()
+            .filter(|a| self.is_enabled(a.id(), config))
+            .filter_map(|a| a.locales_dir().map(|dir| (a.id().to_string(), dir)))
+            .collect()
+    }
+
     pub fn list_addons(&self, state: AppState) -> Vec<super::AddonInfo> {
         self.addons
             .iter()

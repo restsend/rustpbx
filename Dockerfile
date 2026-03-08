@@ -30,6 +30,7 @@ COPY bin/${TARGETARCH}/sipflow /app/sipflow
 # Copy static resources
 COPY ./static /app/static
 COPY ./templates /app/templates
+COPY ./locales /app/locales
 COPY ./config/sounds /app/sounds
 
 # Copy addon static and templates
