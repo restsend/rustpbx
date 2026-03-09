@@ -94,7 +94,7 @@
                         </template>
                     </div>
                 </div>
-                <p class="text-xs text-green-600 mt-2">Reloading…</p>
+                <p class="text-xs text-green-600 mt-2">{{ "licenses.license_active" | t }}</p>
             </div>
         </div>
 
@@ -270,7 +270,6 @@
                         this.verifiedPlan = result.plan || 'unknown';
                         this.verifiedExpiry = result.expiry || '';
                         this.verifiedScope = result.scope || null;
-                        setTimeout(() => window.location.reload(), 2200);
                     } else {
                         this.error = result.message || 'Verification failed.';
                     }

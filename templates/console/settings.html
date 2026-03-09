@@ -6,7 +6,7 @@
         basePath: {{ (base_path | default("/console")) | tojson }},
         settings: {{ settings | default({}) | tojson }},
         currentUser: {{ current_user | default({}) | tojson }},
-        t: {{ t | json | safe }}
+        t: window._settingsTranslations
     })' x-init="init()">
         <div x-show="appReloadModal.open" x-cloak
             class="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 px-4 py-6"
@@ -123,7 +123,6 @@
                 <div class="px-6 py-4">
                     <div class="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-xs text-slate-600">
                         <p>{{ "settings.live_reload_updates" | t }}</p>
-                            follow the refreshed rules.</p>
                     </div>
                     <ul class="mt-4 space-y-3 text-sm text-slate-600">
                         <li class="flex items-start gap-3">
@@ -672,7 +671,7 @@
                         <div class="flex items-center justify-end gap-2 border-t border-slate-200 pt-6">
                             <button type="button" @click="resetProxyDraft" :disabled="proxyProcessing"
                                 class="rounded-md border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-600 hover:bg-slate-50">
-                                Reset
+                                {{ "common.reset" | t }}
                             </button>
                             <button type="submit" :disabled="proxyProcessing"
                                 class="rounded-md bg-sky-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-offset-2">
@@ -865,10 +864,10 @@
                         <select x-model="sipflowDraft.backend_type" :disabled="sipflowProcessing"
                             class="mt-1 block w-full rounded-md border-slate-200 py-2 pl-3 pr-10 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
                             <option value="none">{{ "settings_page.disabled" | t }}</option>
-                            <option value="local">Local SQLite + Structured files</option>
-                            <option value="remote">Remote via UDP/HTTP</option>
+                            <option value="local">{{ "settings_page.local_backend_opt" | t }}</option>
+                            <option value="remote">{{ "settings_page.remote_backend_opt" | t }}</option>
                         </select>
-                        <p class="mt-1 text-xs text-slate-500">Select backend type to enable SipFlow. </p>
+                        <p class="mt-1 text-xs text-slate-500">{{ "settings_page.select_backend" | t }}</p>
                     </div>
 
                     <div x-show="sipflowDraft.backend_type !== 'none'" x-cloak
@@ -877,45 +876,41 @@
                         <div x-show="sipflowDraft.backend_type === 'local'"
                             class="space-y-4 rounded-lg border border-slate-200 bg-slate-50 p-4">
                             <div>
-                                <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Data
-                                    Directory</label>
+                                <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">{{ "settings_page.data_dir" | t }}</label>
                                 <input type="text" x-model="sipflowDraft.local_root" :disabled="sipflowProcessing"
                                     class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                                     placeholder="./config/sipflow">
-                                <p class="mt-1 text-xs text-slate-500">SQLite database and structured file storage
-                                    location</p>
+                                <p class="mt-1 text-xs text-slate-500">{{ "settings_page.data_dir_hint" | t }}</p>
                             </div>
                             <div>
                                 <label
-                                    class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Subdirectories</label>
+                                    class="block text-xs font-semibold uppercase tracking-wide text-slate-400">{{ "settings_page.subdirectories" | t }}</label>
                                 <select x-model="sipflowDraft.local_subdirs" :disabled="sipflowProcessing"
                                     class="mt-1 block w-full rounded-md border-slate-200 py-2 pl-3 pr-10 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
-                                    <option value="none">None (Flat structure)</option>
-                                    <option value="daily">Daily (YYYYMMDD)</option>
-                                    <option value="hourly">Hourly (YYYYMMDD/HH)</option>
+                                    <option value="none">{{ "settings_page.flat_structure" | t }}</option>
+                                    <option value="daily">{{ "settings_page.daily" | t }}</option>
+                                    <option value="hourly">{{ "settings_page.hourly" | t }}</option>
                                 </select>
-                                <p class="mt-1 text-xs text-slate-500">Directory structure for stored files</p>
+                                <p class="mt-1 text-xs text-slate-500">{{ "settings_page.subdir_desc" | t }}</p>
                             </div>
                             <div class="grid gap-4 md:grid-cols-2">
                                 <div>
                                     <label
-                                        class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Flush
-                                        Count</label>
+                                        class="block text-xs font-semibold uppercase tracking-wide text-slate-400">{{ "settings_page.flush_count_label" | t }}</label>
                                     <input type="number" x-model.number="sipflowDraft.local_flush_count"
                                         :disabled="sipflowProcessing"
                                         class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                                         placeholder="1000" min="1">
-                                    <p class="mt-1 text-xs text-slate-500">Buffer size before writing to disk</p>
+                                    <p class="mt-1 text-xs text-slate-500">{{ "settings_page.flush_buffer_desc_short" | t }}</p>
                                 </div>
                                 <div>
                                     <label
-                                        class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Flush
-                                        Interval (seconds)</label>
+                                        class="block text-xs font-semibold uppercase tracking-wide text-slate-400">{{ "settings_page.flush_interval_label" | t }}</label>
                                     <input type="number" x-model.number="sipflowDraft.local_flush_interval_secs"
                                         :disabled="sipflowProcessing"
                                         class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                                         placeholder="5" min="1">
-                                    <p class="mt-1 text-xs text-slate-500">Maximum time to hold data in memory</p>
+                                    <p class="mt-1 text-xs text-slate-500">{{ "settings_page.flush_timeout_desc_short" | t }}</p>
                                 </div>
                             </div>
                         </div>
@@ -926,34 +921,31 @@
                             <div class="grid gap-4 md:grid-cols-2">
                                 <div>
                                     <label
-                                        class="block text-xs font-semibold uppercase tracking-wide text-slate-400">UDP
-                                        Address</label>
+                                        class="block text-xs font-semibold uppercase tracking-wide text-slate-400">{{ "settings_page.udp_address" | t }}</label>
                                     <input type="text" x-model="sipflowDraft.remote_udp_addr"
                                         :disabled="sipflowProcessing"
                                         class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                                         placeholder="192.168.1.100:3000">
-                                    <p class="mt-1 text-xs text-slate-500">UDP endpoint for real-time flow data</p>
+                                    <p class="mt-1 text-xs text-slate-500">{{ "settings_page.udp_address_hint" | t }}</p>
                                 </div>
                                 <div>
                                     <label
-                                        class="block text-xs font-semibold uppercase tracking-wide text-slate-400">HTTP
-                                        Address</label>
+                                        class="block text-xs font-semibold uppercase tracking-wide text-slate-400">{{ "settings_page.http_address" | t }}</label>
                                     <input type="text" x-model="sipflowDraft.remote_http_addr"
                                         :disabled="sipflowProcessing"
                                         class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                                         placeholder="http://192.168.1.100:3001">
-                                    <p class="mt-1 text-xs text-slate-500">HTTP endpoint for queries and downloads</p>
+                                    <p class="mt-1 text-xs text-slate-500">{{ "settings_page.http_address_hint" | t }}</p>
                                 </div>
                             </div>
                             <div>
                                 <label
-                                    class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Timeout
-                                    (seconds)</label>
+                                    class="block text-xs font-semibold uppercase tracking-wide text-slate-400">{{ "settings_page.timeout_label" | t }}</label>
                                 <input type="number" x-model.number="sipflowDraft.remote_timeout_secs"
                                     :disabled="sipflowProcessing"
                                     class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                                     placeholder="10" min="1">
-                                <p class="mt-1 text-xs text-slate-500">Connection and request timeout</p>
+                                <p class="mt-1 text-xs text-slate-500">{{ "settings_page.connection_timeout_hint" | t }}</p>
                             </div>
                         </div>
                     </div>
@@ -965,7 +957,7 @@
                             <button type="button"
                                 class="inline-flex items-center justify-center rounded-md border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-600 transition hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-60"
                                 @click="resetSipFlowDraft" :disabled="sipflowProcessing">
-                                Reset
+                                {{ "common.reset" | t }}
                             </button>
                             <button type="submit"
                                 class="inline-flex items-center justify-center rounded-md bg-sky-600 px-3 py-2 text-xs font-semibold text-white shadow-sm transition hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60"
@@ -1886,6 +1878,7 @@
 </div>
 
 <script>
+    window._settingsTranslations = {{ t | json | safe }};
     document.addEventListener('alpine:init', () => {
         Alpine.data('settingsConsole', (options = {}) => ({
             basePath: options?.basePath || '/console',
@@ -1894,15 +1887,21 @@
             currentUser: options?.currentUser || null,
             t: options?.t || {},
             tabs: (() => {
+                const tget = (obj, key) => {
+                    const parts = key.split('.');
+                    let v = obj;
+                    for (const p of parts) { if (v == null || typeof v !== 'object') return null; v = v[p]; }
+                    return typeof v === 'string' ? v : null;
+                };
                 const tt = options?.t || {};
                 return [
-                    { id: 'platform', label: tt['settings_page.platform_overview'] || 'Platform overview' },
-                    { id: 'proxy', label: tt['settings_page.proxy_settings'] || 'Proxy settings' },
-                    { id: 'sipflow', label: tt['settings_page.sipflow_recording'] || 'SipFlow recording' },
-                    { id: 'recording', label: tt['settings_page.recording_policy'] || 'Recording policy' },
-                    { id: 'security', label: tt['settings_page.security_posture'] || 'Security posture' },
-                    { id: 'departments', label: tt['settings_page.departments'] || 'Departments' },
-                    { id: 'users', label: tt['settings_page.users_title'] || 'Users', requiresSuperuser: true },
+                    { id: 'platform', label: tget(tt, 'settings_page.platform_overview') || 'Platform overview' },
+                    { id: 'proxy', label: tget(tt, 'settings_page.proxy_settings') || 'Proxy settings' },
+                    { id: 'sipflow', label: tget(tt, 'settings_page.sipflow_recording') || 'SipFlow recording' },
+                    { id: 'recording', label: tget(tt, 'settings_page.recording_policy') || 'Recording policy' },
+                    { id: 'security', label: tget(tt, 'settings_page.security_posture') || 'Security posture' },
+                    { id: 'departments', label: tget(tt, 'settings_page.departments') || 'Departments' },
+                    { id: 'users', label: tget(tt, 'settings_page.users_title') || 'Users', requiresSuperuser: true },
                 ];
             })(),
             activeTab: 'platform',
@@ -2268,7 +2267,13 @@
                 return `Last login · ${label}`;
             },
             tt(key) {
-                return this.t[key] || key;
+                const parts = key.split('.');
+                let val = this.t;
+                for (const p of parts) {
+                    if (val == null || typeof val !== 'object') return key;
+                    val = val[p];
+                }
+                return (typeof val === 'string' && val) ? val : key;
             },
             formatDateTime(value) {
                 if (!value) {
@@ -3921,8 +3926,8 @@
                     const root = (this.sipflowDraft.local_root || '').trim();
                     if (!root) {
                         this.$dispatch('toast', {
-                            title: 'Missing information',
-                            message: 'Data directory is required for Local backend.',
+                            title: this.tt('settings_page.missing_information'),
+                            message: this.tt('settings_page.sipflow_data_dir_required'),
                         });
                         return;
                     }
@@ -3937,8 +3942,8 @@
                     const http_addr = (this.sipflowDraft.remote_http_addr || '').trim();
                     if (!udp_addr || !http_addr) {
                         this.$dispatch('toast', {
-                            title: 'Missing information',
-                            message: 'UDP and HTTP addresses are required for Remote backend.',
+                            title: this.tt('settings_page.missing_information'),
+                            message: this.tt('settings_page.sipflow_remote_required'),
                         });
                         return;
                     }
@@ -3967,7 +3972,7 @@
                     });
                     const data = await response.json().catch(() => ({}));
                     if (!response.ok) {
-                        throw new Error(data?.message || data?.error || 'Failed to update SipFlow settings');
+                        throw new Error(data?.message || data?.error || this.tt('settings_page.sipflow_failed_default'));
                     }
 
                     this.sipflowSettings = {
@@ -3976,20 +3981,20 @@
                     };
 
                     this.$dispatch('toast', {
-                        title: 'Settings saved',
-                        message: data?.message || 'SipFlow settings saved. Restart required to apply.',
+                        title: this.tt('settings_page.settings_saved'),
+                        message: data?.message || this.tt('settings_page.sipflow_saved_msg'),
                     });
 
                     this.lastOperation = {
-                        label: 'SipFlow settings',
+                        label: this.tt('settings_page.sipflow_recording'),
                         timestamp: new Date().toLocaleString(),
-                        status: 'Saved. Restart required.',
+                        status: this.tt('settings_page.restart_required_apply'),
                     };
                 } catch (err) {
                     console.error(err);
                     this.$dispatch('toast', {
-                        title: 'Update failed',
-                        message: err?.message || 'Unable to update SipFlow settings.',
+                        title: this.tt('settings_page.update_failed'),
+                        message: err?.message || this.tt('settings_page.sipflow_failed_default'),
                     });
                 } finally {
                     this.sipflowProcessing = false;

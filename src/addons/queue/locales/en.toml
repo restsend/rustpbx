@@ -1,0 +1,178 @@
+[queue]
+# Page titles & headings
+title = "Queues"
+subtitle = "Service queues"
+subtitle_desc = "Create voice queues, manage hold music, and configure fallback behaviors."
+
+# List page actions
+export_all = "Export all"
+refresh_list = "Refresh list"
+new_queue = "New queue"
+
+# Stats cards
+total_queues = "Total queues"
+active = "Active"
+paused = "Paused"
+
+# Filter / search
+all_statuses = "All statuses"
+search_placeholder = "Search by name or note"
+
+# Table columns
+col_queue = "Queue"
+col_hold_treatment = "Hold treatment"
+col_targets = "Targets"
+col_fallback = "Fallback"
+col_updated = "Updated"
+col_actions = "Actions"
+
+# Table states
+loading = "Loading queues…"
+no_queues = "No queues found. Create one to get started."
+
+# Status labels
+status_active = "Active"
+status_paused = "Paused"
+
+# Pagination
+showing = "Showing"
+of = "of"
+prev = "Prev"
+next = "Next"
+page = "Page"
+
+# Row actions (sr-only)
+view_queue = "View queue"
+export_queue = "Export queue"
+delete_queue = "Delete queue"
+
+# Confirm dialogs
+delete_confirm_title = "Delete queue"
+delete_confirm_msg = "Delete queue {name}? This cannot be undone."
+delete_confirm_label = "Delete"
+export_all_confirm_title = "Export all queues"
+export_all_confirm_msg = "Generate updated queue configuration files for every queue? Existing files will be replaced."
+export_confirm_label = "Export"
+
+# Flash messages
+queue_deleted = "Queue deleted."
+queues_exported_n = "Exported {count} queue file."
+queues_exported_n_plural = "Exported {count} queue files."
+queues_exported = "Queues exported."
+queue_exported_to = "Queue exported to {path}."
+queue_exported = "Queue exported."
+
+# Error messages
+load_error = "Unable to load queues"
+delete_error = "Failed to delete queue"
+export_error = "Failed to export queue"
+export_all_error = "Failed to export queues"
+
+# Hold summaries (JS)
+hold_immediate_passthrough = "Answer immediately · passthrough ringback"
+hold_immediate_audio = "Answer immediately · hold audio preferred"
+hold_default = "Default hold tone"
+hold_immediate = "Answer immediately · passthrough ringback"
+
+# Target summaries (JS)
+targets_route_trunks = "Route trunks (no inline targets)"
+targets_parallel = "Parallel"
+targets_sequential = "Sequential"
+targets_timeout = "{timeout}s timeout"
+targets_count = "{count} target"
+targets_count_plural = "{count} targets"
+targets_configure = "Configure inline SIP URIs per queue if needed"
+
+# Fallback summaries (JS)
+fallback_continue = "Continue waiting"
+fallback_redirect = "Redirect to {uri}"
+fallback_play = "Play {file} ({code})"
+fallback_fail = "Fail {code}"
+fallback_custom = "Custom failure action"
+
+# ── Detail / form page ──────────────────────────────────────────────────────
+
+detail_back = "Back to queues"
+detail_subtitle_create = "Publish a new voice queue with hold prompts and failure handling."
+detail_subtitle_edit = "Update hold flow, fallback action, and status for this queue."
+detail_summary_title = "Queue summary"
+detail_name_label = "Name"
+detail_updated_label = "Last updated"
+
+# Tabs
+tab_overview = "Overview"
+tab_targets = "Targets"
+tab_fallback = "Fallback"
+
+# Overview section
+section_basics = "Queue basics"
+field_name = "Queue name"
+field_name_placeholder = "support-primary"
+field_name_hint = "Used in routing destinations."
+field_status = "Status"
+field_status_hint = "Paused queues remain available for edits but will not receive calls."
+field_description = "Description"
+field_description_placeholder = "Internal notes for operators."
+field_accept_immediately = "Accept immediately"
+field_accept_immediately_label = "Bridge caller to agent before hold audio"
+field_passthrough_ringback = "Remote ringback handling"
+field_passthrough_ringback_desc = "Allow downstream color ring tones to replace hold audio while waiting for agents. Leave unchecked to keep playing queue hold music."
+field_tags = "Tags (comma separated)"
+field_tags_placeholder = "premium, apac, vip"
+
+# Hold section
+section_hold = "Hold treatment"
+section_hold_desc = "Upload prompts separately and reference the storage path here. Leave blank to fall back to config/sounds/phone-calling.wav."
+hold_enable_label = "Play custom hold audio"
+hold_audio_file = "Audio file path"
+hold_audio_file_placeholder = "storage://prompts/hold.wav"
+hold_loop = "Loop playback"
+
+# Targets section
+section_targets = "Agent dialing strategy"
+section_targets_desc = "Define how this queue rings SIP targets in sequence or in parallel before falling back."
+field_dial_mode = "Dial mode"
+dial_sequential = "Sequential (hunt)"
+dial_parallel = "Parallel (blast)"
+field_ring_timeout = "Ring timeout (seconds)"
+field_ring_timeout_placeholder = "0"
+field_ring_timeout_hint = "Set to zero to inherit the route timeout."
+dial_targets_title = "Dial targets"
+add_target = "Add target"
+no_targets = "No targets defined. Add SIP URIs to ring from this queue."
+target_uri = "Target URI"
+target_uri_placeholder = "sip:agent@pbx.local"
+target_label = "Label (optional)"
+target_label_placeholder = "Tier 1"
+remove_target = "Remove"
+
+# Fallback section
+section_fallback = "Fallback behavior"
+section_fallback_desc = "Choose what happens when no agents are available. By default the system plays config/sounds/unavailable-phone.wav before hanging up."
+fallback_none = "Continue waiting"
+fallback_redirect_opt = "Redirect to SIP URI"
+fallback_queue_opt = "Send to another queue"
+fallback_failure_opt = "Return failure prompt/code"
+fallback_redirect_label = "Redirect target (SIP URI)"
+fallback_redirect_placeholder = "sip:backup@pbx.local"
+fallback_code_label = "SIP failure code"
+fallback_code_placeholder = "486"
+fallback_reason_label = "Failure reason"
+fallback_reason_placeholder = "All agents busy"
+fallback_prompt_label = "Failure prompt audio"
+fallback_prompt_placeholder = "storage://prompts/queue-full.wav"
+fallback_prompt_hint = "Optional audio clip to play before hanging up."
+fallback_queue_label = "Queue file path"
+fallback_queue_placeholder = "3-support.generated.toml"
+fallback_queue_hint = "Provide the generated queue TOML file (relative to config/queue)."
+
+# Form footer
+save_hint = "Queue changes apply instantly after saving."
+btn_cancel = "Cancel"
+btn_save = "Save changes"
+btn_create = "Create queue"
+
+# JS messages
+queue_updated = "Queue updated."
+queue_created = "Queue created."
+save_failed = "Failed to save queue"

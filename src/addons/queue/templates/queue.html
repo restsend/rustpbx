@@ -1,19 +1,19 @@
 {% extends "console/layout.html" %}
-{% block title %}Queues · {{ site_name | default('RustPBX') }}{% endblock %}
+{% block title %}{{ "queue.title" | t }} · {{ site_name | default('RustPBX') }}{% endblock %}
 {% block content %}
 {% set base_url = base_path | default('/console') %}
 <div class="p-6" x-data='queuePage({
         basePath: {{ base_url | tojson }},
         filters: {{ filters | default({}) | tojson }},
-        createUrl: {{ create_url | tojson }}
+        createUrl: {{ create_url | tojson }},
+        t: window._queueTranslations
     })' x-init="init()">
     <div class="mx-auto max-w-6xl space-y-6">
         <header class="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
             <div class="space-y-1">
-                <p class="text-xs font-semibold uppercase tracking-wide text-sky-600">Service queues</p>
-                <h1 class="text-2xl font-semibold text-slate-900">Queues</h1>
-                <p class="text-sm text-slate-500">Create voice queues, manage hold music, and configure fallback
-                    behaviors.</p>
+                <p class="text-xs font-semibold uppercase tracking-wide text-sky-600">{{ "queue.subtitle" | t }}</p>
+                <h1 class="text-2xl font-semibold text-slate-900">{{ "queue.title" | t }}</h1>
+                <p class="text-sm text-slate-500">{{ "queue.subtitle_desc" | t }}</p>
             </div>
             <div class="flex flex-wrap items-center gap-3">
                 <button type="button"
@@ -33,7 +33,7 @@
                                 d="M12 3v3m6.364 1.636-2.121 2.121M21 12h-3m-1.636 6.364-2.121-2.121M12 21v-3m-6.364-1.636 2.121-2.121M3 12h3m1.636-6.364 2.121 2.121" />
                         </svg>
                     </template>
-                    Export all
+                    {{ "queue.export_all" | t }}
                 </button>
                 <button type="button"
                     class="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-600 transition hover:border-sky-300 hover:text-sky-700 focus:outline-none focus:ring-2 focus:ring-sky-200 focus:ring-offset-2"
@@ -44,14 +44,14 @@
                         <path stroke-linecap="round" stroke-linejoin="round"
                             d="M3 12a9 9 0 0 1 15.364-6.364L21 8.27M21 12a9 9 0 0 1-15.364 6.364L3 15.73" />
                     </svg>
-                    Refresh list
+                    {{ "queue.refresh_list" | t }}
                 </button>
                 <a :href="createUrl"
                     class="inline-flex items-center gap-2 rounded-lg bg-sky-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-offset-2">
                     <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8">
                         <path stroke-linecap="round" stroke-linejoin="round" d="M10 4v12m6-6H4" />
                     </svg>
-                    New queue
+                    {{ "queue.new_queue" | t }}
                 </a>
             </div>
         </header>
@@ -67,15 +67,15 @@
 
         <section class="grid gap-4 sm:grid-cols-3">
             <div class="rounded-xl bg-white p-4 shadow-sm ring-1 ring-black/5">
-                <div class="text-xs font-semibold uppercase tracking-wide text-slate-500">Total queues</div>
+                <div class="text-xs font-semibold uppercase tracking-wide text-slate-500">{{ "queue.total_queues" | t }}</div>
                 <div class="mt-2 text-2xl font-semibold text-slate-900" x-text="summary.total || 0"></div>
             </div>
             <div class="rounded-xl bg-white p-4 shadow-sm ring-1 ring-black/5">
-                <div class="text-xs font-semibold uppercase tracking-wide text-slate-500">Active</div>
+                <div class="text-xs font-semibold uppercase tracking-wide text-slate-500">{{ "queue.active" | t }}</div>
                 <div class="mt-2 text-2xl font-semibold text-emerald-600" x-text="summary.active || 0"></div>
             </div>
             <div class="rounded-xl bg-white p-4 shadow-sm ring-1 ring-black/5">
-                <div class="text-xs font-semibold uppercase tracking-wide text-slate-500">Paused</div>
+                <div class="text-xs font-semibold uppercase tracking-wide text-slate-500">{{ "queue.paused" | t }}</div>
                 <div class="mt-2 text-2xl font-semibold text-amber-500" x-text="summary.inactive || 0"></div>
             </div>
         </section>
@@ -87,7 +87,7 @@
                         class="inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-semibold transition"
                         :class="statusFilter === 'all' ? 'border-sky-200 bg-sky-100 text-sky-700' : 'border-slate-200 text-slate-600 hover:border-sky-300 hover:text-sky-700'"
                         @click="selectStatus('all')">
-                        All statuses
+                        {{ "queue.all_statuses" | t }}
                     </button>
                     <template x-for="tab in statusTabs" :key="tab.value">
                         <button type="button"
@@ -98,7 +98,7 @@
                         </button>
                     </template>
                 </div>
-                <label class="relative w-full lg:w-80" aria-label="Search queues">
+                <label class="relative w-full lg:w-80" aria-label="{{ "queue.search_placeholder" | t }}">
                     <svg class="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400"
                         viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6">
                         <path stroke-linecap="round" stroke-linejoin="round"
@@ -106,7 +106,7 @@
                     </svg>
                     <input type="search" x-model.trim="keyword" @input.debounce.400ms="applyFilters()"
                         class="w-full rounded-lg border border-slate-200 px-3 py-2 pl-9 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                        placeholder="Search by name or note">
+                        placeholder="{{ "queue.search_placeholder" | t }}">
                 </label>
             </div>
         </section>
@@ -116,12 +116,12 @@
                 <table class="min-w-full divide-y divide-slate-200 text-left text-sm">
                     <thead class="bg-slate-50 text-xs font-semibold uppercase tracking-wide text-slate-500">
                         <tr>
-                            <th scope="col" class="px-4 py-2">Queue</th>
-                            <th scope="col" class="px-4 py-2">Hold treatment</th>
-                            <th scope="col" class="px-4 py-2">Targets</th>
-                            <th scope="col" class="px-4 py-2">Fallback</th>
-                            <th scope="col" class="px-4 py-2">Updated</th>
-                            <th scope="col" class="px-4 py-2">Actions</th>
+                            <th scope="col" class="px-4 py-2">{{ "queue.col_queue" | t }}</th>
+                            <th scope="col" class="px-4 py-2">{{ "queue.col_hold_treatment" | t }}</th>
+                            <th scope="col" class="px-4 py-2">{{ "queue.col_targets" | t }}</th>
+                            <th scope="col" class="px-4 py-2">{{ "queue.col_fallback" | t }}</th>
+                            <th scope="col" class="px-4 py-2">{{ "queue.col_updated" | t }}</th>
+                            <th scope="col" class="px-4 py-2">{{ "queue.col_actions" | t }}</th>
                         </tr>
                     </thead>
                     <tbody class="divide-y divide-slate-100 bg-white text-slate-600">
@@ -134,15 +134,15 @@
                                             <path stroke-linecap="round" stroke-linejoin="round"
                                                 d="M12 3v3m6.364 1.636-2.121 2.121M21 12h-3m-1.636 6.364-2.121-2.121M12 21v-3m-6.364-1.636 2.121-2.121M3 12h3m1.636-6.364 2.121 2.121" />
                                         </svg>
-                                        Loading queues…
+                                        <span x-text="tt('queue.loading')"></span>
                                     </div>
                                 </td>
                             </tr>
                         </template>
                         <template x-if="!loading && !queues.length">
                             <tr>
-                                <td colspan="6" class="px-4 py-6 text-center text-sm text-slate-500">
-                                    No queues found. Create one to get started.
+                                <td colspan="6" class="px-4 py-6 text-center text-sm text-slate-500"
+                                    x-text="tt('queue.no_queues')">
                                 </td>
                             </tr>
                         </template>
@@ -161,7 +161,7 @@
                                                     :class="queue.is_active ? 'bg-emerald-50 text-emerald-600 ring-1 ring-emerald-100' : 'bg-amber-50 text-amber-600 ring-1 ring-amber-100'">
                                                     <span class="h-1.5 w-1.5 rounded-full"
                                                         :class="queue.is_active ? 'bg-emerald-400' : 'bg-amber-400'"></span>
-                                                    <span x-text="queue.is_active ? 'Active' : 'Paused'"></span>
+                                                    <span x-text="queue.is_active ? tt('queue.status_active') : tt('queue.status_paused')"></span>
                                                 </span>
                                                 <template x-for="tag in queue.tags" :key="tag">
                                                     <span
@@ -174,12 +174,7 @@
                                 </td>
                                 <td class="px-4 py-3">
                                     <div class="text-sm font-semibold text-slate-800" x-text="holdSummary(queue)"></div>
-                                    <div class="text-xs text-slate-500" x-text="queue.spec?.accept_immediately
-                                            ? (queue.spec?.passthrough_ringback
-                                                ? 'Answer immediately · passthrough ringback'
-                                                : 'Answer immediately · keep hold audio')
-                                            : 'Play hold audio until agent joins'">
-                                    </div>
+                                    <div class="text-xs text-slate-500" x-text="holdDetail(queue)"></div>
                                 </td>
                                 <td class="px-4 py-3">
                                     <div class="text-sm text-slate-700" x-text="targetSummary(queue)"></div>
@@ -192,20 +187,21 @@
                                     x-text="formatDate(queue.updated_at)"></td>
                                 <td class="px-4 py-3">
                                     <div class="flex items-center gap-2">
-                                        <a :href="queue.detail_url || detailUrl(queue.id)" title="View queue"
+                                        <a :href="queue.detail_url || detailUrl(queue.id)"
+                                            :title="tt('queue.view_queue')"
                                             class="inline-flex items-center justify-center rounded-full border border-slate-200 p-2 text-slate-500 transition hover:border-sky-300 hover:text-sky-600">
-                                            <span class="sr-only">View queue</span>
+                                            <span class="sr-only" x-text="tt('queue.view_queue')"></span>
                                             <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor"
                                                 stroke-width="1.6">
                                                 <path stroke-linecap="round" stroke-linejoin="round"
                                                     d="M13.5 3.5l3 3-8 8H5.5v-3l8-8z" />
                                             </svg>
                                         </a>
-                                        <button type="button" title="Export queue"
+                                        <button type="button" :title="tt('queue.export_queue')"
                                             class="inline-flex items-center justify-center rounded-full border border-slate-200 p-2 text-slate-500 transition"
                                             :class="exportingQueueId === queue.id ? 'cursor-not-allowed border-slate-100 text-slate-300' : 'hover:border-indigo-300 hover:text-indigo-600'"
                                             :disabled="exportingQueueId === queue.id" @click="exportQueue(queue)">
-                                            <span class="sr-only">Export queue</span>
+                                            <span class="sr-only" x-text="tt('queue.export_queue')"></span>
                                             <template x-if="exportingQueueId === queue.id">
                                                 <svg class="h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none"
                                                     stroke="currentColor" stroke-width="1.8">
@@ -221,11 +217,11 @@
                                                 </svg>
                                             </template>
                                         </button>
-                                        <button type="button" title="Delete queue"
+                                        <button type="button" :title="tt('queue.delete_queue')"
                                             class="inline-flex items-center justify-center rounded-full border border-slate-200 p-2 text-slate-500 transition"
                                             :class="processingDelete === queue.id ? 'cursor-not-allowed border-slate-100 text-slate-300' : 'hover:border-rose-300 hover:text-rose-600'"
                                             :disabled="processingDelete === queue.id" @click="confirmDelete(queue)">
-                                            <span class="sr-only">Delete queue</span>
+                                            <span class="sr-only" x-text="tt('queue.delete_queue')"></span>
                                             <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor"
                                                 stroke-width="1.6">
                                                 <path stroke-linecap="round" stroke-linejoin="round"
@@ -244,26 +240,31 @@
                 <div
                     class="flex items-center justify-between border-t border-slate-200 px-4 py-3 text-xs text-slate-500">
                     <div>
-                        Showing <span class="font-semibold" x-text="showingFrom"></span>
-                        – <span class="font-semibold" x-text="showingTo"></span>
-                        of <span class="font-semibold" x-text="pagination.total_items"></span>
+                        <span x-text="tt('queue.showing')"></span>
+                        <span class="font-semibold" x-text="showingFrom"></span>
+                        –
+                        <span class="font-semibold" x-text="showingTo"></span>
+                        <span x-text="tt('queue.of')"></span>
+                        <span class="font-semibold" x-text="pagination.total_items"></span>
                     </div>
                     <div class="flex items-center gap-2">
                         <button type="button"
                             class="inline-flex items-center gap-1 rounded-lg border border-slate-200 px-3 py-1.5 font-semibold transition"
                             :class="pagination.has_prev ? 'text-slate-600 hover:border-sky-300 hover:text-sky-700' : 'cursor-not-allowed text-slate-300'"
-                            :disabled="!pagination.has_prev" @click="prevPage()">
-                            Prev
+                            :disabled="!pagination.has_prev" @click="prevPage()"
+                            x-text="tt('queue.prev')">
                         </button>
                         <div class="text-sm font-semibold text-slate-600">
-                            Page <span x-text="pagination.current_page"></span> / <span
-                                x-text="pagination.total_pages"></span>
+                            <span x-text="tt('queue.page')"></span>
+                            <span x-text="pagination.current_page"></span>
+                            /
+                            <span x-text="pagination.total_pages"></span>
                         </div>
                         <button type="button"
                             class="inline-flex items-center gap-1 rounded-lg border border-slate-200 px-3 py-1.5 font-semibold transition"
                             :class="pagination.has_next ? 'text-slate-600 hover:border-sky-300 hover:text-sky-700' : 'cursor-not-allowed text-slate-300'"
-                            :disabled="!pagination.has_next" @click="nextPage()">
-                            Next
+                            :disabled="!pagination.has_next" @click="nextPage()"
+                            x-text="tt('queue.next')">
                         </button>
                     </div>
                 </div>
@@ -273,6 +274,7 @@
 </div>
 
 <script>
+    window._queueTranslations = {{ t | json | safe }};
     document.addEventListener('alpine:init', () => {
         Alpine.data('queuePage', (options) => ({
             basePath: options.basePath || '/console',
@@ -280,6 +282,7 @@
             createUrl: options.createUrl || `${options.basePath || '/console'}/queues/new`,
             exportAllEndpoint: `${options.basePath || '/console'}/queues/export`,
             filtersRaw: options.filters || {},
+            t: options.t || {},
             keyword: '',
             statusFilter: 'all',
             statusOptions: [],
@@ -297,16 +300,25 @@
             exportingQueueId: null,
             showingFrom: 0,
             showingTo: 0,
+            tt(key) {
+                const parts = key.split('.');
+                let val = this.t;
+                for (const p of parts) {
+                    if (val == null || typeof val !== 'object') return key;
+                    val = val[p];
+                }
+                return (typeof val === 'string' && val) ? val : key;
+            },
             init() {
                 this.loadStatusOptions();
                 this.fetchQueues();
             },
             loadStatusOptions() {
-                const options = Array.isArray(this.filtersRaw.status_options) ? this.filtersRaw.status_options : [];
-                this.statusOptions = options.length ? options : [
-                    { value: 'all', label: 'Any status' },
-                    { value: 'active', label: 'Active' },
-                    { value: 'inactive', label: 'Paused' },
+                const opts = Array.isArray(this.filtersRaw.status_options) ? this.filtersRaw.status_options : [];
+                this.statusOptions = opts.length ? opts : [
+                    { value: 'all', label: this.tt('queue.all_statuses') },
+                    { value: 'active', label: this.tt('queue.status_active') },
+                    { value: 'inactive', label: this.tt('queue.status_paused') },
                 ];
                 this.statusTabs = this.statusOptions.filter((opt) => opt.value !== 'all');
             },
@@ -334,7 +346,7 @@
                     });
                     const data = await response.json().catch(() => ({}));
                     if (!response.ok) {
-                        throw new Error(data?.message || 'Failed to load queues');
+                        throw new Error(data?.message || this.tt('queue.load_error'));
                     }
 
                     this.queues = Array.isArray(data?.items) ? data.items : [];
@@ -374,7 +386,7 @@
                     }
                 } catch (err) {
                     console.error(err);
-                    this.error = err?.message || 'Unable to load queues';
+                    this.error = err?.message || this.tt('queue.load_error');
                     this.queues = [];
                     this.pagination = null;
                 } finally {
@@ -386,9 +398,7 @@
                 this.fetchQueues();
             },
             selectStatus(value) {
-                if (this.statusFilter === value) {
-                    return;
-                }
+                if (this.statusFilter === value) return;
                 this.statusFilter = value;
                 this.applyFilters();
             },
@@ -411,9 +421,7 @@
             formatDate(value) {
                 if (!value) return '—';
                 const date = new Date(value);
-                if (Number.isNaN(date.getTime())) {
-                    return value;
-                }
+                if (Number.isNaN(date.getTime())) return value;
                 return date.toLocaleString();
             },
             detailUrl(id) {
@@ -423,86 +431,86 @@
                 const spec = queue?.spec || {};
                 if (spec?.accept_immediately) {
                     return spec?.passthrough_ringback
-                        ? 'Answer immediately · passthrough ringback'
-                        : 'Answer immediately · hold audio preferred';
+                        ? this.tt('queue.hold_immediate_passthrough')
+                        : this.tt('queue.hold_immediate_audio');
                 }
                 const audio = spec?.hold?.audio_file;
                 if (audio) {
                     return spec?.hold?.loop_playback === false ? audio : `${audio} · loop`;
                 }
-                return 'Default hold tone';
+                return this.tt('queue.hold_default');
+            },
+            holdDetail(queue) {
+                const spec = queue?.spec || {};
+                if (spec?.accept_immediately) {
+                    return spec?.passthrough_ringback
+                        ? this.tt('queue.hold_immediate_passthrough')
+                        : this.tt('queue.hold_immediate_audio');
+                }
+                return '';
             },
             strategyTargets(queue) {
                 const rawTargets = queue?.spec?.strategy?.targets;
-                if (!Array.isArray(rawTargets)) {
-                    return [];
-                }
+                if (!Array.isArray(rawTargets)) return [];
                 return rawTargets
-                    .map((target) => ({
-                        uri: (target?.uri || '').trim(),
-                        label: (target?.label || '').trim(),
-                    }))
-                    .filter((target) => target.uri);
+                    .map((t) => ({ uri: (t?.uri || '').trim(), label: (t?.label || '').trim() }))
+                    .filter((t) => t.uri);
             },
             targetSummary(queue) {
                 const targets = this.strategyTargets(queue);
-                if (!targets.length) {
-                    return 'Route trunks (no inline targets)';
-                }
-                const modeLabel = queue?.spec?.strategy?.mode === 'parallel' ? 'Parallel' : 'Sequential';
+                if (!targets.length) return this.tt('queue.targets_route_trunks');
+                const modeLabel = queue?.spec?.strategy?.mode === 'parallel'
+                    ? this.tt('queue.targets_parallel')
+                    : this.tt('queue.targets_sequential');
                 const timeoutRaw = Number(queue?.spec?.strategy?.wait_timeout_secs);
                 const timeoutLabel = Number.isFinite(timeoutRaw) && timeoutRaw > 0
-                    ? ` · ${timeoutRaw}s timeout`
+                    ? ` · ${timeoutRaw}s`
                     : '';
-                const countLabel = `${targets.length} target${targets.length > 1 ? 's' : ''}`;
+                const count = targets.length;
+                const countLabel = count > 1
+                    ? this.tt('queue.targets_count_plural').replace('{count}', count)
+                    : this.tt('queue.targets_count').replace('{count}', count);
                 return `${modeLabel} · ${countLabel}${timeoutLabel}`;
             },
             targetDetails(queue) {
                 const targets = this.strategyTargets(queue);
-                if (!targets.length) {
-                    return 'Configure inline SIP URIs per queue if needed';
-                }
-                const names = targets
-                    .map((target) => target.label || target.uri)
-                    .slice(0, 3)
-                    .join(', ');
+                if (!targets.length) return this.tt('queue.targets_configure');
+                const names = targets.map((t) => t.label || t.uri).slice(0, 3).join(', ');
                 const extra = targets.length > 3 ? ` +${targets.length - 3}` : '';
                 return names + extra;
             },
             fallbackSummary(queue) {
                 const fallback = queue?.spec?.fallback;
-                if (!fallback) {
-                    return 'Continue waiting';
-                }
+                if (!fallback) return this.tt('queue.fallback_continue');
                 if (fallback.redirect) {
-                    return `Redirect to ${fallback.redirect}`;
+                    return this.tt('queue.fallback_redirect').replace('{uri}', fallback.redirect);
                 }
                 if (fallback.failure_prompt) {
-                    return `Play ${fallback.failure_prompt} (${fallback.failure_code || 480})`;
+                    const code = fallback.failure_code || 480;
+                    return this.tt('queue.fallback_play')
+                        .replace('{file}', fallback.failure_prompt)
+                        .replace('{code}', code);
                 }
                 if (fallback.failure_code) {
-                    return `Fail ${fallback.failure_code}${fallback.failure_reason ? ' · ' + fallback.failure_reason : ''}`;
+                    const base = this.tt('queue.fallback_fail').replace('{code}', fallback.failure_code);
+                    return fallback.failure_reason ? `${base} · ${fallback.failure_reason}` : base;
                 }
-                return 'Custom failure action';
+                return this.tt('queue.fallback_custom');
             },
             confirmDelete(queue) {
-                if (!queue || !queue.id) {
-                    return;
-                }
+                if (!queue || !queue.id) return;
                 window.dispatchEvent(new CustomEvent('console:confirm', {
                     detail: {
-                        title: 'Delete queue',
-                        message: `Delete queue ${queue.name}? This cannot be undone.`,
-                        confirmLabel: 'Delete',
+                        title: this.tt('queue.delete_confirm_title'),
+                        message: this.tt('queue.delete_confirm_msg').replace('{name}', queue.name),
+                        confirmLabel: this.tt('queue.delete_confirm_label'),
                         destructive: true,
                         onConfirm: () => this.deleteQueue(queue),
                     },
                 }));
             },
             async deleteQueue(queue) {
-                if (!queue || !queue.id) {
-                    return;
-                }
+                if (!queue || !queue.id) return;
                 this.processingDelete = queue.id;
                 this.error = null;
                 try {
@@ -511,37 +519,31 @@
                         headers: { 'Accept': 'application/json' },
                     });
                     const data = await response.json().catch(() => ({}));
-                    if (!response.ok) {
-                        throw new Error(data?.message || 'Failed to delete queue');
-                    }
-                    this.flash = 'Queue deleted.';
+                    if (!response.ok) throw new Error(data?.message || this.tt('queue.delete_error'));
+                    this.flash = this.tt('queue.queue_deleted');
                     await this.fetchQueues();
                 } catch (err) {
                     console.error(err);
-                    this.error = err?.message || 'Failed to delete queue';
+                    this.error = err?.message || this.tt('queue.delete_error');
                 } finally {
                     this.processingDelete = null;
                 }
             },
             confirmExportAll() {
-                if (this.exportingAll) {
-                    return;
-                }
+                if (this.exportingAll) return;
                 window.dispatchEvent(new CustomEvent('console:confirm', {
                     detail: {
-                        title: 'Export all queues',
-                        message: 'Generate updated queue configuration files for every queue? Existing files will be replaced.',
-                        confirmLabel: 'Export',
-                        cancelLabel: 'Cancel',
+                        title: this.tt('queue.export_all_confirm_title'),
+                        message: this.tt('queue.export_all_confirm_msg'),
+                        confirmLabel: this.tt('queue.export_confirm_label'),
+                        cancelLabel: this.tt('common.cancel'),
                         destructive: false,
                         onConfirm: () => this.exportAllQueues(),
                     },
                 }));
             },
             async exportAllQueues() {
-                if (this.exportingAll) {
-                    return;
-                }
+                if (this.exportingAll) return;
                 this.exportingAll = true;
                 this.error = null;
                 try {
@@ -550,38 +552,32 @@
                         headers: { 'Accept': 'application/json' },
                     });
                     const data = await response.json().catch(() => ({}));
-                    if (!response.ok) {
-                        throw new Error(data?.message || 'Failed to export queues');
-                    }
+                    if (!response.ok) throw new Error(data?.message || this.tt('queue.export_all_error'));
                     const paths = Array.isArray(data?.paths) ? data.paths : [];
                     const count = paths.length;
-                    this.flash = count
-                        ? `Exported ${count} queue file${count === 1 ? '' : 's'}.`
-                        : 'Queues exported.';
+                    if (count === 1) {
+                        this.flash = this.tt('queue.queues_exported_n').replace('{count}', count);
+                    } else if (count > 1) {
+                        this.flash = this.tt('queue.queues_exported_n_plural').replace('{count}', count);
+                    } else {
+                        this.flash = this.tt('queue.queues_exported');
+                    }
                 } catch (err) {
                     console.error(err);
-                    this.error = err?.message || 'Failed to export queues';
+                    this.error = err?.message || this.tt('queue.export_all_error');
                 } finally {
                     this.exportingAll = false;
                 }
             },
             exportEndpoint(queue) {
-                if (!queue) {
-                    return null;
-                }
-                if (typeof queue.export_url === 'string' && queue.export_url.trim().length) {
-                    return queue.export_url;
-                }
+                if (!queue) return null;
+                if (typeof queue.export_url === 'string' && queue.export_url.trim().length) return queue.export_url;
                 return `${this.basePath}/queues/${queue.id}/export`;
             },
             async exportQueue(queue) {
-                if (!queue || !queue.id || this.exportingQueueId === queue.id) {
-                    return;
-                }
+                if (!queue || !queue.id || this.exportingQueueId === queue.id) return;
                 const endpoint = this.exportEndpoint(queue);
-                if (!endpoint) {
-                    return;
-                }
+                if (!endpoint) return;
                 this.exportingQueueId = queue.id;
                 this.error = null;
                 try {
@@ -590,14 +586,14 @@
                         headers: { 'Accept': 'application/json' },
                     });
                     const data = await response.json().catch(() => ({}));
-                    if (!response.ok) {
-                        throw new Error(data?.message || 'Failed to export queue');
-                    }
+                    if (!response.ok) throw new Error(data?.message || this.tt('queue.export_error'));
                     const path = data?.path || data?.paths?.[0];
-                    this.flash = path ? `Queue exported to ${path}.` : 'Queue exported.';
+                    this.flash = path
+                        ? this.tt('queue.queue_exported_to').replace('{path}', path)
+                        : this.tt('queue.queue_exported');
                 } catch (err) {
                     console.error(err);
-                    this.error = err?.message || 'Failed to export queue';
+                    this.error = err?.message || this.tt('queue.export_error');
                 } finally {
                     this.exportingQueueId = null;
                 }
