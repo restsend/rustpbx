@@ -247,7 +247,6 @@ async fn main() -> Result<()> {
                 .event_format(AccessLogEventFormat::new(LocalTime::rfc_3339())),
         );
     }
-
     // Every branch receives the same OTel reload layer so that the commercial
     // TelemetryAddon can inject a live OTel tracing layer later, regardless of
     // which logging backend was chosen.

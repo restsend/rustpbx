@@ -149,6 +149,19 @@ pub async fn verify_license_key(_state: Arc<ConsoleState>, license_key: String) 
     let expiry = info.expiry.map(|d| d.format("%Y-%m-%d").to_string());
     let scope = info.scope;
 
+    // Update in-memory license status immediately so the UI reflects the new
+    // state without requiring a server restart.
+    let new_status = crate::license::LicenseStatus {
+        key_name: key_name.clone(),
+        valid: true,
+        expired: false,
+        expiry: expiry.clone(),
+        plan: plan.clone(),
+        is_trial: false,
+        scope: scope.clone(),
+    };
+    crate::license::update_license_status(&target_addon_ids, new_status);
+
     axum::Json(serde_json::json!({
         "success": true,
         "message": "License key verified and saved successfully.",

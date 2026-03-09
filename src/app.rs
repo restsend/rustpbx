@@ -379,6 +379,30 @@ impl AppStateBuilder {
             tracing::error!("Failed to initialize addons: {}", e);
         }
 
+        // Commerce: verify licenses for all commercial addons at startup and
+        // populate the in-memory cache so the UI can show status without restart.
+        #[cfg(feature = "commerce")]
+        {
+            let commercial_ids: Vec<String> = addon_registry
+                .list_addons(app_state.clone())
+                .into_iter()
+                .filter(|a| a.category == crate::addons::AddonCategory::Commercial)
+                .map(|a| a.id.clone())
+                .collect();
+
+            if !commercial_ids.is_empty() {
+                let license_cfg = app_state.config().licenses.clone();
+                let results = crate::license::check_all_addon_licenses(&commercial_ids, &license_cfg).await;
+                if !results.is_empty() {
+                    tracing::info!(
+                        "License check at startup: {} addon(s) verified",
+                        results.len()
+                    );
+                    crate::license::record_startup_results(results);
+                }
+            }
+        }
+
         // Spawn background update checker (checks miuda.ai/api/check_update daily).
         #[cfg(feature = "console")]
         crate::version::spawn_update_checker(db_conn.clone(), token.clone());
@@ -387,6 +411,14 @@ impl AppStateBuilder {
         {
             if let Some(ref console_state) = app_state.console {
                 console_state.set_sip_server(Some(app_state.sip_server().get_inner()));
+                // Register addon locale directories into the i18n manager before
+                // binding the app_state so that all subsequent renders pick up the
+                // merged translations immediately.
+                for (addon_id, locale_dir) in
+                    app_state.addon_registry.get_locale_dirs(app_state.clone())
+                {
+                    console_state.i18n().register_addon_locales(&addon_id, locale_dir);
+                }
                 console_state.set_app_state(Some(Arc::downgrade(&app_state)));
             }
         }

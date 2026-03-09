@@ -1,12 +1,12 @@
 {% extends "console/layout.html" %}
-{% block title %}{{ "notifications.title" | t }} · {{site_name|default('RustPBX')}}{% endblock %}
+{% block title %}{{ "notifications_page.title" | t }} · {{site_name|default('RustPBX')}}{% endblock %}
 {% block content %}
 <div class="p-6" x-data="notificationsPage()" x-init="init()">
     <div class="mx-auto max-w-4xl space-y-6">
         <header class="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
             <div class="space-y-1">
                 <p class="text-xs font-semibold uppercase tracking-wide text-sky-600">{{ "notifications_page.system_notifications" | t }}</p>
-                <h1 class="text-2xl font-semibold text-slate-900">{{ "notifications.title" | t }}</h1>
+                <h1 class="text-2xl font-semibold text-slate-900">{{ "notifications_page.title" | t }}</h1>
                 <p class="text-sm text-slate-500">{{ "notifications_page.system_notifications" | t }}</p>
             </div>
             <button type="button" @click="markAllRead()"

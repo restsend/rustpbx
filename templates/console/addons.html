@@ -29,7 +29,7 @@
 
         {# Banner: shown when at least one commercial addon has no valid license #}
         {% if commerce_enabled and has_unlicensed_commercial %}
-        <div class="rounded-lg bg-amber-50 border border-amber-200 p-4 flex items-start gap-3">
+        <div data-unlicensed-banner class="rounded-lg bg-amber-50 border border-amber-200 p-4 flex items-start gap-3">
             <svg class="h-5 w-5 text-amber-500 flex-shrink-0 mt-0.5" viewBox="0 0 20 20" fill="currentColor">
                 <path fill-rule="evenodd"
                     d="M8.485 2.495c.673-1.167 2.357-1.167 3.03 0l6.28 10.875c.673 1.167-.17 2.625-1.516 2.625H3.72c-1.347 0-2.189-1.458-1.515-2.625L8.485 2.495zM10 5a.75.75 0 01.75.75v3.5a.75.75 0 01-1.5 0v-3.5A.75.75 0 0110 5zm0 9a1 1 0 100-2 1 1 0 000 2z"
@@ -268,7 +268,7 @@
                             </template>
                         </div>
                     </div>
-                    <p class="text-xs text-green-600 mt-2">Reloading…</p>
+                    <p class="text-xs text-green-600 mt-2">{{ "licenses.license_active" | t }}</p>
                 </div>
             </div>
 
@@ -478,12 +478,14 @@
             verifiedExpiry: '',
             verifiedScope: null,
             loading: false,
+            success: false,
 
             async verifyLicense() {
                 this.error = '';
                 this.verifiedPlan = '';
                 this.verifiedExpiry = '';
                 this.verifiedScope = null;
+                this.success = false;
                 const key = this.licenseKey.trim();
                 if (!key) {
                     this.error = 'Please enter a license key.';
@@ -501,7 +503,10 @@
                         this.verifiedPlan = result.plan || 'unknown';
                         this.verifiedExpiry = result.expiry || '';
                         this.verifiedScope = result.scope || null;
-                        setTimeout(() => window.location.reload(), 2200);
+                        this.success = true;
+                        // Hide the unlicensed banner immediately without reloading
+                        const banner = document.querySelector('[data-unlicensed-banner]');
+                        if (banner) banner.remove();
                     } else {
                         this.error = result.message || 'Verification failed.';
                     }

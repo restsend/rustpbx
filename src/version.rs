@@ -91,10 +91,21 @@ pub async fn check_update() -> anyhow::Result<UpdateInfo> {
         .get("https://miuda.ai/api/check_update")
         .query(&[("version", version), ("edition", edition)])
         .header("User-Agent", get_useragent())
-        .timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(5))
         .send()
-        .await?;
-    let info: UpdateInfo = resp.json().await?;
+        .await;
+    let resp = match resp {
+        Ok(r) => r,
+        Err(e) if e.is_timeout() || e.is_connect() => {
+            anyhow::bail!("version check unreachable (network/timeout): {e}");
+        }
+        Err(e) => anyhow::bail!("version check request error: {e}"),
+    };
+    let status = resp.status();
+    let body = resp.text().await?;
+    debug!("version check response: status={} body={}", status, body);
+    let info: UpdateInfo = serde_json::from_str(&body)
+        .map_err(|e| anyhow::anyhow!("version check parse error: {e}, status={status}, body={body}"))?;
     Ok(info)
 }
 

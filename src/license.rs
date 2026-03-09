@@ -113,10 +113,33 @@ mod inner {
         STARTUP_LICENSE_RESULTS.lock().ok()?.get(addon_id).cloned()
     }
 
+    /// Update the in-memory license status for one or more addons immediately
+    /// after a successful verification (no restart required).
+    pub fn update_license_status(addon_ids: &[String], status: LicenseStatus) {
+        if let Ok(mut cache) = STARTUP_LICENSE_RESULTS.lock() {
+            for id in addon_ids {
+                cache.insert(id.clone(), status.clone());
+            }
+        }
+    }
+
     // ─────────────────────────────────────────────────────────────────────────────
 
     /// Verify a license key against the license server.
+    /// If the key has already been verified this session, returns the cached result
+    /// without making a network request.
     pub async fn verify_license(key: &str) -> anyhow::Result<LicenseInfo> {
+        // Fast path: return cached result if already verified this session.
+        if let Ok(cache) = LICENSE_CACHE.lock() {
+            if let Some(info) = cache.get(key) {
+                tracing::debug!("License key {}... served from cache", &key[..key.len().min(8)]);
+                return Ok(info.clone());
+            }
+        }
+
+        let key_prefix = &key[..key.len().min(8)];
+        tracing::info!("Verifying license key {}... against https://miuda.ai/api/verify", key_prefix);
+
         let client = reqwest::Client::new();
         let resp = client
             .post("https://miuda.ai/api/verify")
@@ -127,8 +150,13 @@ mod inner {
 
         match resp {
             Ok(response) => {
-                if response.status().is_success() {
-                    let verify_data: VerifyResponse = response.json().await?;
+                let status = response.status();
+                tracing::info!("License verify response status: {}", status);
+                if status.is_success() {
+                    let body = response.text().await?;
+                    tracing::debug!("License verify response body: {}", body);
+                    let verify_data: VerifyResponse = serde_json::from_str(&body)
+                        .map_err(|e| anyhow::anyhow!("Failed to parse verify response: {e}, body: {body}"))?;
                     let info = LicenseInfo {
                         key: key.to_string(),
                         valid: verify_data.valid,
@@ -145,10 +173,17 @@ mod inner {
 
                     Ok(info)
                 } else {
-                    anyhow::bail!("Verification failed with status: {}", response.status())
+                    let body = response.text().await.unwrap_or_default();
+                    tracing::warn!(
+                        "License verification failed: status={}, body={}",
+                        status,
+                        body
+                    );
+                    anyhow::bail!("Verification failed with status: {}, body: {}", status, body)
                 }
             }
             Err(e) => {
+                tracing::error!("License verification network error: {}", e);
                 if let Ok(cache) = LICENSE_CACHE.lock() {
                     if let Some(info) = cache.get(key) {
                         tracing::warn!("Network error verifying license, using cached info: {}", e);
@@ -287,7 +322,7 @@ mod inner {
 pub use inner::{
     LicenseInfo, VerifyResponse, can_enable_addon, check_all_addon_licenses, clear_cache,
     get_cached_license, get_license_status, is_expired, record_startup_results,
-    verify_addon_license, verify_license,
+    update_license_status, verify_addon_license, verify_license,
 };
 
 #[cfg(test)]

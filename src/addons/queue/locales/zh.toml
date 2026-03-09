@@ -1,0 +1,178 @@
+[queue]
+# 页面标题
+title = "呼叫队列"
+subtitle = "服务队列"
+subtitle_desc = "创建语音队列，管理保持音乐，配置回落行为。"
+
+# 列表页操作
+export_all = "全部导出"
+refresh_list = "刷新列表"
+new_queue = "新建队列"
+
+# 统计卡片
+total_queues = "队列总数"
+active = "活跃"
+paused = "已暂停"
+
+# 过滤 / 搜索
+all_statuses = "全部状态"
+search_placeholder = "按名称或备注搜索"
+
+# 表格列
+col_queue = "队列"
+col_hold_treatment = "保持处理"
+col_targets = "目标"
+col_fallback = "回落"
+col_updated = "更新时间"
+col_actions = "操作"
+
+# 表格状态
+loading = "加载队列中…"
+no_queues = "未找到队列，请创建一个。"
+
+# 状态标签
+status_active = "活跃"
+status_paused = "已暂停"
+
+# 分页
+showing = "显示"
+of = "共"
+prev = "上一页"
+next = "下一页"
+page = "第"
+
+# 行操作（屏幕阅读器）
+view_queue = "查看队列"
+export_queue = "导出队列"
+delete_queue = "删除队列"
+
+# 确认对话框
+delete_confirm_title = "删除队列"
+delete_confirm_msg = "删除队列 {name}？此操作不可撤销。"
+delete_confirm_label = "删除"
+export_all_confirm_title = "导出全部队列"
+export_all_confirm_msg = "为所有队列生成最新配置文件？现有文件将被替换。"
+export_confirm_label = "导出"
+
+# 提示消息
+queue_deleted = "队列已删除。"
+queues_exported_n = "已导出 {count} 个队列文件。"
+queues_exported_n_plural = "已导出 {count} 个队列文件。"
+queues_exported = "队列已导出。"
+queue_exported_to = "队列已导出至 {path}。"
+queue_exported = "队列已导出。"
+
+# 错误消息
+load_error = "无法加载队列"
+delete_error = "删除队列失败"
+export_error = "导出队列失败"
+export_all_error = "批量导出失败"
+
+# 保持策略摘要（JS）
+hold_immediate_passthrough = "立即接通 · 透传回铃音"
+hold_immediate_audio = "立即接通 · 保持音乐优先"
+hold_default = "默认保持音"
+hold_immediate = "立即接通 · 透传回铃音"
+
+# 目标摘要（JS）
+targets_route_trunks = "通过路由干线（无内联目标）"
+targets_parallel = "并行"
+targets_sequential = "顺序"
+targets_timeout = "{timeout}s 超时"
+targets_count = "{count} 个目标"
+targets_count_plural = "{count} 个目标"
+targets_configure = "如需要可配置内联 SIP URI"
+
+# 回落摘要（JS）
+fallback_continue = "继续等待"
+fallback_redirect = "转接至 {uri}"
+fallback_play = "播放 {file}（{code}）"
+fallback_fail = "失败 {code}"
+fallback_custom = "自定义失败动作"
+
+# ── 详情 / 表单页 ──────────────────────────────────────────────────────
+
+detail_back = "返回队列列表"
+detail_subtitle_create = "发布一个新的语音队列，配置保持提示音和失败处理。"
+detail_subtitle_edit = "更新保持流程、回落动作和队列状态。"
+detail_summary_title = "队列概况"
+detail_name_label = "名称"
+detail_updated_label = "最后更新"
+
+# 标签页
+tab_overview = "概览"
+tab_targets = "目标"
+tab_fallback = "回落"
+
+# 概览部分
+section_basics = "队列基本信息"
+field_name = "队列名称"
+field_name_placeholder = "support-primary"
+field_name_hint = "用于路由目标中。"
+field_status = "状态"
+field_status_hint = "已暂停的队列仍可编辑，但不接收来电。"
+field_description = "描述"
+field_description_placeholder = "供运营人员查看的内部备注。"
+field_accept_immediately = "立即接通"
+field_accept_immediately_label = "在保持音乐之前先接通主叫与坐席"
+field_passthrough_ringback = "远端回铃处理"
+field_passthrough_ringback_desc = "允许下游彩铃替代等待期间的保持音乐。取消勾选则始终播放队列保持音乐。"
+field_tags = "标签（逗号分隔）"
+field_tags_placeholder = "premium, apac, vip"
+
+# 保持部分
+section_hold = "保持处理"
+section_hold_desc = "请单独上传提示音并在此填写存储路径。留空则回落到 config/sounds/phone-calling.wav。"
+hold_enable_label = "播放自定义保持音频"
+hold_audio_file = "音频文件路径"
+hold_audio_file_placeholder = "storage://prompts/hold.wav"
+hold_loop = "循环播放"
+
+# 目标部分
+section_targets = "坐席拨号策略"
+section_targets_desc = "定义队列以顺序或并行方式呼叫 SIP 目标后再执行回落。"
+field_dial_mode = "拨号模式"
+dial_sequential = "顺序（依次尝试）"
+dial_parallel = "并行（同时呼叫）"
+field_ring_timeout = "振铃超时（秒）"
+field_ring_timeout_placeholder = "0"
+field_ring_timeout_hint = "设为零则继承路由超时。"
+dial_targets_title = "拨号目标"
+add_target = "添加目标"
+no_targets = "未定义目标，请添加 SIP URI 以从该队列呼叫。"
+target_uri = "目标 URI"
+target_uri_placeholder = "sip:agent@pbx.local"
+target_label = "标签（可选）"
+target_label_placeholder = "一线坐席"
+remove_target = "移除"
+
+# 回落部分
+section_fallback = "回落行为"
+section_fallback_desc = "选择无坐席可用时的处理方式。默认播放 config/sounds/unavailable-phone.wav 后挂机。"
+fallback_none = "继续等待"
+fallback_redirect_opt = "转接至 SIP URI"
+fallback_queue_opt = "转接至另一队列"
+fallback_failure_opt = "返回失败提示/代码"
+fallback_redirect_label = "转接目标（SIP URI）"
+fallback_redirect_placeholder = "sip:backup@pbx.local"
+fallback_code_label = "SIP 失败代码"
+fallback_code_placeholder = "486"
+fallback_reason_label = "失败原因"
+fallback_reason_placeholder = "所有坐席忙"
+fallback_prompt_label = "失败提示音频"
+fallback_prompt_placeholder = "storage://prompts/queue-full.wav"
+fallback_prompt_hint = "挂机前播放的可选音频片段。"
+fallback_queue_label = "队列文件路径"
+fallback_queue_placeholder = "3-support.generated.toml"
+fallback_queue_hint = "提供生成的队列 TOML 文件（相对于 config/queue）。"
+
+# 表单底部
+save_hint = "队列变更保存后立即生效。"
+btn_cancel = "取消"
+btn_save = "保存更改"
+btn_create = "创建队列"
+
+# JS 消息
+queue_updated = "队列已更新。"
+queue_created = "队列已创建。"
+save_failed = "保存队列失败"
