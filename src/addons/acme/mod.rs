@@ -105,6 +105,16 @@ impl Addon for AcmeAddon {
         Some(r)
     }
 
+    fn locales_dir(&self) -> Option<String> {
+        let dev = "src/addons/acme/locales";
+        let deployed = "locales/acme";
+        if std::path::Path::new(dev).exists() {
+            Some(dev.to_string())
+        } else {
+            Some(deployed.to_string())
+        }
+    }
+
     fn sidebar_items(&self, state: AppState) -> Vec<SidebarItem> {
         if state.config().demo_mode {
             return vec![];

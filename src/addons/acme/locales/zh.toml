@@ -1,0 +1,41 @@
+[acme]
+# 页面标题
+title = "SSL 证书"
+subtitle = "插件"
+subtitle_desc = "通过 Let's Encrypt 管理 HTTPS 和 SIP TLS 证书。"
+
+# 申请表单
+section_request = "申请证书"
+section_request_desc = "为您的域名生成新证书。"
+field_domain = "域名"
+field_domain_placeholder = "pbx.example.com"
+field_email = "邮箱地址"
+field_email_placeholder = "admin@example.com"
+enable_https_label = "启用 HTTPS/WSS"
+enable_https_desc = "更新配置以使用此证书启用 SSL/TLS。"
+enable_sip_tls_label = "启用 SIP TLS"
+enable_sip_tls_desc = "在 5061 端口启用 TLS over SIP。"
+btn_request = "申请证书"
+btn_requesting = "处理中..."
+
+# 状态区域
+section_status = "操作状态"
+section_status_desc = "来自 ACME 客户端的实时反馈。"
+status_ready = "准备好处理请求。"
+
+# 证书列表
+section_certs = "现有证书"
+section_certs_desc = "此插件管理的证书列表。"
+col_domain = "域名"
+col_path = "路径"
+col_created_at = "创建时间"
+no_certs = "未找到证书。"
+
+# JS 消息
+error_missing_fields = "请输入域名和邮箱。"
+error_request_failed = "请求失败"
+status_starting = "开始请求..."
+status_running = "运行中: "
+status_success = "成功: "
+status_error = "错误: "
+status_restart_notice = "\n\n重要：您必须重启服务才能使更改生效。"

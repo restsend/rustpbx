@@ -72,8 +72,13 @@ impl I18n {
             };
             // Merge enabled addon locales on top
             for dir in addon_dirs.iter() {
-                if let Ok(addon_flat) = Self::load_file(dir, &info.code) {
-                    flat.extend(addon_flat);
+                match Self::load_file(dir, &info.code) {
+                    Ok(addon_flat) => {
+                        flat.extend(addon_flat);
+                    }
+                    Err(e) => {
+                        tracing::debug!("i18n: failed to load addon locale {}/{}.toml: {}", dir, info.code, e);
+                    }
                 }
             }
             cache.insert(info.code.clone(), flat);

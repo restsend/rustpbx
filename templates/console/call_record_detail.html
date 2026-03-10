@@ -1,5 +1,5 @@
 {% extends "console/layout.html" %}
-{% block title %}Call Record Detail · {{site_name|default('RustPBX')}}{% endblock %}
+{% block title %}{{ "call_record_detail.tab_overview" | t }} · {{site_name|default('RustPBX')}}{% endblock %}
 {% block content %}
 <div class="p-6">
     <div class="mx-auto max-w-6xl space-y-6" x-data="callRecordDetail({{ call_data | escape }})">
@@ -11,7 +11,7 @@
                         <svg class="h-3 w-3" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6">
                             <path stroke-linecap="round" stroke-linejoin="round" d="M12 5l-5 5 5 5" />
                         </svg>
-                        Back
+                        {{ "call_record_detail.back" | t }}
                     </a>
                     <span>/</span>
                     <span x-text="record.display_id || record.id"></span>
@@ -21,7 +21,7 @@
                     <span x-text="record.display_id || record.id"></span>
                 </h1>
                 <div class="flex items-center gap-2 text-xs text-slate-500">
-                    <span>Call-Id</span>
+                    <span>{{ "call_record_detail.call_id_label" | t }}</span>
                     <span class="font-mono" :title="record.call_id" x-text="record.call_id || '—'"></span>
                     <template x-if="record.call_id">
                         <div class="flex items-center gap-1">
@@ -35,40 +35,40 @@
                                 </svg>
                             </button>
                             <span class="text-[10px] font-semibold text-emerald-600"
-                                x-show="copiedCallId === record.call_id" x-transition.opacity>Copied</span>
+                                x-show="copiedCallId === record.call_id" x-transition.opacity x-text="t.call_record_detail?.copied || '{{ "call_record_detail.copied" | t }}'"></span>
                         </div>
                     </template>
                 </div>
                 <div class="flex flex-wrap items-center gap-x-6 gap-y-2 text-sm text-slate-500">
                     <div class="flex items-center gap-2">
-                        <span class="font-semibold text-slate-400 uppercase text-[10px]">Start</span>
+                        <span class="font-semibold text-slate-400 uppercase text-[10px]">{{ "call_record_detail.label_start" | t }}</span>
                         <span x-text="formatDateTime(record.started_at)"></span>
                     </div>
                     <div class="flex items-center gap-2">
-                        <span class="font-semibold text-slate-400 uppercase text-[10px]">Ring</span>
+                        <span class="font-semibold text-slate-400 uppercase text-[10px]">{{ "call_record_detail.label_ring" | t }}</span>
                         <span x-text="formatDateTime(record.ring_time)"></span>
                     </div>
                     <template x-if="record.ring_time && (record.answer_time || record.ended_at)">
                         <div class="flex items-center gap-2">
-                            <span class="font-semibold text-slate-400 uppercase text-[10px]">Ring Duration</span>
+                            <span class="font-semibold text-slate-400 uppercase text-[10px]">{{ "call_record_detail.label_ring_duration" | t }}</span>
                             <span class="font-mono text-slate-900"
                                 x-text="formatDuration((new Date(record.answer_time || record.ended_at) - new Date(record.ring_time))/1000)"></span>
                         </div>
                     </template>
                     <template x-if="record.answer_time">
                         <div class="flex items-center gap-2">
-                            <span class="font-semibold text-slate-400 uppercase text-[10px]">Answer</span>
+                            <span class="font-semibold text-slate-400 uppercase text-[10px]">{{ "call_record_detail.label_answer" | t }}</span>
                             <span x-text="formatDateTime(record.answer_time)"></span>
                         </div>
                     </template>
                     <template x-if="record.ended_at">
                         <div class="flex items-center gap-2">
-                            <span class="font-semibold text-slate-400 uppercase text-[10px]">End</span>
+                            <span class="font-semibold text-slate-400 uppercase text-[10px]">{{ "call_record_detail.label_end" | t }}</span>
                             <span x-text="formatDateTime(record.ended_at)"></span>
                         </div>
                     </template>
                     <div class="flex items-center gap-2">
-                        <span class="font-semibold text-slate-400 uppercase text-[10px]">Duration</span>
+                        <span class="font-semibold text-slate-400 uppercase text-[10px]">{{ "call_record_detail.label_duration" | t }}</span>
                         <span class="font-mono text-slate-900" x-text="formatDuration(record.duration_secs)"></span>
                     </div>
                 </div>
@@ -123,7 +123,7 @@
                         <path stroke-linecap="round" stroke-linejoin="round" d="M4 12l6 6 6-6" />
                         <path stroke-linecap="round" stroke-linejoin="round" d="M10 18V4" />
                     </svg>
-                    Metadata JSON
+                    {{ "call_record_detail.btn_metadata_json" | t }}
                 </a>
                 <a :href="actions.download_sip_flow || '#'"
                     class="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-4 py-2 font-semibold text-slate-600 transition hover:border-sky-300 hover:text-sky-700">
@@ -131,7 +131,7 @@
                         <path stroke-linecap="round" stroke-linejoin="round" d="M4 4h12v12H4z" />
                         <path stroke-linecap="round" stroke-linejoin="round" d="M6 8h8M6 12h4" />
                     </svg>
-                    SIP trace JSON
+                    {{ "call_record_detail.btn_sip_trace_json" | t }}
                 </a>
             </div>
         </header>
@@ -145,8 +145,8 @@
                         :aria-selected="detailTab === 'overview'" aria-controls="call-record-tab-overview"
                         @click="detailTab = 'overview'">
                         <div class="flex flex-col">
-                            <span class="text-[13px]">Overview</span>
-                            <span class="text-[11px] font-normal text-slate-400">Participants, media, transcript</span>
+                            <span class="text-[13px]">{{ "call_record_detail.tab_overview" | t }}</span>
+                            <span class="text-[11px] font-normal text-slate-400">{{ "call_record_detail.tab_overview_desc" | t }}</span>
                         </div>
                     </button>
                     <button type="button" class="flex-1 rounded-md px-3 py-1.5 text-left transition sm:flex-none"
@@ -154,8 +154,8 @@
                         :aria-selected="detailTab === 'diagnostics'" aria-controls="call-record-tab-diagnostics"
                         @click="detailTab = 'diagnostics'">
                         <div class="flex flex-col">
-                            <span class="text-[13px]">Signalling</span>
-                            <span class="text-[11px] font-normal text-slate-400">SIP flow, RTP metrics</span>
+                            <span class="text-[13px]">{{ "call_record_detail.tab_signalling" | t }}</span>
+                            <span class="text-[11px] font-normal text-slate-400">{{ "call_record_detail.tab_signalling_desc" | t }}</span>
                         </div>
                     </button>
                     <button type="button" class="flex-1 rounded-md px-3 py-1.5 text-left transition sm:flex-none"
@@ -163,8 +163,8 @@
                         :aria-selected="detailTab === 'notes'" aria-controls="call-record-tab-notes"
                         @click="detailTab = 'notes'">
                         <div class="flex flex-col">
-                            <span class="text-[13px]">Notes</span>
-                            <span class="text-[11px] font-normal text-slate-400">Tags, notes</span>
+                            <span class="text-[13px]">{{ "call_record_detail.tab_notes" | t }}</span>
+                            <span class="text-[11px] font-normal text-slate-400">{{ "call_record_detail.tab_notes_desc" | t }}</span>
                         </div>
                     </button>
                 </nav>
@@ -188,12 +188,12 @@
                                     <div
                                         class="mt-3 space-y-1 rounded border border-dashed border-slate-200 px-3 py-2 text-[11px] text-slate-500">
                                         <div class="flex items-center justify-between">
-                                            <span class="font-semibold text-slate-600">Original</span>
+                                            <span class="font-semibold text-slate-600">{{ "call_record_detail.rewrite_original" | t }}</span>
                                             <span class="font-mono"
                                                 x-text="(rewrite[participant.role] && rewrite[participant.role].original) || '—'"></span>
                                         </div>
                                         <div class="flex items-center justify-between">
-                                            <span class="font-semibold text-slate-600">Rewrite</span>
+                                            <span class="font-semibold text-slate-600">{{ "call_record_detail.rewrite_final" | t }}</span>
                                             <span class="font-mono"
                                                 x-text="(rewrite[participant.role] && rewrite[participant.role].final) || '—'"></span>
                                         </div>
@@ -204,16 +204,14 @@
                     </div>
                 </div>
                 <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
-                    <h2 class="text-base font-semibold text-slate-900">Recording & participants</h2>
-                    <p class="mt-1 text-xs text-slate-500">Validate caller identification, agent mapping, and playback
-                        the original media stream.</p>
+                    <h2 class="text-base font-semibold text-slate-900">{{ "call_record_detail.section_recording" | t }}</h2>
+                    <p class="mt-1 text-xs text-slate-500">{{ "call_record_detail.section_recording_desc" | t }}</p>
                     <template x-if="record.recording && record.recording.url">
                         <div class="mt-4 space-y-3">
                             <div class="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
                                 <div>
-                                    <p class="text-sm font-semibold text-slate-900">Stereo waveform (WAV)</p>
-                                    <p class="text-xs text-slate-500">Left channel mirrors caller audio · Right channel
-                                        mirrors callee audio.</p>
+                                    <p class="text-sm font-semibold text-slate-900">{{ "call_record_detail.recording_stereo_title" | t }}</p>
+                                    <p class="text-xs text-slate-500">{{ "call_record_detail.recording_stereo_desc" | t }}</p>
                                 </div>
                                 <div class="flex flex-wrap items-center gap-2">
                                     <button type="button"
@@ -226,8 +224,8 @@
                                             <path stroke-linecap="round" stroke-linejoin="round" d="M8 5v14l10-7z"
                                                 x-show="!waveformPlaying" x-cloak></path>
                                         </svg>
-                                        <span x-text="waveformPlaying ? 'Pause' : 'Play'">
-                                            Play
+                                        <span x-text="waveformPlaying ? '{{ "call_record_detail.btn_pause" | t }}' : '{{ "call_record_detail.btn_play" | t }}'">
+                                            {{ "call_record_detail.btn_play" | t }}
                                         </span>
                                     </button>
                                     <button type="button"
@@ -237,7 +235,7 @@
                                             stroke-width="1.8">
                                             <path stroke-linecap="round" stroke-linejoin="round" d="M8 8h8v8H8z" />
                                         </svg>
-                                        Stop
+                                        {{ "call_record_detail.btn_stop" | t }}
                                     </button>
                                     <a :href="actions.download_recording || record.recording.url"
                                         class="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-2 text-sm font-semibold text-slate-700 transition hover:border-sky-300 hover:text-sky-700"
@@ -247,7 +245,7 @@
                                             <path stroke-linecap="round" stroke-linejoin="round"
                                                 d="M12 5v12m0 0l-4-4m4 4l4-4" />
                                         </svg>
-                                        Download WAV
+                                        {{ "call_record_detail.btn_download_wav" | t }}
                                     </a>
                                 </div>
                             </div>
@@ -260,7 +258,7 @@
                                             <path stroke-linecap="round" stroke-linejoin="round"
                                                 d="M12 3v3m0 12v3m9-9h-3M6 12H3m13.95-6.95l-2.12 2.12M8.17 15.83l-2.12 2.12m0-12.12l2.12 2.12m9.66 9.66l2.12 2.12" />
                                         </svg>
-                                        Loading waveform…
+                                        {{ "call_record_detail.loading_waveform" | t }}
                                     </div>
                                 </template>
                                 <template x-if="waveformError">
@@ -283,7 +281,7 @@
                                         @click="toggleWaveformChannel('left')">
                                         <span class="h-2 w-2 rounded-full"
                                             :class="waveformChannels.left ? 'bg-sky-500' : 'bg-slate-300'"></span>
-                                        Left · Caller
+                                        {{ "call_record_detail.channel_left_caller" | t }}
                                     </button>
                                     <button type="button"
                                         class="inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] font-semibold transition focus:outline-none focus:ring-2 focus:ring-offset-1"
@@ -292,7 +290,7 @@
                                         @click="toggleWaveformChannel('right')">
                                         <span class="h-2 w-2 rounded-full"
                                             :class="waveformChannels.right ? 'bg-emerald-500' : 'bg-slate-300'"></span>
-                                        Right · Callee
+                                        {{ "call_record_detail.channel_right_callee" | t }}
                                     </button>
                                 </div>
                             </div>
@@ -303,7 +301,7 @@
                     <template x-if="!record.recording || !record.recording.url">
                         <div
                             class="mt-4 rounded-lg border border-dashed border-slate-200 px-4 py-6 text-center text-xs text-slate-400">
-                            No media recording stored for this session.
+                            {{ "call_record_detail.no_recording" | t }}
                         </div>
                     </template>
 
@@ -316,16 +314,15 @@
                 <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
                     <div class="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
                         <div>
-                            <h2 class="text-base font-semibold text-slate-900">Signalling</h2>
-                            <p class="text-xs text-slate-500">Inspect SIP signalling timeline to speed up
-                                troubleshooting.</p>
+                            <h2 class="text-base font-semibold text-slate-900">{{ "call_record_detail.section_signalling" | t }}</h2>
+                            <p class="text-xs text-slate-500">{{ "call_record_detail.section_signalling_desc" | t }}</p>
                         </div>
                     </div>
 
                     <!-- RTP Streams -->
                     <div class="mt-4 overflow-hidden rounded-xl bg-white shadow-sm ring-1 ring-black/5">
                         <div class="flex items-center justify-between border-b border-slate-200 bg-slate-50 px-4 py-2">
-                            <div class="font-medium text-slate-700 text-xs">RTP Streams</div>
+                            <div class="font-medium text-slate-700 text-xs">{{ "call_record_detail.rtp_streams_title" | t }}</div>
                             <!-- Analytics removed
                             <template x-if="mediaMetrics && mediaMetrics.rtp_packets !== undefined">
                                 <div class="text-[10px] text-slate-500">
@@ -339,10 +336,10 @@
                             <table class="w-full text-left text-xs" x-show="rtpStreams && rtpStreams.length">
                                 <thead class="bg-slate-50 text-slate-500">
                                     <tr>
-                                        <th class="px-4 py-2 font-semibold">Leg</th>
-                                        <th class="px-4 py-2 font-semibold">Source</th>
-                                        <th class="px-4 py-2 font-semibold">Destination</th>
-                                        <th class="px-4 py-2 font-semibold text-right">Packets</th>
+                                        <th class="px-4 py-2 font-semibold">{{ "call_record_detail.col_leg" | t }}</th>
+                                        <th class="px-4 py-2 font-semibold">{{ "call_record_detail.col_source" | t }}</th>
+                                        <th class="px-4 py-2 font-semibold">{{ "call_record_detail.col_destination" | t }}</th>
+                                        <th class="px-4 py-2 font-semibold text-right">{{ "call_record_detail.col_packets" | t }}</th>
                                     </tr>
                                 </thead>
                                 <tbody class="divide-y divide-slate-100">
@@ -365,8 +362,8 @@
                             </table>
                             <div class="p-4 text-center text-xs text-slate-400"
                                 x-show="!rtpStreams || !rtpStreams.length">
-                                <span x-show="sipFlowLoading">Calculating RTP streams...</span>
-                                <span x-show="!sipFlowLoading">No RTP stream details available.</span>
+                                <span x-show="sipFlowLoading">{{ "call_record_detail.calculating_rtp" | t }}</span>
+                                <span x-show="!sipFlowLoading">{{ "call_record_detail.no_rtp_streams" | t }}</span>
                             </div>
                         </div>
                     </div>
@@ -383,13 +380,13 @@
                                         d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z">
                                     </path>
                                 </svg>
-                                <span class="ml-2 text-xs text-slate-400">Loading signalling data...</span>
+                                <span class="ml-2 text-xs text-slate-400">{{ "call_record_detail.loading_signalling" | t }}</span>
                             </div>
                         </template>
 
                         <template x-if="!sipFlowLoading && sipMessages.length === 0">
                             <div class="rounded-xl bg-slate-50 p-12 text-center text-xs text-slate-400">
-                                No signalling data available.
+                                {{ "call_record_detail.no_signalling" | t }}
                             </div>
                         </template>
 
@@ -539,7 +536,7 @@
                                         class="rounded-xl bg-white shadow-sm ring-1 ring-black/5 overflow-hidden flex flex-col h-[calc(100vh-280px)]">
                                         <div
                                             class="border-b border-slate-200 bg-slate-50 px-4 py-2 flex justify-between items-center flex-shrink-0">
-                                            <span class="font-medium text-slate-700 text-xs">Packet Details</span>
+                                            <span class="font-medium text-slate-700 text-xs">{{ "call_record_detail.packet_details" | t }}</span>
                                             <span class="font-mono text-slate-500 text-[10px]" x-show="selectedSipEntry"
                                                 x-text="selectedSipEntry ? formatDateTimeWithMs(selectedSipEntry.timestamp) : ''"></span>
                                         </div>
@@ -551,7 +548,7 @@
                                             <template x-if="!selectedSipEntry">
                                                 <div
                                                     class="h-full flex items-center justify-center text-slate-500 text-xs">
-                                                    Select a message to view details
+                                                    {{ "call_record_detail.select_message" | t }}
                                                 </div>
                                             </template>
                                         </div>
@@ -569,16 +566,16 @@
                     <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
                         <div class="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
                             <div>
-                                <h2 class="text-base font-semibold text-slate-900">Tags</h2>
-                                <p class="text-xs text-slate-500">Label conversations for follow-up workflows.</p>
+                                <h2 class="text-base font-semibold text-slate-900">{{ "call_record_detail.section_tags" | t }}</h2>
+                                <p class="text-xs text-slate-500">{{ "call_record_detail.section_tags_desc" | t }}</p>
                             </div>
                             <div class="flex items-center gap-2">
                                 <input type="text" x-model.trim="tagInput"
                                     class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                    placeholder="Add tag" @keyup.enter.prevent="addTag">
+                                    placeholder="{{ "call_record_detail.tag_placeholder" | t }}" @keyup.enter.prevent="addTag">
                                 <button type="button"
                                     class="inline-flex items-center rounded-lg bg-sky-600 px-3 py-2 text-sm font-semibold text-white transition hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60"
-                                    :disabled="tagSaving || !tagInput" @click="addTag">Add</button>
+                                    :disabled="tagSaving || !tagInput" @click="addTag">{{ "call_record_detail.btn_add_tag" | t }}</button>
                             </div>
                         </div>
                         <div class="mt-3 flex flex-wrap gap-2">
@@ -598,20 +595,18 @@
                                 </span>
                             </template>
                             <template x-if="!Array.isArray(record.tags) || record.tags.length === 0">
-                                <span class="rounded-full bg-slate-100 px-3 py-1 text-sm text-slate-400">No tags
-                                    yet</span>
+                                <span class="rounded-full bg-slate-100 px-3 py-1 text-sm text-slate-400">{{ "call_record_detail.no_tags" | t }}</span>
                             </template>
                         </div>
                         <p class="mt-2 text-xs text-rose-500" x-show="tagError" x-text="tagError"></p>
-                        <p class="mt-2 text-xs text-slate-400" x-show="tagSaving">Saving tags…</p>
+                        <p class="mt-2 text-xs text-slate-400" x-show="tagSaving">{{ "call_record_detail.saving_tags" | t }}</p>
                     </div>
 
                     <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
                         <div class="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
                             <div>
-                                <h2 class="text-base font-semibold text-slate-900">Call notes</h2>
-                                <p class="text-xs text-slate-500">Document commitments, escalations, or customer
-                                    sentiment.</p>
+                                <h2 class="text-base font-semibold text-slate-900">{{ "call_record_detail.section_notes" | t }}</h2>
+                                <p class="text-xs text-slate-500">{{ "call_record_detail.section_notes_desc" | t }}</p>
                             </div>
                             <button type="button"
                                 class="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-2 text-sm font-semibold text-slate-600 transition hover:border-sky-300 hover:text-sky-700 disabled:cursor-not-allowed disabled:opacity-60"
@@ -621,17 +616,17 @@
                                     <path stroke-linecap="round" stroke-linejoin="round" d="M4 4h12v12H4z" />
                                     <path stroke-linecap="round" stroke-linejoin="round" d="M6 10h8M6 14h5M6 6h8" />
                                 </svg>
-                                <span x-text="noteSaving ? 'Saving…' : 'Save note'"></span>
+                                <span x-text="noteSaving ? '{{ "call_record_detail.btn_saving_note" | t }}' : '{{ "call_record_detail.btn_save_note" | t }}'"></span>
                             </button>
                         </div>
                         <textarea x-model="noteDraft" rows="6"
                             class="mt-3 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                            placeholder="Add internal remark or follow-up task..."></textarea>
+                            placeholder="{{ "call_record_detail.note_placeholder" | t }}"></textarea>
                         <p class="mt-2 text-xs text-rose-500" x-show="noteError" x-text="noteError"></p>
-                        <p class="mt-1 text-xs text-slate-400" x-show="noteSaving">Saving note…</p>
+                        <p class="mt-1 text-xs text-slate-400" x-show="noteSaving">{{ "call_record_detail.saving_note" | t }}</p>
                         <p class="mt-2 text-xs text-slate-400" x-show="notes.updated_at">
-                            Last updated <span x-text="formatDateTime(notes.updated_at)"></span>
-                            <span x-show="notes.updated_by">&middot; by <span x-text="notes.updated_by"></span></span>
+                            {{ "call_record_detail.last_updated" | t }} <span x-text="formatDateTime(notes.updated_at)"></span>
+                            <span x-show="notes.updated_by">&middot; {{ "call_record_detail.updated_by" | t }} <span x-text="notes.updated_by"></span></span>
                         </p>
                     </div>
                 </div>
@@ -643,8 +638,10 @@
 <script defer src="https://unpkg.com/wavesurfer.js@7/dist/wavesurfer.min.js"></script>
 
 <script>
+    window._callRecordDetailTranslations = {{ t | json | safe }};
     document.addEventListener('alpine:init', () => {
         Alpine.data('callRecordDetail', (payload) => ({
+            t: window._callRecordDetailTranslations || {},
             init() {
                 const data = typeof payload === 'string' ? JSON.parse(payload || '{}') : (payload || {});
                 this.record = data.record || {};
@@ -797,7 +794,8 @@
                 } catch (err) {
                     console.error('Failed to add tag', err);
                     this.record.tags = current;
-                    this.tagError = (err && err.message) ? err.message : 'Failed to update tags';
+                    const td = (this.t || {}).call_record_detail || {};
+                    this.tagError = (err && err.message) ? err.message : (td.error_update_tags || 'Failed to update tags');
                 } finally {
                     this.tagSaving = false;
                 }
@@ -818,7 +816,8 @@
                 } catch (err) {
                     console.error('Failed to remove tag', err);
                     this.record.tags = current;
-                    this.tagError = (err && err.message) ? err.message : 'Failed to update tags';
+                    const td = (this.t || {}).call_record_detail || {};
+                    this.tagError = (err && err.message) ? err.message : (td.error_update_tags || 'Failed to update tags');
                 } finally {
                     this.tagSaving = false;
                 }
@@ -837,7 +836,8 @@
                     this.applyUpdatePayload(payload);
                 } catch (err) {
                     console.error('Failed to save note', err);
-                    this.noteError = (err && err.message) ? err.message : 'Failed to save note';
+                    const td = (this.t || {}).call_record_detail || {};
+                    this.noteError = (err && err.message) ? err.message : (td.error_save_note || 'Failed to save note');
                     this.notes = previousNotes;
                 } finally {
                     this.noteSaving = false;
@@ -919,21 +919,22 @@
                 if (!normalized) {
                     return '—';
                 }
+                const td = (this.t || {}).call_record_detail || {};
                 const labels = {
-                    auto: 'Auto detect',
-                    en: 'English (en)',
-                    zh: 'Chinese (zh)',
-                    yue: 'Cantonese (yue)',
-                    ja: 'Japanese (ja)',
-                    ko: 'Korean (ko)',
-                    es: 'Spanish (es)',
-                    fr: 'French (fr)',
-                    de: 'German (de)',
-                    pt: 'Portuguese (pt)',
-                    ru: 'Russian (ru)',
-                    vi: 'Vietnamese (vi)',
-                    th: 'Thai (th)',
-                    id: 'Indonesian (id)',
+                    auto: td.lang_auto || 'Auto detect',
+                    en: td.lang_en || 'English (en)',
+                    zh: td.lang_zh || 'Chinese (zh)',
+                    yue: td.lang_yue || 'Cantonese (yue)',
+                    ja: td.lang_ja || 'Japanese (ja)',
+                    ko: td.lang_ko || 'Korean (ko)',
+                    es: td.lang_es || 'Spanish (es)',
+                    fr: td.lang_fr || 'French (fr)',
+                    de: td.lang_de || 'German (de)',
+                    pt: td.lang_pt || 'Portuguese (pt)',
+                    ru: td.lang_ru || 'Russian (ru)',
+                    vi: td.lang_vi || 'Vietnamese (vi)',
+                    th: td.lang_th || 'Thai (th)',
+                    id: td.lang_id || 'Indonesian (id)',
                 };
                 if (labels[normalized]) {
                     return labels[normalized];
@@ -941,14 +942,15 @@
                 return normalized.toUpperCase();
             },
             transcriptGeneratedLabel() {
+                const td = (this.t || {}).call_record_detail || {};
                 if (!(this.transcript?.available || this.transcriptVisible)) {
-                    return 'Request on demand to analyse conversation outcome.';
+                    return td.transcript_request_hint || 'Request on demand to analyse conversation outcome.';
                 }
                 const formatted = this.formatGeneratedTimestamp(this.transcript?.generated_at);
                 if (formatted) {
                     return formatted;
                 }
-                return 'Transcript ready.';
+                return td.transcript_ready || 'Transcript ready.';
             },
             canRequestTranscript() {
                 const capability = this.transcriptCapabilities && this.transcriptCapabilities.sensevoice_cli;
@@ -1042,18 +1044,19 @@
                 return 'border-slate-200 bg-white/90';
             },
             channelLabel(key) {
+                const td = (this.t || {}).call_record_detail || {};
                 if (key === 'mono' || key === null || key === undefined) {
-                    return 'Mono channel';
+                    return td.channel_mono || 'Mono channel';
                 }
                 const numeric = Number(key);
                 if (!Number.isFinite(numeric)) {
                     return `Channel ${key}`;
                 }
                 if (numeric === 0) {
-                    return 'Left channel';
+                    return td.channel_left || 'Left channel';
                 }
                 if (numeric === 1) {
-                    return 'Right channel';
+                    return td.channel_right || 'Right channel';
                 }
                 return `Channel ${numeric + 1}`;
             },
@@ -1084,8 +1087,9 @@
                 return startText;
             },
             async requestTranscript(force = false) {
+                const td = (this.t || {}).call_record_detail || {};
                 if (!this.transcriptUrl) {
-                    this.transcriptError = 'Transcript endpoint unavailable.';
+                    this.transcriptError = td.transcript_endpoint_unavailable || 'Transcript endpoint unavailable.';
                     return;
                 }
                 if (this.asrProcessing || this.transcriptLoading) {
@@ -1141,7 +1145,8 @@
                     }
                 } catch (err) {
                     console.error('Failed to request transcript', err);
-                    this.transcriptError = 'Failed to request transcription';
+                    const td = (this.t || {}).call_record_detail || {};
+                    this.transcriptError = td.transcript_request_failed || 'Failed to request transcription';
                 } finally {
                     this.asrProcessing = false;
                 }
@@ -1787,27 +1792,29 @@
                 return this.waveformChannels.left !== false && this.waveformChannels.right !== false;
             },
             statusLabel(value) {
+                const td = (this.t || {}).call_record_detail || {};
                 switch ((value || '').toLowerCase()) {
                     case 'completed':
-                        return 'Completed';
+                        return td.status_completed || 'Completed';
                     case 'missed':
-                        return 'Missed';
+                        return td.status_missed || 'Missed';
                     case 'failed':
-                        return 'Failed';
+                        return td.status_failed || 'Failed';
                     default:
-                        return value || 'Unknown';
+                        return value || td.status_unknown || 'Unknown';
                 }
             },
             directionLabel(value) {
+                const td = (this.t || {}).call_record_detail || {};
                 switch ((value || '').toLowerCase()) {
                     case 'inbound':
-                        return 'Inbound';
+                        return td.direction_inbound || 'Inbound';
                     case 'outbound':
-                        return 'Outbound';
+                        return td.direction_outbound || 'Outbound';
                     case 'internal':
-                        return 'Internal';
+                        return td.direction_internal || 'Internal';
                     default:
-                        return value || 'Unknown';
+                        return value || td.direction_unknown || 'Unknown';
                 }
             },
             billingStatusLabel(value) {
@@ -1919,18 +1926,19 @@
                 return lookup[normalized] || 'SIP error';
             },
             hangupTargetLabel(target) {
+                const td = (this.t || {}).call_record_detail || {};
                 if (!target) {
-                    return 'Endpoint';
+                    return td.hangup_endpoint || 'Endpoint';
                 }
                 const normalized = String(target).toLowerCase();
                 if (normalized === 'caller') {
-                    return 'Caller leg';
+                    return td.hangup_caller_leg || 'Caller leg';
                 }
                 if (normalized === 'callee') {
-                    return 'Callee leg';
+                    return td.hangup_callee_leg || 'Callee leg';
                 }
                 if (normalized === 'b2bua') {
-                    return 'B2BUA leg';
+                    return td.hangup_b2bua_leg || 'B2BUA leg';
                 }
                 return target;
             },
@@ -2369,8 +2377,11 @@
 
             // Get participant label
             getParticipantLabel(role) {
+                const td = (this.t || {}).call_record_detail || {};
                 const participant = this.participants.find(p => p.role === role);
-                return participant?.address || (role === 'caller' ? 'Caller' : 'Callee');
+                return participant?.address || (role === 'caller'
+                    ? (td.participant_caller || 'Caller')
+                    : (td.participant_callee || 'Callee'));
             },
         }));
     });

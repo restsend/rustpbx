@@ -1,0 +1,60 @@
+[archive]
+# Page titles & headings
+title = "Archive"
+subtitle = "Addon"
+subtitle_desc = "Manage call record archiving and retention."
+
+# Configuration form
+section_config = "Configuration"
+section_config_desc = "Configure archiving schedule and retention."
+enable_label = "Enable Archiving"
+field_archive_time = "Archive Time (HH:MM)"
+field_timezone = "Timezone"
+field_timezone_hint = "IANA format, e.g. Asia/Shanghai, America/New_York, UTC"
+field_retention_days = "Retention Days"
+field_archive_after_days = "Archive After Days"
+field_archive_after_days_hint = "Archive records older than this many days. If 0, archives yesterday's records."
+field_archive_dir = "Archive Directory"
+field_archive_dir_hint = "Leave blank to use default:"
+btn_save = "Save Configuration"
+btn_saving = "Saving..."
+save_success = "Configuration saved successfully."
+
+# Archive files
+section_files = "Archive Files"
+section_files_desc = "List of compressed call record archives."
+btn_refresh = "Refresh"
+col_filename = "Filename"
+col_date = "Date"
+col_size = "Size"
+col_records = "Records"
+col_actions = "Actions"
+no_archives = "No archives found"
+btn_delete = "Delete"
+
+# Manual archive
+section_manual = "Manual Archive"
+section_manual_desc = "Select a date range to archive call records immediately."
+field_start_date = "Start Date"
+field_end_date = "End Date"
+field_end_date_suffix = "(exclusive)"
+btn_calculate = "Calculate"
+btn_calculating = "Counting..."
+btn_archive = "Archive"
+records_found = " records found in the selected range."
+
+# Confirm dialogs
+delete_confirm_title = "Delete Archive"
+delete_confirm_label = "Delete"
+manual_confirm_title = "Manual Archive"
+manual_confirm_label = "Archive"
+
+# JS messages
+save_failed = "Failed to save: "
+save_error = "Failed to save configuration."
+delete_failed = "Failed to delete: "
+delete_error = "Failed to delete archive."
+count_failed = "Count failed: "
+count_error = "Failed to count records."
+archive_start_error = "Failed to start archive task."
+manual_starting = "Starting..."

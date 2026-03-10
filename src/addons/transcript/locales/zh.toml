@@ -1,0 +1,54 @@
+[transcript]
+# 页面标题
+title = "转录设置"
+subtitle = "插件"
+subtitle_desc = "SenseVoice 通话转录配置。"
+
+# 配置表单
+section_config = "配置"
+section_config_desc = "配置 SenseVoice 执行参数。"
+btn_save = "保存更改"
+btn_saving = "保存中..."
+
+# 字段
+field_command = "命令"
+field_command_hint = "sensevoice-cli 可执行文件路径。"
+field_command_placeholder = "sensevoice-cli"
+field_models_path = "模型路径"
+field_models_path_hint = "包含 SenseVoice 模型的目录。"
+field_models_path_placeholder = "/path/to/models"
+field_default_language = "默认语言"
+field_timeout = "超时（秒）"
+field_hf_endpoint = "HuggingFace 端点"
+field_hf_endpoint_hint = "可选的模型下载镜像（例如 https://hf-mirror.com）。"
+field_hf_endpoint_placeholder = "https://hf-mirror.com"
+
+# 语言选项
+lang_auto = "自动检测"
+lang_zh = "中文"
+lang_en = "英文"
+lang_ja = "日文"
+lang_ko = "韩文"
+lang_yue = "粤语"
+
+# 模型状态部分
+section_model_status = "模型状态"
+model_available = "模型可用"
+model_missing = "模型缺失"
+model_available_desc = "SenseVoice 模型已安装并就绪。"
+model_missing_desc = "在配置路径中未找到模型文件。"
+btn_download = "下载模型"
+btn_redownload = "重新下载"
+btn_downloading = "下载中..."
+
+# 下载确认对话框
+download_confirm_title = "下载模型"
+download_confirm_message = "这将下载约 500MB 的模型文件。是否继续？"
+download_confirm_label = "下载"
+
+# JS 消息
+save_success = "设置保存成功。"
+save_failed = "保存设置失败"
+download_starting = "开始下载，可能需要一段时间..."
+download_success = "模型下载成功。"
+download_failed = "下载失败"

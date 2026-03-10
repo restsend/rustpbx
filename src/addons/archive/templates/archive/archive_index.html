@@ -1,16 +1,16 @@
 {% extends "console/layout.html" %}
 
-{% block title %}Archive · {{site_name|default('RustPBX')}}{% endblock %}
+{% block title %}{{ "archive.title" | t }} · {{site_name|default('RustPBX')}}{% endblock %}
 
 {% block content %}
-<div class="p-6" x-data='archiveManager({{ archives | tojson | safe }}, {{ config | tojson | safe }})'>
+<div class="p-6" x-data='archiveManager({{ archives | tojson }}, {{ config | tojson }}, {{ t | tojson }})'>
     <div class="mx-auto max-w-7xl space-y-6">
         <!-- Header -->
         <div class="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
             <div>
-                <p class="text-[11px] font-semibold uppercase tracking-wide text-sky-600">Addon</p>
-                <h1 class="text-2xl font-semibold text-slate-900">Archive</h1>
-                <p class="text-sm text-slate-500">Manage call record archiving and retention.</p>
+                <p class="text-[11px] font-semibold uppercase tracking-wide text-sky-600">{{ "archive.subtitle" | t }}</p>
+                <h1 class="text-2xl font-semibold text-slate-900">{{ "archive.title" | t }}</h1>
+                <p class="text-sm text-slate-500">{{ "archive.subtitle_desc" | t }}</p>
             </div>
         </div>
 
@@ -20,8 +20,8 @@
             <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
                 <div class="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
                     <div>
-                        <h2 class="text-base font-semibold text-slate-900">Configuration</h2>
-                        <p class="text-xs text-slate-500">Configure archiving schedule and retention.</p>
+                        <h2 class="text-base font-semibold text-slate-900" x-text="t.section_config"></h2>
+                        <p class="text-xs text-slate-500" x-text="t.section_config_desc"></p>
                     </div>
                 </div>
 
@@ -30,52 +30,47 @@
                         <label class="flex items-center gap-2 text-sm font-semibold text-slate-600">
                             <input type="checkbox" x-model="config.enabled"
                                 class="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-500">
-                            <span>Enable Archiving</span>
+                            <span x-text="t.enable_label"></span>
                         </label>
                     </div>
 
                     <div>
-                        <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Archive Time
-                            (HH:MM)</label>
+                        <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400" x-text="t.field_archive_time"></label>
                         <input type="text" x-model="config.archive_time"
                             class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                             placeholder="03:00">
                     </div>
 
                     <div>
-                        <label
-                            class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Timezone</label>
+                        <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400" x-text="t.field_timezone"></label>
                         <input type="text" x-model="config.timezone"
                             class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                             placeholder="UTC">
-                        <p class="mt-1 text-xs text-slate-400">IANA format, e.g. <code>Asia/Shanghai</code>,
-                            <code>America/New_York</code>, <code>UTC</code></p>
+                        <p class="mt-1 text-xs text-slate-400" x-text="t.field_timezone_hint"></p>
                     </div>
 
                     <div>
-                        <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Retention
-                            Days</label>
+                        <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400" x-text="t.field_retention_days"></label>
                         <input type="number" x-model.number="config.retention_days"
                             class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                             placeholder="30">
                     </div>
 
                     <div>
-                        <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Archive After
-                            Days</label>
+                        <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400" x-text="t.field_archive_after_days"></label>
                         <input type="number" x-model.number="config.archive_after_days" min="0"
                             class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                             placeholder="0">
-                        <p class="mt-1 text-xs text-slate-400">Archive records older than this many days. If 0, archives yesterday's records.</p>
+                        <p class="mt-1 text-xs text-slate-400" x-text="t.field_archive_after_days_hint"></p>
                     </div>
 
                     <div>
-                        <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Archive
-                            Directory</label>
+                        <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400" x-text="t.field_archive_dir"></label>
                         <input type="text" x-model="config.archive_dir"
                             class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                             placeholder="{{ effective_archive_dir }}">
-                        <p class="mt-1 text-xs text-slate-400">Leave blank to use default:
+                        <p class="mt-1 text-xs text-slate-400">
+                            <span x-text="t.field_archive_dir_hint"></span>
                             <code>{{ effective_archive_dir }}</code>
                         </p>
                     </div>
@@ -83,8 +78,8 @@
                     <div class="border-t border-slate-200 pt-4 space-y-3">
                         <button @click="saveConfig" :disabled="saving"
                             class="inline-flex w-full items-center justify-center rounded-md bg-sky-600 px-3 py-2 text-xs font-semibold text-white shadow-sm transition hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60">
-                            <span x-show="!saving">Save Configuration</span>
-                            <span x-show="saving">Saving...</span>
+                            <span x-show="!saving" x-text="t.btn_save"></span>
+                            <span x-show="saving" x-text="t.btn_saving"></span>
                         </button>
                         <div x-show="configMsg" x-transition x-cloak class="rounded-md p-3 text-xs"
                             :class="configStatus === 'success' ? 'bg-emerald-50 text-emerald-700' : 'bg-rose-50 text-rose-700'">
@@ -98,22 +93,22 @@
             <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
                 <div class="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
                     <div>
-                        <h2 class="text-base font-semibold text-slate-900">Archive Files</h2>
-                        <p class="text-xs text-slate-500">List of compressed call record archives.</p>
+                        <h2 class="text-base font-semibold text-slate-900" x-text="t.section_files"></h2>
+                        <p class="text-xs text-slate-500" x-text="t.section_files_desc"></p>
                     </div>
                     <button @click="refreshList()"
-                        class="text-sky-600 hover:text-sky-800 text-xs font-semibold">Refresh</button>
+                        class="text-sky-600 hover:text-sky-800 text-xs font-semibold" x-text="t.btn_refresh"></button>
                 </div>
                 <div class="mt-4 max-h-96 overflow-y-auto overflow-x-auto">
                     <table class="min-w-full divide-y divide-slate-200 text-sm">
                         <thead
                             class="sticky top-0 bg-slate-50 text-left text-xs font-semibold uppercase tracking-wide text-slate-500">
                             <tr>
-                                <th class="px-4 py-2">Filename</th>
-                                <th class="px-4 py-2">Date</th>
-                                <th class="px-4 py-2">Size</th>
-                                <th class="px-4 py-2">Records</th>
-                                <th class="px-4 py-2 text-right">Actions</th>
+                                <th class="px-4 py-2">{{ "archive.col_filename" | t }}</th>
+                                <th class="px-4 py-2">{{ "archive.col_date" | t }}</th>
+                                <th class="px-4 py-2">{{ "archive.col_size" | t }}</th>
+                                <th class="px-4 py-2">{{ "archive.col_records" | t }}</th>
+                                <th class="px-4 py-2 text-right">{{ "archive.col_actions" | t }}</th>
                             </tr>
                         </thead>
                         <tbody class="divide-y divide-slate-100">
@@ -128,13 +123,12 @@
                                     </td>
                                     <td class="px-4 py-3 text-right">
                                         <button @click="deleteArchive(file.name)"
-                                            class="text-red-600 hover:text-red-900 text-xs font-semibold">Delete</button>
+                                            class="text-red-600 hover:text-red-900 text-xs font-semibold" x-text="t.btn_delete"></button>
                                     </td>
                                 </tr>
                             </template>
                             <tr x-show="archives.length === 0">
-                                <td colspan="5" class="px-4 py-8 text-center text-slate-400 italic">No archives found
-                                </td>
+                                <td colspan="5" class="px-4 py-8 text-center text-slate-400 italic" x-text="t.no_archives"></td>
                             </tr>
                         </tbody>
                     </table>
@@ -146,31 +140,33 @@
         <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
             <div class="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
                 <div>
-                    <h2 class="text-base font-semibold text-slate-900">Manual Archive</h2>
-                    <p class="text-xs text-slate-500">Select a date range to archive call records immediately.</p>
+                    <h2 class="text-base font-semibold text-slate-900" x-text="t.section_manual"></h2>
+                    <p class="text-xs text-slate-500" x-text="t.section_manual_desc"></p>
                 </div>
             </div>
             <div class="mt-4 grid gap-4 sm:grid-cols-3 items-end">
                 <div>
-                    <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Start Date</label>
+                    <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400" x-text="t.field_start_date"></label>
                     <input type="date" x-model="manual.startDate"
                         class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
                 </div>
                 <div>
-                    <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">End Date <span
-                            class="normal-case font-normal text-slate-400">(exclusive)</span></label>
+                    <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">
+                        <span x-text="t.field_end_date"></span>
+                        <span class="normal-case font-normal text-slate-400" x-text="t.field_end_date_suffix"></span>
+                    </label>
                     <input type="date" x-model="manual.endDate"
                         class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
                 </div>
                 <div class="flex gap-2">
                     <button @click="countRecords" :disabled="manual.counting"
                         class="flex-1 inline-flex items-center justify-center rounded-md border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-sky-400 disabled:opacity-60">
-                        <span x-show="!manual.counting">Calculate</span>
-                        <span x-show="manual.counting">Counting...</span>
+                        <span x-show="!manual.counting" x-text="t.btn_calculate"></span>
+                        <span x-show="manual.counting" x-text="t.btn_calculating"></span>
                     </button>
                     <button @click="startManualArchive" :disabled="manual.count === null || manual.taskId !== null"
-                        class="flex-1 inline-flex items-center justify-center rounded-md bg-amber-600 px-3 py-2 text-xs font-semibold text-white shadow-sm transition hover:bg-amber-500 focus:outline-none focus:ring-2 focus:ring-amber-400 disabled:opacity-60 disabled:cursor-not-allowed">
-                        Archive
+                        class="flex-1 inline-flex items-center justify-center rounded-md bg-amber-600 px-3 py-2 text-xs font-semibold text-white shadow-sm transition hover:bg-amber-500 focus:outline-none focus:ring-2 focus:ring-amber-400 disabled:opacity-60 disabled:cursor-not-allowed"
+                        x-text="t.btn_archive">
                     </button>
                 </div>
             </div>
@@ -179,7 +175,7 @@
             <div class="mt-4 space-y-3">
                 <div x-show="manual.count !== null" x-transition x-cloak
                     class="rounded-md bg-slate-50 px-4 py-3 text-sm text-slate-700">
-                    <span class="font-semibold" x-text="manual.count"></span> records found in the selected range.
+                    <span class="font-semibold" x-text="manual.count"></span><span x-text="t.records_found"></span>
                 </div>
 
                 <div x-show="manual.taskId !== null" x-transition x-cloak>
@@ -207,8 +203,9 @@
 </div>
 
 <script>
-    function archiveManager(archives, config) {
+    function archiveManager(archives, config, translations) {
         return {
+            t: translations.archive || {},
             archives: archives || [],
             config: config || { enabled: false, archive_time: '03:00', timezone: 'UTC', retention_days: 30, archive_after_days: 0, archive_dir: '' },
             saving: false,
@@ -259,16 +256,16 @@
                     const result = await response.json();
                     if (result.success) {
                         this.configStatus = 'success';
-                        this.configMsg = 'Configuration saved successfully.';
+                        this.configMsg = this.t.save_success || 'Configuration saved successfully.';
                         setTimeout(() => this.configMsg = '', 4000);
                     } else {
                         this.configStatus = 'error';
-                        this.configMsg = 'Failed to save: ' + result.error;
+                        this.configMsg = (this.t.save_failed || 'Failed to save: ') + result.error;
                     }
                 } catch (error) {
                     console.error('Failed to save config', error);
                     this.configStatus = 'error';
-                    this.configMsg = 'Failed to save configuration.';
+                    this.configMsg = this.t.save_error || 'Failed to save configuration.';
                 } finally {
                     this.saving = false;
                 }
@@ -277,9 +274,9 @@
             deleteArchive(filename) {
                 window.dispatchEvent(new CustomEvent('console:confirm', {
                     detail: {
-                        title: 'Delete Archive',
+                        title: this.t.delete_confirm_title || 'Delete Archive',
                         message: `Delete "${filename}"? This cannot be undone.`,
-                        confirmLabel: 'Delete',
+                        confirmLabel: this.t.delete_confirm_label || 'Delete',
                         destructive: true,
                         onConfirm: async () => {
                             try {
@@ -293,12 +290,12 @@
                                     this.refreshList();
                                 } else {
                                     this.configStatus = 'error';
-                                    this.configMsg = 'Failed to delete: ' + result.error;
+                                    this.configMsg = (this.t.delete_failed || 'Failed to delete: ') + result.error;
                                 }
                             } catch (error) {
                                 console.error('Failed to delete', error);
                                 this.configStatus = 'error';
-                                this.configMsg = 'Failed to delete archive.';
+                                this.configMsg = this.t.delete_error || 'Failed to delete archive.';
                             }
                         },
                     },
@@ -317,12 +314,12 @@
                         this.manual.count = data.count;
                     } else {
                         this.configStatus = 'error';
-                        this.configMsg = 'Count failed: ' + data.error;
+                        this.configMsg = (this.t.count_failed || 'Count failed: ') + data.error;
                     }
                 } catch (e) {
                     console.error(e);
                     this.configStatus = 'error';
-                    this.configMsg = 'Failed to count records.';
+                    this.configMsg = this.t.count_error || 'Failed to count records.';
                 } finally {
                     this.manual.counting = false;
                 }
@@ -332,9 +329,9 @@
                 if (!this.manual.startDate || !this.manual.endDate) return;
                 window.dispatchEvent(new CustomEvent('console:confirm', {
                     detail: {
-                        title: 'Manual Archive',
+                        title: this.t.manual_confirm_title || 'Manual Archive',
                         message: `Archive ${this.manual.count} records from ${this.manual.startDate} to ${this.manual.endDate}? Records will be permanently deleted from the database after archiving.`,
-                        confirmLabel: 'Archive',
+                        confirmLabel: this.t.manual_confirm_label || 'Archive',
                         destructive: true,
                         onConfirm: async () => {
                             await this._doManualArchive();
@@ -348,7 +345,7 @@
                 this.manual.taskStatus = 'running';
                 this.manual.archived = 0;
                 this.manual.total = 0;
-                this.manual.progressMsg = 'Starting...';
+                this.manual.progressMsg = this.t.manual_starting || 'Starting...';
                 try {
                     const res = await fetch('/api/archive/manual', {
                         method: 'POST',
@@ -361,11 +358,11 @@
                         this._startPolling();
                     } else {
                         this.manual.taskStatus = 'error';
-                        this.manual.progressMsg = data.error || 'Failed to start task.';
+                        this.manual.progressMsg = data.error || (this.t.archive_start_error || 'Failed to start task.');
                     }
                 } catch (e) {
                     this.manual.taskStatus = 'error';
-                    this.manual.progressMsg = 'Failed to start archive task.';
+                    this.manual.progressMsg = this.t.archive_start_error || 'Failed to start archive task.';
                 }
             },
 

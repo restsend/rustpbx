@@ -403,13 +403,12 @@ impl AppStateBuilder {
             }
         }
 
-        // Spawn background update checker (checks miuda.ai/api/check_update daily).
-        #[cfg(feature = "console")]
-        crate::version::spawn_update_checker(db_conn.clone(), token.clone());
-
         #[cfg(feature = "console")]
         {
             if let Some(ref console_state) = app_state.console {
+                // Spawn background update checker only when the console is enabled
+                // (checks miuda.ai/api/check_update at startup, then every 24 hours).
+                crate::version::spawn_update_checker(db_conn.clone(), token.clone());
                 console_state.set_sip_server(Some(app_state.sip_server().get_inner()));
                 // Register addon locale directories into the i18n manager before
                 // binding the app_state so that all subsequent renders pick up the

@@ -6,7 +6,8 @@
             basePath: {{ (base_path | default("/console")) | tojson }},
             filter_options: {{ filter_options | default({}) | tojson }},
             list_url: {{ list_url | default("/console/call-records") | tojson }},
-            page_size_options: {{ page_size_options | default([10, 25, 50]) | tojson }}
+            page_size_options: {{ page_size_options | default([10, 25, 50]) | tojson }},
+            translations: {{ t | tojson }}
         })' x-init="init()">
         <header class="flex flex-col gap-4 md:flex-row md:items-end md:justify-between">
             <div class="space-y-1">
@@ -54,7 +55,7 @@
                                 <template x-for="preset in datePresets" :key="preset.value">
                                     <button type="button"
                                         class="block w-full px-4 py-2 text-left text-xs text-slate-700 hover:bg-slate-50"
-                                        :class="dateRangeLabel === preset.label ? 'bg-slate-50 font-semibold text-sky-600' : ''"
+                                        :class="dateRangeLabel === preset.value ? 'bg-slate-50 font-semibold text-sky-600' : ''"
                                         @click="applyDatePreset(preset.value); open = false">
                                         <span x-text="preset.label"></span>
                                     </button>
@@ -62,7 +63,7 @@
                             </div>
 
                             <!-- Custom Range Inputs (Visible if Custom) -->
-                            <div x-show="dateRangeLabel === 'Custom'"
+                            <div x-show="dateRangeLabel === 'custom'"
                                 class="flex items-center gap-1 border-l border-slate-200 pl-1 ml-1">
                                 <input type="date" x-model="dateFrom"
                                     class="rounded-md border-0 bg-transparent px-2 py-1 text-xs font-medium text-slate-600 focus:ring-2 focus:ring-sky-200"
@@ -430,7 +431,7 @@
                                 <td
                                     class="sticky right-0 z-[1] whitespace-nowrap border-l border-slate-200 bg-gradient-to-l from-white via-white to-slate-50 px-4 py-2 text-right text-xs font-semibold shadow-[-8px_0_12px_-6px_rgba(15,23,42,0.08)] group-hover:from-slate-50 group-hover:via-slate-50 group-hover:to-slate-100">
                                     <div class="flex items-center justify-end gap-2">
-                                        <a :href="recordDetailUrl(record)" title="View detail"
+                                        <a :href="recordDetailUrl(record)" :title="t.action_view_detail || 'View detail'"
                                             class="inline-flex h-8 w-8 items-center justify-center rounded-full border border-slate-200 text-slate-500 transition hover:border-sky-300 hover:text-sky-700">
                                             <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor"
                                                 stroke-width="1.6">
@@ -439,7 +440,7 @@
                                         </a>
                                         <template x-if="record.recording && record.recording.url">
                                             <a :href="record.recording.url" target="_blank" rel="noopener"
-                                                title="Download audio"
+                                                :title="t.action_download_audio || 'Download audio'"
                                                 class="inline-flex h-8 w-8 items-center justify-center rounded-full border border-slate-200 text-slate-500 transition hover:border-sky-300 hover:text-sky-700">
                                                 <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none"
                                                     stroke="currentColor" stroke-width="1.6">
@@ -452,7 +453,7 @@
                                         <button type="button"
                                             class="inline-flex h-8 w-8 items-center justify-center rounded-full border border-rose-200 text-rose-500 transition hover:border-rose-300 hover:text-rose-600 disabled:cursor-not-allowed disabled:opacity-60"
                                             :disabled="deletingId === record.id" @click.stop="deleteRecord(record)"
-                                            title="Delete record">
+                                            :title="t.action_delete_record || 'Delete record'">
                                             <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor"
                                                 stroke-width="1.6">
                                                 <path stroke-linecap="round" stroke-linejoin="round"
@@ -471,13 +472,13 @@
                         <span x-text="filteredRecords.length ? pageRangeStart : 0"></span>
                         –
                         <span x-text="pageRangeEnd"></span>
-                        of
+                        <span x-text="t.records_of || 'of'"></span>
                         <span x-text="filteredRecords.length"></span>
-                        records
+                        <span x-text="t.records_label || 'records'"></span>
                     </div>
                     <div class="flex flex-wrap items-center gap-3">
                         <label class="flex items-center gap-2">
-                            <span class="text-[11px] uppercase tracking-wide text-slate-400">Per page</span>
+                            <span class="text-[11px] uppercase tracking-wide text-slate-400" x-text="t.per_page || 'Per page'"></span>
                             <select x-model.number="pageSize"
                                 class="rounded-lg border border-slate-200 px-2 py-1 text-xs text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
                                 <template x-for="option in pageSizeOptions" :key="option">
@@ -488,13 +489,11 @@
                         <div
                             class="inline-flex items-center gap-1 rounded-full border border-slate-200 bg-white p-1 text-xs font-semibold text-slate-600">
                             <button type="button" class="rounded-full px-2 py-1 transition disabled:opacity-40"
-                                :disabled="currentPage === 1" @click="prevPage">
-                                Prev
+                                :disabled="currentPage === 1" @click="prevPage" x-text="t.page_prev || 'Prev'">
                             </button>
-                            <span class="px-2" x-text="`Page ${currentPage} / ${totalPages}`"></span>
+                            <span class="px-2" x-text="`${currentPage} / ${totalPages}`"></span>
                             <button type="button" class="rounded-full px-2 py-1 transition disabled:opacity-40"
-                                :disabled="currentPage === totalPages" @click="nextPage">
-                                Next
+                                :disabled="currentPage === totalPages" @click="nextPage" x-text="t.page_next || 'Next'">
                             </button>
                         </div>
                     </div>
@@ -507,6 +506,7 @@
 <script>
     document.addEventListener('alpine:init', () => {
         Alpine.data('callRecordsConsole', (payload) => ({
+            t: {},
             basePath: '/console',
             listEndpoint: '/console/call-records',
             records: [],
@@ -538,15 +538,15 @@
             search: '',
             statusFilter: 'any',
             directionFilter: 'any',
-            dateRangeLabel: 'Custom',
+            dateRangeLabel: 'custom',
             _updatingPreset: false,
             datePresets: [
-                { value: 'today', label: 'Today' },
-                { value: 'yesterday', label: 'Yesterday' },
-                { value: 'this_week', label: 'This Week' },
-                { value: 'last_7_days', label: 'Last 7 Days' },
-                { value: 'this_month', label: 'This Month' },
-                { value: 'custom', label: 'Custom' },
+                { value: 'today', labelKey: 'preset_today' },
+                { value: 'yesterday', labelKey: 'preset_yesterday' },
+                { value: 'this_week', labelKey: 'preset_this_week' },
+                { value: 'last_7_days', labelKey: 'preset_last_7_days' },
+                { value: 'this_month', labelKey: 'preset_this_month' },
+                { value: 'custom', labelKey: 'preset_custom' },
             ],
             dateFrom: '',
             dateTo: '',
@@ -575,17 +575,17 @@
             _activeRequest: null,
             sortOrder: 'started_at_desc',
             sortOptions: [
-                { value: 'started_at_desc', label: 'Started · Newest first' },
-                { value: 'started_at_asc', label: 'Started · Oldest first' },
-                { value: 'duration_desc', label: 'Duration · Longest first' },
-                { value: 'duration_asc', label: 'Duration · Shortest first' },
+                { value: 'started_at_desc', labelKey: 'sort_started_newest' },
+                { value: 'started_at_asc', labelKey: 'sort_started_oldest' },
+                { value: 'duration_desc', labelKey: 'sort_duration_longest' },
+                { value: 'duration_asc', labelKey: 'sort_duration_shortest' },
             ],
             filterSelectOptions: [
-                // { key: 'direction', label: 'Direction' },
-                // { key: 'date_range', label: 'Date range' },
-                { key: 'only_transcribed', label: 'Transcribed only' },
-                { key: 'departments', label: 'Departments' },
-                { key: 'sip_trunks', label: 'SIP trunks' },
+                // { key: 'direction', labelKey: 'filter_direction' },
+                // { key: 'date_range', labelKey: 'filter_date_range' },
+                { key: 'only_transcribed', labelKey: 'filter_only_transcribed' },
+                { key: 'departments', labelKey: 'filter_departments' },
+                { key: 'sip_trunks', labelKey: 'filter_sip_trunks' },
             ],
             activeFilters: [],
             persistentFilters: [],
@@ -607,14 +607,14 @@
                     case 'today':
                         from = formatDate(today);
                         to = formatDate(today);
-                        label = 'Today';
+                        label = 'today';
                         break;
                     case 'yesterday':
                         const y = new Date(today);
                         y.setDate(y.getDate() - 1);
                         from = formatDate(y);
                         to = formatDate(y);
-                        label = 'Yesterday';
+                        label = 'yesterday';
                         break;
                     case 'this_week':
                         const day = today.getDay() || 7; // 1 (Mon) - 7 (Sun)
@@ -622,23 +622,23 @@
                         monday.setDate(today.getDate() - day + 1);
                         from = formatDate(monday);
                         to = formatDate(today);
-                        label = 'This Week';
+                        label = 'this_week';
                         break;
                     case 'last_7_days':
                         const last7 = new Date(today);
                         last7.setDate(today.getDate() - 6);
                         from = formatDate(last7);
                         to = formatDate(today);
-                        label = 'Last 7 Days';
+                        label = 'last_7_days';
                         break;
                     case 'this_month':
                         const firstDay = new Date(today.getFullYear(), today.getMonth(), 1);
                         from = formatDate(firstDay);
                         to = formatDate(today);
-                        label = 'This Month';
+                        label = 'this_month';
                         break;
                     case 'custom':
-                        label = 'Custom';
+                        label = 'custom';
                         from = this.dateFrom;
                         to = this.dateTo;
                         break;
@@ -658,6 +658,17 @@
             },
             init() {
                 const data = typeof payload === 'string' ? JSON.parse(payload || '{}') : (payload || {});
+
+                // Load translations
+                if (data.translations && typeof data.translations === 'object') {
+                    this.t = (data.translations || {}).call_record || {};
+                }
+
+                // Populate labels from translation keys
+                this.datePresets = this.datePresets.map(p => ({ ...p, label: this.t[p.labelKey] || p.labelKey }));
+                this.dateRangeLabel = this.t.preset_custom || 'Custom';
+                this.sortOptions = this.sortOptions.map(o => ({ ...o, label: this.t[o.labelKey] || o.labelKey }));
+                this.filterSelectOptions = this.filterSelectOptions.map(o => ({ ...o, label: this.t[o.labelKey] || o.labelKey }));
 
                 if (typeof data.basePath === 'string' && data.basePath) {
                     this.basePath = data.basePath;
@@ -778,12 +789,12 @@
                 this.$watch('selectedTags', immediateWatcher);
                 this.$watch('dateFrom', () => {
                     if (!this._updatingPreset) {
-                        this.dateRangeLabel = 'Custom';
+                        this.dateRangeLabel = 'custom';
                     }
                 });
                 this.$watch('dateTo', () => {
                     if (!this._updatingPreset) {
-                        this.dateRangeLabel = 'Custom';
+                        this.dateRangeLabel = 'custom';
                     }
                 });
                 this.$watch('pageSize', (value, oldValue) => {
@@ -958,7 +969,7 @@
                     });
                     const data = await response.json();
                     if (!response.ok) {
-                        throw new Error(data?.message || 'Failed to load call records');
+                        throw new Error(data?.message || this.t.load_error || 'Failed to load call records');
                     }
 
                     if (this._activeRequest !== token) {
@@ -1005,7 +1016,7 @@
                     if (this._activeRequest !== token) {
                         return;
                     }
-                    this.error = err?.message || 'Unable to load call records';
+                    this.error = err?.message || this.t.load_unable || 'Unable to load call records';
                     this.records = [];
                     this.summary = this.normalizeSummary(null);
                     this.totalItems = 0;
@@ -1169,10 +1180,10 @@
                 }
                 window.dispatchEvent(new CustomEvent('console:confirm', {
                     detail: {
-                        title: 'Delete call record',
-                        message: 'This will permanently remove the call record and associated metadata.',
-                        confirmLabel: 'Delete',
-                        cancelLabel: 'Cancel',
+                        title: this.t.delete_confirm_title || 'Delete call record',
+                        message: this.t.delete_confirm_message || 'This will permanently remove the call record and associated metadata.',
+                        confirmLabel: this.t.delete_confirm_label || 'Delete',
+                        cancelLabel: this.t.delete_confirm_cancel || 'Cancel',
                         destructive: true,
                         onConfirm: () => this.executeDelete(record),
                     },
@@ -1196,7 +1207,7 @@
                         },
                     });
                     if (!response.ok) {
-                        let message = 'Failed to delete record';
+                        let message = this.t.delete_error || 'Failed to delete record';
                         try {
                             const data = await response.json();
                             if (data && data.message) {
@@ -1212,7 +1223,7 @@
                     await this.fetchRecords({ page: targetPage });
                 } catch (err) {
                     console.error(err);
-                    this.error = err && err.message ? err.message : 'Failed to delete record';
+                    this.error = err && err.message ? err.message : (this.t.delete_error || 'Failed to delete record');
                 } finally {
                     this.deletingId = null;
                 }
@@ -1234,11 +1245,11 @@
                     });
                     const data = await response.json();
                     if (!response.ok) {
-                        throw new Error(data?.message || 'Failed to export CSV');
+                        throw new Error(data?.message || this.t.export_error || 'Failed to export CSV');
                     }
                     const rows = Array.isArray(data?.items) ? data.items : [];
                     if (!rows.length) {
-                        this.exportedAt = 'No data to export';
+                        this.exportedAt = this.t.export_no_data || 'No data to export';
                         return;
                     }
                     const csv = this.buildCsv(rows);
@@ -1254,25 +1265,25 @@
                     this.exportedAt = new Date().toLocaleString();
                 } catch (err) {
                     console.error(err);
-                    this.exportedAt = err?.message || 'Export failed';
+                    this.exportedAt = err?.message || this.t.export_failed || 'Export failed';
                 }
             },
             buildCsv(records) {
                 const header = [
-                    'Call ID',
-                    'Display ID',
-                    'Started At',
-                    'Direction',
-                    'Status',
-                    'From',
-                    'To',
-                    'Duration (s)',
-                    'Agent',
-                    'Queue',
-                    'Tags',
-                    'Transcript',
-                    'Billing status',
-                    'Billing total',
+                    this.t.csv_call_id || 'Call ID',
+                    this.t.csv_display_id || 'Display ID',
+                    this.t.csv_started_at || 'Started At',
+                    this.t.csv_direction || 'Direction',
+                    this.t.csv_status || 'Status',
+                    this.t.csv_from || 'From',
+                    this.t.csv_to || 'To',
+                    this.t.csv_duration || 'Duration (s)',
+                    this.t.csv_agent || 'Agent',
+                    this.t.csv_queue || 'Queue',
+                    this.t.csv_tags || 'Tags',
+                    this.t.csv_transcript || 'Transcript',
+                    this.t.csv_billing_status || 'Billing status',
+                    this.t.csv_billing_total || 'Billing total',
                 ];
                 return [header]
                     .concat(
@@ -1288,7 +1299,7 @@
                             record?.agent || '',
                             record?.queue || '',
                             (Array.isArray(record?.tags) ? record.tags : []).join('|'),
-                            record?.has_transcript ? 'Yes' : 'No',
+                            record?.has_transcript ? (this.t.csv_transcript_yes || 'Yes') : (this.t.csv_transcript_no || 'No'),
                             this.billingStatusLabel(record?.billing?.status),
                             this.formatBillingAmount(record?.billing),
                         ])
@@ -1325,19 +1336,19 @@
             filterOptionLabel(key) {
                 switch (key) {
                     case 'status':
-                        return 'Status';
+                        return this.t.filter_status || 'Status';
                     case 'direction':
-                        return 'Direction';
+                        return this.t.filter_direction || 'Direction';
                     case 'date_range':
-                        return 'Date range';
+                        return this.t.filter_date_range || 'Date range';
                     case 'only_transcribed':
-                        return 'Transcribed only';
+                        return this.t.filter_only_transcribed || 'Transcribed only';
                     case 'departments':
-                        return 'Departments';
+                        return this.t.filter_departments || 'Departments';
                     case 'sip_trunks':
-                        return 'SIP trunks';
+                        return this.t.filter_sip_trunks || 'SIP trunks';
                     case 'billing_status':
-                        return 'Billing status';
+                        return this.t.filter_billing_status || 'Billing status';
                     default:
                         return key;
                 }
@@ -1355,14 +1366,14 @@
                             return `${this.dateFrom} → ${this.dateTo}`;
                         }
                         if (this.dateFrom) {
-                            return `From ${this.dateFrom}`;
+                            return `${this.t.filter_from || 'From'} ${this.dateFrom}`;
                         }
                         if (this.dateTo) {
-                            return `Until ${this.dateTo}`;
+                            return `${this.t.filter_until || 'Until'} ${this.dateTo}`;
                         }
                         return '';
                     case 'only_transcribed':
-                        return this.onlyTranscribed ? 'Enabled' : '';
+                        return this.onlyTranscribed ? (this.t.filter_enabled || 'Enabled') : '';
                     case 'departments': {
                         const options = Array.isArray(this.filterOptions.departments)
                             ? this.filterOptions.departments
@@ -1528,15 +1539,15 @@
             statusLabel(value) {
                 switch ((value || '').toLowerCase()) {
                     case 'completed':
-                        return 'Completed';
+                        return this.t.status_completed || 'Completed';
                     case 'missed':
-                        return 'Missed';
+                        return this.t.status_missed || 'Missed';
                     case 'failed':
-                        return 'Failed';
+                        return this.t.status_failed || 'Failed';
                     case 'any':
-                        return 'Any status';
+                        return this.t.status_any || 'Any status';
                     default:
-                        return value || 'Unknown';
+                        return value || (this.t.status_unknown || 'Unknown');
                 }
             },
             statusCodeText(record) {
@@ -1548,45 +1559,45 @@
             directionLabel(value) {
                 switch ((value || '').toLowerCase()) {
                     case 'inbound':
-                        return 'Inbound';
+                        return this.t.direction_inbound || 'Inbound';
                     case 'outbound':
-                        return 'Outbound';
+                        return this.t.direction_outbound || 'Outbound';
                     case 'internal':
-                        return 'Internal';
+                        return this.t.direction_internal || 'Internal';
                     case 'any':
-                        return 'Any direction';
+                        return this.t.direction_any || 'Any direction';
                     default:
-                        return value || 'Unknown';
+                        return value || (this.t.direction_unknown || 'Unknown');
                 }
             },
             billingStatusLabel(value) {
                 switch ((value || '').toLowerCase()) {
                     case 'charged':
-                        return 'Charged';
+                        return this.t.billing_charged || 'Charged';
                     case 'included':
-                        return 'Included';
+                        return this.t.billing_included || 'Included';
                     case 'zero-duration':
-                        return 'Zero duration';
+                        return this.t.billing_zero_duration || 'Zero duration';
                     case 'unrated':
-                        return 'Unrated';
+                        return this.t.billing_unrated || 'Unrated';
                     case 'any':
-                        return 'Any billing status';
+                        return this.t.billing_any || 'Any billing status';
                     default:
-                        return value || 'Unknown';
+                        return value || (this.t.billing_unknown || 'Unknown');
                 }
             },
             transcriptStatusLabel(status, hasTranscript = false) {
                 const value = (status || '').toLowerCase();
                 if (value === 'completed' || hasTranscript) {
-                    return 'Ready';
+                    return this.t.transcript_ready || 'Ready';
                 }
                 if (value === 'processing') {
-                    return 'Processing';
+                    return this.t.transcript_processing || 'Processing';
                 }
                 if (value === 'failed') {
-                    return 'Failed';
+                    return this.t.transcript_failed || 'Failed';
                 }
-                return 'Pending';
+                return this.t.transcript_pending || 'Pending';
             },
             transcriptStatusClasses(status, hasTranscript = false) {
                 const value = (status || '').toLowerCase();
@@ -1689,13 +1700,13 @@
                     return this.formatCurrency(total, billing.currency || 'USD');
                 }
                 if (status === 'included') {
-                    return 'Included';
+                    return this.t.csv_billing_included || 'Included';
                 }
                 if (status === 'zero-duration') {
                     return '0.00';
                 }
                 if (status === 'unrated') {
-                    return 'Unrated';
+                    return this.t.csv_billing_unrated || 'Unrated';
                 }
                 return '—';
             },

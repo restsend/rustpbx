@@ -83,6 +83,16 @@ impl Addon for TranscriptAddon {
         }]
     }
 
+    fn locales_dir(&self) -> Option<String> {
+        let dev = "src/addons/transcript/locales";
+        let deployed = "locales/transcript";
+        if std::path::Path::new(dev).exists() {
+            Some(dev.to_string())
+        } else {
+            Some(deployed.to_string())
+        }
+    }
+
     fn inject_scripts(&self) -> Vec<ScriptInjection> {
         vec![ScriptInjection {
             url_path_regex: r"^/console/call-records/\d+$",

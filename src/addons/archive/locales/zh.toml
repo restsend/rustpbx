@@ -1,0 +1,60 @@
+[archive]
+# 页面标题
+title = "归档"
+subtitle = "插件"
+subtitle_desc = "管理通话记录归档和保留策略。"
+
+# 配置表单
+section_config = "配置"
+section_config_desc = "配置归档计划和保留时间。"
+enable_label = "启用归档"
+field_archive_time = "归档时间（HH:MM）"
+field_timezone = "时区"
+field_timezone_hint = "IANA 格式，例如 Asia/Shanghai、America/New_York、UTC"
+field_retention_days = "保留天数"
+field_archive_after_days = "归档早于天数"
+field_archive_after_days_hint = "归档超过指定天数的记录。设为 0 则归档昨天的记录。"
+field_archive_dir = "归档目录"
+field_archive_dir_hint = "留空则使用默认值："
+btn_save = "保存配置"
+btn_saving = "保存中..."
+save_success = "配置已保存。"
+
+# 归档文件
+section_files = "归档文件"
+section_files_desc = "压缩通话记录归档文件列表。"
+btn_refresh = "刷新"
+col_filename = "文件名"
+col_date = "日期"
+col_size = "大小"
+col_records = "记录数"
+col_actions = "操作"
+no_archives = "未找到归档文件"
+btn_delete = "删除"
+
+# 手动归档
+section_manual = "手动归档"
+section_manual_desc = "选择日期范围以立即归档通话记录。"
+field_start_date = "开始日期"
+field_end_date = "结束日期"
+field_end_date_suffix = "（不含）"
+btn_calculate = "计算"
+btn_calculating = "统计中..."
+btn_archive = "归档"
+records_found = " 条记录在所选范围内。"
+
+# 确认对话框
+delete_confirm_title = "删除归档"
+delete_confirm_label = "删除"
+manual_confirm_title = "手动归档"
+manual_confirm_label = "归档"
+
+# JS 消息
+save_failed = "保存失败："
+save_error = "保存配置失败。"
+delete_failed = "删除失败："
+delete_error = "删除归档失败。"
+count_failed = "统计失败："
+count_error = "统计记录失败。"
+archive_start_error = "启动归档任务失败。"
+manual_starting = "启动中..."

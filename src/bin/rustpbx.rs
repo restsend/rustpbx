@@ -173,6 +173,13 @@ async fn main() -> Result<()> {
         env_filter = env_filter.add_directive(level.into());
     }
 
+    // Suppress noisy third-party crates to warn level by default
+    for noisy in &["hyper_util", "rustls", "sqlx"] {
+        if let Ok(d) = format!("{}=warn", noisy).parse() {
+            env_filter = env_filter.add_directive(d);
+        }
+    }
+
     // Install the hot-swappable reload layer BEFORE the subscriber is built.
     // The commercial TelemetryAddon will inject an OTel layer into this slot
     // during addon initialization.
