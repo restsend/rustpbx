@@ -1,18 +1,19 @@
 {% extends "console/layout.html" %}
-{% block title %}Transcript Settings · {{site_name|default('RustPBX')}}{% endblock %}
+{% block title %}{{ "transcript.title" | t }} · {{site_name|default('RustPBX')}}{% endblock %}
 {% block content %}
 <div class="p-6" x-data='transcriptSettings({
     config: {{ config | default({}) | tojson }},
     modelReady: {{ model_ready | default(false) | tojson }},
-    basePath: {{ base_path | default("/console") | tojson }}
+    basePath: {{ base_path | default("/console") | tojson }},
+    translations: {{ t | tojson }}
 })'>
     <div class="mx-auto max-w-7xl space-y-6">
         <!-- Header -->
         <div class="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
             <div>
-                <p class="text-[11px] font-semibold uppercase tracking-wide text-sky-600">Addon</p>
-                <h1 class="text-2xl font-semibold text-slate-900">Transcript Settings</h1>
-                <p class="text-sm text-slate-500">Configuration for SenseVoice call transcription.</p>
+                <p class="text-[11px] font-semibold uppercase tracking-wide text-sky-600">{{ "transcript.subtitle" | t }}</p>
+                <h1 class="text-2xl font-semibold text-slate-900">{{ "transcript.title" | t }}</h1>
+                <p class="text-sm text-slate-500">{{ "transcript.subtitle_desc" | t }}</p>
             </div>
         </div>
 
@@ -20,65 +21,59 @@
             <form @submit.prevent="saveSettings" class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
                 <div class="flex items-center justify-between">
                     <div>
-                        <h2 class="text-base font-semibold text-slate-900">Configuration</h2>
-                        <p class="text-xs text-slate-500">Configure SenseVoice execution parameters.</p>
+                        <h2 class="text-base font-semibold text-slate-900" x-text="t.section_config"></h2>
+                        <p class="text-xs text-slate-500" x-text="t.section_config_desc"></p>
                     </div>
                     <button type="submit"
                         class="inline-flex items-center justify-center rounded-md bg-sky-600 px-3 py-2 text-xs font-semibold text-white shadow-sm transition hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60"
                         :disabled="saving">
-                        <span x-text="saving ? 'Saving...' : 'Save Changes'"></span>
+                        <span x-text="saving ? t.btn_saving : t.btn_save"></span>
                     </button>
                 </div>
 
                 <div class="mt-6 grid gap-6 sm:grid-cols-2">
                     <div>
-                        <label
-                            class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Command</label>
+                        <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400" x-text="t.field_command"></label>
                         <input type="text" x-model="config.command"
                             class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                            placeholder="sensevoice-cli">
-                        <p class="mt-1 text-xs text-slate-400">Path to the sensevoice-cli executable.</p>
+                            :placeholder="t.field_command_placeholder">
+                        <p class="mt-1 text-xs text-slate-400" x-text="t.field_command_hint"></p>
                     </div>
                     <div>
-                        <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Models
-                            Path</label>
+                        <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400" x-text="t.field_models_path"></label>
                         <input type="text" x-model="config.models_path"
                             class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                            placeholder="/path/to/models">
-                        <p class="mt-1 text-xs text-slate-400">Directory containing SenseVoice models.</p>
+                            :placeholder="t.field_models_path_placeholder">
+                        <p class="mt-1 text-xs text-slate-400" x-text="t.field_models_path_hint"></p>
                     </div>
                     <div>
-                        <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Default
-                            Language</label>
+                        <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400" x-text="t.field_default_language"></label>
                         <select x-model="config.default_language"
                             class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
-                            <option value="auto">Auto Detect</option>
-                            <option value="zh">Chinese</option>
-                            <option value="en">English</option>
-                            <option value="ja">Japanese</option>
-                            <option value="ko">Korean</option>
-                            <option value="yue">Cantonese</option>
+                            <option value="auto" x-text="t.lang_auto"></option>
+                            <option value="zh" x-text="t.lang_zh"></option>
+                            <option value="en" x-text="t.lang_en"></option>
+                            <option value="ja" x-text="t.lang_ja"></option>
+                            <option value="ko" x-text="t.lang_ko"></option>
+                            <option value="yue" x-text="t.lang_yue"></option>
                         </select>
                     </div>
                     <div>
-                        <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Timeout
-                            (seconds)</label>
+                        <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400" x-text="t.field_timeout"></label>
                         <input type="number" x-model.number="config.timeout_secs"
                             class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
                     </div>
                     <div>
-                        <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">HuggingFace
-                            Endpoint</label>
+                        <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400" x-text="t.field_hf_endpoint"></label>
                         <input type="text" x-model="config.hf_endpoint"
                             class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                            placeholder="https://hf-mirror.com">
-                        <p class="mt-1 text-xs text-slate-400">Optional mirror for model downloads (e.g.,
-                            https://hf-mirror.com).</p>
+                            :placeholder="t.field_hf_endpoint_placeholder">
+                        <p class="mt-1 text-xs text-slate-400" x-text="t.field_hf_endpoint_hint"></p>
                     </div>
                 </div>
 
                 <div class="mt-8 border-t border-slate-100 pt-6">
-                    <h3 class="text-sm font-semibold text-slate-900">Model Status</h3>
+                    <h3 class="text-sm font-semibold text-slate-900" x-text="t.section_model_status"></h3>
                     <div
                         class="mt-4 flex items-center justify-between rounded-lg border border-slate-200 bg-slate-50 p-4">
                         <div class="flex items-center gap-3">
@@ -96,17 +91,16 @@
                             </div>
                             <div>
                                 <div class="text-sm font-semibold text-slate-900"
-                                    x-text="modelReady ? 'Model Available' : 'Model Missing'"></div>
+                                    x-text="modelReady ? t.model_available : t.model_missing"></div>
                                 <div class="text-xs text-slate-500"
-                                    x-text="modelReady ? 'SenseVoice model is installed and ready.' : 'Model files not found in the configured path.'">
+                                    x-text="modelReady ? t.model_available_desc : t.model_missing_desc">
                                 </div>
                             </div>
                         </div>
                         <button type="button"
                             class="inline-flex items-center justify-center rounded-md border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-700 shadow-sm transition hover:bg-slate-50 focus:outline-none focus:ring-2 focus:ring-sky-200 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60"
                             @click="downloadModel" :disabled="downloading || modelReady">
-                            <span
-                                x-text="downloading ? 'Downloading...' : (modelReady ? 'Re-download' : 'Download Model')"></span>
+                            <span x-text="downloading ? t.btn_downloading : (modelReady ? t.btn_redownload : t.btn_download)"></span>
                         </button>
                     </div>
 
@@ -128,6 +122,7 @@
 <script>
     document.addEventListener('alpine:init', () => {
         Alpine.data('transcriptSettings', (initialData) => ({
+            t: (initialData.translations || {}).transcript || {},
             config: initialData.config,
             modelReady: initialData.modelReady,
             basePath: initialData.basePath,
@@ -152,10 +147,10 @@
 
                     if (response.ok) {
                         this.status = 'success';
-                        this.message = 'Settings saved successfully.';
+                        this.message = this.t.save_success || 'Settings saved successfully.';
                         setTimeout(() => this.message = '', 3000);
                     } else {
-                        throw new Error(data.message || 'Failed to save settings');
+                        throw new Error(data.message || this.t.save_failed || 'Failed to save settings');
                     }
                 } catch (e) {
                     this.status = 'error';
@@ -168,18 +163,17 @@
             downloadModel() {
                 window.dispatchEvent(new CustomEvent('console:confirm', {
                     detail: {
-                        title: 'Download Model',
-                        message: 'This will download ~500MB of model files. Continue?',
-                        confirmLabel: 'Download',
+                        title: this.t.download_confirm_title || 'Download Model',
+                        message: this.t.download_confirm_message || 'This will download ~500MB of model files. Continue?',
+                        confirmLabel: this.t.download_confirm_label || 'Download',
                         onConfirm: async () => { await this._doDownloadModel(); },
                     },
                 }));
             },
 
             async _doDownloadModel() {
-
                 this.downloading = true;
-                this.downloadMessage = 'Starting download... this may take a while.';
+                this.downloadMessage = this.t.download_starting || 'Starting download... this may take a while.';
                 this.downloadStatus = 'info';
 
                 try {
@@ -198,10 +192,10 @@
 
                     if (response.ok) {
                         this.downloadStatus = 'success';
-                        this.downloadMessage = 'Model downloaded successfully.';
+                        this.downloadMessage = this.t.download_success || 'Model downloaded successfully.';
                         this.modelReady = true;
                     } else {
-                        throw new Error(data.message || 'Download failed');
+                        throw new Error(data.message || this.t.download_failed || 'Download failed');
                     }
                 } catch (e) {
                     this.downloadStatus = 'error';

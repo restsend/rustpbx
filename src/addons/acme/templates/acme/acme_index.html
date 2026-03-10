@@ -1,15 +1,15 @@
 {% extends "console/layout.html" %}
-{% block title %}SSL Certificates · {{site_name|default('RustPBX')}}{% endblock %}
+{% block title %}{{ "acme.title" | t }} · {{site_name|default('RustPBX')}}{% endblock %}
 {% block content %}
 <div class="p-6">
-    <div class="mx-auto max-w-7xl space-y-6" x-data="acmeManager()">
+    <div class="mx-auto max-w-7xl space-y-6" x-data='acmeManager({{ t | tojson }})'>
 
         <!-- Header -->
         <div class="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
             <div>
-                <p class="text-[11px] font-semibold uppercase tracking-wide text-sky-600">Addon</p>
-                <h1 class="text-2xl font-semibold text-slate-900">SSL Certificates</h1>
-                <p class="text-sm text-slate-500">Manage your HTTPS and SIP TLS certificates via Let's Encrypt.</p>
+                <p class="text-[11px] font-semibold uppercase tracking-wide text-sky-600">{{ "acme.subtitle" | t }}</p>
+                <h1 class="text-2xl font-semibold text-slate-900">{{ "acme.title" | t }}</h1>
+                <p class="text-sm text-slate-500">{{ "acme.subtitle_desc" | t }}</p>
             </div>
         </div>
 
@@ -20,49 +20,46 @@
             <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
                 <div class="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
                     <div>
-                        <h2 class="text-base font-semibold text-slate-900">Request Certificate</h2>
-                        <p class="text-xs text-slate-500">Generate a new certificate for your domain.</p>
+                        <h2 class="text-base font-semibold text-slate-900" x-text="t.section_request"></h2>
+                        <p class="text-xs text-slate-500" x-text="t.section_request_desc"></p>
                     </div>
                 </div>
 
                 <div class="mt-4 space-y-4">
                     <div>
-                        <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Domain
-                            Name</label>
+                        <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400" x-text="t.field_domain"></label>
                         <input type="text" x-model="domain"
                             class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                            placeholder="pbx.example.com">
+                            :placeholder="t.field_domain_placeholder">
                     </div>
                     <div>
-                        <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Email
-                            Address</label>
+                        <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400" x-text="t.field_email"></label>
                         <input type="email" x-model="email"
                             class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                            placeholder="admin@example.com">
+                            :placeholder="t.field_email_placeholder">
                     </div>
 
                     <div class="space-y-3 pt-2">
                         <label class="flex items-center gap-2 text-sm font-semibold text-slate-600">
                             <input type="checkbox" x-model="enable_https"
                                 class="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-500">
-                            <span>Enable HTTPS/WSS</span>
+                            <span x-text="t.enable_https_label"></span>
                         </label>
-                        <p class="ml-6 text-xs text-slate-500 -mt-2">Update config to use this certificate for SSL/TLS.
-                        </p>
+                        <p class="ml-6 text-xs text-slate-500 -mt-2" x-text="t.enable_https_desc"></p>
 
                         <label class="flex items-center gap-2 text-sm font-semibold text-slate-600">
                             <input type="checkbox" x-model="enable_sip_tls"
                                 class="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-500">
-                            <span>Enable SIP TLS</span>
+                            <span x-text="t.enable_sip_tls_label"></span>
                         </label>
-                        <p class="ml-6 text-xs text-slate-500 -mt-2">Enable SIP over TLS on port 5061.</p>
+                        <p class="ml-6 text-xs text-slate-500 -mt-2" x-text="t.enable_sip_tls_desc"></p>
                     </div>
 
                     <div class="border-t border-slate-200 pt-4">
                         <button @click="requestCert" :disabled="loading"
                             class="inline-flex w-full items-center justify-center rounded-md bg-sky-600 px-3 py-2 text-xs font-semibold text-white shadow-sm transition hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60">
-                            <span x-show="!loading">Request Certificate</span>
-                            <span x-show="loading">Processing...</span>
+                            <span x-show="!loading" x-text="t.btn_request"></span>
+                            <span x-show="loading" x-text="t.btn_requesting"></span>
                         </button>
                     </div>
                 </div>
@@ -72,13 +69,13 @@
             <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
                 <div class="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
                     <div>
-                        <h2 class="text-base font-semibold text-slate-900">Operation Status</h2>
-                        <p class="text-xs text-slate-500">Real-time feedback from the ACME client.</p>
+                        <h2 class="text-base font-semibold text-slate-900" x-text="t.section_status"></h2>
+                        <p class="text-xs text-slate-500" x-text="t.section_status_desc"></p>
                     </div>
                 </div>
                 <div class="mt-4">
                     <div class="rounded-lg border border-slate-200 bg-slate-50 p-4 text-xs text-slate-600 h-64 overflow-y-auto font-mono whitespace-pre-wrap"
-                        x-text="statusMessage || 'Ready to process requests.'">
+                        x-text="statusMessage || t.status_ready">
                     </div>
                 </div>
             </div>
@@ -88,17 +85,17 @@
         <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
             <div class="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
                 <div>
-                    <h2 class="text-base font-semibold text-slate-900">Existing Certificates</h2>
-                    <p class="text-xs text-slate-500">List of certificates managed by this addon.</p>
+                    <h2 class="text-base font-semibold text-slate-900" x-text="t.section_certs"></h2>
+                    <p class="text-xs text-slate-500" x-text="t.section_certs_desc"></p>
                 </div>
             </div>
             <div class="mt-4 overflow-x-auto">
                 <table class="min-w-full divide-y divide-slate-200 text-sm">
                     <thead class="bg-slate-50 text-left text-xs font-semibold uppercase tracking-wide text-slate-500">
                         <tr>
-                            <th class="px-4 py-2">Domain</th>
-                            <th class="px-4 py-2">Path</th>
-                            <th class="px-4 py-2">Created At</th>
+                            <th class="px-4 py-2">{{ "acme.col_domain" | t }}</th>
+                            <th class="px-4 py-2">{{ "acme.col_path" | t }}</th>
+                            <th class="px-4 py-2">{{ "acme.col_created_at" | t }}</th>
                         </tr>
                     </thead>
                     <tbody class="divide-y divide-slate-100">
@@ -110,8 +107,7 @@
                         </tr>
                         {% else %}
                         <tr>
-                            <td colspan="3" class="px-4 py-3 text-xs text-slate-400 text-center">No certificates found.
-                            </td>
+                            <td colspan="3" class="px-4 py-3 text-xs text-slate-400 text-center">{{ "acme.no_certs" | t }}</td>
                         </tr>
                         {% endfor %}
                     </tbody>
@@ -123,7 +119,8 @@
 
 <script>
     document.addEventListener('alpine:init', () => {
-        Alpine.data('acmeManager', () => ({
+        Alpine.data('acmeManager', (translations) => ({
+            t: translations.acme || {},
             domain: '',
             email: '',
             enable_https: false,
@@ -139,11 +136,11 @@
 
             async requestCert() {
                 if (!this.domain || !this.email) {
-                    this.statusMessage = 'Please enter both domain and email.';
+                    this.statusMessage = this.t.error_missing_fields || 'Please enter both domain and email.';
                     return;
                 }
                 this.loading = true;
-                this.statusMessage = 'Starting request...';
+                this.statusMessage = this.t.status_starting || 'Starting request...';
 
                 try {
                     const response = await fetch('/api/acme/request', {
@@ -160,7 +157,7 @@
                     });
 
                     if (!response.ok) {
-                        throw new Error('Request failed');
+                        throw new Error(this.t.error_request_failed || 'Request failed');
                     }
 
                     const result = await response.json();
@@ -168,7 +165,7 @@
                     this.pollStatus();
 
                 } catch (error) {
-                    this.statusMessage = 'Error: ' + error.message;
+                    this.statusMessage = (this.t.status_error || 'Error: ') + error.message;
                     this.loading = false;
                 }
             },
@@ -189,19 +186,19 @@
 
                         if (status.Running) {
                             this.loading = true;
-                            this.statusMessage = 'Running: ' + status.Running;
+                            this.statusMessage = (this.t.status_running || 'Running: ') + status.Running;
                             this.pollInterval = setTimeout(check, 1000);
                         } else if (status.Success) {
                             this.loading = false;
-                            this.statusMessage = 'Success: ' + status.Success;
+                            this.statusMessage = (this.t.status_success || 'Success: ') + status.Success;
                             if (this.enable_https || this.enable_sip_tls) {
-                                this.statusMessage += '\n\nIMPORTANT: You must RESTART the service to apply changes.';
+                                this.statusMessage += (this.t.status_restart_notice || '\n\nIMPORTANT: You must RESTART the service to apply changes.');
                             }
                             // Optional: reload to see new certs
                             // setTimeout(() => window.location.reload(), 2000);
                         } else if (status.Error) {
                             this.loading = false;
-                            this.statusMessage = 'Error: ' + status.Error;
+                            this.statusMessage = (this.t.status_error || 'Error: ') + status.Error;
                         } else {
                             this.loading = false;
                         }

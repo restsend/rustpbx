@@ -1,0 +1,41 @@
+[acme]
+# Page titles & headings
+title = "SSL Certificates"
+subtitle = "Addon"
+subtitle_desc = "Manage your HTTPS and SIP TLS certificates via Let's Encrypt."
+
+# Request form
+section_request = "Request Certificate"
+section_request_desc = "Generate a new certificate for your domain."
+field_domain = "Domain Name"
+field_domain_placeholder = "pbx.example.com"
+field_email = "Email Address"
+field_email_placeholder = "admin@example.com"
+enable_https_label = "Enable HTTPS/WSS"
+enable_https_desc = "Update config to use this certificate for SSL/TLS."
+enable_sip_tls_label = "Enable SIP TLS"
+enable_sip_tls_desc = "Enable SIP over TLS on port 5061."
+btn_request = "Request Certificate"
+btn_requesting = "Processing..."
+
+# Status section
+section_status = "Operation Status"
+section_status_desc = "Real-time feedback from the ACME client."
+status_ready = "Ready to process requests."
+
+# Certificates list
+section_certs = "Existing Certificates"
+section_certs_desc = "List of certificates managed by this addon."
+col_domain = "Domain"
+col_path = "Path"
+col_created_at = "Created At"
+no_certs = "No certificates found."
+
+# JS messages
+error_missing_fields = "Please enter both domain and email."
+error_request_failed = "Request failed"
+status_starting = "Starting request..."
+status_running = "Running: "
+status_success = "Success: "
+status_error = "Error: "
+status_restart_notice = "\n\nIMPORTANT: You must RESTART the service to apply changes."

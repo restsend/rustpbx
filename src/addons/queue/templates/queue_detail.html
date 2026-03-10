@@ -2,7 +2,7 @@
 {% set has_model = model is defined and model is not none %}
 {% set page_mode = mode | default('create') %}
 {% set model_data = model if has_model else {} %}
-{% block title %}{{ model_data.name | default('New queue') }} · {{ site_name | default('RustPBX') }}{% endblock %}
+{% block title %}{{ model_data.name | default("queue.new_queue" | t) }} · {{ site_name | default('RustPBX') }}{% endblock %}
 {% block content %}
 {% set base_url = base_path | default('/console') %}
 <div class="p-6" x-data='queueDetailPage({
@@ -11,7 +11,8 @@
         model: {{ model_data | tojson }},
         createUrl: {{ create_url | tojson }},
         updateUrl: {{ update_url | tojson }},
-        listUrl: {{ list_url | default(create_url) | tojson }}
+        listUrl: {{ list_url | default(create_url) | tojson }},
+        t: window._queueTranslations
     })' x-init="init()">
     <div class="mx-auto max-w-4xl space-y-6">
         <header class="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
@@ -21,33 +22,33 @@
                     <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2">
                         <path stroke-linecap="round" stroke-linejoin="round" d="M12 5l-4 5 4 5" />
                     </svg>
-                    Back to queues
+                    <span x-text="tt('queue.detail_back')"></span>
                 </a>
                 <div>
                     <h1 class="text-2xl font-semibold text-slate-900" x-text="pageTitle"></h1>
                     <p class="mt-2 text-sm text-slate-500"
-                        x-text="mode === 'create' ? 'Publish a new voice queue with hold prompts and failure handling.' : 'Update hold flow, fallback action, and status for this queue.'">
+                        x-text="mode === 'create' ? tt('queue.detail_subtitle_create') : tt('queue.detail_subtitle_edit')">
                     </p>
                 </div>
             </div>
             <div class="rounded-xl bg-white p-4 text-sm text-slate-600 shadow-sm ring-1 ring-black/5"
                 x-show="mode === 'edit'" x-cloak>
                 <div class="flex items-center justify-between gap-4">
-                    <div class="font-semibold text-slate-900">Queue summary</div>
+                    <div class="font-semibold text-slate-900" x-text="tt('queue.detail_summary_title')"></div>
                     <span class="inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-xs font-semibold"
                         :class="form.is_active ? 'bg-emerald-50 text-emerald-600 ring-1 ring-emerald-100' : 'bg-amber-50 text-amber-600 ring-1 ring-amber-100'">
                         <span class="h-1.5 w-1.5 rounded-full"
                             :class="form.is_active ? 'bg-emerald-400' : 'bg-amber-400'"></span>
-                        <span x-text="form.is_active ? 'Active' : 'Paused'"></span>
+                        <span x-text="form.is_active ? tt('queue.status_active') : tt('queue.status_paused')"></span>
                     </span>
                 </div>
                 <dl class="mt-4 space-y-2 text-xs text-slate-500">
                     <div class="flex items-center justify-between gap-6">
-                        <dt class="uppercase tracking-wide">Name</dt>
+                        <dt class="uppercase tracking-wide" x-text="tt('queue.detail_name_label')"></dt>
                         <dd class="text-sm text-slate-700" x-text="form.name || '—'"></dd>
                     </div>
                     <div class="flex items-center justify-between gap-6">
-                        <dt class="uppercase tracking-wide">Last updated</dt>
+                        <dt class="uppercase tracking-wide" x-text="tt('queue.detail_updated_label')"></dt>
                         <dd class="text-sm text-slate-700" x-text="formatDate(model?.updated_at)"></dd>
                     </div>
                 </dl>
@@ -66,31 +67,31 @@
         <form class="space-y-6" @submit.prevent="submit">
             <div class="rounded-xl bg-white p-2 shadow-sm ring-1 ring-black/5">
                 <div class="flex flex-wrap gap-2">
-                    <button type="button" @click="activeTab = 'overview'" :class="tabButtonClasses('overview')">
-                        Overview
+                    <button type="button" @click="activeTab = 'overview'" :class="tabButtonClasses('overview')"
+                        x-text="tt('queue.tab_overview')">
                     </button>
-                    <button type="button" @click="activeTab = 'targets'" :class="tabButtonClasses('targets')">
-                        Targets
+                    <button type="button" @click="activeTab = 'targets'" :class="tabButtonClasses('targets')"
+                        x-text="tt('queue.tab_targets')">
                     </button>
-                    <button type="button" @click="activeTab = 'fallback'" :class="tabButtonClasses('fallback')">
-                        Fallback
+                    <button type="button" @click="activeTab = 'fallback'" :class="tabButtonClasses('fallback')"
+                        x-text="tt('queue.tab_fallback')">
                     </button>
                 </div>
             </div>
 
             <section class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5" x-show="activeTab === 'overview'"
                 x-cloak>
-                <h2 class="text-sm font-semibold text-slate-900">Queue basics</h2>
+                <h2 class="text-sm font-semibold text-slate-900" x-text="tt('queue.section_basics')"></h2>
                 <div class="mt-4 grid gap-4 md:grid-cols-2">
                     <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
-                        Queue name
+                        <span x-text="tt('queue.field_name')"></span>
                         <input type="text" x-model.trim="form.name" maxlength="160" required
                             class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                            placeholder="support-primary">
-                        <span class="text-xs font-normal text-slate-400">Used in routing destinations.</span>
+                            :placeholder="tt('queue.field_name_placeholder')">
+                        <span class="text-xs font-normal text-slate-400" x-text="tt('queue.field_name_hint')"></span>
                     </label>
                     <div class="flex flex-col gap-2 text-sm font-medium text-slate-700">
-                        Status
+                        <span x-text="tt('queue.field_status')"></span>
                         <button type="button" @click="toggleActive()"
                             class="inline-flex items-center gap-2 rounded-lg px-3 py-1 text-xs font-semibold ring-2 transition"
                             :class="form.is_active ? 'bg-emerald-50 text-emerald-600 ring-emerald-200' : 'bg-slate-100 text-slate-500 ring-slate-200'">
@@ -101,43 +102,40 @@
                                 <path stroke-linecap="round" stroke-linejoin="round" d="M6 6l8 8M6 14l8-8"
                                     x-show="!form.is_active"></path>
                             </svg>
-                            <span x-text="form.is_active ? 'Active' : 'Paused'"></span>
+                            <span x-text="form.is_active ? tt('queue.status_active') : tt('queue.status_paused')"></span>
                         </button>
-                        <span class="text-xs font-normal text-slate-400">Paused queues remain available for edits but
-                            will not receive calls.</span>
+                        <span class="text-xs font-normal text-slate-400" x-text="tt('queue.field_status_hint')"></span>
                     </div>
                     <label class="md:col-span-2 flex flex-col gap-2 text-sm font-medium text-slate-700">
-                        Description
+                        <span x-text="tt('queue.field_description')"></span>
                         <textarea rows="3" x-model.trim="form.description"
                             class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                            placeholder="Internal notes for operators."></textarea>
+                            :placeholder="tt('queue.field_description_placeholder')"></textarea>
                     </label>
                     <div class="flex flex-col gap-2 text-sm font-medium text-slate-700">
-                        Accept immediately
+                        <span x-text="tt('queue.field_accept_immediately')"></span>
                         <label class="inline-flex items-center gap-2 text-sm font-medium text-slate-700">
                             <input type="checkbox"
                                 class="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-400"
                                 x-model="form.spec.accept_immediately">
-                            <span>Bridge caller to agent before hold audio</span>
+                            <span x-text="tt('queue.field_accept_immediately_label')"></span>
                         </label>
                     </div>
                     <div class="flex flex-col gap-2 text-sm font-medium text-slate-700"
                         x-show="form.spec.accept_immediately" x-cloak>
-                        Remote ringback handling
+                        <span x-text="tt('queue.field_passthrough_ringback')"></span>
                         <label class="inline-flex items-start gap-2 text-sm font-medium text-slate-700">
                             <input type="checkbox"
                                 class="mt-1 h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-400"
                                 x-model="form.spec.passthrough_ringback">
-                            <span class="text-sm font-normal text-slate-600">Allow downstream color ring tones to
-                                replace hold audio while waiting for agents. Leave unchecked to keep playing queue
-                                hold music.</span>
+                            <span class="text-sm font-normal text-slate-600" x-text="tt('queue.field_passthrough_ringback_desc')"></span>
                         </label>
                     </div>
                     <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
-                        Tags (comma separated)
+                        <span x-text="tt('queue.field_tags')"></span>
                         <input type="text" x-model.trim="form.tags_input"
                             class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                            placeholder="premium, apac, vip">
+                            :placeholder="tt('queue.field_tags_placeholder')">
                     </label>
                 </div>
             </section>
@@ -145,30 +143,27 @@
             <section class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5" x-show="activeTab === 'overview'"
                 x-cloak>
                 <div class="flex flex-col gap-1">
-                    <h2 class="text-sm font-semibold text-slate-900">Hold treatment</h2>
-                    <p class="text-sm text-slate-500">Upload prompts separately and reference the storage path here.
-                        Leave blank to fall back to <code
-                            class="font-mono text-xs">config/sounds/phone-calling.wav</code>.
-                    </p>
+                    <h2 class="text-sm font-semibold text-slate-900" x-text="tt('queue.section_hold')"></h2>
+                    <p class="text-sm text-slate-500" x-text="tt('queue.section_hold_desc')"></p>
                 </div>
                 <div class="mt-4 space-y-4">
                     <label class="inline-flex items-center gap-2 text-sm font-medium text-slate-700">
                         <input type="checkbox" class="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-400"
                             x-model="holdEnabled">
-                        <span>Play custom hold audio</span>
+                        <span x-text="tt('queue.hold_enable_label')"></span>
                     </label>
                     <div class="grid gap-4 md:grid-cols-2" x-show="holdEnabled" x-cloak>
                         <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
-                            Audio file path
+                            <span x-text="tt('queue.hold_audio_file')"></span>
                             <input type="text" x-model.trim="form.spec.hold.audio_file"
                                 class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                placeholder="storage://prompts/hold.wav">
+                                :placeholder="tt('queue.hold_audio_file_placeholder')">
                         </label>
                         <label class="inline-flex items-center gap-2 text-sm font-medium text-slate-700">
                             <input type="checkbox"
                                 class="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-400"
                                 x-model="form.spec.hold.loop_playback">
-                            Loop playback
+                            <span x-text="tt('queue.hold_loop')"></span>
                         </label>
                     </div>
                 </div>
@@ -177,40 +172,37 @@
             <section class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5" x-show="activeTab === 'targets'"
                 x-cloak>
                 <div class="flex flex-col gap-1">
-                    <h2 class="text-sm font-semibold text-slate-900">Agent dialing strategy</h2>
-                    <p class="text-sm text-slate-500">Define how this queue rings SIP targets in sequence or in parallel
-                        before falling back.</p>
+                    <h2 class="text-sm font-semibold text-slate-900" x-text="tt('queue.section_targets')"></h2>
+                    <p class="text-sm text-slate-500" x-text="tt('queue.section_targets_desc')"></p>
                 </div>
                 <div class="mt-4 space-y-5">
                     <div class="grid gap-4 md:grid-cols-2">
                         <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
-                            Dial mode
+                            <span x-text="tt('queue.field_dial_mode')"></span>
                             <select x-model="form.spec.strategy.mode"
                                 class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
-                                <option value="sequential">Sequential (hunt)</option>
-                                <option value="parallel">Parallel (blast)</option>
+                                <option value="sequential" x-text="tt('queue.dial_sequential')"></option>
+                                <option value="parallel" x-text="tt('queue.dial_parallel')"></option>
                             </select>
                         </label>
                         <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
-                            Ring timeout (seconds)
+                            <span x-text="tt('queue.field_ring_timeout')"></span>
                             <input type="number" min="0" x-model.number="form.spec.strategy.wait_timeout_secs"
                                 class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                placeholder="0">
-                            <span class="text-xs font-normal text-slate-400">Set to zero to inherit the route
-                                timeout.</span>
+                                :placeholder="tt('queue.field_ring_timeout_placeholder')">
+                            <span class="text-xs font-normal text-slate-400" x-text="tt('queue.field_ring_timeout_hint')"></span>
                         </label>
                     </div>
                     <div class="space-y-3">
                         <div class="flex items-center justify-between">
-                            <h3 class="text-sm font-semibold text-slate-800">Dial targets</h3>
+                            <h3 class="text-sm font-semibold text-slate-800" x-text="tt('queue.dial_targets_title')"></h3>
                             <button type="button" @click="addStrategyTarget()"
-                                class="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-600 hover:bg-slate-50">
-                                Add target
+                                class="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-600 hover:bg-slate-50"
+                                x-text="tt('queue.add_target')">
                             </button>
                         </div>
                         <template x-if="!form.spec.strategy.targets.length">
-                            <p class="text-xs text-slate-400">No targets defined. Add SIP URIs to ring from this queue.
-                            </p>
+                            <p class="text-xs text-slate-400" x-text="tt('queue.no_targets')"></p>
                         </template>
                         <div class="space-y-3">
                             <template x-for="(target, index) in form.spec.strategy.targets" :key="index">
@@ -218,22 +210,22 @@
                                     class="grid gap-3 rounded-lg border border-slate-200 p-3 md:grid-cols-[minmax(0,1.2fr)_minmax(0,1fr)_auto]">
                                     <label
                                         class="flex flex-col gap-1 text-xs font-semibold uppercase tracking-wide text-slate-500">
-                                        Target URI
+                                        <span x-text="tt('queue.target_uri')"></span>
                                         <input type="text" x-model.trim="target.uri"
                                             class="rounded-lg border border-slate-200 px-3 py-2 text-sm font-normal text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                            placeholder="sip:agent@pbx.local">
+                                            :placeholder="tt('queue.target_uri_placeholder')">
                                     </label>
                                     <label
                                         class="flex flex-col gap-1 text-xs font-semibold uppercase tracking-wide text-slate-500">
-                                        Label (optional)
+                                        <span x-text="tt('queue.target_label')"></span>
                                         <input type="text" x-model.trim="target.label"
                                             class="rounded-lg border border-slate-200 px-3 py-2 text-sm font-normal text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                            placeholder="Tier 1">
+                                            :placeholder="tt('queue.target_label_placeholder')">
                                     </label>
                                     <div class="flex items-end justify-end">
                                         <button type="button" @click="removeStrategyTarget(index)"
-                                            class="rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-500 hover:bg-slate-50">
-                                            Remove
+                                            class="rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-500 hover:bg-slate-50"
+                                            x-text="tt('queue.remove_target')">
                                         </button>
                                     </div>
                                 </div>
@@ -246,85 +238,79 @@
             <section class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5" x-show="activeTab === 'fallback'"
                 x-cloak>
                 <div class="flex flex-col gap-1">
-                    <h2 class="text-sm font-semibold text-slate-900">Fallback behavior</h2>
-                    <p class="text-sm text-slate-500">Choose what happens when no agents are available. By default the
-                        system plays <code class="font-mono text-xs">config/sounds/unavailable-phone.wav</code> before
-                        hanging up.
-                    </p>
+                    <h2 class="text-sm font-semibold text-slate-900" x-text="tt('queue.section_fallback')"></h2>
+                    <p class="text-sm text-slate-500" x-text="tt('queue.section_fallback_desc')"></p>
                 </div>
                 <div class="mt-4 space-y-4">
                     <div class="flex flex-wrap gap-3">
                         <label class="inline-flex items-center gap-2 text-sm font-medium text-slate-700">
                             <input type="radio" name="queue-fallback" value="none" x-model="fallbackMode"
                                 class="h-4 w-4 text-sky-600 focus:ring-sky-400">
-                            <span>Continue waiting</span>
+                            <span x-text="tt('queue.fallback_none')"></span>
                         </label>
                         <label class="inline-flex items-center gap-2 text-sm font-medium text-slate-700">
                             <input type="radio" name="queue-fallback" value="redirect" x-model="fallbackMode"
                                 class="h-4 w-4 text-sky-600 focus:ring-sky-400">
-                            <span>Redirect to SIP URI</span>
+                            <span x-text="tt('queue.fallback_redirect_opt')"></span>
                         </label>
                         <label class="inline-flex items-center gap-2 text-sm font-medium text-slate-700">
                             <input type="radio" name="queue-fallback" value="queue" x-model="fallbackMode"
                                 class="h-4 w-4 text-sky-600 focus:ring-sky-400">
-                            <span>Send to another queue</span>
+                            <span x-text="tt('queue.fallback_queue_opt')"></span>
                         </label>
                         <label class="inline-flex items-center gap-2 text-sm font-medium text-slate-700">
                             <input type="radio" name="queue-fallback" value="failure" x-model="fallbackMode"
                                 class="h-4 w-4 text-sky-600 focus:ring-sky-400">
-                            <span>Return failure prompt/code</span>
+                            <span x-text="tt('queue.fallback_failure_opt')"></span>
                         </label>
                     </div>
                     <div class="grid gap-4 md:grid-cols-2" x-show="fallbackMode === 'redirect'" x-cloak>
                         <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
-                            Redirect target (SIP URI)
+                            <span x-text="tt('queue.fallback_redirect_label')"></span>
                             <input type="text" x-model.trim="form.spec.fallback.redirect"
                                 class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                placeholder="sip:backup@pbx.local">
+                                :placeholder="tt('queue.fallback_redirect_placeholder')">
                         </label>
                     </div>
                     <div class="grid gap-4 md:grid-cols-2" x-show="fallbackMode === 'failure'" x-cloak>
                         <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
-                            SIP failure code
+                            <span x-text="tt('queue.fallback_code_label')"></span>
                             <input type="number" min="100" max="699" x-model.number="form.spec.fallback.failure_code"
                                 class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                placeholder="486">
+                                :placeholder="tt('queue.fallback_code_placeholder')">
                         </label>
                         <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
-                            Failure reason
+                            <span x-text="tt('queue.fallback_reason_label')"></span>
                             <input type="text" x-model.trim="form.spec.fallback.failure_reason"
                                 class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                placeholder="All agents busy">
+                                :placeholder="tt('queue.fallback_reason_placeholder')">
                         </label>
                         <label class="md:col-span-2 flex flex-col gap-2 text-sm font-medium text-slate-700">
-                            Failure prompt audio
+                            <span x-text="tt('queue.fallback_prompt_label')"></span>
                             <input type="text" x-model.trim="form.spec.fallback.failure_prompt"
                                 class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                placeholder="storage://prompts/queue-full.wav">
-                            <span class="text-xs font-normal text-slate-400">Optional audio clip to play before hanging
-                                up.</span>
+                                :placeholder="tt('queue.fallback_prompt_placeholder')">
+                            <span class="text-xs font-normal text-slate-400" x-text="tt('queue.fallback_prompt_hint')"></span>
                         </label>
                     </div>
                     <div class="grid gap-4 md:grid-cols-2" x-show="fallbackMode === 'queue'" x-cloak>
                         <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
-                            Queue file path
+                            <span x-text="tt('queue.fallback_queue_label')"></span>
                             <input type="text" x-model.trim="form.spec.fallback.queue_ref"
                                 class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                placeholder="3-support.generated.toml">
-                            <span class="text-xs font-normal text-slate-400">Provide the generated queue TOML file
-                                (relative to
-                                <code class="font-mono">config/queue</code>).</span>
+                                :placeholder="tt('queue.fallback_queue_placeholder')">
+                            <span class="text-xs font-normal text-slate-400" x-text="tt('queue.fallback_queue_hint')"></span>
                         </label>
                     </div>
                 </div>
             </section>
 
             <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                <p class="text-xs text-slate-400">Queue changes apply instantly after saving.</p>
+                <p class="text-xs text-slate-400" x-text="tt('queue.save_hint')"></p>
                 <div class="flex items-center gap-3">
                     <a :href="listUrl"
-                        class="inline-flex items-center justify-center rounded-lg border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-600 transition hover:bg-slate-100">
-                        Cancel
+                        class="inline-flex items-center justify-center rounded-lg border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-600 transition hover:bg-slate-100"
+                        x-text="tt('queue.btn_cancel')">
                     </a>
                     <button type="submit"
                         class="inline-flex items-center justify-center gap-2 rounded-lg bg-sky-600 px-5 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-offset-2"
@@ -334,7 +320,7 @@
                             <path stroke-linecap="round" stroke-linejoin="round"
                                 d="M4 10a6 6 0 0 1 6-6m0-3v3m6 6a6 6 0 0 1-6 6m0 3v-3m9-6h-3M1 10h3m10.95 4.95-2.12-2.12M4.05 5.05l2.12 2.12m0 5.66-2.12 2.12m9.9-9.9 2.12-2.12" />
                         </svg>
-                        <span x-text="mode === 'edit' ? 'Save changes' : 'Create queue'"></span>
+                        <span x-text="mode === 'edit' ? tt('queue.btn_save') : tt('queue.btn_create')"></span>
                     </button>
                 </div>
             </div>
@@ -343,6 +329,7 @@
 </div>
 
 <script>
+    window._queueTranslations = {{ t | json | safe }};
     document.addEventListener('alpine:init', () => {
         Alpine.data('queueDetailPage', (options) => ({
             basePath: options.basePath || '/console',
@@ -351,7 +338,8 @@
             createUrl: options.createUrl || `${options.basePath || '/console'}/queues`,
             updateUrl: options.updateUrl || null,
             listUrl: options.listUrl || `${options.basePath || '/console'}/queues`,
-            pageTitle: options.mode === 'edit' ? 'Edit queue' : 'New queue',
+            t: window._queueTranslations,
+            pageTitle: options.mode === 'edit' ? (window._queueTranslations?.queue?.detail_subtitle_edit || 'Edit queue') : (window._queueTranslations?.queue?.new_queue || 'New queue'),
             activeTab: 'overview',
             form: {
                 name: '',
@@ -387,6 +375,15 @@
             init() {
                 this.applyModel(this.model || {});
             },
+            tt(key) {
+                const parts = key.split('.');
+                let val = this.t;
+                for (const part of parts) {
+                    if (val == null) return key;
+                    val = val[part];
+                }
+                return val != null ? String(val) : key;
+            },
             tabButtonClasses(tab) {
                 return this.activeTab === tab
                     ? 'rounded-lg bg-sky-600 px-4 py-2 text-sm font-semibold text-white shadow-sm'
@@ -409,8 +406,8 @@
                 this.holdEnabled = Boolean(spec.hold && (spec.hold.audio_file || spec.hold.loop_playback === false));
                 this.fallbackMode = this.detectFallbackMode(spec.fallback);
                 this.pageTitle = this.mode === 'edit'
-                    ? (model.name ? `Edit ${model.name}` : 'Edit queue')
-                    : 'New queue';
+                    ? (model.name ? `${tt('queue.detail_subtitle_edit')} — ${model.name}` : tt('queue.detail_subtitle_edit'))
+                    : tt('queue.new_queue');
             },
             normalizeSpec(raw) {
                 const spec = {
@@ -568,16 +565,16 @@
                     });
                     const data = await response.json().catch(() => ({}));
                     if (!response.ok) {
-                        throw new Error(data?.message || 'Failed to save queue');
+                        throw new Error(data?.message || tt('queue.save_failed'));
                     }
-                    this.success = isEdit ? 'Queue updated.' : 'Queue created.';
+                    this.success = isEdit ? tt('queue.queue_updated') : tt('queue.queue_created');
                     if (!isEdit && data?.id) {
                         window.location.href = `${this.basePath}/queues/${data.id}`;
                         return;
                     }
                 } catch (err) {
                     console.error(err);
-                    this.error = err?.message || 'Failed to save queue';
+                    this.error = err?.message || tt('queue.save_failed');
                 } finally {
                     this.saving = false;
                 }

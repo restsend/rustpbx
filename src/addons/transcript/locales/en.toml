@@ -1,0 +1,54 @@
+[transcript]
+# Page titles & headings
+title = "Transcript Settings"
+subtitle = "Addon"
+subtitle_desc = "Configuration for SenseVoice call transcription."
+
+# Configuration form
+section_config = "Configuration"
+section_config_desc = "Configure SenseVoice execution parameters."
+btn_save = "Save Changes"
+btn_saving = "Saving..."
+
+# Fields
+field_command = "Command"
+field_command_hint = "Path to the sensevoice-cli executable."
+field_command_placeholder = "sensevoice-cli"
+field_models_path = "Models Path"
+field_models_path_hint = "Directory containing SenseVoice models."
+field_models_path_placeholder = "/path/to/models"
+field_default_language = "Default Language"
+field_timeout = "Timeout (seconds)"
+field_hf_endpoint = "HuggingFace Endpoint"
+field_hf_endpoint_hint = "Optional mirror for model downloads (e.g., https://hf-mirror.com)."
+field_hf_endpoint_placeholder = "https://hf-mirror.com"
+
+# Language options
+lang_auto = "Auto Detect"
+lang_zh = "Chinese"
+lang_en = "English"
+lang_ja = "Japanese"
+lang_ko = "Korean"
+lang_yue = "Cantonese"
+
+# Model status section
+section_model_status = "Model Status"
+model_available = "Model Available"
+model_missing = "Model Missing"
+model_available_desc = "SenseVoice model is installed and ready."
+model_missing_desc = "Model files not found in the configured path."
+btn_download = "Download Model"
+btn_redownload = "Re-download"
+btn_downloading = "Downloading..."
+
+# Download confirm dialog
+download_confirm_title = "Download Model"
+download_confirm_message = "This will download ~500MB of model files. Continue?"
+download_confirm_label = "Download"
+
+# JS messages
+save_success = "Settings saved successfully."
+save_failed = "Failed to save settings"
+download_starting = "Starting download... this may take a while."
+download_success = "Model downloaded successfully."
+download_failed = "Download failed"

@@ -133,12 +133,11 @@ impl AddonRegistry {
             .collect()
     }
 
-    /// Return locale directories for all enabled addons that provide translations.
-    pub fn get_locale_dirs(&self, state: AppState) -> Vec<(String, String)> {
-        let config = state.config();
+    /// Return locale directories for all addons that provide translations (not just enabled ones).
+    /// This is needed because the admin UI needs to display all addons even if not enabled.
+    pub fn get_locale_dirs(&self, _state: AppState) -> Vec<(String, String)> {
         self.addons
             .iter()
-            .filter(|a| self.is_enabled(a.id(), config))
             .filter_map(|a| a.locales_dir().map(|dir| (a.id().to_string(), dir)))
             .collect()
     }
