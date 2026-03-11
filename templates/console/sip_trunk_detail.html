@@ -14,7 +14,7 @@ default('RustPBX') }}{% endblock %}
         tenants: {{ tenants | default([]) | tojson }},
         createUrl: {{ create_url | default(null) | tojson }},
         updateUrl: {{ update_url | default(null) | tojson }},
-        t: translations
+        t: {{ t | tojson }}
     })' x-init="init()">
     <div class="mx-auto max-w-5xl space-y-6">
         <header class="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
@@ -406,11 +406,7 @@ default('RustPBX') }}{% endblock %}
     </div>
 </div>
 
-<div id="sip-trunk-detail-translations" data-translations="{{ t | tojson | safe }}"></div>
-
 <script>
-    const translationsEl = document.getElementById('sip-trunk-detail-translations');
-    const translations = translationsEl ? JSON.parse(translationsEl.dataset.translations || '{}') : {};
     document.addEventListener('alpine:init', () => {
         Alpine.data('sipTrunkDetailPage', (options) => ({
             basePath: options.basePath || '/console',

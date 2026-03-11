@@ -1,4 +1,7 @@
 [archive]
+# Sidebar
+sidebar_name = "归档"
+
 # 页面标题
 title = "归档"
 subtitle = "插件"

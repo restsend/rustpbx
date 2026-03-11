@@ -10,6 +10,7 @@ mod tests {
         EntryAction, IvrDefinition, IvrFileConfig, MenuEntry, MenuNode,
     };
     use crate::call::app::testing::MockCallStack;
+    use crate::media::Track;
     use crate::proxy::proxy_call::state::SessionAction;
     use std::collections::HashMap;
     use std::time::Duration;
@@ -1375,6 +1376,599 @@ action = { type = "transfer", target = "100" }
                 matches!(c, SessionAction::Hangup { code: Some(503), .. })
             })
             .await;
+    }
+
+    // ── E2E helpers ────────────────────────────────────────────────────────
+
+    /// Create a minimal WAV file with `num_samples` mono 16-bit PCM samples at 8 kHz.
+    /// Returns the path as a String.
+    fn create_e2e_wav(name: &str, num_samples: usize) -> String {
+        let temp_dir = std::env::temp_dir();
+        let path = temp_dir.join(name);
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: 8000,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut writer = hound::WavWriter::create(path.to_str().unwrap(), spec)
+            .expect("WavWriter");
+        for i in 0..num_samples {
+            let sample = ((i as f32 / 8.0).sin() * 1000.0) as i16;
+            writer.write_sample(sample).expect("write_sample");
+        }
+        writer.finalize().expect("finalize");
+        path.to_string_lossy().to_string()
+    }
+
+    /// Start real FileTrack playback for a PlayPrompt command and wire its
+    /// completion back into the MockCallStack event channel.
+    ///
+    /// Returns the FileTrack handle (for later stop/inspection if needed).
+    async fn wire_real_playback(
+        audio_file: &str,
+        stack: &MockCallStack,
+    ) -> crate::media::FileTrack {
+        use crate::media::FileTrack;
+        use audio_codec::CodecType;
+        use crate::call::app::ControllerEvent;
+
+        let track = FileTrack::new("e2e-track".to_string())
+            .with_path(audio_file.to_string())
+            .with_loop(false)
+            .with_codec_preference(vec![CodecType::PCMU]);
+
+        let _ = track.local_description().await;
+        track.start_playback().await.expect("start_playback");
+
+        let tx = stack.event_sender();
+        let t = track.clone();
+        crate::utils::spawn(async move {
+            t.wait_for_completion().await;
+            let _ = tx.send(ControllerEvent::AudioComplete {
+                track_id: "default".to_string(),
+                interrupted: false,
+            });
+        });
+
+        track
+    }
+
+    /// Expect the next command to be PlayPrompt matching `expected_path`, start
+    /// real playback, and return the FileTrack.
+    async fn expect_and_play(
+        stack: &mut MockCallStack,
+        expected_path: &str,
+        label: &str,
+    ) -> crate::media::FileTrack {
+        let cmd = stack
+            .next_cmd(500)
+            .await
+            .unwrap_or_else(|| panic!("timed out waiting for PlayPrompt ({label})"));
+        let audio_file = match &cmd {
+            SessionAction::PlayPrompt { audio_file, .. } => {
+                assert_eq!(audio_file, expected_path, "PlayPrompt path mismatch ({label})");
+                audio_file.clone()
+            }
+            other => panic!("Expected PlayPrompt ({label}), got {other:?}"),
+        };
+        wire_real_playback(&audio_file, stack).await
+    }
+
+    // ── E2E: real FileTrack completion drives IVR AudioComplete ──────────────
+
+    /// End-to-end integration test: a real `FileTrack` playing a real WAV file
+    /// fires `completion_notify` which is bridged to `MockCallStack::audio_complete()`
+    /// — verifying the full pipeline:
+    ///
+    ///   IVR emits PlayPrompt → FileTrack starts playback → WAV exhausted →
+    ///   completion_notify → AudioComplete injected → IVR advances state
+    #[tokio::test]
+    async fn test_ivr_real_file_playback_drives_audio_complete() {
+        use tokio::fs;
+
+        let greeting_path = create_e2e_wav("test_ivr_e2e_greeting.wav", 160);
+
+        let ivr = IvrDefinition {
+            name: "e2e-ivr".to_string(),
+            description: None,
+            lang: None,
+            business_hours: None,
+            root: MenuNode {
+                greeting: greeting_path.clone(),
+                timeout_ms: 2000,
+                max_retries: 1,
+                invalid_prompt: None,
+                timeout_action: Some(EntryAction::Hangup { prompt: None }),
+                max_retries_action: Some(EntryAction::Hangup { prompt: None }),
+                entries: vec![MenuEntry {
+                    key: "1".to_string(),
+                    label: Some("Transfer".to_string()),
+                    action: EntryAction::Transfer { target: "2001".to_string() },
+                }],
+                ..Default::default()
+            },
+            menus: HashMap::new(),
+        };
+
+        let mut stack = MockCallStack::run(Box::new(IvrApp::new(ivr)), "caller", "1000");
+
+        stack
+            .assert_cmd(200, "AcceptCall", |c| matches!(c, SessionAction::AcceptCall { .. }))
+            .await;
+
+        let _track = expect_and_play(&mut stack, &greeting_path, "root greeting").await;
+
+        // Real file completes → IVR enters WaitingDtmf → no command emitted
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(
+            stack.drain_cmds().is_empty(),
+            "IVR should be idle waiting for DTMF after real file completion"
+        );
+
+        stack.dtmf("1");
+        stack.join().await.expect("IVR should exit cleanly after transfer");
+
+        let _ = fs::remove_file(&greeting_path).await;
+    }
+
+    // ── E2E: multi-step flow with real file playback ─────────────────────────
+
+    /// Full multi-step e2e: root greeting (real WAV) → DTMF "2" to sub-menu →
+    /// sub-menu greeting (real WAV) → DTMF "1" → transfer.
+    /// Verifies that multiple consecutive real FileTrack completions drive the
+    /// IVR state machine correctly across menu transitions.
+    #[tokio::test]
+    async fn test_ivr_e2e_submenu_real_playback() {
+        use tokio::fs;
+
+        let root_wav = create_e2e_wav("test_ivr_e2e_root.wav", 160);
+        let sub_wav = create_e2e_wav("test_ivr_e2e_sub.wav", 320);
+
+        let ivr = IvrDefinition {
+            name: "e2e-submenu".to_string(),
+            description: None,
+            lang: None,
+            business_hours: None,
+            root: MenuNode {
+                greeting: root_wav.clone(),
+                timeout_ms: 2000,
+                max_retries: 1,
+                invalid_prompt: None,
+                timeout_action: Some(EntryAction::Hangup { prompt: None }),
+                max_retries_action: Some(EntryAction::Hangup { prompt: None }),
+                entries: vec![MenuEntry {
+                    key: "2".to_string(),
+                    label: Some("Support".to_string()),
+                    action: EntryAction::Menu { menu: "support".to_string() },
+                }],
+                ..Default::default()
+            },
+            menus: {
+                let mut m = HashMap::new();
+                m.insert("support".to_string(), MenuNode {
+                    greeting: sub_wav.clone(),
+                    timeout_ms: 2000,
+                    max_retries: 1,
+                    invalid_prompt: None,
+                    timeout_action: Some(EntryAction::Hangup { prompt: None }),
+                    max_retries_action: Some(EntryAction::Hangup { prompt: None }),
+                    entries: vec![MenuEntry {
+                        key: "1".to_string(),
+                        label: Some("Billing".to_string()),
+                        action: EntryAction::Transfer { target: "3001".to_string() },
+                    }],
+                    ..Default::default()
+                });
+                m
+            },
+        };
+
+        let mut stack = MockCallStack::run(Box::new(IvrApp::new(ivr)), "caller", "1000");
+
+        // Answer
+        stack
+            .assert_cmd(200, "AcceptCall", |c| matches!(c, SessionAction::AcceptCall { .. }))
+            .await;
+
+        // Root greeting plays with real FileTrack
+        let _t1 = expect_and_play(&mut stack, &root_wav, "root greeting").await;
+
+        // Wait for real file completion → IVR enters WaitingDtmf
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // Navigate to support sub-menu
+        stack.dtmf("2");
+
+        // Sub-menu greeting plays with real FileTrack
+        let _t2 = expect_and_play(&mut stack, &sub_wav, "support greeting").await;
+
+        // Wait for real file completion → IVR enters WaitingDtmf in support menu
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // Transfer to billing
+        stack.dtmf("1");
+        stack.join().await.expect("IVR should exit cleanly after billing transfer");
+
+        let _ = fs::remove_file(&root_wav).await;
+        let _ = fs::remove_file(&sub_wav).await;
+    }
+
+    // ── E2E: hangup with goodbye prompt using real files ─────────────────────
+
+    /// Verifies the full chain: greeting (real WAV) → DTMF "0" → goodbye prompt
+    /// (real WAV) → hangup. Both audio completions are driven by real FileTrack
+    /// completion, not simulated.
+    #[tokio::test]
+    async fn test_ivr_e2e_hangup_with_real_goodbye() {
+        use tokio::fs;
+
+        let greeting_wav = create_e2e_wav("test_ivr_e2e_hg_greeting.wav", 160);
+        let goodbye_wav = create_e2e_wav("test_ivr_e2e_hg_goodbye.wav", 160);
+
+        let ivr = IvrDefinition {
+            name: "e2e-hangup".to_string(),
+            description: None,
+            lang: None,
+            business_hours: None,
+            root: MenuNode {
+                greeting: greeting_wav.clone(),
+                timeout_ms: 2000,
+                max_retries: 1,
+                invalid_prompt: None,
+                timeout_action: Some(EntryAction::Hangup { prompt: None }),
+                max_retries_action: Some(EntryAction::Hangup { prompt: None }),
+                entries: vec![MenuEntry {
+                    key: "0".to_string(),
+                    label: Some("Hangup".to_string()),
+                    action: EntryAction::Hangup {
+                        prompt: Some(goodbye_wav.clone()),
+                    },
+                }],
+                ..Default::default()
+            },
+            menus: HashMap::new(),
+        };
+
+        let mut stack = MockCallStack::run(Box::new(IvrApp::new(ivr)), "caller", "1000");
+
+        stack
+            .assert_cmd(200, "AcceptCall", |c| matches!(c, SessionAction::AcceptCall { .. }))
+            .await;
+
+        // Greeting with real FileTrack
+        let _t1 = expect_and_play(&mut stack, &greeting_wav, "greeting").await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // Press "0" → IVR plays goodbye prompt
+        stack.dtmf("0");
+
+        // Goodbye prompt with real FileTrack
+        let _t2 = expect_and_play(&mut stack, &goodbye_wav, "goodbye").await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // After goodbye completes → IVR should hang up
+        stack
+            .assert_cmd(500, "Hangup", |c| matches!(c, SessionAction::Hangup { .. }))
+            .await;
+
+        let _ = fs::remove_file(&greeting_wav).await;
+        let _ = fs::remove_file(&goodbye_wav).await;
+    }
+
+    // ── E2E: invalid key → invalid prompt → replay greeting (all real) ───────
+
+    /// Full invalid-key retry cycle with real file playback:
+    ///   greeting (real) → invalid DTMF "7" → invalid prompt (real) →
+    ///   greeting replayed (real) → valid DTMF "1" → transfer.
+    #[tokio::test]
+    async fn test_ivr_e2e_invalid_key_retry_real_playback() {
+        use tokio::fs;
+
+        let greeting_wav = create_e2e_wav("test_ivr_e2e_inv_greeting.wav", 160);
+        let invalid_wav = create_e2e_wav("test_ivr_e2e_inv_invalid.wav", 160);
+
+        let ivr = IvrDefinition {
+            name: "e2e-invalid".to_string(),
+            description: None,
+            lang: None,
+            business_hours: None,
+            root: MenuNode {
+                greeting: greeting_wav.clone(),
+                timeout_ms: 2000,
+                max_retries: 2,
+                invalid_prompt: Some(invalid_wav.clone()),
+                timeout_action: Some(EntryAction::Repeat),
+                max_retries_action: Some(EntryAction::Hangup { prompt: None }),
+                entries: vec![MenuEntry {
+                    key: "1".to_string(),
+                    label: Some("Sales".to_string()),
+                    action: EntryAction::Transfer { target: "2001".to_string() },
+                }],
+                ..Default::default()
+            },
+            menus: HashMap::new(),
+        };
+
+        let mut stack = MockCallStack::run(Box::new(IvrApp::new(ivr)), "caller", "1000");
+
+        stack
+            .assert_cmd(200, "AcceptCall", |c| matches!(c, SessionAction::AcceptCall { .. }))
+            .await;
+
+        // 1. Root greeting (real)
+        let _t1 = expect_and_play(&mut stack, &greeting_wav, "greeting").await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // 2. Press invalid key "7"
+        stack.dtmf("7");
+
+        // 3. Invalid prompt plays (real)
+        let _t2 = expect_and_play(&mut stack, &invalid_wav, "invalid prompt").await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // 4. After invalid prompt finishes → greeting replays (real)
+        let _t3 = expect_and_play(&mut stack, &greeting_wav, "greeting replay").await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // 5. Press valid key "1" → transfer
+        stack.dtmf("1");
+        stack.join().await.expect("IVR should exit after transfer");
+
+        let _ = fs::remove_file(&greeting_wav).await;
+        let _ = fs::remove_file(&invalid_wav).await;
+    }
+
+    // ── E2E: play announcement returns to menu (all real) ────────────────────
+
+    /// Play action: greeting (real) → DTMF "3" → announcement (real) →
+    /// returns to root → greeting replayed (real) → DTMF "1" → transfer.
+    #[tokio::test]
+    async fn test_ivr_e2e_play_returns_to_menu_real() {
+        use tokio::fs;
+
+        let greeting_wav = create_e2e_wav("test_ivr_e2e_play_greeting.wav", 160);
+        let announce_wav = create_e2e_wav("test_ivr_e2e_play_announce.wav", 320);
+
+        let ivr = IvrDefinition {
+            name: "e2e-play".to_string(),
+            description: None,
+            lang: None,
+            business_hours: None,
+            root: MenuNode {
+                greeting: greeting_wav.clone(),
+                timeout_ms: 2000,
+                max_retries: 1,
+                invalid_prompt: None,
+                timeout_action: Some(EntryAction::Hangup { prompt: None }),
+                max_retries_action: Some(EntryAction::Hangup { prompt: None }),
+                entries: vec![
+                    MenuEntry {
+                        key: "3".to_string(),
+                        label: Some("Info".to_string()),
+                        action: EntryAction::Play { prompt: announce_wav.clone() },
+                    },
+                    MenuEntry {
+                        key: "1".to_string(),
+                        label: Some("Sales".to_string()),
+                        action: EntryAction::Transfer { target: "2001".to_string() },
+                    },
+                ],
+                ..Default::default()
+            },
+            menus: HashMap::new(),
+        };
+
+        let mut stack = MockCallStack::run(Box::new(IvrApp::new(ivr)), "caller", "1000");
+
+        stack
+            .assert_cmd(200, "AcceptCall", |c| matches!(c, SessionAction::AcceptCall { .. }))
+            .await;
+
+        // 1. Root greeting (real)
+        let _t1 = expect_and_play(&mut stack, &greeting_wav, "greeting").await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // 2. Press "3" → play announcement
+        stack.dtmf("3");
+
+        // 3. Announcement plays (real)
+        let _t2 = expect_and_play(&mut stack, &announce_wav, "announcement").await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // 4. Announcement finishes → returns to root → greeting replays (real)
+        let _t3 = expect_and_play(&mut stack, &greeting_wav, "greeting replay").await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // 5. Press "1" → transfer
+        stack.dtmf("1");
+        stack.join().await.expect("IVR should exit after transfer");
+
+        let _ = fs::remove_file(&greeting_wav).await;
+        let _ = fs::remove_file(&announce_wav).await;
+    }
+
+    // ── E2E: DTMF barge-in stops real playback ──────────────────────────────
+
+    /// Verifies that pressing a valid DTMF key while the greeting is still
+    /// playing (barge-in) correctly interrupts playback and executes the action.
+    /// Uses a longer WAV (1 second) so we can press DTMF before it finishes.
+    #[tokio::test]
+    async fn test_ivr_e2e_dtmf_bargein_during_real_playback() {
+        use tokio::fs;
+
+        // 8000 samples = 1 second — long enough that we can press DTMF mid-play
+        let greeting_wav = create_e2e_wav("test_ivr_e2e_bargein.wav", 8000);
+
+        let ivr = IvrDefinition {
+            name: "e2e-bargein".to_string(),
+            description: None,
+            lang: None,
+            business_hours: None,
+            root: MenuNode {
+                greeting: greeting_wav.clone(),
+                timeout_ms: 2000,
+                max_retries: 1,
+                invalid_prompt: None,
+                timeout_action: Some(EntryAction::Hangup { prompt: None }),
+                max_retries_action: Some(EntryAction::Hangup { prompt: None }),
+                entries: vec![MenuEntry {
+                    key: "1".to_string(),
+                    label: Some("Sales".to_string()),
+                    action: EntryAction::Transfer { target: "2001".to_string() },
+                }],
+                ..Default::default()
+            },
+            menus: HashMap::new(),
+        };
+
+        let mut stack = MockCallStack::run(Box::new(IvrApp::new(ivr)), "caller", "1000");
+
+        stack
+            .assert_cmd(200, "AcceptCall", |c| matches!(c, SessionAction::AcceptCall { .. }))
+            .await;
+
+        // Greeting starts — we deliberately DO NOT wire real playback completion
+        // because we want to barge-in before it finishes.
+        stack
+            .assert_cmd(200, "PlayPrompt", |c| {
+                matches!(c, SessionAction::PlayPrompt { audio_file, .. } if audio_file == &greeting_wav)
+            })
+            .await;
+
+        // Barge-in: press "1" while greeting is still "playing"
+        // (IVR is in PlayingGreeting state, DTMF during greeting triggers barge-in)
+        stack.dtmf("1");
+
+        // IVR should execute the transfer without waiting for audio to complete
+        stack.join().await.expect("IVR should exit after barge-in transfer");
+
+        let _ = fs::remove_file(&greeting_wav).await;
+    }
+
+    // ── E2E: timeout after real playback → retry → max retries → hangup ─────
+
+    /// Full timeout cycle with real file playback:
+    ///   greeting (real) → timeout → greeting replayed (real) → timeout →
+    ///   greeting replayed (real) → timeout → max retries → hangup.
+    #[tokio::test]
+    async fn test_ivr_e2e_timeout_max_retries_real() {
+        use tokio::fs;
+
+        let greeting_wav = create_e2e_wav("test_ivr_e2e_timeout.wav", 160);
+
+        let ivr = IvrDefinition {
+            name: "e2e-timeout".to_string(),
+            description: None,
+            lang: None,
+            business_hours: None,
+            root: MenuNode {
+                greeting: greeting_wav.clone(),
+                timeout_ms: 150, // short so test doesn't take long
+                max_retries: 2,
+                invalid_prompt: None,
+                timeout_action: Some(EntryAction::Repeat),
+                max_retries_action: Some(EntryAction::Hangup { prompt: None }),
+                entries: vec![MenuEntry {
+                    key: "1".to_string(),
+                    label: Some("Sales".to_string()),
+                    action: EntryAction::Transfer { target: "2001".to_string() },
+                }],
+                ..Default::default()
+            },
+            menus: HashMap::new(),
+        };
+
+        let mut stack = MockCallStack::run(Box::new(IvrApp::new(ivr)), "caller", "1000");
+
+        stack
+            .assert_cmd(200, "AcceptCall", |c| matches!(c, SessionAction::AcceptCall { .. }))
+            .await;
+
+        // 1. Initial greeting (real)
+        let _t1 = expect_and_play(&mut stack, &greeting_wav, "greeting 1").await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // No DTMF → timeout fires (150ms) → repeat → greeting replays (real)
+        let _t2 = expect_and_play(&mut stack, &greeting_wav, "greeting 2 (retry 1)").await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // No DTMF → timeout again → repeat → greeting replays (real)
+        let _t3 = expect_and_play(&mut stack, &greeting_wav, "greeting 3 (retry 2)").await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // No DTMF → timeout → max retries exceeded → hangup
+        stack
+            .assert_cmd(500, "Hangup-max-retries", |c| {
+                matches!(c, SessionAction::Hangup { .. })
+            })
+            .await;
+
+        let _ = fs::remove_file(&greeting_wav).await;
+    }
+
+    // ── E2E: PlayAndHangup with real file ────────────────────────────────────
+
+    /// PlayAndHangup with SIP code: greeting (real) → DTMF "4" → busy prompt
+    /// (real) → hangup with code 486.
+    #[tokio::test]
+    async fn test_ivr_e2e_play_and_hangup_with_code_real() {
+        use tokio::fs;
+
+        let greeting_wav = create_e2e_wav("test_ivr_e2e_pah_greeting.wav", 160);
+        let busy_wav = create_e2e_wav("test_ivr_e2e_pah_busy.wav", 160);
+
+        let ivr = IvrDefinition {
+            name: "e2e-play-and-hangup".to_string(),
+            description: None,
+            lang: None,
+            business_hours: None,
+            root: MenuNode {
+                greeting: greeting_wav.clone(),
+                timeout_ms: 2000,
+                max_retries: 1,
+                invalid_prompt: None,
+                timeout_action: Some(EntryAction::Hangup { prompt: None }),
+                max_retries_action: Some(EntryAction::Hangup { prompt: None }),
+                entries: vec![MenuEntry {
+                    key: "4".to_string(),
+                    label: Some("Busy".to_string()),
+                    action: EntryAction::PlayAndHangup {
+                        prompt: Some(busy_wav.clone()),
+                        code: Some(486),
+                    },
+                }],
+                ..Default::default()
+            },
+            menus: HashMap::new(),
+        };
+
+        let mut stack = MockCallStack::run(Box::new(IvrApp::new(ivr)), "caller", "1000");
+
+        stack
+            .assert_cmd(200, "AcceptCall", |c| matches!(c, SessionAction::AcceptCall { .. }))
+            .await;
+
+        // Greeting (real)
+        let _t1 = expect_and_play(&mut stack, &greeting_wav, "greeting").await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // Press "4" → PlayAndHangup
+        stack.dtmf("4");
+
+        // Busy prompt (real)
+        let _t2 = expect_and_play(&mut stack, &busy_wav, "busy prompt").await;
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // After busy prompt → hangup with code 486
+        stack
+            .assert_cmd(500, "Hangup-486", |c| {
+                matches!(c, SessionAction::Hangup { code: Some(486), .. })
+            })
+            .await;
+
+        let _ = fs::remove_file(&greeting_wav).await;
+        let _ = fs::remove_file(&busy_wav).await;
     }
 
     #[tokio::test]

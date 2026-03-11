@@ -1,4 +1,7 @@
 [archive]
+# Sidebar
+sidebar_name = "Archive"
+
 # Page titles & headings
 title = "Archive"
 subtitle = "Addon"

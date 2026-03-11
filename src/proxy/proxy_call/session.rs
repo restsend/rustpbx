@@ -507,11 +507,36 @@ impl CallSession {
 
     /// Helper method to create queue hold music track (unified PC approach)
     async fn create_queue_hold_track(&self, audio_file: &str, loop_playback: bool) {
+        // Determine the caller's negotiated codec.
+        let caller_codec = self
+            .caller_offer
+            .as_ref()
+            .map(|offer| MediaNegotiator::extract_codec_params(offer).0)
+            .and_then(|codecs| codecs.first().map(|c| c.codec))
+            .unwrap_or(CodecType::PCMU);
+
         let hold_ssrc = rand::random::<u32>();
         let track = crate::media::FileTrack::new("queue-hold-music".to_string())
             .with_path(audio_file.to_string())
             .with_loop(loop_playback)
-            .with_ssrc(hold_ssrc);
+            .with_ssrc(hold_ssrc)
+            .with_codec_preference(vec![caller_codec]);
+
+        // Get the caller's already-negotiated PeerConnection so RTP frames are
+        // sent through its established transport, not the FileTrack's own PC.
+        let caller_pc = {
+            let tracks = self.caller_peer.get_tracks().await;
+            if let Some(t) = tracks.first() {
+                t.lock().await.get_peer_connection().await
+            } else {
+                None
+            }
+        };
+
+        // Start the real RTP sending loop before handing ownership to the peer.
+        if let Err(e) = track.start_playback_on(caller_pc).await {
+            warn!(audio_file, error = %e, "create_queue_hold_track: start_playback failed");
+        }
 
         self.caller_peer.update_track(Box::new(track), None).await;
     }
@@ -4120,7 +4145,6 @@ impl CallSession {
         _await_completion: bool,
     ) -> Result<()> {
         use crate::call::app::ControllerEvent;
-        use crate::media::audio_source::estimate_audio_duration;
 
         info!(session_id = %self.context.session_id, file = %file_path, "Playing audio file");
 
@@ -4141,35 +4165,66 @@ impl CallSession {
             return Ok(());
         }
 
-        // Attach a FileTrack to the caller-side peer so the audio is actually
-        // sent over RTP.  Any existing "prompt" track is replaced.
+        // Build the FileTrack and start the real RTP sending loop before handing
+        // ownership to the peer.  start_playback() spawns the background task
+        // internally so we can still call it on `track` before boxing it.
+
+        // Determine the caller's negotiated codec so the FileTrack encodes in
+        // the format the caller expects to receive.
+        let caller_codec = self
+            .caller_offer
+            .as_ref()
+            .map(|offer| MediaNegotiator::extract_codec_params(offer).0)
+            .and_then(|codecs| codecs.first().map(|c| c.codec))
+            .unwrap_or(CodecType::PCMU);
+
         let track = crate::media::FileTrack::new("prompt".to_string())
             .with_path(file_path.to_string())
             .with_loop(false)
-            .with_cancel_token(self.cancel_token.child_token());
+            .with_cancel_token(self.cancel_token.child_token())
+            .with_codec_preference(vec![caller_codec]);
 
-        self.caller_peer
-            .update_track(Box::new(track), Some("prompt".to_string()))
-            .await;
+        // Get the caller's already-negotiated PeerConnection so RTP frames are
+        // sent through its established transport (ICE + UDP), not the FileTrack's
+        // own un-negotiated PC.  Same pattern as media_bridge::forward_track().
+        let caller_pc = {
+            let tracks = self.caller_peer.get_tracks().await;
+            if let Some(t) = tracks.first() {
+                t.lock().await.get_peer_connection().await
+            } else {
+                None
+            }
+        };
 
-        // Estimate how long the audio will take.  After that period we fire
-        // AudioComplete so the CallApp can advance to the next state.
-        // The timer can be cut short if the session is cancelled (caller hung up).
-        let duration = estimate_audio_duration(file_path);
-        debug!(
-            session_id = %self.context.session_id,
-            file = %file_path,
-            duration_ms = duration.as_millis(),
-            "Scheduling AudioComplete after estimated playback duration"
-        );
+        // Start playback — this spawns the RTP sending task internally.
+        // We intentionally do this before update_track() so the task is
+        // already running when the track is registered with the peer.
+        if let Err(e) = track.start_playback_on(caller_pc).await {
+            warn!(
+                session_id = %self.context.session_id,
+                file = %file_path,
+                error = %e,
+                "start_playback failed, sending interrupted AudioComplete"
+            );
+            if let Some(ref tx) = self.app_event_tx {
+                let _ = tx.send(ControllerEvent::AudioComplete {
+                    track_id: "default".to_string(),
+                    interrupted: true,
+                });
+            }
+            return Ok(());
+        }
 
+        // Spawn a watcher task: waits for the playback task to complete
+        // (file exhausted or cancelled) then fires AudioComplete.
+        let track_for_wait = track.clone();
         if let Some(event_tx) = self.app_event_tx.clone() {
             let cancel = self.cancel_token.child_token();
             let fp = file_path.to_string();
             crate::utils::spawn(async move {
                 tokio::select! {
-                    _ = tokio::time::sleep(duration) => {
-                        debug!(file = %fp, "Audio playback timer elapsed, sending AudioComplete");
+                    _ = track_for_wait.wait_for_completion() => {
+                        debug!(file = %fp, "FileTrack completed, sending AudioComplete");
                         let _ = event_tx.send(ControllerEvent::AudioComplete {
                             track_id: "default".to_string(),
                             interrupted: false,
@@ -4190,6 +4245,10 @@ impl CallSession {
                 "app_event_tx not set — AudioComplete will not be delivered (IVR may stall)"
             );
         }
+
+        self.caller_peer
+            .update_track(Box::new(track), Some("prompt".to_string()))
+            .await;
 
         Ok(())
     }

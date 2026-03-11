@@ -7,6 +7,9 @@ use std::sync::Arc;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SidebarItem {
     pub name: String,
+    /// i18n key for the sidebar item name (e.g., "queue.sidebar_name")
+    /// If set, the template will use this for translation lookup.
+    pub name_key: Option<String>,
     pub icon: String, // SVG content
     pub url: String,
     pub permission: Option<String>, // Permission required
