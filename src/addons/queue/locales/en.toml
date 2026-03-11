@@ -1,4 +1,7 @@
 [queue]
+# Sidebar
+sidebar_name = "Queues"
+
 # Page titles & headings
 title = "Queues"
 subtitle = "Service queues"

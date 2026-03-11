@@ -1,4 +1,7 @@
 [transcript]
+# Sidebar
+sidebar_name = "Call Transcription"
+
 # Page titles & headings
 title = "Transcript Settings"
 subtitle = "Addon"

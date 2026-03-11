@@ -550,42 +550,157 @@ impl FileTrack {
         Ok(())
     }
 
-    /// Start audio playback task
-    ///
     pub async fn start_playback(&self) -> Result<()> {
+        self.start_playback_on(None).await
+    }
+    pub async fn start_playback_on(&self, target_pc: Option<PeerConnection>) -> Result<()> {
+        use audio_codec::create_encoder;
+        use rustrtc::media::{AudioFrame, MediaSample};
+
         let file_path = self
             .file_path
             .as_ref()
             .ok_or_else(|| anyhow!("No file path set"))?;
 
-        if !std::path::Path::new(file_path).exists() {
+        // Allow remote URLs through — FileAudioSource handles downloading.
+        let is_remote = file_path.starts_with("http://") || file_path.starts_with("https://");
+        if !is_remote && !std::path::Path::new(file_path).exists() {
             return Err(anyhow!("Audio file not found: {}", file_path));
         }
+
+        // Determine the codec we will encode to (first preference wins).
+        let codec = self
+            .codec_preference
+            .first()
+            .copied()
+            .unwrap_or(CodecType::PCMU);
+        let payload_type = codec.payload_type();
+        let samples_per_frame: usize = {
+            // 20 ms at the codec's clock rate.  PCMU/PCMA/G722 → 8 kHz → 160.
+            // Opus → 48 kHz → 960.
+            let clock_rate = codec.clock_rate() as usize;
+            clock_rate * 20 / 1000
+        };
+
+        // Use the caller's negotiated PC when provided, otherwise fall back to
+        // the FileTrack's own (un-negotiated) PC.
+        let has_external_pc = target_pc.is_some();
+        let pc = target_pc.unwrap_or_else(|| self.pc.clone());
 
         debug!(
             file = %file_path,
             loop_playback = self.loop_playback,
-            "FileTrack playback started"
+            ?codec,
+            samples_per_frame,
+            has_external_pc,
+            "FileTrack start_playback_on"
         );
 
+        // Initialise the audio source manager (idempotent if already done).
+        let audio_source_manager = {
+            // We need a &mut self to call init_audio_source, but start_playback
+            // takes &self.  Clone the manager if already initialised, or build
+            // one inline here.
+            if let Some(ref mgr) = self.audio_source_manager {
+                mgr.clone()
+            } else {
+                let target_sample_rate = codec.clock_rate();
+                let mgr = Arc::new(audio_source::AudioSourceManager::new(target_sample_rate));
+                mgr.switch_to_file(file_path.clone(), self.loop_playback)?;
+                mgr
+            }
+        };
+
+        // Create a sample_track pair.  `source_target` is the write end we
+        // push frames into; `track_target` is the MediaStreamTrack we register
+        // with the PeerConnection sender.
+        let (source_target, track_target, _) =
+            rustrtc::media::track::sample_track(rustrtc::media::MediaKind::Audio, 100);
+
+        // Wire track_target into the PC's existing Send transceiver.
+        let transceivers = pc.get_transceivers();
+        let existing = transceivers.iter().find(|t| t.kind() == MediaKind::Audio);
+
+        let ssrc = rand::random::<u32>();
+        let mut params = RtpCodecParameters::default();
+        params.payload_type = payload_type;
+        params.clock_rate = codec.clock_rate();
+        params.channels = codec.channels() as u8;
+
+        if let Some(transceiver) = existing {
+            let track_arc: Arc<dyn rustrtc::media::MediaStreamTrack> = track_target;
+            let new_sender = rustrtc::RtpSender::builder(track_arc, ssrc)
+                .params(params)
+                .build();
+            transceiver.set_sender(Some(new_sender));
+        } else {
+            let _ = pc.add_track(track_target, params);
+        }
+
+        // Clone everything we need to move into the background task.
         let completion_notify = self.completion_notify.clone();
-        let loop_playback = self.loop_playback;
         let cancel_token = self.cancel_token.clone();
+        let loop_playback = self.loop_playback;
 
         crate::utils::spawn(async move {
-            if !loop_playback {
+            let mut encoder = create_encoder(codec);
+            let mut rtp_timestamp: u32 = rand::random();
+            let mut sequence_number: u16 = rand::random();
+            let interval_ms = 20u64;
+            let mut interval =
+                tokio::time::interval(tokio::time::Duration::from_millis(interval_ms));
+
+            loop {
                 tokio::select! {
-                    _ = tokio::time::sleep(tokio::time::Duration::from_millis(100)) => {
-                        debug!("FileTrack playback completed");
-                    }
                     _ = cancel_token.cancelled() => {
                         debug!("FileTrack playback cancelled");
+                        completion_notify.notify_waiters();
+                        break;
+                    }
+                    _ = interval.tick() => {
+                        // Read one frame of PCM samples from the source.
+                        let mut pcm_buf = vec![0i16; samples_per_frame];
+                        let read = audio_source_manager.read_samples(&mut pcm_buf);
+
+                        if read == 0 {
+                            // Source exhausted — completion_notify was already
+                            // triggered by AudioSourceManager::read_samples.
+                            // For non-looping sources we also notify here in case
+                            // the manager chose not to.
+                            if !loop_playback {
+                                debug!("FileTrack playback completed (file exhausted)");
+                                completion_notify.notify_waiters();
+                                break;
+                            }
+                            // Looping sources restart automatically; keep going.
+                            continue;
+                        }
+
+                        // Encode PCM → target codec.
+                        let encoded = encoder.encode(&pcm_buf[..read]);
+
+                        let frame = AudioFrame {
+                            rtp_timestamp,
+                            clock_rate: codec.clock_rate(),
+                            data: encoded.into(),
+                            sequence_number: Some(sequence_number),
+                            payload_type: Some(payload_type),
+                            marker: false,
+                            raw_packet: None,
+                            source_addr: None,
+                        };
+
+                        rtp_timestamp =
+                            rtp_timestamp.wrapping_add(samples_per_frame as u32);
+                        sequence_number = sequence_number.wrapping_add(1);
+
+                        if let Err(e) = source_target.send(MediaSample::Audio(frame)).await {
+                            debug!("FileTrack source_target.send failed (receiver gone): {}", e);
+                            completion_notify.notify_waiters();
+                            break;
+                        }
                     }
                 }
-                completion_notify.notify_waiters();
-            } else {
-                cancel_token.cancelled().await;
-                debug!("FileTrack playback stopped");
             }
         });
 

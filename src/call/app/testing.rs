@@ -157,6 +157,13 @@ impl MockCallStack {
         self
     }
 
+    /// Return a clone of the event sender so callers can inject events
+    /// asynchronously (e.g. from a background task wired to a real FileTrack
+    /// completion_notify).
+    pub fn event_sender(&self) -> tokio::sync::mpsc::UnboundedSender<ControllerEvent> {
+        self.event_tx.clone()
+    }
+
     // ── Command observation ───────────────────────────────────────────────────
 
     /// Wait up to `timeout_ms` milliseconds for the next [`SessionAction`] sent by the app.

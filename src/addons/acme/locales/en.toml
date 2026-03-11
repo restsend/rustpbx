@@ -1,4 +1,7 @@
 [acme]
+# Sidebar
+sidebar_name = "SSL Certificates"
+
 # Page titles & headings
 title = "SSL Certificates"
 subtitle = "Addon"

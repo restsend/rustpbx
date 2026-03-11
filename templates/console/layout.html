@@ -340,11 +340,12 @@
                     {% if addon_sidebar_items %}
                     <div class="my-2 border-t border-slate-100"></div>
                     {% for item in addon_sidebar_items %}
+                    {% set item_display_name = item.name_key | default(value=item.name) | t %}
                     <a href="{{ item.url }}"
                         class="group mt-1 flex items-center gap-3 rounded-lg px-3 py-2 hover:bg-slate-50 transition-all duration-200 {{ 'bg-sky-50 text-sky-700' if nav_active==item.name else 'text-slate-700' }}"
-                        :class="{ 'justify-center gap-0 px-2 py-3': sidebarCollapsed }" title="{{ item.name }}">
+                        :class="{ 'justify-center gap-0 px-2 py-3': sidebarCollapsed }" title="{{ item_display_name }}">
                         {{ item.icon | safe }}
-                        <span x-show="!sidebarCollapsed" x-transition.opacity x-cloak>{{ item.name }}</span>
+                        <span x-show="!sidebarCollapsed" x-transition.opacity x-cloak>{{ item_display_name }}</span>
                     </a>
                     {% endfor %}
                     {% endif %}

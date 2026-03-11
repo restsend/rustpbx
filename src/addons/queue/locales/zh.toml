@@ -1,4 +1,7 @@
 [queue]
+# Sidebar
+sidebar_name = "呼叫队列"
+
 # 页面标题
 title = "呼叫队列"
 subtitle = "服务队列"

@@ -1,4 +1,7 @@
 [acme]
+# Sidebar
+sidebar_name = "SSL 证书"
+
 # 页面标题
 title = "SSL 证书"
 subtitle = "插件"

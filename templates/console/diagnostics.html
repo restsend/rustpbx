@@ -43,7 +43,7 @@
                         <span
                             class="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2.5 py-1 font-semibold text-slate-600">
                             {{ "diagnostics.label_expires" | t }}
-                            <span x-text="connection.expires ? connection.expires + ' s' : '{{ \"diagnostics.label_expires_default\" | t }}'"></span>
+                            <span x-text="connection.expires ? connection.expires + ' s' : '{{ 'diagnostics.label_expires_default' | t }}'"></span>
                         </span>
                     </div>
                 </div>
@@ -81,9 +81,9 @@
                                         </div>
                                         <div class="mt-1 font-mono text-[11px]" x-text="item.address || '—'"></div>
                                         <div class="text-[11px] text-slate-500" x-show="item.example_uri"
-                                            x-text="'{{ \"diagnostics.label_example\" | t }} ' + item.example_uri"></div>
+                                            x-text="'{{ 'diagnostics.label_example' | t }} ' + item.example_uri"></div>
                                         <div class="text-[11px] text-slate-500" x-show="item.path"
-                                            x-text="'{{ \"diagnostics.label_path\" | t }} ' + item.path"></div>
+                                            x-text="'{{ 'diagnostics.label_path' | t }} ' + item.path"></div>
                                     </li>
                                 </template>
                             </ul>
@@ -106,7 +106,7 @@
                                             <span class="font-semibold" x-text="account.username"></span>
                                             <span
                                                 class="rounded-full bg-white px-2 py-0.5 text-[10px] font-semibold text-slate-500"
-                                                x-text="account.source_label || '{{ \"diagnostics.label_account\" | t }}'"></span>
+                                                x-text="account.source_label || '{{ 'diagnostics.label_account' | t }}'"></span>
                                         </div>
                                         <div class="mt-1 font-mono text-[11px]" x-text="account.uri"></div>
                                         <div class="text-[11px] text-slate-500">
@@ -195,7 +195,7 @@
                                 </span>
                                 <span
                                     class="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-semibold text-slate-500"
-                                    x-text="webrtcTest.result.iceSource === 'server' ? '{{ \"diagnostics.server_ice\" | t }}' : '{{ \"diagnostics.fallback_ice\" | t }}'"></span>
+                                    x-text="webrtcTest.result.iceSource === 'server' ? '{{ 'diagnostics.server_ice' | t }}' : '{{ 'diagnostics.fallback_ice' | t }}'"></span>
                             </div>
                             <div class="grid gap-3 sm:grid-cols-2">
                                 <div>
@@ -208,7 +208,7 @@
                                                 </div>
                                                 <template x-if="server.username">
                                                     <div class="text-[10px] text-slate-400"
-                                                        x-text="'{{ \"diagnostics.label_user\" | t }} ' + server.username"></div>
+                                                        x-text="'{{ 'diagnostics.label_user' | t }} ' + server.username"></div>
                                                 </template>
                                                 <template x-if="server.credentialSupplied">
                                                     <div class="text-[10px] text-slate-400">{{ "diagnostics.label_credential_supplied" | t }}</div>
@@ -285,7 +285,7 @@
                                         </div>
                                         <div>{{ "diagnostics.ice_servers_mode" | t }}
                                             <span class="font-mono text-slate-700"
-                                                x-text="webrtcTest.result.diagnostics.usingServerList ? '{{ \"diagnostics.server_list\" | t }}' : '{{ \"diagnostics.fallback_stun\" | t }}'"></span>
+                                                x-text="webrtcTest.result.diagnostics.usingServerList ? '{{ 'diagnostics.server_list' | t }}' : '{{ 'diagnostics.fallback_stun' | t }}'"></span>
                                         </div>
                                     </div>
                                 </div>
@@ -345,7 +345,7 @@
                                 stroke-width="1.6">
                                 <path stroke-linecap="round" stroke-linejoin="round" d="M10 4v12M4 10h12" />
                             </svg>
-                            <span x-text="routingAdvanced ? '{{ \"diagnostics.btn_hide_advanced\" | t }}' : '{{ \"diagnostics.btn_advanced_options\" | t }}'"></span>
+                            <span x-text="routingAdvanced ? '{{ 'diagnostics.btn_hide_advanced' | t }}' : '{{ 'diagnostics.btn_advanced_options' | t }}'"></span>
                         </button>
                     </div>
                 </div>
@@ -569,7 +569,7 @@
                                     x-text="item.sourceIp || '—'"></span></div>
                             <div class="mt-2 inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-semibold"
                                 :class="item.result === 'ok' ? 'bg-emerald-50 text-emerald-600 ring-1 ring-emerald-200' : 'bg-amber-50 text-amber-600 ring-1 ring-amber-200'">
-                                <span x-text="item.result === 'ok' ? '{{ \"diagnostics.label_pass\" | t }}' : '{{ \"diagnostics.label_warning_result\" | t }}'"></span>
+                                <span x-text="item.result === 'ok' ? '{{ 'diagnostics.label_pass' | t }}' : '{{ 'diagnostics.label_warning_result' | t }}'"></span>
                             </div>
                         </div>
                     </template>
@@ -594,7 +594,7 @@
                         <div class="flex items-center gap-2">
                             <input type="text" x-model="dialogCallIdInput" @keydown.enter.prevent="applyDialogFilter"
                                 class="w-48 rounded-lg border border-slate-200 px-3 py-1.5 text-xs text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                placeholder="{{ \"diagnostics.filter_call_id_placeholder\" | t }}">
+                                placeholder="{{ 'diagnostics.filter_call_id_placeholder' | t }}">
                             <button type="button" @click="applyDialogFilter"
                                 :disabled="dialogsLoading || !(dialogCallIdInput && dialogCallIdInput.trim())"
                                 class="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-1.5 text-[11px] font-semibold text-slate-600 transition hover:border-sky-300 hover:text-sky-700 disabled:cursor-not-allowed disabled:opacity-60">
@@ -686,7 +686,7 @@
                                                         <path stroke-linecap="round" stroke-linejoin="round"
                                                             d="M6 8l4 4 4-4" />
                                                     </svg>
-                                                    <span x-text="expand ? '{{ \"diagnostics.btn_hide_sdp\" | t }}' : '{{ \"diagnostics.btn_show_sdp\" | t }}'"></span>
+                                                    <span x-text="expand ? '{{ 'diagnostics.btn_hide_sdp' | t }}' : '{{ 'diagnostics.btn_show_sdp' | t }}'"></span>
                                                 </button>
                                                 <div class="text-[11px] text-slate-400">{{ "diagnostics.label_dialog_id" | t }}</div>
                                                 <div class="max-w-xs break-all font-mono text-[11px] text-slate-500"
@@ -723,7 +723,7 @@
 
                     <template x-if="!dialogsLoading && !dialogsError && !dialogs.length">
                         <div class="rounded-lg border border-dashed border-slate-200 px-4 py-6 text-center text-sm text-slate-400"
-                            x-text="dialogCallId ? '{{ \"diagnostics.no_dialogs_filtered\" | t }}' : '{{ \"diagnostics.no_dialogs\" | t }}'">
+                            x-text="dialogCallId ? '{{ 'diagnostics.no_dialogs_filtered' | t }}' : '{{ 'diagnostics.no_dialogs' | t }}'">
                         </div>
                     </template>
                 </div>
@@ -852,7 +852,7 @@
                                                     <div class="rounded-full px-2 py-0.5 text-[11px] font-semibold"
                                                         :class="record.supports_webrtc ? 'bg-emerald-50 text-emerald-600 ring-1 ring-emerald-200' : 'bg-slate-100 text-slate-600 ring-1 ring-slate-200'">
                                                         <span
-                                                            x-text="record.supports_webrtc ? '{{ \"diagnostics.webrtc_capable\" | t }}' : '{{ \"diagnostics.sip_only\" | t }}'"></span>
+                                                            x-text="record.supports_webrtc ? '{{ 'diagnostics.webrtc_capable' | t }}' : '{{ 'diagnostics.sip_only' | t }}'"></span>
                                                     </div>
                                                     <div class="text-[11px] text-slate-400">
                                                         {{ "diagnostics.expires_in" | t }} <span x-text="record.expires"></span> {{ "diagnostics.expires_s" | t }}

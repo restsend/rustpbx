@@ -1,4 +1,7 @@
 [transcript]
+# Sidebar
+sidebar_name = "通话转录"
+
 # 页面标题
 title = "转录设置"
 subtitle = "插件"
