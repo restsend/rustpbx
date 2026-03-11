@@ -42,4 +42,10 @@ COPY ./src/addons/archive/templates /app/templates/archive
 COPY ./src/addons/queue/templates /app/templates/queue
 COPY ./src/addons/transcript/templates /app/templates/transcript
 
+# Copy addon locales
+COPY ./src/addons/acme/locales /app/locales/acme
+COPY ./src/addons/archive/locales /app/locales/archive
+COPY ./src/addons/queue/locales /app/locales/queue
+COPY ./src/addons/transcript/locales /app/locales/transcript
+
 ENTRYPOINT ["/app/rustpbx"]
