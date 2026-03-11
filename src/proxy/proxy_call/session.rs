@@ -575,17 +575,17 @@ impl CallSession {
         // Add TelephoneEvent if caller supports DTMF
         if callee_dtmf_pt.is_some() {
             if let Some(pt) = caller_dtmf_pt {
-            if !codec_info
-                .iter()
-                .any(|c| c.codec == CodecType::TelephoneEvent)
-            {
-                codec_info.push(CodecInfo {
-                    payload_type: pt,
-                    codec: CodecType::TelephoneEvent,
-                    clock_rate: 8000,
-                    channels: 1,
-                });
-            }
+                if !codec_info
+                    .iter()
+                    .any(|c| c.codec == CodecType::TelephoneEvent)
+                {
+                    codec_info.push(CodecInfo {
+                        payload_type: pt,
+                        codec: CodecType::TelephoneEvent,
+                        clock_rate: 8000,
+                        channels: 1,
+                    });
+                }
             }
         }
 
@@ -4169,27 +4169,45 @@ impl CallSession {
         // ownership to the peer.  start_playback() spawns the background task
         // internally so we can still call it on `track` before boxing it.
 
-        // Determine the caller's negotiated codec so the FileTrack encodes in
-        // the format the caller expects to receive.
-        let caller_codec = self
-            .caller_offer
+        // Prefer the active caller-leg track codec so prompt playback matches
+        // the already-established media path. Fall back to the caller offer.
+        let caller_tracks = self.caller_peer.get_tracks().await;
+        let mut caller_codec_info = None;
+        for track in &caller_tracks {
+            let guard = track.lock().await;
+            if guard.id() == "prompt" {
+                continue;
+            }
+            caller_codec_info = guard.preferred_codec_info();
+            if caller_codec_info.is_some() {
+                break;
+            }
+        }
+        let caller_codec_info = caller_codec_info.or_else(|| {
+            self.caller_offer
+                .as_ref()
+                .map(|offer| MediaNegotiator::extract_codec_params(offer).0)
+                .and_then(|codecs| codecs.first().cloned())
+        });
+        let caller_codec = caller_codec_info
             .as_ref()
-            .map(|offer| MediaNegotiator::extract_codec_params(offer).0)
-            .and_then(|codecs| codecs.first().map(|c| c.codec))
+            .map(|info| info.codec)
             .unwrap_or(CodecType::PCMU);
 
-        let track = crate::media::FileTrack::new("prompt".to_string())
+        let mut track = crate::media::FileTrack::new("prompt".to_string())
             .with_path(file_path.to_string())
             .with_loop(false)
             .with_cancel_token(self.cancel_token.child_token())
             .with_codec_preference(vec![caller_codec]);
+        if let Some(info) = caller_codec_info {
+            track = track.with_codec_info(info);
+        }
 
         // Get the caller's already-negotiated PeerConnection so RTP frames are
         // sent through its established transport (ICE + UDP), not the FileTrack's
         // own un-negotiated PC.  Same pattern as media_bridge::forward_track().
         let caller_pc = {
-            let tracks = self.caller_peer.get_tracks().await;
-            if let Some(t) = tracks.first() {
+            if let Some(t) = caller_tracks.first() {
                 t.lock().await.get_peer_connection().await
             } else {
                 None
@@ -4870,16 +4888,14 @@ mod codec_negotiation_tests {
             (96, (CodecType::Opus, 48000, 2)),
             (0, (CodecType::PCMU, 8000, 1)),
         ];
-        let allow_codecs = vec![
-            CodecType::PCMU,
-            CodecType::Opus,
-            CodecType::TelephoneEvent,
-        ];
+        let allow_codecs = vec![CodecType::PCMU, CodecType::Opus, CodecType::TelephoneEvent];
 
         let merged = build_callee_offer_codec_info_for_test(&caller_rtp_map, &allow_codecs);
 
         assert!(
-            !merged.iter().any(|codec| codec.codec == CodecType::TelephoneEvent),
+            !merged
+                .iter()
+                .any(|codec| codec.codec == CodecType::TelephoneEvent),
             "callee offer should not append TelephoneEvent from allow_codecs"
         );
     }

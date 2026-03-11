@@ -50,6 +50,9 @@ pub trait Track: Send + Sync {
     fn set_codec_preference(&mut self, _codecs: Vec<CodecType>) {
         // Optional: override to set codec preference
     }
+    fn preferred_codec_info(&self) -> Option<negotiate::CodecInfo> {
+        None
+    }
 
     /// Allow downcasting to concrete types for dynamic audio source switching
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
@@ -308,6 +311,10 @@ impl Track for RtcTrack {
     async fn get_peer_connection(&self) -> Option<PeerConnection> {
         Some(self.pc.clone())
     }
+
+    fn preferred_codec_info(&self) -> Option<negotiate::CodecInfo> {
+        self.rtp_map.first().cloned()
+    }
 }
 
 pub mod recorder;
@@ -433,6 +440,7 @@ pub struct FileTrack {
     pc: PeerConnection,
     completion_notify: Arc<tokio::sync::Notify>,
     codec_preference: Vec<CodecType>,
+    codec_info: Option<negotiate::CodecInfo>,
     mode: TransportMode,
     rtp_start_port: Option<u16>,
     rtp_end_port: Option<u16>,
@@ -458,6 +466,7 @@ impl FileTrack {
             pc,
             completion_notify: Arc::new(tokio::sync::Notify::new()),
             codec_preference: vec![CodecType::PCMU, CodecType::PCMA],
+            codec_info: None,
             mode: TransportMode::Rtp,
             rtp_start_port: None,
             rtp_end_port: None,
@@ -483,6 +492,11 @@ impl FileTrack {
 
     pub fn with_codec_preference(mut self, codecs: Vec<CodecType>) -> Self {
         self.codec_preference = codecs;
+        self
+    }
+
+    pub fn with_codec_info(mut self, info: negotiate::CodecInfo) -> Self {
+        self.codec_info = Some(info);
         self
     }
 
@@ -568,17 +582,26 @@ impl FileTrack {
             return Err(anyhow!("Audio file not found: {}", file_path));
         }
 
-        // Determine the codec we will encode to (first preference wins).
-        let codec = self
-            .codec_preference
-            .first()
-            .copied()
-            .unwrap_or(CodecType::PCMU);
-        let payload_type = codec.payload_type();
+        // Determine the codec/payload type we will encode to.
+        let selected = self.codec_info.clone().unwrap_or_else(|| {
+            let codec = self
+                .codec_preference
+                .first()
+                .copied()
+                .unwrap_or(CodecType::PCMU);
+            negotiate::CodecInfo {
+                payload_type: codec.payload_type(),
+                codec,
+                clock_rate: codec.clock_rate(),
+                channels: codec.channels() as u16,
+            }
+        });
+        let codec = selected.codec;
+        let payload_type = selected.payload_type;
         let samples_per_frame: usize = {
             // 20 ms at the codec's clock rate.  PCMU/PCMA/G722 → 8 kHz → 160.
             // Opus → 48 kHz → 960.
-            let clock_rate = codec.clock_rate() as usize;
+            let clock_rate = selected.clock_rate as usize;
             clock_rate * 20 / 1000
         };
 
@@ -604,7 +627,7 @@ impl FileTrack {
             if let Some(ref mgr) = self.audio_source_manager {
                 mgr.clone()
             } else {
-                let target_sample_rate = codec.clock_rate();
+                let target_sample_rate = selected.clock_rate;
                 let mgr = Arc::new(audio_source::AudioSourceManager::new(target_sample_rate));
                 mgr.switch_to_file(file_path.clone(), self.loop_playback)?;
                 mgr
@@ -624,8 +647,8 @@ impl FileTrack {
         let ssrc = rand::random::<u32>();
         let mut params = RtpCodecParameters::default();
         params.payload_type = payload_type;
-        params.clock_rate = codec.clock_rate();
-        params.channels = codec.channels() as u8;
+        params.clock_rate = selected.clock_rate;
+        params.channels = selected.channels as u8;
 
         if let Some(transceiver) = existing {
             let track_arc: Arc<dyn rustrtc::media::MediaStreamTrack> = track_target;
@@ -681,7 +704,7 @@ impl FileTrack {
 
                         let frame = AudioFrame {
                             rtp_timestamp,
-                            clock_rate: codec.clock_rate(),
+                            clock_rate: selected.clock_rate,
                             data: encoded.into(),
                             sequence_number: Some(sequence_number),
                             payload_type: Some(payload_type),
