@@ -138,6 +138,7 @@ impl Recorder {
         leg: Leg,
         sample: &MediaSample,
         dtmf_pt: Option<u8>,
+        dtmf_clock_rate: Option<u32>,
         codec_hint: Option<CodecType>,
     ) -> Result<()> {
         let frame = match sample {
@@ -147,7 +148,12 @@ impl Recorder {
 
         if let (Some(pt), Some(dpt)) = (frame.payload_type, dtmf_pt) {
             if pt == dpt {
-                return self.write_dtmf_payload(leg, &frame.data, frame.rtp_timestamp);
+                return self.write_dtmf_payload(
+                    leg,
+                    &frame.data,
+                    frame.rtp_timestamp,
+                    dtmf_clock_rate.unwrap_or(self.sample_rate),
+                );
             }
         }
 
@@ -237,7 +243,13 @@ impl Recorder {
         Ok(())
     }
 
-    pub fn write_dtmf_payload(&mut self, leg: Leg, payload: &[u8], timestamp: u32) -> Result<()> {
+    pub fn write_dtmf_payload(
+        &mut self,
+        leg: Leg,
+        payload: &[u8],
+        timestamp: u32,
+        clock_rate: u32,
+    ) -> Result<()> {
         if payload.len() < 4 {
             return Ok(());
         }
@@ -253,9 +265,9 @@ impl Recorder {
         let end_bit = (payload[1] & 0x80) != 0;
         if end_bit {
             let duration = u16::from_be_bytes([payload[2], payload[3]]);
-            let duration_ms = (duration as u32 * 1000) / self.sample_rate;
+            let duration_ms = (duration as u32 * 1000) / clock_rate.max(1);
             debug!(leg = ?leg, digit = %digit, duration_ms = %duration_ms, "Recording DTMF digit");
-            self.write_dtmf(leg, digit, duration_ms, Some(timestamp))
+            self.write_dtmf(leg, digit, duration_ms, Some(timestamp), Some(clock_rate))
         } else {
             Ok(())
         }
@@ -267,6 +279,7 @@ impl Recorder {
         digit: char,
         duration_ms: u32,
         timestamp: Option<u32>,
+        timestamp_clock_rate: Option<u32>,
     ) -> Result<()> {
         let pcm = self.dtmf_gen.generate(digit, duration_ms);
         debug!(
@@ -279,6 +292,7 @@ impl Recorder {
 
         // Determine absolute timestamp
         let ts = if let Some(t) = timestamp {
+            let timestamp_clock_rate = timestamp_clock_rate.unwrap_or(self.sample_rate).max(1);
             match leg {
                 Leg::A => {
                     if self.base_timestamp_a.is_none() {
@@ -288,7 +302,10 @@ impl Recorder {
                             / 1000) as u32;
                     }
                     let relative = t.wrapping_sub(self.base_timestamp_a.unwrap());
-                    self.start_offset_a.wrapping_add(relative)
+                    let scaled_relative =
+                        (relative as u64 * self.sample_rate as u64 / timestamp_clock_rate as u64)
+                            as u32;
+                    self.start_offset_a.wrapping_add(scaled_relative)
                 }
                 Leg::B => {
                     if self.base_timestamp_b.is_none() {
@@ -298,7 +315,10 @@ impl Recorder {
                             / 1000) as u32;
                     }
                     let relative = t.wrapping_sub(self.base_timestamp_b.unwrap());
-                    self.start_offset_b.wrapping_add(relative)
+                    let scaled_relative =
+                        (relative as u64 * self.sample_rate as u64 / timestamp_clock_rate as u64)
+                            as u32;
+                    self.start_offset_b.wrapping_add(scaled_relative)
                 }
             }
         } else {
