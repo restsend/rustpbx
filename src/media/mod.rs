@@ -38,6 +38,24 @@ pub fn get_timestamp() -> u64 {
         .as_millis() as u64
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AudioFrameTiming {
+    pcm_sample_rate: u32,
+    pcm_samples_per_frame: usize,
+    rtp_ticks_per_frame: u32,
+}
+
+fn audio_frame_timing(codec: CodecType, rtp_clock_rate: u32) -> AudioFrameTiming {
+    let frame_ms = 20u32;
+    let pcm_sample_rate = codec.samplerate();
+
+    AudioFrameTiming {
+        pcm_sample_rate,
+        pcm_samples_per_frame: (pcm_sample_rate * frame_ms / 1000) as usize,
+        rtp_ticks_per_frame: rtp_clock_rate * frame_ms / 1000,
+    }
+}
+
 #[async_trait]
 pub trait Track: Send + Sync {
     fn id(&self) -> &str;
@@ -547,9 +565,14 @@ impl FileTrack {
         }
 
         let target_sample_rate = self
-            .codec_preference
-            .first()
-            .map(|c| c.clock_rate())
+            .codec_info
+            .as_ref()
+            .map(|info| info.codec.samplerate())
+            .or_else(|| {
+                self.codec_preference
+                    .first()
+                    .map(|codec| codec.samplerate())
+            })
             .unwrap_or(8000);
 
         let manager = Arc::new(audio_source::AudioSourceManager::new(target_sample_rate));
@@ -598,12 +621,8 @@ impl FileTrack {
         });
         let codec = selected.codec;
         let payload_type = selected.payload_type;
-        let samples_per_frame: usize = {
-            // 20 ms at the codec's clock rate.  PCMU/PCMA/G722 → 8 kHz → 160.
-            // Opus → 48 kHz → 960.
-            let clock_rate = selected.clock_rate as usize;
-            clock_rate * 20 / 1000
-        };
+        let frame_timing = audio_frame_timing(codec, selected.clock_rate);
+        let samples_per_frame = frame_timing.pcm_samples_per_frame;
 
         // Use the caller's negotiated PC when provided, otherwise fall back to
         // the FileTrack's own (un-negotiated) PC.
@@ -615,6 +634,8 @@ impl FileTrack {
             loop_playback = self.loop_playback,
             ?codec,
             samples_per_frame,
+            pcm_sample_rate = frame_timing.pcm_sample_rate,
+            rtp_ticks_per_frame = frame_timing.rtp_ticks_per_frame,
             has_external_pc,
             "FileTrack start_playback_on"
         );
@@ -627,8 +648,9 @@ impl FileTrack {
             if let Some(ref mgr) = self.audio_source_manager {
                 mgr.clone()
             } else {
-                let target_sample_rate = selected.clock_rate;
-                let mgr = Arc::new(audio_source::AudioSourceManager::new(target_sample_rate));
+                let mgr = Arc::new(audio_source::AudioSourceManager::new(
+                    frame_timing.pcm_sample_rate,
+                ));
                 mgr.switch_to_file(file_path.clone(), self.loop_playback)?;
                 mgr
             }
@@ -714,7 +736,7 @@ impl FileTrack {
                         };
 
                         rtp_timestamp =
-                            rtp_timestamp.wrapping_add(samples_per_frame as u32);
+                            rtp_timestamp.wrapping_add(frame_timing.rtp_ticks_per_frame);
                         sequence_number = sequence_number.wrapping_add(1);
 
                         if let Err(e) = source_target.send(MediaSample::Audio(frame)).await {
