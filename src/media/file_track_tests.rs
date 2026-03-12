@@ -93,6 +93,24 @@ async fn test_file_track_opus_codec_sdp() {
     );
 }
 
+#[test]
+fn test_audio_frame_timing_g722_splits_pcm_rate_from_rtp_clock() {
+    let timing = audio_frame_timing(CodecType::G722, 8000);
+
+    assert_eq!(
+        timing.pcm_sample_rate, 16000,
+        "G722 audio processing should use 16 kHz PCM"
+    );
+    assert_eq!(
+        timing.pcm_samples_per_frame, 320,
+        "20 ms of 16 kHz PCM should read 320 samples"
+    );
+    assert_eq!(
+        timing.rtp_ticks_per_frame, 160,
+        "20 ms of G722 RTP should advance timestamps by 160 ticks at 8 kHz"
+    );
+}
+
 #[tokio::test]
 async fn test_file_track_multiple_codecs() {
     let track = FileTrack::new("test-multi".to_string())

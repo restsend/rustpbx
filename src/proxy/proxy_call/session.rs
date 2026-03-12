@@ -299,6 +299,27 @@ impl CallSession {
         }
     }
 
+    fn explicit_audio_default_selection() -> (CodecType, rustrtc::RtpCodecParameters, Option<u8>) {
+        (
+            CodecType::PCMU,
+            rustrtc::RtpCodecParameters {
+                payload_type: CodecType::PCMU.payload_type(),
+                clock_rate: CodecType::PCMU.clock_rate(),
+                channels: CodecType::PCMU.channels() as u8,
+            },
+            None,
+        )
+    }
+
+    fn select_best_audio_from_sdp(
+        &self,
+        sdp: &str,
+    ) -> Option<(CodecType, rustrtc::RtpCodecParameters, Option<u8>)> {
+        let (codecs, dtmf) = MediaNegotiator::extract_codec_params(sdp);
+        MediaNegotiator::select_best_codec(&codecs, &self.context.dialplan.allow_codecs)
+            .map(|codec| (codec.codec, codec.to_params(), dtmf))
+    }
+
     fn get_retry_codes(&self) -> Option<&Vec<u16>> {
         match &self.context.dialplan.flow {
             crate::call::DialplanFlow::Queue { plan, .. } => plan.retry_codes.as_ref(),
@@ -1258,21 +1279,20 @@ impl CallSession {
                         answer = answer_for_caller;
 
                         if self.media_bridge.is_none() {
-                            let default_codec = (
-                                CodecType::PCMU,
-                                rustrtc::RtpCodecParameters::default(),
-                                None,
-                            );
-                            let (codec_b, params_b, dtmf_pt_b) = {
-                                let (codecs, dtmf) =
-                                    MediaNegotiator::extract_codec_params(&callee_early_sdp);
-                                MediaNegotiator::select_best_codec(
-                                    &codecs,
-                                    &self.context.dialplan.allow_codecs,
-                                )
-                                .map(|c| (c.codec, c.to_params(), dtmf))
-                                .unwrap_or(default_codec.clone())
-                            };
+                            let default_codec = Self::explicit_audio_default_selection();
+                            let (codec_b, params_b, dtmf_pt_b) = self
+                                .select_best_audio_from_sdp(&callee_early_sdp)
+                                .or_else(|| {
+                                    self.answer
+                                        .as_deref()
+                                        .and_then(|s| self.select_best_audio_from_sdp(s))
+                                })
+                                .or_else(|| {
+                                    self.caller_offer
+                                        .as_deref()
+                                        .and_then(|s| self.select_best_audio_from_sdp(s))
+                                })
+                                .unwrap_or(default_codec.clone());
                             let from_answer = self.answer.as_ref().and_then(|s| {
                                 let (codecs, dtmf) = MediaNegotiator::extract_codec_params(s);
                                 codecs
@@ -1302,7 +1322,7 @@ impl CallSession {
                                     .map(|chosen| (chosen.codec, chosen.to_params(), dtmf))
                             });
                             let (codec_a, params_a, dtmf_pt_a) =
-                                from_answer.or(from_offer).unwrap_or(default_codec);
+                                from_answer.or(from_offer).unwrap_or(default_codec.clone());
 
                             let ssrc_a = self
                                 .answer
@@ -1313,7 +1333,9 @@ impl CallSession {
                             info!(
                                 session_id = %self.context.session_id,
                                 ?codec_a,
+                                ?params_a,
                                 ?codec_b,
+                                ?params_b,
                                 ssrc_a,
                                 ssrc_b,
                                 "Creating media bridge during early media (183)"
@@ -1610,21 +1632,19 @@ impl CallSession {
             let track_id = Self::CALLEE_TRACK_ID.to_string();
 
             if self.media_bridge.is_none() {
-                let default_codec = (
-                    CodecType::PCMU,
-                    rustrtc::RtpCodecParameters::default(),
-                    None,
-                );
+                let default_codec = Self::explicit_audio_default_selection();
                 let (codec_b, params_b, dtmf_pt_b) = callee_answer
-                    .as_ref()
-                    .map(|s| {
-                        let (codecs, dtmf) = MediaNegotiator::extract_codec_params(s);
-                        MediaNegotiator::select_best_codec(
-                            &codecs,
-                            &self.context.dialplan.allow_codecs,
-                        )
-                        .map(|c| (c.codec, c.to_params(), dtmf))
-                        .unwrap_or(default_codec.clone())
+                    .as_deref()
+                    .and_then(|s| self.select_best_audio_from_sdp(s))
+                    .or_else(|| {
+                        self.answer
+                            .as_deref()
+                            .and_then(|s| self.select_best_audio_from_sdp(s))
+                    })
+                    .or_else(|| {
+                        self.caller_offer
+                            .as_deref()
+                            .and_then(|s| self.select_best_audio_from_sdp(s))
                     })
                     .unwrap_or(default_codec.clone());
                 let from_offer = self.caller_offer.as_ref().and_then(|offer| {
@@ -1669,7 +1689,9 @@ impl CallSession {
 
                 debug!(
                     ?codec_a,
+                    ?params_a,
                     ?codec_b,
+                    ?params_b,
                     ssrc_a,
                     ssrc_b,
                     "Media bridge for call session"
