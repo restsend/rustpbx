@@ -1,4 +1,6 @@
+use crate::media::negotiate::CodecInfo;
 use crate::media::recorder::{Leg, Recorder, RecorderOption};
+use crate::media::transcoder::RtpTiming;
 use crate::proxy::proxy_call::media_peer::MediaPeer;
 use crate::sipflow::{SipFlowBackend, SipFlowItem, SipFlowMsgType};
 use anyhow::Result;
@@ -17,8 +19,8 @@ pub struct MediaBridge {
     pub params_b: rustrtc::RtpCodecParameters,
     pub codec_a: CodecType,
     pub codec_b: CodecType,
-    pub dtmf_pt_a: Option<u8>,
-    pub dtmf_pt_b: Option<u8>,
+    pub dtmf_codecs_a: Vec<CodecInfo>,
+    pub dtmf_codecs_b: Vec<CodecInfo>,
     pub ssrc_a: Option<u32>,
     pub ssrc_b: Option<u32>,
     started: AtomicBool,
@@ -28,13 +30,57 @@ pub struct MediaBridge {
 }
 
 impl MediaBridge {
+    fn rewrite_dtmf_duration(
+        frame: &mut rustrtc::media::AudioFrame,
+        source_clock_rate: u32,
+        target_clock_rate: u32,
+    ) {
+        if frame.data.len() < 4 || source_clock_rate == target_clock_rate {
+            return;
+        }
+
+        let mut payload = frame.data.to_vec();
+        let duration = u16::from_be_bytes([payload[2], payload[3]]);
+        let scaled = ((duration as u64 * target_clock_rate as u64) / source_clock_rate as u64)
+            .min(u16::MAX as u64) as u16;
+        payload[2..4].copy_from_slice(&scaled.to_be_bytes());
+        frame.data = bytes::Bytes::from(payload);
+    }
+
+    fn source_dtmf_codec(source_dtmf_codecs: &[CodecInfo], payload_type: u8) -> Option<&CodecInfo> {
+        source_dtmf_codecs
+            .iter()
+            .find(|codec| codec.payload_type == payload_type)
+    }
+
+    fn select_target_dtmf_codec<'a>(
+        target_dtmf_codecs: &'a [CodecInfo],
+        source_dtmf: &CodecInfo,
+        target_audio_clock_rate: u32,
+    ) -> Option<&'a CodecInfo> {
+        target_dtmf_codecs
+            .iter()
+            .find(|codec| codec.clock_rate == source_dtmf.clock_rate)
+            .or_else(|| {
+                target_dtmf_codecs
+                    .iter()
+                    .find(|codec| codec.clock_rate == target_audio_clock_rate)
+            })
+            .or_else(|| {
+                target_dtmf_codecs
+                    .iter()
+                    .find(|codec| codec.clock_rate == 8000)
+            })
+            .or_else(|| target_dtmf_codecs.first())
+    }
+
     pub fn new(
         leg_a: Arc<dyn MediaPeer>,
         leg_b: Arc<dyn MediaPeer>,
         params_a: rustrtc::RtpCodecParameters,
         params_b: rustrtc::RtpCodecParameters,
-        dtmf_pt_a: Option<u8>,
-        dtmf_pt_b: Option<u8>,
+        dtmf_codecs_a: Vec<CodecInfo>,
+        dtmf_codecs_b: Vec<CodecInfo>,
         codec_a: CodecType,
         codec_b: CodecType,
         ssrc_a: Option<u32>,
@@ -62,8 +108,8 @@ impl MediaBridge {
             params_b,
             codec_a,
             codec_b,
-            dtmf_pt_a,
-            dtmf_pt_b,
+            dtmf_codecs_a,
+            dtmf_codecs_b,
             ssrc_a,
             ssrc_b,
             started: AtomicBool::new(false),
@@ -105,8 +151,8 @@ impl MediaBridge {
             let params_b = self.params_b.clone();
             let codec_a = self.codec_a;
             let codec_b = self.codec_b;
-            let dtmf_pt_a = self.dtmf_pt_a;
-            let dtmf_pt_b = self.dtmf_pt_b;
+            let dtmf_codecs_a = self.dtmf_codecs_a.clone();
+            let dtmf_codecs_b = self.dtmf_codecs_b.clone();
             let ssrc_a = self.ssrc_a;
             let ssrc_b = self.ssrc_b;
             let recorder = self.recorder.clone();
@@ -128,8 +174,8 @@ impl MediaBridge {
                         params_b,
                         codec_a,
                         codec_b,
-                        dtmf_pt_a,
-                        dtmf_pt_b,
+                        dtmf_codecs_a,
+                        dtmf_codecs_b,
                         ssrc_a,
                         ssrc_b,
                         recorder,
@@ -151,8 +197,8 @@ impl MediaBridge {
         params_b: rustrtc::RtpCodecParameters,
         codec_a: CodecType,
         codec_b: CodecType,
-        dtmf_pt_a: Option<u8>,
-        dtmf_pt_b: Option<u8>,
+        dtmf_codecs_a: Vec<CodecInfo>,
+        dtmf_codecs_b: Vec<CodecInfo>,
         ssrc_a: Option<u32>,
         ssrc_b: Option<u32>,
         recorder: Arc<Mutex<Option<Recorder>>>,
@@ -175,8 +221,8 @@ impl MediaBridge {
              source_codec: CodecType,
              target_codec: CodecType,
              leg_enum: Leg,
-             source_dtmf_pt: Option<u8>,
-             target_dtmf_pt: Option<u8>,
+             source_dtmf_codecs: Vec<CodecInfo>,
+             target_dtmf_codecs: Vec<CodecInfo>,
              rec: Arc<Mutex<Option<Recorder>>>,
              cid: String,
              backend: Option<Arc<dyn SipFlowBackend>>,
@@ -197,8 +243,8 @@ impl MediaBridge {
                         source_codec,
                         target_codec,
                         leg_enum,
-                        source_dtmf_pt,
-                        target_dtmf_pt,
+                        source_dtmf_codecs,
+                        target_dtmf_codecs,
                         None,
                         rec,
                         cid,
@@ -239,8 +285,8 @@ impl MediaBridge {
                     codec_a,
                     codec_b,
                     Leg::A,
-                    dtmf_pt_a,
-                    dtmf_pt_b,
+                    dtmf_codecs_a.clone(),
+                    dtmf_codecs_b.clone(),
                     recorder.clone(),
                     call_id.clone(),
                     sipflow_backend.clone(),
@@ -269,8 +315,8 @@ impl MediaBridge {
                     codec_b,
                     codec_a,
                     Leg::B,
-                    dtmf_pt_b,
-                    dtmf_pt_a,
+                    dtmf_codecs_b.clone(),
+                    dtmf_codecs_a.clone(),
                     recorder.clone(),
                     call_id.clone(),
                     sipflow_backend.clone(),
@@ -304,8 +350,8 @@ impl MediaBridge {
                                         codec_a,
                                         codec_b,
                                         Leg::A,
-                                        dtmf_pt_a,
-                                        dtmf_pt_b,
+                                        dtmf_codecs_a.clone(),
+                                        dtmf_codecs_b.clone(),
                                         recorder.clone(),
                                         call_id.clone(),
                                         sipflow_backend.clone(),
@@ -345,8 +391,8 @@ impl MediaBridge {
                                         codec_b,
                                         codec_a,
                                         Leg::B,
-                                        dtmf_pt_b,
-                                        dtmf_pt_a,
+                                        dtmf_codecs_b.clone(),
+                                        dtmf_codecs_a.clone(),
                                         recorder.clone(),
                                         call_id.clone(),
                                         sipflow_backend.clone(),
@@ -381,8 +427,8 @@ impl MediaBridge {
         source_codec: CodecType,
         target_codec: CodecType,
         leg: Leg,
-        source_dtmf_pt: Option<u8>,
-        target_dtmf_pt: Option<u8>,
+        source_dtmf_codecs: Vec<CodecInfo>,
+        target_dtmf_codecs: Vec<CodecInfo>,
         target_ssrc: Option<u32>,
         recorder: Arc<Mutex<Option<Recorder>>>,
         call_id: String,
@@ -398,8 +444,8 @@ impl MediaBridge {
             source_codec,
             target_codec,
             needs_transcoding,
-            source_dtmf_pt,
-            target_dtmf_pt
+            source_dtmf_codecs,
+            target_dtmf_codecs
         );
         let (source_target, track_target, _) =
             rustrtc::media::track::sample_track(MediaKind::Audio, 100);
@@ -475,6 +521,7 @@ impl MediaBridge {
         } else {
             None
         };
+        let mut outbound_timing = RtpTiming::default();
 
         let mut last_seq: Option<u16> = None;
         let mut packet_count: u64 = 0;
@@ -489,8 +536,6 @@ impl MediaBridge {
             if source_peer.is_suppressed(&track_id) {
                 continue;
             }
-
-            let mut is_dtmf = false;
 
             packets_since_last_stat += 1;
             if let MediaSample::Audio(ref f) = sample {
@@ -518,6 +563,14 @@ impl MediaBridge {
 
             if let MediaSample::Audio(ref mut frame) = sample {
                 packet_count += 1;
+                let mut drop_dtmf_for_target = false;
+                let mut rewrite_source_clock_rate = source_codec.clock_rate();
+                let mut rewrite_target_clock_rate = target_params.clock_rate;
+                let mut rewrite_target_payload_type = target_pt;
+                let source_dtmf = frame
+                    .payload_type
+                    .and_then(|pt| Self::source_dtmf_codec(&source_dtmf_codecs, pt))
+                    .cloned();
                 if packet_count % 250 == 1 {
                     // 5 seconds at 50pps
                     debug!(
@@ -567,42 +620,67 @@ impl MediaBridge {
                     }
                 }
 
-                // Rewrite payload type to match target's expected PT
-                if let Some(pt) = frame.payload_type {
-                    if Some(pt) == source_dtmf_pt {
-                        is_dtmf = true;
-                        if let Some(t_dtmf) = target_dtmf_pt {
-                            frame.payload_type = Some(t_dtmf);
-                        }
-                    } else if !needs_transcoding {
-                        // If not transcoding, rewrite audio PT to target PT
-                        frame.payload_type = Some(target_pt);
-                    }
-                }
+                let is_dtmf = source_dtmf.is_some();
 
                 if let Some(ref mut r) = *recorder.lock().unwrap() {
                     let recorder_dtmf_pt = if is_dtmf { frame.payload_type } else { None };
+                    let recorder_dtmf_clock_rate = if is_dtmf {
+                        source_dtmf.as_ref().map(|codec| codec.clock_rate)
+                    } else {
+                        None
+                    };
                     let recorder_codec = if recorder_dtmf_pt.is_some() {
                         None
                     } else {
                         Some(source_codec)
                     };
                     let recorder_sample = MediaSample::Audio(frame.clone());
-                    let _ = r.write_sample(leg, &recorder_sample, recorder_dtmf_pt, recorder_codec);
+                    let _ = r.write_sample(
+                        leg,
+                        &recorder_sample,
+                        recorder_dtmf_pt,
+                        recorder_dtmf_clock_rate,
+                        recorder_codec,
+                    );
+                }
+
+                // Rewrite payload type to match target's expected PT
+                if let Some(source_dtmf) = source_dtmf.as_ref() {
+                    if let Some(target_dtmf) = Self::select_target_dtmf_codec(
+                        &target_dtmf_codecs,
+                        source_dtmf,
+                        target_params.clock_rate,
+                    ) {
+                        Self::rewrite_dtmf_duration(
+                            frame,
+                            source_dtmf.clock_rate,
+                            target_dtmf.clock_rate,
+                        );
+                        rewrite_source_clock_rate = source_dtmf.clock_rate;
+                        rewrite_target_clock_rate = target_dtmf.clock_rate;
+                        rewrite_target_payload_type = target_dtmf.payload_type;
+                    } else {
+                        drop_dtmf_for_target = true;
+                    }
+                }
+
+                if drop_dtmf_for_target {
+                    continue;
                 }
 
                 if let Some(ref mut t) = transcoder {
                     if !is_dtmf {
                         sample = MediaSample::Audio(t.transcode(frame));
-                        // After transcoding, ensure PT matches the target's negotiated PT
-                        if let MediaSample::Audio(ref mut new_frame) = sample {
-                            if new_frame.payload_type != Some(target_pt) {
-                                new_frame.payload_type = Some(target_pt);
-                            }
-                        }
-                    } else {
-                        t.update_dtmf_timestamp(frame);
                     }
+                }
+
+                if let MediaSample::Audio(ref mut outbound_frame) = sample {
+                    outbound_timing.rewrite(
+                        outbound_frame,
+                        rewrite_source_clock_rate,
+                        rewrite_target_clock_rate,
+                        rewrite_target_payload_type,
+                    );
                 }
             }
 
@@ -664,8 +742,8 @@ mod tests {
             leg_b.clone(),
             rustrtc::RtpCodecParameters::default(),
             rustrtc::RtpCodecParameters::default(),
-            None,
-            None,
+            vec![],
+            vec![],
             CodecType::PCMU,
             CodecType::PCMU,
             None,
@@ -692,8 +770,8 @@ mod tests {
             leg_b.clone(),
             rustrtc::RtpCodecParameters::default(),
             rustrtc::RtpCodecParameters::default(),
-            None,
-            None,
+            vec![],
+            vec![],
             CodecType::PCMU,
             CodecType::PCMA,
             None,
@@ -709,4 +787,80 @@ mod tests {
         // Should log transcoding required
         bridge.start().await.unwrap();
     }
+
+    #[test]
+    fn test_dtmf_rewriter_rescales_timestamp_duration_and_payload() {
+        let mut timing = RtpTiming::default();
+        let mut frame = rustrtc::media::AudioFrame {
+            rtp_timestamp: 8000,
+            clock_rate: 8000,
+            data: bytes::Bytes::from_static(&[5, 0x80, 0x01, 0x90]),
+            sequence_number: Some(320),
+            payload_type: Some(101),
+            marker: false,
+            raw_packet: None,
+            source_addr: None,
+        };
+
+        MediaBridge::rewrite_dtmf_duration(&mut frame, 8000, 48000);
+        timing.rewrite(&mut frame, 8000, 48000, 110);
+
+        assert_eq!(frame.payload_type, Some(110));
+        let first_output_timestamp = frame.rtp_timestamp;
+        let first_output_sequence = frame.sequence_number;
+        assert_eq!(&frame.data[..], &[5, 0x80, 0x09, 0x60]);
+
+        frame.rtp_timestamp = 8160;
+        frame.clock_rate = 8000;
+        frame.sequence_number = Some(321);
+        frame.data = bytes::Bytes::from_static(&[5, 0x80, 0x03, 0x20]);
+
+        MediaBridge::rewrite_dtmf_duration(&mut frame, 8000, 48000);
+        timing.rewrite(&mut frame, 8000, 48000, 110);
+
+        assert_eq!(frame.rtp_timestamp, first_output_timestamp + 960);
+        assert_eq!(
+            frame.sequence_number,
+            Some(first_output_sequence.unwrap().wrapping_add(1))
+        );
+        assert_eq!(&frame.data[..], &[5, 0x80, 0x12, 0xC0]);
+    }
+
+    #[test]
+    fn test_passthrough_audio_and_dtmf_share_rtp_timeline() {
+        let mut timing = RtpTiming::default();
+        let mut audio = rustrtc::media::AudioFrame {
+            rtp_timestamp: 48_000,
+            clock_rate: 48_000,
+            data: bytes::Bytes::from_static(&[0; 8]),
+            sequence_number: Some(1000),
+            payload_type: Some(96),
+            marker: false,
+            raw_packet: None,
+            source_addr: None,
+        };
+
+        timing.rewrite(&mut audio, 48_000, 8_000, 0);
+
+        let first_output_timestamp = audio.rtp_timestamp;
+        let first_output_sequence = audio.sequence_number.unwrap();
+
+        let mut dtmf = rustrtc::media::AudioFrame {
+            rtp_timestamp: 48_960,
+            clock_rate: 48_000,
+            data: bytes::Bytes::from_static(&[1, 0x80, 0x03, 0xC0]),
+            sequence_number: Some(1001),
+            payload_type: Some(110),
+            marker: false,
+            raw_packet: None,
+            source_addr: None,
+        };
+
+        timing.rewrite(&mut dtmf, 48_000, 8_000, 101);
+
+        assert_eq!(dtmf.payload_type, Some(101));
+        assert_eq!(dtmf.sequence_number, Some(first_output_sequence.wrapping_add(1)));
+        assert_eq!(dtmf.rtp_timestamp, first_output_timestamp + 160);
+    }
+
 }

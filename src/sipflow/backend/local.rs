@@ -10,7 +10,9 @@ use crate::config::SipFlowSubdirs;
 use crate::sipflow::backend::SipFlowBackend;
 use crate::sipflow::protocol::{MsgType, Packet};
 use crate::sipflow::storage::{StorageManager, process_packet};
-use crate::sipflow::wav_utils::generate_wav_from_packets_ex;
+use crate::sipflow::wav_utils::{
+    build_payload_type_map, build_payload_type_map_by_leg, generate_wav_from_packets_with_leg_map_ex,
+};
 use crate::sipflow::{SipFlowItem, SipFlowMsgType};
 
 enum Command {
@@ -230,7 +232,26 @@ impl SipFlowBackend for LocalBackend {
             if packets.is_empty() {
                 return Ok(Vec::new());
             }
-            generate_wav_from_packets_ex(&packets, true)
+            let media_stats = storage
+                .query_media_stats(&call_id, start_time, end_time)
+                .await
+                .unwrap_or_default();
+            let mut leg_sources = std::collections::HashMap::<i32, Vec<String>>::new();
+            for (leg, src, _) in media_stats {
+                leg_sources.entry(leg).or_default().push(src);
+            }
+            let flow = storage
+                .query_flow_in_range(start_time, end_time)
+                .await
+                .unwrap_or_default();
+            let payload_map = build_payload_type_map(&flow);
+            let leg_payload_map = build_payload_type_map_by_leg(&flow, &leg_sources);
+            generate_wav_from_packets_with_leg_map_ex(
+                &packets,
+                &payload_map,
+                &leg_payload_map,
+                true,
+            )
         })
         .await??;
 

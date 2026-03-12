@@ -382,6 +382,72 @@ impl StorageManager {
         Ok(results)
     }
 
+    pub async fn query_flow_in_range(
+        &mut self,
+        start_dt: DateTime<Local>,
+        end_dt: DateTime<Local>,
+    ) -> Result<Vec<SipFlowItem>> {
+        let mut results = Vec::new();
+        let folders = self.get_folders_in_range(start_dt, end_dt);
+
+        for dir in folders {
+            let db_path = dir.join("sipflow.db");
+            let raw_path = dir.join("data.raw");
+
+            if !db_path.exists() || !raw_path.exists() {
+                continue;
+            }
+
+            let mut conn =
+                SqliteConnection::connect(&format!("sqlite:{}", db_path.to_string_lossy())).await?;
+            let mut raw_file = File::open(raw_path)?;
+
+            let rows = sqlx::query(
+                "SELECT s.src, s.dst, s.timestamp, s.offset, s.size
+                 FROM sip_msgs s
+                 ORDER BY s.timestamp ASC",
+            )
+            .fetch_all(&mut conn)
+            .await?;
+
+            for row in rows {
+                use sqlx::Row;
+                let src: String = row.get(0);
+                let dst: String = row.get(1);
+                let ts: i64 = row.get(2);
+                let offset: i64 = row.get(3);
+                let size: i64 = row.get(4);
+
+                let mut buf = vec![0u8; size as usize];
+                let raw_msg = (|| -> std::io::Result<Vec<u8>> {
+                    raw_file.seek(SeekFrom::Start(offset as u64 + 10))?;
+                    raw_file.read_exact(&mut buf)?;
+
+                    raw_file.seek(SeekFrom::Start(offset as u64 + 2))?;
+                    let mut orig_size_buf = [0u8; 4];
+                    raw_file.read_exact(&mut orig_size_buf)?;
+                    if buf.starts_with(&ZSTD_MAGIC) {
+                        zstd::decode_all(&buf[..])
+                    } else {
+                        Ok(buf)
+                    }
+                })()?;
+
+                results.push(SipFlowItem {
+                    src_addr: src,
+                    dst_addr: dst,
+                    timestamp: ts as u64,
+                    payload: Bytes::from(raw_msg),
+                    msg_type: SipFlowMsgType::Sip,
+                    seq: 0,
+                });
+            }
+        }
+
+        results.sort_by_key(|r| r.timestamp);
+        Ok(results)
+    }
+
     pub async fn query_media_stats(
         &mut self,
         callid: &str,

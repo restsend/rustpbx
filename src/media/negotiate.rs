@@ -1,6 +1,7 @@
 use anyhow::{Result, anyhow};
 use audio_codec::CodecType;
 use rustrtc::{MediaKind, SdpType, SessionDescription};
+use std::collections::{HashMap, HashSet};
 
 /// Parsed RTP codec information from SDP
 #[derive(Debug, Clone)]
@@ -24,6 +25,16 @@ impl CodecInfo {
             ..Default::default()
         }
     }
+
+    pub fn is_dtmf(&self) -> bool {
+        self.codec == CodecType::TelephoneEvent
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ExtractedCodecs {
+    pub audio: Vec<CodecInfo>,
+    pub dtmf: Vec<CodecInfo>,
 }
 
 /// Complete negotiation result
@@ -38,13 +49,17 @@ pub struct NegotiationResult {
 pub struct MediaNegotiator;
 
 impl MediaNegotiator {
-    /// Parse RTP map from SDP media section
-    /// Returns: Vec<(payload_type, (codec, clock_rate, channels))>
-    pub fn parse_rtp_map_from_section(
-        section: &rustrtc::MediaSection,
-    ) -> Vec<(u8, (CodecType, u32, u16))> {
-        let mut rtp_map = Vec::new();
-        let mut seen_pts = std::collections::HashSet::new();
+    fn parse_audio_section(sdp_str: &str) -> Option<rustrtc::MediaSection> {
+        SessionDescription::parse(SdpType::Answer, sdp_str)
+            .or_else(|_| SessionDescription::parse(SdpType::Offer, sdp_str))
+            .ok()?
+            .media_sections
+            .into_iter()
+            .find(|m| m.kind == MediaKind::Audio)
+    }
+
+    fn parse_rtpmap_attributes(section: &rustrtc::MediaSection) -> HashMap<u8, CodecInfo> {
+        let mut codec_by_pt = HashMap::new();
 
         for attr in &section.attributes {
             if attr.key == "rtpmap" {
@@ -54,7 +69,7 @@ impl MediaNegotiator {
                             let parts: Vec<&str> = codec_str.split('/').collect();
                             if parts.len() >= 2 {
                                 let codec_name = parts[0];
-                                let mut clock_rate = parts[1].parse::<u32>().unwrap_or(8000);
+                                let clock_rate = parts[1].parse::<u32>().unwrap_or(8000);
                                 let channels = if parts.len() >= 3 {
                                     parts[2].parse::<u16>().unwrap_or(1)
                                 } else {
@@ -66,12 +81,15 @@ impl MediaNegotiator {
                                     Err(_) => continue,
                                 };
 
-                                if codec_type == CodecType::G722 && clock_rate != 8000 {
-                                    clock_rate = 8000;
-                                }
-
-                                rtp_map.push((pt, (codec_type, clock_rate, channels)));
-                                seen_pts.insert(pt);
+                                codec_by_pt.insert(
+                                    pt,
+                                    CodecInfo {
+                                        payload_type: pt,
+                                        codec: codec_type,
+                                        clock_rate,
+                                        channels,
+                                    },
+                                );
                             }
                         }
                     }
@@ -79,84 +97,98 @@ impl MediaNegotiator {
             }
         }
 
-        // Handle static payload types
-        for format in &section.formats {
-            if let Ok(pt) = format.parse::<u8>() {
-                if seen_pts.contains(&pt) {
-                    continue;
-                }
-
-                // Use CodecType::try_from for standard payload type conversion
-                let static_codec = if let Ok(codec) = CodecType::try_from(pt) {
-                    // Standard payload types: 0=PCMU, 8=PCMA, 9=G722, 18=G729
-                    let (rate, chans) = match codec {
-                        CodecType::PCMU | CodecType::PCMA | CodecType::G722 | CodecType::G729 => {
-                            (8000, 1)
-                        }
-                        #[cfg(feature = "opus")]
-                        CodecType::Opus => (48000, 2),
-                        _ => continue, // Ignore telephone-event and other types
-                    };
-                    Some((codec, rate, chans))
-                } else {
-                    // Non-standard fallback for common dynamic payload types when rtpmap is missing
-                    // Only apply this for Audio logic to implicit infer Opus
-                    #[cfg(feature = "opus")]
-                    if (pt == 96 || pt == 111) && section.kind == MediaKind::Audio {
-                        Some((CodecType::Opus, 48000, 2))
-                    } else {
-                        None
-                    }
-                    #[cfg(not(feature = "opus"))]
-                    None
-                };
-
-                if let Some((codec, rate, chans)) = static_codec {
-                    rtp_map.push((pt, (codec, rate, chans)));
-                    seen_pts.insert(pt);
-                }
-            }
-        }
-
-        rtp_map
+        codec_by_pt
     }
 
-    /// Extract codec parameters from SDP string
-    /// Returns: (Vec<CodecInfo>, dtmf_payload_type)
-    pub fn extract_codec_params(sdp_str: &str) -> (Vec<CodecInfo>, Option<u8>) {
-        let mut codecs = Vec::new();
-        let mut dtmf_pt = None;
+    fn static_codec_for_payload(
+        section: &rustrtc::MediaSection,
+        pt: u8,
+    ) -> Option<CodecInfo> {
+        let static_codec = if let Ok(codec) = CodecType::try_from(pt) {
+            let (rate, chans) = match codec {
+                CodecType::PCMU | CodecType::PCMA | CodecType::G722 | CodecType::G729 => (8000, 1),
+                #[cfg(feature = "opus")]
+                CodecType::Opus => (48000, 2),
+                _ => return None,
+            };
+            Some((codec, rate, chans))
+        } else {
+            #[cfg(feature = "opus")]
+            if (pt == 96 || pt == 111) && section.kind == MediaKind::Audio {
+                Some((CodecType::Opus, 48000, 2))
+            } else {
+                None
+            }
+            #[cfg(not(feature = "opus"))]
+            None
+        };
 
-        let desc = SessionDescription::parse(SdpType::Answer, sdp_str)
-            .or_else(|_| SessionDescription::parse(SdpType::Offer, sdp_str));
+        static_codec.map(|(codec, rate, chans)| CodecInfo {
+            payload_type: pt,
+            codec,
+            clock_rate: rate,
+            channels: chans,
+        })
+    }
 
-        if let Ok(desc) = desc {
-            if let Some(section) = desc
-                .media_sections
-                .iter()
-                .find(|m| m.kind == MediaKind::Audio)
-            {
-                let rtp_map = Self::parse_rtp_map_from_section(section);
+    fn extract_ordered_codecs_from_section(section: &rustrtc::MediaSection) -> Vec<CodecInfo> {
+        let mut codec_by_pt = Self::parse_rtpmap_attributes(section);
+        let mut ordered_codecs = Vec::new();
+        let mut seen_pts = HashSet::new();
 
-                for (pt, (codec, clock, channels)) in rtp_map {
-                    if codec == CodecType::TelephoneEvent {
-                        if clock == 8000 && dtmf_pt.is_none() {
-                            dtmf_pt = Some(pt);
-                        }
-                        continue;
-                    }
+        for format in &section.formats {
+            let Ok(pt) = format.parse::<u8>() else {
+                continue;
+            };
+            if !seen_pts.insert(pt) {
+                continue;
+            }
 
-                    codecs.push(CodecInfo {
-                        payload_type: pt,
-                        codec,
-                        clock_rate: clock,
-                        channels: channels as u16,
-                    });
-                }
+            let codec = codec_by_pt
+                .remove(&pt)
+                .or_else(|| Self::static_codec_for_payload(section, pt));
+            if let Some(codec) = codec {
+                ordered_codecs.push(codec);
             }
         }
 
-        (codecs, dtmf_pt)
+        ordered_codecs
+    }
+
+    /// Parse RTP map from SDP media section in `m=` payload order.
+    /// Returns: Vec<(payload_type, (codec, clock_rate, channels))>
+    pub fn parse_rtp_map_from_section(
+        section: &rustrtc::MediaSection,
+    ) -> Vec<(u8, (CodecType, u32, u16))> {
+        Self::extract_ordered_codecs_from_section(section)
+            .into_iter()
+            .map(|codec| {
+                (
+                    codec.payload_type,
+                    (codec.codec, codec.clock_rate, codec.channels),
+                )
+            })
+            .collect()
+    }
+
+    pub fn extract_codec_params(sdp_str: &str) -> ExtractedCodecs {
+        Self::parse_audio_section(sdp_str)
+            .map(|section| {
+                let mut extracted = ExtractedCodecs::default();
+                for codec in Self::extract_ordered_codecs_from_section(&section) {
+                    if codec.is_dtmf() {
+                        extracted.dtmf.push(codec);
+                    } else {
+                        extracted.audio.push(codec);
+                    }
+                }
+                extracted
+            })
+            .unwrap_or_default()
+    }
+
+    pub fn extract_dtmf_codecs(sdp_str: &str) -> Vec<CodecInfo> {
+        Self::extract_codec_params(sdp_str).dtmf
     }
 
     /// Select the best common codec based on preference
@@ -173,27 +205,12 @@ impl MediaNegotiator {
 
     /// Extract all codec information from SDP
     pub fn extract_all_codecs(sdp_str: &str) -> Vec<CodecInfo> {
-        let mut codecs = Vec::new();
-
-        if let Ok(desc) = SessionDescription::parse(SdpType::Offer, sdp_str) {
-            if let Some(section) = desc
-                .media_sections
-                .iter()
-                .find(|m| m.kind == MediaKind::Audio)
-            {
-                let rtp_map = Self::parse_rtp_map_from_section(section);
-                for (pt, (codec, clock, channels)) in rtp_map {
-                    codecs.push(CodecInfo {
-                        payload_type: pt,
-                        codec,
-                        clock_rate: clock,
-                        channels,
-                    });
-                }
-            }
-        }
-
-        codecs
+        let extracted = Self::extract_codec_params(sdp_str);
+        extracted
+            .audio
+            .into_iter()
+            .chain(extracted.dtmf)
+            .collect()
     }
 
     /// Negotiate codec between two SDP offers/answers
@@ -220,15 +237,16 @@ impl MediaNegotiator {
                     },
                 };
 
-                let dtmf_pt = remote_codecs
+                let remote_dtmf_codecs: Vec<_> = remote_codecs
                     .iter()
-                    .find(|r| r.codec == CodecType::TelephoneEvent)
-                    .map(|r| r.payload_type);
+                    .filter(|r| r.codec == CodecType::TelephoneEvent)
+                    .cloned()
+                    .collect();
 
                 return Ok(NegotiationResult {
                     codec: remote.codec,
                     params,
-                    dtmf_pt,
+                    dtmf_pt: remote_dtmf_codecs.first().map(|codec| codec.payload_type),
                 });
             }
         }
@@ -351,18 +369,25 @@ mod tests {
             a=rtpmap:0 PCMU/8000\r\n\
             a=rtpmap:101 telephone-event/8000\r\n";
 
-        let (codecs, dtmf_pt) = MediaNegotiator::extract_codec_params(sdp);
-        let first = &codecs[0];
+        let codecs = MediaNegotiator::extract_codec_params(sdp);
+        let first = &codecs.audio[0];
         let params = first.to_params();
 
         assert_eq!(first.codec, CodecType::PCMU);
         assert_eq!(params.payload_type, 0);
         assert_eq!(params.clock_rate, 8000);
-        assert_eq!(dtmf_pt, Some(101));
+        assert_eq!(
+            codecs
+                .dtmf
+                .iter()
+                .map(|codec| codec.payload_type)
+                .collect::<Vec<_>>(),
+            vec![101]
+        );
     }
 
     #[test]
-    fn test_extract_codec_params_prefers_telephone_event_8000() {
+    fn test_extract_codec_params_preserves_dtmf_offer_order() {
         let sdp = "v=0\r\n\
             o=- 1234 1234 IN IP4 127.0.0.1\r\n\
             s=-\r\n\
@@ -372,9 +397,16 @@ mod tests {
             a=rtpmap:110 telephone-event/48000\r\n\
             a=rtpmap:126 telephone-event/8000\r\n";
 
-        let (_, dtmf_pt) = MediaNegotiator::extract_codec_params(sdp);
+        let codecs = MediaNegotiator::extract_codec_params(sdp);
 
-        assert_eq!(dtmf_pt, Some(126));
+        assert_eq!(
+            codecs
+                .dtmf
+                .iter()
+                .map(|codec| (codec.payload_type, codec.clock_rate))
+                .collect::<Vec<_>>(),
+            vec![(110, 48000), (126, 8000)]
+        );
     }
 
     #[test]
@@ -525,9 +557,9 @@ mod tests {
         // PCMU(0) is first, G722(9) is later.
         // We should pick PCMU because it's first in the Answer.
         let sdp = "v=0\r\no=- 123456 123456 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 4000 RTP/AVP 0 101 8 9\r\na=rtpmap:0 PCMU/8000\r\na=rtpmap:101 telephone-event/8000\r\na=rtpmap:8 PCMA/8000\r\na=rtpmap:9 G722/8000\r\n";
-        let (codecs, _) = MediaNegotiator::extract_codec_params(sdp);
+        let codecs = MediaNegotiator::extract_codec_params(sdp);
         assert_eq!(
-            codecs[0].codec,
+            codecs.audio[0].codec,
             CodecType::PCMU,
             "Should have picked PCMU (the first codec)"
         );
@@ -612,8 +644,7 @@ mod tests {
     }
 
     #[test]
-    fn test_g722_clock_rate_correction() {
-        // Test that G722/16000 (incorrect) is corrected to G722/8000 (RFC 3551)
+    fn test_g722_clock_rate_preserves_sdp_value() {
         let sdp = "v=0\r\n\
             o=- 1769236545 1769236546 IN IP4 192.168.3.211\r\n\
             s=-\r\n\
@@ -629,22 +660,22 @@ mod tests {
             a=rtpmap:18 G729/8000/1\r\n\
             a=rtpmap:111 opus/48000/2\r\n";
 
-        let (codecs, _) = MediaNegotiator::extract_codec_params(sdp);
+        let codecs = MediaNegotiator::extract_codec_params(sdp);
 
         // Find G722 codec
-        let g722_info = codecs.iter().find(|c| c.codec == CodecType::G722);
+        let g722_info = codecs.audio.iter().find(|c| c.codec == CodecType::G722);
         assert!(g722_info.is_some(), "G722 should be parsed");
 
         let g722_info = g722_info.unwrap();
         assert_eq!(
-            g722_info.clock_rate, 8000,
-            "G722 RTP clock rate should be corrected to 8000 Hz (RFC 3551)"
+            g722_info.clock_rate, 16000,
+            "G722 clock rate should now follow the SDP value as offered"
         );
         assert_eq!(g722_info.payload_type, 9);
         assert_eq!(g722_info.channels, 1);
 
         // Verify other codecs are not affected
-        let g729_info = codecs.iter().find(|c| c.codec == CodecType::G729);
+        let g729_info = codecs.audio.iter().find(|c| c.codec == CodecType::G729);
         assert!(g729_info.is_some());
         assert_eq!(g729_info.unwrap().clock_rate, 8000);
     }

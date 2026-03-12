@@ -38,6 +38,23 @@ pub fn get_timestamp() -> u64 {
         .as_millis() as u64
 }
 
+fn codec_info_rtpmap(info: &negotiate::CodecInfo) -> String {
+    let codec_name = match info.codec {
+        CodecType::PCMU => "PCMU",
+        CodecType::PCMA => "PCMA",
+        CodecType::G722 => "G722",
+        CodecType::G729 => "G729",
+        #[cfg(feature = "opus")]
+        CodecType::Opus => "opus",
+        CodecType::TelephoneEvent => "telephone-event",
+    };
+
+    match info.channels {
+        0 | 1 => format!("{}/{}", codec_name, info.clock_rate),
+        channels => format!("{}/{}/{}", codec_name, info.clock_rate, channels),
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct AudioFrameTiming {
     pcm_sample_rate: u32,
@@ -248,7 +265,7 @@ impl RtcTrack {
 
                     section.attributes.push(Attribute {
                         key: "rtpmap".to_string(),
-                        value: Some(format!("{} {}", pt, info.codec.rtpmap())),
+                        value: Some(format!("{} {}", pt, codec_info_rtpmap(info))),
                     });
                     if let Some(fmtp) = info.codec.fmtp() {
                         section.attributes.push(Attribute {
