@@ -183,11 +183,11 @@ mod recorder_advanced_tests {
 
         // Write samples from both legs
         recorder
-            .write_sample(Leg::A, &MediaSample::Audio(frame_a), None, None)
+            .write_sample(Leg::A, &MediaSample::Audio(frame_a), None, None, None)
             .expect("Should write Leg A sample");
 
         recorder
-            .write_sample(Leg::B, &MediaSample::Audio(frame_b), None, None)
+            .write_sample(Leg::B, &MediaSample::Audio(frame_b), None, None, None)
             .expect("Should write Leg B sample");
 
         // Force flush
@@ -223,7 +223,7 @@ mod recorder_advanced_tests {
         };
 
         recorder
-            .write_sample(Leg::A, &MediaSample::Audio(frame), None, None)
+            .write_sample(Leg::A, &MediaSample::Audio(frame), None, None, None)
             .expect("Should write sample");
 
         recorder.finalize().expect("Should finalize recorder");
@@ -253,7 +253,7 @@ mod recorder_advanced_tests {
         ];
 
         recorder
-            .write_dtmf_payload(Leg::A, &dtmf_payload, 0)
+            .write_dtmf_payload(Leg::A, &dtmf_payload, 0, 8000)
             .expect("Should write DTMF payload");
 
         recorder.finalize().expect("Should finalize");
@@ -263,6 +263,86 @@ mod recorder_advanced_tests {
 
         // Cleanup
         let _ = std::fs::remove_file(&temp_path);
+    }
+
+    #[test]
+    fn test_recorder_dtmf_uses_event_clock_rate() {
+        let temp_path_a = std::env::temp_dir().join("test_recorder_dtmf_clock_a.wav");
+        let temp_path_b = std::env::temp_dir().join("test_recorder_dtmf_clock_b.wav");
+        let mut recorder_a = Recorder::new(temp_path_a.to_str().unwrap(), CodecType::PCMU).unwrap();
+        let mut recorder_b = Recorder::new(temp_path_b.to_str().unwrap(), CodecType::PCMU).unwrap();
+
+        recorder_a
+            .write_dtmf_payload(Leg::A, &[5, 0x80, 0x12, 0xC0], 0, 48000)
+            .expect("48k DTMF should be written");
+        recorder_b
+            .write_dtmf_payload(Leg::A, &[5, 0x80, 0x03, 0x20], 0, 8000)
+            .expect("8k DTMF should be written");
+
+        recorder_a.finalize().expect("48k finalize should succeed");
+        recorder_b.finalize().expect("8k finalize should succeed");
+
+        let len_a = std::fs::metadata(&temp_path_a).unwrap().len();
+        let len_b = std::fs::metadata(&temp_path_b).unwrap().len();
+
+        let size_delta = len_a.abs_diff(len_b);
+        assert!(
+            size_delta <= 32,
+            "Equivalent 100ms DTMF should produce nearly the same recording size regardless of event clock, delta={}",
+            size_delta
+        );
+
+        let _ = std::fs::remove_file(&temp_path_a);
+        let _ = std::fs::remove_file(&temp_path_b);
+    }
+
+    #[test]
+    fn test_recorder_dtmf_timestamp_uses_event_clock_rate() {
+        let temp_path_a = std::env::temp_dir().join("test_recorder_dtmf_ts_a.wav");
+        let temp_path_b = std::env::temp_dir().join("test_recorder_dtmf_ts_b.wav");
+        let mut recorder_a = Recorder::new(temp_path_a.to_str().unwrap(), CodecType::PCMU).unwrap();
+        let mut recorder_b = Recorder::new(temp_path_b.to_str().unwrap(), CodecType::PCMU).unwrap();
+
+        let frame = AudioFrame {
+            data: vec![0xFF; 160].into(),
+            rtp_timestamp: 0,
+            sequence_number: Some(1),
+            payload_type: Some(0),
+            clock_rate: 8000,
+            marker: false,
+            raw_packet: None,
+            source_addr: None,
+        };
+
+        recorder_a
+            .write_sample(Leg::A, &MediaSample::Audio(frame.clone()), None, None, None)
+            .expect("Should write anchor sample");
+        recorder_b
+            .write_sample(Leg::A, &MediaSample::Audio(frame), None, None, None)
+            .expect("Should write anchor sample");
+
+        recorder_a
+            .write_dtmf_payload(Leg::A, &[5, 0x80, 0x12, 0xC0], 4800, 48000)
+            .expect("48k DTMF should be written");
+        recorder_b
+            .write_dtmf_payload(Leg::A, &[5, 0x80, 0x03, 0x20], 800, 8000)
+            .expect("8k DTMF should be written");
+
+        recorder_a.finalize().expect("48k finalize should succeed");
+        recorder_b.finalize().expect("8k finalize should succeed");
+
+        let len_a = std::fs::metadata(&temp_path_a).unwrap().len();
+        let len_b = std::fs::metadata(&temp_path_b).unwrap().len();
+
+        let size_delta = len_a.abs_diff(len_b);
+        assert!(
+            size_delta <= 32,
+            "Equivalent timestamp offsets should produce nearly the same recording size regardless of event clock, delta={}",
+            size_delta
+        );
+
+        let _ = std::fs::remove_file(&temp_path_a);
+        let _ = std::fs::remove_file(&temp_path_b);
     }
 
     #[test]
@@ -276,20 +356,20 @@ mod recorder_advanced_tests {
         for digit in 0u8..=9u8 {
             let payload = vec![digit, 0x80, 0x03, 0x20];
             recorder
-                .write_dtmf_payload(Leg::A, &payload, 0)
+                .write_dtmf_payload(Leg::A, &payload, 0, 8000)
                 .expect(&format!("Should write DTMF {}", digit));
         }
 
         // Test * (code 10)
         let payload_star = vec![10, 0x80, 0x03, 0x20];
         recorder
-            .write_dtmf_payload(Leg::A, &payload_star, 0)
+            .write_dtmf_payload(Leg::A, &payload_star, 0, 8000)
             .unwrap();
 
         // Test # (code 11)
         let payload_hash = vec![11, 0x80, 0x03, 0x20];
         recorder
-            .write_dtmf_payload(Leg::A, &payload_hash, 0)
+            .write_dtmf_payload(Leg::A, &payload_hash, 0, 8000)
             .unwrap();
 
         recorder.finalize().expect("Should finalize");
@@ -307,12 +387,12 @@ mod recorder_advanced_tests {
 
         // Too short payload (should be ignored)
         let short_payload = vec![5, 0x80];
-        let result = recorder.write_dtmf_payload(Leg::A, &short_payload, 0);
+        let result = recorder.write_dtmf_payload(Leg::A, &short_payload, 0, 8000);
         assert!(result.is_ok(), "Short payload should be ignored gracefully");
 
         // Invalid digit code (>15)
         let invalid_payload = vec![99, 0x80, 0x03, 0x20];
-        let result = recorder.write_dtmf_payload(Leg::A, &invalid_payload, 0);
+        let result = recorder.write_dtmf_payload(Leg::A, &invalid_payload, 0, 8000);
         assert!(result.is_ok(), "Invalid digit should be ignored gracefully");
 
         recorder.finalize().expect("Should finalize");
@@ -388,7 +468,7 @@ mod recorder_advanced_tests {
         };
 
         recorder
-            .write_sample(Leg::A, &MediaSample::Audio(frame), None, None)
+            .write_sample(Leg::A, &MediaSample::Audio(frame), None, None, None)
             .expect("Should write PCMA sample to PCMU recorder");
 
         recorder.finalize().expect("Should finalize");
@@ -431,11 +511,11 @@ mod recorder_advanced_tests {
         };
 
         recorder
-            .write_sample(Leg::A, &MediaSample::Audio(frame_a), None, None)
+            .write_sample(Leg::A, &MediaSample::Audio(frame_a), None, None, None)
             .unwrap();
 
         recorder
-            .write_sample(Leg::B, &MediaSample::Audio(frame_b), None, None)
+            .write_sample(Leg::B, &MediaSample::Audio(frame_b), None, None, None)
             .unwrap();
 
         recorder.finalize().unwrap();
@@ -476,10 +556,10 @@ mod recorder_advanced_tests {
         };
 
         recorder
-            .write_sample(Leg::A, &MediaSample::Audio(frame_a), None, None)
+            .write_sample(Leg::A, &MediaSample::Audio(frame_a), None, None, None)
             .unwrap();
         recorder
-            .write_sample(Leg::B, &MediaSample::Audio(frame_b), None, None)
+            .write_sample(Leg::B, &MediaSample::Audio(frame_b), None, None, None)
             .unwrap();
 
         recorder.finalize().unwrap();
@@ -531,7 +611,7 @@ mod recorder_advanced_tests {
         });
 
         recorder
-            .write_sample(Leg::A, &frame, None, Some(CodecType::Opus))
+            .write_sample(Leg::A, &frame, None, None, Some(CodecType::Opus))
             .expect("Should write Opus sample with dynamic payload type");
         recorder.finalize().expect("Should finalize recorder");
 
@@ -585,7 +665,7 @@ mod recorder_advanced_tests {
                 raw_packet: None,
                 source_addr: None,
             });
-            recorder.write_sample(Leg::A, &frame, None, None).ok();
+            recorder.write_sample(Leg::A, &frame, None, None, None).ok();
         }
 
         // Leg B: callee (5 packets)
@@ -601,7 +681,7 @@ mod recorder_advanced_tests {
                 raw_packet: None,
                 source_addr: None,
             });
-            recorder.write_sample(Leg::B, &frame, None, None).ok();
+            recorder.write_sample(Leg::B, &frame, None, None, None).ok();
         }
 
         recorder.finalize().ok();
@@ -644,7 +724,9 @@ mod recorder_advanced_tests {
             source_addr: None,
         });
 
-        recorder.write_sample(Leg::A, &frame, Some(101), None).ok();
+        recorder
+            .write_sample(Leg::A, &frame, Some(101), Some(8000), None)
+            .ok();
         recorder.finalize().ok();
 
         // Verify file was created

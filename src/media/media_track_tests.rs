@@ -97,6 +97,43 @@ async fn test_media_track_codec_preference() {
 }
 
 #[tokio::test]
+async fn test_media_track_preserves_custom_dtmf_rtpmap() {
+    let track = RtpTrackBuilder::new("test-track-dtmf-rtpmap".to_string())
+        .with_mode(TransportMode::Rtp)
+        .with_codec_info(vec![
+            negotiate::CodecInfo {
+                payload_type: 96,
+                codec: CodecType::Opus,
+                clock_rate: 48000,
+                channels: 2,
+            },
+            negotiate::CodecInfo {
+                payload_type: 101,
+                codec: CodecType::TelephoneEvent,
+                clock_rate: 48000,
+                channels: 1,
+            },
+            negotiate::CodecInfo {
+                payload_type: 97,
+                codec: CodecType::TelephoneEvent,
+                clock_rate: 8000,
+                channels: 1,
+            },
+        ])
+        .build();
+
+    let offer_sdp = track.local_description().await.unwrap();
+    assert!(
+        offer_sdp.contains("a=rtpmap:101 telephone-event/48000"),
+        "SDP should preserve telephone-event/48000"
+    );
+    assert!(
+        offer_sdp.contains("a=rtpmap:97 telephone-event/8000"),
+        "SDP should preserve telephone-event/8000"
+    );
+}
+
+#[tokio::test]
 async fn test_media_track_handshake() {
     // Test offer-answer handshake
     let track1 = RtpTrackBuilder::new("track1".to_string())
