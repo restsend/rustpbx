@@ -4,7 +4,7 @@ mod callsession_b2bua_tests {
     use super::super::session::NegotiationState;
     use super::super::test_util::tests::MockMediaPeer;
     use crate::call::{DialStrategy, DialplanFlow};
-    use crate::media::negotiate::MediaNegotiator;
+    use crate::media::negotiate::{CodecInfo, MediaNegotiator};
     // use crate::proxy::tests::common::create_test_server;
     use audio_codec::CodecType;
     use rustrtc::RtpCodecParameters;
@@ -65,8 +65,8 @@ mod callsession_b2bua_tests {
             leg_b.clone(),
             params_a,
             params_b,
-            None,
-            None,
+            vec![],
+            vec![],
             CodecType::PCMU,
             CodecType::PCMU,
             None,
@@ -104,8 +104,8 @@ mod callsession_b2bua_tests {
             leg_b.clone(),
             params_a,
             params_b,
-            None,
-            None,
+            vec![],
+            vec![],
             CodecType::Opus,
             CodecType::PCMU,
             None,
@@ -144,8 +144,8 @@ mod callsession_b2bua_tests {
             leg_b.clone(),
             params_a.clone(),
             params_b.clone(),
-            None,
-            None,
+            vec![],
+            vec![],
             CodecType::PCMA,
             CodecType::PCMU,
             None,
@@ -217,22 +217,22 @@ mod callsession_b2bua_tests {
     #[test]
     fn test_extract_codec_params_pcmu() {
         let sdp = create_sdp_answer("PCMU/8000/1", 0);
-        let (codecs, dtmf_pt) = MediaNegotiator::extract_codec_params(&sdp);
-        let first = &codecs[0];
+        let codecs = MediaNegotiator::extract_codec_params(&sdp);
+        let first = &codecs.audio[0];
         let params = first.to_params();
 
         assert_eq!(first.codec, CodecType::PCMU);
         assert_eq!(params.payload_type, 0);
         assert_eq!(params.clock_rate, 8000);
         assert_eq!(params.channels, 1);
-        assert_eq!(dtmf_pt, None);
+        assert!(codecs.dtmf.is_empty());
     }
 
     #[test]
     fn test_extract_codec_params_pcma() {
         let sdp = create_sdp_answer("PCMA/8000/1", 8);
-        let (codecs, _) = MediaNegotiator::extract_codec_params(&sdp);
-        let first = &codecs[0];
+        let codecs = MediaNegotiator::extract_codec_params(&sdp);
+        let first = &codecs.audio[0];
         let params = first.to_params();
 
         assert_eq!(first.codec, CodecType::PCMA);
@@ -244,8 +244,8 @@ mod callsession_b2bua_tests {
     #[test]
     fn test_extract_codec_params_opus() {
         let sdp = create_sdp_answer("opus/48000/2", 111);
-        let (codecs, _) = MediaNegotiator::extract_codec_params(&sdp);
-        let first = &codecs[0];
+        let codecs = MediaNegotiator::extract_codec_params(&sdp);
+        let first = &codecs.audio[0];
         let params = first.to_params();
 
         assert_eq!(first.codec, CodecType::Opus);
@@ -257,8 +257,8 @@ mod callsession_b2bua_tests {
     #[test]
     fn test_extract_codec_params_g722() {
         let sdp = create_sdp_answer("G722/8000", 9);
-        let (codecs, _) = MediaNegotiator::extract_codec_params(&sdp);
-        let first = &codecs[0];
+        let codecs = MediaNegotiator::extract_codec_params(&sdp);
+        let first = &codecs.audio[0];
         let params = first.to_params();
 
         assert_eq!(first.codec, CodecType::G722);
@@ -277,13 +277,20 @@ mod callsession_b2bua_tests {
             a=rtpmap:0 PCMU/8000/1\r\n\
             a=rtpmap:101 telephone-event/8000\r\n";
 
-        let (codecs, dtmf_pt) = MediaNegotiator::extract_codec_params(sdp);
-        let first = &codecs[0];
+        let codecs = MediaNegotiator::extract_codec_params(sdp);
+        let first = &codecs.audio[0];
         let params = first.to_params();
 
         assert_eq!(first.codec, CodecType::PCMU);
         assert_eq!(params.payload_type, 0);
-        assert_eq!(dtmf_pt, Some(101));
+        assert_eq!(
+            codecs
+                .dtmf
+                .iter()
+                .map(|codec| codec.payload_type)
+                .collect::<Vec<_>>(),
+            vec![101]
+        );
     }
 
     // ==================== Test 3: Codec Compatibility Scenarios ====================
@@ -294,8 +301,8 @@ mod callsession_b2bua_tests {
         let alice_offer = create_sdp_offer("PCMU/8000/1", 0);
         let bob_answer = create_sdp_answer("PCMU/8000/1", 0);
 
-        let (alice_codecs, _) = MediaNegotiator::extract_codec_params(&alice_offer);
-        let (bob_codecs, _) = MediaNegotiator::extract_codec_params(&bob_answer);
+        let alice_codecs = MediaNegotiator::extract_codec_params(&alice_offer).audio;
+        let bob_codecs = MediaNegotiator::extract_codec_params(&bob_answer).audio;
         let bob_codec = bob_codecs[0].codec;
 
         // Verify Alice supports Bob's chosen codec
@@ -320,7 +327,7 @@ mod callsession_b2bua_tests {
             .unwrap();
         let alice_codecs = MediaNegotiator::parse_rtp_map_from_section(alice_section);
 
-        let (bob_codecs, _) = MediaNegotiator::extract_codec_params(&bob_answer);
+        let bob_codecs = MediaNegotiator::extract_codec_params(&bob_answer).audio;
         let bob_codec = bob_codecs[0].codec;
 
         // Verify Alice does NOT support Bob's codec
@@ -347,8 +354,8 @@ mod callsession_b2bua_tests {
             leg_b.clone(),
             mock_rtp_params(0, 8000, 1),
             mock_rtp_params(0, 8000, 1),
-            None,
-            None,
+            vec![],
+            vec![],
             CodecType::PCMU,
             CodecType::PCMU,
             None,
@@ -383,8 +390,8 @@ mod callsession_b2bua_tests {
             leg_b.clone(),
             mock_rtp_params(0, 8000, 1),
             mock_rtp_params(0, 8000, 1),
-            None,
-            None,
+            vec![],
+            vec![],
             CodecType::PCMU,
             CodecType::PCMU,
             None,
@@ -437,8 +444,18 @@ mod callsession_b2bua_tests {
             leg_b.clone(),
             mock_rtp_params(0, 8000, 1),
             mock_rtp_params(0, 8000, 1),
-            Some(101), // DTMF for leg A
-            Some(101), // DTMF for leg B
+            vec![CodecInfo {
+                payload_type: 101,
+                codec: CodecType::TelephoneEvent,
+                clock_rate: 8000,
+                channels: 1,
+            }],
+            vec![CodecInfo {
+                payload_type: 101,
+                codec: CodecType::TelephoneEvent,
+                clock_rate: 8000,
+                channels: 1,
+            }],
             CodecType::PCMU,
             CodecType::PCMU,
             None,
@@ -448,8 +465,8 @@ mod callsession_b2bua_tests {
             None,
         );
 
-        assert_eq!(bridge.dtmf_pt_a, Some(101));
-        assert_eq!(bridge.dtmf_pt_b, Some(101));
+        assert_eq!(bridge.dtmf_codecs_a.len(), 1);
+        assert_eq!(bridge.dtmf_codecs_b.len(), 1);
 
         bridge.start().await.expect("Bridge should start");
         bridge.stop();
@@ -497,8 +514,8 @@ mod callsession_b2bua_tests {
             leg_b.clone(),
             mock_rtp_params(0, 8000, 1),
             mock_rtp_params(0, 8000, 1),
-            None,
-            None,
+            vec![],
+            vec![],
             CodecType::PCMU,
             CodecType::PCMU,
             None,

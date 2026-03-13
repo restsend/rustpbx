@@ -38,6 +38,41 @@ pub fn get_timestamp() -> u64 {
         .as_millis() as u64
 }
 
+fn codec_info_rtpmap(info: &negotiate::CodecInfo) -> String {
+    let codec_name = match info.codec {
+        CodecType::PCMU => "PCMU",
+        CodecType::PCMA => "PCMA",
+        CodecType::G722 => "G722",
+        CodecType::G729 => "G729",
+        #[cfg(feature = "opus")]
+        CodecType::Opus => "opus",
+        CodecType::TelephoneEvent => "telephone-event",
+    };
+
+    match info.channels {
+        0 | 1 => format!("{}/{}", codec_name, info.clock_rate),
+        channels => format!("{}/{}/{}", codec_name, info.clock_rate, channels),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct AudioFrameTiming {
+    pcm_sample_rate: u32,
+    pcm_samples_per_frame: usize,
+    rtp_ticks_per_frame: u32,
+}
+
+fn audio_frame_timing(codec: CodecType, rtp_clock_rate: u32) -> AudioFrameTiming {
+    let frame_ms = 20u32;
+    let pcm_sample_rate = codec.samplerate();
+
+    AudioFrameTiming {
+        pcm_sample_rate,
+        pcm_samples_per_frame: (pcm_sample_rate * frame_ms / 1000) as usize,
+        rtp_ticks_per_frame: rtp_clock_rate * frame_ms / 1000,
+    }
+}
+
 #[async_trait]
 pub trait Track: Send + Sync {
     fn id(&self) -> &str;
@@ -49,6 +84,9 @@ pub trait Track: Send + Sync {
     async fn set_recorder_option(&mut self, _option: RecorderOption) {}
     fn set_codec_preference(&mut self, _codecs: Vec<CodecType>) {
         // Optional: override to set codec preference
+    }
+    fn preferred_codec_info(&self) -> Option<negotiate::CodecInfo> {
+        None
     }
 
     /// Allow downcasting to concrete types for dynamic audio source switching
@@ -227,7 +265,7 @@ impl RtcTrack {
 
                     section.attributes.push(Attribute {
                         key: "rtpmap".to_string(),
-                        value: Some(format!("{} {}", pt, info.codec.rtpmap())),
+                        value: Some(format!("{} {}", pt, codec_info_rtpmap(info))),
                     });
                     if let Some(fmtp) = info.codec.fmtp() {
                         section.attributes.push(Attribute {
@@ -307,6 +345,10 @@ impl Track for RtcTrack {
 
     async fn get_peer_connection(&self) -> Option<PeerConnection> {
         Some(self.pc.clone())
+    }
+
+    fn preferred_codec_info(&self) -> Option<negotiate::CodecInfo> {
+        self.rtp_map.first().cloned()
     }
 }
 
@@ -433,6 +475,7 @@ pub struct FileTrack {
     pc: PeerConnection,
     completion_notify: Arc<tokio::sync::Notify>,
     codec_preference: Vec<CodecType>,
+    codec_info: Option<negotiate::CodecInfo>,
     mode: TransportMode,
     rtp_start_port: Option<u16>,
     rtp_end_port: Option<u16>,
@@ -458,6 +501,7 @@ impl FileTrack {
             pc,
             completion_notify: Arc::new(tokio::sync::Notify::new()),
             codec_preference: vec![CodecType::PCMU, CodecType::PCMA],
+            codec_info: None,
             mode: TransportMode::Rtp,
             rtp_start_port: None,
             rtp_end_port: None,
@@ -483,6 +527,11 @@ impl FileTrack {
 
     pub fn with_codec_preference(mut self, codecs: Vec<CodecType>) -> Self {
         self.codec_preference = codecs;
+        self
+    }
+
+    pub fn with_codec_info(mut self, info: negotiate::CodecInfo) -> Self {
+        self.codec_info = Some(info);
         self
     }
 
@@ -533,9 +582,14 @@ impl FileTrack {
         }
 
         let target_sample_rate = self
-            .codec_preference
-            .first()
-            .map(|c| c.clock_rate())
+            .codec_info
+            .as_ref()
+            .map(|info| info.codec.samplerate())
+            .or_else(|| {
+                self.codec_preference
+                    .first()
+                    .map(|codec| codec.samplerate())
+            })
             .unwrap_or(8000);
 
         let manager = Arc::new(audio_source::AudioSourceManager::new(target_sample_rate));
@@ -568,19 +622,24 @@ impl FileTrack {
             return Err(anyhow!("Audio file not found: {}", file_path));
         }
 
-        // Determine the codec we will encode to (first preference wins).
-        let codec = self
-            .codec_preference
-            .first()
-            .copied()
-            .unwrap_or(CodecType::PCMU);
-        let payload_type = codec.payload_type();
-        let samples_per_frame: usize = {
-            // 20 ms at the codec's clock rate.  PCMU/PCMA/G722 → 8 kHz → 160.
-            // Opus → 48 kHz → 960.
-            let clock_rate = codec.clock_rate() as usize;
-            clock_rate * 20 / 1000
-        };
+        // Determine the codec/payload type we will encode to.
+        let selected = self.codec_info.clone().unwrap_or_else(|| {
+            let codec = self
+                .codec_preference
+                .first()
+                .copied()
+                .unwrap_or(CodecType::PCMU);
+            negotiate::CodecInfo {
+                payload_type: codec.payload_type(),
+                codec,
+                clock_rate: codec.clock_rate(),
+                channels: codec.channels() as u16,
+            }
+        });
+        let codec = selected.codec;
+        let payload_type = selected.payload_type;
+        let frame_timing = audio_frame_timing(codec, selected.clock_rate);
+        let samples_per_frame = frame_timing.pcm_samples_per_frame;
 
         // Use the caller's negotiated PC when provided, otherwise fall back to
         // the FileTrack's own (un-negotiated) PC.
@@ -592,6 +651,8 @@ impl FileTrack {
             loop_playback = self.loop_playback,
             ?codec,
             samples_per_frame,
+            pcm_sample_rate = frame_timing.pcm_sample_rate,
+            rtp_ticks_per_frame = frame_timing.rtp_ticks_per_frame,
             has_external_pc,
             "FileTrack start_playback_on"
         );
@@ -604,8 +665,9 @@ impl FileTrack {
             if let Some(ref mgr) = self.audio_source_manager {
                 mgr.clone()
             } else {
-                let target_sample_rate = codec.clock_rate();
-                let mgr = Arc::new(audio_source::AudioSourceManager::new(target_sample_rate));
+                let mgr = Arc::new(audio_source::AudioSourceManager::new(
+                    frame_timing.pcm_sample_rate,
+                ));
                 mgr.switch_to_file(file_path.clone(), self.loop_playback)?;
                 mgr
             }
@@ -624,8 +686,8 @@ impl FileTrack {
         let ssrc = rand::random::<u32>();
         let mut params = RtpCodecParameters::default();
         params.payload_type = payload_type;
-        params.clock_rate = codec.clock_rate();
-        params.channels = codec.channels() as u8;
+        params.clock_rate = selected.clock_rate;
+        params.channels = selected.channels as u8;
 
         if let Some(transceiver) = existing {
             let track_arc: Arc<dyn rustrtc::media::MediaStreamTrack> = track_target;
@@ -681,7 +743,7 @@ impl FileTrack {
 
                         let frame = AudioFrame {
                             rtp_timestamp,
-                            clock_rate: codec.clock_rate(),
+                            clock_rate: selected.clock_rate,
                             data: encoded.into(),
                             sequence_number: Some(sequence_number),
                             payload_type: Some(payload_type),
@@ -691,7 +753,7 @@ impl FileTrack {
                         };
 
                         rtp_timestamp =
-                            rtp_timestamp.wrapping_add(samples_per_frame as u32);
+                            rtp_timestamp.wrapping_add(frame_timing.rtp_ticks_per_frame);
                         sequence_number = sequence_number.wrapping_add(1);
 
                         if let Err(e) = source_target.send(MediaSample::Audio(frame)).await {
