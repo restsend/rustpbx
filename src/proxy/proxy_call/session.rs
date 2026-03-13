@@ -299,7 +299,8 @@ impl CallSession {
         }
     }
 
-    fn explicit_audio_default_selection() -> (CodecType, rustrtc::RtpCodecParameters, Vec<CodecInfo>) {
+    fn explicit_audio_default_selection() -> (CodecType, rustrtc::RtpCodecParameters, Vec<CodecInfo>)
+    {
         (
             CodecType::PCMU,
             rustrtc::RtpCodecParameters {
@@ -353,10 +354,9 @@ impl CallSession {
         Self::append_dtmf_codecs(codec_info, caller_dtmf_codecs, used_payload_types);
 
         for (clock_rate, preferred_payload_type) in [(8000, 101u8), (48000, 110u8)] {
-            if codec_info
-                .iter()
-                .any(|codec| codec.codec == CodecType::TelephoneEvent && codec.clock_rate == clock_rate)
-            {
+            if codec_info.iter().any(|codec| {
+                codec.codec == CodecType::TelephoneEvent && codec.clock_rate == clock_rate
+            }) {
                 continue;
             }
 
@@ -376,9 +376,7 @@ impl CallSession {
         use_media_proxy || callee_has_dtmf
     }
 
-    fn extract_telephone_event_codecs(
-        rtp_map: &[(u8, (CodecType, u32, u16))],
-    ) -> Vec<CodecInfo> {
+    fn extract_telephone_event_codecs(rtp_map: &[(u8, (CodecType, u32, u16))]) -> Vec<CodecInfo> {
         let mut seen_payload_types = HashSet::new();
         rtp_map
             .iter()
@@ -781,7 +779,9 @@ impl CallSession {
                 .collect()
         };
 
-        if let Some(prefer) = MediaNegotiator::select_best_codec(&callee_extracted.audio, allow_codecs) {
+        if let Some(prefer) =
+            MediaNegotiator::select_best_codec(&callee_extracted.audio, allow_codecs)
+        {
             if let Some(i) = negotiated_codecs
                 .iter()
                 .position(|c| c.codec == prefer.codec)
@@ -4469,6 +4469,7 @@ async fn dtmf_track_reader(
         .into_iter()
         .map(|codec| codec.payload_type)
         .collect();
+    let mut last_event = None;
     loop {
         tokio::select! {
             _ = cancel.cancelled() => break,
@@ -4480,6 +4481,10 @@ async fn dtmf_track_reader(
                             .is_some_and(|pt| dtmf_payload_types.contains(&pt))
                         {
                             if let Some(digit) = parse_dtmf_rfc4733(&frame.data) {
+                                if let Some((d,t)) = &last_event && d == &digit && *t == frame.rtp_timestamp{
+                                    continue;
+                                }
+                                last_event = Some((digit.clone(),frame.rtp_timestamp));
                                 debug!(dtmf = %digit, "DTMF received from caller (RFC 4733)");
                                 let _ = event_tx.send(
                                     crate::call::app::ControllerEvent::DtmfReceived(digit),
@@ -4508,6 +4513,7 @@ async fn spawn_caller_dtmf_listener(
     dtmf_codecs: Vec<CodecInfo>,
     cancel: CancellationToken,
 ) {
+    let mut started_track_ids = HashSet::new();
     let tracks = caller_peer.get_tracks().await;
     let Some(track_handle) = tracks.into_iter().next() else {
         return;
@@ -4522,6 +4528,10 @@ async fn spawn_caller_dtmf_listener(
     for transceiver in pc.get_transceivers() {
         if let Some(receiver) = transceiver.receiver() {
             let incoming_track = receiver.track();
+            let track_id = incoming_track.id().to_string();
+            if !started_track_ids.insert(track_id.clone()) {
+                continue;
+            }
             let tx = event_tx.clone();
             let c = cancel.clone();
             let codecs = dtmf_codecs.clone();
@@ -4532,28 +4542,26 @@ async fn spawn_caller_dtmf_listener(
     }
 
     // Watch for new tracks (e.g. re-INVITE after hold/resume).
-    let mut pc_recv = Box::pin(pc.recv());
     loop {
         tokio::select! {
             _ = cancel.cancelled() => break,
-            event = &mut pc_recv => {
-                match event {
-                    Some(rustrtc::PeerConnectionEvent::Track(transceiver)) => {
-                        if let Some(receiver) = transceiver.receiver() {
-                            let incoming_track = receiver.track();
-                            let tx = event_tx.clone();
-                            let c = cancel.clone();
-                            let codecs = dtmf_codecs.clone();
-                            tokio::spawn(async move {
-                                dtmf_track_reader(incoming_track, tx, codecs, c).await;
-                            });
+            event = pc.recv() => {
+                if let Some(rustrtc::PeerConnectionEvent::Track(transceiver)) = event {
+                    if let Some(receiver) = transceiver.receiver() {
+                        let incoming_track = receiver.track();
+                        let track_id = incoming_track.id().to_string();
+                        if !started_track_ids.insert(track_id.clone()) {
+                            continue;
                         }
-                        pc_recv = Box::pin(pc.recv());
+                        let tx = event_tx.clone();
+                        let c = cancel.clone();
+                        let codecs = dtmf_codecs.clone();
+                        tokio::spawn(async move {
+                            dtmf_track_reader(incoming_track, tx, codecs, c).await;
+                        });
                     }
-                    Some(_) => {
-                        pc_recv = Box::pin(pc.recv());
-                    }
-                    None => break,
+                } else {
+                    break;
                 }
             }
         }
