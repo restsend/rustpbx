@@ -513,7 +513,7 @@ impl IvrApp {
             ];
             // Add collected variables as query params
             for (k, v) in &filtered_vars {
-                params.push((Box::leak(k.clone().into_boxed_str()) as &str, v.as_str()));
+                params.push((k, v));
             }
             ctx.http_client.get(url).query(&params)
         } else {
