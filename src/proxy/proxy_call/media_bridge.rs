@@ -260,8 +260,6 @@ impl MediaBridge {
                 }
             };
 
-        let mut pc_a_recv = Box::pin(pc_a.recv());
-        let mut pc_b_recv = Box::pin(pc_b.recv());
         let mut pc_a_closed = false;
         let mut pc_b_closed = false;
 
@@ -330,7 +328,7 @@ impl MediaBridge {
 
         loop {
             tokio::select! {
-                event_a = &mut pc_a_recv, if !pc_a_closed => {
+                event_a = pc_a.recv(), if !pc_a_closed => {
                     if let Some(event) = event_a {
                         match event {
                             rustrtc::PeerConnectionEvent::Track(transceiver) => {
@@ -365,13 +363,12 @@ impl MediaBridge {
                             _ => {
                             }
                         }
-                        pc_a_recv = Box::pin(pc_a.recv());
                     } else {
                         debug!("Leg A PeerConnection closed");
                         pc_a_closed = true;
                     }
                 }
-                event_b = &mut pc_b_recv, if !pc_b_closed => {
+                event_b = pc_b.recv(), if !pc_b_closed => {
                     if let Some(event) = event_b {
                         match event {
                             rustrtc::PeerConnectionEvent::Track(transceiver) => {
@@ -405,7 +402,6 @@ impl MediaBridge {
                             }
                             _ => {}
                         }
-                        pc_b_recv = Box::pin(pc_b.recv());
                     } else {
                         debug!("Leg B PeerConnection closed");
                         pc_b_closed = true;
@@ -859,8 +855,10 @@ mod tests {
         timing.rewrite(&mut dtmf, 48_000, 8_000, 101);
 
         assert_eq!(dtmf.payload_type, Some(101));
-        assert_eq!(dtmf.sequence_number, Some(first_output_sequence.wrapping_add(1)));
+        assert_eq!(
+            dtmf.sequence_number,
+            Some(first_output_sequence.wrapping_add(1))
+        );
         assert_eq!(dtmf.rtp_timestamp, first_output_timestamp + 160);
     }
-
 }
