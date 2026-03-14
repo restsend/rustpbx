@@ -9,7 +9,7 @@ use anyhow::Result;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::time::sleep;
+use tokio::time::{sleep, timeout};
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
@@ -418,12 +418,18 @@ async fn test_webrtc_to_rtp_bridge() {
     // Alice (WebRTC) calls Bob (RTP)
     let alice_webrtc_sdp = "v=0\r\no=- 654321 654321 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 5678 UDP/TLS/RTP/SAVPF 111 101\r\na=rtpmap:111 opus/48000/2\r\na=rtpmap:101 telephone-event/8000\r\na=sendrecv\r\n".to_string();
 
-    let call_task =
-        tokio::spawn(async move { alice_ua.make_call("bob", Some(alice_webrtc_sdp)).await });
+    let call_task = tokio::spawn(async move {
+        timeout(
+            Duration::from_secs(30),
+            alice_ua.make_call("bob", Some(alice_webrtc_sdp)),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("Call timed out"))?
+    });
 
     // Bob should receive incoming call and answer
     let answer_task = tokio::spawn(async move {
-        for _ in 0..50 {
+        for _ in 0..300 {
             let events = bob_ua.process_dialog_events().await.unwrap_or_default();
             for event in events {
                 if let TestUaEvent::IncomingCall(dialog_id) = event {

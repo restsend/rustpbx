@@ -76,17 +76,17 @@ tracing = "0.1.43"
 tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
 tracing-appender = "0.2.4"
 url = "2.5.8"
-uuid = { version = "1.19.0", features = ["v4"] }
+uuid = { version = "1.22.0", features = ["v4"] }
 clap = { version = "4.5.54", features = ["derive"] }
 toml = "0.9.8"
 toml_edit = { version = "0.23.9", features = ["serde"] }
 rand = "0.10.0"
 chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = "0.10.4"
-rsipstack = "0.4.11"
+rsipstack = "0.4.13"
 #rsipstack = { path = "../rsipstack" }
 audio-codec = { version = "0.3.30", default-features = false }
-rustrtc = "0.3.29"
+rustrtc = "0.3.30"
 #rustrtc = { path = "../rustrtc" }
 reqwest = { version = "0.13", features = [
     "json",
@@ -104,7 +104,7 @@ sha2 = "0.10.9"
 hex = "0.4.3"
 dotenvy = "0.15.7"
 md-5 = "0.10.6"
-once_cell = "1.21.3"
+once_cell = "1.21.4"
 regex = "1.12.3"
 http = "1.4.0"
 urlencoding = "2.1.3"
@@ -130,7 +130,7 @@ sea-orm-migration = { version = "1.1.19", features = [
 argon2 = { version = "0.5.3", features = ["password-hash"] }
 object_store = { version = "0.13.1", features = ["aws", "azure", "gcp"] }
 humantime = "2.3.0"
-serde_with = "3.16.1"
+serde_with = "3.18.0"
 async-compression = { version = "0.4", features = [
     "tokio",
     "gzip",
@@ -141,12 +141,16 @@ lru = "0.16.3"
 metrics = "0.24"
 metrics-exporter-prometheus = { version = "0.16", optional = true }
 # OTel stack — only pulled in for the commercial `addon-telemetry` feature.
-opentelemetry = { version = "0.27", optional = true }
-opentelemetry-otlp = { version = "0.27", features = ["tonic"], optional = true }
-opentelemetry_sdk = { version = "0.27", features = [
+opentelemetry = { version = "0.31.0", optional = true }
+opentelemetry-otlp = { version = "0.31.0", features = [
+    "grpc-tonic",
+    "trace",
+    "metrics",
+], optional = true }
+opentelemetry_sdk = { version = "0.31.0", features = [
     "rt-tokio",
 ], optional = true }
-tracing-opentelemetry = { version = "0.28", optional = true }
+tracing-opentelemetry = { version = "0.32", optional = true }
 phonenumber = "0.3.7"
 tower-http = { version = "0.6.8", features = [
     "fs",

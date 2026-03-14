@@ -1,0 +1,33 @@
+# E2E Test IVR configuration
+# Simple IVR for testing RTP audio reception
+
+[ivr]
+name = "test_e2e"
+description = "E2E Test IVR"
+lang = "en"
+
+# No business hours restriction for testing
+[ivr.root]
+# Use existing sound file
+greeting = "config/sounds/unavailable-phone.wav"
+timeout_ms = 10000
+max_retries = 2
+invalid_prompt = "config/sounds/unavailable-phone.wav"
+
+# Hangup after timeout
+timeout_action = { type = "hangup" }
+
+# Hangup after max retries
+max_retries_action = { type = "hangup" }
+
+# Entry 1: Hangup with goodbye
+[[ivr.root.entries]]
+key = "1"
+label = "Hangup"
+action = { type = "hangup", prompt = "config/sounds/unavailable-phone.wav" }
+
+# Entry #: Hangup immediately
+[[ivr.root.entries]]
+key = "#"
+label = "Hangup"
+action = { type = "hangup" }
