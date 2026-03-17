@@ -49,23 +49,40 @@ fn main() {
 }
 
 fn get_git_commit_hash() -> String {
-    Command::new("git")
+    // First try to get from .git directory
+    let commit_from_git = Command::new("git")
         .args(["rev-parse", "--short", "HEAD"])
         .output()
         .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
-        .unwrap_or_else(|_| "unknown".to_string())
+        .unwrap_or_else(|_| "unknown".to_string());
+
+    // If .git doesn't exist or failed, try environment variable
+    if commit_from_git == "unknown" {
+        env::var("GIT_COMMIT_HASH").unwrap_or_else(|_| "unknown".to_string())
+    } else {
+        commit_from_git
+    }
 }
 
 fn get_git_branch() -> String {
-    Command::new("git")
+    // First try to get from .git directory
+    let branch_from_git = Command::new("git")
         .args(["rev-parse", "--abbrev-ref", "HEAD"])
         .output()
         .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
-        .unwrap_or_else(|_| "unknown".to_string())
+        .unwrap_or_else(|_| "unknown".to_string());
+
+    // If .git doesn't exist or failed, try environment variable
+    if branch_from_git == "unknown" {
+        env::var("GIT_BRANCH").unwrap_or_else(|_| "unknown".to_string())
+    } else {
+        branch_from_git
+    }
 }
 
 fn get_git_dirty() -> String {
-    Command::new("git")
+    // First try to get from .git directory
+    let dirty_from_git = Command::new("git")
         .args(["diff", "--quiet", "--ignore-submodules"])
         .output()
         .map(|output| {
@@ -76,5 +93,12 @@ fn get_git_dirty() -> String {
             }
         })
         .unwrap_or_else(|_| "unknown")
-        .to_string()
+        .to_string();
+
+    // If .git doesn't exist or failed, try environment variable
+    if dirty_from_git == "unknown" {
+        env::var("GIT_DIRTY").unwrap_or_else(|_| "unknown".to_string())
+    } else {
+        dirty_from_git
+    }
 }
