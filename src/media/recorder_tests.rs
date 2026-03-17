@@ -3,6 +3,7 @@ mod recorder_advanced_tests {
     use super::super::recorder::{DtmfGenerator, Leg, Recorder};
     use audio_codec::CodecType;
     use rustrtc::media::{AudioFrame, MediaSample};
+    use rustrtc::rtp::{RtpHeader, RtpPacket};
 
     // ==================== DTMF Generator Tests ====================
 
@@ -522,6 +523,306 @@ mod recorder_advanced_tests {
 
         let metadata = std::fs::metadata(&temp_path).unwrap();
         assert!(metadata.len() > 44);
+
+        let _ = std::fs::remove_file(&temp_path);
+    }
+
+    #[test]
+    fn test_recorder_nominal_pcmu_packet_size_matches_rtp_duration() {
+        let temp_path = std::env::temp_dir().join("test_nominal_pcmu_duration.wav");
+        let path_str = temp_path.to_str().unwrap();
+
+        let mut recorder = Recorder::new(path_str, CodecType::PCMU).unwrap();
+
+        for i in 0..50u32 {
+            let frame = AudioFrame {
+                data: vec![0xFF; 160].into(),
+                rtp_timestamp: i * 160,
+                sequence_number: Some(i as u16),
+                payload_type: Some(0),
+                clock_rate: 8000,
+                marker: false,
+                raw_packet: None,
+                source_addr: None,
+            };
+
+            recorder
+                .write_sample(Leg::A, &MediaSample::Audio(frame), None, None, None)
+                .unwrap();
+        }
+
+        recorder.finalize().unwrap();
+
+        let metadata = std::fs::metadata(&temp_path).unwrap();
+        assert_eq!(
+            metadata.len(),
+            16_044,
+            "1 second of 8k PCMU mono audio is written as 8k stereo WAV (44-byte header + 16000 bytes payload)"
+        );
+
+        let _ = std::fs::remove_file(&temp_path);
+    }
+
+    #[test]
+    #[ignore = "diagnostic reproducer for current recorder duration inflation bug"]
+    fn repro_recorder_inflates_duration_when_frame_bytes_exceed_rtp_span() {
+        let temp_path = std::env::temp_dir().join("test_recorder_inflated_duration.wav");
+        let path_str = temp_path.to_str().unwrap();
+
+        let mut recorder = Recorder::new(path_str, CodecType::PCMA).unwrap();
+
+        for i in 0..50u32 {
+            let frame = AudioFrame {
+                data: vec![0; 3840].into(),
+                rtp_timestamp: i * 160,
+                sequence_number: Some(i as u16),
+                payload_type: Some(8),
+                clock_rate: 8000,
+                marker: false,
+                raw_packet: None,
+                source_addr: None,
+            };
+
+            recorder
+                .write_sample(Leg::A, &MediaSample::Audio(frame), None, None, None)
+                .unwrap();
+        }
+
+        recorder.finalize().unwrap();
+
+        let metadata = std::fs::metadata(&temp_path).unwrap();
+        assert!(
+            metadata.len() > 16_044,
+            "Oversized frames still inflate the payload beyond the 1-second baseline"
+        );
+        assert_eq!(
+            metadata.len(),
+            23_404,
+            "Current recorder logic extends 1 second of RTP timestamps into about 1.46 seconds of WAV payload"
+        );
+
+        let _ = std::fs::remove_file(&temp_path);
+    }
+
+    #[test]
+    fn test_recorder_uses_frame_clock_rate_for_timestamp_alignment() {
+        let temp_path = std::env::temp_dir().join("test_recorder_mostly_silence.wav");
+        let path_str = temp_path.to_str().unwrap();
+
+        let mut recorder = Recorder::new(path_str, CodecType::PCMA).unwrap();
+        let mut encoder = audio_codec::create_encoder(CodecType::PCMA);
+        let silence_byte = encoder.encode(&vec![0i16; 160])[0];
+
+        for i in 0..10u32 {
+            let frame = AudioFrame {
+                data: vec![0xAA; 160].into(),
+                rtp_timestamp: i * 960,
+                sequence_number: Some(i as u16),
+                payload_type: Some(8),
+                clock_rate: 48000,
+                marker: false,
+                raw_packet: None,
+                source_addr: None,
+            };
+
+            recorder
+                .write_sample(Leg::A, &MediaSample::Audio(frame), None, None, None)
+                .unwrap();
+        }
+
+        recorder.finalize().unwrap();
+
+        let file = std::fs::read(&temp_path).unwrap();
+        let payload = &file[44..];
+        let leg_a: Vec<u8> = payload.iter().step_by(2).copied().collect();
+        let leg_b: Vec<u8> = payload.iter().skip(1).step_by(2).copied().collect();
+
+        let silence_count = leg_a.iter().filter(|&&byte| byte == silence_byte).count();
+        let signal_count = leg_a.iter().filter(|&&byte| byte == 0xAA).count();
+        let leg_b_silence_count = leg_b.iter().filter(|&&byte| byte == silence_byte).count();
+
+        assert!(
+            signal_count > silence_count * 3,
+            "Leg A should retain contiguous audio after clock-rate-aware timestamp scaling: silence_count={}, signal_count={}",
+            silence_count,
+            signal_count
+        );
+        assert!(
+            leg_b_silence_count > leg_b.len() * 9 / 10,
+            "Leg B should remain almost entirely silent because no packets were written for it"
+        );
+        assert_eq!(
+            file.len(),
+            3_244,
+            "Ten 20ms frames at 8kHz should produce 1600 stereo samples plus a 44-byte WAV header"
+        );
+
+        let _ = std::fs::remove_file(&temp_path);
+    }
+
+    #[test]
+    fn test_recorder_prefers_raw_rtp_payload_over_mutated_frame_data() {
+        let temp_path = std::env::temp_dir().join("test_recorder_prefers_raw_payload.wav");
+        let path_str = temp_path.to_str().unwrap();
+
+        let mut recorder = Recorder::new(path_str, CodecType::PCMA).unwrap();
+
+        for i in 0..50u32 {
+            let raw_payload = vec![0xD5; 160];
+            let raw_packet =
+                RtpPacket::new(RtpHeader::new(8, i as u16, i * 160, 12345), raw_payload);
+            let frame = AudioFrame {
+                data: vec![0; 3840].into(),
+                rtp_timestamp: i * 160,
+                sequence_number: Some(i as u16),
+                payload_type: Some(8),
+                clock_rate: 48000,
+                marker: false,
+                raw_packet: Some(raw_packet),
+                source_addr: None,
+            };
+
+            recorder
+                .write_sample(Leg::A, &MediaSample::Audio(frame), None, None, None)
+                .unwrap();
+        }
+
+        recorder.finalize().unwrap();
+
+        let metadata = std::fs::metadata(&temp_path).unwrap();
+        assert_eq!(
+            metadata.len(),
+            16_044,
+            "Recorder should use the original 160-byte RTP payload instead of an expanded 3840-byte frame buffer"
+        );
+
+        let _ = std::fs::remove_file(&temp_path);
+    }
+
+    #[test]
+    fn test_recorder_resets_timeline_on_rtp_stream_switch() {
+        let temp_path = std::env::temp_dir().join("test_recorder_stream_switch.wav");
+        let path_str = temp_path.to_str().unwrap();
+
+        let mut recorder = Recorder::new(path_str, CodecType::PCMA).unwrap();
+
+        for i in 0..50u32 {
+            let raw_packet = RtpPacket::new(
+                RtpHeader::new(8, i as u16, i * 160, 11_111),
+                vec![0xD5; 160],
+            );
+            let frame = AudioFrame {
+                data: vec![0; 160].into(),
+                rtp_timestamp: i * 160,
+                sequence_number: Some(i as u16),
+                payload_type: Some(8),
+                clock_rate: 8000,
+                marker: false,
+                raw_packet: Some(raw_packet),
+                source_addr: None,
+            };
+
+            recorder
+                .write_sample(Leg::A, &MediaSample::Audio(frame), None, None, None)
+                .unwrap();
+        }
+
+        for i in 0..50u32 {
+            let rtp_timestamp = 2_400_000 + i * 160;
+            let raw_packet = RtpPacket::new(
+                RtpHeader::new(8, (i + 50) as u16, rtp_timestamp, 22_222),
+                vec![0xD5; 160],
+            );
+            let frame = AudioFrame {
+                data: vec![0; 160].into(),
+                rtp_timestamp,
+                sequence_number: Some((i + 50) as u16),
+                payload_type: Some(8),
+                clock_rate: 8000,
+                marker: false,
+                raw_packet: Some(raw_packet),
+                source_addr: None,
+            };
+
+            recorder
+                .write_sample(Leg::A, &MediaSample::Audio(frame), None, None, None)
+                .unwrap();
+        }
+
+        recorder.finalize().unwrap();
+
+        let metadata = std::fs::metadata(&temp_path).unwrap();
+        assert_eq!(
+            metadata.len(),
+            32_044,
+            "A large timestamp jump on a new SSRC should start a new contiguous segment instead of expanding the WAV with silence"
+        );
+
+        let _ = std::fs::remove_file(&temp_path);
+    }
+
+    #[test]
+    fn test_recorder_handles_183_early_media_then_200_ok_stream_switch() {
+        let temp_path = std::env::temp_dir().join("test_recorder_183_200_stream_switch.wav");
+        let path_str = temp_path.to_str().unwrap();
+
+        let mut recorder = Recorder::new(path_str, CodecType::PCMA).unwrap();
+
+        // Phase 1: 183 early media arrives on the first RTP stream.
+        for i in 0..100u32 {
+            let rtp_timestamp = i * 160;
+            let raw_packet = RtpPacket::new(
+                RtpHeader::new(8, i as u16, rtp_timestamp, 0x183183),
+                vec![0xD5; 160],
+            );
+            let frame = AudioFrame {
+                data: vec![0; 160].into(),
+                rtp_timestamp,
+                sequence_number: Some(i as u16),
+                payload_type: Some(8),
+                clock_rate: 8000,
+                marker: false,
+                raw_packet: Some(raw_packet),
+                source_addr: None,
+            };
+
+            recorder
+                .write_sample(Leg::A, &MediaSample::Audio(frame), None, None, None)
+                .unwrap();
+        }
+
+        // Phase 2: 200 OK lands, media is re-synced, and RTP continues on a new stream
+        // with a new SSRC and a far-ahead timestamp base.
+        for i in 0..100u32 {
+            let rtp_timestamp = 3_600_000 + i * 160;
+            let raw_packet = RtpPacket::new(
+                RtpHeader::new(8, (i + 100) as u16, rtp_timestamp, 0x200200),
+                vec![0xD5; 160],
+            );
+            let frame = AudioFrame {
+                data: vec![0; 160].into(),
+                rtp_timestamp,
+                sequence_number: Some((i + 100) as u16),
+                payload_type: Some(8),
+                clock_rate: 8000,
+                marker: false,
+                raw_packet: Some(raw_packet),
+                source_addr: None,
+            };
+
+            recorder
+                .write_sample(Leg::A, &MediaSample::Audio(frame), None, None, None)
+                .unwrap();
+        }
+
+        recorder.finalize().unwrap();
+
+        let metadata = std::fs::metadata(&temp_path).unwrap();
+        assert_eq!(
+            metadata.len(),
+            64_044,
+            "183 early media followed by 200 OK on a new RTP stream should produce two contiguous 2-second segments, not a silence-inflated WAV"
+        );
 
         let _ = std::fs::remove_file(&temp_path);
     }
