@@ -16,6 +16,7 @@ pub mod models;
 pub mod observability;
 pub mod preflight;
 pub mod proxy;
+pub mod rwi;
 pub mod services;
 pub mod sipflow;
 pub mod storage;

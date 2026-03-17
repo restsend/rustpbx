@@ -158,24 +158,42 @@ impl CallController {
         file: impl Into<String>,
         _interruptible: bool,
     ) -> anyhow::Result<PlaybackHandle> {
+        self.play_audio_with_options(file, None, false, _interruptible).await
+    }
+
+    /// Play an audio file with full control over track ID, looping, and
+    /// DTMF interruptibility.
+    ///
+    /// - `track_id` – caller-assigned unique ID; a UUID is generated when `None`.
+    /// - `loop_playback` – when `true`, the file loops until explicitly stopped.
+    /// - `interruptible` – whether DTMF should stop playback (handled by the app).
+    pub async fn play_audio_with_options(
+        &self,
+        file: impl Into<String>,
+        track_id: Option<String>,
+        loop_playback: bool,
+        interruptible: bool,
+    ) -> anyhow::Result<PlaybackHandle> {
         let path = file.into();
+        let track_id = track_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
         self.session.send_command(SessionAction::PlayPrompt {
             audio_file: path.clone(),
             send_progress: false,
             await_completion: true,
+            track_id: Some(track_id.clone()),
+            loop_playback,
+            interrupt_on_dtmf: interruptible,
         })?;
 
         Ok(PlaybackHandle {
-            track_id: "default".to_string(), // TODO: generate unique ID
+            track_id,
             file_path: path,
         })
     }
 
     /// Stop current audio playback.
-    ///
-    /// Full implementation pending `SessionAction::StopPlayback` (tracked in RWI P0).
     pub async fn stop_audio(&self) -> anyhow::Result<()> {
-        // TODO: self.session.send_command(SessionAction::StopPlayback { track_id: None })?;
+        self.session.send_command(SessionAction::StopPlayback)?;
         Ok(())
     }
 
@@ -229,14 +247,35 @@ impl CallController {
         Ok(RecordingHandle { path: p })
     }
 
-    /// Stop the active recording.
-    pub async fn stop_recording(&self) -> anyhow::Result<RecordingInfo> {
-        // TODO: Send stop command and await result
-        Ok(RecordingInfo {
-            path: "placeholder.wav".to_string(),
-            duration: Duration::from_secs(0),
-            size_bytes: 0,
-        })
+    /// Stop the active recording and wait for completion.
+    ///
+    /// Sends a stop command and waits for the `RecordingComplete` event.
+    /// Returns the recording info including path, duration, and file size.
+    ///
+    /// # Errors
+    /// Returns an error if the event channel is closed or a hangup occurs.
+    pub async fn stop_recording(&mut self) -> anyhow::Result<RecordingInfo> {
+        self.session.send_command(SessionAction::StopRecording)?;
+
+        loop {
+            match self.event_rx.recv().await {
+                Some(ControllerEvent::RecordingComplete(info)) => {
+                    return Ok(info);
+                }
+                Some(ControllerEvent::Hangup(reason)) => {
+                    return Err(anyhow::anyhow!(
+                        "Call hung up while stopping recording: {:?}",
+                        reason
+                    ));
+                }
+                Some(_) => {
+                    // Ignore other events (DTMF, AudioComplete, etc.)
+                }
+                None => {
+                    return Err(anyhow::anyhow!("Event channel closed"));
+                }
+            }
+        }
     }
 
     /// Collect DTMF digits with timeout and inter-digit gap detection.
@@ -304,5 +343,118 @@ impl CallController {
     /// Wait for the next event from the channel.
     pub async fn wait_event(&mut self) -> Option<ControllerEvent> {
         self.event_rx.recv().await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::proxy::proxy_call::state::{CallSessionHandle, CallSessionShared, SessionAction};
+    use crate::call::DialDirection;
+    use tokio::time::{timeout, Duration};
+
+    /// Creates a controller with access to both the event sender and command receiver.
+    /// Returns (controller, event_tx, cmd_rx)
+    fn make_controller_with_channels() -> (
+        CallController,
+        tokio::sync::mpsc::UnboundedSender<ControllerEvent>,
+        tokio::sync::mpsc::UnboundedReceiver<SessionAction>,
+    ) {
+        let shared = CallSessionShared::new(
+            "test-session".to_string(),
+            DialDirection::Inbound,
+            Some("caller".to_string()),
+            Some("callee".to_string()),
+            None,
+        );
+        let (handle, cmd_rx) = CallSessionHandle::with_shared(shared);
+        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (controller, _timer_rx) = CallController::new(handle, event_rx);
+        (controller, event_tx, cmd_rx)
+    }
+
+    #[tokio::test]
+    async fn test_stop_recording_returns_recording_info() {
+        let (mut controller, event_tx, mut cmd_rx) = make_controller_with_channels();
+
+        // Spawn a task that monitors commands and sends RecordingComplete when StopRecording is received
+        let event_tx_clone = event_tx.clone();
+        tokio::spawn(async move {
+            while let Some(cmd) = cmd_rx.recv().await {
+                if matches!(cmd, SessionAction::StopRecording) {
+                    // Simulate the session processing the stop and sending back RecordingComplete
+                    let _ = event_tx_clone.send(ControllerEvent::RecordingComplete(RecordingInfo {
+                        path: "/tmp/test.wav".to_string(),
+                        duration: Duration::from_secs(5),
+                        size_bytes: 1024,
+                    }));
+                    break;
+                }
+            }
+        });
+
+        let result = timeout(Duration::from_secs(1), controller.stop_recording()).await;
+        assert!(result.is_ok());
+        let info = result.unwrap().unwrap();
+        assert_eq!(info.path, "/tmp/test.wav");
+        assert_eq!(info.duration, Duration::from_secs(5));
+        assert_eq!(info.size_bytes, 1024);
+    }
+
+    #[tokio::test]
+    async fn test_stop_recording_handles_hangup() {
+        let (mut controller, event_tx, mut cmd_rx) = make_controller_with_channels();
+
+        // Spawn a task that sends Hangup instead of RecordingComplete
+        tokio::spawn(async move {
+            // Wait for StopRecording command
+            while let Some(cmd) = cmd_rx.recv().await {
+                if matches!(cmd, SessionAction::StopRecording) {
+                    let _ = event_tx.send(ControllerEvent::Hangup(None));
+                    break;
+                }
+            }
+        });
+
+        let result = timeout(Duration::from_secs(1), controller.stop_recording()).await;
+        assert!(result.is_ok());
+        let result = result.unwrap();
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("hung up"));
+    }
+
+    #[tokio::test]
+    async fn test_stop_recording_ignores_other_events() {
+        let (mut controller, event_tx, mut cmd_rx) = make_controller_with_channels();
+
+        let event_tx_clone = event_tx.clone();
+        tokio::spawn(async move {
+            // Wait for StopRecording command
+            while let Some(cmd) = cmd_rx.recv().await {
+                if matches!(cmd, SessionAction::StopRecording) {
+                    // Send some other events first (simulating concurrent events)
+                    let _ = event_tx_clone.send(ControllerEvent::DtmfReceived("1".to_string()));
+                    let _ = event_tx_clone.send(ControllerEvent::AudioComplete {
+                        track_id: "test".to_string(),
+                        interrupted: false,
+                    });
+                    // Then send RecordingComplete
+                    let _ = event_tx_clone.send(ControllerEvent::RecordingComplete(RecordingInfo {
+                        path: "/tmp/test2.wav".to_string(),
+                        duration: Duration::from_secs(10),
+                        size_bytes: 2048,
+                    }));
+                    break;
+                }
+            }
+        });
+
+        let result = timeout(Duration::from_secs(1), controller.stop_recording()).await;
+        assert!(result.is_ok());
+        let info = result.unwrap().unwrap();
+        assert_eq!(info.path, "/tmp/test2.wav");
+        assert_eq!(info.duration, Duration::from_secs(10));
+        assert_eq!(info.size_bytes, 2048);
     }
 }

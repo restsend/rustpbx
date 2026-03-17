@@ -3,6 +3,7 @@ use crate::{
     proxy::routing::{RouteQueueConfig, RouteRule, TrunkConfig},
     storage::StorageConfig,
 };
+use crate::rwi::auth::RwiConfig;
 use anyhow::{Error, Result};
 use clap::Parser;
 use rsip::StatusCode;
@@ -210,6 +211,8 @@ pub struct Config {
     #[cfg(feature = "commerce")]
     #[serde(default)]
     pub licenses: Option<LicenseConfig>,
+    #[serde(default)]
+    pub rwi: Option<RwiConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -927,6 +930,7 @@ impl Default for Config {
             webrtc_port_end: default_config_webrtc_end_port(),
             #[cfg(feature = "console")]
             console: None,
+            rwi: None,
             database_url: default_database_url(),
             recording: None,
             archive: None,

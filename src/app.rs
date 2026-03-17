@@ -45,6 +45,8 @@ use tower_http::{
 };
 use tracing::{info, warn};
 
+use crate::proxy::active_call_registry::ActiveProxyCallRegistry;
+
 pub struct CoreContext {
     pub config: Arc<Config>,
     pub db: DatabaseConnection,
@@ -52,6 +54,9 @@ pub struct CoreContext {
     pub callrecord_sender: Option<CallRecordSender>,
     pub callrecord_stats: Option<Arc<crate::callrecord::CallRecordStats>>,
     pub storage: crate::storage::Storage,
+    pub rwi_auth: Option<crate::rwi::RwiAuthRef>,
+    pub rwi_gateway: Option<crate::rwi::RwiGatewayRef>,
+    pub rwi_call_registry: Option<Arc<ActiveProxyCallRegistry>>,
 }
 
 pub struct AppStateInner {
@@ -303,13 +308,18 @@ impl AppStateBuilder {
             None => None,
         };
 
-        let core = Arc::new(CoreContext {
+        let mut core = Arc::new(CoreContext {
             config: config.clone(),
             db: db_conn.clone(),
             token: token.clone(),
             callrecord_sender: callrecord_sender.clone(),
             callrecord_stats: callrecord_stats.clone(),
             storage: storage.clone(),
+            rwi_auth: crate::rwi::create_rwi_auth(&config),
+            rwi_gateway: config.rwi.as_ref().map(|_| {
+                std::sync::Arc::new(tokio::sync::RwLock::new(crate::rwi::RwiGateway::new()))
+            }),
+            rwi_call_registry: None,
         });
 
         let sip_server = match self.proxy_builder {
@@ -353,6 +363,22 @@ impl AppStateBuilder {
                 builder.build().await
             }
         }?;
+
+        // Update rwi_call_registry with the active call registry from sip_server
+        if config.rwi.is_some() {
+            let registry = sip_server.inner.active_call_registry.clone();
+            core = Arc::new(CoreContext {
+                config: core.config.clone(),
+                db: core.db.clone(),
+                token: core.token.clone(),
+                callrecord_sender: core.callrecord_sender.clone(),
+                callrecord_stats: core.callrecord_stats.clone(),
+                storage: core.storage.clone(),
+                rwi_auth: core.rwi_auth.clone(),
+                rwi_gateway: core.rwi_gateway.clone(),
+                rwi_call_registry: Some(registry),
+            });
+        }
 
         let app_state = Arc::new(AppStateInner {
             core: core.clone(),
@@ -631,6 +657,42 @@ pub fn create_router(state: AppState) -> Router {
         .nest_service("/static", static_files_service)
         .merge(call_routes)
         .layer(cors);
+
+    // Add RWI WebSocket endpoint if configured
+    if let (Some(auth), Some(gateway), Some(call_registry)) = (
+        state.core.rwi_auth.clone(),
+        state.core.rwi_gateway.clone(),
+        state.core.rwi_call_registry.clone(),
+    ) {
+        let rwi_auth = auth;
+        let rwi_gateway = gateway;
+        let rwi_call_registry = call_registry;
+        let rwi_sip_server: Option<crate::proxy::server::SipServerRef> =
+            Some(state.sip_server().get_inner());
+        router = router.route(
+            "/rwi/v1",
+            axum::routing::get(
+                async move |client_addr: crate::handler::middleware::clientaddr::ClientAddr,
+                            ws: axum::extract::ws::WebSocketUpgrade,
+                            axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+                            headers: axum::http::HeaderMap| {
+                    use axum::extract::Query;
+                    use axum::Extension;
+
+                    crate::rwi::handler::rwi_ws_handler(
+                        client_addr,
+                        ws,
+                        Query(params),
+                        Extension(rwi_auth),
+                        Extension(rwi_gateway),
+                        Extension(rwi_call_registry),
+                        Extension(rwi_sip_server),
+                        headers,
+                    ).await
+                },
+            ),
+        );
+    }
 
     #[cfg(feature = "console")]
     if let Some(console_state) = state.console.clone() {

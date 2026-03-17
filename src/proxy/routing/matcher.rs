@@ -243,7 +243,7 @@ async fn match_invite_impl(
                 let current_callee = option.callee.user().unwrap_or_default();
 
                 if let PolicyCheckStatus::Rejected(rejection) = guard
-                    .check_policy(policy, &current_caller, &current_callee, origin_country)
+                    .check_policy(&rule.name, policy, &current_caller, &current_callee, origin_country)
                     .await?
                 {
                     let reason = rejection.to_string();
@@ -335,6 +335,7 @@ async fn match_invite_impl(
 
                                     if let PolicyCheckStatus::Rejected(rejection) = guard
                                         .check_policy(
+                                            &format!("trunk:{}", selected_trunk),
                                             policy,
                                             &current_caller,
                                             &current_callee,
@@ -441,6 +442,7 @@ async fn match_invite_impl(
 
                                     if let PolicyCheckStatus::Rejected(rejection) = guard
                                         .check_policy(
+                                            &format!("trunk:{}", selected_trunk),
                                             policy,
                                             &current_caller,
                                             &current_callee,

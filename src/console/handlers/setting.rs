@@ -11,6 +11,7 @@ use crate::models::department::{
 use crate::models::user::{
     ActiveModel as UserActiveModel, Column as UserColumn, Entity as UserEntity, Model as UserModel,
 };
+use crate::rwi::auth::RwiConfig;
 use argon2::Argon2;
 use argon2::password_hash::rand_core::OsRng;
 use argon2::password_hash::{PasswordHasher, SaltString};
@@ -147,6 +148,7 @@ pub fn urls() -> Router<Arc<ConsoleState>> {
             post(test_user_backend),
         )
         .route("/settings/config/security", patch(update_security_settings))
+        .route("/settings/config/rwi", patch(update_rwi_settings))
         .route(
             "/settings/departments",
             post(query_departments).put(create_department),
@@ -408,6 +410,15 @@ async fn build_settings_payload(state: &ConsoleState) -> JsonValue {
         JsonValue::Array(operations.clone()),
     );
     data.insert("console".to_string(), console_meta);
+
+    // Add RWI configuration
+    let rwi_config = if let Some(app_state) = state.app_state() {
+        let config_arc = app_state.config().clone();
+        config_arc.rwi.clone().unwrap_or_default()
+    } else {
+        RwiConfig::default()
+    };
+    data.insert("rwi".to_string(), serde_json::to_value(rwi_config).unwrap_or(JsonValue::Null));
 
     JsonValue::Object(data)
 }
@@ -1709,12 +1720,12 @@ pub(crate) async fn update_storage_settings(
                     let normalized = format_value.trim().to_ascii_lowercase();
                     if normalized.is_empty() {
                         table.remove("format");
-                    } else if normalized == "wav" || normalized == "ogg" {
+                    } else if normalized == "wav" {
                         table["format"] = value(normalized);
                     } else {
                         return json_error(
                             StatusCode::UNPROCESSABLE_ENTITY,
-                            "recorder_format must be either 'wav' or 'ogg'",
+                            "recorder_format must be 'wav'",
                         );
                     }
                 }
@@ -1814,6 +1825,153 @@ pub(crate) async fn update_security_settings(
         "security": {
             "acl_rules": acl_rules,
         }
+    }))
+    .into_response()
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct RwiSettingsPayload {
+    enabled: Option<bool>,
+    max_connections: Option<usize>,
+    max_calls_per_connection: Option<usize>,
+    orphan_hold_secs: Option<u32>,
+    originate_rate_limit: Option<usize>,
+    tokens: Option<Vec<RwiTokenPayload>>,
+    contexts: Option<Vec<RwiContextPayload>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RwiTokenPayload {
+    token: String,
+    scopes: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RwiContextPayload {
+    name: String,
+    no_answer_timeout_secs: Option<u32>,
+    no_answer_action: Option<String>,
+    no_answer_transfer_target: Option<String>,
+}
+
+pub(crate) async fn update_rwi_settings(
+    State(state): State<Arc<ConsoleState>>,
+    AuthRequired(_): AuthRequired,
+    Json(payload): Json<RwiSettingsPayload>,
+) -> Response {
+    let config_path = match get_config_path(&state) {
+        Ok(path) => path,
+        Err(resp) => return resp,
+    };
+
+    let mut doc = match load_document(&config_path) {
+        Ok(doc) => doc,
+        Err(resp) => return resp,
+    };
+
+    let mut modified = false;
+
+    // Update [rwi] section
+    let rwi_table = ensure_table_mut(&mut doc, "rwi");
+
+    if let Some(enabled) = payload.enabled {
+        rwi_table.insert("enabled", value(enabled));
+        modified = true;
+    }
+
+    if let Some(max_connections) = payload.max_connections {
+        rwi_table.insert("max_connections", value(max_connections as i64));
+        modified = true;
+    }
+
+    if let Some(max_calls) = payload.max_calls_per_connection {
+        rwi_table.insert("max_calls_per_connection", value(max_calls as i64));
+        modified = true;
+    }
+
+    if let Some(orphan_hold) = payload.orphan_hold_secs {
+        rwi_table.insert("orphan_hold_secs", value(orphan_hold as i64));
+        modified = true;
+    }
+
+    if let Some(rate_limit) = payload.originate_rate_limit {
+        rwi_table.insert("originate_rate_limit", value(rate_limit as i64));
+        modified = true;
+    }
+
+    // Update tokens
+    if let Some(tokens) = payload.tokens {
+        // Use toml serialization to build the tokens array
+        let tokens_vec: Vec<toml::Value> = tokens
+            .into_iter()
+            .map(|t| {
+                let mut m = toml::map::Map::new();
+                m.insert("token".to_string(), toml::Value::String(t.token));
+                m.insert("scopes".to_string(), toml::Value::Array(
+                    t.scopes.into_iter().map(toml::Value::String).collect()
+                ));
+                toml::Value::Table(m)
+            })
+            .collect();
+        let tokens_toml = toml::Value::Array(tokens_vec);
+        // Set using toml::to_string and parse back to toml_edit
+        let tokens_str = toml::to_string(&tokens_toml).unwrap_or_default();
+        // Parse the tokens section from string
+        if let Ok(tokens_doc) = tokens_str.parse::<DocumentMut>() {
+            if let Some(tokens_item) = tokens_doc.as_table().get("") {
+                rwi_table["tokens"] = tokens_item.clone();
+                modified = true;
+            }
+        }
+    }
+
+    // Update contexts
+    if let Some(contexts) = payload.contexts {
+        let contexts_vec: Vec<toml::Value> = contexts
+            .into_iter()
+            .map(|c| {
+                let mut m = toml::map::Map::new();
+                m.insert("name".to_string(), toml::Value::String(c.name));
+                if let Some(timeout) = c.no_answer_timeout_secs {
+                    m.insert("no_answer_timeout_secs".to_string(), toml::Value::Integer(timeout as i64));
+                }
+                if let Some(action) = c.no_answer_action {
+                    m.insert("no_answer_action".to_string(), toml::Value::String(action));
+                }
+                if let Some(target) = c.no_answer_transfer_target {
+                    m.insert("no_answer_transfer_target".to_string(), toml::Value::String(target));
+                }
+                toml::Value::Table(m)
+            })
+            .collect();
+        let contexts_toml = toml::Value::Array(contexts_vec);
+        let contexts_str = toml::to_string(&contexts_toml).unwrap_or_default();
+        if let Ok(contexts_doc) = contexts_str.parse::<DocumentMut>() {
+            if let Some(contexts_item) = contexts_doc.as_table().get("") {
+                rwi_table["contexts"] = contexts_item.clone();
+                modified = true;
+            }
+        }
+    }
+
+    let doc_text = doc.to_string();
+    let config = match parse_config_from_str(&doc_text) {
+        Ok(cfg) => cfg,
+        Err(resp) => return resp,
+    };
+
+    if modified {
+        if let Err(resp) = persist_document(&config_path, doc_text) {
+            return resp;
+        }
+    }
+
+    let rwi_config = config.rwi.unwrap_or_default();
+    Json(json!({
+        "status": "ok",
+        "requires_restart": true,
+        "message": "RWI settings saved. Please restart the service for changes to take effect.",
+        "rwi": rwi_config
     }))
     .into_response()
 }

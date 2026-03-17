@@ -99,6 +99,7 @@ pub async fn create_test_server_with_config(
         storage: None,
         presence_manager: Arc::new(crate::proxy::presence::PresenceManager::new(None)),
         addon_registry: None,
+        rwi_gateway: None,
     });
 
     // Add test users

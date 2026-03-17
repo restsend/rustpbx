@@ -114,6 +114,7 @@ impl PolicyGuard {
 
     pub async fn check_policy(
         &self,
+        policy_id: &str,
         policy: &PolicySpec,
         caller: &str,
         callee: &str,
@@ -297,7 +298,7 @@ impl PolicyGuard {
             if !self
                 .limiter
                 .check_and_increment(
-                    "policy_id", // TODO: Pass policy ID
+                    policy_id,
                     "caller",
                     caller,
                     limit.count,
@@ -316,7 +317,7 @@ impl PolicyGuard {
         if let Some(limit) = &policy.daily_limit {
             if !self
                 .limiter
-                .check_daily_limit("policy_id", "caller", caller, limit.count)
+                .check_daily_limit(policy_id, "caller", caller, limit.count)
                 .await?
             {
                 let reason = format!("Daily limit reached for caller {}", caller);
@@ -330,7 +331,7 @@ impl PolicyGuard {
         if let Some(limit) = &policy.concurrency {
             if !self
                 .limiter
-                .check_concurrency("policy_id", "caller", caller, limit.max_total)
+                .check_concurrency(policy_id, "caller", caller, limit.max_total)
                 .await?
             {
                 let reason = format!("Concurrency limit reached for caller {}", caller);
@@ -983,3 +984,163 @@ impl FrequencyLimiter for DbFrequencyLimiter {
         Ok(res.rows_affected)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::policy::{FrequencyLimit, DailyLimit, ConcurrencyLimit};
+    use std::collections::HashMap;
+
+    /// A test limiter that records what policy_id was passed
+    struct RecordingLimiter {
+        last_policy_id: RwLock<Option<String>>,
+    }
+
+    impl RecordingLimiter {
+        fn new() -> Arc<Self> {
+            Arc::new(Self {
+                last_policy_id: RwLock::new(None),
+            })
+        }
+
+        fn get_last_policy_id(&self) -> Option<String> {
+            self.last_policy_id.read().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl FrequencyLimiter for RecordingLimiter {
+        async fn check_and_increment(
+            &self,
+            policy_id: &str,
+            _scope: &str,
+            _scope_value: &str,
+            _limit: u32,
+            _window_hours: u32,
+        ) -> Result<bool> {
+            *self.last_policy_id.write().unwrap() = Some(policy_id.to_string());
+            Ok(true)
+        }
+
+        async fn check_daily_limit(
+            &self,
+            policy_id: &str,
+            _scope: &str,
+            _scope_value: &str,
+            _limit: u32,
+        ) -> Result<bool> {
+            *self.last_policy_id.write().unwrap() = Some(policy_id.to_string());
+            Ok(true)
+        }
+
+        async fn check_concurrency(
+            &self,
+            policy_id: &str,
+            _scope: &str,
+            _scope_value: &str,
+            _max_concurrency: u32,
+        ) -> Result<bool> {
+            *self.last_policy_id.write().unwrap() = Some(policy_id.to_string());
+            Ok(true)
+        }
+
+        async fn release_concurrency(
+            &self,
+            _policy_id: &str,
+            _scope: &str,
+            _scope_value: &str,
+        ) -> Result<()> {
+            Ok(())
+        }
+
+        async fn list_limits(
+            &self,
+            _policy_id: Option<String>,
+            _scope: Option<String>,
+            _scope_value: Option<String>,
+            _limit_type: Option<String>,
+        ) -> Result<Vec<crate::models::frequency_limit::Model>> {
+            Ok(vec![])
+        }
+
+        async fn clear_limits(
+            &self,
+            _policy_id: Option<String>,
+            _scope: Option<String>,
+            _scope_value: Option<String>,
+            _limit_type: Option<String>,
+        ) -> Result<u64> {
+            Ok(0)
+        }
+    }
+
+    #[tokio::test]
+    async fn test_check_policy_uses_policy_id_for_frequency_limit() {
+        let limiter = RecordingLimiter::new();
+        let guard = PolicyGuard::new(limiter.clone());
+
+        let mut policy = PolicySpec::default();
+        policy.frequency_limit = Some(FrequencyLimit {
+            count: 10,
+            window_hours: 1,
+        });
+
+        let result = guard
+            .check_policy("test-policy-123", &policy, "caller1", "callee1", None)
+            .await;
+
+        assert!(result.is_ok());
+        assert_eq!(limiter.get_last_policy_id(), Some("test-policy-123".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_check_policy_uses_policy_id_for_daily_limit() {
+        let limiter = RecordingLimiter::new();
+        let guard = PolicyGuard::new(limiter.clone());
+
+        let mut policy = PolicySpec::default();
+        policy.daily_limit = Some(DailyLimit { count: 100 });
+
+        let result = guard
+            .check_policy("daily-policy-456", &policy, "caller1", "callee1", None)
+            .await;
+
+        assert!(result.is_ok());
+        assert_eq!(limiter.get_last_policy_id(), Some("daily-policy-456".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_check_policy_uses_policy_id_for_concurrency() {
+        let limiter = RecordingLimiter::new();
+        let guard = PolicyGuard::new(limiter.clone());
+
+        let mut policy = PolicySpec::default();
+        policy.concurrency = Some(ConcurrencyLimit {
+            max_total: 5,
+            max_per_account: HashMap::new(),
+        });
+
+        let result = guard
+            .check_policy("concurrency-policy-789", &policy, "caller1", "callee1", None)
+            .await;
+
+        assert!(result.is_ok());
+        assert_eq!(limiter.get_last_policy_id(), Some("concurrency-policy-789".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_check_policy_allows_when_no_limits() {
+        let limiter = InMemoryFrequencyLimiter::new();
+        let guard = PolicyGuard::new(limiter);
+
+        let policy = PolicySpec::default();
+
+        let result = guard
+            .check_policy("any-policy", &policy, "caller1", "callee1", None)
+            .await;
+
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), PolicyCheckStatus::Allowed);
+    }
+}
+
