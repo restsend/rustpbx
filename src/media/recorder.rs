@@ -74,6 +74,8 @@ pub struct Recorder {
     start_offset_b: u32, // in samples
     last_ssrc_a: Option<u32>,
     last_ssrc_b: Option<u32>,
+    last_dtmf_event_a: Option<(u8, u32)>,
+    last_dtmf_event_b: Option<(u8, u32)>,
 
     next_flush_ts: u32, // The next timestamp to be flushed
     ptime: Duration,
@@ -130,6 +132,8 @@ impl Recorder {
             start_offset_b: 0,
             last_ssrc_a: None,
             last_ssrc_b: None,
+            last_dtmf_event_a: None,
+            last_dtmf_event_b: None,
             next_flush_ts: 0,
             written_samples: 0,
             writer,
@@ -356,6 +360,16 @@ impl Recorder {
 
         let end_bit = (payload[1] & 0x80) != 0;
         if end_bit {
+            let last_dtmf_event = match leg {
+                Leg::A => &mut self.last_dtmf_event_a,
+                Leg::B => &mut self.last_dtmf_event_b,
+            };
+            if last_dtmf_event.is_some_and(|(last_digit, last_ts)| {
+                last_digit == digit_code && last_ts == timestamp
+            }) {
+                return Ok(());
+            }
+            *last_dtmf_event = Some((digit_code, timestamp));
             let duration = u16::from_be_bytes([payload[2], payload[3]]);
             let duration_ms = (duration as u32 * 1000) / clock_rate.max(1);
             debug!(leg = ?leg, digit = %digit, duration_ms = %duration_ms, "Recording DTMF digit");
@@ -1008,6 +1022,8 @@ mod tests {
             written_samples: 0,
             writer: Box::new(TestWriter::new()),
             ptime: Duration::from_millis(20),
+            last_dtmf_event_a: None,
+            last_dtmf_event_b: None,
         }
     }
 
