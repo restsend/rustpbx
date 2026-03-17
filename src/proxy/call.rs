@@ -476,7 +476,8 @@ impl CallModule {
             .with_caller(caller_uri)
             .with_media(media_config)
             .with_recording(recording)
-            .with_route_invite(route_invite);
+            .with_route_invite(route_invite)
+            .with_passthrough_failure(self.inner.config.passthrough_failure);
 
         if let Some((app_name, app_params, auto_answer)) = pending_app {
             dialplan = dialplan.with_application(app_name, app_params, auto_answer);

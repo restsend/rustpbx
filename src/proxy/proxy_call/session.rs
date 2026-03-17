@@ -4243,6 +4243,28 @@ impl CallSession {
                 }
             }
         }
+
+        if !self.server_dialog.state().is_terminated() {
+            let (code, reason) = if self.context.dialplan.passthrough_failure {
+                self.last_error.clone().unwrap_or((
+                    StatusCode::ServerInternalError,
+                    Some("Call failed".to_string()),
+                ))
+            } else {
+                (
+                    StatusCode::ServerInternalError,
+                    Some("Call failed".to_string()),
+                )
+            };
+
+            info!(
+                session_id = %self.context.session_id,
+                status_code = %code,
+                passthrough = self.context.dialplan.passthrough_failure,
+                "Rejecting caller with failure response"
+            );
+            let _ = self.server_dialog.reject(Some(code), reason);
+        }
     }
     pub async fn play_audio_file(
         &mut self,
