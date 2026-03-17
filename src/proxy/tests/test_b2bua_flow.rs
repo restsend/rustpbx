@@ -464,3 +464,84 @@ async fn test_webrtc_to_rtp_bridge() {
     info!("WebRTC to RTP bridging test passed!");
     cancel_token.cancel();
 }
+
+#[tokio::test]
+async fn test_callee_reject_passthrough_486_busy_here() {
+    let _ = tracing_subscriber::fmt::try_init();
+    let proxy = TestProxyServer::start().await.unwrap();
+    let proxy_addr = proxy.get_addr();
+
+    let alice_port = portpicker::pick_unused_port().unwrap_or(25040);
+    let bob_port = portpicker::pick_unused_port().unwrap_or(25041);
+
+    let alice = create_test_ua("alice", "password123", proxy_addr, alice_port)
+        .await
+        .unwrap();
+    let bob = create_test_ua("bob", "password456", proxy_addr, bob_port)
+        .await
+        .unwrap();
+
+    alice.register().await.unwrap();
+    bob.register().await.unwrap();
+
+    sleep(Duration::from_millis(500)).await;
+
+    let dummy_sdp = "v=0\r\no=- 123456 123456 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 1234 RTP/AVP 0 101\r\na=rtpmap:0 PCMU/8000\r\na=rtpmap:101 telephone-event/8000\r\na=fmtp:101 0-16\r\na=sendrecv\r\n".to_string();
+
+    // Bob rejects the call with 486 BusyHere
+    let answer_task = tokio::spawn(async move {
+        for _ in 0..50 {
+            let events = bob.process_dialog_events().await.unwrap_or_default();
+            for event in events {
+                match event {
+                    TestUaEvent::IncomingCall(dialog_id) => {
+                        info!("Bob received incoming call: {}", dialog_id);
+                        // Reject with 486 BusyHere
+                        bob.reject_call_with_reason(
+                            &dialog_id,
+                            Some(486),
+                            Some("Busy Here".to_string()),
+                        )
+                        .await
+                        .unwrap();
+                        return Ok::<_, anyhow::Error>(dialog_id);
+                    }
+                    _ => {}
+                }
+            }
+            sleep(Duration::from_millis(100)).await;
+        }
+        Err(anyhow::anyhow!("No incoming call received"))
+    });
+
+    // Alice makes a call to Bob
+    let alice_sdp = dummy_sdp.clone();
+    let alice_clone = alice.clone();
+    let call_task = tokio::spawn(async move {
+        timeout(
+            Duration::from_secs(10),
+            alice_clone.make_call("bob", Some(alice_sdp)),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("Call timed out"))?
+    });
+
+    let (call_result, answer_result) = tokio::join!(call_task, answer_task);
+
+    // Alice's call should fail with 486 BusyHere (not 500 ServerInternalError)
+    let call_result_inner = call_result.unwrap();
+    let err_str = call_result_inner.unwrap_err().to_string();
+    info!("Alice call error: {:?}", err_str);
+
+    // Verify the error contains 486 (not 500)
+    assert!(
+        err_str.contains("486"),
+        "Expected 486 BusyHere, but got: {}",
+        err_str
+    );
+
+    // Bob should have rejected the call
+    let _ = answer_result.unwrap();
+
+    info!("Test passed: 486 BusyHere was propagated to caller");
+}

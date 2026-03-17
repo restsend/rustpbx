@@ -2555,6 +2555,7 @@ impl CallSession {
                         reason.clone(),
                         Some(target.aor.to_string()),
                     );
+                    self.set_error(code, reason, Some(target.aor.to_string()));
 
                     if should_retry {
                         continue;

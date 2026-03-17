@@ -287,8 +287,18 @@ impl TestUa {
         }
     }
 
-    /// Reject a call
     pub async fn reject_call(&self, dialog_id: &DialogId) -> Result<()> {
+        self.reject_call_with_reason(dialog_id, None, None).await
+    }
+
+    pub async fn reject_call_with_reason(
+        &self,
+        dialog_id: &DialogId,
+        status_code: Option<u16>,
+        reason: Option<String>,
+    ) -> Result<()> {
+        use rsip::StatusCode;
+
         let dialog_layer = self
             .dialog_layer
             .as_ref()
@@ -297,7 +307,8 @@ impl TestUa {
         if let Some(dialog) = dialog_layer.get_dialog(dialog_id) {
             match dialog {
                 Dialog::ServerInvite(d) => {
-                    d.reject(None, None).map_err(|e| e.into_anyhow())?;
+                    let code = status_code.map(|c| StatusCode::from(c));
+                    d.reject(code, reason).map_err(|e| e.into_anyhow())?;
                     Ok(())
                 }
                 _ => Err(anyhow!("Invalid dialog type for rejecting")),
