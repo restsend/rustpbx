@@ -60,3 +60,7 @@ model.md
 PRODUCT_ROADMAP.md
 config/voicemail.toml
 config.toml.test
+docs/mcu.md
+docs/rwi_plan.md
+docs/rwi_testing.md
+docs/media_mixer_plan.md

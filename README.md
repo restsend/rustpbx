@@ -39,6 +39,7 @@ Different from Asterisk/FreeSWITCH (C modules), RustPBX exposes all call control
 - **Transcript** — Post-call transcription via local SenseVoice (offline, no cloud dependency)
 - **CDR Webhooks** — Push call detail records + recordings to your system on hangup
 - **WebRTC Phone** — Built-in browser softphone for testing
+- **RWI (RustPBX WebSocket Interface)** — JSON-over-WebSocket for real-time call control: originate, answer, hold, transfer, record, queue management, supervisor whisper/barge, and media stream injection
 
 ---
 
@@ -160,6 +161,7 @@ See [API Integration Guide](docs/api_integration_guide.md) for the full webhook 
 |---|---|
 | [Configuration Guide](docs/configuration.md) | All config options |
 | [API Integration Guide](docs/api_integration_guide.md) | HTTP Router, Webhooks, Active Call Control |
+| [RWI Protocol](docs/rwi.md) | WebSocket Interface for real-time call control |
 | [Product Roadmap](PRODUCT_ROADMAP.md) | Commercial plugins & Q2 2026 plan |
 
 ---

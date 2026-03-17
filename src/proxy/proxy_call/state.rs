@@ -3,6 +3,7 @@ use crate::callrecord::CallRecordHangupReason;
 use crate::proxy::active_call_registry::{
     ActiveProxyCallEntry, ActiveProxyCallRegistry, ActiveProxyCallStatus,
 };
+use crate::rwi::SupervisorMode;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use rsip::StatusCode;
@@ -42,12 +43,21 @@ pub enum SessionAction {
         audio_file: String,
         send_progress: bool,
         await_completion: bool,
+        #[serde(default)]
+        track_id: Option<String>,
+        #[serde(default)]
+        loop_playback: bool,
+        #[serde(default)]
+        interrupt_on_dtmf: bool,
     },
     StartRecording {
         path: String,
         max_duration: Option<std::time::Duration>,
         beep: bool,
     },
+    PauseRecording,
+    ResumeRecording,
+    StopRecording,
     Hangup {
         reason: Option<CallRecordHangupReason>,
         code: Option<u16>,
@@ -57,6 +67,30 @@ pub enum SessionAction {
     RefreshSession,
     MuteTrack(String),
     UnmuteTrack(String),
+    BridgeTo {
+        target_session_id: String,
+    },
+    Unbridge,
+    StopPlayback,
+    SupervisorListen {
+        target_session_id: String,
+    },
+    SupervisorWhisper {
+        target_session_id: String,
+    },
+    SupervisorBarge {
+        target_session_id: String,
+    },
+    SupervisorStop,
+    StartSupervisorMode {
+        supervisor_session_id: String,
+        target_session_id: String,
+        mode: SupervisorMode,
+    },
+    Hold {
+        music_source: Option<String>,
+    },
+    Unhold,
 }
 
 impl SessionAction {
@@ -101,6 +135,7 @@ pub struct CallSessionShared {
     inner: Arc<RwLock<CallSessionSnapshot>>,
     registry: Option<Weak<ActiveProxyCallRegistry>>,
     events: Arc<RwLock<Option<ProxyCallEventSender>>>,
+    app_event_tx: Arc<RwLock<Option<mpsc::UnboundedSender<crate::call::app::ControllerEvent>>>>,
 }
 
 impl CallSessionShared {
@@ -132,7 +167,33 @@ impl CallSessionShared {
             inner: Arc::new(RwLock::new(inner)),
             registry: registry.map(|r| Arc::downgrade(&r)),
             events: Arc::new(RwLock::new(None)),
+            app_event_tx: Arc::new(RwLock::new(None)),
         }
+    }
+
+    /// Set (or clear) the app-event sender used by [`send_app_event`].
+    ///
+    /// Called by `run_application` at the start and end of a call app.
+    pub fn set_app_event_sender(
+        &self,
+        sender: Option<mpsc::UnboundedSender<crate::call::app::ControllerEvent>>,
+    ) {
+        if let Ok(mut slot) = self.app_event_tx.write() {
+            *slot = sender;
+        }
+    }
+
+    /// Send a [`ControllerEvent`] directly to the running `CallApp` event loop,
+    /// bypassing the `SessionAction` / `action_inbox` path.
+    ///
+    /// Returns `true` if the event was delivered (i.e. an app is currently running).
+    pub fn send_app_event(&self, event: crate::call::app::ControllerEvent) -> bool {
+        if let Ok(slot) = self.app_event_tx.read() {
+            if let Some(tx) = slot.as_ref() {
+                return tx.send(event).is_ok();
+            }
+        }
+        false
     }
 
     pub fn snapshot(&self) -> CallSessionSnapshot {
@@ -148,6 +209,11 @@ impl CallSessionShared {
     pub fn answer_sdp(&self) -> Option<String> {
         let inner = self.inner.read().unwrap();
         inner.answer_sdp.clone()
+    }
+
+    pub fn queue_name(&self) -> Option<String> {
+        let inner = self.inner.read().unwrap();
+        inner.queue_name.clone()
     }
 
     pub fn register_active_call(&self, handle: CallSessionHandle) {
@@ -455,5 +521,144 @@ impl CallSessionHandle {
 
     pub fn send_command(&self, action: SessionAction) -> Result<()> {
         self.cmd_tx.send(action).map_err(Into::into)
+    }
+
+    pub fn set_queue_name(&self, queue: Option<String>) {
+        self.shared.set_queue_name(queue)
+    }
+
+    pub fn queue_name(&self) -> Option<String> {
+        self.shared.queue_name()
+    }
+
+    /// Send a [`ControllerEvent`] directly to the running `CallApp` event loop.
+    ///
+    /// Returns `true` if the event was delivered (i.e. an app is currently running
+    /// on this call and the channel is open).
+    pub fn send_app_event(&self, event: crate::call::app::ControllerEvent) -> bool {
+        self.shared.send_app_event(event)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::call::DialDirection;
+
+    fn make_handle(session_id: &str) -> (CallSessionHandle, SessionActionReceiver) {
+        let shared = CallSessionShared::new(
+            session_id.to_string(),
+            DialDirection::Inbound,
+            Some("caller".to_string()),
+            Some("callee".to_string()),
+            None,
+        );
+        CallSessionHandle::with_shared(shared)
+    }
+
+    // ── SessionAction serialization / equality ─────────────────────────────
+
+    #[test]
+    fn test_session_action_bridge_to_serde() {
+        let action = SessionAction::BridgeTo {
+            target_session_id: "session-b".to_string(),
+        };
+        let json = serde_json::to_string(&action).unwrap();
+        let decoded: SessionAction = serde_json::from_str(&json).unwrap();
+        assert!(
+            matches!(decoded, SessionAction::BridgeTo { target_session_id } if target_session_id == "session-b")
+        );
+    }
+
+    #[test]
+    fn test_session_action_unbridge_serde() {
+        let action = SessionAction::Unbridge;
+        let json = serde_json::to_string(&action).unwrap();
+        let decoded: SessionAction = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, SessionAction::Unbridge);
+    }
+
+    #[test]
+    fn test_session_action_stop_playback_serde() {
+        let action = SessionAction::StopPlayback;
+        let json = serde_json::to_string(&action).unwrap();
+        let decoded: SessionAction = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, SessionAction::StopPlayback);
+    }
+
+    // ── send_command / receive round-trips ─────────────────────────────────
+
+    #[test]
+    fn test_send_bridge_to_via_handle() {
+        let (handle, mut rx) = make_handle("s-bridge");
+        handle
+            .send_command(SessionAction::BridgeTo {
+                target_session_id: "s-other".to_string(),
+            })
+            .expect("send should succeed");
+
+        let received = rx.try_recv().expect("should have one message");
+        assert!(
+            matches!(received, SessionAction::BridgeTo { target_session_id } if target_session_id == "s-other")
+        );
+    }
+
+    #[test]
+    fn test_send_unbridge_via_handle() {
+        let (handle, mut rx) = make_handle("s-unbridge");
+        handle
+            .send_command(SessionAction::Unbridge)
+            .expect("send should succeed");
+
+        let received = rx.try_recv().expect("should have one message");
+        assert_eq!(received, SessionAction::Unbridge);
+    }
+
+    #[test]
+    fn test_send_stop_playback_via_handle() {
+        let (handle, mut rx) = make_handle("s-stop");
+        handle
+            .send_command(SessionAction::StopPlayback)
+            .expect("send should succeed");
+
+        let received = rx.try_recv().expect("should have one message");
+        assert_eq!(received, SessionAction::StopPlayback);
+    }
+
+    // ── ordering: multiple commands are queued in order ────────────────────
+
+    #[test]
+    fn test_command_queue_ordering() {
+        let (handle, mut rx) = make_handle("s-order");
+
+        handle.send_command(SessionAction::StopPlayback).unwrap();
+        handle.send_command(SessionAction::Unbridge).unwrap();
+        handle
+            .send_command(SessionAction::BridgeTo {
+                target_session_id: "target".to_string(),
+            })
+            .unwrap();
+
+        assert_eq!(rx.try_recv().unwrap(), SessionAction::StopPlayback);
+        assert_eq!(rx.try_recv().unwrap(), SessionAction::Unbridge);
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            SessionAction::BridgeTo { .. }
+        ));
+        assert!(rx.try_recv().is_err(), "queue should be empty");
+    }
+
+    // ── send fails after receiver is dropped ──────────────────────────────
+
+    #[test]
+    fn test_send_fails_after_receiver_dropped() {
+        let (handle, rx) = make_handle("s-closed");
+        drop(rx); // close the receiving end
+
+        let result = handle.send_command(SessionAction::StopPlayback);
+        assert!(
+            result.is_err(),
+            "send_command should fail when receiver is dropped"
+        );
     }
 }

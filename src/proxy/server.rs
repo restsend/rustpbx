@@ -76,8 +76,8 @@ pub struct SipServerInner {
     pub runnings_tx: Arc<AtomicUsize>,
     pub storage: Option<crate::storage::Storage>,
     pub presence_manager: Arc<PresenceManager>,
-    /// Addon registry for accessing call applications (voicemail, ivr, etc.)
     pub addon_registry: Option<Arc<crate::addons::registry::AddonRegistry>>,
+    pub rwi_gateway: Option<Arc<tokio::sync::RwLock<crate::rwi::gateway::RwiGateway>>>,
 }
 
 pub type SipServerRef = Arc<SipServerInner>;
@@ -114,6 +114,8 @@ pub struct SipServerBuilder {
     no_bind: bool,
     /// Addon registry for accessing call applications (voicemail, ivr, etc.)
     addon_registry: Option<Arc<crate::addons::registry::AddonRegistry>>,
+    /// RWI gateway to wire into the server for call-app factory use.
+    rwi_gateway: Option<Arc<tokio::sync::RwLock<crate::rwi::gateway::RwiGateway>>>,
 }
 
 impl SipServerBuilder {
@@ -142,6 +144,7 @@ impl SipServerBuilder {
             sipflow_backend: None,
             no_bind: false,
             addon_registry: None,
+            rwi_gateway: None,
         }
     }
 
@@ -259,12 +262,19 @@ impl SipServerBuilder {
         self
     }
 
-    /// Set the addon registry for accessing call applications (voicemail, ivr, etc.)
     pub fn with_addon_registry(
         mut self,
         registry: Option<Arc<crate::addons::registry::AddonRegistry>>,
     ) -> Self {
         self.addon_registry = registry;
+        self
+    }
+
+    pub fn with_rwi_gateway(
+        mut self,
+        gateway: Arc<tokio::sync::RwLock<crate::rwi::gateway::RwiGateway>>,
+    ) -> Self {
+        self.rwi_gateway = Some(gateway);
         self
     }
 
@@ -402,7 +412,7 @@ impl SipServerBuilder {
                                 client_cert: None,
                                 client_key: None,
                                 ca_certs: None,
-                                sni_hostname: None
+                                sni_hostname: None,
                             };
                             match TlsListenerConnection::new(
                                 local_addr.into(),
@@ -557,6 +567,7 @@ impl SipServerBuilder {
             storage: self.storage,
             presence_manager,
             addon_registry: self.addon_registry,
+            rwi_gateway: self.rwi_gateway,
         });
 
         let inner_weak = Arc::downgrade(&inner);
