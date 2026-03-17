@@ -72,6 +72,8 @@ pub struct Recorder {
     base_timestamp_b: Option<u32>,
     start_offset_a: u32, // in samples
     start_offset_b: u32, // in samples
+    last_ssrc_a: Option<u32>,
+    last_ssrc_b: Option<u32>,
 
     next_flush_ts: u32, // The next timestamp to be flushed
     ptime: Duration,
@@ -126,6 +128,8 @@ impl Recorder {
             base_timestamp_b: None,
             start_offset_a: 0,
             start_offset_b: 0,
+            last_ssrc_a: None,
+            last_ssrc_b: None,
             next_flush_ts: 0,
             written_samples: 0,
             writer,
@@ -157,15 +161,21 @@ impl Recorder {
             }
         }
 
-        let mut encoded = match sample {
-            MediaSample::Audio(frame) => frame.data.clone(),
-            _ => return Ok(()),
-        };
         let decoder_type = match codec_hint {
             Some(codec) => codec,
             None => CodecType::try_from(frame.payload_type.unwrap_or(0))?,
         };
-        let decoder_clockrate = decoder_type.clock_rate();
+        let packet_ssrc = frame.raw_packet.as_ref().map(|packet| packet.header.ssrc);
+        let (mut encoded, frame_clock_rate) = match sample {
+            MediaSample::Audio(frame) => match frame.raw_packet.as_ref() {
+                Some(packet) => (
+                    Bytes::copy_from_slice(&packet.payload),
+                    decoder_type.clock_rate().max(1),
+                ),
+                None => (frame.data.clone(), frame.clock_rate.max(1)),
+            },
+            _ => return Ok(()),
+        };
 
         if decoder_type != self.codec {
             let decoder = self
@@ -190,6 +200,13 @@ impl Recorder {
             }
             .into();
         }
+        self.maybe_reset_leg_timeline(
+            leg,
+            frame.rtp_timestamp,
+            frame_clock_rate,
+            packet_ssrc,
+            &encoded,
+        );
         let absolute_ts = match leg {
             Leg::A => {
                 if self.base_timestamp_a.is_none() {
@@ -206,7 +223,7 @@ impl Recorder {
                     .rtp_timestamp
                     .wrapping_sub(self.base_timestamp_a.unwrap());
                 let scaled_relative =
-                    (relative as u64 * self.sample_rate as u64 / decoder_clockrate as u64) as u32;
+                    (relative as u64 * self.sample_rate as u64 / frame_clock_rate as u64) as u32;
                 self.start_offset_a.wrapping_add(scaled_relative)
             }
             Leg::B => {
@@ -224,7 +241,7 @@ impl Recorder {
                     .rtp_timestamp
                     .wrapping_sub(self.base_timestamp_b.unwrap());
                 let scaled_relative =
-                    (relative as u64 * self.sample_rate as u64 / decoder_clockrate as u64) as u32;
+                    (relative as u64 * self.sample_rate as u64 / frame_clock_rate as u64) as u32;
                 self.start_offset_b.wrapping_add(scaled_relative)
             }
         };
@@ -241,6 +258,81 @@ impl Recorder {
             self.flush()?;
         }
         Ok(())
+    }
+
+    fn maybe_reset_leg_timeline(
+        &mut self,
+        leg: Leg,
+        rtp_timestamp: u32,
+        frame_clock_rate: u32,
+        packet_ssrc: Option<u32>,
+        encoded: &[u8],
+    ) {
+        let leg_end = self.leg_end_ts(leg);
+        let (base_timestamp, start_offset, last_ssrc) = match leg {
+            Leg::A => (
+                &mut self.base_timestamp_a,
+                &mut self.start_offset_a,
+                &mut self.last_ssrc_a,
+            ),
+            Leg::B => (
+                &mut self.base_timestamp_b,
+                &mut self.start_offset_b,
+                &mut self.last_ssrc_b,
+            ),
+        };
+
+        let Some(base) = *base_timestamp else {
+            *last_ssrc = packet_ssrc;
+            return;
+        };
+
+        let projected = start_offset.wrapping_add(
+            ((rtp_timestamp.wrapping_sub(base)) as u64 * self.sample_rate as u64
+                / frame_clock_rate.max(1) as u64) as u32,
+        );
+        let max_gap = self.sample_rate * 2;
+        let ssrc_changed =
+            matches!((*last_ssrc, packet_ssrc), (Some(prev), Some(curr)) if prev != curr);
+        let timestamp_far_ahead = projected > leg_end.saturating_add(max_gap);
+        let timestamp_far_behind = leg_end > projected.saturating_add(max_gap);
+        let prev_ssrc = *last_ssrc;
+
+        if ssrc_changed || timestamp_far_ahead || timestamp_far_behind {
+            debug!(
+                recorder_path = %self.path,
+                leg = ?leg,
+                base_timestamp = base,
+                rtp_timestamp,
+                frame_clock_rate,
+                prev_ssrc,
+                packet_ssrc,
+                leg_end,
+                projected,
+                max_gap,
+                ssrc_changed,
+                timestamp_far_ahead,
+                timestamp_far_behind,
+                encoded_len = encoded.len(),
+                "Recorder timeline discontinuity detected, resetting leg base"
+            );
+            *base_timestamp = Some(rtp_timestamp);
+            *start_offset = leg_end;
+        }
+
+        *last_ssrc = packet_ssrc.or(*last_ssrc);
+    }
+
+    fn leg_end_ts(&self, leg: Leg) -> u32 {
+        let (samples_per_block, bytes_per_block) = self.block_info();
+        let buffered_end = match leg {
+            Leg::A => self.buffer_a.last_key_value(),
+            Leg::B => self.buffer_b.last_key_value(),
+        }
+        .map(|(k, v)| k + (v.len() / bytes_per_block) as u32 * samples_per_block)
+        .unwrap_or(self.next_flush_ts);
+
+        buffered_end.max(self.next_flush_ts)
     }
 
     pub fn write_dtmf_payload(
@@ -302,9 +394,9 @@ impl Recorder {
                             / 1000) as u32;
                     }
                     let relative = t.wrapping_sub(self.base_timestamp_a.unwrap());
-                    let scaled_relative =
-                        (relative as u64 * self.sample_rate as u64 / timestamp_clock_rate as u64)
-                            as u32;
+                    let scaled_relative = (relative as u64 * self.sample_rate as u64
+                        / timestamp_clock_rate as u64)
+                        as u32;
                     self.start_offset_a.wrapping_add(scaled_relative)
                 }
                 Leg::B => {
@@ -315,9 +407,9 @@ impl Recorder {
                             / 1000) as u32;
                     }
                     let relative = t.wrapping_sub(self.base_timestamp_b.unwrap());
-                    let scaled_relative =
-                        (relative as u64 * self.sample_rate as u64 / timestamp_clock_rate as u64)
-                            as u32;
+                    let scaled_relative = (relative as u64 * self.sample_rate as u64
+                        / timestamp_clock_rate as u64)
+                        as u32;
                     self.start_offset_b.wrapping_add(scaled_relative)
                 }
             }
@@ -910,6 +1002,8 @@ mod tests {
             base_timestamp_b: None,
             start_offset_a: 0,
             start_offset_b: 0,
+            last_ssrc_a: None,
+            last_ssrc_b: None,
             next_flush_ts: 0,
             written_samples: 0,
             writer: Box::new(TestWriter::new()),
