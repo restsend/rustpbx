@@ -672,6 +672,15 @@ pub struct ProxyConfig {
     pub sip_flow_max_items: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub addons: Option<Vec<String>>,
+    /// Whether to passthrough callee's failure status code to caller.
+    /// When true, the caller receives the same SIP error code (e.g., 486, 603) that the callee returned.
+    /// When false, a generic error code is sent instead.
+    #[serde(default = "default_passthrough_failure")]
+    pub passthrough_failure: bool,
+}
+
+fn default_passthrough_failure() -> bool {
+    true
 }
 
 #[derive(Default, Clone)]
@@ -868,6 +877,7 @@ impl Default for ProxyConfig {
             nat_fix: true,
             sip_flow_max_items: None,
             addons: None,
+            passthrough_failure: true,
         }
     }
 }

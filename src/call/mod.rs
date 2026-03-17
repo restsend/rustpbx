@@ -688,6 +688,7 @@ pub struct Dialplan {
     pub with_original_headers: bool,
     pub extensions: http::Extensions,
     pub allow_codecs: Vec<CodecType>,
+    pub passthrough_failure: bool,
 }
 
 impl std::fmt::Debug for Dialplan {
@@ -747,6 +748,7 @@ impl Dialplan {
                 CodecType::Opus,
                 CodecType::TelephoneEvent,
             ],
+            passthrough_failure: false,
         }
     }
 
@@ -806,6 +808,11 @@ impl Dialplan {
 
     pub fn with_call_forwarding(mut self, config: Option<CallForwardingConfig>) -> Self {
         self.call_forwarding = config;
+        self
+    }
+
+    pub fn with_passthrough_failure(mut self, enabled: bool) -> Self {
+        self.passthrough_failure = enabled;
         self
     }
 
