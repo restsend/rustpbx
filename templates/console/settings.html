@@ -129,15 +129,18 @@
                             <span class="mt-1 flex h-2.5 w-2.5 flex-none rounded-full"
                                 :class="aclReloadModal.status === 'success' ? 'bg-emerald-500' : (aclReloadModal.status === 'running' ? 'bg-sky-400 animate-pulse' : 'bg-slate-300')"></span>
                             <div>
-                                <div class="font-semibold text-slate-800">{{ "settings.refresh_proxy_filters" | t }}</div>
-                                <div class="text-xs text-slate-500">{{ "settings.refresh_proxy_filters_desc" | t }}</div>
+                                <div class="font-semibold text-slate-800">{{ "settings.refresh_proxy_filters" | t }}
+                                </div>
+                                <div class="text-xs text-slate-500">{{ "settings.refresh_proxy_filters_desc" | t }}
+                                </div>
                             </div>
                         </li>
                         <li class="flex items-start gap-3">
                             <span class="mt-1 flex h-2.5 w-2.5 flex-none rounded-full"
                                 :class="aclReloadModal.status === 'success' ? 'bg-emerald-500' : (aclReloadModal.status === 'running' ? 'bg-sky-400 animate-pulse' : 'bg-slate-300')"></span>
                             <div>
-                                <div class="font-semibold text-slate-800">{{ "settings.confirm_rule_summary" | t }}</div>
+                                <div class="font-semibold text-slate-800">{{ "settings.confirm_rule_summary" | t }}
+                                </div>
                                 <div class="text-xs text-slate-500">{{ "settings.confirm_rule_summary_desc" | t }}</div>
                             </div>
                         </li>
@@ -189,7 +192,8 @@
 
         <div class="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
             <div>
-                <p class="text-[11px] font-semibold uppercase tracking-wide text-sky-600">{{ "settings.control_plane" | t }}</p>
+                <p class="text-[11px] font-semibold uppercase tracking-wide text-sky-600">{{ "settings.control_plane" |
+                    t }}</p>
                 <h1 class="text-2xl font-semibold text-slate-900">{{ "settings.title" | t }}</h1>
                 <p class="text-sm text-slate-500">{{ "settings_page.subtitle" | t }}</p>
             </div>
@@ -234,53 +238,63 @@
                 <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
                     <div class="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
                         <div>
-                            <h2 class="text-base font-semibold text-slate-900">{{ "settings_page.runtime_overview" | t }}</h2>
+                            <h2 class="text-base font-semibold text-slate-900">{{ "settings_page.runtime_overview" | t
+                                }}</h2>
                             <p class="text-xs text-slate-500">{{ "settings_page.runtime_overview_desc" | t }}
                             </p>
                         </div>
                     </div>
                     <div class="mt-4 space-y-3 text-sm text-slate-600">
                         <div class="flex items-baseline justify-between">
-                            <span class="text-xs uppercase tracking-wide text-slate-400">{{ "settings_page.address" | t }}</span>
+                            <span class="text-xs uppercase tracking-wide text-slate-400">{{ "settings_page.address" | t
+                                }}</span>
                             <span class="font-mono" x-text="proxyConfig.addr || '—'"></span>
                         </div>
                         <div class="flex items-baseline justify-between">
-                            <span class="text-xs uppercase tracking-wide text-slate-400">{{ "settings_page.ports" | t }}</span>
+                            <span class="text-xs uppercase tracking-wide text-slate-400">{{ "settings_page.ports" | t
+                                }}</span>
                             <span class="font-mono"
                                 x-text="(proxyConfig.ports || []).map(port => `${port.label}:${port.value}`).join(', ') || '—'"></span>
                         </div>
                         <div class="flex items-baseline justify-between">
-                            <span class="text-xs uppercase tracking-wide text-slate-400">{{ "settings_page.modules" | t }}</span>
+                            <span class="text-xs uppercase tracking-wide text-slate-400">{{ "settings_page.modules" | t
+                                }}</span>
                             <span
                                 x-text="(proxyConfig.modules || []).length ? proxyConfig.modules.join(', ') : '—'"></span>
                         </div>
                         <div class="flex items-baseline justify-between">
-                            <span class="text-xs uppercase tracking-wide text-slate-400">{{ "settings_page.realms" | t }}</span>
+                            <span class="text-xs uppercase tracking-wide text-slate-400">{{ "settings_page.realms" | t
+                                }}</span>
                             <span
                                 x-text="(proxyConfig.realms || []).length ? proxyConfig.realms.join(', ') : '—'"></span>
                         </div>
                         <div class="flex items-baseline justify-between">
-                            <span class="text-xs uppercase tracking-wide text-slate-400">{{ "settings_page.data_sources" | t }}</span>
+                            <span class="text-xs uppercase tracking-wide text-slate-400">{{ "settings_page.data_sources"
+                                | t }}</span>
                             <span
                                 x-text="proxyConfig.data_sources ? `Routes · ${proxyConfig.data_sources.routes}, Trunks · ${proxyConfig.data_sources.trunks}` : '—'"></span>
                         </div>
                     </div>
                     <div class="mt-4 rounded-lg border border-slate-200 bg-slate-50 px-4 py-3">
-                        <div class="text-[11px] font-semibold uppercase tracking-wide text-slate-400">{{ "settings_page.transactions" | t }}
+                        <div class="text-[11px] font-semibold uppercase tracking-wide text-slate-400">{{
+                            "settings_page.transactions" | t }}
                         </div>
                         <div class="mt-3 grid grid-cols-3 gap-3 text-sm text-slate-700">
                             <div>
-                                <div class="text-xs uppercase tracking-wide text-slate-400">{{ "settings_page.running" | t }}</div>
+                                <div class="text-xs uppercase tracking-wide text-slate-400">{{ "settings_page.running" |
+                                    t }}</div>
                                 <div class="mt-1 font-semibold text-slate-900"
                                     x-text="displayMetric(stats.proxy?.transactions?.running)"></div>
                             </div>
                             <div>
-                                <div class="text-xs uppercase tracking-wide text-slate-400">{{ "settings_page.finished" | t }}</div>
+                                <div class="text-xs uppercase tracking-wide text-slate-400">{{ "settings_page.finished"
+                                    | t }}</div>
                                 <div class="mt-1 font-semibold text-slate-900"
                                     x-text="displayMetric(stats.proxy?.transactions?.finished)"></div>
                             </div>
                             <div>
-                                <div class="text-xs uppercase tracking-wide text-slate-400">{{ "settings_page.waiting_ack" | t }}</div>
+                                <div class="text-xs uppercase tracking-wide text-slate-400">{{
+                                    "settings_page.waiting_ack" | t }}</div>
                                 <div class="mt-1 font-semibold text-slate-900"
                                     x-text="displayMetric(stats.proxy?.transactions?.waiting_ack)"></div>
                             </div>
@@ -294,7 +308,8 @@
                 <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
                     <div class="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
                         <div>
-                            <h2 class="text-base font-semibold text-slate-900">{{ "settings_page.platform_settings" | t }}</h2>
+                            <h2 class="text-base font-semibold text-slate-900">{{ "settings_page.platform_settings" | t
+                                }}</h2>
                             <p class="text-xs text-slate-500">{{ "settings_page.platform_settings_desc" | t }}
                             </p>
                         </div>
@@ -302,7 +317,8 @@
                     <form class="mt-4 space-y-4" @submit.prevent="savePlatformSettings">
                         <div class="grid gap-4 md:grid-cols-2">
                             <div>
-                                <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">{{ "settings_page.log_level" | t }}</label>
+                                <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">{{
+                                    "settings_page.log_level" | t }}</label>
                                 <select x-model="platformDraft.log_level" :disabled="platformProcessing"
                                     class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
                                     <option value="">{{ "common.default" | t }}</option>
@@ -314,28 +330,32 @@
                                 </select>
                             </div>
                             <div>
-                                <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">{{ "settings_page.log_file" | t }}</label>
+                                <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">{{
+                                    "settings_page.log_file" | t }}</label>
                                 <input type="text" x-model="platformDraft.log_file" :disabled="platformProcessing"
                                     class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                                     placeholder="/var/log/rustpbx.log" />
                             </div>
                         </div>
                         <div>
-                            <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">{{ "settings_page.external_ip" | t }}</label>
+                            <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">{{
+                                "settings_page.external_ip" | t }}</label>
                             <input type="text" x-model="platformDraft.external_ip" :disabled="platformProcessing"
                                 class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                                 placeholder="1.2.3.4" />
                         </div>
                         <div class="grid gap-4 sm:grid-cols-2">
                             <div>
-                                <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">{{ "settings_page.rtp_start_port" | t }}</label>
+                                <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">{{
+                                    "settings_page.rtp_start_port" | t }}</label>
                                 <input type="number" min="1" max="65535" x-model="platformDraft.rtp_start_port"
                                     :disabled="platformProcessing"
                                     class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                                     placeholder="12000" />
                             </div>
                             <div>
-                                <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">{{ "settings_page.rtp_end_port" | t }}</label>
+                                <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">{{
+                                    "settings_page.rtp_end_port" | t }}</label>
                                 <input type="number" min="1" max="65535" x-model="platformDraft.rtp_end_port"
                                     :disabled="platformProcessing"
                                     class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
@@ -354,7 +374,8 @@
                                 <button type="submit"
                                     class="inline-flex items-center justify-center rounded-md bg-sky-600 px-3 py-2 text-xs font-semibold text-white shadow-sm transition hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60"
                                     :disabled="platformProcessing">
-                                    <span x-text="platformProcessing ? tt('common.saving') : tt('common.save_changes')"></span>
+                                    <span
+                                        x-text="platformProcessing ? tt('common.saving') : tt('common.save_changes')"></span>
                                 </button>
                             </div>
                         </div>
@@ -381,7 +402,8 @@
                         <tbody class="divide-y divide-slate-100">
                             <template x-if="!keyConfigRows().length">
                                 <tr>
-                                    <td class="px-4 py-3 text-xs text-slate-400" colspan="2">{{ "settings_page.no_config" | t }}</td>
+                                    <td class="px-4 py-3 text-xs text-slate-400" colspan="2">{{
+                                        "settings_page.no_config" | t }}</td>
                                 </tr>
                             </template>
                             <template x-for="item in keyConfigRows()" :key="item.label">
@@ -408,7 +430,8 @@
                 <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
                     <div class="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
                         <div>
-                            <h2 class="text-base font-semibold text-slate-900">{{ "settings_page.proxy_config" | t }}</h2>
+                            <h2 class="text-base font-semibold text-slate-900">{{ "settings_page.proxy_config" | t }}
+                            </h2>
                             <p class="text-xs text-slate-500">{{ "settings_page.proxy_config_desc" | t }}</p>
                         </div>
                     </div>
@@ -416,7 +439,8 @@
                         <!-- Realms Section -->
                         <div class="space-y-4">
                             <div>
-                                <label class="block text-sm font-semibold text-slate-900">{{ "settings_page.realms_label" | t }}</label>
+                                <label class="block text-sm font-semibold text-slate-900">{{
+                                    "settings_page.realms_label" | t }}</label>
                                 <p class="mt-1 text-xs text-slate-500">{{ "settings_page.realms_desc" | t }}</p>
                                 <textarea x-model="proxyDraft.realms" :disabled="proxyProcessing" rows="3"
                                     class="mt-2 block w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
@@ -429,29 +453,30 @@
                         <!-- Locator Webhook -->
                         <div class="space-y-4">
                             <div>
-                                <h3 class="text-sm font-semibold text-slate-900">{{ "settings_page.locator_webhook" | t }}</h3>
+                                <h3 class="text-sm font-semibold text-slate-900">{{ "settings_page.locator_webhook" | t
+                                    }}</h3>
                                 <p class="text-xs text-slate-500">{{ "settings_page.locator_webhook_desc" | t }}</p>
                             </div>
                             <div class="grid gap-4 md:grid-cols-2">
                                 <div class="md:col-span-1">
-                                    <label
-                                        class="block text-xs font-semibold uppercase tracking-wide text-slate-400">{{ "settings_page.webhook_url" | t }}</label>
+                                    <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">{{
+                                        "settings_page.webhook_url" | t }}</label>
                                     <input type="url" x-model="proxyDraft.locator_webhook.url"
                                         :disabled="proxyProcessing"
                                         class="mt-1 block w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                                         placeholder="https://api.example.com/sip-events">
                                 </div>
                                 <div class="md:col-span-1">
-                                    <label
-                                        class="block text-xs font-semibold uppercase tracking-wide text-slate-400">{{ "settings_page.timeout_ms" | t }}</label>
+                                    <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">{{
+                                        "settings_page.timeout_ms" | t }}</label>
                                     <input type="number" x-model="proxyDraft.locator_webhook.timeout_ms"
                                         :disabled="proxyProcessing"
                                         class="mt-1 block w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                                         placeholder="5000">
                                 </div>
                                 <div class="md:col-span-2">
-                                    <label
-                                        class="block text-xs font-semibold uppercase tracking-wide text-slate-400">{{ "settings_page.custom_headers" | t }}</label>
+                                    <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">{{
+                                        "settings_page.custom_headers" | t }}</label>
                                     <textarea x-model="proxyDraft.locator_webhook.headers" :disabled="proxyProcessing"
                                         rows="2"
                                         class="mt-1 block w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
@@ -480,7 +505,8 @@
                         <div class="space-y-4">
                             <div class="flex items-center justify-between">
                                 <div>
-                                    <h3 class="text-sm font-semibold text-slate-900">{{ "settings_page.user_backends" | t }}</h3>
+                                    <h3 class="text-sm font-semibold text-slate-900">{{ "settings_page.user_backends" |
+                                        t }}</h3>
                                     <p class="text-xs text-slate-500">{{ "settings_page.user_backends_desc" | t }}</p>
                                 </div>
                                 <div class="relative" x-data="{ open: false }" @click.away="open = false">
@@ -623,20 +649,21 @@
                         <!-- HTTP Call Router -->
                         <div class="space-y-4">
                             <div>
-                                <h3 class="text-sm font-semibold text-slate-900">{{ "settings_page.router_backend" | t }}</h3>
+                                <h3 class="text-sm font-semibold text-slate-900">{{ "settings_page.router_backend" | t
+                                    }}</h3>
                                 <p class="text-xs text-slate-500">{{ "settings_page.router_backend_desc" | t }}</p>
                             </div>
                             <div class="grid gap-4 md:grid-cols-2">
                                 <div class="md:col-span-1">
-                                    <label
-                                        class="block text-xs font-semibold uppercase tracking-wide text-slate-400">{{ "settings_page.router_url" | t }}</label>
+                                    <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">{{
+                                        "settings_page.router_url" | t }}</label>
                                     <input type="url" x-model="proxyDraft.http_router.url" :disabled="proxyProcessing"
                                         class="mt-1 block w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                                         placeholder="https://api.example.com/route-call">
                                 </div>
                                 <div class="md:col-span-1">
-                                    <label
-                                        class="block text-xs font-semibold uppercase tracking-wide text-slate-400">{{ "settings_page.router_timeout" | t }}</label>
+                                    <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">{{
+                                        "settings_page.router_timeout" | t }}</label>
                                     <input type="number" x-model="proxyDraft.http_router.timeout_ms"
                                         :disabled="proxyProcessing"
                                         class="mt-1 block w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
@@ -675,7 +702,8 @@
                             </button>
                             <button type="submit" :disabled="proxyProcessing"
                                 class="rounded-md bg-sky-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-offset-2">
-                                <span x-text="proxyProcessing ? tt('common.saving') : tt('settings_page.save_proxy_settings')"></span>
+                                <span
+                                    x-text="proxyProcessing ? tt('common.saving') : tt('settings_page.save_proxy_settings')"></span>
                             </button>
                         </div>
                     </form>
@@ -689,7 +717,8 @@
                 <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
                     <div class="flex flex-col gap-2 md:flex-row md:items-end md:justify-between">
                         <div>
-                            <h2 class="text-base font-semibold text-slate-900">{{ "settings_page.storage_destinations" | t }}</h2>
+                            <h2 class="text-base font-semibold text-slate-900">{{ "settings_page.storage_destinations" |
+                                t }}</h2>
                             <p class="text-xs text-slate-500">{{ "settings_page.storage_destinations_desc" | t }}</p>
                         </div>
                         <span class="text-xs font-semibold uppercase tracking-wide text-slate-400">
@@ -699,7 +728,8 @@
                     </div>
                     <form class="mt-4 space-y-4" @submit.prevent="saveStorageSettings">
                         <div>
-                            <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">{{ "settings_page.storage_backend" | t }}</label>
+                            <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">{{
+                                "settings_page.storage_backend" | t }}</label>
                             <select x-model="storageDraft.callrecord_mode" :disabled="storageProcessing"
                                 class="mt-1 block w-full rounded-md border-slate-200 py-2 pl-3 pr-10 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
                                 <option value="disabled">{{ "settings_page.disabled" | t }}</option>
@@ -860,7 +890,8 @@
                 </div>
                 <form class="mt-4 space-y-4" @submit.prevent="saveSipFlowSettings">
                     <div>
-                        <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">{{ "settings_page.recording_backend" | t }}</label>
+                        <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">{{
+                            "settings_page.recording_backend" | t }}</label>
                         <select x-model="sipflowDraft.backend_type" :disabled="sipflowProcessing"
                             class="mt-1 block w-full rounded-md border-slate-200 py-2 pl-3 pr-10 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
                             <option value="none">{{ "settings_page.disabled" | t }}</option>
@@ -876,15 +907,16 @@
                         <div x-show="sipflowDraft.backend_type === 'local'"
                             class="space-y-4 rounded-lg border border-slate-200 bg-slate-50 p-4">
                             <div>
-                                <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">{{ "settings_page.data_dir" | t }}</label>
+                                <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">{{
+                                    "settings_page.data_dir" | t }}</label>
                                 <input type="text" x-model="sipflowDraft.local_root" :disabled="sipflowProcessing"
                                     class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                                     placeholder="./config/sipflow">
                                 <p class="mt-1 text-xs text-slate-500">{{ "settings_page.data_dir_hint" | t }}</p>
                             </div>
                             <div>
-                                <label
-                                    class="block text-xs font-semibold uppercase tracking-wide text-slate-400">{{ "settings_page.subdirectories" | t }}</label>
+                                <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">{{
+                                    "settings_page.subdirectories" | t }}</label>
                                 <select x-model="sipflowDraft.local_subdirs" :disabled="sipflowProcessing"
                                     class="mt-1 block w-full rounded-md border-slate-200 py-2 pl-3 pr-10 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
                                     <option value="none">{{ "settings_page.flat_structure" | t }}</option>
@@ -895,22 +927,24 @@
                             </div>
                             <div class="grid gap-4 md:grid-cols-2">
                                 <div>
-                                    <label
-                                        class="block text-xs font-semibold uppercase tracking-wide text-slate-400">{{ "settings_page.flush_count_label" | t }}</label>
+                                    <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">{{
+                                        "settings_page.flush_count_label" | t }}</label>
                                     <input type="number" x-model.number="sipflowDraft.local_flush_count"
                                         :disabled="sipflowProcessing"
                                         class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                                         placeholder="1000" min="1">
-                                    <p class="mt-1 text-xs text-slate-500">{{ "settings_page.flush_buffer_desc_short" | t }}</p>
+                                    <p class="mt-1 text-xs text-slate-500">{{ "settings_page.flush_buffer_desc_short" |
+                                        t }}</p>
                                 </div>
                                 <div>
-                                    <label
-                                        class="block text-xs font-semibold uppercase tracking-wide text-slate-400">{{ "settings_page.flush_interval_label" | t }}</label>
+                                    <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">{{
+                                        "settings_page.flush_interval_label" | t }}</label>
                                     <input type="number" x-model.number="sipflowDraft.local_flush_interval_secs"
                                         :disabled="sipflowProcessing"
                                         class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                                         placeholder="5" min="1">
-                                    <p class="mt-1 text-xs text-slate-500">{{ "settings_page.flush_timeout_desc_short" | t }}</p>
+                                    <p class="mt-1 text-xs text-slate-500">{{ "settings_page.flush_timeout_desc_short" |
+                                        t }}</p>
                                 </div>
                             </div>
                         </div>
@@ -920,32 +954,35 @@
                             class="space-y-4 rounded-lg border border-slate-200 bg-slate-50 p-4">
                             <div class="grid gap-4 md:grid-cols-2">
                                 <div>
-                                    <label
-                                        class="block text-xs font-semibold uppercase tracking-wide text-slate-400">{{ "settings_page.udp_address" | t }}</label>
+                                    <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">{{
+                                        "settings_page.udp_address" | t }}</label>
                                     <input type="text" x-model="sipflowDraft.remote_udp_addr"
                                         :disabled="sipflowProcessing"
                                         class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                                         placeholder="192.168.1.100:3000">
-                                    <p class="mt-1 text-xs text-slate-500">{{ "settings_page.udp_address_hint" | t }}</p>
+                                    <p class="mt-1 text-xs text-slate-500">{{ "settings_page.udp_address_hint" | t }}
+                                    </p>
                                 </div>
                                 <div>
-                                    <label
-                                        class="block text-xs font-semibold uppercase tracking-wide text-slate-400">{{ "settings_page.http_address" | t }}</label>
+                                    <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">{{
+                                        "settings_page.http_address" | t }}</label>
                                     <input type="text" x-model="sipflowDraft.remote_http_addr"
                                         :disabled="sipflowProcessing"
                                         class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                                         placeholder="http://192.168.1.100:3001">
-                                    <p class="mt-1 text-xs text-slate-500">{{ "settings_page.http_address_hint" | t }}</p>
+                                    <p class="mt-1 text-xs text-slate-500">{{ "settings_page.http_address_hint" | t }}
+                                    </p>
                                 </div>
                             </div>
                             <div>
-                                <label
-                                    class="block text-xs font-semibold uppercase tracking-wide text-slate-400">{{ "settings_page.timeout_label" | t }}</label>
+                                <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">{{
+                                    "settings_page.timeout_label" | t }}</label>
                                 <input type="number" x-model.number="sipflowDraft.remote_timeout_secs"
                                     :disabled="sipflowProcessing"
                                     class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                                     placeholder="10" min="1">
-                                <p class="mt-1 text-xs text-slate-500">{{ "settings_page.connection_timeout_hint" | t }}</p>
+                                <p class="mt-1 text-xs text-slate-500">{{ "settings_page.connection_timeout_hint" | t }}
+                                </p>
                             </div>
                         </div>
                     </div>
@@ -962,7 +999,8 @@
                             <button type="submit"
                                 class="inline-flex items-center justify-center rounded-md bg-sky-600 px-3 py-2 text-xs font-semibold text-white shadow-sm transition hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60"
                                 :disabled="sipflowProcessing">
-                                <span x-text="sipflowProcessing ? tt('common.saving') : tt('common.save_changes')"></span>
+                                <span
+                                    x-text="sipflowProcessing ? tt('common.saving') : tt('common.save_changes')"></span>
                             </button>
                         </div>
                     </div>
@@ -975,14 +1013,16 @@
             <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
                 <div class="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
                     <div>
-                        <h2 class="text-base font-semibold text-slate-900">{{ "settings_page.recording_policy" | t }}</h2>
+                        <h2 class="text-base font-semibold text-slate-900">{{ "settings_page.recording_policy" | t }}
+                        </h2>
                         <p class="text-xs text-slate-500">{{ "settings_page.recording_policy_desc" | t }}</p>
                     </div>
                 </div>
                 <form class="mt-4 space-y-4" @submit.prevent="saveStorageSettings">
                     <div class="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
                         <div>
-                            <label class="text-xs font-semibold uppercase tracking-wide text-slate-400">{{ "settings_page.policy_enabled" | t }}</label>
+                            <label class="text-xs font-semibold uppercase tracking-wide text-slate-400">{{
+                                "settings_page.policy_enabled" | t }}</label>
                             <p class="text-xs text-slate-500">{{ "settings_page.policy_enabled_desc" | t }}</p>
                         </div>
                         <label class="inline-flex items-center gap-2 text-sm font-semibold text-slate-600">
@@ -1002,7 +1042,8 @@
                                 <span>{{ "settings_page.auto_start" | t }}</span>
                             </label>
                             <div>
-                                <span class="text-xs font-semibold uppercase tracking-wide text-slate-400">{{ "settings_page.directions" | t }}</span>
+                                <span class="text-xs font-semibold uppercase tracking-wide text-slate-400">{{
+                                    "settings_page.directions" | t }}</span>
                                 <div class="mt-2 grid gap-2 sm:grid-cols-3">
                                     <label class="flex items-center gap-2 text-xs font-semibold text-slate-600">
                                         <input type="checkbox"
@@ -1031,14 +1072,17 @@
                         </div>
                         <div class="grid gap-4 md:grid-cols-2">
                             <div>
-                                <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">{{ "settings_page.caller_allow_list" | t }}</label>
+                                <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">{{
+                                    "settings_page.caller_allow_list" | t }}</label>
                                 <textarea x-model="storageDraft.recording_caller_allow" :disabled="storageProcessing"
                                     class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                                     rows="3" placeholder="alice@rustpbx.com"></textarea>
-                                <p class="mt-1 text-[11px] text-slate-400">{{ "settings_page.pattern_glob_hint" | t }}</p>
+                                <p class="mt-1 text-[11px] text-slate-400">{{ "settings_page.pattern_glob_hint" | t }}
+                                </p>
                             </div>
                             <div>
-                                <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">{{ "settings_page.caller_deny_list" | t }}</label>
+                                <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">{{
+                                    "settings_page.caller_deny_list" | t }}</label>
                                 <textarea x-model="storageDraft.recording_caller_deny" :disabled="storageProcessing"
                                     class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                                     rows="3" placeholder="sales@*"></textarea>
@@ -1046,13 +1090,15 @@
                         </div>
                         <div class="grid gap-4 md:grid-cols-2">
                             <div>
-                                <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">{{ "settings_page.callee_allow_list" | t }}</label>
+                                <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">{{
+                                    "settings_page.callee_allow_list" | t }}</label>
                                 <textarea x-model="storageDraft.recording_callee_allow" :disabled="storageProcessing"
                                     class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                                     rows="3" placeholder="support@rustpbx.com"></textarea>
                             </div>
                             <div>
-                                <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">{{ "settings_page.callee_deny_list" | t }}</label>
+                                <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">{{
+                                    "settings_page.callee_deny_list" | t }}</label>
                                 <textarea x-model="storageDraft.recording_callee_deny" :disabled="storageProcessing"
                                     class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                                     rows="3" placeholder="test-*"></textarea>
@@ -1060,7 +1106,8 @@
                         </div>
                         <div class="grid gap-4 md:grid-cols-3">
                             <div>
-                                <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">{{ "settings_page.sample_rate" | t }}</label>
+                                <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">{{
+                                    "settings_page.sample_rate" | t }}</label>
                                 <input type="number" min="8000" step="1000" x-model="storageDraft.recording_samplerate"
                                     :disabled="storageProcessing"
                                     class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
@@ -1149,7 +1196,8 @@
                             <button type="submit"
                                 class="inline-flex items-center justify-center rounded-md bg-sky-600 px-3 py-2 text-xs font-semibold text-white shadow-sm transition hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60"
                                 :disabled="storageProcessing">
-                                <span x-text="storageProcessing ? tt('common.saving') : tt('common.save_changes')"></span>
+                                <span
+                                    x-text="storageProcessing ? tt('common.saving') : tt('common.save_changes')"></span>
                             </button>
                         </div>
                     </div>
@@ -1164,66 +1212,79 @@
                     <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
                         <div class="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
                             <div>
-                                <h2 class="text-base font-semibold text-slate-900">{{ "settings_page.acl_title" | t }}</h2>
+                                <h2 class="text-base font-semibold text-slate-900">{{ "settings_page.acl_title" | t }}
+                                </h2>
                                 <p class="text-xs text-slate-500">{{ "settings_page.acl_desc" | t }}</p>
                             </div>
                             <div class="text-right text-xs text-slate-500">
                                 <div class="text-sm font-semibold text-slate-800"
                                     x-text="acl.active_rules.length ? acl.active_rules.length + ' ' + tt('settings_page.acl_active') : tt('settings_page.acl_no_rules')">
                                 </div>
-                                <div class="text-[11px] uppercase tracking-wide">{{ "settings_page.rule_status" | t }}</div>
+                                <div class="text-[11px] uppercase tracking-wide">{{ "settings_page.rule_status" | t }}
+                                </div>
                             </div>
                         </div>
                         <div class="mt-4 grid gap-3 sm:grid-cols-3">
                             <div class="rounded-lg border border-slate-200 px-4 py-3">
-                                <div class="text-[11px] font-semibold uppercase tracking-wide text-slate-400">{{ "settings_page.embedded_rules" | t }}</div>
+                                <div class="text-[11px] font-semibold uppercase tracking-wide text-slate-400">{{
+                                    "settings_page.embedded_rules" | t }}</div>
                                 <div class="mt-1 text-sm font-semibold text-slate-800" x-text="acl.embedded_count || 0">
                                 </div>
                                 <div class="text-xs text-slate-500">{{ "settings_page.embedded_rules_desc" | t }}</div>
                             </div>
                             <div class="rounded-lg border border-slate-200 px-4 py-3">
-                                <div class="text-[11px] font-semibold uppercase tracking-wide text-slate-400">{{ "settings_page.file_rules" | t }}</div>
+                                <div class="text-[11px] font-semibold uppercase tracking-wide text-slate-400">{{
+                                    "settings_page.file_rules" | t }}</div>
                                 <div class="mt-1 text-sm font-semibold text-slate-800"
                                     x-text="acl.file_patterns.length ? acl.file_patterns.join(', ') : tt('settings_page.acl_inline_only')">
                                 </div>
                                 <div class="text-xs text-slate-500">{{ "settings_page.file_rules_desc" | t }}</div>
                             </div>
                             <div class="rounded-lg border border-slate-200 px-4 py-3">
-                                <div class="text-[11px] font-semibold uppercase tracking-wide text-slate-400" x-text="tt('settings_page.reload_support')"></div>
+                                <div class="text-[11px] font-semibold uppercase tracking-wide text-slate-400"
+                                    x-text="tt('settings_page.reload_support')"></div>
                                 <div class="mt-1 text-sm font-semibold"
                                     :class="acl.reload_supported ? 'text-emerald-600' : 'text-rose-600'"
-                                    x-text="acl.reload_supported ? tt('settings_page.acl_available') : tt('settings_page.acl_proxy_offline')"></div>
-                                <div class="text-xs text-slate-500" x-text="tt('settings_page.reload_rules_desc')"></div>
+                                    x-text="acl.reload_supported ? tt('settings_page.acl_available') : tt('settings_page.acl_proxy_offline')">
+                                </div>
+                                <div class="text-xs text-slate-500" x-text="tt('settings_page.reload_rules_desc')">
+                                </div>
                             </div>
                         </div>
                         <template x-if="acl.metrics">
                             <div class="mt-4 rounded-lg border border-dashed border-slate-200 px-4 py-3">
-                                <div class="text-[11px] font-semibold uppercase tracking-wide text-slate-400" x-text="tt('settings_page.reload_metrics')"></div>
+                                <div class="text-[11px] font-semibold uppercase tracking-wide text-slate-400"
+                                    x-text="tt('settings_page.reload_metrics')"></div>
                                 <dl class="mt-3 grid gap-3 text-xs text-slate-600 sm:grid-cols-2 lg:grid-cols-4">
                                     <div>
-                                        <dt class="text-[11px] uppercase tracking-wide text-slate-400" x-text="tt('settings_page.total_rules')"></dt>
+                                        <dt class="text-[11px] uppercase tracking-wide text-slate-400"
+                                            x-text="tt('settings_page.total_rules')"></dt>
                                         <dd class="mt-1 text-sm font-semibold text-slate-800"
                                             x-text="acl.metrics?.total ?? '—'"></dd>
                                     </div>
                                     <div>
-                                        <dt class="text-[11px] uppercase tracking-wide text-slate-400" x-text="tt('settings_page.embedded_rules')"></dt>
+                                        <dt class="text-[11px] uppercase tracking-wide text-slate-400"
+                                            x-text="tt('settings_page.embedded_rules')"></dt>
                                         <dd class="mt-1 text-sm font-semibold text-slate-800"
                                             x-text="acl.metrics?.config_count ?? 0"></dd>
                                     </div>
                                     <div>
-                                        <dt class="text-[11px] uppercase tracking-wide text-slate-400" x-text="tt('settings_page.file_rules')"></dt>
+                                        <dt class="text-[11px] uppercase tracking-wide text-slate-400"
+                                            x-text="tt('settings_page.file_rules')"></dt>
                                         <dd class="mt-1 text-sm font-semibold text-slate-800"
                                             x-text="acl.metrics?.file_count ?? 0"></dd>
                                     </div>
                                     <div>
-                                        <dt class="text-[11px] uppercase tracking-wide text-slate-400" x-text="tt('settings_page.reload_duration')"></dt>
+                                        <dt class="text-[11px] uppercase tracking-wide text-slate-400"
+                                            x-text="tt('settings_page.reload_duration')"></dt>
                                         <dd class="mt-1 text-sm font-semibold text-slate-800"
                                             x-text="formatDuration(acl.metrics?.duration_ms) || '—'"></dd>
                                     </div>
                                 </dl>
                                 <template x-if="acl.metrics?.files?.length">
                                     <div class="mt-3 text-xs text-slate-600">
-                                        <div class="text-[11px] uppercase tracking-wide text-slate-400" x-text="tt('settings_page.loaded_files')"></div>
+                                        <div class="text-[11px] uppercase tracking-wide text-slate-400"
+                                            x-text="tt('settings_page.loaded_files')"></div>
                                         <ul class="mt-1 space-y-1">
                                             <template x-for="file in acl.metrics.files" :key="file">
                                                 <li class="rounded bg-slate-100 px-2 py-1 font-mono text-[11px] text-slate-700"
@@ -1234,7 +1295,8 @@
                                 </template>
                                 <template x-if="acl.metrics?.patterns?.length">
                                     <div class="mt-3 text-xs text-slate-600">
-                                        <div class="text-[11px] uppercase tracking-wide text-slate-400" x-text="tt('settings_page.file_patterns')"></div>
+                                        <div class="text-[11px] uppercase tracking-wide text-slate-400"
+                                            x-text="tt('settings_page.file_patterns')"></div>
                                         <ul class="mt-1 space-y-1">
                                             <template x-for="pattern in acl.metrics.patterns" :key="pattern">
                                                 <li class="rounded bg-slate-100 px-2 py-1 font-mono text-[11px] text-slate-700"
@@ -1248,9 +1310,12 @@
                         <template x-if="operations.length">
                             <div class="mt-4 rounded-xl border border-rose-200 bg-rose-50 p-5">
                                 <div class="flex items-center justify-between">
-                                    <h3 class="text-sm font-semibold text-rose-700" x-text="t.settings_page?.danger_zone || 'Danger zone'"></h3>
+                                    <h3 class="text-sm font-semibold text-rose-700"
+                                        x-text="t.settings_page?.danger_zone || 'Danger zone'"></h3>
                                 </div>
-                                <p class="mt-2 text-xs text-slate-500" x-text="t.settings_page?.danger_zone_desc || 'Reload actions apply immediately to the SIP proxy in-memory state.'"></p>
+                                <p class="mt-2 text-xs text-slate-500"
+                                    x-text="t.settings_page?.danger_zone_desc || 'Reload actions apply immediately to the SIP proxy in-memory state.'">
+                                </p>
                                 <div class="mt-4 space-y-4 text-sm text-slate-600">
                                     <template x-for="action in operations" :key="action.id">
                                         <div class="rounded-lg border border-rose-200 bg-rose-50 p-4">
@@ -1295,13 +1360,17 @@
                     <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
                         <div class="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
                             <div>
-                                <h2 class="text-base font-semibold text-slate-900" x-text="t.settings_page?.update_rules || 'Update rules'"></h2>
-                                <p class="text-xs text-slate-500" x-text="t.settings_page?.update_rules_desc || 'Edit ACL entries and blocked user agents. Restart required.'"></p>
+                                <h2 class="text-base font-semibold text-slate-900"
+                                    x-text="t.settings_page?.update_rules || 'Update rules'"></h2>
+                                <p class="text-xs text-slate-500"
+                                    x-text="t.settings_page?.update_rules_desc || 'Edit ACL entries and blocked user agents. Restart required.'">
+                                </p>
                             </div>
                         </div>
                         <form class="mt-4 space-y-4" @submit.prevent="saveSecuritySettings">
                             <div>
-                                <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400" x-text="t.settings_page?.acl_title || 'ACL rules'"></label>
+                                <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400"
+                                    x-text="t.settings_page?.acl_title || 'ACL rules'"></label>
                                 <textarea rows="6" x-model="securityDraft.acl_rules" :disabled="securityProcessing"
                                     class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                                     placeholder="allow all&#10;deny all"></textarea>
@@ -1319,7 +1388,8 @@
                                     <button type="submit"
                                         class="inline-flex items-center justify-center rounded-md bg-sky-600 px-3 py-2 text-xs font-semibold text-white shadow-sm transition hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60"
                                         :disabled="securityProcessing">
-                                        <span x-text="securityProcessing ? tt('common.saving') : tt('common.save_changes')"></span>
+                                        <span
+                                            x-text="securityProcessing ? tt('common.saving') : tt('common.save_changes')"></span>
                                     </button>
                                 </div>
                             </div>
@@ -1329,13 +1399,15 @@
             </div>
         </section>
 
-        <section x-show="activeTab === 'rwi'" x-cloak x-transition.opacity class="space-y-6" id="settings-tab-rwi" role="tabpanel" tabindex="0">
+        <section x-show="activeTab === 'rwi'" x-cloak x-transition.opacity class="space-y-6" id="settings-tab-rwi"
+            role="tabpanel" tabindex="0">
             <div class="grid gap-6 lg:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
                 <div class="space-y-6">
                     <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
                         <div class="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
                             <div>
-                                <h2 class="text-base font-semibold text-slate-900">{{ "settings_page.rwi_settings" | t }}</h2>
+                                <h2 class="text-base font-semibold text-slate-900">{{ "settings_page.rwi_settings" | t
+                                    }}</h2>
                                 <p class="text-xs text-slate-500">{{ "settings_page.rwi_settings_desc" | t }}</p>
                             </div>
                         </div>
@@ -1350,20 +1422,23 @@
                                     </label>
                                 </div>
 
-                                <div class="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-xs text-slate-600">
+                                <div
+                                    class="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-xs text-slate-600">
                                     <p>{{ "settings_page.rwi_endpoint_desc" | t }}</p>
                                 </div>
 
                                 <div class="grid grid-cols-2 gap-4">
                                     <div>
-                                        <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">
+                                        <label
+                                            class="block text-xs font-semibold uppercase tracking-wide text-slate-400">
                                             {{ "settings_page.rwi_max_connections" | t }}
                                         </label>
                                         <input type="number" x-model.number="rwiDraft.max_connections"
                                             class="mt-1 block w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-900 focus:border-sky-500 focus:outline-none focus:ring-1 focus:ring-sky-500">
                                     </div>
                                     <div>
-                                        <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">
+                                        <label
+                                            class="block text-xs font-semibold uppercase tracking-wide text-slate-400">
                                             {{ "settings_page.rwi_max_calls_per_conn" | t }}
                                         </label>
                                         <input type="number" x-model.number="rwiDraft.max_calls_per_connection"
@@ -1373,14 +1448,16 @@
 
                                 <div class="grid grid-cols-2 gap-4">
                                     <div>
-                                        <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">
+                                        <label
+                                            class="block text-xs font-semibold uppercase tracking-wide text-slate-400">
                                             {{ "settings_page.rwi_orphan_hold_secs" | t }}
                                         </label>
                                         <input type="number" x-model.number="rwiDraft.orphan_hold_secs"
                                             class="mt-1 block w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-900 focus:border-sky-500 focus:outline-none focus:ring-1 focus:ring-sky-500">
                                     </div>
                                     <div>
-                                        <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">
+                                        <label
+                                            class="block text-xs font-semibold uppercase tracking-wide text-slate-400">
                                             {{ "settings_page.rwi_originate_rate_limit" | t }}
                                         </label>
                                         <input type="number" x-model.number="rwiDraft.originate_rate_limit"
@@ -1393,7 +1470,8 @@
                                 <button type="submit"
                                     class="inline-flex items-center justify-center gap-2 rounded-lg bg-sky-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60"
                                     :disabled="rwiProcessing">
-                                    <span x-text="rwiProcessing ? tt('common.saving') : tt('common.save_changes')"></span>
+                                    <span
+                                        x-text="rwiProcessing ? tt('common.saving') : tt('common.save_changes')"></span>
                                 </button>
                             </div>
                         </form>
@@ -1403,13 +1481,15 @@
                     <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
                         <div class="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
                             <div>
-                                <h2 class="text-base font-semibold text-slate-900">{{ "settings_page.rwi_tokens" | t }}</h2>
+                                <h2 class="text-base font-semibold text-slate-900">{{ "settings_page.rwi_tokens" | t }}
+                                </h2>
                                 <p class="text-xs text-slate-500">{{ "settings_page.rwi_tokens_desc" | t }}</p>
                             </div>
                             <button type="button" @click="addRwiToken()"
                                 class="inline-flex items-center gap-1 rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-medium text-slate-600 transition hover:bg-slate-50">
-                                <svg class="h-3 w-3" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2">
-                                    <path stroke-linecap="round" stroke-linejoin="round" d="M10 5v10M5 10h10"/>
+                                <svg class="h-3 w-3" viewBox="0 0 20 20" fill="none" stroke="currentColor"
+                                    stroke-width="2">
+                                    <path stroke-linecap="round" stroke-linejoin="round" d="M10 5v10M5 10h10" />
                                 </svg>
                                 {{ "common.add" | t }}
                             </button>
@@ -1421,31 +1501,39 @@
                                     <div class="flex items-start justify-between gap-4">
                                         <div class="flex-1 space-y-3">
                                             <div>
-                                                <label class="block text-xs font-medium text-slate-500">{{ "settings_page.rwi_token" | t }}</label>
+                                                <label class="block text-xs font-medium text-slate-500">{{
+                                                    "settings_page.rwi_token" | t }}</label>
                                                 <input type="text" x-model="token.token"
                                                     class="mt-1 block w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-900 focus:border-sky-500 focus:outline-none focus:ring-1 focus:ring-sky-500"
                                                     placeholder="secret-token">
                                             </div>
                                             <div>
-                                                <label class="block text-xs font-medium text-slate-500">{{ "settings_page.rwi_scopes" | t }}</label>
+                                                <label class="block text-xs font-medium text-slate-500">{{
+                                                    "settings_page.rwi_scopes" | t }}</label>
                                                 <div class="mt-1 space-y-2">
-                                                    <template x-for="scope in ['call.control', 'queue.control', 'supervisor.control', 'media.stream', 'record.control']" :key="scope">
+                                                    <template
+                                                        x-for="scope in ['call.control', 'queue.control', 'supervisor.control', 'media.stream', 'record.control']"
+                                                        :key="scope">
                                                         <label class="flex items-center gap-2 text-sm text-slate-700">
                                                             <input type="checkbox"
                                                                 :checked="token.scopes.includes(scope)"
                                                                 @change="if ($event.target.checked) { token.scopes.push(scope) } else { token.scopes = token.scopes.filter(s => s !== scope) }"
                                                                 class="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-500">
-                                                            <span x-text="scope"></span>
+                                                            <span
+                                                                x-text="tt('settings_page.rwi_scope_' + scope.replace('.', '_'))"></span>
                                                         </label>
                                                     </template>
                                                 </div>
-                                                <p class="mt-1 text-xs text-slate-400">{{ "settings_page.rwi_scopes_hint" | t }}</p>
+                                                <p class="mt-1 text-xs text-slate-400">{{
+                                                    "settings_page.rwi_scopes_hint" | t }}</p>
                                             </div>
                                         </div>
                                         <button type="button" @click="removeRwiToken(index)"
                                             class="mt-6 rounded-lg p-1.5 text-slate-400 transition hover:bg-slate-100 hover:text-rose-500">
-                                            <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2">
-                                                <path stroke-linecap="round" stroke-linejoin="round" d="M6 6l8 8M14 6l-8 8"/>
+                                            <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor"
+                                                stroke-width="2">
+                                                <path stroke-linecap="round" stroke-linejoin="round"
+                                                    d="M6 6l8 8M14 6l-8 8" />
                                             </svg>
                                         </button>
                                     </div>
@@ -1469,13 +1557,15 @@
                     <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
                         <div class="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
                             <div>
-                                <h2 class="text-base font-semibold text-slate-900">{{ "settings_page.rwi_contexts" | t }}</h2>
+                                <h2 class="text-base font-semibold text-slate-900">{{ "settings_page.rwi_contexts" | t
+                                    }}</h2>
                                 <p class="text-xs text-slate-500">{{ "settings_page.rwi_contexts_desc" | t }}</p>
                             </div>
                             <button type="button" @click="addRwiContext()"
                                 class="inline-flex items-center gap-1 rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-medium text-slate-600 transition hover:bg-slate-50">
-                                <svg class="h-3 w-3" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2">
-                                    <path stroke-linecap="round" stroke-linejoin="round" d="M10 5v10M5 10h10"/>
+                                <svg class="h-3 w-3" viewBox="0 0 20 20" fill="none" stroke="currentColor"
+                                    stroke-width="2">
+                                    <path stroke-linecap="round" stroke-linejoin="round" d="M10 5v10M5 10h10" />
                                 </svg>
                                 {{ "common.add" | t }}
                             </button>
@@ -1487,19 +1577,22 @@
                                     <div class="flex items-start justify-between gap-4">
                                         <div class="flex-1 space-y-3">
                                             <div>
-                                                <label class="block text-xs font-medium text-slate-500">{{ "settings_page.rwi_context_name" | t }}</label>
+                                                <label class="block text-xs font-medium text-slate-500">{{
+                                                    "settings_page.rwi_context_name" | t }}</label>
                                                 <input type="text" x-model="ctx.name"
                                                     class="mt-1 block w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-900 focus:border-sky-500 focus:outline-none focus:ring-1 focus:ring-sky-500"
                                                     placeholder="ivr_bot">
                                             </div>
                                             <div class="grid grid-cols-2 gap-3">
                                                 <div>
-                                                    <label class="block text-xs font-medium text-slate-500">{{ "settings_page.rwi_no_answer_timeout" | t }}</label>
+                                                    <label class="block text-xs font-medium text-slate-500">{{
+                                                        "settings_page.rwi_no_answer_timeout" | t }}</label>
                                                     <input type="number" x-model.number="ctx.no_answer_timeout_secs"
                                                         class="mt-1 block w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-900 focus:border-sky-500 focus:outline-none focus:ring-1 focus:ring-sky-500">
                                                 </div>
                                                 <div>
-                                                    <label class="block text-xs font-medium text-slate-500">{{ "settings_page.rwi_no_answer_action" | t }}</label>
+                                                    <label class="block text-xs font-medium text-slate-500">{{
+                                                        "settings_page.rwi_no_answer_action" | t }}</label>
                                                     <select x-model="ctx.no_answer_action"
                                                         class="mt-1 block w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-900 focus:border-sky-500 focus:outline-none focus:ring-1 focus:ring-sky-500">
                                                         <option value="">--</option>
@@ -1510,7 +1603,8 @@
                                                 </div>
                                             </div>
                                             <div x-show="ctx.no_answer_action === 'transfer'">
-                                                <label class="block text-xs font-medium text-slate-500">{{ "settings_page.rwi_transfer_target" | t }}</label>
+                                                <label class="block text-xs font-medium text-slate-500">{{
+                                                    "settings_page.rwi_transfer_target" | t }}</label>
                                                 <input type="text" x-model="ctx.no_answer_transfer_target"
                                                     class="mt-1 block w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-900 focus:border-sky-500 focus:outline-none focus:ring-1 focus:ring-sky-500"
                                                     placeholder="sip:voicemail@local">
@@ -1518,14 +1612,17 @@
                                         </div>
                                         <button type="button" @click="removeRwiContext(index)"
                                             class="mt-6 rounded-lg p-1.5 text-slate-400 transition hover:bg-slate-100 hover:text-rose-500">
-                                            <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2">
-                                                <path stroke-linecap="round" stroke-linejoin="round" d="M6 6l8 8M14 6l-8 8"/>
+                                            <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor"
+                                                stroke-width="2">
+                                                <path stroke-linecap="round" stroke-linejoin="round"
+                                                    d="M6 6l8 8M14 6l-8 8" />
                                             </svg>
                                         </button>
                                     </div>
                                 </div>
                             </template>
-                            <div x-show="rwiDraft.contexts.length === 0" class="text-center py-4 text-sm text-slate-500">
+                            <div x-show="rwiDraft.contexts.length === 0"
+                                class="text-center py-4 text-sm text-slate-500">
                                 {{ "settings_page.rwi_no_contexts" | t }}
                             </div>
                         </div>
@@ -1548,7 +1645,8 @@
                     <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
                         <div class="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
                             <div>
-                                <h2 class="text-base font-semibold text-slate-900">{{ "settings_page.departments" | t }}</h2>
+                                <h2 class="text-base font-semibold text-slate-900">{{ "settings_page.departments" | t }}
+                                </h2>
                                 <p class="text-xs text-slate-500">{{ "settings_page.departments_desc" | t }}</p>
                             </div>
                             <div class="flex flex-wrap items-center gap-2 text-xs font-semibold text-slate-500">
@@ -1679,7 +1777,8 @@
                                                             x-text="selectedDepartment.slug || '—'"></span>
                                                     </div>
                                                     <div class="flex items-center justify-between">
-                                                        <span>{{ "settings_page.department_manager_contact" | t }}</span>
+                                                        <span>{{ "settings_page.department_manager_contact" | t
+                                                            }}</span>
                                                         <span class="font-semibold text-slate-700"
                                                             x-text="selectedDepartment.manager_contact || tt('settings_page.not_set')"></span>
                                                     </div>
@@ -1702,7 +1801,8 @@
                                                     </p>
                                                 </div>
                                                 <div>
-                                                    <div class="text-xs uppercase tracking-wide text-slate-400">{{ "settings_page.department_metadata" | t }}
+                                                    <div class="text-xs uppercase tracking-wide text-slate-400">{{
+                                                        "settings_page.department_metadata" | t }}
                                                     </div>
                                                     <pre class="mt-1 max-h-40 overflow-auto rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600"
                                                         x-text="formatMetadata(selectedDepartment.metadata)"></pre>
@@ -1725,7 +1825,8 @@
                                                     </div>
                                                     <button type="button"
                                                         class="text-xs font-semibold text-slate-400 transition hover:text-slate-600"
-                                                        @click="cancelDepartmentForm()">{{ "common.cancel" | t }}</button>
+                                                        @click="cancelDepartmentForm()">{{ "common.cancel" | t
+                                                        }}</button>
                                                 </header>
                                                 <div class="grid gap-4 md:grid-cols-2">
                                                     <label
@@ -1781,7 +1882,8 @@
                                                 <div class="flex items-center justify-end gap-3">
                                                     <button type="button"
                                                         class="inline-flex items-center justify-center rounded-lg border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-600 transition hover:bg-slate-100"
-                                                        @click="cancelDepartmentForm()">{{ "common.cancel" | t }}</button>
+                                                        @click="cancelDepartmentForm()">{{ "common.cancel" | t
+                                                        }}</button>
                                                     <button type="submit"
                                                         class="inline-flex items-center justify-center gap-2 rounded-lg bg-sky-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-offset-2"
                                                         :disabled="departmentProcessing.save">
@@ -1812,7 +1914,8 @@
                     <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
                         <div class="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
                             <div>
-                                <h2 class="text-base font-semibold text-slate-900">{{ "settings_page.users_title" | t }}</h2>
+                                <h2 class="text-base font-semibold text-slate-900">{{ "settings_page.users_title" | t }}
+                                </h2>
                                 <p class="text-xs text-slate-500">{{ "settings_page.users_desc" | t }}</p>
                             </div>
                             <div class="flex flex-wrap items-center gap-2 text-xs font-semibold text-slate-500">
