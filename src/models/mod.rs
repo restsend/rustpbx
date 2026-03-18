@@ -94,8 +94,6 @@ async fn prepare_mysql_database(database_url: &str) -> Result<()> {
 pub async fn create_db(database_url: &str) -> Result<DatabaseConnection> {
     if database_url.starts_with("sqlite://") {
         prepare_sqlite_database(database_url)?;
-    } else if database_url.starts_with("mysql://") || database_url.starts_with("mysqlx://") {
-        prepare_mysql_database(database_url).await?;
     }
 
     let db = Database::connect(database_url)
