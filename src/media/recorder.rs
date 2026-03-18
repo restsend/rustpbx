@@ -442,7 +442,22 @@ impl Recorder {
             .last()
             .map(|event| event.end_ts)
             .unwrap_or(0);
-        let max_available_ts = max_ts_a.max(max_ts_b).max(max_dtmf_ts_a).max(max_dtmf_ts_b);
+        // Use min of both legs' audio when both have data to prevent one leg
+        // from driving the flush past the other's position (which would cause
+        // DTMF events arriving on the lagging leg to miss their start region).
+        // Fall back to max when only one leg has data or legs diverge by > 500ms.
+        let max_audio_ts = if max_ts_a > self.next_flush_ts && max_ts_b > self.next_flush_ts {
+            let min_ts = max_ts_a.min(max_ts_b);
+            let max_ts = max_ts_a.max(max_ts_b);
+            if max_ts - min_ts > self.sample_rate / 2 {
+                max_ts // legs diverged too much, flush the leading leg
+            } else {
+                min_ts // flush up to the lagging leg
+            }
+        } else {
+            max_ts_a.max(max_ts_b)
+        };
+        let max_available_ts = max_audio_ts.max(max_dtmf_ts_a).max(max_dtmf_ts_b);
 
         if max_available_ts <= self.next_flush_ts {
             return Ok(());
@@ -456,6 +471,22 @@ impl Recorder {
             flush_len = max_flush_samples;
         }
 
+        // Don't flush past non-ended DTMF events. Hold audio in the buffer until
+        // the DTMF tone's full duration is known, so we can overlay the complete tone.
+        let flush_end = self.next_flush_ts + flush_len;
+        let stale_threshold = self.sample_rate * 2; // 2 seconds staleness guard
+        for events in [&self.dtmf_events_a, &self.dtmf_events_b] {
+            for event in events {
+                if !event.ended
+                    && event.start_ts > self.next_flush_ts
+                    && event.start_ts < flush_end
+                    && flush_end.saturating_sub(event.start_ts) < stale_threshold
+                {
+                    flush_len = event.start_ts - self.next_flush_ts;
+                }
+            }
+        }
+
         let (samples_per_block, _) = self.block_info();
         flush_len = (flush_len / samples_per_block) * samples_per_block;
 
@@ -466,19 +497,29 @@ impl Recorder {
         let flush_start = self.next_flush_ts;
         let data_a = self.get_leg_data(Leg::A, flush_len)?;
         let data_b = self.get_leg_data(Leg::B, flush_len)?;
-        let data_a = self.apply_dtmf_overlay(Leg::A, flush_start, flush_len, data_a)?;
-        let data_b = self.apply_dtmf_overlay(Leg::B, flush_start, flush_len, data_b)?;
-
-        self.next_flush_ts += flush_len;
-        self.prune_dtmf_events(self.next_flush_ts);
 
         let output = if self.channels == 1 {
-            // Mono: mix both legs
-            self.mix(&data_a, &data_b)?
+            // Mono: decode to PCM, overlay DTMF, mix, encode once
+            let mut pcm_a = create_decoder(self.codec).decode(&data_a);
+            let mut pcm_b = create_decoder(self.codec).decode(&data_b);
+            self.apply_dtmf_overlay_pcm(Leg::A, flush_start, &mut pcm_a);
+            self.apply_dtmf_overlay_pcm(Leg::B, flush_start, &mut pcm_b);
+            let mixed = Self::mix_pcm(&pcm_a, &pcm_b);
+            if let Some(enc) = self.encoder.as_mut() {
+                enc.encode(&mixed)
+            } else {
+                audio_codec::samples_to_bytes(&mixed)
+            }
         } else {
-            // Stereo: interleave both legs
-            self.interleave(&data_a, &data_b)?
+            // Stereo: only decode/re-encode when DTMF overlaps, then interleave encoded blocks
+            let data_a = self.apply_dtmf_if_needed(Leg::A, flush_start, flush_len, data_a);
+            let data_b = self.apply_dtmf_if_needed(Leg::B, flush_start, flush_len, data_b);
+            self.interleave_encoded(&data_a, &data_b)
         };
+
+        // Advance flush position and prune DTMF events AFTER overlay has been applied
+        self.next_flush_ts += flush_len;
+        self.prune_dtmf_events(self.next_flush_ts);
 
         self.writer.write_packet(&output, flush_len as usize)?;
         self.written_bytes += output.len() as u32;
@@ -648,25 +689,14 @@ impl Recorder {
         }
     }
 
-    fn apply_dtmf_overlay(
-        &mut self,
-        leg: Leg,
-        flush_start: u32,
-        flush_len: u32,
-        data: Vec<u8>,
-    ) -> Result<Vec<u8>> {
+    /// Apply DTMF overlay directly onto PCM samples in-place.
+    fn apply_dtmf_overlay_pcm(&self, leg: Leg, flush_start: u32, pcm: &mut [i16]) {
+        let flush_len = pcm.len() as u32;
         let flush_end = flush_start + flush_len;
         let events = match leg {
             Leg::A => &self.dtmf_events_a,
             Leg::B => &self.dtmf_events_b,
         };
-        if events.is_empty() || data.is_empty() {
-            return Ok(data);
-        }
-
-        let mut decoder = create_decoder(self.codec);
-        let mut pcm = decoder.decode(&data);
-        let mut touched = false;
 
         for event in events {
             if event.end_ts <= flush_start || event.start_ts >= flush_end {
@@ -681,49 +711,89 @@ impl Recorder {
                 continue;
             }
 
+            let total_duration = (event.end_ts - event.start_ts) as usize;
             let dtmf_pcm = self.dtmf_gen.generate_segment(
                 event.digit,
                 segment_start as usize,
                 segment_len as usize,
             );
+            // Apply fade-in/fade-out ramp (2ms) to avoid clicks at tone boundaries
+            let ramp_samples = (self.sample_rate as usize / 500).max(1); // 2ms
             let pcm_offset = (overlap_start - flush_start) as usize;
             for (i, sample) in dtmf_pcm.iter().enumerate() {
+                let abs_pos = segment_start as usize + i; // position within the full tone
+                let mut gain = 1.0f32;
+                // Fade in at tone start
+                if abs_pos < ramp_samples {
+                    gain = abs_pos as f32 / ramp_samples as f32;
+                }
+                // Fade out at tone end
+                let from_end = total_duration.saturating_sub(abs_pos + 1);
+                if from_end < ramp_samples {
+                    gain = gain.min((from_end + 1) as f32 / ramp_samples as f32);
+                }
+                let ramped = (*sample as f32 * gain) as i32;
                 if let Some(dest) = pcm.get_mut(pcm_offset + i) {
-                    *dest = ((*dest as i32 + *sample as i32)
+                    *dest = ((*dest as i32 + ramped)
                         .clamp(i16::MIN as i32, i16::MAX as i32))
                         as i16;
                 }
             }
 
-            touched = true;
             debug!(
-                "Recording DTMF: leg={:?}, digit={}, duration={}ms, samples={}",
+                "Recording DTMF overlay: leg={:?}, digit={}, duration={}ms, segment_start={}ms, segment_len={}ms, flush_start={}, event_start={}",
                 leg,
                 event.digit,
                 ((event.end_ts - event.start_ts) as u64 * 1000 / self.sample_rate as u64) as u32,
-                event.end_ts - event.start_ts
+                (segment_start as u64 * 1000 / self.sample_rate as u64) as u32,
+                (segment_len as u64 * 1000 / self.sample_rate as u64) as u32,
+                flush_start,
+                event.start_ts,
             );
         }
+    }
 
-        if !touched {
-            return Ok(data);
+    /// For stereo mode: decode, overlay DTMF, re-encode only when DTMF events overlap.
+    /// Otherwise return the encoded data unchanged to avoid a wasteful codec round-trip.
+    fn apply_dtmf_if_needed(&self, leg: Leg, flush_start: u32, flush_len: u32, data: Vec<u8>) -> Vec<u8> {
+        if data.is_empty() {
+            return data;
+        }
+        let flush_end = flush_start + flush_len;
+        let events = match leg {
+            Leg::A => &self.dtmf_events_a,
+            Leg::B => &self.dtmf_events_b,
+        };
+        let has_overlap = events
+            .iter()
+            .any(|e| e.start_ts < flush_end && e.end_ts > flush_start);
+        if !has_overlap {
+            return data;
         }
 
-        Ok(if let Some(enc) = self.encoder.as_mut() {
-            enc.encode(&pcm)
-        } else {
-            audio_codec::samples_to_bytes(&pcm)
-        })
+        let mut pcm = create_decoder(self.codec).decode(&data);
+        self.apply_dtmf_overlay_pcm(leg, flush_start, &mut pcm);
+        create_encoder(self.codec).encode(&pcm)
     }
 
     fn prune_dtmf_events(&mut self, flushed_to: u32) {
-        self.dtmf_events_a
-            .retain(|event| !(event.ended && event.end_ts <= flushed_to));
-        self.dtmf_events_b
-            .retain(|event| !(event.ended && event.end_ts <= flushed_to));
+        let stale_threshold = self.sample_rate * 2; // 2 seconds
+        let retain = |event: &DtmfEvent| {
+            if event.ended && event.end_ts <= flushed_to {
+                return false; // fully flushed
+            }
+            // Prune stale non-ended events (end packet lost)
+            if !event.ended && flushed_to > event.end_ts.saturating_add(stale_threshold) {
+                return false;
+            }
+            true
+        };
+        self.dtmf_events_a.retain(retain);
+        self.dtmf_events_b.retain(retain);
     }
 
-    fn interleave(&mut self, data_a: &[u8], data_b: &[u8]) -> Result<Vec<u8>> {
+    /// Interleave encoded audio blocks for stereo WAV output.
+    fn interleave_encoded(&self, data_a: &[u8], data_b: &[u8]) -> Vec<u8> {
         let (_, bytes_per_block) = self.block_info();
         let len = data_a.len().min(data_b.len());
         let mut interleaved = Vec::with_capacity(len * 2);
@@ -732,53 +802,17 @@ impl Recorder {
             interleaved.extend_from_slice(&data_a[i * bytes_per_block..(i + 1) * bytes_per_block]);
             interleaved.extend_from_slice(&data_b[i * bytes_per_block..(i + 1) * bytes_per_block]);
         }
-        Ok(interleaved)
+        interleaved
     }
 
-    fn mix(&mut self, data_a: &[u8], data_b: &[u8]) -> Result<Vec<u8>> {
-        let (_, bytes_per_block) = self.block_info();
-        let len = data_a.len().min(data_b.len());
+    /// Mix two PCM sample slices by averaging (prevents clipping).
+    fn mix_pcm(pcm_a: &[i16], pcm_b: &[i16]) -> Vec<i16> {
+        let len = pcm_a.len().min(pcm_b.len());
         let mut mixed = Vec::with_capacity(len);
-
-        match self.codec {
-            CodecType::PCMU | CodecType::PCMA => {
-                // For μ-law/A-law, decode to PCM, mix, and re-encode
-                let mut decoder_a = create_decoder(self.codec);
-                let pcm_a = decoder_a.decode(data_a);
-
-                let mut decoder_b = create_decoder(self.codec);
-                let pcm_b = decoder_b.decode(data_b);
-
-                // Mix PCM samples (average to prevent clipping)
-                let mut pcm_mixed = Vec::with_capacity(pcm_a.len().min(pcm_b.len()));
-                for i in 0..pcm_a.len().min(pcm_b.len()) {
-                    let sample = ((pcm_a[i] as i32 + pcm_b[i] as i32) / 2) as i16;
-                    pcm_mixed.push(sample);
-                }
-
-                // Re-encode to target codec
-                if let Some(enc) = self.encoder.as_mut() {
-                    mixed = enc.encode(&pcm_mixed);
-                } else {
-                    mixed = audio_codec::samples_to_bytes(&pcm_mixed);
-                }
-            }
-            _ => {
-                // For PCM data, mix directly
-                let num_blocks = len / bytes_per_block;
-                for i in 0..num_blocks {
-                    let start = i * bytes_per_block;
-                    let end = (i + 1) * bytes_per_block;
-                    for j in start..end.min(data_a.len()).min(data_b.len()) {
-                        // Mix by averaging (simple approach)
-                        let sample = ((data_a[j] as i16 + data_b[j] as i16) / 2) as u8;
-                        mixed.push(sample);
-                    }
-                }
-            }
+        for i in 0..len {
+            mixed.push(((pcm_a[i] as i32 + pcm_b[i] as i32) / 2) as i16);
         }
-
-        Ok(mixed)
+        mixed
     }
 }
 
@@ -797,67 +831,29 @@ impl DtmfGenerator {
         Self { sample_rate }
     }
 
-    pub fn generate(&self, digit: char, duration_ms: u32) -> Vec<i16> {
-        let freqs = match digit {
-            '1' => (697.0, 1209.0),
-            '2' => (697.0, 1336.0),
-            '3' => (697.0, 1477.0),
-            '4' => (770.0, 1209.0),
-            '5' => (770.0, 1336.0),
-            '6' => (770.0, 1477.0),
-            '7' => (852.0, 1209.0),
-            '8' => (852.0, 1336.0),
-            '9' => (852.0, 1477.0),
-            '*' => (941.0, 1209.0),
-            '0' => (941.0, 1336.0),
-            '#' => (941.0, 1477.0),
-            'A' => (697.0, 1633.0),
-            'B' => (770.0, 1633.0),
-            'C' => (852.0, 1633.0),
-            'D' => (941.0, 1633.0),
-            _ => return Vec::new(),
-        };
-
-        let num_samples = (self.sample_rate as f32 * (duration_ms as f32 / 1000.0)) as usize;
-        let mut samples = Vec::with_capacity(num_samples);
-
-        for i in 0..num_samples {
-            let t = i as f32 / self.sample_rate as f32;
-            let s1 = (2.0 * std::f32::consts::PI * freqs.0 * t).sin();
-            let s2 = (2.0 * std::f32::consts::PI * freqs.1 * t).sin();
-            let s = (s1 + s2) / 2.0;
-            samples.push((s * 32767.0) as i16);
+    fn freqs(digit: char) -> Option<(f32, f32)> {
+        match digit {
+            '1' => Some((697.0, 1209.0)),
+            '2' => Some((697.0, 1336.0)),
+            '3' => Some((697.0, 1477.0)),
+            '4' => Some((770.0, 1209.0)),
+            '5' => Some((770.0, 1336.0)),
+            '6' => Some((770.0, 1477.0)),
+            '7' => Some((852.0, 1209.0)),
+            '8' => Some((852.0, 1336.0)),
+            '9' => Some((852.0, 1477.0)),
+            '*' => Some((941.0, 1209.0)),
+            '0' => Some((941.0, 1336.0)),
+            '#' => Some((941.0, 1477.0)),
+            'A' => Some((697.0, 1633.0)),
+            'B' => Some((770.0, 1633.0)),
+            'C' => Some((852.0, 1633.0)),
+            'D' => Some((941.0, 1633.0)),
+            _ => None,
         }
-
-        samples
     }
 
-    pub fn generate_segment(
-        &self,
-        digit: char,
-        start_sample: usize,
-        num_samples: usize,
-    ) -> Vec<i16> {
-        let freqs = match digit {
-            '1' => (697.0, 1209.0),
-            '2' => (697.0, 1336.0),
-            '3' => (697.0, 1477.0),
-            '4' => (770.0, 1209.0),
-            '5' => (770.0, 1336.0),
-            '6' => (770.0, 1477.0),
-            '7' => (852.0, 1209.0),
-            '8' => (852.0, 1336.0),
-            '9' => (852.0, 1477.0),
-            '*' => (941.0, 1209.0),
-            '0' => (941.0, 1336.0),
-            '#' => (941.0, 1477.0),
-            'A' => (697.0, 1633.0),
-            'B' => (770.0, 1633.0),
-            'C' => (852.0, 1633.0),
-            'D' => (941.0, 1633.0),
-            _ => return Vec::new(),
-        };
-
+    fn generate_samples(&self, freqs: (f32, f32), start_sample: usize, num_samples: usize) -> Vec<i16> {
         let mut samples = Vec::with_capacity(num_samples);
         for i in 0..num_samples {
             let t = (start_sample + i) as f32 / self.sample_rate as f32;
@@ -866,8 +862,27 @@ impl DtmfGenerator {
             let s = (s1 + s2) / 2.0;
             samples.push((s * 32767.0) as i16);
         }
-
         samples
+    }
+
+    pub fn generate(&self, digit: char, duration_ms: u32) -> Vec<i16> {
+        let Some(freqs) = Self::freqs(digit) else {
+            return Vec::new();
+        };
+        let num_samples = (self.sample_rate as f32 * (duration_ms as f32 / 1000.0)) as usize;
+        self.generate_samples(freqs, 0, num_samples)
+    }
+
+    pub fn generate_segment(
+        &self,
+        digit: char,
+        start_sample: usize,
+        num_samples: usize,
+    ) -> Vec<i16> {
+        let Some(freqs) = Self::freqs(digit) else {
+            return Vec::new();
+        };
+        self.generate_samples(freqs, start_sample, num_samples)
     }
 }
 
@@ -877,37 +892,20 @@ mod tests {
     use audio_codec::{CodecType, create_decoder, create_encoder};
 
     #[test]
-    fn test_mix_pcmu_both_silent() {
-        // Test mixing two silent audio streams
-        let mut recorder = create_test_recorder(CodecType::PCMU, 1);
-
-        // Create silent PCM samples (all zeros)
-        let pcm_silent = vec![0i16; 160];
-
-        // Encode to PCMU
-        let mut encoder = create_encoder(CodecType::PCMU);
-        let data_a = encoder.encode(&pcm_silent);
-        let data_b = encoder.encode(&pcm_silent);
-
-        // Mix the data
-        let mixed = recorder.mix(&data_a, &data_b).unwrap();
-
-        // Decode and verify
-        let mut decoder = create_decoder(CodecType::PCMU);
-        let pcm_result = decoder.decode(&mixed);
-
-        // All samples should be near zero (silence)
-        let max_sample = pcm_result.iter().map(|&s| s.abs()).max().unwrap_or(0);
-        assert!(
-            max_sample < 100,
-            "Mixed silent audio should remain silent, got max={}",
-            max_sample
-        );
+    fn test_mix_pcm_both_silent() {
+        let pcm_a = vec![0i16; 160];
+        let pcm_b = vec![0i16; 160];
+        let mixed = Recorder::mix_pcm(&pcm_a, &pcm_b);
+        let max_sample = mixed.iter().map(|&s| s.abs()).max().unwrap_or(0);
+        assert_eq!(max_sample, 0, "Mixed silent audio should remain silent");
     }
 
     #[test]
     fn test_progressive_dtmf_updates_do_not_duplicate_recorded_duration() {
         let mut recorder = create_test_recorder(CodecType::PCMU, 1);
+        // Pin the timeline to avoid timing-dependent start_offset
+        recorder.base_timestamp_a = Some(0);
+        recorder.start_offset_a = 0;
 
         for duration in [160u16, 320, 480, 640, 800, 960, 1120, 1280, 1440] {
             let payload = [5, 0x00, (duration >> 8) as u8, duration as u8];
@@ -931,76 +929,40 @@ mod tests {
     }
 
     #[test]
-    fn test_mix_pcmu_one_silent() {
-        // Test mixing one silent and one active audio stream
-        let mut recorder = create_test_recorder(CodecType::PCMU, 1);
-
-        // Create test PCM samples
+    fn test_mix_pcm_one_silent() {
         let pcm_silent = vec![0i16; 160];
         let pcm_active: Vec<i16> = (0..160)
             .map(|i| ((i as f32 / 10.0).sin() * 5000.0) as i16)
             .collect();
 
-        // Encode to PCMU
-        let mut encoder_a = create_encoder(CodecType::PCMU);
-        let mut encoder_b = create_encoder(CodecType::PCMU);
-        let data_a = encoder_a.encode(&pcm_silent);
-        let data_b = encoder_b.encode(&pcm_active);
+        let mixed = Recorder::mix_pcm(&pcm_silent, &pcm_active);
 
-        // Mix the data
-        let mixed = recorder.mix(&data_a, &data_b).unwrap();
-
-        // Decode and verify
-        let mut decoder = create_decoder(CodecType::PCMU);
-        let pcm_result = decoder.decode(&mixed);
-
-        // The mixed result should be roughly half the amplitude of the active stream
-        // since we're averaging with silence (0)
-        let mut decoder_b = create_decoder(CodecType::PCMU);
-        let pcm_b_decoded = decoder_b.decode(&data_b);
-
-        // Check that mixed amplitude is roughly half of the original
-        let avg_mixed: i32 = pcm_result
+        let avg_mixed: i32 = mixed
             .iter()
             .take(100)
             .map(|&s| s.abs() as i32)
             .sum::<i32>()
             / 100;
-        let avg_original: i32 = pcm_b_decoded
+        let avg_original: i32 = pcm_active
             .iter()
             .take(100)
             .map(|&s| s.abs() as i32)
             .sum::<i32>()
             / 100;
 
-        // Both should have non-zero amplitude
-        assert!(
-            avg_original > 100,
-            "Original signal should be non-zero, got {}",
-            avg_original
-        );
-        assert!(
-            avg_mixed > 50,
-            "Mixed signal should be non-zero, got {}",
-            avg_mixed
-        );
+        assert!(avg_original > 100, "Original signal should be non-zero, got {}", avg_original);
+        assert!(avg_mixed > 50, "Mixed signal should be non-zero, got {}", avg_mixed);
 
         let ratio = avg_mixed as f32 / avg_original as f32;
         assert!(
-            ratio > 0.35 && ratio < 0.65,
-            "Mixed amplitude should be ~0.5x original, got ratio={} (mixed={}, orig={})",
-            ratio,
-            avg_mixed,
-            avg_original
+            ratio > 0.45 && ratio < 0.55,
+            "Mixed amplitude should be exactly 0.5x original in PCM domain, got ratio={} (mixed={}, orig={})",
+            ratio, avg_mixed, avg_original
         );
     }
 
     #[test]
-    fn test_mix_pcmu_both_active() {
-        // Test mixing two active audio streams with different amplitudes
-        let mut recorder = create_test_recorder(CodecType::PCMU, 1);
-
-        // Create test PCM samples with different amplitudes
+    fn test_mix_pcm_both_active() {
         let pcm_a: Vec<i16> = (0..160)
             .map(|i| (i as f32 * 50.0).sin() as i16 * 2000)
             .collect();
@@ -1008,61 +970,31 @@ mod tests {
             .map(|i| (i as f32 * 70.0).sin() as i16 * 3000)
             .collect();
 
-        // Encode to PCMU
-        let mut encoder_a = create_encoder(CodecType::PCMU);
-        let mut encoder_b = create_encoder(CodecType::PCMU);
-        let data_a = encoder_a.encode(&pcm_a);
-        let data_b = encoder_b.encode(&pcm_b);
+        let mixed = Recorder::mix_pcm(&pcm_a, &pcm_b);
 
-        // Mix the data
-        let mixed = recorder.mix(&data_a, &data_b).unwrap();
+        assert_eq!(mixed.len(), pcm_a.len());
 
-        // Verify the output length is correct (same as inputs for PCMU)
-        assert_eq!(mixed.len(), data_a.len());
-        assert_eq!(mixed.len(), data_b.len());
-
-        // Decode all three and verify averaging
-        let mut decoder_a = create_decoder(CodecType::PCMU);
-        let mut decoder_b = create_decoder(CodecType::PCMU);
-        let mut decoder_mixed = create_decoder(CodecType::PCMU);
-
-        let pcm_a_decoded = decoder_a.decode(&data_a);
-        let pcm_b_decoded = decoder_b.decode(&data_b);
-        let pcm_mixed = decoder_mixed.decode(&mixed);
-
-        // Check that mixed samples are approximately the average
-        let sample_idx = 50; // Check middle sample
-        let expected =
-            ((pcm_a_decoded[sample_idx] as i32 + pcm_b_decoded[sample_idx] as i32) / 2) as i16;
-        let actual = pcm_mixed[sample_idx];
-        let diff = (expected - actual).abs();
-
-        // Allow some tolerance due to codec quantization
-        assert!(
-            diff < 200,
-            "Mixed sample should be average of inputs, expected ~{}, got {}, diff={}",
-            expected,
-            actual,
-            diff
+        let sample_idx = 50;
+        let expected = ((pcm_a[sample_idx] as i32 + pcm_b[sample_idx] as i32) / 2) as i16;
+        let actual = mixed[sample_idx];
+        assert_eq!(
+            expected, actual,
+            "Mixed sample should be exact average in PCM domain"
         );
     }
 
     #[test]
-    fn test_interleave_pcmu() {
-        // Test interleaving two audio streams for stereo recording
-        let mut recorder = create_test_recorder(CodecType::PCMU, 2);
+    fn test_interleave_encoded() {
+        let recorder = create_test_recorder(CodecType::PCMU, 2);
 
-        // Create distinct test data
+        // Create distinct encoded test data (PCMU: 1 byte per sample)
         let data_a: Vec<u8> = (0..160).map(|i| (i % 256) as u8).collect();
         let data_b: Vec<u8> = (0..160).map(|i| ((i + 128) % 256) as u8).collect();
 
-        // Interleave the data
-        let interleaved = recorder.interleave(&data_a, &data_b).unwrap();
+        let interleaved = recorder.interleave_encoded(&data_a, &data_b);
 
-        // Verify length is double
         assert_eq!(interleaved.len(), data_a.len() + data_b.len());
 
-        // Verify interleaving pattern: A[0], B[0], A[1], B[1], ...
         for i in 0..10 {
             assert_eq!(
                 interleaved[i * 2],
@@ -1100,33 +1032,15 @@ mod tests {
     }
 
     #[test]
-    fn test_mix_prevents_clipping() {
-        // Test that mixing prevents clipping by averaging instead of adding
-        let mut recorder = create_test_recorder(CodecType::PCMU, 1);
-
-        // Create high-amplitude samples near the maximum
+    fn test_mix_pcm_prevents_clipping() {
         let pcm_high = vec![20000i16; 160];
+        let mixed = Recorder::mix_pcm(&pcm_high, &pcm_high);
 
-        // Encode to PCMU
-        let mut encoder_a = create_encoder(CodecType::PCMU);
-        let mut encoder_b = create_encoder(CodecType::PCMU);
-        let data_a = encoder_a.encode(&pcm_high);
-        let data_b = encoder_b.encode(&pcm_high);
-
-        // Mix the data
-        let mixed = recorder.mix(&data_a, &data_b).unwrap();
-
-        // Decode and verify no clipping
-        let mut decoder = create_decoder(CodecType::PCMU);
-        let pcm_result = decoder.decode(&mixed);
-
-        // The result should be around 20000 (averaged), not 40000 (which would clip)
         let avg_result: i32 =
-            pcm_result.iter().map(|&s| s as i32).sum::<i32>() / pcm_result.len() as i32;
-        assert!(
-            avg_result > 15000 && avg_result < 25000,
-            "Mixed high-amplitude audio should not clip, avg={}",
-            avg_result
+            mixed.iter().map(|&s| s as i32).sum::<i32>() / mixed.len() as i32;
+        assert_eq!(
+            avg_result, 20000,
+            "Mixed identical high-amplitude audio should average to same value"
         );
     }
 
