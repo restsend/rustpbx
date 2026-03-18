@@ -62,46 +62,27 @@ pub fn prepare_sqlite_database(database_url: &str) -> Result<()> {
     Ok(())
 }
 
-async fn prepare_mysql_database(database_url: &str) -> Result<()> {
-    let url = Url::parse(database_url)?;
-
-    let database_name = url.path().trim_start_matches('/');
-    if database_name.is_empty() {
-        return Err(anyhow::anyhow!("No database specified"));
-    }
-
-    let mut server_url = url.clone();
-    server_url.set_path("/mysql");
-    server_url.set_query(None);
-    let server_url_str = server_url.to_string();
-
-    let mut conn = sqlx::MySqlConnection::connect(&server_url_str)
-        .await
-        .with_context(|| format!("failed to connect to MySQL server: {}", server_url_str))?;
-
-    sqlx::query(&format!(
-        "CREATE DATABASE IF NOT EXISTS `{}` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci",
-        database_name
-    ))
-    .execute(&mut conn)
-    .await
-    .with_context(|| format!("failed to create database: {}", database_name))?;
-
-    conn.close().await?;
-    Ok(())
-}
-
 pub async fn create_db(database_url: &str) -> Result<DatabaseConnection> {
     if database_url.starts_with("sqlite://") {
-        prepare_sqlite_database(database_url)?;
+        prepare_sqlite_database(database_url).map_err(|e| {
+            tracing::error!("failed to prepare SQLite database {database_url} {:?}", e);
+            let msg = format!("failed to prepare SQLite database {database_url}: {e}");
+            anyhow::anyhow!(msg)
+        })?;
     }
 
     let db = Database::connect(database_url)
         .await
-        .with_context(|| format!("failed to connect admin database: {}", database_url))?;
+        .map_err(|e: sea_orm::DbErr| {
+            tracing::error!("failed to connect to database {:?}", e);
+            let msg = format!("failed to connect to database {database_url}: {e}");
+            anyhow::anyhow!(msg)
+        })?;
 
-    migration::Migrator::up(&db, None)
-        .await
-        .context("failed to run database migrations")?;
+    migration::Migrator::up(&db, None).await.map_err(|e| {
+        tracing::error!("failed to run database migrations on {:?}", e);
+        let msg = format!("failed to run database migrations on {database_url}: {e}");
+        anyhow::anyhow!(msg)
+    })?;
     Ok(db)
 }
