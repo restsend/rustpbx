@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::fs::File;
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use tracing::debug;
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -37,7 +37,7 @@ impl Default for RecorderOption {
         Self {
             recorder_file: "".to_string(),
             samplerate: 16000,
-            ptime: 200,
+            ptime: 1280,
         }
     }
 }
@@ -75,7 +75,6 @@ pub struct Recorder {
     buffer_b: BTreeMap<u32, Bytes>,
 
     start_instant: Instant,
-    last_flush: Instant,
 
     base_timestamp_a: Option<u32>,
     base_timestamp_b: Option<u32>,
@@ -87,7 +86,7 @@ pub struct Recorder {
     dtmf_events_b: Vec<DtmfEvent>,
 
     next_flush_ts: u32, // The next timestamp to be flushed
-    ptime: Duration,
+    ptime_samples: u32, // samples per flush period (e.g. 160 for 20ms @ 8kHz)
 
     written_samples: u64,
     writer: Box<dyn StreamWriter>,
@@ -95,6 +94,10 @@ pub struct Recorder {
 
 impl Recorder {
     pub fn new(path: &str, codec: CodecType) -> Result<Self> {
+        Self::with_ptime(path, codec, 1280)
+    }
+
+    pub fn with_ptime(path: &str, codec: CodecType, ptime_ms: u32) -> Result<Self> {
         // ensure the directory exists
         if let Some(parent) = PathBuf::from(path).parent() {
             std::fs::create_dir_all(parent).ok();
@@ -121,6 +124,20 @@ impl Recorder {
         let mut writer = Box::new(WavWriter::new(file, sample_rate, channels, Some(codec)));
         writer.write_header()?;
 
+        // Compute ptime_samples: flush interval normalized to multiple of codec ptime (20ms)
+        let samples_per_block = match codec {
+            CodecType::G729 => 80u32,
+            CodecType::PCMU | CodecType::PCMA => 1,
+            CodecType::G722 => 2,
+            _ => 1,
+        };
+        let codec_ptime_samples = (sample_rate / 50 / samples_per_block) * samples_per_block;
+        let codec_ptime_samples = codec_ptime_samples.max(samples_per_block);
+        let ptime_ms = ptime_ms.max(20); // at least 20ms
+        let raw_flush_samples = sample_rate * ptime_ms / 1000;
+        let flush_periods = (raw_flush_samples / codec_ptime_samples).max(1);
+        let ptime_samples = codec_ptime_samples * flush_periods;
+
         Ok(Self {
             path: path.to_string(),
             codec,
@@ -134,7 +151,6 @@ impl Recorder {
             buffer_a: BTreeMap::new(),
             buffer_b: BTreeMap::new(),
             start_instant: Instant::now(),
-            last_flush: Instant::now(),
             base_timestamp_a: None,
             base_timestamp_b: None,
             start_offset_a: 0,
@@ -146,7 +162,7 @@ impl Recorder {
             next_flush_ts: 0,
             written_samples: 0,
             writer,
-            ptime: Duration::from_millis(200),
+            ptime_samples,
         })
     }
 
@@ -267,8 +283,13 @@ impl Recorder {
                 self.buffer_b.insert(absolute_ts, encoded);
             }
         }
-        if self.last_flush.elapsed() >= self.ptime {
-            self.flush()?;
+        // Hold back flushing while there are active (non-ended) DTMF events,
+        // so their audio region stays in the buffer for overlay.
+        let flush_limit = self.dtmf_flush_limit();
+        while self.next_flush_ts + self.ptime_samples <= flush_limit
+            && self.max_available_ts() >= self.next_flush_ts + self.ptime_samples
+        {
+            self.flush_one_period()?;
         }
         Ok(())
     }
@@ -411,92 +432,48 @@ impl Recorder {
         Ok(())
     }
 
-    fn flush(&mut self) -> Result<()> {
-        self.last_flush = Instant::now();
-
-        let max_ts_a = self
-            .buffer_a
-            .last_key_value()
-            .map(|(k, v)| {
-                let (_, bytes_per_block) = self.block_info();
-                let samples_per_block = self.samples_per_block();
-                k + (v.len() / bytes_per_block) as u32 * samples_per_block
-            })
-            .unwrap_or(0);
-        let max_ts_b = self
-            .buffer_b
-            .last_key_value()
-            .map(|(k, v)| {
-                let (_, bytes_per_block) = self.block_info();
-                let samples_per_block = self.samples_per_block();
-                k + (v.len() / bytes_per_block) as u32 * samples_per_block
-            })
-            .unwrap_or(0);
-        let max_dtmf_ts_a = self
+    /// Returns the flush limit: if there are active (non-ended) DTMF events,
+    /// don't flush past their start_ts so the overlay can be applied.
+    /// If all events are ended (or none exist), returns u32::MAX (no limit).
+    fn dtmf_flush_limit(&self) -> u32 {
+        let earliest_active = self
             .dtmf_events_a
-            .last()
-            .map(|event| event.end_ts)
-            .unwrap_or(0);
-        let max_dtmf_ts_b = self
-            .dtmf_events_b
-            .last()
-            .map(|event| event.end_ts)
-            .unwrap_or(0);
-        // Use min of both legs' audio when both have data to prevent one leg
-        // from driving the flush past the other's position (which would cause
-        // DTMF events arriving on the lagging leg to miss their start region).
-        // Fall back to max when only one leg has data or legs diverge by > 500ms.
-        let max_audio_ts = if max_ts_a > self.next_flush_ts && max_ts_b > self.next_flush_ts {
-            let min_ts = max_ts_a.min(max_ts_b);
-            let max_ts = max_ts_a.max(max_ts_b);
-            if max_ts - min_ts > self.sample_rate / 2 {
-                max_ts // legs diverged too much, flush the leading leg
-            } else {
-                min_ts // flush up to the lagging leg
-            }
-        } else {
-            max_ts_a.max(max_ts_b)
+            .iter()
+            .chain(self.dtmf_events_b.iter())
+            .filter(|e| !e.ended)
+            .map(|e| e.start_ts)
+            .min();
+        earliest_active.unwrap_or(u32::MAX)
+    }
+
+    /// Returns the maximum timestamp across both leg buffers and DTMF events.
+    fn max_available_ts(&self) -> u32 {
+        let (samples_per_block, bytes_per_block) = self.block_info();
+        let buf_end = |buf: &BTreeMap<u32, Bytes>| {
+            buf.last_key_value()
+                .map(|(k, v)| k + (v.len() / bytes_per_block) as u32 * samples_per_block)
+                .unwrap_or(0)
         };
-        let max_available_ts = max_audio_ts.max(max_dtmf_ts_a).max(max_dtmf_ts_b);
+        let max_audio = buf_end(&self.buffer_a).max(buf_end(&self.buffer_b));
+        let max_dtmf_a = self.dtmf_events_a.last().map(|e| e.end_ts).unwrap_or(0);
+        let max_dtmf_b = self.dtmf_events_b.last().map(|e| e.end_ts).unwrap_or(0);
+        max_audio.max(max_dtmf_a).max(max_dtmf_b)
+    }
 
-        if max_available_ts <= self.next_flush_ts {
-            return Ok(());
-        }
+    /// Flush exactly one ptime period (ptime_samples).
+    fn flush_one_period(&mut self) -> Result<()> {
+        self.flush_samples(self.ptime_samples)
+    }
 
-        let mut flush_len = max_available_ts - self.next_flush_ts;
-
-        // Limit flush length to prevent huge memory allocation (e.g., 10 seconds max)
-        let max_flush_samples = self.sample_rate * 10;
-        if flush_len > max_flush_samples {
-            flush_len = max_flush_samples;
-        }
-
-        // Don't flush past non-ended DTMF events. Hold audio in the buffer until
-        // the DTMF tone's full duration is known, so we can overlay the complete tone.
-        let flush_end = self.next_flush_ts + flush_len;
-        let stale_threshold = self.sample_rate * 2; // 2 seconds staleness guard
-        for events in [&self.dtmf_events_a, &self.dtmf_events_b] {
-            for event in events {
-                if !event.ended
-                    && event.start_ts > self.next_flush_ts
-                    && event.start_ts < flush_end
-                    && flush_end.saturating_sub(event.start_ts) < stale_threshold
-                {
-                    flush_len = event.start_ts - self.next_flush_ts;
-                }
-            }
-        }
-
-        let (samples_per_block, _) = self.block_info();
-        flush_len = (flush_len / samples_per_block) * samples_per_block;
-
-        if flush_len == 0 {
+    /// Core flush logic: flush exactly `len` samples from next_flush_ts.
+    fn flush_samples(&mut self, len: u32) -> Result<()> {
+        if len == 0 {
             return Ok(());
         }
 
         let flush_start = self.next_flush_ts;
-        let data_a = self.get_leg_data(Leg::A, flush_len)?;
-        let data_b = self.get_leg_data(Leg::B, flush_len)?;
+        let data_a = self.get_leg_data(Leg::A, len)?;
+        let data_b = self.get_leg_data(Leg::B, len)?;
 
         let output = if self.channels == 1 {
             // Mono: decode to PCM, overlay DTMF, mix, encode once
@@ -512,24 +489,34 @@ impl Recorder {
             }
         } else {
             // Stereo: only decode/re-encode when DTMF overlaps, then interleave encoded blocks
-            let data_a = self.apply_dtmf_if_needed(Leg::A, flush_start, flush_len, data_a);
-            let data_b = self.apply_dtmf_if_needed(Leg::B, flush_start, flush_len, data_b);
+            let data_a = self.apply_dtmf_if_needed(Leg::A, flush_start, len, data_a);
+            let data_b = self.apply_dtmf_if_needed(Leg::B, flush_start, len, data_b);
             self.interleave_encoded(&data_a, &data_b)
         };
 
         // Advance flush position and prune DTMF events AFTER overlay has been applied
-        self.next_flush_ts += flush_len;
+        self.next_flush_ts += len;
         self.prune_dtmf_events(self.next_flush_ts);
 
-        self.writer.write_packet(&output, flush_len as usize)?;
+        self.writer.write_packet(&output, len as usize)?;
         self.written_bytes += output.len() as u32;
-        self.written_samples += flush_len as u64;
+        self.written_samples += len as u64;
 
         Ok(())
     }
 
     pub fn finalize(&mut self) -> Result<()> {
-        self.flush()?;
+        // Flush all complete periods
+        while self.max_available_ts() >= self.next_flush_ts + self.ptime_samples {
+            self.flush_one_period()?;
+        }
+        // Flush any remaining partial period
+        let remaining = self.max_available_ts().saturating_sub(self.next_flush_ts);
+        let (samples_per_block, _) = self.block_info();
+        let remaining_aligned = (remaining / samples_per_block) * samples_per_block;
+        if remaining_aligned > 0 {
+            self.flush_samples(remaining_aligned)?;
+        }
         self.writer.finalize()?;
         Ok(())
     }
@@ -542,10 +529,6 @@ impl Recorder {
             CodecType::Opus => (1, 2), // Buffering PCM
             _ => (1, 2),               // PCM
         }
-    }
-
-    fn samples_per_block(&self) -> u32 {
-        self.block_info().0
     }
 
     fn get_silence_bytes(&mut self, _leg: Leg, blocks: usize) -> Result<Bytes> {
@@ -727,10 +710,12 @@ impl Recorder {
                 if abs_pos < ramp_samples {
                     gain = abs_pos as f32 / ramp_samples as f32;
                 }
-                // Fade out at tone end
-                let from_end = total_duration.saturating_sub(abs_pos + 1);
-                if from_end < ramp_samples {
-                    gain = gain.min((from_end + 1) as f32 / ramp_samples as f32);
+                // Fade out at tone end — only if the event has ended (we know the real end)
+                if event.ended {
+                    let from_end = total_duration.saturating_sub(abs_pos + 1);
+                    if from_end < ramp_samples {
+                        gain = gain.min((from_end + 1) as f32 / ramp_samples as f32);
+                    }
                 }
                 let ramped = (*sample as f32 * gain) as i32;
                 if let Some(dest) = pcm.get_mut(pcm_offset + i) {
@@ -907,12 +892,20 @@ mod tests {
         recorder.base_timestamp_a = Some(0);
         recorder.start_offset_a = 0;
 
+        // Feed audio data alongside DTMF to advance the sample-based clock.
+        // Each iteration: push a 160-sample silence packet at the DTMF end_ts,
+        // which gives the recorder enough data to potentially flush periods.
+        let mut encoder = create_encoder(CodecType::PCMU);
+        let silence = encoder.encode(&vec![0i16; 160]);
+
         for duration in [160u16, 320, 480, 640, 800, 960, 1120, 1280, 1440] {
             let payload = [5, 0x00, (duration >> 8) as u8, duration as u8];
             recorder
                 .write_dtmf_payload(Leg::A, &payload, 0, 8000)
                 .expect("progressive DTMF should be accepted");
-            recorder.flush().expect("flush should succeed");
+            // Insert audio at the current DTMF end position to drive the flush clock
+            let audio_ts = duration as u32;
+            recorder.buffer_a.insert(audio_ts, Bytes::from(silence.clone()));
         }
 
         let payload = [5, 0x80, 0x06, 0x40];
@@ -1048,6 +1041,16 @@ mod tests {
     fn create_test_recorder(codec: CodecType, channels: u16) -> Recorder {
         let sample_rate = codec.samplerate();
         let encoder = Some(create_encoder(codec));
+        // flush interval normalized to multiple of codec ptime (20ms), default 1280ms = LCM(4096 bytes, 160 samples)
+        let samples_per_block = match codec {
+            CodecType::G729 => 80u32,
+            CodecType::PCMU | CodecType::PCMA => 1,
+            CodecType::G722 => 2,
+            _ => 1,
+        };
+        let codec_ptime_samples = ((sample_rate / 50) / samples_per_block * samples_per_block).max(samples_per_block);
+        let flush_periods = (sample_rate / codec_ptime_samples).max(1);
+        let ptime_samples = codec_ptime_samples * flush_periods;
 
         Recorder {
             path: "test.wav".to_string(),
@@ -1062,7 +1065,6 @@ mod tests {
             buffer_a: BTreeMap::new(),
             buffer_b: BTreeMap::new(),
             start_instant: Instant::now(),
-            last_flush: Instant::now(),
             base_timestamp_a: None,
             base_timestamp_b: None,
             start_offset_a: 0,
@@ -1072,7 +1074,7 @@ mod tests {
             next_flush_ts: 0,
             written_samples: 0,
             writer: Box::new(TestWriter::new()),
-            ptime: Duration::from_millis(20),
+            ptime_samples,
             dtmf_events_a: Vec::new(),
             dtmf_events_b: Vec::new(),
         }
