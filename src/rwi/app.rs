@@ -1,6 +1,6 @@
-use crate::call::app::{AppAction, AppEvent, CallApp, CallAppType, ApplicationContext};
-use crate::call::app::{CallController, ExitReason};
 use crate::call::RouteContext;
+use crate::call::app::{AppAction, AppEvent, ApplicationContext, CallApp, CallAppType};
+use crate::call::app::{CallController, ExitReason};
 use crate::rwi::gateway::{RwiGateway, SessionId};
 use crate::rwi::proto::RwiEvent;
 use crate::rwi::session::OwnershipMode;
@@ -44,7 +44,11 @@ impl crate::call::CallAppFactory for RwiAddon {
             .and_then(|v| v.as_str())
             .map(String::from);
 
-        Some(Box::new(RwiApp::new(context_name, session_id, self.gateway.clone())))
+        Some(Box::new(RwiApp::new(
+            context_name,
+            session_id,
+            self.gateway.clone(),
+        )))
     }
 }
 
@@ -62,7 +66,11 @@ pub struct RwiApp {
 }
 
 impl RwiApp {
-    pub fn new(context_name: String, session_id: Option<SessionId>, gateway: Arc<RwLock<RwiGateway>>) -> Self {
+    pub fn new(
+        context_name: String,
+        session_id: Option<SessionId>,
+        gateway: Arc<RwLock<RwiGateway>>,
+    ) -> Self {
         Self {
             context_name,
             session_id,
@@ -100,15 +108,18 @@ impl CallApp for RwiApp {
     ) -> anyhow::Result<AppAction> {
         let call_id = context.call_info.session_id.clone();
 
-        self.send_event(RwiEvent::CallIncoming(crate::rwi::proto::CallIncomingData {
-            call_id: call_id.clone(),
-            context: self.context_name.clone(),
-            caller: context.call_info.caller.clone(),
-            callee: context.call_info.callee.clone(),
-            direction: context.call_info.direction.clone(),
-            trunk: None,
-            sip_headers: std::collections::HashMap::new(),
-        })).await;
+        self.send_event(RwiEvent::CallIncoming(
+            crate::rwi::proto::CallIncomingData {
+                call_id: call_id.clone(),
+                context: self.context_name.clone(),
+                caller: context.call_info.caller.clone(),
+                callee: context.call_info.callee.clone(),
+                direction: context.call_info.direction.clone(),
+                trunk: None,
+                sip_headers: std::collections::HashMap::new(),
+            },
+        ))
+        .await;
 
         if let Some(session_id) = &self.session_id {
             let claim_ok = {
@@ -122,7 +133,10 @@ impl CallApp for RwiApp {
             if claim_ok {
                 self.owned = true;
                 self.owned_call_id = Some(call_id.clone());
-                self.send_event(RwiEvent::CallAnswered { call_id: call_id.clone() }).await;
+                self.send_event(RwiEvent::CallAnswered {
+                    call_id: call_id.clone(),
+                })
+                .await;
             }
         }
 
@@ -143,14 +157,16 @@ impl CallApp for RwiApp {
                     call_id: context.call_info.session_id.clone(),
                     track_id,
                     interrupted: true,
-                }).await;
+                })
+                .await;
             }
         }
 
         self.send_event(RwiEvent::Dtmf {
             call_id: context.call_info.session_id.clone(),
             digit,
-        }).await;
+        })
+        .await;
         Ok(AppAction::Continue)
     }
 
@@ -168,7 +184,8 @@ impl CallApp for RwiApp {
             call_id: context.call_info.session_id.clone(),
             track_id,
             interrupted: false,
-        }).await;
+        })
+        .await;
         Ok(AppAction::Continue)
     }
 
@@ -194,18 +211,18 @@ impl CallApp for RwiApp {
                     .get("interrupt_on_dtmf")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false);
-                let loop_playback = data
-                    .get("loop")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
+                let loop_playback = data.get("loop").and_then(|v| v.as_bool()).unwrap_or(false);
 
                 if !audio_file.is_empty() {
-                    match controller.play_audio_with_options(
-                        &audio_file,
-                        Some(track_id.clone()),
-                        loop_playback,
-                        interrupt_on_dtmf,
-                    ).await {
+                    match controller
+                        .play_audio_with_options(
+                            &audio_file,
+                            Some(track_id.clone()),
+                            loop_playback,
+                            interrupt_on_dtmf,
+                        )
+                        .await
+                    {
                         Ok(_handle) => {
                             self.current_track_id = Some(track_id);
                             self.interrupt_on_dtmf = interrupt_on_dtmf;
@@ -288,7 +305,9 @@ mod tests {
         let session_id = session.read().await.id.clone();
 
         let call_id = "test-call-001".to_string();
-        let result = gw.claim_call_ownership(&session_id, call_id.clone(), OwnershipMode::Control).await;
+        let result = gw
+            .claim_call_ownership(&session_id, call_id.clone(), OwnershipMode::Control)
+            .await;
         assert!(result.is_ok());
 
         assert_eq!(gw.get_call_owner(&call_id), Some(session_id));
@@ -314,10 +333,14 @@ mod tests {
         let session2_id = session2.read().await.id.clone();
 
         let call_id = "test-call-001".to_string();
-        let result1 = gw.claim_call_ownership(&session1_id, call_id.clone(), OwnershipMode::Control).await;
+        let result1 = gw
+            .claim_call_ownership(&session1_id, call_id.clone(), OwnershipMode::Control)
+            .await;
         assert!(result1.is_ok());
 
-        let result2 = gw.claim_call_ownership(&session2_id, call_id.clone(), OwnershipMode::Control).await;
+        let result2 = gw
+            .claim_call_ownership(&session2_id, call_id.clone(), OwnershipMode::Control)
+            .await;
         assert!(result2.is_err());
     }
 
@@ -335,7 +358,9 @@ mod tests {
         let session_id = session.read().await.id.clone();
 
         let call_id = "test-call-001".to_string();
-        gw.claim_call_ownership(&session_id, call_id.clone(), OwnershipMode::Control).await.unwrap();
+        gw.claim_call_ownership(&session_id, call_id.clone(), OwnershipMode::Control)
+            .await
+            .unwrap();
 
         assert_eq!(gw.get_call_owner(&call_id), Some(session_id.clone()));
 
@@ -356,7 +381,11 @@ mod tests {
         let session = gw.create_session(identity);
         let session_id = session.read().await.id.clone();
 
-        gw.subscribe(&session_id, vec!["context1".to_string(), "context2".to_string()]).await;
+        gw.subscribe(
+            &session_id,
+            vec!["context1".to_string(), "context2".to_string()],
+        )
+        .await;
 
         let subscribers = gw.get_sessions_subscribed_to_context("context1");
         assert!(subscribers.contains(&session_id));
@@ -396,8 +425,14 @@ mod tests {
 
         let v = event_rx.try_recv().expect("event should be delivered");
         let s = serde_json::to_string(&v).unwrap();
-        assert!(s.contains("dtmf") || s.contains("Dtmf"), "event should be a DTMF event: {s}");
-        assert!(s.contains("\"5\"") || s.contains("5"), "event should contain digit 5: {s}");
+        assert!(
+            s.contains("dtmf") || s.contains("Dtmf"),
+            "event should be a DTMF event: {s}"
+        );
+        assert!(
+            s.contains("\"5\"") || s.contains("5"),
+            "event should contain digit 5: {s}"
+        );
     }
 
     #[tokio::test]
@@ -447,7 +482,10 @@ mod tests {
 
         let session_id = {
             let mut gw = gateway.write().await;
-            let identity = RwiIdentity { token: "dual".into(), scopes: vec![] };
+            let identity = RwiIdentity {
+                token: "dual".into(),
+                scopes: vec![],
+            };
             let session = gw.create_session(identity);
             let sid = session.read().await.id.clone();
             gw.set_session_event_sender(&sid, tx);
@@ -474,7 +512,10 @@ mod tests {
 
         let session_id = {
             let mut gw = gateway.write().await;
-            let identity = RwiIdentity { token: "tok".into(), scopes: vec![] };
+            let identity = RwiIdentity {
+                token: "tok".into(),
+                scopes: vec![],
+            };
             let session = gw.create_session(identity);
             session.read().await.id.clone()
         };
@@ -502,7 +543,9 @@ mod tests {
             interrupt_on_dtmf: false,
         };
 
-        app.on_exit(ExitReason::Normal).await.expect("on_exit should not error");
+        app.on_exit(ExitReason::Normal)
+            .await
+            .expect("on_exit should not error");
 
         assert_eq!(
             gateway.read().await.get_call_owner(&call_id),
@@ -517,7 +560,10 @@ mod tests {
 
         let session_a = {
             let mut gw = gateway.write().await;
-            let id = RwiIdentity { token: "a".into(), scopes: vec![] };
+            let id = RwiIdentity {
+                token: "a".into(),
+                scopes: vec![],
+            };
             let s = gw.create_session(id);
             s.read().await.id.clone()
         };
@@ -531,7 +577,10 @@ mod tests {
 
         let session_b = {
             let mut gw = gateway.write().await;
-            let id = RwiIdentity { token: "b".into(), scopes: vec![] };
+            let id = RwiIdentity {
+                token: "b".into(),
+                scopes: vec![],
+            };
             let s = gw.create_session(id);
             s.read().await.id.clone()
         };
@@ -545,7 +594,9 @@ mod tests {
             interrupt_on_dtmf: false,
         };
 
-        app.on_exit(ExitReason::Normal).await.expect("on_exit should not error");
+        app.on_exit(ExitReason::Normal)
+            .await
+            .expect("on_exit should not error");
 
         assert_eq!(
             gateway.read().await.get_call_owner(&call_id),
@@ -559,7 +610,9 @@ mod tests {
     async fn test_on_exit_no_call_id_does_not_panic() {
         let gateway = create_test_gateway();
         let mut app = RwiApp::new("ctx".to_string(), None, gateway.clone());
-        app.on_exit(ExitReason::Normal).await.expect("on_exit should not error");
+        app.on_exit(ExitReason::Normal)
+            .await
+            .expect("on_exit should not error");
     }
 
     // ── on_enter event ordering tests ─────────────────────────────────────
@@ -586,19 +639,23 @@ mod tests {
 
         let app = RwiApp::new("ctx".to_string(), Some(session_id), gateway.clone());
 
-        app.send_event(crate::rwi::proto::RwiEvent::CallIncoming(crate::rwi::proto::CallIncomingData {
-            call_id: "c-test".to_string(),
-            context: "ctx".to_string(),
-            caller: "1001".to_string(),
-            callee: "2000".to_string(),
-            direction: "inbound".to_string(),
-            trunk: None,
-            sip_headers: std::collections::HashMap::new(),
-        })).await;
+        app.send_event(crate::rwi::proto::RwiEvent::CallIncoming(
+            crate::rwi::proto::CallIncomingData {
+                call_id: "c-test".to_string(),
+                context: "ctx".to_string(),
+                caller: "1001".to_string(),
+                callee: "2000".to_string(),
+                direction: "inbound".to_string(),
+                trunk: None,
+                sip_headers: std::collections::HashMap::new(),
+            },
+        ))
+        .await;
 
         app.send_event(crate::rwi::proto::RwiEvent::CallAnswered {
             call_id: "c-test".to_string(),
-        }).await;
+        })
+        .await;
 
         let first = event_rx.try_recv().expect("first event should arrive");
         let first_str = serde_json::to_string(&first).unwrap();
@@ -624,7 +681,10 @@ mod tests {
 
         {
             let mut gw = gateway.write().await;
-            let identity = RwiIdentity { token: "sub".into(), scopes: vec![] };
+            let identity = RwiIdentity {
+                token: "sub".into(),
+                scopes: vec![],
+            };
             let session = gw.create_session(identity);
             let sid = session.read().await.id.clone();
             gw.set_session_event_sender(&sid, event_tx);
@@ -632,15 +692,18 @@ mod tests {
         }
 
         let app = RwiApp::new("ctx-anon".to_string(), None, gateway.clone());
-        app.send_event(crate::rwi::proto::RwiEvent::CallIncoming(crate::rwi::proto::CallIncomingData {
-            call_id: "c-anon".to_string(),
-            context: "ctx-anon".to_string(),
-            caller: "1002".to_string(),
-            callee: "2001".to_string(),
-            direction: "inbound".to_string(),
-            trunk: None,
-            sip_headers: std::collections::HashMap::new(),
-        })).await;
+        app.send_event(crate::rwi::proto::RwiEvent::CallIncoming(
+            crate::rwi::proto::CallIncomingData {
+                call_id: "c-anon".to_string(),
+                context: "ctx-anon".to_string(),
+                caller: "1002".to_string(),
+                callee: "2001".to_string(),
+                direction: "inbound".to_string(),
+                trunk: None,
+                sip_headers: std::collections::HashMap::new(),
+            },
+        ))
+        .await;
 
         let ev = event_rx.try_recv().expect("CallIncoming should arrive");
         let ev_str = serde_json::to_string(&ev).unwrap();

@@ -100,10 +100,7 @@ impl MediaNegotiator {
         codec_by_pt
     }
 
-    fn static_codec_for_payload(
-        section: &rustrtc::MediaSection,
-        pt: u8,
-    ) -> Option<CodecInfo> {
+    fn static_codec_for_payload(section: &rustrtc::MediaSection, pt: u8) -> Option<CodecInfo> {
         let static_codec = if let Ok(codec) = CodecType::try_from(pt) {
             let (rate, chans) = match codec {
                 CodecType::PCMU | CodecType::PCMA | CodecType::G722 | CodecType::G729 => (8000, 1),
@@ -206,11 +203,7 @@ impl MediaNegotiator {
     /// Extract all codec information from SDP
     pub fn extract_all_codecs(sdp_str: &str) -> Vec<CodecInfo> {
         let extracted = Self::extract_codec_params(sdp_str);
-        extracted
-            .audio
-            .into_iter()
-            .chain(extracted.dtmf)
-            .collect()
+        extracted.audio.into_iter().chain(extracted.dtmf).collect()
     }
 
     /// Negotiate codec between two SDP offers/answers

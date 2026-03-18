@@ -22,52 +22,159 @@ impl<T> RwiEnvelope<T> {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RwiCommand {
-    SessionSubscribe { contexts: Vec<String> },
-    SessionUnsubscribe { contexts: Vec<String> },
+    SessionSubscribe {
+        contexts: Vec<String>,
+    },
+    SessionUnsubscribe {
+        contexts: Vec<String>,
+    },
     SessionListCalls,
-    SessionAttachCall { call_id: String, mode: AttachMode },
-    SessionDetachCall { call_id: String },
+    SessionAttachCall {
+        call_id: String,
+        mode: AttachMode,
+    },
+    SessionDetachCall {
+        call_id: String,
+    },
     CallOriginate(CallOriginateParams),
-    CallAnswer { call_id: String },
-    CallReject { call_id: String, reason: Option<RejectReason> },
-    CallRing { call_id: String },
-    CallHangup { call_id: String, reason: Option<String>, code: Option<u16> },
-    CallBridge { leg_a: String, leg_b: String },
-    CallUnbridge { call_id: String },
-    CallTransfer { call_id: String, target: String },
-    CallSetRingbackSource { target_call_id: String, source_call_id: String },
+    CallAnswer {
+        call_id: String,
+    },
+    CallReject {
+        call_id: String,
+        reason: Option<RejectReason>,
+    },
+    CallRing {
+        call_id: String,
+    },
+    CallHangup {
+        call_id: String,
+        reason: Option<String>,
+        code: Option<u16>,
+    },
+    CallBridge {
+        leg_a: String,
+        leg_b: String,
+    },
+    CallUnbridge {
+        call_id: String,
+    },
+    CallTransfer {
+        call_id: String,
+        target: String,
+    },
+    CallSetRingbackSource {
+        target_call_id: String,
+        source_call_id: String,
+    },
     MediaPlay(MediaPlayParams),
-    MediaStop { call_id: String },
+    MediaStop {
+        call_id: String,
+    },
     MediaStreamStart(MediaStreamParams),
-    MediaStreamStop { call_id: String },
+    MediaStreamStop {
+        call_id: String,
+    },
     MediaInjectStart(MediaInjectParams),
-    MediaInjectStop { call_id: String },
+    MediaInjectStop {
+        call_id: String,
+    },
     RecordStart(RecordStartParams),
-    RecordPause { call_id: String },
-    RecordResume { call_id: String },
-    RecordStop { call_id: String },
-    RecordMaskSegment { call_id: String, recording_id: String, start_secs: u64, end_secs: u64 },
+    RecordPause {
+        call_id: String,
+    },
+    RecordResume {
+        call_id: String,
+    },
+    RecordStop {
+        call_id: String,
+    },
+    RecordMaskSegment {
+        call_id: String,
+        recording_id: String,
+        start_secs: u64,
+        end_secs: u64,
+    },
     QueueEnqueue(QueueEnqueueParams),
-    QueueDequeue { call_id: String },
-    QueueHold { call_id: String },
-    QueueUnhold { call_id: String },
-    QueueSetPriority { call_id: String, priority: u32 },
-    QueueAssignAgent { call_id: String, agent_id: String },
-    QueueRequeue { call_id: String, queue_id: String, priority: Option<u32> },
-    SupervisorListen { supervisor_call_id: String, target_call_id: String },
-    SupervisorWhisper { supervisor_call_id: String, target_call_id: String, agent_leg: String },
-    SupervisorBarge { supervisor_call_id: String, target_call_id: String, agent_leg: String },
-    SupervisorStop { supervisor_call_id: String, target_call_id: String },
-    SupervisorTakeover { supervisor_call_id: String, target_call_id: String, agent_leg: String },
-    SipMessage { call_id: String, content_type: String, body: String },
-    SipNotify { call_id: String, event: String, content_type: String, body: String },
-    SipOptionsPing { call_id: String },
+    QueueDequeue {
+        call_id: String,
+    },
+    QueueHold {
+        call_id: String,
+    },
+    QueueUnhold {
+        call_id: String,
+    },
+    QueueSetPriority {
+        call_id: String,
+        priority: u32,
+    },
+    QueueAssignAgent {
+        call_id: String,
+        agent_id: String,
+    },
+    QueueRequeue {
+        call_id: String,
+        queue_id: String,
+        priority: Option<u32>,
+    },
+    SupervisorListen {
+        supervisor_call_id: String,
+        target_call_id: String,
+    },
+    SupervisorWhisper {
+        supervisor_call_id: String,
+        target_call_id: String,
+        agent_leg: String,
+    },
+    SupervisorBarge {
+        supervisor_call_id: String,
+        target_call_id: String,
+        agent_leg: String,
+    },
+    SupervisorStop {
+        supervisor_call_id: String,
+        target_call_id: String,
+    },
+    SupervisorTakeover {
+        supervisor_call_id: String,
+        target_call_id: String,
+        agent_leg: String,
+    },
+    SipMessage {
+        call_id: String,
+        content_type: String,
+        body: String,
+    },
+    SipNotify {
+        call_id: String,
+        event: String,
+        content_type: String,
+        body: String,
+    },
+    SipOptionsPing {
+        call_id: String,
+    },
     ConferenceCreate(ConferenceCreateParams),
-    ConferenceAdd { conf_id: String, call_id: String },
-    ConferenceRemove { conf_id: String, call_id: String },
-    ConferenceMute { conf_id: String, call_id: String },
-    ConferenceUnmute { conf_id: String, call_id: String },
-    ConferenceDestroy { conf_id: String },
+    ConferenceAdd {
+        conf_id: String,
+        call_id: String,
+    },
+    ConferenceRemove {
+        conf_id: String,
+        call_id: String,
+    },
+    ConferenceMute {
+        conf_id: String,
+        call_id: String,
+    },
+    ConferenceUnmute {
+        conf_id: String,
+        call_id: String,
+    },
+    ConferenceDestroy {
+        conf_id: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -224,52 +331,190 @@ impl Default for ConferenceBackend {
 #[serde(rename_all = "snake_case")]
 pub enum RwiEvent {
     CallIncoming(CallIncomingData),
-    CallRinging { call_id: String },
-    CallEarlyMedia { call_id: String },
-    CallAnswered { call_id: String },
-    CallBridged { leg_a: String, leg_b: String },
-    CallUnbridged { call_id: String },
-    CallTransferred { call_id: String },
-    CallTransferAccepted { call_id: String },
-    CallTransferFailed { call_id: String, sip_status: Option<u16> },
-    CallHangup { call_id: String, reason: Option<String>, sip_status: Option<u16> },
-    CallNoAnswer { call_id: String },
-    CallBusy { call_id: String },
-    MediaHoldStarted { call_id: String },
-    MediaHoldStopped { call_id: String },
-    MediaRingbackPassthroughStarted { source: String, target: String },
-    MediaRingbackPassthroughStopped { source: String, target: String },
-    MediaPlayStarted { call_id: String, track_id: String },
-    MediaPlayFinished { call_id: String, track_id: String, interrupted: bool },
-    MediaStreamStarted { call_id: String },
-    MediaStreamStopped { call_id: String },
-    RecordStarted { call_id: String, recording_id: String },
-    RecordPaused { call_id: String, recording_id: String },
-    RecordResumed { call_id: String, recording_id: String },
-    RecordStopped { call_id: String, recording_id: String, duration_secs: Option<u64> },
-    RecordFailed { call_id: String, recording_id: String, error: String },
-    RecordSegmentMasked { call_id: String, recording_id: String, start_secs: u64, end_secs: u64 },
-    QueueJoined { call_id: String, queue_id: String },
-    QueuePositionChanged { call_id: String, queue_id: String, position: u32 },
-    QueueAgentOffered { call_id: String, queue_id: String, agent_id: String },
-    QueueAgentConnected { call_id: String, queue_id: String, agent_id: String },
-    QueueLeft { call_id: String, queue_id: String, reason: Option<String> },
-    QueueWaitTimeout { call_id: String, queue_id: String },
-    SupervisorListenStarted { supervisor_call_id: String, target_call_id: String },
-    SupervisorWhisperStarted { supervisor_call_id: String, target_call_id: String },
-    SupervisorBargeStarted { supervisor_call_id: String, target_call_id: String },
-    SupervisorModeStopped { supervisor_call_id: String, target_call_id: String },
-    SupervisorTakeoverCompleted { supervisor_call_id: String, target_call_id: String, previous_agent_call_id: String },
-    SipMessageReceived { call_id: String, content_type: String, body: String },
-    SipNotifyReceived { call_id: String, event: String, content_type: String, body: String },
-    Dtmf { call_id: String, digit: String },
-    ConferenceCreated { conf_id: String },
-    ConferenceMemberJoined { conf_id: String, call_id: String },
-    ConferenceMemberLeft { conf_id: String, call_id: String },
-    ConferenceMemberMuted { conf_id: String, call_id: String },
-    ConferenceMemberUnmuted { conf_id: String, call_id: String },
-    ConferenceDestroyed { conf_id: String },
-    ConferenceError { conf_id: String, error: String },
+    CallRinging {
+        call_id: String,
+    },
+    CallEarlyMedia {
+        call_id: String,
+    },
+    CallAnswered {
+        call_id: String,
+    },
+    CallBridged {
+        leg_a: String,
+        leg_b: String,
+    },
+    CallUnbridged {
+        call_id: String,
+    },
+    CallTransferred {
+        call_id: String,
+    },
+    CallTransferAccepted {
+        call_id: String,
+    },
+    CallTransferFailed {
+        call_id: String,
+        sip_status: Option<u16>,
+    },
+    CallHangup {
+        call_id: String,
+        reason: Option<String>,
+        sip_status: Option<u16>,
+    },
+    CallNoAnswer {
+        call_id: String,
+    },
+    CallBusy {
+        call_id: String,
+    },
+    MediaHoldStarted {
+        call_id: String,
+    },
+    MediaHoldStopped {
+        call_id: String,
+    },
+    MediaRingbackPassthroughStarted {
+        source: String,
+        target: String,
+    },
+    MediaRingbackPassthroughStopped {
+        source: String,
+        target: String,
+    },
+    MediaPlayStarted {
+        call_id: String,
+        track_id: String,
+    },
+    MediaPlayFinished {
+        call_id: String,
+        track_id: String,
+        interrupted: bool,
+    },
+    MediaStreamStarted {
+        call_id: String,
+    },
+    MediaStreamStopped {
+        call_id: String,
+    },
+    RecordStarted {
+        call_id: String,
+        recording_id: String,
+    },
+    RecordPaused {
+        call_id: String,
+        recording_id: String,
+    },
+    RecordResumed {
+        call_id: String,
+        recording_id: String,
+    },
+    RecordStopped {
+        call_id: String,
+        recording_id: String,
+        duration_secs: Option<u64>,
+    },
+    RecordFailed {
+        call_id: String,
+        recording_id: String,
+        error: String,
+    },
+    RecordSegmentMasked {
+        call_id: String,
+        recording_id: String,
+        start_secs: u64,
+        end_secs: u64,
+    },
+    QueueJoined {
+        call_id: String,
+        queue_id: String,
+    },
+    QueuePositionChanged {
+        call_id: String,
+        queue_id: String,
+        position: u32,
+    },
+    QueueAgentOffered {
+        call_id: String,
+        queue_id: String,
+        agent_id: String,
+    },
+    QueueAgentConnected {
+        call_id: String,
+        queue_id: String,
+        agent_id: String,
+    },
+    QueueLeft {
+        call_id: String,
+        queue_id: String,
+        reason: Option<String>,
+    },
+    QueueWaitTimeout {
+        call_id: String,
+        queue_id: String,
+    },
+    SupervisorListenStarted {
+        supervisor_call_id: String,
+        target_call_id: String,
+    },
+    SupervisorWhisperStarted {
+        supervisor_call_id: String,
+        target_call_id: String,
+    },
+    SupervisorBargeStarted {
+        supervisor_call_id: String,
+        target_call_id: String,
+    },
+    SupervisorModeStopped {
+        supervisor_call_id: String,
+        target_call_id: String,
+    },
+    SupervisorTakeoverCompleted {
+        supervisor_call_id: String,
+        target_call_id: String,
+        previous_agent_call_id: String,
+    },
+    SipMessageReceived {
+        call_id: String,
+        content_type: String,
+        body: String,
+    },
+    SipNotifyReceived {
+        call_id: String,
+        event: String,
+        content_type: String,
+        body: String,
+    },
+    Dtmf {
+        call_id: String,
+        digit: String,
+    },
+    ConferenceCreated {
+        conf_id: String,
+    },
+    ConferenceMemberJoined {
+        conf_id: String,
+        call_id: String,
+    },
+    ConferenceMemberLeft {
+        conf_id: String,
+        call_id: String,
+    },
+    ConferenceMemberMuted {
+        conf_id: String,
+        call_id: String,
+    },
+    ConferenceMemberUnmuted {
+        conf_id: String,
+        call_id: String,
+    },
+    ConferenceDestroyed {
+        conf_id: String,
+    },
+    ConferenceError {
+        conf_id: String,
+        error: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -26,7 +26,10 @@ pub fn urls() -> Router<Arc<ConsoleState>> {
     router
 }
 
-pub async fn index(State(state): State<Arc<ConsoleState>>, headers: HeaderMap) -> impl IntoResponse {
+pub async fn index(
+    State(state): State<Arc<ConsoleState>>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
     let addons = if let Some(app_state) = state.app_state() {
         // Try to load config from disk to get the latest state
         let config = if let Some(path) = &app_state.config_path {

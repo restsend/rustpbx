@@ -52,10 +52,7 @@ impl RwiGateway {
 
     /// Create a new RWI session and return the Arc handle.
     /// The caller must call [`set_session_event_sender`] with the WS sender after this.
-    pub fn create_session(
-        &mut self,
-        identity: RwiIdentity,
-    ) -> Arc<RwLock<RwiSession>> {
+    pub fn create_session(&mut self, identity: RwiIdentity) -> Arc<RwLock<RwiSession>> {
         let (command_tx, _command_rx) = tokio::sync::mpsc::unbounded_channel();
         let session = RwiSession::new(identity, command_tx);
         let session_id = session.id.clone();
@@ -67,7 +64,8 @@ impl RwiGateway {
     /// Register the WebSocket event sender for a session so that `send_event`
     /// and `fan_out_event_to_context` can deliver events to it.
     pub fn set_session_event_sender(&mut self, session_id: &SessionId, sender: WsEventSender) {
-        self.session_event_senders.insert(session_id.clone(), sender);
+        self.session_event_senders
+            .insert(session_id.clone(), sender);
     }
 
     pub async fn remove_session(&mut self, session_id: &SessionId) {
@@ -173,7 +171,8 @@ impl RwiGateway {
         if let Some(session) = self.sessions.get(session_id) {
             let mut session = session.write().await;
             session.add_supervisor_target(target_call_id.clone(), mode);
-            self.supervisor_calls.insert(target_call_id, session_id.clone());
+            self.supervisor_calls
+                .insert(target_call_id, session_id.clone());
             true
         } else {
             false
@@ -318,8 +317,14 @@ mod tests {
             vec![session_id.clone()]
         );
 
-        gateway.unsubscribe(&session_id, &["context1".to_string()]).await;
-        assert!(gateway.get_sessions_subscribed_to_context("context1").is_empty());
+        gateway
+            .unsubscribe(&session_id, &["context1".to_string()])
+            .await;
+        assert!(
+            gateway
+                .get_sessions_subscribed_to_context("context1")
+                .is_empty()
+        );
         assert_eq!(
             gateway.get_sessions_subscribed_to_context("context2"),
             vec![session_id]
@@ -415,9 +420,7 @@ mod tests {
             Some(session_id.clone())
         );
 
-        gateway
-            .detach_supervisor(&session_id, &target_call)
-            .await;
+        gateway.detach_supervisor(&session_id, &target_call).await;
         assert!(!gateway.is_supervisor(&target_call));
     }
 
@@ -477,9 +480,11 @@ mod tests {
 
         gateway.remove_session(&session_id).await;
 
-        assert!(gateway
-            .get_sessions_subscribed_to_context("context1")
-            .is_empty());
+        assert!(
+            gateway
+                .get_sessions_subscribed_to_context("context1")
+                .is_empty()
+        );
         assert!(gateway.sessions.get(&session_id).is_none());
     }
 
@@ -495,7 +500,10 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(gateway.get_call_owner(&"call_001".to_string()), Some(session_id.clone()));
+        assert_eq!(
+            gateway.get_call_owner(&"call_001".to_string()),
+            Some(session_id.clone())
+        );
 
         gateway.remove_session(&session_id).await;
 
@@ -512,7 +520,9 @@ mod tests {
         let (tx, mut rx) = mpsc::unbounded_channel();
         gateway.set_session_event_sender(&session_id, tx);
 
-        let event = RwiEvent::CallAnswered { call_id: "call_001".to_string() };
+        let event = RwiEvent::CallAnswered {
+            call_id: "call_001".to_string(),
+        };
         gateway.send_event_to_session(&session_id, &event);
 
         let received = rx.recv().await.expect("should receive event");
@@ -535,7 +545,11 @@ mod tests {
             .await
             .unwrap();
 
-        let event = RwiEvent::CallHangup { call_id: call_id.clone(), reason: None, sip_status: None };
+        let event = RwiEvent::CallHangup {
+            call_id: call_id.clone(),
+            reason: None,
+            sip_status: None,
+        };
         gateway.send_event_to_call_owner(&call_id, &event);
 
         let received = rx.recv().await.expect("should receive event");
@@ -546,8 +560,14 @@ mod tests {
     async fn test_fan_out_event_to_context() {
         let mut gateway = RwiGateway::new();
 
-        let id1 = RwiIdentity { token: "t1".into(), scopes: vec![] };
-        let id2 = RwiIdentity { token: "t2".into(), scopes: vec![] };
+        let id1 = RwiIdentity {
+            token: "t1".into(),
+            scopes: vec![],
+        };
+        let id2 = RwiIdentity {
+            token: "t2".into(),
+            scopes: vec![],
+        };
 
         let s1 = gateway.create_session(id1);
         let s1_id = s1.read().await.id.clone();
@@ -562,7 +582,9 @@ mod tests {
         gateway.subscribe(&s1_id, vec!["ctx".into()]).await;
         gateway.subscribe(&s2_id, vec!["ctx".into()]).await;
 
-        let event = RwiEvent::CallRinging { call_id: "c1".into() };
+        let event = RwiEvent::CallRinging {
+            call_id: "c1".into(),
+        };
         gateway.fan_out_event_to_context("ctx", &event);
 
         assert!(rx1.recv().await.is_some());

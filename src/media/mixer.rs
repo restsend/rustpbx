@@ -74,11 +74,7 @@ pub struct MixerPeer {
 }
 
 impl MixerPeer {
-    pub fn new(
-        peer: Arc<dyn MediaPeer>,
-        input_id: String,
-        output_id: String,
-    ) -> Self {
+    pub fn new(peer: Arc<dyn MediaPeer>, input_id: String, output_id: String) -> Self {
         Self {
             peer,
             input_id,
@@ -286,7 +282,9 @@ impl MediaMixer {
                 // Agent -> customer
                 self.set_route(MixerRoute {
                     input_id: agent_input_id.to_string(),
-                    outputs: [(customer_output_id.to_string(), 1.0)].into_iter().collect(),
+                    outputs: [(customer_output_id.to_string(), 1.0)]
+                        .into_iter()
+                        .collect(),
                 });
                 // Supervisor hears both (tap) but sends nothing
                 self.set_route(MixerRoute {
@@ -296,11 +294,15 @@ impl MediaMixer {
                 // Both customer and agent go to supervisor (tap)
                 self.set_route(MixerRoute {
                     input_id: customer_input_id.to_string(),
-                    outputs: [(supervisor_output_id.to_string(), 1.0)].into_iter().collect(),
+                    outputs: [(supervisor_output_id.to_string(), 1.0)]
+                        .into_iter()
+                        .collect(),
                 });
                 self.set_route(MixerRoute {
                     input_id: agent_input_id.to_string(),
-                    outputs: [(supervisor_output_id.to_string(), 1.0)].into_iter().collect(),
+                    outputs: [(supervisor_output_id.to_string(), 1.0)]
+                        .into_iter()
+                        .collect(),
                 });
             }
             SupervisorMixerMode::Whisper => {
@@ -417,7 +419,8 @@ impl MediaMixer {
                 cancel_token,
                 frame_size,
                 sample_rate,
-            ).await;
+            )
+            .await;
         });
     }
 
@@ -431,7 +434,10 @@ impl MediaMixer {
         frame_size: usize,
         sample_rate: u32,
     ) {
-        info!("Mixing loop started for {} (frame_size: {}, sample_rate: {})", mixer_id, frame_size, sample_rate);
+        info!(
+            "Mixing loop started for {} (frame_size: {}, sample_rate: {})",
+            mixer_id, frame_size, sample_rate
+        );
 
         // Calculate sleep interval based on frame size
         // frame_size samples at sample_rate Hz = frame_size / sample_rate seconds
@@ -655,8 +661,12 @@ mod tests {
 
         // Apply supervisor mode routing
         mixer.apply_supervisor_mode(
-            "customer", "agent", "supervisor",
-            "customer-out", "agent-out", "supervisor-out",
+            "customer",
+            "agent",
+            "supervisor",
+            "customer-out",
+            "agent-out",
+            "supervisor-out",
         );
 
         // Verify routes are set correctly for Listen mode
@@ -678,8 +688,12 @@ mod tests {
         mixer.set_mode(SupervisorMixerMode::Whisper);
 
         mixer.apply_supervisor_mode(
-            "customer", "agent", "supervisor",
-            "customer-out", "agent-out", "supervisor-out",
+            "customer",
+            "agent",
+            "supervisor",
+            "customer-out",
+            "agent-out",
+            "supervisor-out",
         );
 
         // Verify routes exist
@@ -695,8 +709,12 @@ mod tests {
         mixer.set_mode(SupervisorMixerMode::Barge);
 
         mixer.apply_supervisor_mode(
-            "customer", "agent", "supervisor",
-            "customer-out", "agent-out", "supervisor-out",
+            "customer",
+            "agent",
+            "supervisor",
+            "customer-out",
+            "agent-out",
+            "supervisor-out",
         );
 
         // In Barge mode, everyone can hear everyone

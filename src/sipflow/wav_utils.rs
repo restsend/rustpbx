@@ -7,10 +7,7 @@ use std::{
 };
 
 use crate::media::{
-    StreamWriter,
-    negotiate::MediaNegotiator,
-    recorder::DtmfGenerator,
-    wav_writer::WavWriter,
+    StreamWriter, negotiate::MediaNegotiator, recorder::DtmfGenerator, wav_writer::WavWriter,
 };
 use crate::sipflow::{SipFlowItem, SipFlowMsgType, extract_rtp_addr, extract_sdp};
 
@@ -89,7 +86,10 @@ fn infer_leg_for_sdp(sdp: &str, leg_sources: &HashMap<i32, Vec<String>>) -> Opti
 
     for (leg, sources) in leg_sources {
         let exact_match = sources.iter().any(|src| src == &rtp_addr);
-        let port_match = sources.iter().filter_map(|src| media_port(src)).any(|port| port == rtp_port);
+        let port_match = sources
+            .iter()
+            .filter_map(|src| media_port(src))
+            .any(|port| port == rtp_port);
 
         if exact_match || port_match {
             if matched_leg.is_some_and(|current_leg| current_leg != *leg) {
@@ -675,7 +675,9 @@ mod tests {
         };
 
         let map = build_payload_type_map(&[item]);
-        let descriptor = map.get(&101).expect("telephone-event payload should be parsed");
+        let descriptor = map
+            .get(&101)
+            .expect("telephone-event payload should be parsed");
         assert_eq!(descriptor.codec, CodecType::TelephoneEvent);
         assert_eq!(descriptor.clock_rate, 8000);
     }

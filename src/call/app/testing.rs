@@ -22,8 +22,8 @@
 //! ```
 
 use super::{AppEventLoop, CallApp, CallController, ControllerEvent, RecordingInfo};
-use crate::call::app::{ApplicationContext, CallInfo};
 use crate::call::DialDirection;
+use crate::call::app::{ApplicationContext, CallInfo};
 use crate::config::Config;
 use crate::proxy::proxy_call::state::{CallSessionHandle, CallSessionShared, SessionAction};
 use chrono::Utc;
@@ -96,19 +96,25 @@ impl MockCallStack {
         );
 
         let cancel = CancellationToken::new();
-        let event_loop =
-            AppEventLoop::new(app, controller, ctx, cancel.child_token(), timer_rx);
+        let event_loop = AppEventLoop::new(app, controller, ctx, cancel.child_token(), timer_rx);
 
         let join_handle = tokio::spawn(event_loop.run());
 
-        Self { event_tx, cmd_rx, cancel, join_handle }
+        Self {
+            event_tx,
+            cmd_rx,
+            cancel,
+            join_handle,
+        }
     }
 
     // ── Event injection ───────────────────────────────────────────────────────
 
     /// Inject a DTMF digit received from the remote party.
     pub fn dtmf(&self, digit: impl Into<String>) -> &Self {
-        let _ = self.event_tx.send(ControllerEvent::DtmfReceived(digit.into()));
+        let _ = self
+            .event_tx
+            .send(ControllerEvent::DtmfReceived(digit.into()));
         self
     }
 
@@ -137,11 +143,13 @@ impl MockCallStack {
         duration: Duration,
         size_bytes: u64,
     ) -> &Self {
-        let _ = self.event_tx.send(ControllerEvent::RecordingComplete(RecordingInfo {
-            path: path.into(),
-            duration,
-            size_bytes,
-        }));
+        let _ = self
+            .event_tx
+            .send(ControllerEvent::RecordingComplete(RecordingInfo {
+                path: path.into(),
+                duration,
+                size_bytes,
+            }));
         self
     }
 
@@ -153,7 +161,9 @@ impl MockCallStack {
 
     /// Inject a custom event.
     pub fn custom(&self, name: impl Into<String>, data: serde_json::Value) -> &Self {
-        let _ = self.event_tx.send(ControllerEvent::Custom(name.into(), data));
+        let _ = self
+            .event_tx
+            .send(ControllerEvent::Custom(name.into(), data));
         self
     }
 
@@ -170,13 +180,10 @@ impl MockCallStack {
     ///
     /// Returns `None` on timeout.
     pub async fn next_cmd(&mut self, timeout_ms: u64) -> Option<SessionAction> {
-        tokio::time::timeout(
-            Duration::from_millis(timeout_ms),
-            self.cmd_rx.recv(),
-        )
-        .await
-        .ok()
-        .flatten()
+        tokio::time::timeout(Duration::from_millis(timeout_ms), self.cmd_rx.recv())
+            .await
+            .ok()
+            .flatten()
     }
 
     /// Assert the next command satisfies `matcher` within `timeout_ms` ms.

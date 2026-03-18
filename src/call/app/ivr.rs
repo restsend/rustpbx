@@ -330,7 +330,9 @@ impl IvrApp {
                                 ),
                                 terminator: Some('#'),
                                 play_prompt: Some(prompt.clone()),
-                                inter_digit_timeout: Some(Duration::from_millis(*inter_digit_timeout_ms)),
+                                inter_digit_timeout: Some(Duration::from_millis(
+                                    *inter_digit_timeout_ms,
+                                )),
                             })
                             .await?;
                         combined.push_str(&more);
@@ -394,8 +396,14 @@ impl IvrApp {
                                     *inter_digit_timeout_ms * (*max_digits as u64 + 1),
                                 ),
                                 terminator,
-                                play_prompt: if prompt_str.is_empty() { None } else { Some(prompt_str.to_string()) },
-                                inter_digit_timeout: Some(Duration::from_millis(*inter_digit_timeout_ms)),
+                                play_prompt: if prompt_str.is_empty() {
+                                    None
+                                } else {
+                                    Some(prompt_str.to_string())
+                                },
+                                inter_digit_timeout: Some(Duration::from_millis(
+                                    *inter_digit_timeout_ms,
+                                )),
                             })
                             .await?;
                         combined.push_str(&more);
@@ -409,7 +417,11 @@ impl IvrApp {
                             *inter_digit_timeout_ms * (*max_digits as u64 + 1),
                         ),
                         terminator,
-                        play_prompt: if prompt_str.is_empty() { None } else { Some(prompt_str.to_string()) },
+                        play_prompt: if prompt_str.is_empty() {
+                            None
+                        } else {
+                            Some(prompt_str.to_string())
+                        },
                         inter_digit_timeout: Some(Duration::from_millis(*inter_digit_timeout_ms)),
                     })
                     .await?
@@ -440,7 +452,16 @@ impl IvrApp {
                     "IVR calling webhook"
                 );
 
-                let webhook_response = self.call_webhook(url, method_str, headers, variables.as_deref(), *timeout, ctx).await;
+                let webhook_response = self
+                    .call_webhook(
+                        url,
+                        method_str,
+                        headers,
+                        variables.as_deref(),
+                        *timeout,
+                        ctx,
+                    )
+                    .await;
 
                 match webhook_response {
                     Ok(response) => {
@@ -535,7 +556,9 @@ impl IvrApp {
 
         let response = tokio::time::timeout(Duration::from_secs(timeout_secs), req_builder.send())
             .await
-            .map_err(|_| anyhow::anyhow!("Webhook request timed out after {} seconds", timeout_secs))?
+            .map_err(|_| {
+                anyhow::anyhow!("Webhook request timed out after {} seconds", timeout_secs)
+            })?
             .map_err(|e| anyhow::anyhow!("Webhook request failed: {}", e))?;
 
         let status = response.status();

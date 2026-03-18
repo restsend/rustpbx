@@ -418,7 +418,10 @@ async fn build_settings_payload(state: &ConsoleState) -> JsonValue {
     } else {
         RwiConfig::default()
     };
-    data.insert("rwi".to_string(), serde_json::to_value(rwi_config).unwrap_or(JsonValue::Null));
+    data.insert(
+        "rwi".to_string(),
+        serde_json::to_value(rwi_config).unwrap_or(JsonValue::Null),
+    );
 
     JsonValue::Object(data)
 }
@@ -1907,9 +1910,10 @@ pub(crate) async fn update_rwi_settings(
             .map(|t| {
                 let mut m = toml::map::Map::new();
                 m.insert("token".to_string(), toml::Value::String(t.token));
-                m.insert("scopes".to_string(), toml::Value::Array(
-                    t.scopes.into_iter().map(toml::Value::String).collect()
-                ));
+                m.insert(
+                    "scopes".to_string(),
+                    toml::Value::Array(t.scopes.into_iter().map(toml::Value::String).collect()),
+                );
                 toml::Value::Table(m)
             })
             .collect();
@@ -1933,13 +1937,19 @@ pub(crate) async fn update_rwi_settings(
                 let mut m = toml::map::Map::new();
                 m.insert("name".to_string(), toml::Value::String(c.name));
                 if let Some(timeout) = c.no_answer_timeout_secs {
-                    m.insert("no_answer_timeout_secs".to_string(), toml::Value::Integer(timeout as i64));
+                    m.insert(
+                        "no_answer_timeout_secs".to_string(),
+                        toml::Value::Integer(timeout as i64),
+                    );
                 }
                 if let Some(action) = c.no_answer_action {
                     m.insert("no_answer_action".to_string(), toml::Value::String(action));
                 }
                 if let Some(target) = c.no_answer_transfer_target {
-                    m.insert("no_answer_transfer_target".to_string(), toml::Value::String(target));
+                    m.insert(
+                        "no_answer_transfer_target".to_string(),
+                        toml::Value::String(target),
+                    );
                 }
                 toml::Value::Table(m)
             })

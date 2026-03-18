@@ -22,9 +22,8 @@ use uuid::Uuid;
 
 // ─── WebSocket helpers ───────────────────────────────────────────────────────
 
-type WsStream = tokio_tungstenite::WebSocketStream<
-    tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
->;
+type WsStream =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
 /// Connect to the RWI WebSocket with the test token.
 async fn ws_connect(rwi_url: &str) -> WsStream {
@@ -126,8 +125,10 @@ async fn test_supervisor_listen_command_accepted() {
     let mut ws = ws_connect(&pbx.rwi_url).await;
 
     // Subscribe so events are delivered
-    let (sub_id, sub_json) =
-        rwi_req("session.subscribe", serde_json::json!({"contexts": ["default"]}));
+    let (sub_id, sub_json) = rwi_req(
+        "session.subscribe",
+        serde_json::json!({"contexts": ["default"]}),
+    );
     let v = ws_send_recv_with_id(&mut ws, &sub_json, &sub_id).await;
     assert_eq!(v["response"], "success", "subscribe failed: {v}");
 
@@ -148,9 +149,9 @@ async fn test_supervisor_listen_command_accepted() {
 
     // Wait for agent to answer
     let _answered = recv_until(&mut ws, 10, |v| {
-        v.get("call_answered").is_some() &&
-        v["call_answered"]["call_id"] == agent_call_id
-    }).await;
+        v.get("call_answered").is_some() && v["call_answered"]["call_id"] == agent_call_id
+    })
+    .await;
     tracing::info!("Agent answered");
 
     // Now try to send supervisor.listen - this verifies the command is accepted
@@ -211,8 +212,10 @@ async fn test_supervisor_whisper_command_accepted() {
     let mut ws = ws_connect(&pbx.rwi_url).await;
 
     // Subscribe
-    let (sub_id, sub_json) =
-        rwi_req("session.subscribe", serde_json::json!({"contexts": ["default"]}));
+    let (sub_id, sub_json) = rwi_req(
+        "session.subscribe",
+        serde_json::json!({"contexts": ["default"]}),
+    );
     let v = ws_send_recv_with_id(&mut ws, &sub_json, &sub_id).await;
     assert_eq!(v["response"], "success");
 
@@ -276,8 +279,10 @@ async fn test_supervisor_barge_command_accepted() {
     let mut ws = ws_connect(&pbx.rwi_url).await;
 
     // Subscribe
-    let (sub_id, sub_json) =
-        rwi_req("session.subscribe", serde_json::json!({"contexts": ["default"]}));
+    let (sub_id, sub_json) = rwi_req(
+        "session.subscribe",
+        serde_json::json!({"contexts": ["default"]}),
+    );
     let v = ws_send_recv_with_id(&mut ws, &sub_json, &sub_id).await;
     assert_eq!(v["response"], "success");
 
@@ -352,8 +357,10 @@ async fn test_supervisor_listen_full_flow() {
     let mut ws = ws_connect(&pbx.rwi_url).await;
 
     // Subscribe so events are delivered
-    let (sub_id, sub_json) =
-        rwi_req("session.subscribe", serde_json::json!({"contexts": ["default"]}));
+    let (sub_id, sub_json) = rwi_req(
+        "session.subscribe",
+        serde_json::json!({"contexts": ["default"]}),
+    );
     let v = ws_send_recv_with_id(&mut ws, &sub_json, &sub_id).await;
     assert_eq!(v["response"], "success", "subscribe failed: {v}");
 
@@ -376,10 +383,10 @@ async fn test_supervisor_listen_full_flow() {
     let agent_result = tokio::time::timeout(
         std::time::Duration::from_secs(10),
         recv_until(&mut ws, 15, |v| {
-            v.get("call_answered").is_some() &&
-            v["call_answered"]["call_id"] == agent_call_id
-        })
-    ).await;
+            v.get("call_answered").is_some() && v["call_answered"]["call_id"] == agent_call_id
+        }),
+    )
+    .await;
     match agent_result {
         Ok(v) => tracing::info!("Agent answered: {} - {:?}", agent_call_id, v),
         Err(_) => tracing::warn!("Agent did NOT answer within timeout, continuing anyway..."),
@@ -408,10 +415,10 @@ async fn test_supervisor_listen_full_flow() {
     let sup_result = tokio::time::timeout(
         std::time::Duration::from_secs(10),
         recv_until(&mut ws, 15, |v| {
-            v.get("call_answered").is_some() &&
-            v["call_answered"]["call_id"] == supervisor_call_id
-        })
-    ).await;
+            v.get("call_answered").is_some() && v["call_answered"]["call_id"] == supervisor_call_id
+        }),
+    )
+    .await;
     match sup_result {
         Ok(v) => tracing::info!("Supervisor answered: {} - {:?}", supervisor_call_id, v),
         Err(_) => tracing::warn!("Supervisor did NOT answer within timeout, continuing anyway..."),
@@ -461,8 +468,10 @@ async fn test_supervisor_whisper_full_flow() {
     let mut ws = ws_connect(&pbx.rwi_url).await;
 
     // Subscribe
-    let (sub_id, sub_json) =
-        rwi_req("session.subscribe", serde_json::json!({"contexts": ["default"]}));
+    let (sub_id, sub_json) = rwi_req(
+        "session.subscribe",
+        serde_json::json!({"contexts": ["default"]}),
+    );
     let v = ws_send_recv_with_id(&mut ws, &sub_json, &sub_id).await;
     assert_eq!(v["response"], "success");
 
@@ -530,8 +539,10 @@ async fn test_supervisor_barge_full_flow() {
     let mut ws = ws_connect(&pbx.rwi_url).await;
 
     // Subscribe
-    let (sub_id, sub_json) =
-        rwi_req("session.subscribe", serde_json::json!({"contexts": ["default"]}));
+    let (sub_id, sub_json) = rwi_req(
+        "session.subscribe",
+        serde_json::json!({"contexts": ["default"]}),
+    );
     let v = ws_send_recv_with_id(&mut ws, &sub_json, &sub_id).await;
     assert_eq!(v["response"], "success");
 

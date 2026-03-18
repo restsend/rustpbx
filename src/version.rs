@@ -25,7 +25,11 @@ pub fn get_short_version() -> &'static str {
 }
 
 pub fn get_useragent() -> String {
-    format!("rustpbx/{} (built {})", env!("CARGO_PKG_VERSION"), env!("BUILD_DATE"))
+    format!(
+        "rustpbx/{} (built {})",
+        env!("CARGO_PKG_VERSION"),
+        env!("BUILD_DATE")
+    )
 }
 
 // ─── Update check ────────────────────────────────────────────────────────────
@@ -66,8 +70,9 @@ pub async fn check_update() -> anyhow::Result<UpdateInfo> {
     let status = resp.status();
     let body = resp.text().await?;
     debug!("version check response: status={} body={}", status, body);
-    let info: UpdateInfo = serde_json::from_str(&body)
-        .map_err(|e| anyhow::anyhow!("version check parse error: {e}, status={status}, body={body}"))?;
+    let info: UpdateInfo = serde_json::from_str(&body).map_err(|e| {
+        anyhow::anyhow!("version check parse error: {e}, status={status}, body={body}")
+    })?;
     Ok(info)
 }
 
@@ -84,7 +89,9 @@ pub fn spawn_update_checker(
             match check_update().await {
                 Ok(info) if info.has_update => {
                     use crate::models::system_notification::{ActiveModel, Column, Entity};
-                    use sea_orm::{ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, QueryFilter};
+                    use sea_orm::{
+                        ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, QueryFilter,
+                    };
 
                     let title = format!("New version available: {}", info.latest_version);
                     let exists = Entity::find()
@@ -106,7 +113,9 @@ pub fn spawn_update_checker(
                             created_at: Set(chrono::Utc::now()),
                         };
                         match am.insert(&db).await {
-                            Ok(_) => info!(latest = %info.latest_version, "update notification created"),
+                            Ok(_) => {
+                                info!(latest = %info.latest_version, "update notification created")
+                            }
                             Err(e) => debug!("failed to insert update notification: {e}"),
                         }
                     }

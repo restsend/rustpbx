@@ -30,9 +30,8 @@ use uuid::Uuid;
 
 // ─── WebSocket helpers ───────────────────────────────────────────────────────
 
-type WsStream = tokio_tungstenite::WebSocketStream<
-    tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
->;
+type WsStream =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
 /// Connect to the RWI WebSocket with the test token.
 async fn ws_connect(rwi_url: &str) -> WsStream {
@@ -126,8 +125,10 @@ async fn test_originate_single_bob_answers() {
     let mut ws = ws_connect(&pbx.rwi_url).await;
 
     // Subscribe so events are delivered to this session
-    let (_, sub_json) =
-        rwi_req("session.subscribe", serde_json::json!({"contexts": ["default"]}));
+    let (_, sub_json) = rwi_req(
+        "session.subscribe",
+        serde_json::json!({"contexts": ["default"]}),
+    );
     let v = ws_send_recv(&mut ws, &sub_json).await;
     assert_eq!(v["response"], "success", "subscribe failed: {v}");
 
@@ -156,16 +157,16 @@ async fn test_originate_single_bob_answers() {
     // Expect CallRinging within 5 s
     // Events are serialized as {"call_ringing": {"call_id": "..."}} (snake_case enum variant)
     let ringing = recv_until(&mut ws, 5, |v| {
-        v.get("call_ringing").is_some()
-            || v.to_string().contains("ringing")
-    }).await;
+        v.get("call_ringing").is_some() || v.to_string().contains("ringing")
+    })
+    .await;
     tracing::info!("Got ringing event: {:?}", ringing);
 
     // Expect CallAnswered within 10 s (bob rings for 1 s, then answers)
     let answered = recv_until(&mut ws, 10, |v| {
-        v.get("call_answered").is_some()
-            || v.to_string().contains("answered")
-    }).await;
+        v.get("call_answered").is_some() || v.to_string().contains("answered")
+    })
+    .await;
     tracing::info!("Got answered event: {:?}", answered);
 
     ws.close(None).await.unwrap();
@@ -184,8 +185,10 @@ async fn test_originate_no_answer() {
     let pbx = TestPbx::start(sip_port).await;
 
     let mut ws = ws_connect(&pbx.rwi_url).await;
-    let (_, sub_json) =
-        rwi_req("session.subscribe", serde_json::json!({"contexts": ["default"]}));
+    let (_, sub_json) = rwi_req(
+        "session.subscribe",
+        serde_json::json!({"contexts": ["default"]}),
+    );
     let v = ws_send_recv(&mut ws, &sub_json).await;
     assert_eq!(v["response"], "success");
 
@@ -210,7 +213,8 @@ async fn test_originate_no_answer() {
             || v.get("call_busy").is_some()
             || v.to_string().contains("hangup")
             || v.to_string().contains("no_answer")
-    }).await;
+    })
+    .await;
     tracing::info!("Got failure event: {:?}", fail_event);
 
     ws.close(None).await.unwrap();
@@ -230,7 +234,10 @@ async fn test_originate_then_hangup() {
     let mut ws = ws_connect(&pbx.rwi_url).await;
 
     // Subscribe
-    let (_, sub_json) = rwi_req("session.subscribe", serde_json::json!({"contexts": ["default"]}));
+    let (_, sub_json) = rwi_req(
+        "session.subscribe",
+        serde_json::json!({"contexts": ["default"]}),
+    );
     let v = ws_send_recv(&mut ws, &sub_json).await;
     assert_eq!(v["response"], "success");
 
@@ -252,9 +259,7 @@ async fn test_originate_then_hangup() {
     assert_eq!(v["response"], "success");
 
     // Wait for ringing
-    let _ringing = recv_until(&mut ws, 5, |v| {
-        v.get("call_ringing").is_some()
-    }).await;
+    let _ringing = recv_until(&mut ws, 5, |v| v.get("call_ringing").is_some()).await;
     tracing::info!("Got ringing event - test passed");
 
     // Clean up
@@ -277,7 +282,10 @@ async fn test_originate_and_bridge() {
     let mut ws = ws_connect(&pbx.rwi_url).await;
 
     // Subscribe
-    let (_, sub_json) = rwi_req("session.subscribe", serde_json::json!({"contexts": ["default"]}));
+    let (_, sub_json) = rwi_req(
+        "session.subscribe",
+        serde_json::json!({"contexts": ["default"]}),
+    );
     let v = ws_send_recv(&mut ws, &sub_json).await;
     assert_eq!(v["response"], "success");
 
@@ -297,9 +305,7 @@ async fn test_originate_and_bridge() {
     assert_eq!(v["response"], "success");
 
     // Wait for Alice to answer
-    let _answered_a = recv_until(&mut ws, 10, |v| {
-        v.get("call_answered").is_some()
-    }).await;
+    let _answered_a = recv_until(&mut ws, 10, |v| v.get("call_answered").is_some()).await;
     tracing::info!("Alice answered");
 
     // Originate to Bob
@@ -318,9 +324,7 @@ async fn test_originate_and_bridge() {
     assert_eq!(v["response"], "success");
 
     // Wait for Bob to answer
-    let _answered_b = recv_until(&mut ws, 10, |v| {
-        v.get("call_answered").is_some()
-    }).await;
+    let _answered_b = recv_until(&mut ws, 10, |v| v.get("call_answered").is_some()).await;
     tracing::info!("Bob answered");
 
     // Bridge the calls
@@ -334,12 +338,12 @@ async fn test_originate_and_bridge() {
     let v = ws_send_recv(&mut ws, &bridge_json).await;
     tracing::info!("bridge response: {:?}", v);
     // Bridge response may be success, command_failed, or error (depending on media)
-    assert!(v["response"] == "success" || v["response"] == "command_failed" || v["response"] == "error");
+    assert!(
+        v["response"] == "success" || v["response"] == "command_failed" || v["response"] == "error"
+    );
 
     // Expect CallBridged event
-    let _bridged = recv_until(&mut ws, 5, |v| {
-        v.get("call_bridged").is_some()
-    }).await;
+    let _bridged = recv_until(&mut ws, 5, |v| v.get("call_bridged").is_some()).await;
     tracing::info!("Calls bridged");
 
     ws.close(None).await.unwrap();
@@ -360,7 +364,10 @@ async fn test_media_play() {
     let mut ws = ws_connect(&pbx.rwi_url).await;
 
     // Subscribe
-    let (_, sub_json) = rwi_req("session.subscribe", serde_json::json!({"contexts": ["default"]}));
+    let (_, sub_json) = rwi_req(
+        "session.subscribe",
+        serde_json::json!({"contexts": ["default"]}),
+    );
     let v = ws_send_recv(&mut ws, &sub_json).await;
     assert_eq!(v["response"], "success");
 
@@ -382,9 +389,7 @@ async fn test_media_play() {
     assert_eq!(v["response"], "success");
 
     // Wait for answer
-    let _answered = recv_until(&mut ws, 10, |v| {
-        v.get("call_answered").is_some()
-    }).await;
+    let _answered = recv_until(&mut ws, 10, |v| v.get("call_answered").is_some()).await;
 
     // Play a sound (use a non-existent file to test error handling)
     let (_, play_json) = rwi_req(
@@ -418,7 +423,10 @@ async fn test_call_hold_unhold() {
     let mut ws = ws_connect(&pbx.rwi_url).await;
 
     // Subscribe
-    let (_, sub_json) = rwi_req("session.subscribe", serde_json::json!({"contexts": ["default"]}));
+    let (_, sub_json) = rwi_req(
+        "session.subscribe",
+        serde_json::json!({"contexts": ["default"]}),
+    );
     let v = ws_send_recv(&mut ws, &sub_json).await;
     assert_eq!(v["response"], "success");
 
@@ -440,9 +448,7 @@ async fn test_call_hold_unhold() {
     assert_eq!(v["response"], "success");
 
     // Wait for answer
-    let _answered = recv_until(&mut ws, 10, |v| {
-        v.get("call_answered").is_some()
-    }).await;
+    let _answered = recv_until(&mut ws, 10, |v| v.get("call_answered").is_some()).await;
     tracing::info!("Bob answered");
 
     // Note: call.hold requires an RWI app running on the call session.
@@ -473,7 +479,10 @@ async fn test_call_transfer() {
     let mut ws = ws_connect(&pbx.rwi_url).await;
 
     // Subscribe
-    let (_, sub_json) = rwi_req("session.subscribe", serde_json::json!({"contexts": ["default"]}));
+    let (_, sub_json) = rwi_req(
+        "session.subscribe",
+        serde_json::json!({"contexts": ["default"]}),
+    );
     let v = ws_send_recv(&mut ws, &sub_json).await;
     assert_eq!(v["response"], "success");
 
@@ -495,9 +504,7 @@ async fn test_call_transfer() {
     assert_eq!(v["response"], "success");
 
     // Wait for answer
-    let _answered = recv_until(&mut ws, 10, |v| {
-        v.get("call_answered").is_some()
-    }).await;
+    let _answered = recv_until(&mut ws, 10, |v| v.get("call_answered").is_some()).await;
     tracing::info!("Bob answered");
 
     // Transfer to Charlie
@@ -532,7 +539,10 @@ async fn test_call_ring() {
     let mut ws = ws_connect(&pbx.rwi_url).await;
 
     // Subscribe
-    let (_, sub_json) = rwi_req("session.subscribe", serde_json::json!({"contexts": ["default"]}));
+    let (_, sub_json) = rwi_req(
+        "session.subscribe",
+        serde_json::json!({"contexts": ["default"]}),
+    );
     let v = ws_send_recv(&mut ws, &sub_json).await;
     assert_eq!(v["response"], "success");
 
@@ -554,9 +564,7 @@ async fn test_call_ring() {
     assert_eq!(v["response"], "success");
 
     // Wait for ringing (should come automatically from sipbot)
-    let _ringing = recv_until(&mut ws, 5, |v| {
-        v.get("call_ringing").is_some()
-    }).await;
+    let _ringing = recv_until(&mut ws, 5, |v| v.get("call_ringing").is_some()).await;
     tracing::info!("Got ringing event");
 
     // Now send explicit call.ring (redundant but tests the command)
@@ -588,7 +596,10 @@ async fn test_parallel_originate_first_answer() {
     let mut ws = ws_connect(&pbx.rwi_url).await;
 
     // Subscribe
-    let (_, sub_json) = rwi_req("session.subscribe", serde_json::json!({"contexts": ["default"]}));
+    let (_, sub_json) = rwi_req(
+        "session.subscribe",
+        serde_json::json!({"contexts": ["default"]}),
+    );
     let v = ws_send_recv(&mut ws, &sub_json).await;
     assert_eq!(v["response"], "success");
 
@@ -626,14 +637,14 @@ async fn test_parallel_originate_first_answer() {
     assert_eq!(v["response"], "success", "second originate failed: {:?}", v);
 
     // Wait for first answer (either Alice or Bob)
-    let answered = recv_until(&mut ws, 10, |v| {
-        v.get("call_answered").is_some()
-    }).await;
+    let answered = recv_until(&mut ws, 10, |v| v.get("call_answered").is_some()).await;
     tracing::info!("First answered: {:?}", answered);
 
     // Get the call_id of the answered call
     let answered_call = if let Some(call) = answered.get("call_answered") {
-        call.get("call_id").and_then(|v| v.as_str()).unwrap_or("unknown")
+        call.get("call_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown")
     } else {
         "unknown"
     };
@@ -657,7 +668,10 @@ async fn test_list_calls() {
     let mut ws = ws_connect(&pbx.rwi_url).await;
 
     // Subscribe
-    let (_, sub_json) = rwi_req("session.subscribe", serde_json::json!({"contexts": ["default"]}));
+    let (_, sub_json) = rwi_req(
+        "session.subscribe",
+        serde_json::json!({"contexts": ["default"]}),
+    );
     let v = ws_send_recv(&mut ws, &sub_json).await;
     assert_eq!(v["response"], "success");
 
@@ -684,9 +698,7 @@ async fn test_list_calls() {
     assert_eq!(v["response"], "success");
 
     // Wait for answer
-    let _answered = recv_until(&mut ws, 10, |v| {
-        v.get("call_answered").is_some()
-    }).await;
+    let _answered = recv_until(&mut ws, 10, |v| v.get("call_answered").is_some()).await;
 
     // List calls after originate
     let (_, list_json) = rwi_req("session.list_calls", serde_json::json!({}));

@@ -418,13 +418,9 @@ impl ProxyModule for PresenceModule {
         let mwi_module = self.clone();
         crate::utils::spawn(async move {
             while let Some(trigger) = mwi_rx.recv().await {
-                let subscribers = mwi_module
-                    .manager
-                    .get_mwi_subscribers(&trigger.extension);
+                let subscribers = mwi_module.manager.get_mwi_subscribers(&trigger.extension);
                 for sub in subscribers {
-                    let _ = mwi_module
-                        .send_mwi_notify(&trigger, &sub)
-                        .await;
+                    let _ = mwi_module.send_mwi_notify(&trigger, &sub).await;
                 }
             }
         });
@@ -788,13 +784,14 @@ impl PresenceModule {
             "Sending MWI NOTIFY"
         );
 
-        let waiting = if trigger.new_messages > 0 { "yes" } else { "no" };
+        let waiting = if trigger.new_messages > 0 {
+            "yes"
+        } else {
+            "no"
+        };
         let body = format!(
             "Messages-Waiting: {}\r\nMessage-Account: {}\r\nVoice-Message: {}/{} (0/0)\r\n",
-            waiting,
-            sub.account_uri,
-            trigger.new_messages,
-            trigger.old_messages,
+            waiting, sub.account_uri, trigger.new_messages, trigger.old_messages,
         );
 
         let dialog = self

@@ -165,11 +165,7 @@ impl MixerRegistry {
     ///
     /// # Returns
     /// The created MediaMixer instance
-    pub fn create_conference_mixer(
-        &self,
-        room_id: String,
-        sample_rate: u32,
-    ) -> Arc<MediaMixer> {
+    pub fn create_conference_mixer(&self, room_id: String, sample_rate: u32) -> Arc<MediaMixer> {
         let mixer = Arc::new(MediaMixer::new(room_id.clone(), sample_rate));
 
         let entry = MixerRegistryEntry {
@@ -349,7 +345,11 @@ impl MixerRegistry {
         let participant_ids: Vec<String> = {
             let mixers = self.mixers.lock().unwrap();
             if let Some(entry) = mixers.get(mixer_id) {
-                entry.participants.iter().map(|p| p.session_id.clone()).collect()
+                entry
+                    .participants
+                    .iter()
+                    .map(|p| p.session_id.clone())
+                    .collect()
             } else {
                 return false;
             }
@@ -385,7 +385,10 @@ impl MixerRegistry {
     /// Get participant count for a mixer
     pub fn participant_count(&self, mixer_id: &str) -> usize {
         let mixers = self.mixers.lock().unwrap();
-        mixers.get(mixer_id).map(|e| e.participants.len()).unwrap_or(0)
+        mixers
+            .get(mixer_id)
+            .map(|e| e.participants.len())
+            .unwrap_or(0)
     }
 
     /// Check if a session is in any mixer

@@ -143,12 +143,7 @@ impl TrunkRegistrar {
     }
 
     /// Spawn a background task for trunk registration.
-    fn start_registration(
-        &self,
-        name: String,
-        config: TrunkConfig,
-        endpoint: EndpointInnerRef,
-    ) {
+    fn start_registration(&self, name: String, config: TrunkConfig, endpoint: EndpointInnerRef) {
         let child_token = self.parent_cancel.child_token();
         {
             self.cancel_tokens

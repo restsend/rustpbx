@@ -133,7 +133,11 @@ impl CallController {
         Ok(())
     }
 
-    pub async fn hangup(&self, reason: Option<CallRecordHangupReason>, code: Option<u16>) -> anyhow::Result<()> {
+    pub async fn hangup(
+        &self,
+        reason: Option<CallRecordHangupReason>,
+        code: Option<u16>,
+    ) -> anyhow::Result<()> {
         self.session.send_command(SessionAction::Hangup {
             reason,
             code,
@@ -158,7 +162,8 @@ impl CallController {
         file: impl Into<String>,
         _interruptible: bool,
     ) -> anyhow::Result<PlaybackHandle> {
-        self.play_audio_with_options(file, None, false, _interruptible).await
+        self.play_audio_with_options(file, None, false, _interruptible)
+            .await
     }
 
     /// Play an audio file with full control over track ID, looping, and
@@ -349,9 +354,9 @@ impl CallController {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::proxy::proxy_call::state::{CallSessionHandle, CallSessionShared, SessionAction};
     use crate::call::DialDirection;
-    use tokio::time::{timeout, Duration};
+    use crate::proxy::proxy_call::state::{CallSessionHandle, CallSessionShared, SessionAction};
+    use tokio::time::{Duration, timeout};
 
     /// Creates a controller with access to both the event sender and command receiver.
     /// Returns (controller, event_tx, cmd_rx)
@@ -383,11 +388,12 @@ mod tests {
             while let Some(cmd) = cmd_rx.recv().await {
                 if matches!(cmd, SessionAction::StopRecording) {
                     // Simulate the session processing the stop and sending back RecordingComplete
-                    let _ = event_tx_clone.send(ControllerEvent::RecordingComplete(RecordingInfo {
-                        path: "/tmp/test.wav".to_string(),
-                        duration: Duration::from_secs(5),
-                        size_bytes: 1024,
-                    }));
+                    let _ =
+                        event_tx_clone.send(ControllerEvent::RecordingComplete(RecordingInfo {
+                            path: "/tmp/test.wav".to_string(),
+                            duration: Duration::from_secs(5),
+                            size_bytes: 1024,
+                        }));
                     break;
                 }
             }
@@ -440,11 +446,12 @@ mod tests {
                         interrupted: false,
                     });
                     // Then send RecordingComplete
-                    let _ = event_tx_clone.send(ControllerEvent::RecordingComplete(RecordingInfo {
-                        path: "/tmp/test2.wav".to_string(),
-                        duration: Duration::from_secs(10),
-                        size_bytes: 2048,
-                    }));
+                    let _ =
+                        event_tx_clone.send(ControllerEvent::RecordingComplete(RecordingInfo {
+                            path: "/tmp/test2.wav".to_string(),
+                            duration: Duration::from_secs(10),
+                            size_bytes: 2048,
+                        }));
                     break;
                 }
             }

@@ -26,8 +26,7 @@ use rustpbx::{
         server::{SipServerBuilder, SipServerRef},
     },
     rwi::{
-        RwiAuth, RwiAuthRef,
-        RwiGateway, RwiGatewayRef,
+        RwiAuth, RwiAuthRef, RwiGateway, RwiGatewayRef,
         auth::{RwiConfig, RwiTokenConfig},
         handler::rwi_ws_handler,
     },
@@ -98,10 +97,8 @@ impl TestPbx {
             }],
             ..Default::default()
         };
-        let auth: RwiAuthRef =
-            Arc::new(tokio::sync::RwLock::new(RwiAuth::new(&rwi_config)));
-        let gateway: RwiGatewayRef =
-            Arc::new(tokio::sync::RwLock::new(RwiGateway::new()));
+        let auth: RwiAuthRef = Arc::new(tokio::sync::RwLock::new(RwiAuth::new(&rwi_config)));
+        let gateway: RwiGatewayRef = Arc::new(tokio::sync::RwLock::new(RwiGateway::new()));
 
         // ── Build Axum router with RWI endpoint ──────────────────────────────
         let auth_c = auth.clone();

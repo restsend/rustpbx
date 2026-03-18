@@ -1,6 +1,6 @@
 use super::*;
-use rustrtc::media::MediaStreamTrack as _;
 use rustrtc::TransportMode;
+use rustrtc::media::MediaStreamTrack as _;
 use tokio::fs;
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -18,8 +18,8 @@ async fn create_test_wav_file_with_samples(path: &str, num_samples: usize) -> Re
         bits_per_sample: 16,
         sample_format: hound::SampleFormat::Int,
     };
-    let mut writer = hound::WavWriter::create(path, spec)
-        .map_err(|e| anyhow::anyhow!("WavWriter: {e}"))?;
+    let mut writer =
+        hound::WavWriter::create(path, spec).map_err(|e| anyhow::anyhow!("WavWriter: {e}"))?;
     for i in 0..num_samples {
         let sample = ((i as f32 / 8.0).sin() * 1000.0) as i16;
         writer
@@ -371,17 +371,20 @@ async fn test_file_track_completion_drives_audio_complete_event() {
     });
 
     // Allow 2 s — the 20 ms file should complete within ~40 ms.
-    let event = tokio::time::timeout(
-        tokio::time::Duration::from_secs(2),
-        event_rx.recv(),
-    )
-    .await
-    .expect("AudioComplete must arrive within 2 s")
-    .expect("channel must not be closed");
+    let event = tokio::time::timeout(tokio::time::Duration::from_secs(2), event_rx.recv())
+        .await
+        .expect("AudioComplete must arrive within 2 s")
+        .expect("channel must not be closed");
 
     match event {
-        ControllerEvent::AudioComplete { interrupted, track_id } => {
-            assert!(!interrupted, "File-exhausted playback must not be interrupted");
+        ControllerEvent::AudioComplete {
+            interrupted,
+            track_id,
+        } => {
+            assert!(
+                !interrupted,
+                "File-exhausted playback must not be interrupted"
+            );
             assert_eq!(track_id, "default");
         }
         other => panic!("unexpected event: {:?}", other),
@@ -445,13 +448,10 @@ async fn test_file_track_stop_drives_interrupted_audio_complete() {
 
     // completion_notify fires → watcher sends AudioComplete (interrupted=false
     // in this wiring, since we chose notify over session cancel).
-    let event = tokio::time::timeout(
-        tokio::time::Duration::from_millis(500),
-        event_rx.recv(),
-    )
-    .await
-    .expect("AudioComplete must arrive within 500 ms after stop()")
-    .expect("channel must not be closed");
+    let event = tokio::time::timeout(tokio::time::Duration::from_millis(500), event_rx.recv())
+        .await
+        .expect("AudioComplete must arrive within 500 ms after stop()")
+        .expect("channel must not be closed");
 
     assert!(
         matches!(event, ControllerEvent::AudioComplete { .. }),
@@ -526,10 +526,7 @@ async fn test_start_playback_on_external_pc_delivers_rtp() {
         .with_loop(false)
         .with_codec_preference(vec![CodecType::PCMU]);
 
-    file_track
-        .start_playback_on(Some(caller_pc))
-        .await
-        .unwrap();
+    file_track.start_playback_on(Some(caller_pc)).await.unwrap();
 
     // ── 5. Read from the receiver PC's track and verify frames arrive ───
     //
@@ -576,8 +573,7 @@ async fn test_start_playback_on_external_pc_delivers_rtp() {
         // If no pre-existing receiver had data, wait for PeerConnectionEvent::Track.
         let mut pc_recv = Box::pin(receiver_pc.recv());
         loop {
-            match tokio::time::timeout(tokio::time::Duration::from_millis(500), &mut pc_recv)
-                .await
+            match tokio::time::timeout(tokio::time::Duration::from_millis(500), &mut pc_recv).await
             {
                 Ok(Some(rustrtc::PeerConnectionEvent::Track(transceiver))) => {
                     if let Some(receiver) = transceiver.receiver() {
@@ -630,7 +626,10 @@ async fn test_start_playback_on_external_pc_delivers_rtp() {
         frame_count
     );
 
-    debug!(frame_count, "test_start_playback_on_external_pc_delivers_rtp passed");
+    debug!(
+        frame_count,
+        "test_start_playback_on_external_pc_delivers_rtp passed"
+    );
 
     // Cleanup.
     file_track.stop().await;

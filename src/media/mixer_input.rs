@@ -60,10 +60,13 @@ impl MixerInput {
 
         // Select track based on track_id if specified
         let track = if let Some(ref track_id) = self.track_id {
-            tracks.iter().find(|t| {
-                let guard = t.blocking_lock();
-                guard.id() == track_id
-            }).cloned()
+            tracks
+                .iter()
+                .find(|t| {
+                    let guard = t.blocking_lock();
+                    guard.id() == track_id
+                })
+                .cloned()
         } else {
             tracks.first().cloned()
         }?;
@@ -93,7 +96,10 @@ impl MixerInput {
 
     /// Get the sample rate of the decoder
     pub fn sample_rate(&self) -> u32 {
-        self.decoder.as_ref().map(|d| d.sample_rate()).unwrap_or(8000)
+        self.decoder
+            .as_ref()
+            .map(|d| d.sample_rate())
+            .unwrap_or(8000)
     }
 
     /// Create a decoder for the given codec
@@ -199,12 +205,7 @@ mod tests {
 
     #[test]
     fn test_decoded_frame() {
-        let frame = DecodedFrame::new(
-            "test-input".to_string(),
-            vec![0i16; 160],
-            8000,
-            0,
-        );
+        let frame = DecodedFrame::new("test-input".to_string(), vec![0i16; 160], 8000, 0);
 
         assert_eq!(frame.input_id, "test-input");
         assert_eq!(frame.samples.len(), 160);
@@ -213,12 +214,8 @@ mod tests {
 
     #[test]
     fn test_decoded_frame_with_sequence() {
-        let frame = DecodedFrame::new(
-            "test-input".to_string(),
-            vec![1i16, 2i16, 3i16],
-            8000,
-            100,
-        ).with_sequence(42);
+        let frame = DecodedFrame::new("test-input".to_string(), vec![1i16, 2i16, 3i16], 8000, 100)
+            .with_sequence(42);
 
         assert_eq!(frame.sequence, Some(42));
         assert_eq!(frame.timestamp, 100);

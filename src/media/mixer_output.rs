@@ -117,7 +117,10 @@ impl MixerOutput {
 
     /// Get the encoder's sample rate
     pub fn sample_rate(&self) -> u32 {
-        self.encoder.as_ref().map(|e| e.sample_rate()).unwrap_or(8000)
+        self.encoder
+            .as_ref()
+            .map(|e| e.sample_rate())
+            .unwrap_or(8000)
     }
 
     /// Create an encoder for the given codec
@@ -274,8 +277,8 @@ mod tests {
     #[test]
     fn test_mixer_output_gain_application() {
         let peer = Arc::new(crate::proxy::proxy_call::test_util::tests::MockMediaPeer::new());
-        let mut output = MixerOutput::new("output-1".to_string(), peer, CodecType::PCMU)
-            .with_gain(2.0); // Double the gain
+        let mut output =
+            MixerOutput::new("output-1".to_string(), peer, CodecType::PCMU).with_gain(2.0); // Double the gain
 
         let samples: Vec<i16> = vec![1000i16; 160];
 
