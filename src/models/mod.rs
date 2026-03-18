@@ -1,8 +1,6 @@
 use anyhow::{Context, Result};
 use sea_orm::{Database, DatabaseConnection};
 use sea_orm_migration::MigratorTrait;
-use sqlx::Connection;
-use url::Url;
 
 pub mod add_rewrite_columns;
 pub mod add_sip_trunk_register_columns;
