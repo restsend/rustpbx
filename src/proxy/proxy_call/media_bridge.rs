@@ -90,7 +90,7 @@ impl MediaBridge {
         sipflow_backend: Option<Arc<dyn SipFlowBackend>>,
     ) -> Self {
         let recorder = if let Some(option) = recorder_option {
-            match Recorder::with_ptime(&option.recorder_file, codec_a, option.ptime) {
+            match Recorder::with_options(&option.recorder_file, codec_a, option.ptime, option.samplerate) {
                 Ok(r) => Some(r),
                 Err(e) => {
                     warn!("Failed to create recorder: {:?}", e);

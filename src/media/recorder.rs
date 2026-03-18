@@ -19,6 +19,9 @@ pub struct RecorderOption {
     pub recorder_file: String,
     #[serde(default)]
     pub samplerate: u32,
+    /// Flush interval in milliseconds (how often buffered audio is written to disk).
+    /// Default 1280ms = LCM(4096-byte disk block, 160-sample codec ptime).
+    /// Named "ptime" for config backward compatibility; not related to RTP ptime.
     #[serde(default)]
     pub ptime: u32,
 }
@@ -36,7 +39,7 @@ impl Default for RecorderOption {
     fn default() -> Self {
         Self {
             recorder_file: "".to_string(),
-            samplerate: 16000,
+            samplerate: 8000,
             ptime: 1280,
         }
     }
@@ -60,9 +63,7 @@ struct DtmfEvent {
 pub struct Recorder {
     pub path: String,
     pub codec: CodecType,
-    written_bytes: u32,
     sample_rate: u32,
-    channels: u16,
     dtmf_gen: DtmfGenerator,
     encoder: Option<Box<dyn Encoder>>,
 
@@ -92,12 +93,23 @@ pub struct Recorder {
     writer: Box<dyn StreamWriter>,
 }
 
+/// Returns (samples_per_block, bytes_per_block) for the given codec.
+fn codec_block_info(codec: CodecType) -> (u32, usize) {
+    match codec {
+        CodecType::G729 => (80, 10),
+        CodecType::PCMU | CodecType::PCMA => (1, 1),
+        CodecType::G722 => (2, 1),
+        CodecType::Opus => (1, 2),
+        _ => (1, 2),
+    }
+}
+
 impl Recorder {
     pub fn new(path: &str, codec: CodecType) -> Result<Self> {
-        Self::with_ptime(path, codec, 1280)
+        Self::with_options(path, codec, 1280, 0)
     }
 
-    pub fn with_ptime(path: &str, codec: CodecType, ptime_ms: u32) -> Result<Self> {
+    pub fn with_options(path: &str, codec: CodecType, ptime_ms: u32, samplerate: u32) -> Result<Self> {
         // ensure the directory exists
         if let Some(parent) = PathBuf::from(path).parent() {
             std::fs::create_dir_all(parent).ok();
@@ -112,11 +124,11 @@ impl Recorder {
             _ => codec,
         };
 
-        let sample_rate = codec.samplerate();
+        let sample_rate = if samplerate > 0 { samplerate } else { codec.samplerate() };
         let encoder = Some(create_encoder(codec));
         debug!(
-            "Creating recorder: path={}, src_codec={:?} codec={:?}",
-            path, src_codec, codec
+            "Creating recorder: path={}, src_codec={:?} codec={:?} sample_rate={}",
+            path, src_codec, codec, sample_rate
         );
         // PCMU/PCMA are mono codecs (1 channel), we force stereo (2 channels) for better separation
         // of leg A and leg B audio in the recording.
@@ -125,12 +137,7 @@ impl Recorder {
         writer.write_header()?;
 
         // Compute ptime_samples: flush interval normalized to multiple of codec ptime (20ms)
-        let samples_per_block = match codec {
-            CodecType::G729 => 80u32,
-            CodecType::PCMU | CodecType::PCMA => 1,
-            CodecType::G722 => 2,
-            _ => 1,
-        };
+        let (samples_per_block, _) = codec_block_info(codec);
         let codec_ptime_samples = (sample_rate / 50 / samples_per_block) * samples_per_block;
         let codec_ptime_samples = codec_ptime_samples.max(samples_per_block);
         let ptime_ms = ptime_ms.max(20); // at least 20ms
@@ -141,9 +148,7 @@ impl Recorder {
         Ok(Self {
             path: path.to_string(),
             codec,
-            written_bytes: 0,
             sample_rate,
-            channels,
             dtmf_gen: DtmfGenerator::new(sample_rate),
             encoder,
             decoders: HashMap::new(),
@@ -475,31 +480,16 @@ impl Recorder {
         let data_a = self.get_leg_data(Leg::A, len)?;
         let data_b = self.get_leg_data(Leg::B, len)?;
 
-        let output = if self.channels == 1 {
-            // Mono: decode to PCM, overlay DTMF, mix, encode once
-            let mut pcm_a = create_decoder(self.codec).decode(&data_a);
-            let mut pcm_b = create_decoder(self.codec).decode(&data_b);
-            self.apply_dtmf_overlay_pcm(Leg::A, flush_start, &mut pcm_a);
-            self.apply_dtmf_overlay_pcm(Leg::B, flush_start, &mut pcm_b);
-            let mixed = Self::mix_pcm(&pcm_a, &pcm_b);
-            if let Some(enc) = self.encoder.as_mut() {
-                enc.encode(&mixed)
-            } else {
-                audio_codec::samples_to_bytes(&mixed)
-            }
-        } else {
-            // Stereo: only decode/re-encode when DTMF overlaps, then interleave encoded blocks
-            let data_a = self.apply_dtmf_if_needed(Leg::A, flush_start, len, data_a);
-            let data_b = self.apply_dtmf_if_needed(Leg::B, flush_start, len, data_b);
-            self.interleave_encoded(&data_a, &data_b)
-        };
+        // Stereo: only decode/re-encode when DTMF overlaps, then interleave encoded blocks
+        let data_a = self.apply_dtmf_if_needed(Leg::A, flush_start, len, data_a);
+        let data_b = self.apply_dtmf_if_needed(Leg::B, flush_start, len, data_b);
+        let output = self.interleave_encoded(&data_a, &data_b);
 
         // Advance flush position and prune DTMF events AFTER overlay has been applied
         self.next_flush_ts += len;
         self.prune_dtmf_events(self.next_flush_ts);
 
         self.writer.write_packet(&output, len as usize)?;
-        self.written_bytes += output.len() as u32;
         self.written_samples += len as u64;
 
         Ok(())
@@ -522,13 +512,7 @@ impl Recorder {
     }
 
     fn block_info(&self) -> (u32, usize) {
-        match self.codec {
-            CodecType::G729 => (80, 10),
-            CodecType::PCMU | CodecType::PCMA => (1, 1),
-            CodecType::G722 => (2, 1),
-            CodecType::Opus => (1, 2), // Buffering PCM
-            _ => (1, 2),               // PCM
-        }
+        codec_block_info(self.codec)
     }
 
     fn get_silence_bytes(&mut self, _leg: Leg, blocks: usize) -> Result<Bytes> {
@@ -791,6 +775,7 @@ impl Recorder {
     }
 
     /// Mix two PCM sample slices by averaging (prevents clipping).
+    #[cfg(test)]
     fn mix_pcm(pcm_a: &[i16], pcm_b: &[i16]) -> Vec<i16> {
         let len = pcm_a.len().min(pcm_b.len());
         let mut mixed = Vec::with_capacity(len);
@@ -887,7 +872,7 @@ mod tests {
 
     #[test]
     fn test_progressive_dtmf_updates_do_not_duplicate_recorded_duration() {
-        let mut recorder = create_test_recorder(CodecType::PCMU, 1);
+        let mut recorder = create_test_recorder(CodecType::PCMU);
         // Pin the timeline to avoid timing-dependent start_offset
         recorder.base_timestamp_a = Some(0);
         recorder.start_offset_a = 0;
@@ -978,7 +963,7 @@ mod tests {
 
     #[test]
     fn test_interleave_encoded() {
-        let recorder = create_test_recorder(CodecType::PCMU, 2);
+        let recorder = create_test_recorder(CodecType::PCMU);
 
         // Create distinct encoded test data (PCMU: 1 byte per sample)
         let data_a: Vec<u8> = (0..160).map(|i| (i % 256) as u8).collect();
@@ -1005,26 +990,6 @@ mod tests {
     }
 
     #[test]
-    fn test_channel_selection_mono() {
-        // Verify that mono recording (channels=1) uses mix
-        let recorder = create_test_recorder(CodecType::PCMU, 1);
-        assert_eq!(recorder.channels, 1, "Mono recorder should have 1 channel");
-    }
-
-    #[test]
-    fn test_channel_selection_stereo() {
-        // Verify that stereo recording (channels=2) for wideband codecs
-        let recorder = create_test_recorder(CodecType::Opus, 2);
-        assert_eq!(recorder.channels, 2, "Opus recorder should have 2 channels");
-
-        let recorder_g722 = create_test_recorder(CodecType::G722, 2);
-        assert_eq!(
-            recorder_g722.channels, 2,
-            "G722 recorder should have 2 channels"
-        );
-    }
-
-    #[test]
     fn test_mix_pcm_prevents_clipping() {
         let pcm_high = vec![20000i16; 160];
         let mixed = Recorder::mix_pcm(&pcm_high, &pcm_high);
@@ -1038,16 +1003,10 @@ mod tests {
     }
 
     // Helper function to create a test recorder
-    fn create_test_recorder(codec: CodecType, channels: u16) -> Recorder {
+    fn create_test_recorder(codec: CodecType) -> Recorder {
         let sample_rate = codec.samplerate();
         let encoder = Some(create_encoder(codec));
-        // flush interval normalized to multiple of codec ptime (20ms), default 1280ms = LCM(4096 bytes, 160 samples)
-        let samples_per_block = match codec {
-            CodecType::G729 => 80u32,
-            CodecType::PCMU | CodecType::PCMA => 1,
-            CodecType::G722 => 2,
-            _ => 1,
-        };
+        let (samples_per_block, _) = codec_block_info(codec);
         let codec_ptime_samples = ((sample_rate / 50) / samples_per_block * samples_per_block).max(samples_per_block);
         let flush_periods = (sample_rate / codec_ptime_samples).max(1);
         let ptime_samples = codec_ptime_samples * flush_periods;
@@ -1055,9 +1014,7 @@ mod tests {
         Recorder {
             path: "test.wav".to_string(),
             codec,
-            written_bytes: 0,
             sample_rate,
-            channels,
             dtmf_gen: DtmfGenerator::new(sample_rate),
             encoder,
             decoders: HashMap::new(),
