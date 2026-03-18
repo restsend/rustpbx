@@ -99,8 +99,8 @@ mod ivr_test;
 
 pub use app_context::{AppSharedState, ApplicationContext, CallInfo};
 pub use controller::{
-    CallController, ControllerEvent, DtmfCollectConfig, HangupDuringCollection,
-    PlaybackHandle, RecordingHandle, RecordingInfo,
+    CallController, ControllerEvent, DtmfCollectConfig, HangupDuringCollection, PlaybackHandle,
+    RecordingHandle, RecordingInfo,
 };
 pub use event_loop::AppEventLoop;
 

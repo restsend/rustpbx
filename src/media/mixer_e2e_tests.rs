@@ -75,8 +75,12 @@ mod mixer_e2e_tests {
         // customer -> agent, customer -> supervisor, agent -> customer, agent -> supervisor
         // supervisor -> (nothing)
         mixer.apply_supervisor_mode(
-            "customer", "agent", "supervisor",
-            "customer-out", "agent-out", "supervisor-out",
+            "customer",
+            "agent",
+            "supervisor",
+            "customer-out",
+            "agent-out",
+            "supervisor-out",
         );
 
         let routes = mixer.get_routes();
@@ -88,17 +92,24 @@ mod mixer_e2e_tests {
         // - agent -> supervisor-out (last write)
         // - supervisor -> empty
         let customer_route = routes.get("customer").expect("customer route exists");
-        assert!(customer_route.outputs.contains_key("supervisor-out"),
-            "customer should route to supervisor-out in Listen mode");
+        assert!(
+            customer_route.outputs.contains_key("supervisor-out"),
+            "customer should route to supervisor-out in Listen mode"
+        );
 
         // agent routes to supervisor-out (last write overwrote customer-out)
         let agent_route = routes.get("agent").expect("agent route exists");
-        assert!(agent_route.outputs.contains_key("supervisor-out"),
-            "agent should route to supervisor-out in Listen mode");
+        assert!(
+            agent_route.outputs.contains_key("supervisor-out"),
+            "agent should route to supervisor-out in Listen mode"
+        );
 
         // supervisor should have NO outputs (listen only)
         let supervisor_route = routes.get("supervisor").expect("supervisor route exists");
-        assert!(supervisor_route.outputs.is_empty(), "supervisor should not send in Listen mode");
+        assert!(
+            supervisor_route.outputs.is_empty(),
+            "supervisor should not send in Listen mode"
+        );
     }
 
     /// Test: Supervisor mode routing - Whisper mode
@@ -108,8 +119,12 @@ mod mixer_e2e_tests {
         mixer.set_mode(SupervisorMixerMode::Whisper);
 
         mixer.apply_supervisor_mode(
-            "customer", "agent", "supervisor",
-            "customer-out", "agent-out", "supervisor-out",
+            "customer",
+            "agent",
+            "supervisor",
+            "customer-out",
+            "agent-out",
+            "supervisor-out",
         );
 
         let routes = mixer.get_routes();
@@ -138,8 +153,12 @@ mod mixer_e2e_tests {
         mixer.set_mode(SupervisorMixerMode::Barge);
 
         mixer.apply_supervisor_mode(
-            "customer", "agent", "supervisor",
-            "customer-out", "agent-out", "supervisor-out",
+            "customer",
+            "agent",
+            "supervisor",
+            "customer-out",
+            "agent-out",
+            "supervisor-out",
         );
 
         let routes = mixer.get_routes();
@@ -164,15 +183,13 @@ mod mixer_e2e_tests {
         let mixer = MediaMixer::new("test-routing".to_string(), 8000);
 
         // Configure output routing: agent-out receives from customer and supervisor
-        mixer.set_output_routing("agent-out", vec![
-            "customer".to_string(),
-            "supervisor".to_string(),
-        ]);
+        mixer.set_output_routing(
+            "agent-out",
+            vec!["customer".to_string(), "supervisor".to_string()],
+        );
 
         // Configure customer-out receives from agent
-        mixer.set_output_routing("customer-out", vec![
-            "agent".to_string(),
-        ]);
+        mixer.set_output_routing("customer-out", vec!["agent".to_string()]);
 
         // Verify routing
         let agent_routing = mixer.get_output_routing("agent-out").unwrap();
@@ -186,12 +203,8 @@ mod mixer_e2e_tests {
     #[test]
     fn test_decoded_frame_lifecycle() {
         // Create a frame with sequence directly
-        let frame = DecodedFrame::new(
-            "input-1".to_string(),
-            vec![100i16; 160],
-            8000,
-            0,
-        ).with_sequence(42);
+        let frame =
+            DecodedFrame::new("input-1".to_string(), vec![100i16; 160], 8000, 0).with_sequence(42);
 
         assert_eq!(frame.input_id, "input-1");
         assert_eq!(frame.samples.len(), 160);

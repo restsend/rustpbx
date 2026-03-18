@@ -712,7 +712,12 @@ action = { type = "transfer", target = "operator" }
         let config: IvrFileConfig = toml::from_str(toml_str).expect("parse TOML");
 
         // Check unknown_key_action is parsed
-        let unknown_action = config.ivr.root.unknown_key_action.as_ref().expect("unknown_key_action");
+        let unknown_action = config
+            .ivr
+            .root
+            .unknown_key_action
+            .as_ref()
+            .expect("unknown_key_action");
         match unknown_action {
             EntryAction::CollectExtension {
                 min_digits,
@@ -809,21 +814,36 @@ action = { type = "menu", menu = "root" }
         assert!(ivr.root.unknown_key_action.is_some());
 
         // Verify 0 -> transfer to operator
-        let op_entry = ivr.root.entries.iter().find(|e| e.key == "0").expect("0 entry");
+        let op_entry = ivr
+            .root
+            .entries
+            .iter()
+            .find(|e| e.key == "0")
+            .expect("0 entry");
         match &op_entry.action {
             EntryAction::Transfer { target } => assert_eq!(target, "9000"),
             _ => panic!("Expected Transfer"),
         }
 
         // Verify 1 -> collect
-        let collect_entry = ivr.root.entries.iter().find(|e| e.key == "1").expect("1 entry");
+        let collect_entry = ivr
+            .root
+            .entries
+            .iter()
+            .find(|e| e.key == "1")
+            .expect("1 entry");
         match &collect_entry.action {
             EntryAction::Collect { variable, .. } => assert_eq!(variable, "account"),
             _ => panic!("Expected Collect"),
         }
 
         // Verify 2 -> webhook with variables
-        let webhook_entry = ivr.root.entries.iter().find(|e| e.key == "2").expect("2 entry");
+        let webhook_entry = ivr
+            .root
+            .entries
+            .iter()
+            .find(|e| e.key == "2")
+            .expect("2 entry");
         match &webhook_entry.action {
             EntryAction::Webhook { url, variables, .. } => {
                 assert_eq!(url, "https://api.example.com/lookup");

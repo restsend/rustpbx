@@ -1,18 +1,16 @@
-pub mod proto;
+pub mod app;
 pub mod auth;
-pub mod session;
 pub mod gateway;
 pub mod handler;
-pub mod app;
 pub mod processor;
+pub mod proto;
+pub mod session;
 
+pub use app::*;
 pub use auth::*;
-pub use session::*;
 pub use gateway::{RwiGatewayRef, *};
 pub use handler::*;
-pub use app::*;
 pub use processor::*;
+pub use session::*;
 
-pub use proto::{
-    RwiCommand, RwiEvent, RwiResponse, RwiError, ResponseStatus, CallIncomingData,
-};
+pub use proto::{CallIncomingData, ResponseStatus, RwiCommand, RwiError, RwiEvent, RwiResponse};

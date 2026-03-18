@@ -1,9 +1,9 @@
+use crate::rwi::auth::RwiConfig;
 use crate::{
     call::{CallRecordingConfig, DialDirection, QueuePlan, user::SipUser},
     proxy::routing::{RouteQueueConfig, RouteRule, TrunkConfig},
     storage::StorageConfig,
 };
-use crate::rwi::auth::RwiConfig;
 use anyhow::{Error, Result};
 use clap::Parser;
 use rsip::StatusCode;

@@ -723,7 +723,8 @@ async fn test_authenticate_request_preserves_authorization_uri_transport_case() 
     let server = create_issue_146_server().await;
     let module = AuthModule::new(server);
     let auth_header_value = r#"Digest username="111",realm="pbx.e36",nonce="K1KmT96onZZVMvBB",uri="sip:pbx.e36:5061;transport=tls",response="0c9ba3a13fbcc4f342fd7eb9c2be6a83",algorithm=MD5"#;
-    let request = create_issue_146_register_request("sip:pbx.e36:5061;transport=tls", auth_header_value);
+    let request =
+        create_issue_146_register_request("sip:pbx.e36:5061;transport=tls", auth_header_value);
     let (tx, _) = create_transaction(request).await;
 
     let result = module.authenticate_request(&tx).await.unwrap();

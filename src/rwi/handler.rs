@@ -7,16 +7,16 @@ use crate::rwi::processor::RwiCommandProcessor;
 use crate::rwi::proto::{ResponseStatus, RwiError, RwiResponse};
 use crate::rwi::session::{OwnershipMode, RwiCommandMessage, RwiCommandPayload};
 use axum::{
-    extract::ws::{Message, WebSocket, WebSocketUpgrade},
-    extract::Query,
-    http::{header, HeaderMap, StatusCode},
-    response::IntoResponse,
     Extension,
+    extract::Query,
+    extract::ws::{Message, WebSocket, WebSocketUpgrade},
+    http::{HeaderMap, StatusCode, header},
+    response::IntoResponse,
 };
 use futures::{SinkExt, StreamExt};
 use std::sync::Arc;
-use tokio::sync::mpsc;
 use tokio::sync::RwLock;
+use tokio::sync::mpsc;
 
 pub async fn rwi_ws_handler(
     _client_addr: ClientAddr,
@@ -48,13 +48,15 @@ pub async fn rwi_ws_handler(
                     r#"Bearer realm="rwi", error="invalid_token""#,
                 )],
             )
-            .into_response();
+                .into_response();
         }
     };
 
-    ws.protocols(["rwi-v1"]).on_upgrade(async move |socket| {
-        handle_websocket(socket, identity, gateway, call_registry, sip_server).await;
-    }).into_response()
+    ws.protocols(["rwi-v1"])
+        .on_upgrade(async move |socket| {
+            handle_websocket(socket, identity, gateway, call_registry, sip_server).await;
+        })
+        .into_response()
 }
 
 fn extract_token(
@@ -95,7 +97,6 @@ async fn handle_websocket(
 
     let (ws_tx, mut ws_rx) = mpsc::unbounded_channel::<String>();
 
-
     let processor = {
         let p = RwiCommandProcessor::new(call_registry, gateway.clone());
         let p = if let Some(server) = sip_server {
@@ -133,7 +134,6 @@ async fn handle_websocket(
 
     let (command_tx, _command_rx) = mpsc::unbounded_channel::<RwiCommandMessage>();
 
-
     let session_id_clone = session_id.clone();
     let gateway_clone = gateway.clone();
     let ws_tx_resp = ws_tx.clone();
@@ -148,7 +148,8 @@ async fn handle_websocket(
                         processor.clone(),
                         &session_id_clone,
                         gateway_clone.clone(),
-                    ).await;
+                    )
+                    .await;
                     if let Some(json) = response_json {
                         let _ = ws_tx_resp.send(json);
                     }
@@ -211,7 +212,8 @@ async fn handle_text_message(
     match &command {
         RwiCommandPayload::Subscribe { contexts } => {
             let mut gw = gateway.write().await;
-            gw.subscribe(&session_id.to_string(), contexts.clone()).await;
+            gw.subscribe(&session_id.to_string(), contexts.clone())
+                .await;
         }
         RwiCommandPayload::Unsubscribe { contexts } => {
             let mut gw = gateway.write().await;
@@ -219,7 +221,10 @@ async fn handle_text_message(
         }
         RwiCommandPayload::DetachCall { call_id } => {
             let mut gw = gateway.write().await;
-            if gw.release_call_ownership(&session_id.to_string(), call_id).await {
+            if gw
+                .release_call_ownership(&session_id.to_string(), call_id)
+                .await
+            {
                 gw.detach_supervisor(&session_id.to_string(), call_id).await;
             }
         }
@@ -235,7 +240,6 @@ async fn handle_text_message(
         call_id,
         command: RwiCommandPayload::ListCalls,
     });
-
 
     let resp = match result {
         Ok(cmd_result) => {
@@ -272,18 +276,22 @@ async fn handle_text_message(
                 crate::rwi::processor::CommandResult::ConferenceCreated { conf_id } => {
                     Some(serde_json::json!({ "conf_id": conf_id }))
                 }
-                crate::rwi::processor::CommandResult::ConferenceMemberAdded { conf_id, call_id } => {
-                    Some(serde_json::json!({ "conf_id": conf_id, "call_id": call_id }))
-                }
-                crate::rwi::processor::CommandResult::ConferenceMemberRemoved { conf_id, call_id } => {
-                    Some(serde_json::json!({ "conf_id": conf_id, "call_id": call_id }))
-                }
-                crate::rwi::processor::CommandResult::ConferenceMemberMuted { conf_id, call_id } => {
-                    Some(serde_json::json!({ "conf_id": conf_id, "call_id": call_id }))
-                }
-                crate::rwi::processor::CommandResult::ConferenceMemberUnmuted { conf_id, call_id } => {
-                    Some(serde_json::json!({ "conf_id": conf_id, "call_id": call_id }))
-                }
+                crate::rwi::processor::CommandResult::ConferenceMemberAdded {
+                    conf_id,
+                    call_id,
+                } => Some(serde_json::json!({ "conf_id": conf_id, "call_id": call_id })),
+                crate::rwi::processor::CommandResult::ConferenceMemberRemoved {
+                    conf_id,
+                    call_id,
+                } => Some(serde_json::json!({ "conf_id": conf_id, "call_id": call_id })),
+                crate::rwi::processor::CommandResult::ConferenceMemberMuted {
+                    conf_id,
+                    call_id,
+                } => Some(serde_json::json!({ "conf_id": conf_id, "call_id": call_id })),
+                crate::rwi::processor::CommandResult::ConferenceMemberUnmuted {
+                    conf_id,
+                    call_id,
+                } => Some(serde_json::json!({ "conf_id": conf_id, "call_id": call_id })),
                 crate::rwi::processor::CommandResult::ConferenceDestroyed { conf_id } => {
                     Some(serde_json::json!({ "conf_id": conf_id }))
                 }
@@ -331,8 +339,8 @@ fn parse_action(action: &str, params: &serde_json::Value) -> Result<RwiCommandPa
         "params": params
     });
 
-    let req: crate::rwi::session::RwiRequest = serde_json::from_value(json)
-        .map_err(|e| e.to_string())?;
+    let req: crate::rwi::session::RwiRequest =
+        serde_json::from_value(json).map_err(|e| e.to_string())?;
 
     Ok(req.into())
 }
@@ -354,7 +362,9 @@ fn extract_call_id(cmd: &RwiCommandPayload) -> Option<String> {
         RwiCommandPayload::Transfer { call_id, .. } => Some(call_id.clone()),
         RwiCommandPayload::TransferAttended { call_id, .. } => Some(call_id.clone()),
         RwiCommandPayload::TransferComplete { call_id, .. } => Some(call_id.clone()),
-        RwiCommandPayload::TransferCancel { consultation_call_id } => Some(consultation_call_id.clone()),
+        RwiCommandPayload::TransferCancel {
+            consultation_call_id,
+        } => Some(consultation_call_id.clone()),
         RwiCommandPayload::CallHold { call_id, .. } => Some(call_id.clone()),
         RwiCommandPayload::CallUnhold { call_id } => Some(call_id.clone()),
         RwiCommandPayload::SetRingbackSource { target_call_id, .. } => Some(target_call_id.clone()),
@@ -380,7 +390,9 @@ fn extract_call_id(cmd: &RwiCommandPayload) -> Option<String> {
         RwiCommandPayload::SupervisorWhisper { target_call_id, .. } => Some(target_call_id.clone()),
         RwiCommandPayload::SupervisorBarge { target_call_id, .. } => Some(target_call_id.clone()),
         RwiCommandPayload::SupervisorStop { target_call_id, .. } => Some(target_call_id.clone()),
-        RwiCommandPayload::SupervisorTakeover { target_call_id, .. } => Some(target_call_id.clone()),
+        RwiCommandPayload::SupervisorTakeover { target_call_id, .. } => {
+            Some(target_call_id.clone())
+        }
         RwiCommandPayload::SipMessage { call_id, .. } => Some(call_id.clone()),
         RwiCommandPayload::SipNotify { call_id, .. } => Some(call_id.clone()),
         RwiCommandPayload::SipOptionsPing { call_id } => Some(call_id.clone()),
@@ -421,10 +433,7 @@ mod tests {
     #[test]
     fn test_extract_token_from_header() {
         let mut headers = axum::http::HeaderMap::new();
-        headers.insert(
-            "authorization",
-            "Bearer test-token-123".parse().unwrap(),
-        );
+        headers.insert("authorization", "Bearer test-token-123".parse().unwrap());
         let params = std::collections::HashMap::new();
         let token = extract_token(&headers, &params);
         assert_eq!(token, Some("test-token-123".to_string()));
@@ -462,24 +471,21 @@ mod tests {
     async fn test_session_subscribe_returns_success() {
         let v = process_msg(
             r#"{"action": "session.subscribe", "params": {"contexts": ["ctx1", "ctx2"]}}"#,
-        ).await;
+        )
+        .await;
         assert_eq!(v["response"], "success");
     }
 
     #[tokio::test]
     async fn test_session_list_calls_returns_success_with_action_id() {
-        let v = process_msg(
-            r#"{"action": "session.list_calls", "action_id": "req-1"}"#,
-        ).await;
+        let v = process_msg(r#"{"action": "session.list_calls", "action_id": "req-1"}"#).await;
         assert_eq!(v["response"], "success");
         assert_eq!(v["action_id"], "req-1");
     }
 
     #[tokio::test]
     async fn test_call_answer_not_found_returns_error() {
-        let v = process_msg(
-            r#"{"action": "call.answer", "params": {"call_id": "missing"}}"#,
-        ).await;
+        let v = process_msg(r#"{"action": "call.answer", "params": {"call_id": "missing"}}"#).await;
         assert_eq!(v["response"], "error");
         assert_eq!(v["error"]["code"], "not_found");
     }
@@ -488,15 +494,15 @@ mod tests {
     async fn test_call_hangup_not_found_returns_error() {
         let v = process_msg(
             r#"{"action": "call.hangup", "params": {"call_id": "missing", "reason": "normal"}}"#,
-        ).await;
+        )
+        .await;
         assert_eq!(v["response"], "error");
     }
 
     #[tokio::test]
     async fn test_call_bridge_not_found_returns_error() {
-        let v = process_msg(
-            r#"{"action": "call.bridge", "params": {"leg_a": "a", "leg_b": "b"}}"#,
-        ).await;
+        let v = process_msg(r#"{"action": "call.bridge", "params": {"leg_a": "a", "leg_b": "b"}}"#)
+            .await;
         assert_eq!(v["response"], "error");
     }
 
@@ -537,21 +543,25 @@ mod tests {
 
     #[tokio::test]
     async fn test_response_preserves_action_id() {
-        let v = process_msg(
-            r#"{"action": "session.list_calls", "action_id": "my-custom-id"}"#,
-        ).await;
+        let v =
+            process_msg(r#"{"action": "session.list_calls", "action_id": "my-custom-id"}"#).await;
         assert_eq!(v["action_id"], "my-custom-id");
     }
 
     #[test]
     fn test_extract_call_id_answer() {
-        let cmd = RwiCommandPayload::Answer { call_id: "c1".into() };
+        let cmd = RwiCommandPayload::Answer {
+            call_id: "c1".into(),
+        };
         assert_eq!(extract_call_id(&cmd), Some("c1".into()));
     }
 
     #[test]
     fn test_extract_call_id_bridge() {
-        let cmd = RwiCommandPayload::Bridge { leg_a: "a".into(), leg_b: "b".into() };
+        let cmd = RwiCommandPayload::Bridge {
+            leg_a: "a".into(),
+            leg_b: "b".into(),
+        };
         assert_eq!(extract_call_id(&cmd), Some("a".into()));
     }
 
@@ -563,9 +573,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_call_ring_not_found() {
-        let v = process_msg(
-            r#"{"action": "call.ring", "params": {"call_id": "nope"}}"#,
-        ).await;
+        let v = process_msg(r#"{"action": "call.ring", "params": {"call_id": "nope"}}"#).await;
         assert_eq!(v["response"], "error");
         assert_eq!(v["error"]["code"], "not_found");
     }
@@ -574,7 +582,8 @@ mod tests {
     async fn test_call_reject_not_found() {
         let v = process_msg(
             r#"{"action": "call.reject", "params": {"call_id": "nope", "reason": "busy"}}"#,
-        ).await;
+        )
+        .await;
         assert_eq!(v["response"], "error");
     }
 
@@ -582,15 +591,14 @@ mod tests {
     async fn test_call_transfer_not_found() {
         let v = process_msg(
             r#"{"action": "call.transfer", "params": {"call_id": "nope", "target": "sip:x@y"}}"#,
-        ).await;
+        )
+        .await;
         assert_eq!(v["response"], "error");
     }
 
     #[tokio::test]
     async fn test_call_unbridge_not_found() {
-        let v = process_msg(
-            r#"{"action": "call.unbridge", "params": {"call_id": "nope"}}"#,
-        ).await;
+        let v = process_msg(r#"{"action": "call.unbridge", "params": {"call_id": "nope"}}"#).await;
         assert_eq!(v["response"], "error");
     }
 
@@ -635,9 +643,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_media_stream_start_not_found_returns_error() {
-        let v = process_msg(
-            r#"{"action": "media.stream_start", "params": {"call_id": "nope"}}"#,
-        ).await;
+        let v =
+            process_msg(r#"{"action": "media.stream_start", "params": {"call_id": "nope"}}"#).await;
         assert_eq!(v["response"], "error");
         assert_ne!(v["error"]["code"], "unknown_action");
     }
@@ -653,9 +660,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_media_stream_stop_not_found_returns_error() {
-        let v = process_msg(
-            r#"{"action": "media.stream_stop", "params": {"call_id": "nope"}}"#,
-        ).await;
+        let v =
+            process_msg(r#"{"action": "media.stream_stop", "params": {"call_id": "nope"}}"#).await;
         assert_eq!(v["response"], "error");
         assert_ne!(v["error"]["code"], "unknown_action");
     }
@@ -681,9 +687,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_media_inject_start_not_found_returns_error() {
-        let v = process_msg(
-            r#"{"action": "media.inject_start", "params": {"call_id": "nope"}}"#,
-        ).await;
+        let v =
+            process_msg(r#"{"action": "media.inject_start", "params": {"call_id": "nope"}}"#).await;
         assert_eq!(v["response"], "error");
         assert_ne!(v["error"]["code"], "unknown_action");
     }
@@ -699,9 +704,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_media_inject_stop_not_found_returns_error() {
-        let v = process_msg(
-            r#"{"action": "media.inject_stop", "params": {"call_id": "nope"}}"#,
-        ).await;
+        let v =
+            process_msg(r#"{"action": "media.inject_stop", "params": {"call_id": "nope"}}"#).await;
         assert_eq!(v["response"], "error");
         assert_ne!(v["error"]["code"], "unknown_action");
     }
@@ -749,9 +753,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_record_start_not_found_returns_error() {
-        let v = process_msg(
-            r#"{"action": "record.start", "params": {"call_id": "nope"}}"#,
-        ).await;
+        let v = process_msg(r#"{"action": "record.start", "params": {"call_id": "nope"}}"#).await;
         assert_eq!(v["response"], "error");
         assert_ne!(v["error"]["code"], "unknown_action");
     }
@@ -767,9 +769,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_record_pause_not_found_returns_error() {
-        let v = process_msg(
-            r#"{"action": "record.pause", "params": {"call_id": "nope"}}"#,
-        ).await;
+        let v = process_msg(r#"{"action": "record.pause", "params": {"call_id": "nope"}}"#).await;
         assert_eq!(v["response"], "error");
         assert_ne!(v["error"]["code"], "unknown_action");
     }
@@ -785,9 +785,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_record_resume_not_found_returns_error() {
-        let v = process_msg(
-            r#"{"action": "record.resume", "params": {"call_id": "nope"}}"#,
-        ).await;
+        let v = process_msg(r#"{"action": "record.resume", "params": {"call_id": "nope"}}"#).await;
         assert_eq!(v["response"], "error");
         assert_ne!(v["error"]["code"], "unknown_action");
     }
@@ -803,9 +801,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_record_stop_not_found_returns_error() {
-        let v = process_msg(
-            r#"{"action": "record.stop", "params": {"call_id": "nope"}}"#,
-        ).await;
+        let v = process_msg(r#"{"action": "record.stop", "params": {"call_id": "nope"}}"#).await;
         assert_eq!(v["response"], "error");
         assert_ne!(v["error"]["code"], "unknown_action");
     }
@@ -856,7 +852,8 @@ mod tests {
     async fn test_queue_enqueue_not_found_returns_error() {
         let v = process_msg(
             r#"{"action": "queue.enqueue", "params": {"call_id": "nope", "queue_id": "q1"}}"#,
-        ).await;
+        )
+        .await;
         assert_eq!(v["response"], "error");
         assert_ne!(v["error"]["code"], "unknown_action");
     }
@@ -872,9 +869,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_queue_dequeue_not_found_returns_error() {
-        let v = process_msg(
-            r#"{"action": "queue.dequeue", "params": {"call_id": "nope"}}"#,
-        ).await;
+        let v = process_msg(r#"{"action": "queue.dequeue", "params": {"call_id": "nope"}}"#).await;
         assert_eq!(v["response"], "error");
         assert_ne!(v["error"]["code"], "unknown_action");
     }
@@ -890,9 +885,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_queue_hold_not_found_returns_error() {
-        let v = process_msg(
-            r#"{"action": "queue.hold", "params": {"call_id": "nope"}}"#,
-        ).await;
+        let v = process_msg(r#"{"action": "queue.hold", "params": {"call_id": "nope"}}"#).await;
         assert_eq!(v["response"], "error");
         assert_ne!(v["error"]["code"], "unknown_action");
     }
@@ -908,9 +901,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_queue_unhold_not_found_returns_error() {
-        let v = process_msg(
-            r#"{"action": "queue.unhold", "params": {"call_id": "nope"}}"#,
-        ).await;
+        let v = process_msg(r#"{"action": "queue.unhold", "params": {"call_id": "nope"}}"#).await;
         assert_eq!(v["response"], "error");
         assert_ne!(v["error"]["code"], "unknown_action");
     }
@@ -925,7 +916,10 @@ mod tests {
         });
         let cmd = parse_action("supervisor.listen", &params).unwrap();
         match cmd {
-            RwiCommandPayload::SupervisorListen { supervisor_call_id, target_call_id } => {
+            RwiCommandPayload::SupervisorListen {
+                supervisor_call_id,
+                target_call_id,
+            } => {
                 assert_eq!(supervisor_call_id, "sup1");
                 assert_eq!(target_call_id, "tgt1");
             }
@@ -953,7 +947,11 @@ mod tests {
         });
         let cmd = parse_action("supervisor.whisper", &params).unwrap();
         match cmd {
-            RwiCommandPayload::SupervisorWhisper { supervisor_call_id, target_call_id, agent_leg } => {
+            RwiCommandPayload::SupervisorWhisper {
+                supervisor_call_id,
+                target_call_id,
+                agent_leg,
+            } => {
                 assert_eq!(supervisor_call_id, "sup2");
                 assert_eq!(target_call_id, "tgt2");
                 assert_eq!(agent_leg, "leg-a");
@@ -982,7 +980,11 @@ mod tests {
         });
         let cmd = parse_action("supervisor.barge", &params).unwrap();
         match cmd {
-            RwiCommandPayload::SupervisorBarge { supervisor_call_id, target_call_id, agent_leg } => {
+            RwiCommandPayload::SupervisorBarge {
+                supervisor_call_id,
+                target_call_id,
+                agent_leg,
+            } => {
                 assert_eq!(supervisor_call_id, "sup3");
                 assert_eq!(target_call_id, "tgt3");
                 assert_eq!(agent_leg, "leg-b");
@@ -1010,7 +1012,10 @@ mod tests {
         });
         let cmd = parse_action("supervisor.stop", &params).unwrap();
         match cmd {
-            RwiCommandPayload::SupervisorStop { supervisor_call_id, target_call_id } => {
+            RwiCommandPayload::SupervisorStop {
+                supervisor_call_id,
+                target_call_id,
+            } => {
                 assert_eq!(supervisor_call_id, "sup4");
                 assert_eq!(target_call_id, "tgt4");
             }
@@ -1039,7 +1044,11 @@ mod tests {
         });
         let cmd = parse_action("sip.message", &params).unwrap();
         match cmd {
-            RwiCommandPayload::SipMessage { call_id, content_type, body } => {
+            RwiCommandPayload::SipMessage {
+                call_id,
+                content_type,
+                body,
+            } => {
                 assert_eq!(call_id, "sip1");
                 assert_eq!(content_type, "text/html");
                 assert_eq!(body, "<b>hello</b>");
@@ -1053,7 +1062,9 @@ mod tests {
         let params = serde_json::json!({ "call_id": "sip1" });
         let cmd = parse_action("sip.message", &params).unwrap();
         match cmd {
-            RwiCommandPayload::SipMessage { content_type, body, .. } => {
+            RwiCommandPayload::SipMessage {
+                content_type, body, ..
+            } => {
                 assert_eq!(content_type, "text/plain");
                 assert_eq!(body, "");
             }
@@ -1065,7 +1076,8 @@ mod tests {
     async fn test_sip_message_not_found_returns_error() {
         let v = process_msg(
             r#"{"action": "sip.message", "params": {"call_id": "nope", "body": "hi"}}"#,
-        ).await;
+        )
+        .await;
         assert_eq!(v["response"], "error");
         assert_ne!(v["error"]["code"], "unknown_action");
     }
@@ -1082,7 +1094,12 @@ mod tests {
         });
         let cmd = parse_action("sip.notify", &params).unwrap();
         match cmd {
-            RwiCommandPayload::SipNotify { call_id, event, content_type, body } => {
+            RwiCommandPayload::SipNotify {
+                call_id,
+                event,
+                content_type,
+                body,
+            } => {
                 assert_eq!(call_id, "sip2");
                 assert_eq!(event, "presence");
                 assert_eq!(content_type, "application/pidf+xml");
@@ -1097,7 +1114,12 @@ mod tests {
         let params = serde_json::json!({ "call_id": "sip2" });
         let cmd = parse_action("sip.notify", &params).unwrap();
         match cmd {
-            RwiCommandPayload::SipNotify { event, content_type, body, .. } => {
+            RwiCommandPayload::SipNotify {
+                event,
+                content_type,
+                body,
+                ..
+            } => {
                 assert_eq!(event, "");
                 assert_eq!(content_type, "application/json");
                 assert_eq!(body, "");
@@ -1110,7 +1132,8 @@ mod tests {
     async fn test_sip_notify_not_found_returns_error() {
         let v = process_msg(
             r#"{"action": "sip.notify", "params": {"call_id": "nope", "event": "check-sync"}}"#,
-        ).await;
+        )
+        .await;
         assert_eq!(v["response"], "error");
         assert_ne!(v["error"]["code"], "unknown_action");
     }
@@ -1126,9 +1149,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_sip_options_ping_not_found_returns_error() {
-        let v = process_msg(
-            r#"{"action": "sip.options_ping", "params": {"call_id": "nope"}}"#,
-        ).await;
+        let v =
+            process_msg(r#"{"action": "sip.options_ping", "params": {"call_id": "nope"}}"#).await;
         assert_eq!(v["response"], "error");
         assert_ne!(v["error"]["code"], "unknown_action");
     }
@@ -1139,7 +1161,8 @@ mod tests {
     async fn test_new_commands_preserve_action_id() {
         let v = process_msg(
             r#"{"action": "record.stop", "action_id": "my-id-42", "params": {"call_id": "nope"}}"#,
-        ).await;
+        )
+        .await;
         assert_eq!(v["action_id"], "my-id-42");
     }
 
@@ -1154,7 +1177,11 @@ mod tests {
         });
         let cmd = parse_action("call.transfer.attended", &params).unwrap();
         match cmd {
-            RwiCommandPayload::TransferAttended { call_id, target, timeout_secs } => {
+            RwiCommandPayload::TransferAttended {
+                call_id,
+                target,
+                timeout_secs,
+            } => {
                 assert_eq!(call_id, "orig-1");
                 assert_eq!(target, "sip:agent@local");
                 assert_eq!(timeout_secs, Some(30));
@@ -1194,7 +1221,10 @@ mod tests {
         });
         let cmd = parse_action("call.transfer.complete", &params).unwrap();
         match cmd {
-            RwiCommandPayload::TransferComplete { call_id, consultation_call_id } => {
+            RwiCommandPayload::TransferComplete {
+                call_id,
+                consultation_call_id,
+            } => {
                 assert_eq!(call_id, "orig-2");
                 assert_eq!(consultation_call_id, "consult-42");
             }
@@ -1218,7 +1248,9 @@ mod tests {
         let params = serde_json::json!({ "consultation_call_id": "consult-99" });
         let cmd = parse_action("call.transfer.cancel", &params).unwrap();
         match cmd {
-            RwiCommandPayload::TransferCancel { consultation_call_id } => {
+            RwiCommandPayload::TransferCancel {
+                consultation_call_id,
+            } => {
                 assert_eq!(consultation_call_id, "consult-99");
             }
             _ => panic!("expected TransferCancel"),
@@ -1229,7 +1261,8 @@ mod tests {
     async fn test_transfer_cancel_succeeds_even_without_call() {
         let v = process_msg(
             r#"{"action": "call.transfer.cancel", "params": {"consultation_call_id": "nope"}}"#,
-        ).await;
+        )
+        .await;
         assert_ne!(v["error"]["code"], "unknown_action");
     }
 }

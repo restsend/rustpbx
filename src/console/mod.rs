@@ -87,12 +87,21 @@ impl ConsoleState {
         ctx: serde_json::Value,
         headers: &HeaderMap,
     ) -> Response {
-        let locale = detect_locale(headers, self.i18n.available_locales(), self.i18n.default_locale());
+        let locale = detect_locale(
+            headers,
+            self.i18n.available_locales(),
+            self.i18n.default_locale(),
+        );
         self.render_with_locale(template, ctx, &locale)
     }
 
     /// Render a template with a specific locale.
-    pub fn render_with_locale(&self, template: &str, ctx: serde_json::Value, locale: &str) -> Response {
+    pub fn render_with_locale(
+        &self,
+        template: &str,
+        ctx: serde_json::Value,
+        locale: &str,
+    ) -> Response {
         let mut ctx = ctx;
         if ctx.is_object() {
             if let Some(map) = ctx.as_object_mut() {
@@ -215,33 +224,28 @@ impl ConsoleState {
         // ── t filter: {{ "nav.dashboard" | t }} ──────────────────────────
         let i18n_t = self.i18n.clone();
         let locale_t = locale.to_string();
-        tmpl_env.add_filter(
-            "t",
-            move |key: &str| -> String { i18n_t.t(&locale_t, key) },
-        );
+        tmpl_env.add_filter("t", move |key: &str| -> String { i18n_t.t(&locale_t, key) });
 
         // ── tvars filter: {{ "messages.saved" | tvars({"name": ext.name}) }} ─
         let i18n_tv = self.i18n.clone();
         let locale_tv = locale.to_string();
         tmpl_env.add_filter(
             "tvars",
-            move |key: &str,
-                  vars: minijinja::Value|
-                  -> Result<String, minijinja::Error> {
-                let vars_map: std::collections::HashMap<String, String> =
-                    if let Ok(obj) = serde_json::from_str::<serde_json::Value>(
+            move |key: &str, vars: minijinja::Value| -> Result<String, minijinja::Error> {
+                let vars_map: std::collections::HashMap<String, String> = if let Ok(obj) =
+                    serde_json::from_str::<serde_json::Value>(
                         &serde_json::to_string(&vars).unwrap_or_default(),
                     ) {
-                        if let serde_json::Value::Object(m) = obj {
-                            m.into_iter()
-                                .filter_map(|(k, v)| v.as_str().map(|s| (k, s.to_string())))
-                                .collect()
-                        } else {
-                            Default::default()
-                        }
+                    if let serde_json::Value::Object(m) = obj {
+                        m.into_iter()
+                            .filter_map(|(k, v)| v.as_str().map(|s| (k, s.to_string())))
+                            .collect()
                     } else {
                         Default::default()
-                    };
+                    }
+                } else {
+                    Default::default()
+                };
                 Ok(i18n_tv.t_with_vars(&locale_tv, key, &vars_map))
             },
         );

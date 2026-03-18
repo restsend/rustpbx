@@ -97,7 +97,7 @@ mod tests {
                                 },
                             },
                         ],
-                    ..Default::default()
+                        ..Default::default()
                     },
                 );
                 m
@@ -754,7 +754,7 @@ action = { type = "transfer", target = "100" }
     /// Spawn a one-shot axum HTTP server that always returns `body`.
     /// Returns the base URL (e.g. `"http://127.0.0.1:PORT"`).
     async fn spawn_webhook_server(body: serde_json::Value) -> String {
-        use axum::{routing::any, Json, Router};
+        use axum::{Json, Router, routing::any};
 
         let port = portpicker::pick_unused_port().expect("no free port");
         let router = Router::new().route(
@@ -765,10 +765,9 @@ action = { type = "transfer", target = "100" }
             }),
         );
 
-        let listener =
-            tokio::net::TcpListener::bind(format!("127.0.0.1:{}", port))
-                .await
-                .expect("bind");
+        let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{}", port))
+            .await
+            .expect("bind");
 
         tokio::spawn(async move {
             axum::serve(listener, router).await.ok();
@@ -823,7 +822,9 @@ action = { type = "transfer", target = "100" }
         let mut stack = MockCallStack::run(Box::new(IvrApp::new(ivr)), "caller", "1000");
 
         stack
-            .assert_cmd(200, "AcceptCall", |c| matches!(c, SessionAction::AcceptCall { .. }))
+            .assert_cmd(200, "AcceptCall", |c| {
+                matches!(c, SessionAction::AcceptCall { .. })
+            })
             .await;
         stack
             .assert_cmd(200, "PlayPrompt-greeting", |c| {
@@ -843,7 +844,10 @@ action = { type = "transfer", target = "100" }
             )
             .await;
 
-        stack.join().await.expect("should exit after webhook transfer");
+        stack
+            .join()
+            .await
+            .expect("should exit after webhook transfer");
     }
 
     // ── 18. Webhook → hangup ─────────────────────────────────────────────────
@@ -860,17 +864,23 @@ action = { type = "transfer", target = "100" }
         let mut stack = MockCallStack::run(Box::new(IvrApp::new(ivr)), "caller", "1000");
 
         stack
-            .assert_cmd(200, "AcceptCall", |c| matches!(c, SessionAction::AcceptCall { .. }))
+            .assert_cmd(200, "AcceptCall", |c| {
+                matches!(c, SessionAction::AcceptCall { .. })
+            })
             .await;
         stack
-            .assert_cmd(200, "PlayPrompt", |c| matches!(c, SessionAction::PlayPrompt { .. }))
+            .assert_cmd(200, "PlayPrompt", |c| {
+                matches!(c, SessionAction::PlayPrompt { .. })
+            })
             .await;
         stack.audio_complete("default");
 
         stack.dtmf("1");
 
         stack
-            .assert_cmd(1000, "Hangup-webhook", |c| matches!(c, SessionAction::Hangup { .. }))
+            .assert_cmd(1000, "Hangup-webhook", |c| {
+                matches!(c, SessionAction::Hangup { .. })
+            })
             .await;
     }
 
@@ -888,10 +898,14 @@ action = { type = "transfer", target = "100" }
         let mut stack = MockCallStack::run(Box::new(IvrApp::new(ivr)), "caller", "1000");
 
         stack
-            .assert_cmd(200, "AcceptCall", |c| matches!(c, SessionAction::AcceptCall { .. }))
+            .assert_cmd(200, "AcceptCall", |c| {
+                matches!(c, SessionAction::AcceptCall { .. })
+            })
             .await;
         stack
-            .assert_cmd(200, "PlayPrompt", |c| matches!(c, SessionAction::PlayPrompt { .. }))
+            .assert_cmd(200, "PlayPrompt", |c| {
+                matches!(c, SessionAction::PlayPrompt { .. })
+            })
             .await;
         stack.audio_complete("default");
 
@@ -927,10 +941,14 @@ action = { type = "transfer", target = "100" }
         let mut stack = MockCallStack::run(Box::new(IvrApp::new(ivr)), "caller", "1000");
 
         stack
-            .assert_cmd(200, "AcceptCall", |c| matches!(c, SessionAction::AcceptCall { .. }))
+            .assert_cmd(200, "AcceptCall", |c| {
+                matches!(c, SessionAction::AcceptCall { .. })
+            })
             .await;
         stack
-            .assert_cmd(200, "PlayPrompt", |c| matches!(c, SessionAction::PlayPrompt { .. }))
+            .assert_cmd(200, "PlayPrompt", |c| {
+                matches!(c, SessionAction::PlayPrompt { .. })
+            })
             .await;
         stack.audio_complete("default");
 
@@ -986,7 +1004,9 @@ action = { type = "transfer", target = "100" }
                 entries: vec![MenuEntry {
                     key: "1".to_string(),
                     label: Some("Billing".to_string()),
-                    action: EntryAction::Transfer { target: "3001".to_string() },
+                    action: EntryAction::Transfer {
+                        target: "3001".to_string(),
+                    },
                 }],
                 ..Default::default()
             },
@@ -995,10 +1015,14 @@ action = { type = "transfer", target = "100" }
         let mut stack = MockCallStack::run(Box::new(IvrApp::new(ivr)), "caller", "1000");
 
         stack
-            .assert_cmd(200, "AcceptCall", |c| matches!(c, SessionAction::AcceptCall { .. }))
+            .assert_cmd(200, "AcceptCall", |c| {
+                matches!(c, SessionAction::AcceptCall { .. })
+            })
             .await;
         stack
-            .assert_cmd(200, "PlayPrompt-root", |c| matches!(c, SessionAction::PlayPrompt { .. }))
+            .assert_cmd(200, "PlayPrompt-root", |c| {
+                matches!(c, SessionAction::PlayPrompt { .. })
+            })
             .await;
         stack.audio_complete("default");
 
@@ -1016,7 +1040,10 @@ action = { type = "transfer", target = "100" }
         // Press "1" in support menu → transfer to billing
         stack.audio_complete("default");
         stack.dtmf("1");
-        stack.join().await.expect("should exit after billing transfer");
+        stack
+            .join()
+            .await
+            .expect("should exit after billing transfer");
     }
 
     // ── 22. Webhook → repeat current menu ────────────────────────────────────
@@ -1029,10 +1056,14 @@ action = { type = "transfer", target = "100" }
         let mut stack = MockCallStack::run(Box::new(IvrApp::new(ivr)), "caller", "1000");
 
         stack
-            .assert_cmd(200, "AcceptCall", |c| matches!(c, SessionAction::AcceptCall { .. }))
+            .assert_cmd(200, "AcceptCall", |c| {
+                matches!(c, SessionAction::AcceptCall { .. })
+            })
             .await;
         stack
-            .assert_cmd(200, "PlayPrompt", |c| matches!(c, SessionAction::PlayPrompt { .. }))
+            .assert_cmd(200, "PlayPrompt", |c| {
+                matches!(c, SessionAction::PlayPrompt { .. })
+            })
             .await;
         stack.audio_complete("default");
 
@@ -1065,10 +1096,14 @@ action = { type = "transfer", target = "100" }
         let mut stack = MockCallStack::run(Box::new(IvrApp::new(ivr)), "caller", "1000");
 
         stack
-            .assert_cmd(200, "AcceptCall", |c| matches!(c, SessionAction::AcceptCall { .. }))
+            .assert_cmd(200, "AcceptCall", |c| {
+                matches!(c, SessionAction::AcceptCall { .. })
+            })
             .await;
         stack
-            .assert_cmd(200, "PlayPrompt", |c| matches!(c, SessionAction::PlayPrompt { .. }))
+            .assert_cmd(200, "PlayPrompt", |c| {
+                matches!(c, SessionAction::PlayPrompt { .. })
+            })
             .await;
         stack.audio_complete("default");
 
@@ -1082,7 +1117,10 @@ action = { type = "transfer", target = "100" }
             )
             .await;
 
-        stack.join().await.expect("should exit after queue transfer");
+        stack
+            .join()
+            .await
+            .expect("should exit after queue transfer");
     }
 
     // ── 24. Webhook → voicemail ───────────────────────────────────────────────
@@ -1099,10 +1137,14 @@ action = { type = "transfer", target = "100" }
         let mut stack = MockCallStack::run(Box::new(IvrApp::new(ivr)), "caller", "1000");
 
         stack
-            .assert_cmd(200, "AcceptCall", |c| matches!(c, SessionAction::AcceptCall { .. }))
+            .assert_cmd(200, "AcceptCall", |c| {
+                matches!(c, SessionAction::AcceptCall { .. })
+            })
             .await;
         stack
-            .assert_cmd(200, "PlayPrompt", |c| matches!(c, SessionAction::PlayPrompt { .. }))
+            .assert_cmd(200, "PlayPrompt", |c| {
+                matches!(c, SessionAction::PlayPrompt { .. })
+            })
             .await;
         stack.audio_complete("default");
 
@@ -1116,7 +1158,10 @@ action = { type = "transfer", target = "100" }
             )
             .await;
 
-        stack.join().await.expect("should exit after voicemail transfer");
+        stack
+            .join()
+            .await
+            .expect("should exit after voicemail transfer");
     }
 
     // ── 25. Webhook → collect_extension ──────────────────────────────────────
@@ -1138,10 +1183,14 @@ action = { type = "transfer", target = "100" }
         let mut stack = MockCallStack::run(Box::new(IvrApp::new(ivr)), "caller", "1000");
 
         stack
-            .assert_cmd(200, "AcceptCall", |c| matches!(c, SessionAction::AcceptCall { .. }))
+            .assert_cmd(200, "AcceptCall", |c| {
+                matches!(c, SessionAction::AcceptCall { .. })
+            })
             .await;
         stack
-            .assert_cmd(200, "PlayPrompt", |c| matches!(c, SessionAction::PlayPrompt { .. }))
+            .assert_cmd(200, "PlayPrompt", |c| {
+                matches!(c, SessionAction::PlayPrompt { .. })
+            })
             .await;
         stack.audio_complete("default");
 
@@ -1172,7 +1221,10 @@ action = { type = "transfer", target = "100" }
             )
             .await;
 
-        stack.join().await.expect("should exit after collect transfer");
+        stack
+            .join()
+            .await
+            .expect("should exit after collect transfer");
     }
 
     // ── 26. Webhook GET method ────────────────────────────────────────────────
@@ -1190,10 +1242,14 @@ action = { type = "transfer", target = "100" }
         let mut stack = MockCallStack::run(Box::new(IvrApp::new(ivr)), "caller", "1000");
 
         stack
-            .assert_cmd(200, "AcceptCall", |c| matches!(c, SessionAction::AcceptCall { .. }))
+            .assert_cmd(200, "AcceptCall", |c| {
+                matches!(c, SessionAction::AcceptCall { .. })
+            })
             .await;
         stack
-            .assert_cmd(200, "PlayPrompt", |c| matches!(c, SessionAction::PlayPrompt { .. }))
+            .assert_cmd(200, "PlayPrompt", |c| {
+                matches!(c, SessionAction::PlayPrompt { .. })
+            })
             .await;
         stack.audio_complete("default");
 
@@ -1207,7 +1263,10 @@ action = { type = "transfer", target = "100" }
             )
             .await;
 
-        stack.join().await.expect("should exit after GET webhook transfer");
+        stack
+            .join()
+            .await
+            .expect("should exit after GET webhook transfer");
     }
 
     // ── 27. Webhook error → fallback to current menu ──────────────────────────
@@ -1222,10 +1281,14 @@ action = { type = "transfer", target = "100" }
         let mut stack = MockCallStack::run(Box::new(IvrApp::new(ivr)), "caller", "1000");
 
         stack
-            .assert_cmd(200, "AcceptCall", |c| matches!(c, SessionAction::AcceptCall { .. }))
+            .assert_cmd(200, "AcceptCall", |c| {
+                matches!(c, SessionAction::AcceptCall { .. })
+            })
             .await;
         stack
-            .assert_cmd(200, "PlayPrompt", |c| matches!(c, SessionAction::PlayPrompt { .. }))
+            .assert_cmd(200, "PlayPrompt", |c| {
+                matches!(c, SessionAction::PlayPrompt { .. })
+            })
             .await;
         stack.audio_complete("default");
 
@@ -1324,7 +1387,9 @@ action = { type = "transfer", target = "100" }
         let mut stack = MockCallStack::run(Box::new(IvrApp::new(ivr)), "caller", "1000");
 
         stack
-            .assert_cmd(200, "AcceptCall", |c| matches!(c, SessionAction::AcceptCall { .. }))
+            .assert_cmd(200, "AcceptCall", |c| {
+                matches!(c, SessionAction::AcceptCall { .. })
+            })
             .await;
         stack
             .assert_cmd(200, "PlayPrompt-greeting", |c| {
@@ -1347,7 +1412,13 @@ action = { type = "transfer", target = "100" }
         stack.audio_complete("default");
         stack
             .assert_cmd(200, "Hangup-486", |c| {
-                matches!(c, SessionAction::Hangup { code: Some(486), .. })
+                matches!(
+                    c,
+                    SessionAction::Hangup {
+                        code: Some(486),
+                        ..
+                    }
+                )
             })
             .await;
     }
@@ -1358,7 +1429,9 @@ action = { type = "transfer", target = "100" }
         let mut stack = MockCallStack::run(Box::new(IvrApp::new(ivr)), "caller", "1000");
 
         stack
-            .assert_cmd(200, "AcceptCall", |c| matches!(c, SessionAction::AcceptCall { .. }))
+            .assert_cmd(200, "AcceptCall", |c| {
+                matches!(c, SessionAction::AcceptCall { .. })
+            })
             .await;
         stack
             .assert_cmd(200, "PlayPrompt-greeting", |c| {
@@ -1373,7 +1446,13 @@ action = { type = "transfer", target = "100" }
         // No prompt — should hang up immediately with SIP code 503
         stack
             .assert_cmd(200, "Hangup-503", |c| {
-                matches!(c, SessionAction::Hangup { code: Some(503), .. })
+                matches!(
+                    c,
+                    SessionAction::Hangup {
+                        code: Some(503),
+                        ..
+                    }
+                )
             })
             .await;
     }
@@ -1391,8 +1470,7 @@ action = { type = "transfer", target = "100" }
             bits_per_sample: 16,
             sample_format: hound::SampleFormat::Int,
         };
-        let mut writer = hound::WavWriter::create(path.to_str().unwrap(), spec)
-            .expect("WavWriter");
+        let mut writer = hound::WavWriter::create(path.to_str().unwrap(), spec).expect("WavWriter");
         for i in 0..num_samples {
             let sample = ((i as f32 / 8.0).sin() * 1000.0) as i16;
             writer.write_sample(sample).expect("write_sample");
@@ -1409,9 +1487,9 @@ action = { type = "transfer", target = "100" }
         audio_file: &str,
         stack: &MockCallStack,
     ) -> crate::media::FileTrack {
+        use crate::call::app::ControllerEvent;
         use crate::media::FileTrack;
         use audio_codec::CodecType;
-        use crate::call::app::ControllerEvent;
 
         let track = FileTrack::new("e2e-track".to_string())
             .with_path(audio_file.to_string())
@@ -1447,7 +1525,10 @@ action = { type = "transfer", target = "100" }
             .unwrap_or_else(|| panic!("timed out waiting for PlayPrompt ({label})"));
         let audio_file = match &cmd {
             SessionAction::PlayPrompt { audio_file, .. } => {
-                assert_eq!(audio_file, expected_path, "PlayPrompt path mismatch ({label})");
+                assert_eq!(
+                    audio_file, expected_path,
+                    "PlayPrompt path mismatch ({label})"
+                );
                 audio_file.clone()
             }
             other => panic!("Expected PlayPrompt ({label}), got {other:?}"),
@@ -1484,7 +1565,9 @@ action = { type = "transfer", target = "100" }
                 entries: vec![MenuEntry {
                     key: "1".to_string(),
                     label: Some("Transfer".to_string()),
-                    action: EntryAction::Transfer { target: "2001".to_string() },
+                    action: EntryAction::Transfer {
+                        target: "2001".to_string(),
+                    },
                 }],
                 ..Default::default()
             },
@@ -1494,7 +1577,9 @@ action = { type = "transfer", target = "100" }
         let mut stack = MockCallStack::run(Box::new(IvrApp::new(ivr)), "caller", "1000");
 
         stack
-            .assert_cmd(200, "AcceptCall", |c| matches!(c, SessionAction::AcceptCall { .. }))
+            .assert_cmd(200, "AcceptCall", |c| {
+                matches!(c, SessionAction::AcceptCall { .. })
+            })
             .await;
 
         let _track = expect_and_play(&mut stack, &greeting_path, "root greeting").await;
@@ -1507,7 +1592,10 @@ action = { type = "transfer", target = "100" }
         );
 
         stack.dtmf("1");
-        stack.join().await.expect("IVR should exit cleanly after transfer");
+        stack
+            .join()
+            .await
+            .expect("IVR should exit cleanly after transfer");
 
         let _ = fs::remove_file(&greeting_path).await;
     }
@@ -1540,26 +1628,33 @@ action = { type = "transfer", target = "100" }
                 entries: vec![MenuEntry {
                     key: "2".to_string(),
                     label: Some("Support".to_string()),
-                    action: EntryAction::Menu { menu: "support".to_string() },
+                    action: EntryAction::Menu {
+                        menu: "support".to_string(),
+                    },
                 }],
                 ..Default::default()
             },
             menus: {
                 let mut m = HashMap::new();
-                m.insert("support".to_string(), MenuNode {
-                    greeting: sub_wav.clone(),
-                    timeout_ms: 2000,
-                    max_retries: 1,
-                    invalid_prompt: None,
-                    timeout_action: Some(EntryAction::Hangup { prompt: None }),
-                    max_retries_action: Some(EntryAction::Hangup { prompt: None }),
-                    entries: vec![MenuEntry {
-                        key: "1".to_string(),
-                        label: Some("Billing".to_string()),
-                        action: EntryAction::Transfer { target: "3001".to_string() },
-                    }],
-                    ..Default::default()
-                });
+                m.insert(
+                    "support".to_string(),
+                    MenuNode {
+                        greeting: sub_wav.clone(),
+                        timeout_ms: 2000,
+                        max_retries: 1,
+                        invalid_prompt: None,
+                        timeout_action: Some(EntryAction::Hangup { prompt: None }),
+                        max_retries_action: Some(EntryAction::Hangup { prompt: None }),
+                        entries: vec![MenuEntry {
+                            key: "1".to_string(),
+                            label: Some("Billing".to_string()),
+                            action: EntryAction::Transfer {
+                                target: "3001".to_string(),
+                            },
+                        }],
+                        ..Default::default()
+                    },
+                );
                 m
             },
         };
@@ -1568,7 +1663,9 @@ action = { type = "transfer", target = "100" }
 
         // Answer
         stack
-            .assert_cmd(200, "AcceptCall", |c| matches!(c, SessionAction::AcceptCall { .. }))
+            .assert_cmd(200, "AcceptCall", |c| {
+                matches!(c, SessionAction::AcceptCall { .. })
+            })
             .await;
 
         // Root greeting plays with real FileTrack
@@ -1588,7 +1685,10 @@ action = { type = "transfer", target = "100" }
 
         // Transfer to billing
         stack.dtmf("1");
-        stack.join().await.expect("IVR should exit cleanly after billing transfer");
+        stack
+            .join()
+            .await
+            .expect("IVR should exit cleanly after billing transfer");
 
         let _ = fs::remove_file(&root_wav).await;
         let _ = fs::remove_file(&sub_wav).await;
@@ -1633,7 +1733,9 @@ action = { type = "transfer", target = "100" }
         let mut stack = MockCallStack::run(Box::new(IvrApp::new(ivr)), "caller", "1000");
 
         stack
-            .assert_cmd(200, "AcceptCall", |c| matches!(c, SessionAction::AcceptCall { .. }))
+            .assert_cmd(200, "AcceptCall", |c| {
+                matches!(c, SessionAction::AcceptCall { .. })
+            })
             .await;
 
         // Greeting with real FileTrack
@@ -1683,7 +1785,9 @@ action = { type = "transfer", target = "100" }
                 entries: vec![MenuEntry {
                     key: "1".to_string(),
                     label: Some("Sales".to_string()),
-                    action: EntryAction::Transfer { target: "2001".to_string() },
+                    action: EntryAction::Transfer {
+                        target: "2001".to_string(),
+                    },
                 }],
                 ..Default::default()
             },
@@ -1693,7 +1797,9 @@ action = { type = "transfer", target = "100" }
         let mut stack = MockCallStack::run(Box::new(IvrApp::new(ivr)), "caller", "1000");
 
         stack
-            .assert_cmd(200, "AcceptCall", |c| matches!(c, SessionAction::AcceptCall { .. }))
+            .assert_cmd(200, "AcceptCall", |c| {
+                matches!(c, SessionAction::AcceptCall { .. })
+            })
             .await;
 
         // 1. Root greeting (real)
@@ -1746,12 +1852,16 @@ action = { type = "transfer", target = "100" }
                     MenuEntry {
                         key: "3".to_string(),
                         label: Some("Info".to_string()),
-                        action: EntryAction::Play { prompt: announce_wav.clone() },
+                        action: EntryAction::Play {
+                            prompt: announce_wav.clone(),
+                        },
                     },
                     MenuEntry {
                         key: "1".to_string(),
                         label: Some("Sales".to_string()),
-                        action: EntryAction::Transfer { target: "2001".to_string() },
+                        action: EntryAction::Transfer {
+                            target: "2001".to_string(),
+                        },
                     },
                 ],
                 ..Default::default()
@@ -1762,7 +1872,9 @@ action = { type = "transfer", target = "100" }
         let mut stack = MockCallStack::run(Box::new(IvrApp::new(ivr)), "caller", "1000");
 
         stack
-            .assert_cmd(200, "AcceptCall", |c| matches!(c, SessionAction::AcceptCall { .. }))
+            .assert_cmd(200, "AcceptCall", |c| {
+                matches!(c, SessionAction::AcceptCall { .. })
+            })
             .await;
 
         // 1. Root greeting (real)
@@ -1815,7 +1927,9 @@ action = { type = "transfer", target = "100" }
                 entries: vec![MenuEntry {
                     key: "1".to_string(),
                     label: Some("Sales".to_string()),
-                    action: EntryAction::Transfer { target: "2001".to_string() },
+                    action: EntryAction::Transfer {
+                        target: "2001".to_string(),
+                    },
                 }],
                 ..Default::default()
             },
@@ -1825,7 +1939,9 @@ action = { type = "transfer", target = "100" }
         let mut stack = MockCallStack::run(Box::new(IvrApp::new(ivr)), "caller", "1000");
 
         stack
-            .assert_cmd(200, "AcceptCall", |c| matches!(c, SessionAction::AcceptCall { .. }))
+            .assert_cmd(200, "AcceptCall", |c| {
+                matches!(c, SessionAction::AcceptCall { .. })
+            })
             .await;
 
         // Greeting starts — we deliberately DO NOT wire real playback completion
@@ -1841,7 +1957,10 @@ action = { type = "transfer", target = "100" }
         stack.dtmf("1");
 
         // IVR should execute the transfer without waiting for audio to complete
-        stack.join().await.expect("IVR should exit after barge-in transfer");
+        stack
+            .join()
+            .await
+            .expect("IVR should exit after barge-in transfer");
 
         let _ = fs::remove_file(&greeting_wav).await;
     }
@@ -1872,7 +1991,9 @@ action = { type = "transfer", target = "100" }
                 entries: vec![MenuEntry {
                     key: "1".to_string(),
                     label: Some("Sales".to_string()),
-                    action: EntryAction::Transfer { target: "2001".to_string() },
+                    action: EntryAction::Transfer {
+                        target: "2001".to_string(),
+                    },
                 }],
                 ..Default::default()
             },
@@ -1882,7 +2003,9 @@ action = { type = "transfer", target = "100" }
         let mut stack = MockCallStack::run(Box::new(IvrApp::new(ivr)), "caller", "1000");
 
         stack
-            .assert_cmd(200, "AcceptCall", |c| matches!(c, SessionAction::AcceptCall { .. }))
+            .assert_cmd(200, "AcceptCall", |c| {
+                matches!(c, SessionAction::AcceptCall { .. })
+            })
             .await;
 
         // 1. Initial greeting (real)
@@ -1946,7 +2069,9 @@ action = { type = "transfer", target = "100" }
         let mut stack = MockCallStack::run(Box::new(IvrApp::new(ivr)), "caller", "1000");
 
         stack
-            .assert_cmd(200, "AcceptCall", |c| matches!(c, SessionAction::AcceptCall { .. }))
+            .assert_cmd(200, "AcceptCall", |c| {
+                matches!(c, SessionAction::AcceptCall { .. })
+            })
             .await;
 
         // Greeting (real)
@@ -1963,7 +2088,13 @@ action = { type = "transfer", target = "100" }
         // After busy prompt → hangup with code 486
         stack
             .assert_cmd(500, "Hangup-486", |c| {
-                matches!(c, SessionAction::Hangup { code: Some(486), .. })
+                matches!(
+                    c,
+                    SessionAction::Hangup {
+                        code: Some(486),
+                        ..
+                    }
+                )
             })
             .await;
 
@@ -1983,7 +2114,9 @@ action = { type = "transfer", target = "100" }
         let mut stack = MockCallStack::run(Box::new(IvrApp::new(ivr)), "caller", "1000");
 
         stack
-            .assert_cmd(200, "AcceptCall", |c| matches!(c, SessionAction::AcceptCall { .. }))
+            .assert_cmd(200, "AcceptCall", |c| {
+                matches!(c, SessionAction::AcceptCall { .. })
+            })
             .await;
         stack
             .assert_cmd(200, "PlayPrompt-greeting", |c| {
@@ -2008,7 +2141,13 @@ action = { type = "transfer", target = "100" }
         stack.audio_complete("default");
         stack
             .assert_cmd(200, "Hangup-486", |c| {
-                matches!(c, SessionAction::Hangup { code: Some(486), .. })
+                matches!(
+                    c,
+                    SessionAction::Hangup {
+                        code: Some(486),
+                        ..
+                    }
+                )
             })
             .await;
     }

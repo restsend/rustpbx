@@ -26,8 +26,7 @@ use futures::{SinkExt, StreamExt};
 use rustpbx::{
     proxy::active_call_registry::ActiveProxyCallRegistry,
     rwi::{
-        RwiAuth, RwiAuthRef,
-        RwiGateway, RwiGatewayRef,
+        RwiAuth, RwiAuthRef, RwiGateway, RwiGatewayRef,
         auth::{RwiConfig, RwiTokenConfig},
         handler::rwi_ws_handler,
     },
@@ -58,14 +57,9 @@ fn make_auth() -> RwiAuthRef {
 
 /// Start an in-process Axum server on an OS-assigned port.
 /// Returns (base_url, gateway_ref, registry_ref).
-async fn start_test_server() -> (
-    String,
-    RwiGatewayRef,
-    Arc<ActiveProxyCallRegistry>,
-) {
+async fn start_test_server() -> (String, RwiGatewayRef, Arc<ActiveProxyCallRegistry>) {
     let auth = make_auth();
-    let gateway: RwiGatewayRef =
-        Arc::new(tokio::sync::RwLock::new(RwiGateway::new()));
+    let gateway: RwiGatewayRef = Arc::new(tokio::sync::RwLock::new(RwiGateway::new()));
     let registry = Arc::new(ActiveProxyCallRegistry::new());
 
     let auth_c = auth.clone();
@@ -110,7 +104,9 @@ async fn start_test_server() -> (
 }
 
 /// Connect a WebSocket client with the test token.
-async fn connect(url: &str) -> tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>> {
+async fn connect(
+    url: &str,
+) -> tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>> {
     let full = format!("{}?token={}", url, TEST_TOKEN);
     let (ws, _) = timeout(Duration::from_secs(5), connect_async(&full))
         .await
@@ -196,7 +192,10 @@ async fn test_auth_rejected_without_token() {
     .expect("timeout");
 
     // tungstenite returns Err on a non-101 HTTP response
-    assert!(result.is_err(), "connection without token should be rejected");
+    assert!(
+        result.is_err(),
+        "connection without token should be rejected"
+    );
 }
 
 /// A valid token must result in a successful WebSocket upgrade.
@@ -216,7 +215,10 @@ async fn test_session_subscribe_returns_success() {
     let (url, _gw, _reg) = start_test_server().await;
     let mut ws = connect(&url).await;
 
-    let (id, json) = req("session.subscribe", serde_json::json!({"contexts": ["default"]}));
+    let (id, json) = req(
+        "session.subscribe",
+        serde_json::json!({"contexts": ["default"]}),
+    );
     let v = send_recv(&mut ws, &json).await;
 
     assert_eq!(v["response"], "success");
@@ -236,7 +238,11 @@ async fn test_session_list_calls_empty_returns_array() {
     assert_eq!(v["response"], "success");
     assert_eq!(v["action_id"], id);
     // data should be an array (possibly empty)
-    assert!(v["data"].is_array(), "list_calls data must be array, got: {}", v);
+    assert!(
+        v["data"].is_array(),
+        "list_calls data must be array, got: {}",
+        v
+    );
 
     ws.close(None).await.unwrap();
 }
@@ -320,7 +326,9 @@ async fn test_invalid_json_returns_parse_error() {
     let (url, _gw, _reg) = start_test_server().await;
     let mut ws = connect(&url).await;
 
-    ws.send(Message::Text("not json at all".into())).await.unwrap();
+    ws.send(Message::Text("not json at all".into()))
+        .await
+        .unwrap();
     let msg = timeout(Duration::from_secs(5), ws.next())
         .await
         .expect("timeout")
@@ -342,7 +350,10 @@ async fn test_call_answer_not_found_returns_not_found() {
     let (url, _gw, _reg) = start_test_server().await;
     let mut ws = connect(&url).await;
 
-    let (_, json) = req("call.answer", serde_json::json!({"call_id": "no-such-call"}));
+    let (_, json) = req(
+        "call.answer",
+        serde_json::json!({"call_id": "no-such-call"}),
+    );
     let v = send_recv(&mut ws, &json).await;
 
     assert_eq!(v["response"], "error");
@@ -431,12 +442,15 @@ async fn test_sequential_commands_on_single_connection() {
     let mut ws = connect(&url).await;
 
     let commands = vec![
-        ("session.subscribe", serde_json::json!({"contexts": ["ctx1", "ctx2"]})),
+        (
+            "session.subscribe",
+            serde_json::json!({"contexts": ["ctx1", "ctx2"]}),
+        ),
         ("session.list_calls", serde_json::json!({})),
         ("call.answer", serde_json::json!({"call_id": "no-call"})),
         ("call.hangup", serde_json::json!({"call_id": "no-call"})),
-        ("call.ring",   serde_json::json!({"call_id": "no-call"})),
-        ("media.stop",  serde_json::json!({"call_id": "no-call"})),
+        ("call.ring", serde_json::json!({"call_id": "no-call"})),
+        ("media.stop", serde_json::json!({"call_id": "no-call"})),
         ("call.unbridge", serde_json::json!({"call_id": "no-call"})),
     ];
 
@@ -587,7 +601,12 @@ async fn test_conference_create_duplicate_returns_error() {
     );
     let v = send_recv_matching(&mut ws, &json, &action_id).await;
     assert_eq!(v["response"], "error");
-    assert!(v["error"]["message"].as_str().unwrap().contains("already exists"));
+    assert!(
+        v["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("already exists")
+    );
 }
 
 #[tokio::test]
@@ -604,7 +623,12 @@ async fn test_conference_create_external_requires_mcu_uri() {
     );
     let v = send_recv(&mut ws, &json).await;
     assert_eq!(v["response"], "error");
-    assert!(v["error"]["message"].as_str().unwrap().contains("external backend requires mcu_uri"));
+    assert!(
+        v["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("external backend requires mcu_uri")
+    );
 }
 
 #[tokio::test]
@@ -647,7 +671,12 @@ async fn test_conference_destroy_not_found_returns_error() {
     );
     let v = send_recv(&mut ws, &json).await;
     assert_eq!(v["response"], "error");
-    assert!(v["error"]["message"].as_str().unwrap().contains("not found"));
+    assert!(
+        v["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("not found")
+    );
 }
 
 #[tokio::test]
@@ -665,7 +694,12 @@ async fn test_conference_add_not_found_returns_error() {
     );
     let v = send_recv(&mut ws, &json).await;
     assert_eq!(v["response"], "error");
-    assert!(v["error"]["message"].as_str().unwrap().contains("not found"));
+    assert!(
+        v["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("not found")
+    );
 }
 
 #[tokio::test]
@@ -693,7 +727,12 @@ async fn test_conference_mute_not_in_conference_returns_error() {
     );
     let v = send_recv_matching(&mut ws, &json, &action_id).await;
     assert_eq!(v["response"], "error");
-    assert!(v["error"]["message"].as_str().unwrap().contains("is not in conference"));
+    assert!(
+        v["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("is not in conference")
+    );
 }
 
 #[tokio::test]
@@ -721,7 +760,12 @@ async fn test_conference_unmute_not_in_conference_returns_error() {
     );
     let v = send_recv_matching(&mut ws, &json, &action_id).await;
     assert_eq!(v["response"], "error");
-    assert!(v["error"]["message"].as_str().unwrap().contains("is not in conference"));
+    assert!(
+        v["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("is not in conference")
+    );
 }
 
 #[tokio::test]
@@ -749,5 +793,10 @@ async fn test_conference_remove_not_in_conference_returns_error() {
     );
     let v = send_recv_matching(&mut ws, &json, &action_id).await;
     assert_eq!(v["response"], "error");
-    assert!(v["error"]["message"].as_str().unwrap().contains("is not in conference"));
+    assert!(
+        v["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("is not in conference")
+    );
 }

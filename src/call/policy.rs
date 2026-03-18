@@ -297,13 +297,7 @@ impl PolicyGuard {
         if let Some(limit) = &policy.frequency_limit {
             if !self
                 .limiter
-                .check_and_increment(
-                    policy_id,
-                    "caller",
-                    caller,
-                    limit.count,
-                    limit.window_hours,
-                )
+                .check_and_increment(policy_id, "caller", caller, limit.count, limit.window_hours)
                 .await?
             {
                 let reason = format!("Frequency limit reached for caller {}", caller);
@@ -988,7 +982,7 @@ impl FrequencyLimiter for DbFrequencyLimiter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::policy::{FrequencyLimit, DailyLimit, ConcurrencyLimit};
+    use crate::models::policy::{ConcurrencyLimit, DailyLimit, FrequencyLimit};
     use std::collections::HashMap;
 
     /// A test limiter that records what policy_id was passed
@@ -1090,7 +1084,10 @@ mod tests {
             .await;
 
         assert!(result.is_ok());
-        assert_eq!(limiter.get_last_policy_id(), Some("test-policy-123".to_string()));
+        assert_eq!(
+            limiter.get_last_policy_id(),
+            Some("test-policy-123".to_string())
+        );
     }
 
     #[tokio::test]
@@ -1106,7 +1103,10 @@ mod tests {
             .await;
 
         assert!(result.is_ok());
-        assert_eq!(limiter.get_last_policy_id(), Some("daily-policy-456".to_string()));
+        assert_eq!(
+            limiter.get_last_policy_id(),
+            Some("daily-policy-456".to_string())
+        );
     }
 
     #[tokio::test]
@@ -1121,11 +1121,20 @@ mod tests {
         });
 
         let result = guard
-            .check_policy("concurrency-policy-789", &policy, "caller1", "callee1", None)
+            .check_policy(
+                "concurrency-policy-789",
+                &policy,
+                "caller1",
+                "callee1",
+                None,
+            )
             .await;
 
         assert!(result.is_ok());
-        assert_eq!(limiter.get_last_policy_id(), Some("concurrency-policy-789".to_string()));
+        assert_eq!(
+            limiter.get_last_policy_id(),
+            Some("concurrency-policy-789".to_string())
+        );
     }
 
     #[tokio::test]
@@ -1143,4 +1152,3 @@ mod tests {
         assert_eq!(result.unwrap(), PolicyCheckStatus::Allowed);
     }
 }
-

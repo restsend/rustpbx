@@ -29,12 +29,12 @@ fn main() {
 }
 
 fn verify_toml(path: &str) -> Result<(), String> {
-    let content = fs::read_to_string(path)
-        .map_err(|e| format!("Failed to read {}: {}", path, e))?;
+    let content =
+        fs::read_to_string(path).map_err(|e| format!("Failed to read {}: {}", path, e))?;
 
     // Parse TOML to check for syntax errors
-    let _: toml::Value = toml::from_str(&content)
-        .map_err(|e| format!("TOML parse error at {}: {}", path, e))?;
+    let _: toml::Value =
+        toml::from_str(&content).map_err(|e| format!("TOML parse error at {}: {}", path, e))?;
 
     // Check for duplicate keys by parsing manually
     let mut seen_keys: HashSet<String> = HashSet::new();
@@ -50,7 +50,7 @@ fn verify_toml(path: &str) -> Result<(), String> {
 
         // Track section headers
         if trimmed.starts_with('[') && trimmed.ends_with(']') {
-            current_section = trimmed[1..trimmed.len()-1].to_string();
+            current_section = trimmed[1..trimmed.len() - 1].to_string();
             continue;
         }
 

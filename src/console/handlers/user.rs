@@ -202,10 +202,7 @@ pub async fn logout(
     response
 }
 
-pub async fn register_page(
-    State(state): State<Arc<ConsoleState>>,
-    headers: HeaderMap,
-) -> Response {
+pub async fn register_page(State(state): State<Arc<ConsoleState>>, headers: HeaderMap) -> Response {
     let policy = match state.registration_policy().await {
         Ok(policy) => policy,
         Err(err) => {
@@ -353,10 +350,7 @@ pub async fn register_post(
     }
 }
 
-pub async fn forgot_page(
-    State(state): State<Arc<ConsoleState>>,
-    headers: HeaderMap,
-) -> Response {
+pub async fn forgot_page(State(state): State<Arc<ConsoleState>>, headers: HeaderMap) -> Response {
     state.render_with_headers(
         "console/forgot.html",
         json!({

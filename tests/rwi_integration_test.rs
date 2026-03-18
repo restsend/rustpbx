@@ -84,7 +84,10 @@ impl RwiTestClient {
         })
     }
 
-    async fn send_request(&mut self, request: RwiRequest) -> Result<RwiResponse, Box<dyn std::error::Error + Send + Sync>> {
+    async fn send_request(
+        &mut self,
+        request: RwiRequest,
+    ) -> Result<RwiResponse, Box<dyn std::error::Error + Send + Sync>> {
         let json = request.to_json();
         self.ws.send(Message::Text(json.into())).await?;
 
@@ -106,24 +109,36 @@ impl RwiTestClient {
         }
     }
 
-    async fn subscribe(&mut self, contexts: Vec<&str>) -> Result<RwiResponse, Box<dyn std::error::Error + Send + Sync>> {
+    async fn subscribe(
+        &mut self,
+        contexts: Vec<&str>,
+    ) -> Result<RwiResponse, Box<dyn std::error::Error + Send + Sync>> {
         let request = RwiRequest::new("session.subscribe")
             .with_params(serde_json::json!({ "contexts": contexts }));
         self.send_request(request).await
     }
 
-    async fn list_calls(&mut self) -> Result<RwiResponse, Box<dyn std::error::Error + Send + Sync>> {
+    async fn list_calls(
+        &mut self,
+    ) -> Result<RwiResponse, Box<dyn std::error::Error + Send + Sync>> {
         let request = RwiRequest::new("session.list_calls");
         self.send_request(request).await
     }
 
-    async fn answer_call(&mut self, call_id: &str) -> Result<RwiResponse, Box<dyn std::error::Error + Send + Sync>> {
-        let request = RwiRequest::new("call.answer")
-            .with_params(serde_json::json!({ "call_id": call_id }));
+    async fn answer_call(
+        &mut self,
+        call_id: &str,
+    ) -> Result<RwiResponse, Box<dyn std::error::Error + Send + Sync>> {
+        let request =
+            RwiRequest::new("call.answer").with_params(serde_json::json!({ "call_id": call_id }));
         self.send_request(request).await
     }
 
-    async fn hangup_call(&mut self, call_id: &str, reason: Option<&str>) -> Result<RwiResponse, Box<dyn std::error::Error + Send + Sync>> {
+    async fn hangup_call(
+        &mut self,
+        call_id: &str,
+        reason: Option<&str>,
+    ) -> Result<RwiResponse, Box<dyn std::error::Error + Send + Sync>> {
         let mut params = serde_json::json!({ "call_id": call_id });
         if let Some(r) = reason {
             params["reason"] = serde_json::json!(r);
@@ -132,7 +147,11 @@ impl RwiTestClient {
         self.send_request(request).await
     }
 
-    async fn reject_call(&mut self, call_id: &str, reason: Option<&str>) -> Result<RwiResponse, Box<dyn std::error::Error + Send + Sync>> {
+    async fn reject_call(
+        &mut self,
+        call_id: &str,
+        reason: Option<&str>,
+    ) -> Result<RwiResponse, Box<dyn std::error::Error + Send + Sync>> {
         let mut params = serde_json::json!({ "call_id": call_id });
         if let Some(r) = reason {
             params["reason"] = serde_json::json!(r);
@@ -141,19 +160,31 @@ impl RwiTestClient {
         self.send_request(request).await
     }
 
-    async fn ring_call(&mut self, call_id: &str) -> Result<RwiResponse, Box<dyn std::error::Error + Send + Sync>> {
-        let request = RwiRequest::new("call.ring")
-            .with_params(serde_json::json!({ "call_id": call_id }));
+    async fn ring_call(
+        &mut self,
+        call_id: &str,
+    ) -> Result<RwiResponse, Box<dyn std::error::Error + Send + Sync>> {
+        let request =
+            RwiRequest::new("call.ring").with_params(serde_json::json!({ "call_id": call_id }));
         self.send_request(request).await
     }
 
-    async fn transfer_call(&mut self, call_id: &str, target: &str) -> Result<RwiResponse, Box<dyn std::error::Error + Send + Sync>> {
+    async fn transfer_call(
+        &mut self,
+        call_id: &str,
+        target: &str,
+    ) -> Result<RwiResponse, Box<dyn std::error::Error + Send + Sync>> {
         let request = RwiRequest::new("call.transfer")
             .with_params(serde_json::json!({ "call_id": call_id, "target": target }));
         self.send_request(request).await
     }
 
-    async fn originate(&mut self, call_id: &str, destination: &str, caller_id: Option<&str>) -> Result<RwiResponse, Box<dyn std::error::Error + Send + Sync>> {
+    async fn originate(
+        &mut self,
+        call_id: &str,
+        destination: &str,
+        caller_id: Option<&str>,
+    ) -> Result<RwiResponse, Box<dyn std::error::Error + Send + Sync>> {
         let mut params = serde_json::json!({
             "call_id": call_id,
             "destination": destination,
@@ -165,21 +196,29 @@ impl RwiTestClient {
         self.send_request(request).await
     }
 
-    async fn bridge(&mut self, leg_a: &str, leg_b: &str) -> Result<RwiResponse, Box<dyn std::error::Error + Send + Sync>> {
+    async fn bridge(
+        &mut self,
+        leg_a: &str,
+        leg_b: &str,
+    ) -> Result<RwiResponse, Box<dyn std::error::Error + Send + Sync>> {
         let request = RwiRequest::new("call.bridge")
             .with_params(serde_json::json!({ "leg_a": leg_a, "leg_b": leg_b }));
         self.send_request(request).await
     }
 
-    async fn media_play(&mut self, call_id: &str, source_type: &str, uri: &str) -> Result<RwiResponse, Box<dyn std::error::Error + Send + Sync>> {
-        let request = RwiRequest::new("media.play")
-            .with_params(serde_json::json!({
-                "call_id": call_id,
-                "source": {
-                    "type": source_type,
-                    "uri": uri
-                }
-            }));
+    async fn media_play(
+        &mut self,
+        call_id: &str,
+        source_type: &str,
+        uri: &str,
+    ) -> Result<RwiResponse, Box<dyn std::error::Error + Send + Sync>> {
+        let request = RwiRequest::new("media.play").with_params(serde_json::json!({
+            "call_id": call_id,
+            "source": {
+                "type": source_type,
+                "uri": uri
+            }
+        }));
         self.send_request(request).await
     }
 
@@ -276,7 +315,10 @@ async fn test_call_operations_on_nonexistent_call() {
 
             let response = result.unwrap();
             // Should return error for non-existent call
-            assert_eq!(response.response, "error", "Expected error for non-existent call");
+            assert_eq!(
+                response.response, "error",
+                "Expected error for non-existent call"
+            );
             assert!(response.error.is_some());
 
             // Try to hangup non-existent call
@@ -365,7 +407,9 @@ async fn test_call_originate() {
             let _ = client.subscribe(vec!["default"]).await;
 
             // Try to originate a call
-            let result = client.originate("new-call", "sip:test@local", Some("1001")).await;
+            let result = client
+                .originate("new-call", "sip:test@local", Some("1001"))
+                .await;
             assert!(result.is_ok());
 
             let response = result.unwrap();

@@ -20,6 +20,8 @@ pub mod audio_source;
 #[cfg(test)]
 mod file_track_tests;
 pub mod mixer;
+#[cfg(test)]
+mod mixer_e2e_tests;
 pub mod mixer_input;
 pub mod mixer_output;
 pub mod mixer_registry;
@@ -27,8 +29,6 @@ pub mod negotiate;
 pub mod transcoder;
 #[cfg(test)]
 mod unified_pc_tests;
-#[cfg(test)]
-mod mixer_e2e_tests;
 pub mod wav_writer;
 
 pub trait StreamWriter: Send + Sync {

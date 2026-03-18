@@ -47,19 +47,47 @@ pub struct RwiCommandMessage {
 
 #[derive(Debug, Clone)]
 pub enum RwiCommandPayload {
-    Subscribe { contexts: Vec<String> },
-    Unsubscribe { contexts: Vec<String> },
+    Subscribe {
+        contexts: Vec<String>,
+    },
+    Unsubscribe {
+        contexts: Vec<String>,
+    },
     ListCalls,
-    AttachCall { call_id: String, mode: OwnershipMode },
-    DetachCall { call_id: String },
+    AttachCall {
+        call_id: String,
+        mode: OwnershipMode,
+    },
+    DetachCall {
+        call_id: String,
+    },
     Originate(OriginateRequest),
-    Answer { call_id: String },
-    Reject { call_id: String, reason: Option<String> },
-    Ring { call_id: String },
-    Hangup { call_id: String, reason: Option<String>, code: Option<u16> },
-    Bridge { leg_a: String, leg_b: String },
-    Unbridge { call_id: String },
-    Transfer { call_id: String, target: String },
+    Answer {
+        call_id: String,
+    },
+    Reject {
+        call_id: String,
+        reason: Option<String>,
+    },
+    Ring {
+        call_id: String,
+    },
+    Hangup {
+        call_id: String,
+        reason: Option<String>,
+        code: Option<u16>,
+    },
+    Bridge {
+        leg_a: String,
+        leg_b: String,
+    },
+    Unbridge {
+        call_id: String,
+    },
+    Transfer {
+        call_id: String,
+        target: String,
+    },
     /// Attended transfer: agent talks to target first, then completes transfer.
     /// Steps: 1) call.call_id is placed on hold, 2) new leg created to target,
     /// 3) when target answers, agent can complete or cancel transfer.
@@ -82,42 +110,126 @@ pub enum RwiCommandPayload {
         consultation_call_id: String,
     },
     /// Place a call on hold with optional music.
-    CallHold { call_id: String, music: Option<String> },
+    CallHold {
+        call_id: String,
+        music: Option<String>,
+    },
     /// Release a call from hold.
-    CallUnhold { call_id: String },
-    SetRingbackSource { target_call_id: String, source_call_id: String },
+    CallUnhold {
+        call_id: String,
+    },
+    SetRingbackSource {
+        target_call_id: String,
+        source_call_id: String,
+    },
     MediaPlay(MediaPlayRequest),
-    MediaStop { call_id: String },
+    MediaStop {
+        call_id: String,
+    },
     MediaStreamStart(MediaStreamRequest),
-    MediaStreamStop { call_id: String },
+    MediaStreamStop {
+        call_id: String,
+    },
     MediaInjectStart(MediaInjectRequest),
-    MediaInjectStop { call_id: String },
+    MediaInjectStop {
+        call_id: String,
+    },
     RecordStart(RecordStartRequest),
-    RecordPause { call_id: String },
-    RecordResume { call_id: String },
-    RecordStop { call_id: String },
-    RecordMaskSegment { call_id: String, recording_id: String, start_secs: u64, end_secs: u64 },
+    RecordPause {
+        call_id: String,
+    },
+    RecordResume {
+        call_id: String,
+    },
+    RecordStop {
+        call_id: String,
+    },
+    RecordMaskSegment {
+        call_id: String,
+        recording_id: String,
+        start_secs: u64,
+        end_secs: u64,
+    },
     QueueEnqueue(QueueEnqueueRequest),
-    QueueDequeue { call_id: String },
-    QueueHold { call_id: String },
-    QueueUnhold { call_id: String },
-    QueueSetPriority { call_id: String, priority: u32 },
-    QueueAssignAgent { call_id: String, agent_id: String },
-    QueueRequeue { call_id: String, queue_id: String, priority: Option<u32> },
-    SupervisorTakeover { supervisor_call_id: String, target_call_id: String, agent_leg: String },
-    SupervisorListen { supervisor_call_id: String, target_call_id: String },
-    SupervisorWhisper { supervisor_call_id: String, target_call_id: String, agent_leg: String },
-    SupervisorBarge { supervisor_call_id: String, target_call_id: String, agent_leg: String },
-    SupervisorStop { supervisor_call_id: String, target_call_id: String },
-    SipMessage { call_id: String, content_type: String, body: String },
-    SipNotify { call_id: String, event: String, content_type: String, body: String },
-    SipOptionsPing { call_id: String },
+    QueueDequeue {
+        call_id: String,
+    },
+    QueueHold {
+        call_id: String,
+    },
+    QueueUnhold {
+        call_id: String,
+    },
+    QueueSetPriority {
+        call_id: String,
+        priority: u32,
+    },
+    QueueAssignAgent {
+        call_id: String,
+        agent_id: String,
+    },
+    QueueRequeue {
+        call_id: String,
+        queue_id: String,
+        priority: Option<u32>,
+    },
+    SupervisorTakeover {
+        supervisor_call_id: String,
+        target_call_id: String,
+        agent_leg: String,
+    },
+    SupervisorListen {
+        supervisor_call_id: String,
+        target_call_id: String,
+    },
+    SupervisorWhisper {
+        supervisor_call_id: String,
+        target_call_id: String,
+        agent_leg: String,
+    },
+    SupervisorBarge {
+        supervisor_call_id: String,
+        target_call_id: String,
+        agent_leg: String,
+    },
+    SupervisorStop {
+        supervisor_call_id: String,
+        target_call_id: String,
+    },
+    SipMessage {
+        call_id: String,
+        content_type: String,
+        body: String,
+    },
+    SipNotify {
+        call_id: String,
+        event: String,
+        content_type: String,
+        body: String,
+    },
+    SipOptionsPing {
+        call_id: String,
+    },
     ConferenceCreate(ConferenceCreateRequest),
-    ConferenceAdd { conf_id: String, call_id: String },
-    ConferenceRemove { conf_id: String, call_id: String },
-    ConferenceMute { conf_id: String, call_id: String },
-    ConferenceUnmute { conf_id: String, call_id: String },
-    ConferenceDestroy { conf_id: String },
+    ConferenceAdd {
+        conf_id: String,
+        call_id: String,
+    },
+    ConferenceRemove {
+        conf_id: String,
+        call_id: String,
+    },
+    ConferenceMute {
+        conf_id: String,
+        call_id: String,
+    },
+    ConferenceUnmute {
+        conf_id: String,
+        call_id: String,
+    },
+    ConferenceDestroy {
+        conf_id: String,
+    },
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -286,7 +398,10 @@ pub enum RwiRequest {
     #[serde(alias = "session.list_calls")]
     ListCalls,
     #[serde(alias = "session.attach_call")]
-    AttachCall { call_id: Option<String>, mode: Option<String> },
+    AttachCall {
+        call_id: Option<String>,
+        mode: Option<String>,
+    },
     #[serde(alias = "session.detach_call")]
     DetachCall { call_id: Option<String> },
 
@@ -296,29 +411,57 @@ pub enum RwiRequest {
     #[serde(alias = "call.answer")]
     Answer { call_id: Option<String> },
     #[serde(alias = "call.reject")]
-    Reject { call_id: Option<String>, reason: Option<String> },
+    Reject {
+        call_id: Option<String>,
+        reason: Option<String>,
+    },
     #[serde(alias = "call.ring")]
     Ring { call_id: Option<String> },
     #[serde(alias = "call.hangup")]
-    Hangup { call_id: Option<String>, reason: Option<String>, code: Option<u16> },
+    Hangup {
+        call_id: Option<String>,
+        reason: Option<String>,
+        code: Option<u16>,
+    },
     #[serde(alias = "call.bridge")]
-    Bridge { leg_a: Option<String>, leg_b: Option<String> },
+    Bridge {
+        leg_a: Option<String>,
+        leg_b: Option<String>,
+    },
     #[serde(alias = "call.unbridge")]
     Unbridge { call_id: Option<String> },
     #[serde(alias = "call.transfer")]
-    Transfer { call_id: Option<String>, target: Option<String> },
+    Transfer {
+        call_id: Option<String>,
+        target: Option<String>,
+    },
     #[serde(alias = "call.transfer.attended")]
-    TransferAttended { call_id: Option<String>, target: Option<String>, timeout_secs: Option<u32> },
+    TransferAttended {
+        call_id: Option<String>,
+        target: Option<String>,
+        timeout_secs: Option<u32>,
+    },
     #[serde(alias = "call.transfer.complete")]
-    TransferComplete { call_id: Option<String>, consultation_call_id: Option<String> },
+    TransferComplete {
+        call_id: Option<String>,
+        consultation_call_id: Option<String>,
+    },
     #[serde(alias = "call.transfer.cancel")]
-    TransferCancel { consultation_call_id: Option<String> },
+    TransferCancel {
+        consultation_call_id: Option<String>,
+    },
     #[serde(alias = "call.hold")]
-    CallHold { call_id: Option<String>, music: Option<String> },
+    CallHold {
+        call_id: Option<String>,
+        music: Option<String>,
+    },
     #[serde(alias = "call.unhold")]
     CallUnhold { call_id: Option<String> },
     #[serde(alias = "call.set_ringback_source")]
-    SetRingbackSource { target_call_id: Option<String>, source_call_id: Option<String> },
+    SetRingbackSource {
+        target_call_id: Option<String>,
+        source_call_id: Option<String>,
+    },
 
     // Media commands
     #[serde(alias = "media.play")]
@@ -361,29 +504,66 @@ pub enum RwiRequest {
     #[serde(alias = "queue.unhold")]
     QueueUnhold { call_id: Option<String> },
     #[serde(alias = "queue.set_priority")]
-    QueueSetPriority { call_id: Option<String>, priority: Option<u32> },
+    QueueSetPriority {
+        call_id: Option<String>,
+        priority: Option<u32>,
+    },
     #[serde(alias = "queue.assign_agent")]
-    QueueAssignAgent { call_id: Option<String>, agent_id: Option<String> },
+    QueueAssignAgent {
+        call_id: Option<String>,
+        agent_id: Option<String>,
+    },
     #[serde(alias = "queue.requeue")]
-    QueueRequeue { call_id: Option<String>, queue_id: Option<String>, priority: Option<u32> },
+    QueueRequeue {
+        call_id: Option<String>,
+        queue_id: Option<String>,
+        priority: Option<u32>,
+    },
 
     // Supervisor commands
     #[serde(alias = "supervisor.listen")]
-    SupervisorListen { supervisor_call_id: Option<String>, target_call_id: Option<String> },
+    SupervisorListen {
+        supervisor_call_id: Option<String>,
+        target_call_id: Option<String>,
+    },
     #[serde(alias = "supervisor.whisper")]
-    SupervisorWhisper { supervisor_call_id: Option<String>, target_call_id: Option<String>, agent_leg: Option<String> },
+    SupervisorWhisper {
+        supervisor_call_id: Option<String>,
+        target_call_id: Option<String>,
+        agent_leg: Option<String>,
+    },
     #[serde(alias = "supervisor.barge")]
-    SupervisorBarge { supervisor_call_id: Option<String>, target_call_id: Option<String>, agent_leg: Option<String> },
+    SupervisorBarge {
+        supervisor_call_id: Option<String>,
+        target_call_id: Option<String>,
+        agent_leg: Option<String>,
+    },
     #[serde(alias = "supervisor.stop")]
-    SupervisorStop { supervisor_call_id: Option<String>, target_call_id: Option<String> },
+    SupervisorStop {
+        supervisor_call_id: Option<String>,
+        target_call_id: Option<String>,
+    },
     #[serde(alias = "supervisor.takeover")]
-    SupervisorTakeover { supervisor_call_id: Option<String>, target_call_id: Option<String>, agent_leg: Option<String> },
+    SupervisorTakeover {
+        supervisor_call_id: Option<String>,
+        target_call_id: Option<String>,
+        agent_leg: Option<String>,
+    },
 
     // SIP commands
     #[serde(alias = "sip.message")]
-    SipMessage { call_id: Option<String>, content_type: Option<String>, body: Option<String> },
+    SipMessage {
+        call_id: Option<String>,
+        content_type: Option<String>,
+        body: Option<String>,
+    },
     #[serde(alias = "sip.notify")]
-    SipNotify { call_id: Option<String>, event: Option<String>, content_type: Option<String>, body: Option<String> },
+    SipNotify {
+        call_id: Option<String>,
+        event: Option<String>,
+        content_type: Option<String>,
+        body: Option<String>,
+    },
     #[serde(alias = "sip.options_ping")]
     SipOptionsPing { call_id: Option<String> },
 
@@ -391,13 +571,25 @@ pub enum RwiRequest {
     #[serde(alias = "conference.create")]
     ConferenceCreate(ConferenceCreateRequest),
     #[serde(alias = "conference.add")]
-    ConferenceAdd { conf_id: Option<String>, call_id: Option<String> },
+    ConferenceAdd {
+        conf_id: Option<String>,
+        call_id: Option<String>,
+    },
     #[serde(alias = "conference.remove")]
-    ConferenceRemove { conf_id: Option<String>, call_id: Option<String> },
+    ConferenceRemove {
+        conf_id: Option<String>,
+        call_id: Option<String>,
+    },
     #[serde(alias = "conference.mute")]
-    ConferenceMute { conf_id: Option<String>, call_id: Option<String> },
+    ConferenceMute {
+        conf_id: Option<String>,
+        call_id: Option<String>,
+    },
     #[serde(alias = "conference.unmute")]
-    ConferenceUnmute { conf_id: Option<String>, call_id: Option<String> },
+    ConferenceUnmute {
+        conf_id: Option<String>,
+        call_id: Option<String>,
+    },
     #[serde(alias = "conference.destroy")]
     ConferenceDestroy { conf_id: Option<String> },
 }
@@ -446,7 +638,11 @@ impl From<RwiRequest> for RwiCommandPayload {
             RwiRequest::Ring { call_id } => RwiCommandPayload::Ring {
                 call_id: call_id.unwrap_or_default(),
             },
-            RwiRequest::Hangup { call_id, reason, code } => RwiCommandPayload::Hangup {
+            RwiRequest::Hangup {
+                call_id,
+                reason,
+                code,
+            } => RwiCommandPayload::Hangup {
                 call_id: call_id.unwrap_or_default(),
                 reason,
                 code,
@@ -462,16 +658,25 @@ impl From<RwiRequest> for RwiCommandPayload {
                 call_id: call_id.unwrap_or_default(),
                 target: target.unwrap_or_default(),
             },
-            RwiRequest::TransferAttended { call_id, target, timeout_secs } => RwiCommandPayload::TransferAttended {
+            RwiRequest::TransferAttended {
+                call_id,
+                target,
+                timeout_secs,
+            } => RwiCommandPayload::TransferAttended {
                 call_id: call_id.unwrap_or_default(),
                 target: target.unwrap_or_default(),
                 timeout_secs,
             },
-            RwiRequest::TransferComplete { call_id, consultation_call_id } => RwiCommandPayload::TransferComplete {
+            RwiRequest::TransferComplete {
+                call_id,
+                consultation_call_id,
+            } => RwiCommandPayload::TransferComplete {
                 call_id: call_id.unwrap_or_default(),
                 consultation_call_id: consultation_call_id.unwrap_or_default(),
             },
-            RwiRequest::TransferCancel { consultation_call_id } => RwiCommandPayload::TransferCancel {
+            RwiRequest::TransferCancel {
+                consultation_call_id,
+            } => RwiCommandPayload::TransferCancel {
                 consultation_call_id: consultation_call_id.unwrap_or_default(),
             },
             RwiRequest::CallHold { call_id, music } => RwiCommandPayload::CallHold {
@@ -481,7 +686,10 @@ impl From<RwiRequest> for RwiCommandPayload {
             RwiRequest::CallUnhold { call_id } => RwiCommandPayload::CallUnhold {
                 call_id: call_id.unwrap_or_default(),
             },
-            RwiRequest::SetRingbackSource { target_call_id, source_call_id } => RwiCommandPayload::SetRingbackSource {
+            RwiRequest::SetRingbackSource {
+                target_call_id,
+                source_call_id,
+            } => RwiCommandPayload::SetRingbackSource {
                 target_call_id: target_call_id.unwrap_or_default(),
                 source_call_id: source_call_id.unwrap_or_default(),
             },
@@ -527,7 +735,12 @@ impl From<RwiRequest> for RwiCommandPayload {
             RwiRequest::RecordStop { call_id } => RwiCommandPayload::RecordStop {
                 call_id: call_id.unwrap_or_default(),
             },
-            RwiRequest::RecordMaskSegment { call_id, recording_id, start_secs, end_secs } => RwiCommandPayload::RecordMaskSegment {
+            RwiRequest::RecordMaskSegment {
+                call_id,
+                recording_id,
+                start_secs,
+                end_secs,
+            } => RwiCommandPayload::RecordMaskSegment {
                 call_id: call_id.unwrap_or_default(),
                 recording_id: recording_id.unwrap_or_default(),
                 start_secs: start_secs.unwrap_or(0),
@@ -548,48 +761,83 @@ impl From<RwiRequest> for RwiCommandPayload {
             RwiRequest::QueueUnhold { call_id } => RwiCommandPayload::QueueUnhold {
                 call_id: call_id.unwrap_or_default(),
             },
-            RwiRequest::QueueSetPriority { call_id, priority } => RwiCommandPayload::QueueSetPriority {
-                call_id: call_id.unwrap_or_default(),
-                priority: priority.unwrap_or(0),
-            },
-            RwiRequest::QueueAssignAgent { call_id, agent_id } => RwiCommandPayload::QueueAssignAgent {
-                call_id: call_id.unwrap_or_default(),
-                agent_id: agent_id.unwrap_or_default(),
-            },
-            RwiRequest::QueueRequeue { call_id, queue_id, priority } => RwiCommandPayload::QueueRequeue {
+            RwiRequest::QueueSetPriority { call_id, priority } => {
+                RwiCommandPayload::QueueSetPriority {
+                    call_id: call_id.unwrap_or_default(),
+                    priority: priority.unwrap_or(0),
+                }
+            }
+            RwiRequest::QueueAssignAgent { call_id, agent_id } => {
+                RwiCommandPayload::QueueAssignAgent {
+                    call_id: call_id.unwrap_or_default(),
+                    agent_id: agent_id.unwrap_or_default(),
+                }
+            }
+            RwiRequest::QueueRequeue {
+                call_id,
+                queue_id,
+                priority,
+            } => RwiCommandPayload::QueueRequeue {
                 call_id: call_id.unwrap_or_default(),
                 queue_id: queue_id.unwrap_or_default(),
                 priority,
             },
-            RwiRequest::SupervisorListen { supervisor_call_id, target_call_id } => RwiCommandPayload::SupervisorListen {
+            RwiRequest::SupervisorListen {
+                supervisor_call_id,
+                target_call_id,
+            } => RwiCommandPayload::SupervisorListen {
                 supervisor_call_id: supervisor_call_id.unwrap_or_default(),
                 target_call_id: target_call_id.unwrap_or_default(),
             },
-            RwiRequest::SupervisorWhisper { supervisor_call_id, target_call_id, agent_leg } => RwiCommandPayload::SupervisorWhisper {
-                supervisor_call_id: supervisor_call_id.unwrap_or_default(),
-                target_call_id: target_call_id.unwrap_or_default(),
-                agent_leg: agent_leg.unwrap_or_default(),
-            },
-            RwiRequest::SupervisorBarge { supervisor_call_id, target_call_id, agent_leg } => RwiCommandPayload::SupervisorBarge {
-                supervisor_call_id: supervisor_call_id.unwrap_or_default(),
-                target_call_id: target_call_id.unwrap_or_default(),
-                agent_leg: agent_leg.unwrap_or_default(),
-            },
-            RwiRequest::SupervisorStop { supervisor_call_id, target_call_id } => RwiCommandPayload::SupervisorStop {
-                supervisor_call_id: supervisor_call_id.unwrap_or_default(),
-                target_call_id: target_call_id.unwrap_or_default(),
-            },
-            RwiRequest::SupervisorTakeover { supervisor_call_id, target_call_id, agent_leg } => RwiCommandPayload::SupervisorTakeover {
+            RwiRequest::SupervisorWhisper {
+                supervisor_call_id,
+                target_call_id,
+                agent_leg,
+            } => RwiCommandPayload::SupervisorWhisper {
                 supervisor_call_id: supervisor_call_id.unwrap_or_default(),
                 target_call_id: target_call_id.unwrap_or_default(),
                 agent_leg: agent_leg.unwrap_or_default(),
             },
-            RwiRequest::SipMessage { call_id, content_type, body } => RwiCommandPayload::SipMessage {
+            RwiRequest::SupervisorBarge {
+                supervisor_call_id,
+                target_call_id,
+                agent_leg,
+            } => RwiCommandPayload::SupervisorBarge {
+                supervisor_call_id: supervisor_call_id.unwrap_or_default(),
+                target_call_id: target_call_id.unwrap_or_default(),
+                agent_leg: agent_leg.unwrap_or_default(),
+            },
+            RwiRequest::SupervisorStop {
+                supervisor_call_id,
+                target_call_id,
+            } => RwiCommandPayload::SupervisorStop {
+                supervisor_call_id: supervisor_call_id.unwrap_or_default(),
+                target_call_id: target_call_id.unwrap_or_default(),
+            },
+            RwiRequest::SupervisorTakeover {
+                supervisor_call_id,
+                target_call_id,
+                agent_leg,
+            } => RwiCommandPayload::SupervisorTakeover {
+                supervisor_call_id: supervisor_call_id.unwrap_or_default(),
+                target_call_id: target_call_id.unwrap_or_default(),
+                agent_leg: agent_leg.unwrap_or_default(),
+            },
+            RwiRequest::SipMessage {
+                call_id,
+                content_type,
+                body,
+            } => RwiCommandPayload::SipMessage {
                 call_id: call_id.unwrap_or_default(),
                 content_type: content_type.unwrap_or_else(|| "text/plain".to_string()),
                 body: body.unwrap_or_default(),
             },
-            RwiRequest::SipNotify { call_id, event, content_type, body } => RwiCommandPayload::SipNotify {
+            RwiRequest::SipNotify {
+                call_id,
+                event,
+                content_type,
+                body,
+            } => RwiCommandPayload::SipNotify {
                 call_id: call_id.unwrap_or_default(),
                 event: event.unwrap_or_default(),
                 content_type: content_type.unwrap_or_else(|| "application/json".to_string()),
@@ -608,18 +856,22 @@ impl From<RwiRequest> for RwiCommandPayload {
                 conf_id: conf_id.unwrap_or_default(),
                 call_id: call_id.unwrap_or_default(),
             },
-            RwiRequest::ConferenceRemove { conf_id, call_id } => RwiCommandPayload::ConferenceRemove {
-                conf_id: conf_id.unwrap_or_default(),
-                call_id: call_id.unwrap_or_default(),
-            },
+            RwiRequest::ConferenceRemove { conf_id, call_id } => {
+                RwiCommandPayload::ConferenceRemove {
+                    conf_id: conf_id.unwrap_or_default(),
+                    call_id: call_id.unwrap_or_default(),
+                }
+            }
             RwiRequest::ConferenceMute { conf_id, call_id } => RwiCommandPayload::ConferenceMute {
                 conf_id: conf_id.unwrap_or_default(),
                 call_id: call_id.unwrap_or_default(),
             },
-            RwiRequest::ConferenceUnmute { conf_id, call_id } => RwiCommandPayload::ConferenceUnmute {
-                conf_id: conf_id.unwrap_or_default(),
-                call_id: call_id.unwrap_or_default(),
-            },
+            RwiRequest::ConferenceUnmute { conf_id, call_id } => {
+                RwiCommandPayload::ConferenceUnmute {
+                    conf_id: conf_id.unwrap_or_default(),
+                    call_id: call_id.unwrap_or_default(),
+                }
+            }
             RwiRequest::ConferenceDestroy { conf_id } => RwiCommandPayload::ConferenceDestroy {
                 conf_id: conf_id.unwrap_or_default(),
             },
@@ -628,7 +880,10 @@ impl From<RwiRequest> for RwiCommandPayload {
 }
 
 impl RwiSession {
-    pub fn new(identity: RwiIdentity, command_tx: mpsc::UnboundedSender<RwiCommandMessage>) -> Self {
+    pub fn new(
+        identity: RwiIdentity,
+        command_tx: mpsc::UnboundedSender<RwiCommandMessage>,
+    ) -> Self {
         Self {
             id: Uuid::new_v4().to_string(),
             identity,
@@ -708,8 +963,7 @@ impl RwiSession {
     }
 
     pub fn can_listen_to_call(&self, call_id: &str) -> bool {
-        self.owns_call(call_id)
-            || self.supervisor_targets.contains_key(call_id)
+        self.owns_call(call_id) || self.supervisor_targets.contains_key(call_id)
     }
 }
 
@@ -904,7 +1158,10 @@ mod tests {
         assert_eq!(request.destination, "sip:test@local");
         assert_eq!(request.caller_id, Some("1001".to_string()));
         assert!(request.hold_music.is_some());
-        assert_eq!(request.extra_headers.get("X-Custom"), Some(&"value".to_string()));
+        assert_eq!(
+            request.extra_headers.get("X-Custom"),
+            Some(&"value".to_string())
+        );
     }
 
     #[test]
@@ -967,6 +1224,9 @@ mod tests {
 
         assert_eq!(request.queue_id, "support");
         assert_eq!(request.priority, Some(5));
-        assert_eq!(request.skills, Some(vec!["en".to_string(), "tech".to_string()]));
+        assert_eq!(
+            request.skills,
+            Some(vec!["en".to_string(), "tech".to_string()])
+        );
     }
 }

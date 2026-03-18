@@ -418,7 +418,8 @@ impl AppStateBuilder {
 
             if !commercial_ids.is_empty() {
                 let license_cfg = app_state.config().licenses.clone();
-                let results = crate::license::check_all_addon_licenses(&commercial_ids, &license_cfg).await;
+                let results =
+                    crate::license::check_all_addon_licenses(&commercial_ids, &license_cfg).await;
                 if !results.is_empty() {
                     tracing::info!(
                         "License check at startup: {} addon(s) verified",
@@ -442,7 +443,9 @@ impl AppStateBuilder {
                 for (addon_id, locale_dir) in
                     app_state.addon_registry.get_locale_dirs(app_state.clone())
                 {
-                    console_state.i18n().register_addon_locales(&addon_id, locale_dir);
+                    console_state
+                        .i18n()
+                        .register_addon_locales(&addon_id, locale_dir);
                 }
                 console_state.set_app_state(Some(Arc::downgrade(&app_state)));
             }
@@ -674,10 +677,12 @@ pub fn create_router(state: AppState) -> Router {
             axum::routing::get(
                 async move |client_addr: crate::handler::middleware::clientaddr::ClientAddr,
                             ws: axum::extract::ws::WebSocketUpgrade,
-                            axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+                            axum::extract::Query(params): axum::extract::Query<
+                    std::collections::HashMap<String, String>,
+                >,
                             headers: axum::http::HeaderMap| {
-                    use axum::extract::Query;
                     use axum::Extension;
+                    use axum::extract::Query;
 
                     crate::rwi::handler::rwi_ws_handler(
                         client_addr,
@@ -688,7 +693,8 @@ pub fn create_router(state: AppState) -> Router {
                         Extension(rwi_call_registry),
                         Extension(rwi_sip_server),
                         headers,
-                    ).await
+                    )
+                    .await
                 },
             ),
         );

@@ -51,9 +51,8 @@ mod tests {
             id_cache_size: 64,
             upload: None,
         };
-        let backend: Arc<dyn SipFlowBackend> = Arc::from(
-            create_backend(&cfg).expect("backend creation should succeed"),
-        );
+        let backend: Arc<dyn SipFlowBackend> =
+            Arc::from(create_backend(&cfg).expect("backend creation should succeed"));
 
         for _ in 0..5 {
             backend

@@ -40,11 +40,7 @@ impl CallRecordHook for SipFlowUploadHook {
         let start = Local.from_utc_datetime(&record.start_time.naive_utc());
         let end = Local.from_utc_datetime(&record.end_time.naive_utc());
 
-        let wav_bytes = match self
-            .backend
-            .query_media(&record.call_id, start, end)
-            .await
-        {
+        let wav_bytes = match self.backend.query_media(&record.call_id, start, end).await {
             Ok(b) => b,
             Err(e) => {
                 warn!(call_id = %record.call_id, "SipFlowUploadHook: query_media failed: {e}");
@@ -77,14 +73,7 @@ impl CallRecordHook for SipFlowUploadHook {
                     format!("{}/{}", root.trim_end_matches('/'), key)
                 };
                 upload_s3(
-                    vendor,
-                    bucket,
-                    region,
-                    access_key,
-                    secret_key,
-                    endpoint,
-                    &full_key,
-                    wav_bytes,
+                    vendor, bucket, region, access_key, secret_key, endpoint, &full_key, wav_bytes,
                 )
                 .await
                 .map(|_| {
@@ -95,10 +84,9 @@ impl CallRecordHook for SipFlowUploadHook {
                     )
                 })
             }
-            SipFlowUploadConfig::Http {
-                url,
-                headers,
-            } => upload_http(url, headers.as_ref(), &record.call_id, wav_bytes).await,
+            SipFlowUploadConfig::Http { url, headers } => {
+                upload_http(url, headers.as_ref(), &record.call_id, wav_bytes).await
+            }
         };
 
         match url_result {
@@ -321,11 +309,7 @@ root = "recordings"
             crate::config::SipFlowConfig::Local { upload, .. } => {
                 let upload = upload.expect("upload should be set");
                 match upload {
-                    SipFlowUploadConfig::S3 {
-                        bucket,
-                        region,
-                        ..
-                    } => {
+                    SipFlowUploadConfig::S3 { bucket, region, .. } => {
                         assert_eq!(bucket, "my-recordings");
                         assert_eq!(region, "us-east-1");
                     }
@@ -352,9 +336,7 @@ url = "https://example.com/recordings"
             crate::config::SipFlowConfig::Local { upload, .. } => {
                 let upload = upload.expect("upload should be set");
                 match upload {
-                    SipFlowUploadConfig::Http {
-                        url, ..
-                    } => {
+                    SipFlowUploadConfig::Http { url, .. } => {
                         assert_eq!(url, "https://example.com/recordings");
                     }
                     _ => panic!("expected Http variant"),

@@ -1,7 +1,5 @@
-use crate::console::{middleware::AuthRequired, ConsoleState};
-use crate::models::system_notification::{
-    ActiveModel, Column, Entity, Model,
-};
+use crate::console::{ConsoleState, middleware::AuthRequired};
+use crate::models::system_notification::{ActiveModel, Column, Entity, Model};
 use axum::{
     Json, Router,
     extract::{Path as AxumPath, State},
@@ -9,21 +7,18 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
+use sea_orm::sea_query::Order;
 use sea_orm::{
     ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter,
     QueryOrder,
 };
-use sea_orm::sea_query::Order;
 use serde_json::json;
 use std::sync::Arc;
 
 pub fn urls() -> Router<Arc<ConsoleState>> {
     Router::new()
         .route("/notifications", get(list_notifications))
-        .route(
-            "/api/notifications/unread-count",
-            get(unread_count_handler),
-        )
+        .route("/api/notifications/unread-count", get(unread_count_handler))
         .route("/api/notifications/{id}/read", post(mark_read_handler))
         .route("/api/notifications/read-all", post(mark_all_read_handler))
 }

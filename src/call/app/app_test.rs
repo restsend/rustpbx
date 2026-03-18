@@ -57,7 +57,10 @@ mod tests {
             _ctrl: &mut CallController,
             _ctx: &ApplicationContext,
         ) -> Result<AppAction> {
-            Ok(AppAction::Hangup { reason: None, code: None })
+            Ok(AppAction::Hangup {
+                reason: None,
+                code: None,
+            })
         }
     }
 
@@ -116,7 +119,10 @@ mod tests {
         ) -> Result<AppAction> {
             match digit.as_str() {
                 "1" => Ok(AppAction::Transfer("sip:sales@pbx".to_string())),
-                "9" => Ok(AppAction::Hangup { reason: None, code: None }),
+                "9" => Ok(AppAction::Hangup {
+                    reason: None,
+                    code: None,
+                }),
                 _ => Ok(AppAction::Continue),
             }
         }
@@ -306,7 +312,10 @@ mod tests {
             self.log.lock().unwrap().push(format!("timeout:{id}"));
             self.fired_count += 1;
             if self.fired_count >= 1 {
-                Ok(AppAction::Hangup { reason: None, code: None })
+                Ok(AppAction::Hangup {
+                    reason: None,
+                    code: None,
+                })
             } else {
                 Ok(AppAction::Continue)
             }
@@ -373,7 +382,10 @@ mod tests {
             _ctx: &ApplicationContext,
         ) -> Result<AppAction> {
             self.log.lock().unwrap().push(format!("timeout:{id}"));
-            Ok(AppAction::Hangup { reason: None, code: None })
+            Ok(AppAction::Hangup {
+                reason: None,
+                code: None,
+            })
         }
     }
 
@@ -437,7 +449,10 @@ mod tests {
                 })
                 .await?;
             self.log.lock().unwrap().push(format!("collected:{digits}"));
-            Ok(AppAction::Hangup { reason: None, code: None })
+            Ok(AppAction::Hangup {
+                reason: None,
+                code: None,
+            })
         }
     }
 
@@ -578,7 +593,10 @@ mod tests {
                 })
                 .await?;
             self.log.lock().unwrap().push(format!("collected:{digits}"));
-            Ok(AppAction::Hangup { reason: None, code: None })
+            Ok(AppAction::Hangup {
+                reason: None,
+                code: None,
+            })
         }
     }
 
@@ -692,7 +710,10 @@ mod tests {
                 })
                 .await?;
             self.log.lock().unwrap().push(format!("pin:{digits}"));
-            Ok(AppAction::Hangup { reason: None, code: None })
+            Ok(AppAction::Hangup {
+                reason: None,
+                code: None,
+            })
         }
     }
 

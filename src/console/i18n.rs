@@ -61,7 +61,10 @@ impl I18n {
         cache.clear();
 
         // Load core locales
-        let addon_dirs = self.addon_locales_dirs.read().unwrap_or_else(|e| e.into_inner());
+        let addon_dirs = self
+            .addon_locales_dirs
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         for info in &self.config.available {
             let mut flat = match Self::load_file("locales", &info.code) {
                 Ok(f) => f,
@@ -77,7 +80,12 @@ impl I18n {
                         flat.extend(addon_flat);
                     }
                     Err(e) => {
-                        tracing::debug!("i18n: failed to load addon locale {}/{}.toml: {}", dir, info.code, e);
+                        tracing::debug!(
+                            "i18n: failed to load addon locale {}/{}.toml: {}",
+                            dir,
+                            info.code,
+                            e
+                        );
                     }
                 }
             }
@@ -130,8 +138,15 @@ impl I18n {
     /// immediately reload all translations so the new strings are available.
     pub fn register_addon_locales(&self, addon_id: &str, locales_dir: String) {
         {
-            let mut dirs = self.addon_locales_dirs.write().unwrap_or_else(|e| e.into_inner());
-            tracing::debug!("i18n: registering addon '{}' locales at '{}'", addon_id, locales_dir);
+            let mut dirs = self
+                .addon_locales_dirs
+                .write()
+                .unwrap_or_else(|e| e.into_inner());
+            tracing::debug!(
+                "i18n: registering addon '{}' locales at '{}'",
+                addon_id,
+                locales_dir
+            );
             dirs.push(locales_dir);
         }
         self.reload();
@@ -192,7 +207,11 @@ impl I18n {
         let mut root = serde_json::Map::new();
         if let Some(flat) = flat {
             for (dotted_key, value) in flat {
-                Self::set_nested(&mut root, dotted_key, serde_json::Value::String(value.clone()));
+                Self::set_nested(
+                    &mut root,
+                    dotted_key,
+                    serde_json::Value::String(value.clone()),
+                );
             }
         }
         serde_json::Value::Object(root)
@@ -349,8 +368,16 @@ save = "保存"
         let config = LocaleConfig {
             default: "en".to_string(),
             available: vec![
-                LocaleInfo { code: "en".into(), name: "English".into(), native_name: "English".into() },
-                LocaleInfo { code: "zh".into(), name: "Chinese".into(), native_name: "中文".into() },
+                LocaleInfo {
+                    code: "en".into(),
+                    name: "English".into(),
+                    native_name: "English".into(),
+                },
+                LocaleInfo {
+                    code: "zh".into(),
+                    name: "Chinese".into(),
+                    native_name: "中文".into(),
+                },
             ],
         };
 
@@ -414,8 +441,16 @@ save = "保存"
             "locale=zh; rustpbx_session=abc".parse().unwrap(),
         );
         let available = vec![
-            LocaleInfo { code: "en".into(), name: "English".into(), native_name: "English".into() },
-            LocaleInfo { code: "zh".into(), name: "Chinese".into(), native_name: "中文".into() },
+            LocaleInfo {
+                code: "en".into(),
+                name: "English".into(),
+                native_name: "English".into(),
+            },
+            LocaleInfo {
+                code: "zh".into(),
+                name: "Chinese".into(),
+                native_name: "中文".into(),
+            },
         ];
         assert_eq!(detect_locale(&headers, &available, "en"), "zh");
     }
@@ -428,8 +463,16 @@ save = "保存"
             "zh-CN,zh;q=0.9,en;q=0.8".parse().unwrap(),
         );
         let available = vec![
-            LocaleInfo { code: "en".into(), name: "English".into(), native_name: "English".into() },
-            LocaleInfo { code: "zh".into(), name: "Chinese".into(), native_name: "中文".into() },
+            LocaleInfo {
+                code: "en".into(),
+                name: "English".into(),
+                native_name: "English".into(),
+            },
+            LocaleInfo {
+                code: "zh".into(),
+                name: "Chinese".into(),
+                native_name: "中文".into(),
+            },
         ];
         assert_eq!(detect_locale(&headers, &available, "en"), "zh");
     }
@@ -437,9 +480,11 @@ save = "保存"
     #[test]
     fn detect_locale_defaults_when_unsupported() {
         let headers = axum::http::HeaderMap::new();
-        let available = vec![
-            LocaleInfo { code: "en".into(), name: "English".into(), native_name: "English".into() },
-        ];
+        let available = vec![LocaleInfo {
+            code: "en".into(),
+            name: "English".into(),
+            native_name: "English".into(),
+        }];
         assert_eq!(detect_locale(&headers, &available, "en"), "en");
     }
 }

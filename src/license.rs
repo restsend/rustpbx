@@ -132,13 +132,19 @@ mod inner {
         // Fast path: return cached result if already verified this session.
         if let Ok(cache) = LICENSE_CACHE.lock() {
             if let Some(info) = cache.get(key) {
-                tracing::debug!("License key {}... served from cache", &key[..key.len().min(8)]);
+                tracing::debug!(
+                    "License key {}... served from cache",
+                    &key[..key.len().min(8)]
+                );
                 return Ok(info.clone());
             }
         }
 
         let key_prefix = &key[..key.len().min(8)];
-        tracing::info!("Verifying license key {}... against https://miuda.ai/api/verify", key_prefix);
+        tracing::info!(
+            "Verifying license key {}... against https://miuda.ai/api/verify",
+            key_prefix
+        );
 
         let client = reqwest::Client::new();
         let resp = client
@@ -155,8 +161,9 @@ mod inner {
                 if status.is_success() {
                     let body = response.text().await?;
                     tracing::debug!("License verify response body: {}", body);
-                    let verify_data: VerifyResponse = serde_json::from_str(&body)
-                        .map_err(|e| anyhow::anyhow!("Failed to parse verify response: {e}, body: {body}"))?;
+                    let verify_data: VerifyResponse = serde_json::from_str(&body).map_err(|e| {
+                        anyhow::anyhow!("Failed to parse verify response: {e}, body: {body}")
+                    })?;
                     let info = LicenseInfo {
                         key: key.to_string(),
                         valid: verify_data.valid,
@@ -179,7 +186,11 @@ mod inner {
                         status,
                         body
                     );
-                    anyhow::bail!("Verification failed with status: {}, body: {}", status, body)
+                    anyhow::bail!(
+                        "Verification failed with status: {}, body: {}",
+                        status,
+                        body
+                    )
                 }
             }
             Err(e) => {
