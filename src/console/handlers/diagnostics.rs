@@ -115,15 +115,17 @@ impl From<Transport> for ProbeTransport {
 pub async fn page_diagnostics(
     State(state): State<Arc<ConsoleState>>,
     headers: HeaderMap,
-    AuthRequired(_): AuthRequired,
+    AuthRequired(user): AuthRequired,
 ) -> Response {
     let bootstrap = diagnostics_bootstrap(&state).await;
+    let current_user = state.build_current_user_ctx(&user).await;
     state.render_with_headers(
         "console/diagnostics.html",
         json!({
             "nav_active": "diagnostics",
             "test_data": bootstrap,
             "addon_scripts": state.get_injected_scripts("/console/diagnostics"),
+            "current_user": current_user,
         }),
         &headers,
     )

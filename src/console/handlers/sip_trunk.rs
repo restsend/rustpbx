@@ -67,15 +67,17 @@ pub fn urls() -> Router<Arc<ConsoleState>> {
 async fn page_sip_trunks(
     State(state): State<Arc<ConsoleState>>,
     headers: HeaderMap,
-    AuthRequired(_): AuthRequired,
+    AuthRequired(user): AuthRequired,
 ) -> Response {
     let (filters, _) = build_filters_payload(state.db()).await;
+    let current_user = state.build_current_user_ctx(&user).await;
     state.render_with_headers(
         "console/sip_trunk.html",
         json!({
             "nav_active": "sip-trunk",
             "filters": filters,
             "create_url": state.url_for("/sip-trunk/new"),
+            "current_user": current_user,
         }),
         &headers,
     )
@@ -84,9 +86,10 @@ async fn page_sip_trunks(
 async fn page_sip_trunk_create(
     State(state): State<Arc<ConsoleState>>,
     headers: HeaderMap,
-    AuthRequired(_): AuthRequired,
+    AuthRequired(user): AuthRequired,
 ) -> Response {
     let (filters, tenants) = build_filters_payload(state.db()).await;
+    let current_user = state.build_current_user_ctx(&user).await;
     state.render_with_headers(
         "console/sip_trunk_detail.html",
         json!({
@@ -95,6 +98,7 @@ async fn page_sip_trunk_create(
             "tenants": tenants,
             "mode": "create",
             "create_url": state.url_for("/sip-trunk"),
+            "current_user": current_user,
         }),
         &headers,
     )
@@ -104,7 +108,7 @@ async fn page_sip_trunk_detail(
     AxumPath(id): AxumPath<i64>,
     State(state): State<Arc<ConsoleState>>,
     headers: HeaderMap,
-    AuthRequired(_): AuthRequired,
+    AuthRequired(user): AuthRequired,
 ) -> Response {
     let db = state.db();
     let (filters, tenants) = build_filters_payload(db).await;
@@ -138,6 +142,8 @@ async fn page_sip_trunk_detail(
     #[cfg(not(feature = "addon-wholesale"))]
     let tenant_link: Option<serde_json::Value> = None;
 
+    let current_user = state.build_current_user_ctx(&user).await;
+
     match result {
         Ok(Some(model)) => {
             #[allow(unused_mut)]
@@ -164,6 +170,7 @@ async fn page_sip_trunk_detail(
                     "tenants": tenants,
                     "mode": "edit",
                     "update_url": state.url_for(&format!("/sip-trunk/{id}")),
+                    "current_user": current_user,
                 }),
                 &headers,
             )
@@ -186,9 +193,16 @@ async fn page_sip_trunk_detail(
 
 async fn create_sip_trunk(
     State(state): State<Arc<ConsoleState>>,
-    AuthRequired(_): AuthRequired,
+    AuthRequired(user): AuthRequired,
     Form(form): Form<SipTrunkForm>,
 ) -> Response {
+    if !state.has_permission(&user, "trunks", "write").await {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({"message": "Permission denied"})),
+        )
+            .into_response();
+    }
     let db = state.db();
     let now = Utc::now();
     let mut active = SipTrunkActiveModel {
@@ -230,9 +244,16 @@ async fn create_sip_trunk(
 async fn update_sip_trunk(
     AxumPath(id): AxumPath<i64>,
     State(state): State<Arc<ConsoleState>>,
-    AuthRequired(_): AuthRequired,
+    AuthRequired(user): AuthRequired,
     Form(form): Form<SipTrunkForm>,
 ) -> Response {
+    if !state.has_permission(&user, "trunks", "write").await {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({"message": "Permission denied"})),
+        )
+            .into_response();
+    }
     let db = state.db();
     let model = match SipTrunkEntity::find_by_id(id).one(db).await {
         Ok(Some(model)) => model,
@@ -290,8 +311,15 @@ async fn update_sip_trunk(
 async fn delete_sip_trunk(
     AxumPath(id): AxumPath<i64>,
     State(state): State<Arc<ConsoleState>>,
-    AuthRequired(_): AuthRequired,
+    AuthRequired(user): AuthRequired,
 ) -> Response {
+    if !state.has_permission(&user, "trunks", "write").await {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({"message": "Permission denied"})),
+        )
+            .into_response();
+    }
     let db = state.db();
     let model = match SipTrunkEntity::find_by_id(id).one(db).await {
         Ok(Some(model)) => model,
@@ -775,4 +803,120 @@ fn parse_json_field(value: &Option<String>, field: &str) -> Result<Option<Value>
     serde_json::from_str(raw)
         .map(Some)
         .map_err(|err| bad_request(format!("{} must be valid JSON: {}", field, err)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        config::ConsoleConfig, console::middleware::AuthRequired, models::migration::Migrator,
+    };
+    use axum::{extract::State, http::StatusCode};
+    use chrono::Utc;
+    use sea_orm::Database;
+    use sea_orm_migration::MigratorTrait;
+    use std::sync::Arc;
+
+    fn superuser() -> crate::models::user::Model {
+        let now = Utc::now();
+        crate::models::user::Model {
+            id: 1,
+            email: "admin@rustpbx.com".into(),
+            username: "admin".into(),
+            password_hash: "hashed".into(),
+            reset_token: None,
+            reset_token_expires: None,
+            last_login_at: None,
+            last_login_ip: None,
+            created_at: now,
+            updated_at: now,
+            is_active: true,
+            is_staff: true,
+            is_superuser: true,
+            mfa_enabled: false,
+            mfa_secret: None,
+            auth_source: "local".into(),
+        }
+    }
+
+    fn unprivileged_user() -> crate::models::user::Model {
+        let now = Utc::now();
+        crate::models::user::Model {
+            id: 99,
+            email: "limited@rustpbx.com".into(),
+            username: "limited".into(),
+            password_hash: "hashed".into(),
+            reset_token: None,
+            reset_token_expires: None,
+            last_login_at: None,
+            last_login_ip: None,
+            created_at: now,
+            updated_at: now,
+            is_active: true,
+            is_staff: false,
+            is_superuser: false,
+            mfa_enabled: false,
+            mfa_secret: None,
+            auth_source: "local".into(),
+        }
+    }
+
+    async fn setup_state() -> Arc<ConsoleState> {
+        let db = Database::connect("sqlite::memory:")
+            .await
+            .expect("connect sqlite memory");
+        Migrator::up(&db, None).await.expect("run migrations");
+        ConsoleState::initialize(
+            Arc::new(crate::callrecord::DefaultCallRecordFormatter::default()),
+            db,
+            ConsoleConfig::default(),
+        )
+        .await
+        .expect("initialize console state")
+    }
+
+    #[tokio::test]
+    async fn create_sip_trunk_denied_without_permission() {
+        let state = setup_state().await;
+        let user = unprivileged_user();
+        let form = SipTrunkForm::default();
+        let resp =
+            create_sip_trunk(State(state), AuthRequired(user), axum::extract::Form(form)).await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn update_sip_trunk_denied_without_permission() {
+        let state = setup_state().await;
+        let user = unprivileged_user();
+        let form = SipTrunkForm::default();
+        let resp = update_sip_trunk(
+            AxumPath(999i64),
+            State(state),
+            AuthRequired(user),
+            axum::extract::Form(form),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn delete_sip_trunk_denied_without_permission() {
+        let state = setup_state().await;
+        let user = unprivileged_user();
+        let resp = delete_sip_trunk(AxumPath(999i64), State(state), AuthRequired(user)).await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn create_sip_trunk_allowed_for_superuser() {
+        let state = setup_state().await;
+        let user = superuser();
+        let mut form = SipTrunkForm::default();
+        form.name = Some("test-trunk".into());
+        form.sip_server = Some("sip.example.com".into());
+        let resp =
+            create_sip_trunk(State(state), AuthRequired(user), axum::extract::Form(form)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
 }

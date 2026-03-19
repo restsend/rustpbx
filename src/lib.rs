@@ -20,5 +20,6 @@ pub mod rwi;
 pub mod services;
 pub mod sipflow;
 pub mod storage;
+pub mod tls_reloader;
 pub mod utils;
 pub mod version;

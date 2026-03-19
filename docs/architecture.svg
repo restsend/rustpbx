@@ -1,0 +1,395 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 660" width="1100" height="660"
+  font-family="'Segoe UI', system-ui, -apple-system, sans-serif">
+  <defs>
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" style="stop-color:#f1f5f9"/>
+      <stop offset="100%" style="stop-color:#e2e8f0"/>
+    </linearGradient>
+    <linearGradient id="skyGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#0ea5e9"/>
+      <stop offset="100%" style="stop-color:#0284c7"/>
+    </linearGradient>
+    <linearGradient id="slateGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#334155"/>
+      <stop offset="100%" style="stop-color:#1e293b"/>
+    </linearGradient>
+    <linearGradient id="indigoGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" style="stop-color:#6366f1"/>
+      <stop offset="100%" style="stop-color:#4338ca"/>
+    </linearGradient>
+
+    <!-- clip paths for column headers (rounded top only) -->
+    <clipPath id="clipCol1"><rect x="20" y="50" width="158" height="36" rx="11"/></clipPath>
+    <clipPath id="clipCol2"><rect x="194" y="50" width="456" height="36" rx="11"/></clipPath>
+    <clipPath id="clipCol3"><rect x="666" y="50" width="414" height="36" rx="11"/></clipPath>
+
+    <filter id="sh" x="-4%" y="-4%" width="110%" height="118%">
+      <feDropShadow dx="0" dy="2" stdDeviation="4" flood-color="#0f172a" flood-opacity="0.10"/>
+    </filter>
+
+    <marker id="mSky" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto">
+      <path d="M0,0 L0,6 L7,3 z" fill="#0ea5e9"/>
+    </marker>
+    <marker id="mBlue" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto">
+      <path d="M0,0 L0,6 L7,3 z" fill="#3b82f6"/>
+    </marker>
+    <marker id="mBlueR" markerWidth="7" markerHeight="7" refX="1" refY="3" orient="auto">
+      <path d="M7,0 L7,6 L0,3 z" fill="#3b82f6"/>
+    </marker>
+    <marker id="mAmber" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto">
+      <path d="M0,0 L0,6 L7,3 z" fill="#f59e0b"/>
+    </marker>
+    <marker id="mViolet" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto">
+      <path d="M0,0 L0,6 L7,3 z" fill="#8b5cf6"/>
+    </marker>
+    <marker id="mVioletR" markerWidth="7" markerHeight="7" refX="1" refY="3" orient="auto">
+      <path d="M7,0 L7,6 L0,3 z" fill="#8b5cf6"/>
+    </marker>
+    <!-- 双向箭头 markers -->
+    <marker id="mVioletBoth" markerWidth="7" markerHeight="7" refX="3.5" refY="3" orient="auto">
+      <path d="M0,0 L0,6 L3.5,3 z M7,0 L7,6 L3.5,3 z" fill="#8b5cf6"/>
+    </marker>
+  </defs>
+
+  <!-- ── Background ── -->
+  <rect width="1100" height="660" fill="url(#bgGrad)"/>
+
+  <!-- ══════════════════════════════════════════════════════
+       TITLE  (single clean bar, no patch rects)
+  ══════════════════════════════════════════════════════ -->
+  <rect x="20" y="10" width="1060" height="32" rx="8" fill="url(#slateGrad)"/>
+  <text x="550" y="31" text-anchor="middle" font-size="15" font-weight="800" fill="white" letter-spacing="0.5">
+    RustPBX · Next-Gen Call Center Architecture
+  </text>
+
+  <!-- ══════════════════════════════════════════════════════
+       COLUMN PANELS  (white card, header via clipPath)
+  ══════════════════════════════════════════════════════ -->
+  <!-- Col 1 card -->
+  <rect x="20" y="50" width="158" height="590" rx="11" fill="white" filter="url(#sh)" stroke="#e2e8f0" stroke-width="1"/>
+  <rect clip-path="url(#clipCol1)" x="20" y="50" width="158" height="36" fill="url(#slateGrad)"/>
+  <text x="99" y="73" text-anchor="middle" font-size="12" font-weight="700" fill="white">Access</text>
+
+  <!-- Col 2 card -->
+  <rect x="194" y="50" width="456" height="590" rx="11" fill="white" filter="url(#sh)" stroke="#7dd3fc" stroke-width="1.5"/>
+  <rect clip-path="url(#clipCol2)" x="194" y="50" width="456" height="36" fill="url(#skyGrad)"/>
+  <rect x="208" y="57" width="24" height="24" rx="6" fill="white" opacity="0.2"/>
+  <text x="220" y="74" text-anchor="middle" font-size="13" font-weight="900" fill="white">R</text>
+  <text x="430" y="74" text-anchor="middle" font-size="13" font-weight="800" fill="white" letter-spacing="0.5">RustPBX Core Engine</text>
+
+  <!-- Col 3 card -->
+  <rect x="666" y="50" width="414" height="590" rx="11" fill="white" filter="url(#sh)" stroke="#c7d2fe" stroke-width="1.5"/>
+  <rect clip-path="url(#clipCol3)" x="666" y="50" width="414" height="36" fill="url(#indigoGrad)"/>
+  <text x="873" y="74" text-anchor="middle" font-size="13" font-weight="700" fill="white">App Service  (Your Business Logic)</text>
+
+  <!-- ══════════════════════════════════════════════════════
+       COL 1 — ACCESS
+       三项居中，间距加大
+  ══════════════════════════════════════════════════════ -->
+
+  <!-- PSTN - 居中放置 -->
+  <rect x="32" y="180" width="134" height="74" rx="9" fill="#f0f9ff" stroke="#bae6fd" stroke-width="1.5"/>
+  <text x="99" y="203" text-anchor="middle" font-size="19">📞</text>
+  <text x="99" y="221" text-anchor="middle" font-size="12" font-weight="700" fill="#0c4a6e">PSTN</text>
+  <text x="99" y="236" text-anchor="middle" font-size="9" fill="#64748b">SIP Trunk / ITSP</text>
+  <text x="99" y="247" text-anchor="middle" font-size="8.5" fill="#94a3b8">SIP/UDP · RTP</text>
+
+  <!-- WebRTC -->
+  <rect x="32" y="280" width="134" height="74" rx="9" fill="#f0f9ff" stroke="#bae6fd" stroke-width="1.5"/>
+  <text x="99" y="303" text-anchor="middle" font-size="19">🌐</text>
+  <text x="99" y="321" text-anchor="middle" font-size="12" font-weight="700" fill="#0c4a6e">WebRTC</text>
+  <text x="99" y="336" text-anchor="middle" font-size="9" fill="#64748b">Browser / Mobile</text>
+  <text x="99" y="347" text-anchor="middle" font-size="8.5" fill="#94a3b8">SIP/WSS · DTLS/SRTP</text>
+
+  <!-- SIP Client -->
+  <rect x="32" y="380" width="134" height="66" rx="9" fill="#f0f9ff" stroke="#bae6fd" stroke-width="1.5"/>
+  <text x="99" y="401" text-anchor="middle" font-size="19">📱</text>
+  <text x="99" y="419" text-anchor="middle" font-size="12" font-weight="700" fill="#0c4a6e">SIP Client</text>
+  <text x="99" y="435" text-anchor="middle" font-size="9" fill="#64748b">Softphone / Hardphone</text>
+
+  <!-- Protocol strip — pinned to bottom of col1 -->
+  <rect x="32" y="530" width="134" height="98" rx="9" fill="#f8fafc" stroke="#e2e8f0" stroke-width="1"/>
+  <text x="99" y="547" text-anchor="middle" font-size="8.5" font-weight="700" fill="#94a3b8" letter-spacing="1">PROTOCOLS</text>
+  <rect x="40"  y="554" width="54" height="17" rx="8" fill="#0ea5e9"/>
+  <text x="67"  y="566" text-anchor="middle" font-size="8.5" fill="white" font-weight="600">SIP/UDP</text>
+  <rect x="102" y="554" width="54" height="17" rx="8" fill="#0284c7"/>
+  <text x="129" y="566" text-anchor="middle" font-size="8.5" fill="white" font-weight="600">SIP/WSS</text>
+  <rect x="40"  y="578" width="54" height="17" rx="8" fill="#0369a1"/>
+  <text x="67"  y="590" text-anchor="middle" font-size="8.5" fill="white" font-weight="600">RTP/SRTP</text>
+  <rect x="102" y="578" width="54" height="17" rx="8" fill="#075985"/>
+  <text x="129" y="590" text-anchor="middle" font-size="8.5" fill="white" font-weight="600">DTLS</text>
+  <rect x="55"  y="602" width="88" height="17" rx="8" fill="#0c4a6e"/>
+  <text x="99"  y="614" text-anchor="middle" font-size="8.5" fill="white" font-weight="600">WebSocket / WSS</text>
+
+  <!-- ══════════════════════════════════════════════════════
+       COL 2 — RUSTPBX CORE
+       左右两列布局：左边Interfaces(1/4)，右边Core Services(3/4)
+  ══════════════════════════════════════════════════════ -->
+
+  <!-- § CALL CONTROL label -->
+  <text x="422" y="103" text-anchor="middle" font-size="8.5" font-weight="700" fill="#94a3b8" letter-spacing="1.5">CALL CONTROL</text>
+
+  <!-- B2BUA -->
+  <rect x="206" y="110" width="136" height="68" rx="9" fill="#f0f9ff" stroke="#7dd3fc" stroke-width="1.5"/>
+  <text x="274" y="130" text-anchor="middle" font-size="16">🔀</text>
+  <text x="274" y="148" text-anchor="middle" font-size="11" font-weight="700" fill="#0c4a6e">B2BUA</text>
+  <text x="274" y="163" text-anchor="middle" font-size="8.5" fill="#64748b">Call Bridging</text>
+  <text x="274" y="174" text-anchor="middle" font-size="8" fill="#94a3b8">Back-to-Back UA</text>
+
+  <!-- IVR -->
+  <rect x="352" y="110" width="136" height="68" rx="9" fill="#f0f9ff" stroke="#7dd3fc" stroke-width="1.5"/>
+  <text x="420" y="130" text-anchor="middle" font-size="16">🎯</text>
+  <text x="420" y="148" text-anchor="middle" font-size="11" font-weight="700" fill="#0c4a6e">IVR</text>
+  <text x="420" y="163" text-anchor="middle" font-size="8.5" fill="#64748b">Auto Attendant</text>
+  <text x="420" y="174" text-anchor="middle" font-size="8" fill="#94a3b8">DTMF / Speech</text>
+
+  <!-- Media Fabric -->
+  <rect x="498" y="110" width="140" height="68" rx="9" fill="#f0f9ff" stroke="#7dd3fc" stroke-width="1.5"/>
+  <text x="568" y="130" text-anchor="middle" font-size="16">🎵</text>
+  <text x="568" y="148" text-anchor="middle" font-size="11" font-weight="700" fill="#0c4a6e">Media Fabric</text>
+  <text x="568" y="163" text-anchor="middle" font-size="8.5" fill="#64748b">RTP Proxy · SRTP</text>
+  <text x="568" y="174" text-anchor="middle" font-size="8" fill="#94a3b8">Transcoding · DTMF</text>
+
+  <!-- divider -->
+  <line x1="206" y1="190" x2="638" y2="190" stroke="#e2e8f0" stroke-width="1" stroke-dasharray="4,3"/>
+
+  <!-- 左右两列布局区域 -->
+  <!-- 左列：Core Services (约3/4宽度 = 320px) -->
+  <!-- 右列：Interfaces (约1/4宽度 = 110px) -->
+
+  <!-- 左列标题 -->
+  <text x="370" y="204" text-anchor="middle" font-size="7.5" font-weight="700" fill="#94a3b8" letter-spacing="1">CORE SERVICES</text>
+
+  <!-- 左列：Core Services (2列布局) -->
+  <!-- 第一行 -->
+  <!-- CDR -->
+  <rect x="206" y="212" width="150" height="60" rx="8" fill="#f0fdf4" stroke="#86efac" stroke-width="1.5"/>
+  <text x="281" y="232" text-anchor="middle" font-size="13">📊</text>
+  <text x="281" y="248" text-anchor="middle" font-size="10" font-weight="700" fill="#14532d">CDR</text>
+  <text x="281" y="263" text-anchor="middle" font-size="8" fill="#166534">Call Records</text>
+
+  <!-- Recording -->
+  <rect x="364" y="212" width="150" height="60" rx="8" fill="#f0fdf4" stroke="#86efac" stroke-width="1.5"/>
+  <text x="439" y="232" text-anchor="middle" font-size="13">🎙️</text>
+  <text x="439" y="248" text-anchor="middle" font-size="10" font-weight="700" fill="#14532d">Recording</text>
+  <text x="439" y="263" text-anchor="middle" font-size="8" fill="#166534">S3 / Local</text>
+
+  <!-- 第二行 -->
+  <!-- ACL -->
+  <rect x="206" y="280" width="150" height="60" rx="8" fill="#f0fdf4" stroke="#86efac" stroke-width="1.5"/>
+  <text x="281" y="300" text-anchor="middle" font-size="13">🛡️</text>
+  <text x="281" y="316" text-anchor="middle" font-size="10" font-weight="700" fill="#14532d">ACL</text>
+  <text x="281" y="331" text-anchor="middle" font-size="8" fill="#166534">Access Control</text>
+
+  <!-- Routing -->
+  <rect x="364" y="280" width="150" height="60" rx="8" fill="#f0fdf4" stroke="#86efac" stroke-width="1.5"/>
+  <text x="439" y="300" text-anchor="middle" font-size="13">🗺️</text>
+  <text x="439" y="316" text-anchor="middle" font-size="10" font-weight="700" fill="#14532d">Routing</text>
+  <text x="439" y="331" text-anchor="middle" font-size="8" fill="#166534">Dial · LCR</text>
+
+  <!-- 第三行 -->
+  <!-- Queue -->
+  <rect x="206" y="348" width="150" height="60" rx="8" fill="#f0fdf4" stroke="#86efac" stroke-width="1.5"/>
+  <text x="281" y="368" text-anchor="middle" font-size="13">👥</text>
+  <text x="281" y="384" text-anchor="middle" font-size="10" font-weight="700" fill="#14532d">Queue</text>
+  <text x="281" y="399" text-anchor="middle" font-size="8" fill="#166534">ACD · Skills</text>
+
+  <!-- SIP Trunk -->
+  <rect x="364" y="348" width="150" height="60" rx="8" fill="#f0fdf4" stroke="#86efac" stroke-width="1.5"/>
+  <text x="439" y="368" text-anchor="middle" font-size="13">🔗</text>
+  <text x="439" y="384" text-anchor="middle" font-size="10" font-weight="700" fill="#14532d">SIP Trunk</text>
+  <text x="439" y="399" text-anchor="middle" font-size="8" fill="#166534">ITSP</text>
+
+  <!-- 第四行 -->
+  <!-- Registry -->
+  <rect x="206" y="416" width="150" height="60" rx="8" fill="#f0fdf4" stroke="#86efac" stroke-width="1.5"/>
+  <text x="281" y="436" text-anchor="middle" font-size="13">📋</text>
+  <text x="281" y="452" text-anchor="middle" font-size="10" font-weight="700" fill="#14532d">Registry</text>
+  <text x="281" y="467" text-anchor="middle" font-size="8" fill="#166534">Endpoints</text>
+
+  <!-- Extension -->
+  <rect x="364" y="416" width="150" height="60" rx="8" fill="#f0fdf4" stroke="#86efac" stroke-width="1.5"/>
+  <text x="439" y="436" text-anchor="middle" font-size="13">📞</text>
+  <text x="439" y="452" text-anchor="middle" font-size="10" font-weight="700" fill="#14532d">Extension</text>
+  <text x="439" y="467" text-anchor="middle" font-size="8" fill="#166534">Users · Auth</text>
+
+  <!-- 右列标题 -->
+  <text x="583" y="204" text-anchor="middle" font-size="7.5" font-weight="700" fill="#94a3b8" letter-spacing="1">INTERFACES</text>
+
+  <!-- HTTP DialPlan - 右列 -->
+  <rect x="526" y="226" width="110" height="70" rx="8" fill="#eff6ff" stroke="#3b82f6" stroke-width="1.5"/>
+  <rect x="526" y="226" width="110" height="18" rx="8" fill="#3b82f6"/>
+  <rect x="526" y="236" width="110" height="8" fill="#3b82f6"/>
+  <text x="581" y="239" text-anchor="middle" font-size="9" font-weight="700" fill="white">⚡ HTTP DialPlan</text>
+  <text x="581" y="258" text-anchor="middle" font-size="8" fill="#1e40af">Dynamic routing</text>
+  <text x="581" y="272" text-anchor="middle" font-size="8" fill="#1e40af">via HTTP</text>
+  <text x="581" y="288" text-anchor="middle" font-size="7.5" fill="#3b82f6" font-weight="600">POST → JSON</text>
+
+  <!-- RWI Gateway - 右列 -->
+  <rect x="526" y="316" width="110" height="70" rx="8" fill="#f5f3ff" stroke="#8b5cf6" stroke-width="1.5"/>
+  <rect x="526" y="316" width="110" height="18" rx="8" fill="#8b5cf6"/>
+  <rect x="526" y="326" width="110" height="8" fill="#8b5cf6"/>
+  <text x="581" y="329" text-anchor="middle" font-size="9" font-weight="700" fill="white">RWI Gateway</text>
+  <text x="581" y="348" text-anchor="middle" font-size="8" fill="#4c1d95">Inject · Monitor</text>
+  <text x="581" y="362" text-anchor="middle" font-size="8" fill="#4c1d95">Barge-in · Whisper</text>
+  <text x="581" y="378" text-anchor="middle" font-size="7.5" fill="#94a3b8">WebSocket</text>
+
+  <!-- Webhook - 右列 -->
+  <rect x="526" y="406" width="110" height="70" rx="8" fill="#fffbeb" stroke="#f59e0b" stroke-width="1.5"/>
+  <text x="581" y="426" text-anchor="middle" font-size="15">🪝</text>
+  <text x="581" y="444" text-anchor="middle" font-size="9" font-weight="700" fill="#92400e">Webhook</text>
+  <text x="581" y="458" text-anchor="middle" font-size="8" fill="#78350f">Call Events Push</text>
+  <text x="581" y="472" text-anchor="middle" font-size="7.5" fill="#94a3b8">HTTP POST</text>
+
+  <!-- Platform strip — pinned to bottom of col2 -->
+  <line x1="206" y1="500" x2="638" y2="500" stroke="#e2e8f0" stroke-width="1" stroke-dasharray="4,3"/>
+  <text x="422" y="514" text-anchor="middle" font-size="8.5" font-weight="700" fill="#94a3b8" letter-spacing="1.5">PLATFORM</text>
+
+  <!-- Web Console -->
+  <rect x="206" y="522" width="134" height="52" rx="8" fill="#fef9f0" stroke="#fed7aa" stroke-width="1.5"/>
+  <text x="273" y="540" text-anchor="middle" font-size="10.5" font-weight="700" fill="#92400e">🖥️  Web Console</text>
+  <text x="273" y="554" text-anchor="middle" font-size="8.5" fill="#78350f">Extensions · Trunks · CDR</text>
+  <text x="273" y="566" text-anchor="middle" font-size="8" fill="#94a3b8">Metrics · Addons</text>
+
+  <!-- Observability -->
+  <rect x="350" y="522" width="134" height="52" rx="8" fill="#fef9f0" stroke="#fed7aa" stroke-width="1.5"/>
+  <text x="417" y="540" text-anchor="middle" font-size="10.5" font-weight="700" fill="#92400e">📈  Observability</text>
+  <text x="417" y="554" text-anchor="middle" font-size="8.5" fill="#78350f">Prometheus · Tracing</text>
+  <text x="417" y="566" text-anchor="middle" font-size="8" fill="#94a3b8">Health · Diagnostics</text>
+
+  <!-- Addon System -->
+  <rect x="494" y="522" width="144" height="52" rx="8" fill="#fef9f0" stroke="#fed7aa" stroke-width="1.5"/>
+  <text x="566" y="540" text-anchor="middle" font-size="10.5" font-weight="700" fill="#92400e">🧩  Addon System</text>
+  <text x="566" y="554" text-anchor="middle" font-size="8.5" fill="#78350f">Queue · Archive · Transcript</text>
+  <text x="566" y="566" text-anchor="middle" font-size="8" fill="#94a3b8">Voicemail · ACME</text>
+
+  <!-- Rust badge -->
+  <rect x="206" y="584" width="432" height="44" rx="8" fill="#f0f9ff" stroke="#bae6fd" stroke-width="1"/>
+  <text x="422" y="606" text-anchor="middle" font-size="9.5" fill="#0c4a6e" font-weight="700">🦀  Built with Rust</text>
+  <text x="422" y="621" text-anchor="middle" font-size="8.5" fill="#0369a1">Axum · rsipstack · Sea-ORM · minijinja</text>
+
+  <!-- ══════════════════════════════════════════════════════
+       COL 3 — APP SERVICE
+       Contact Center Capabilities 在上，Interfaces Handler 在下
+  ══════════════════════════════════════════════════════ -->
+
+  <!-- CONTACT CENTER CAPABILITIES 标签 -->
+  <text x="873" y="95" text-anchor="middle" font-size="8.5" font-weight="700" fill="#6366f1" letter-spacing="1.5">CONTACT CENTER CAPABILITIES</text>
+
+  <!-- Human Agent -->
+  <rect x="678" y="104" width="186" height="130" rx="9" fill="#f0fdf4" stroke="#86efac" stroke-width="1.5"/>
+  <text x="771" y="132" text-anchor="middle" font-size="24">👨‍💼</text>
+  <text x="771" y="154" text-anchor="middle" font-size="11" font-weight="700" fill="#14532d">Human Agent</text>
+  <text x="771" y="171" text-anchor="middle" font-size="8.5" fill="#166534">WebRTC Softphone</text>
+  <text x="771" y="185" text-anchor="middle" font-size="8.5" fill="#166534">Live monitoring · Barge-in</text>
+  <text x="771" y="199" text-anchor="middle" font-size="8.5" fill="#166534">Whisper coaching</text>
+  <rect x="706" y="208" width="130" height="18" rx="9" fill="#dcfce7" stroke="#86efac" stroke-width="1"/>
+  <text x="771" y="221" text-anchor="middle" font-size="8" fill="#15803d" font-weight="600">via SIP / WebRTC</text>
+
+  <!-- AI Voice Agent -->
+  <rect x="874" y="104" width="194" height="130" rx="9" fill="#fdf4ff" stroke="#d8b4fe" stroke-width="2"/>
+  <rect x="874" y="104" width="194" height="22" rx="9" fill="#a855f7"/>
+  <rect x="874" y="114" width="194" height="12" fill="#a855f7"/>
+  <text x="971" y="118" text-anchor="middle" font-size="11" font-weight="700" fill="white">🤖 AI Voice Agent</text>
+  <text x="971" y="141" text-anchor="middle" font-size="8.5" fill="#6b21a8">ASR → LLM → TTS</text>
+  <text x="971" y="155" text-anchor="middle" font-size="8.5" fill="#6b21a8">Audio inject via RWI</text>
+  <text x="971" y="169" text-anchor="middle" font-size="8.5" fill="#6b21a8">Intent recognition</text>
+  <text x="971" y="183" text-anchor="middle" font-size="8.5" fill="#6b21a8">Seamless human handoff</text>
+  <rect x="900" y="194" width="142" height="18" rx="9" fill="#f3e8ff" stroke="#d8b4fe" stroke-width="1"/>
+  <text x="971" y="207" text-anchor="middle" font-size="8" fill="#7e22ce" font-weight="600">HTTP DialPlan + RWI</text>
+
+  <!-- divider -->
+  <line x1="678" y1="244" x2="1058" y2="244" stroke="#e0e7ff" stroke-width="1" stroke-dasharray="4,3"/>
+
+  <!-- HTTP DialPlan Handler -->
+  <rect x="678" y="252" width="390" height="90" rx="9" fill="#eff6ff" stroke="#3b82f6" stroke-width="2"/>
+  <rect x="678" y="252" width="390" height="22" rx="9" fill="#3b82f6"/>
+  <rect x="678" y="262" width="390" height="12" fill="#3b82f6"/>
+  <text x="873" y="266" text-anchor="middle" font-size="11" font-weight="700" fill="white">⚡ HTTP DialPlan Handler</text>
+  <rect x="688" y="282" width="112" height="48" rx="7" fill="white" stroke="#bfdbfe" stroke-width="1"/>
+  <text x="744" y="300" text-anchor="middle" font-size="9" font-weight="600" fill="#1d4ed8">Route Decision</text>
+  <text x="744" y="316" text-anchor="middle" font-size="8.5" fill="#3b82f6">bridge / transfer</text>
+  <rect x="810" y="282" width="112" height="48" rx="7" fill="white" stroke="#bfdbfe" stroke-width="1"/>
+  <text x="866" y="300" text-anchor="middle" font-size="9" font-weight="600" fill="#1d4ed8">Play / Collect</text>
+  <text x="866" y="316" text-anchor="middle" font-size="8.5" fill="#3b82f6">TTS · DTMF</text>
+  <rect x="932" y="282" width="126" height="48" rx="7" fill="white" stroke="#bfdbfe" stroke-width="1"/>
+  <text x="995" y="300" text-anchor="middle" font-size="9" font-weight="600" fill="#1d4ed8">CRM / Ticketing</text>
+  <text x="995" y="316" text-anchor="middle" font-size="8.5" fill="#3b82f6">Business Logic</text>
+
+  <!-- divider -->
+  <line x1="678" y1="352" x2="1058" y2="352" stroke="#e0e7ff" stroke-width="1" stroke-dasharray="4,3"/>
+
+  <!-- RWI Call Control -->
+  <rect x="678" y="360" width="390" height="90" rx="9" fill="#f5f3ff" stroke="#8b5cf6" stroke-width="2"/>
+  <rect x="678" y="360" width="390" height="22" rx="9" fill="#8b5cf6"/>
+  <rect x="678" y="370" width="390" height="12" fill="#8b5cf6"/>
+  <text x="873" y="374" text-anchor="middle" font-size="11" font-weight="700" fill="white">🎛️ RWI Call Control</text>
+  <rect x="688" y="388" width="116" height="54" rx="6" fill="white" stroke="#c4b5fd" stroke-width="1"/>
+  <text x="746" y="402" text-anchor="middle" font-size="8" font-weight="700" fill="#6b21a8">Call Operations</text>
+  <text x="746" y="416" text-anchor="middle" font-size="7.5" fill="#7c3aed">Inject · Monitor</text>
+  <text x="746" y="428" text-anchor="middle" font-size="7.5" fill="#7c3aed">Barge-in · Whisper</text>
+  <text x="746" y="440" text-anchor="middle" font-size="7.5" fill="#7c3aed">Hold · Transfer</text>
+  <rect x="810" y="388" width="116" height="54" rx="6" fill="white" stroke="#c4b5fd" stroke-width="1"/>
+  <text x="868" y="402" text-anchor="middle" font-size="8" font-weight="700" fill="#6b21a8">Media Control</text>
+  <text x="868" y="416" text-anchor="middle" font-size="7.5" fill="#7c3aed">Play · Stop</text>
+  <text x="868" y="428" text-anchor="middle" font-size="7.5" fill="#7c3aed">Mute · DTMF</text>
+  <text x="868" y="440" text-anchor="middle" font-size="7.5" fill="#7c3aed">Recording</text>
+  <rect x="932" y="388" width="126" height="54" rx="6" fill="white" stroke="#c4b5fd" stroke-width="1"/>
+  <text x="995" y="402" text-anchor="middle" font-size="8" font-weight="700" fill="#6b21a8">Real-time Events</text>
+  <text x="995" y="416" text-anchor="middle" font-size="7.5" fill="#7c3aed">Transcript · ASR</text>
+  <text x="995" y="428" text-anchor="middle" font-size="7.5" fill="#7c3aed">Sentiment · Intent</text>
+  <text x="995" y="440" text-anchor="middle" font-size="7.5" fill="#94a3b8">WebSocket stream</text>
+
+  <!-- divider -->
+  <line x1="678" y1="460" x2="1058" y2="460" stroke="#e0e7ff" stroke-width="1" stroke-dasharray="4,3"/>
+
+  <!-- Webhook Consumer -->
+  <rect x="678" y="468" width="390" height="80" rx="9" fill="#fffbeb" stroke="#f59e0b" stroke-width="1.5"/>
+  <text x="873" y="492" text-anchor="middle" font-size="11" font-weight="700" fill="#92400e">🪝 Webhook Consumer</text>
+  <text x="873" y="512" text-anchor="middle" font-size="9" fill="#78350f">INVITE · ANSWER · BYE · DTMF</text>
+  <text x="873" y="528" text-anchor="middle" font-size="9" fill="#78350f">CDR push · Queue Events → Trigger workflows</text>
+
+  <!-- Call Flow bar — pinned to bottom of col3 -->
+  <rect x="678" y="580" width="390" height="44" rx="9" fill="#f8fafc" stroke="#c7d2fe" stroke-width="1.5"/>
+  <text x="873" y="599" text-anchor="middle" font-size="10" font-weight="700" fill="#334155">🔄  Intelligent Call Flow</text>
+  <text x="873" y="614" text-anchor="middle" font-size="8.5" fill="#64748b">Inbound → HTTP DialPlan → Queue → AI screens → RWI inject / Human Agent</text>
+
+  <!-- ══════════════════════════════════════════════════════
+       ARROWS  Col1 → Col2  (SIP/RTP)
+  ══════════════════════════════════════════════════════ -->
+  <!-- PSTN → B2BUA -->
+  <line x1="166" y1="217" x2="194" y2="217" stroke="#0ea5e9" stroke-width="1.8" marker-end="url(#mSky)"/>
+  <!-- WebRTC → center -->
+  <line x1="166" y1="317" x2="194" y2="317" stroke="#0ea5e9" stroke-width="1.8" marker-end="url(#mSky)"/>
+  <!-- SIP Client → IVR -->
+  <line x1="166" y1="413" x2="194" y2="413" stroke="#0ea5e9" stroke-width="1.8" marker-end="url(#mSky)" stroke-dasharray="5,3"/>
+
+  <!-- ══════════════════════════════════════════════════════
+       ARROWS  Col2 → Col3
+       Interfaces在右侧，直接连接到Col3
+  ══════════════════════════════════════════════════════ -->
+
+  <!-- DialPlan: col2→col3 单向曲线 -->
+  <path d="M636,261 C656,261 660,297 678,297" stroke="#3b82f6" stroke-width="2" fill="none" marker-end="url(#mBlue)"/>
+
+  <!-- RWI: col2↔col3 双向单线 -->
+  <line x1="636" y1="351" x2="678" y2="405" stroke="#8b5cf6" stroke-width="2" marker-start="url(#mVioletR)" marker-end="url(#mViolet)"/>
+
+  <!-- Webhook: col2→col3 单向曲线 -->
+  <path d="M636,441 C660,441 665,508 678,508" stroke="#f59e0b" stroke-width="2" fill="none" marker-end="url(#mAmber)"/>
+
+  <!-- Channel labels in gap -->
+  <rect x="638" y="270" width="40" height="14" rx="7" fill="#3b82f6"/>
+  <text x="658" y="281" text-anchor="middle" font-size="7.5" fill="white" font-weight="700">DialPlan</text>
+
+  <rect x="638" y="370" width="40" height="14" rx="7" fill="#8b5cf6"/>
+  <text x="658" y="381" text-anchor="middle" font-size="7.5" fill="white" font-weight="700">RWI</text>
+
+  <rect x="638" y="470" width="40" height="14" rx="7" fill="#f59e0b"/>
+  <text x="658" y="481" text-anchor="middle" font-size="7.5" fill="white" font-weight="700">Webhook</text>
+
+  <!-- ══════════════════════════════════════════════════════
+       LEGEND
+  ══════════════════════════════════════════════════════ -->
+  <rect x="20" y="648" width="1060" height="8" rx="4" fill="none"/>
+</svg>

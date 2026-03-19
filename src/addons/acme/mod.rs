@@ -1,5 +1,6 @@
 use crate::addons::{Addon, SidebarItem};
 use crate::app::AppState;
+use crate::config::AcmeConfig;
 use async_trait::async_trait;
 use axum::{
     Extension, Router,
@@ -8,6 +9,7 @@ use axum::{
 use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
+use tokio::sync::RwLock as TokioRwLock;
 
 mod handlers;
 
@@ -23,6 +25,8 @@ pub enum AcmeStatus {
 pub struct AcmeState {
     pub challenges: Arc<RwLock<HashMap<String, String>>>,
     pub status: Arc<RwLock<AcmeStatus>>,
+    /// Auto-renewal configuration (loaded from config.toml)
+    pub auto_renew_config: Arc<TokioRwLock<AcmeConfig>>,
 }
 
 pub struct AcmeAddon {
@@ -35,7 +39,20 @@ impl AcmeAddon {
             state: AcmeState {
                 challenges: Arc::new(RwLock::new(HashMap::new())),
                 status: Arc::new(RwLock::new(AcmeStatus::None)),
+                auto_renew_config: Arc::new(TokioRwLock::new(AcmeConfig::default())),
             },
+        }
+    }
+
+    /// Load auto-renew configuration from AppState config
+    pub fn load_config(&self, config: &crate::config::Config) {
+        if let Some(ref acme_config) = config.acme {
+            let mut auto_renew = self.state.auto_renew_config.blocking_write();
+            *auto_renew = acme_config.clone();
+            tracing::info!(
+                "ACME auto-renew config loaded: auto_renew={}",
+                acme_config.auto_renew
+            );
         }
     }
 }
@@ -58,8 +75,17 @@ impl Addon for AcmeAddon {
     fn screenshots(&self) -> Vec<&'static str> {
         vec!["/static/acme/screenshot.png"]
     }
-    async fn initialize(&self, _state: AppState) -> anyhow::Result<()> {
-        // Initialize ACME background tasks or check config
+    async fn initialize(&self, state: AppState) -> anyhow::Result<()> {
+        // Load auto-renew configuration from config.toml
+        self.load_config(state.config());
+
+        // Spawn background task for certificate expiry checking
+        let state_clone = self.state.clone();
+        let app_state = state.clone();
+        crate::utils::spawn(async move {
+            handlers::spawn_auto_renew_checker(state_clone, app_state).await;
+        });
+
         tracing::info!("ACME Addon initialized");
         Ok(())
     }
@@ -82,7 +108,12 @@ impl Addon for AcmeAddon {
             )
             .route("/console/acme", get(handlers::ui_index))
             .route("/api/acme/request", post(handlers::request_cert))
-            .route("/api/acme/status", get(handlers::status));
+            .route("/api/acme/status", get(handlers::status))
+            .route("/api/acme/auto-renew", get(handlers::get_auto_renew_config))
+            .route(
+                "/api/acme/auto-renew",
+                post(handlers::set_auto_renew_config),
+            );
 
         #[cfg(feature = "console")]
         if let Some(console_state) = state.console.clone() {

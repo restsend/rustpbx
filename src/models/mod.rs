@@ -17,10 +17,12 @@ pub mod frequency_limit;
 pub mod migration;
 pub mod policy;
 pub mod presence;
+pub mod rbac;
 pub mod routing;
 pub mod sip_trunk;
 pub mod system_notification;
 pub mod user;
+pub mod wholesale_agent;
 
 pub fn prepare_sqlite_database(database_url: &str) -> Result<()> {
     let Some(path_part) = database_url.strip_prefix("sqlite://") else {

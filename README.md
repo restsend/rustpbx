@@ -29,6 +29,11 @@ Different from Asterisk/FreeSWITCH (C modules), RustPBX exposes all call control
 
 ---
 
+## Next-Gen Call Center Architecture 
+![RustPBX Architecture](./docs/architecture.svg)
+
+---
+
 ## Core Capabilities
 
 - **SIP Proxy** — Full SIP stack (UDP/TCP/WebSocket), registration, auth, B2BUA
@@ -40,6 +45,7 @@ Different from Asterisk/FreeSWITCH (C modules), RustPBX exposes all call control
 - **CDR Webhooks** — Push call detail records + recordings to your system on hangup
 - **WebRTC Phone** — Built-in browser softphone for testing
 - **RWI (RustPBX WebSocket Interface)** — JSON-over-WebSocket for real-time call control: originate, answer, hold, transfer, record, queue management, supervisor whisper/barge, and media stream injection
+-- **Role-Based Access Control (RBAC)** system with fine-grained permissions.
 
 ---
 

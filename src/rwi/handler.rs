@@ -334,10 +334,28 @@ fn error_response(action_id: &str, code: &str, message: impl Into<String>) -> Op
 
 fn parse_action(action: &str, params: &serde_json::Value) -> Result<RwiCommandPayload, String> {
     // Build JSON with action tag for serde enum deserialization
-    let json = serde_json::json!({
-        "action": action,
-        "params": params
-    });
+    // For unit variants (like ListCalls), params should be absent/null, not empty object
+    let json = if params.is_null() {
+        serde_json::json!({
+            "action": action,
+        })
+    } else if let serde_json::Value::Object(obj) = params {
+        if obj.is_empty() {
+            serde_json::json!({
+                "action": action,
+            })
+        } else {
+            serde_json::json!({
+                "action": action,
+                "params": params
+            })
+        }
+    } else {
+        serde_json::json!({
+            "action": action,
+            "params": params
+        })
+    };
 
     let req: crate::rwi::session::RwiRequest =
         serde_json::from_value(json).map_err(|e| e.to_string())?;

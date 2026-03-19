@@ -7,6 +7,18 @@
     <meta name="description" content="{{site_description|default('RustPBX Admin Console')}}" />
     <title>{% block title %}{{page_title|default('RustPBX Admin')}}{% endblock %}</title>
     {% block js_head %}
+    <script>
+        window.__currentUser = {{ current_user | json | safe }};
+        window.hasPermission = function(perm) {
+            // If current_user is missing but user reached this authenticated page,
+            // default to showing items (backend has already authenticated)
+            if (!window.__currentUser) return true;
+            var perms = window.__currentUser.permissions || [];
+            if (perms.indexOf('*') !== -1) return true;
+            return perms.indexOf(perm) !== -1;
+        };
+        window.can = window.hasPermission;
+    </script>
     {% for js in js_files %}
     <script src="{{ js }}" defer></script>
     {% endfor %}
@@ -240,6 +252,7 @@
                         <span x-show="!sidebarCollapsed" x-transition.opacity x-cloak>{{ "nav.dashboard" | t }}</span>
                     </a>
                     <a href="{{ bp }}/extensions"
+                        x-show="can('extensions:read')" x-cloak
                         class="group mt-1 flex items-center gap-3 rounded-lg px-3 py-2 hover:bg-slate-50 transition-all duration-200 {{ 'bg-sky-50 text-sky-700' if nav_active=='extensions' else 'text-slate-700' }}"
                         :class="{ 'justify-center gap-0 px-2 py-3': sidebarCollapsed }" title="{{ 'nav.extensions' | t }}">
                         <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5"
@@ -250,6 +263,7 @@
                         <span x-show="!sidebarCollapsed" x-transition.opacity x-cloak>{{ "nav.extensions" | t }}</span>
                     </a>
                     <a href="{{ bp }}/routing"
+                        x-show="can('routes:read')" x-cloak
                         class="group mt-1 flex items-center gap-3 rounded-lg px-3 py-2 hover:bg-slate-50 transition-all duration-200 {{ 'bg-sky-50 text-sky-700' if nav_active=='routing' else 'text-slate-700' }}"
                         :class="{ 'justify-center gap-0 px-2 py-3': sidebarCollapsed }" title="{{ 'nav.routing' | t }}">
                         <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5"
@@ -260,6 +274,7 @@
                         <span x-show="!sidebarCollapsed" x-transition.opacity x-cloak>{{ "nav.routing" | t }}</span>
                     </a>
                     <a href="{{ bp }}/sip-trunk"
+                        x-show="can('trunks:read')" x-cloak
                         class="group mt-1 flex items-center gap-3 rounded-lg px-3 py-2 hover:bg-slate-50 transition-all duration-200 {{ 'bg-sky-50 text-sky-700' if nav_active in ['sip-trunk', 'sip-trunk-detail'] else 'text-slate-700' }}"
                         :class="{ 'justify-center gap-0 px-2 py-3': sidebarCollapsed }" title="{{ 'nav.sip_trunk' | t }}">
                         <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5"
@@ -270,6 +285,7 @@
                         <span x-show="!sidebarCollapsed" x-transition.opacity x-cloak>{{ "nav.sip_trunk" | t }}</span>
                     </a>
                     <a href="{{ bp }}/call-records"
+                        x-show="can('cdr:read')" x-cloak
                         class="group mt-1 flex items-center gap-3 rounded-lg px-3 py-2 hover:bg-slate-50 transition-all duration-200 {{ 'bg-sky-50 text-sky-700' if nav_active=='call-records' else 'text-slate-700' }}"
                         :class="{ 'justify-center gap-0 px-2 py-3': sidebarCollapsed }" title="{{ 'nav.call_records' | t }}">
                         <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5"
@@ -280,6 +296,7 @@
                         <span x-show="!sidebarCollapsed" x-transition.opacity x-cloak>{{ "nav.call_records" | t }}</span>
                     </a>
                     <a href="{{ bp }}/diagnostics"
+                        x-show="can('diagnostics:read')" x-cloak
                         class="group mt-1 flex items-center gap-3 rounded-lg px-3 py-2 hover:bg-slate-50 transition-all duration-200 {{ 'bg-sky-50 text-sky-700' if nav_active=='diagnostics' else 'text-slate-700' }}"
                         :class="{ 'justify-center gap-0 px-2 py-3': sidebarCollapsed }" title="{{ 'nav.diagnostics' | t }}">
                         <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5"
@@ -290,6 +307,7 @@
                         <span x-show="!sidebarCollapsed" x-transition.opacity x-cloak>{{ "nav.diagnostics" | t }}</span>
                     </a>
                     <a href="{{ bp }}/metrics/runtime"
+                        x-show="can('metrics:read')" x-cloak
                         class="group mt-1 flex items-center gap-3 rounded-lg px-3 py-2 hover:bg-slate-50 transition-all duration-200 {{ 'bg-sky-50 text-sky-700' if nav_active=='metrics' else 'text-slate-700' }}"
                         :class="{ 'justify-center gap-0 px-2 py-3': sidebarCollapsed }" title="{{ 'nav.metrics' | t }}">
                         <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5"
@@ -300,6 +318,7 @@
                         <span x-show="!sidebarCollapsed" x-transition.opacity x-cloak>{{ "nav.metrics" | t }}</span>
                     </a>
                     <a href="{{ bp }}/addons"
+                        x-show="can('system:read')" x-cloak
                         class="group mt-1 flex items-center gap-3 rounded-lg px-3 py-2 hover:bg-slate-50 transition-all duration-200 {{ 'bg-sky-50 text-sky-700' if nav_active=='addons' else 'text-slate-700' }}"
                         :class="{ 'justify-center gap-0 px-2 py-3': sidebarCollapsed }" title="{{ 'nav.addons' | t }}">
                         <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5"
@@ -310,6 +329,7 @@
                         <span x-show="!sidebarCollapsed" x-transition.opacity x-cloak>{{ "nav.addons" | t }}</span>
                     </a>
                     <a href="{{ bp }}/notifications"
+                        x-show="can('system:read') || can('extensions:read')" x-cloak
                         class="group mt-1 flex items-center gap-3 rounded-lg px-3 py-2 hover:bg-slate-50 transition-all duration-200 {{ 'bg-sky-50 text-sky-700' if nav_active=='notifications' else 'text-slate-700' }}"
                         :class="{ 'justify-center gap-0 px-2 py-3': sidebarCollapsed }" title="{{ 'nav.notifications' | t }}"
                         x-data="{ unread: 0 }"
@@ -327,6 +347,7 @@
                         <span x-show="!sidebarCollapsed" x-transition.opacity x-cloak>{{ "nav.notifications" | t }}</span>
                     </a>
                     <a href="{{ bp }}/settings"
+                        x-show="can('system:read') || can('users:read') || can('departments:read')" x-cloak
                         class="group mt-1 flex items-center gap-3 rounded-lg px-3 py-2 hover:bg-slate-50 transition-all duration-200 {{ 'bg-sky-50 text-sky-700' if nav_active=='settings' else 'text-slate-700' }}"
                         :class="{ 'justify-center gap-0 px-2 py-3': sidebarCollapsed }" title="{{ 'nav.settings' | t }}">
                         <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5"
@@ -342,6 +363,7 @@
                     {% for item in addon_sidebar_items %}
                     {% set item_display_name = item.name_key | default(value=item.name) | t %}
                     <a href="{{ item.url }}"
+                        {% if item.permission %}x-show="can('{{ item.permission }}')" x-cloak{% endif %}
                         class="group mt-1 flex items-center gap-3 rounded-lg px-3 py-2 hover:bg-slate-50 transition-all duration-200 {{ 'bg-sky-50 text-sky-700' if nav_active==item.name else 'text-slate-700' }}"
                         :class="{ 'justify-center gap-0 px-2 py-3': sidebarCollapsed }" title="{{ item_display_name }}">
                         {{ item.icon | safe }}

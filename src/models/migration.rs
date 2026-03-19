@@ -23,6 +23,8 @@ impl MigratorTrait for Migrator {
             Box::new(super::system_notification::Migration),
             Box::new(super::add_user_mfa_columns::Migration),
             Box::new(super::add_sip_trunk_register_columns::Migration),
+            Box::new(super::rbac::Migration),
+            Box::new(super::wholesale_agent::Migration),
         ]
     }
 }

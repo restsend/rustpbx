@@ -566,7 +566,7 @@ async fn download_call_record_metadata(
 async fn page_call_records(
     State(state): State<Arc<ConsoleState>>,
     headers: HeaderMap,
-    AuthRequired(_): AuthRequired,
+    AuthRequired(user): AuthRequired,
 ) -> Response {
     let filters = match load_filters(state.db()).await {
         Ok(filters) => filters,
@@ -580,6 +580,8 @@ async fn page_call_records(
         }
     };
 
+    let current_user = state.build_current_user_ctx(&user).await;
+
     state.render_with_headers(
         "console/call_records.html",
         json!({
@@ -588,6 +590,7 @@ async fn page_call_records(
             "filter_options": filters,
             "list_url": state.url_for("/call-records"),
             "page_size_options": vec![10, 25, 50],
+            "current_user": current_user,
         }),
         &headers,
     )
@@ -701,7 +704,7 @@ async fn page_call_record_detail(
     AxumPath(id_param): AxumPath<String>,
     State(state): State<Arc<ConsoleState>>,
     headers: HeaderMap,
-    AuthRequired(_): AuthRequired,
+    AuthRequired(user): AuthRequired,
 ) -> Response {
     let db = state.db();
     let model_result = if let Ok(pk) = id_param.parse::<i64>() {
@@ -749,6 +752,7 @@ async fn page_call_record_detail(
 
     let cdr_data = load_cdr_data(&state, &model).await;
     let payload = build_detail_payload(&model, &related, &state, cdr_data.as_ref());
+    let current_user = state.build_current_user_ctx(&user).await;
 
     state.render_with_headers(
         "console/call_record_detail.html",
@@ -759,6 +763,7 @@ async fn page_call_record_detail(
             "call_data": serde_json::to_string(&payload).unwrap_or_default(),
 
             "addon_scripts": state.get_injected_scripts(&format!("/console/call-records/{}", model.id)),
+            "current_user": current_user,
         }),
         &headers,
     )
@@ -866,8 +871,15 @@ async fn update_call_record(
 async fn delete_call_record(
     AxumPath(pk): AxumPath<i64>,
     State(state): State<Arc<ConsoleState>>,
-    AuthRequired(_): AuthRequired,
+    AuthRequired(user): AuthRequired,
 ) -> Response {
+    if !state.has_permission(&user, "cdr", "delete").await {
+        return (
+            StatusCode::FORBIDDEN,
+            axum::Json(serde_json::json!({"message": "Permission denied"})),
+        )
+            .into_response();
+    }
     match CallRecordEntity::delete_by_id(pk).exec(state.db()).await {
         Ok(result) => {
             if result.rows_affected == 0 {
@@ -1594,12 +1606,58 @@ mod tests {
     use super::*;
     use crate::{
         config::ConsoleConfig,
-        console::ConsoleState,
-        models::{call_record, migration::Migrator},
+        console::{ConsoleState, middleware::AuthRequired},
+        models::{call_record, migration::Migrator, user},
     };
+    use axum::{extract::State, http::StatusCode};
+    use chrono::Utc;
     use sea_orm::{ActiveModelTrait, ActiveValue::Set, Database, DatabaseConnection};
     use sea_orm_migration::MigratorTrait;
     use std::sync::Arc;
+
+    fn superuser() -> user::Model {
+        let now = Utc::now();
+        user::Model {
+            id: 1,
+            email: "admin@rustpbx.com".into(),
+            username: "admin".into(),
+            password_hash: "hashed".into(),
+            reset_token: None,
+            reset_token_expires: None,
+            last_login_at: None,
+            last_login_ip: None,
+            created_at: now,
+            updated_at: now,
+            is_active: true,
+            is_staff: true,
+            is_superuser: true,
+            mfa_enabled: false,
+            mfa_secret: None,
+            auth_source: "local".into(),
+        }
+    }
+
+    fn unprivileged_user() -> user::Model {
+        let now = Utc::now();
+        user::Model {
+            id: 99,
+            email: "limited@rustpbx.com".into(),
+            username: "limited".into(),
+            password_hash: "hashed".into(),
+            reset_token: None,
+            reset_token_expires: None,
+            last_login_at: None,
+            last_login_ip: None,
+            created_at: now,
+            updated_at: now,
+            is_active: true,
+            is_staff: false,
+            is_superuser: false,
+            mfa_enabled: false,
+            mfa_secret: None,
+            auth_source: "local".into(),
+        }
+    }
 
     async fn setup_db() -> DatabaseConnection {
         let db = Database::connect("sqlite::memory:")
@@ -1662,5 +1720,55 @@ mod tests {
             .expect("related context");
         let payload = build_record_payload(&record, &related, &state, None);
         assert_eq!(payload["id"], 1);
+    }
+
+    #[tokio::test]
+    async fn delete_call_record_denied_without_permission() {
+        let db = setup_db().await;
+        let state = create_console_state(db.clone()).await;
+        let record = call_record::ActiveModel {
+            call_id: Set("del-denied-1".into()),
+            direction: Set("inbound".into()),
+            status: Set("completed".into()),
+            started_at: Set(Utc::now()),
+            duration_secs: Set(10),
+            has_transcript: Set(false),
+            transcript_status: Set("pending".into()),
+            created_at: Set(Utc::now()),
+            updated_at: Set(Utc::now()),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .expect("insert call record");
+
+        let user = unprivileged_user();
+        let resp = delete_call_record(AxumPath(record.id), State(state), AuthRequired(user)).await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn delete_call_record_allowed_for_superuser() {
+        let db = setup_db().await;
+        let state = create_console_state(db.clone()).await;
+        let record = call_record::ActiveModel {
+            call_id: Set("del-super-1".into()),
+            direction: Set("inbound".into()),
+            status: Set("completed".into()),
+            started_at: Set(Utc::now()),
+            duration_secs: Set(10),
+            has_transcript: Set(false),
+            transcript_status: Set("pending".into()),
+            created_at: Set(Utc::now()),
+            updated_at: Set(Utc::now()),
+            ..Default::default()
+        }
+        .insert(&db)
+        .await
+        .expect("insert call record");
+
+        let user = superuser();
+        let resp = delete_call_record(AxumPath(record.id), State(state), AuthRequired(user)).await;
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
     }
 }

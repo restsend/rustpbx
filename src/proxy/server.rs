@@ -78,6 +78,8 @@ pub struct SipServerInner {
     pub presence_manager: Arc<PresenceManager>,
     pub addon_registry: Option<Arc<crate::addons::registry::AddonRegistry>>,
     pub rwi_gateway: Option<Arc<tokio::sync::RwLock<crate::rwi::gateway::RwiGateway>>>,
+    /// Stored TLS listener for hot-reload support (cloned from the original)
+    pub tls_listener: Option<rsipstack::transport::TlsListenerConnection>,
 }
 
 pub type SipServerRef = Arc<SipServerInner>;
@@ -311,6 +313,8 @@ impl SipServerBuilder {
         let cancel_token = self.cancel_token.unwrap_or_default();
         let config = self.config.clone();
         let transport_layer = TransportLayer::new(cancel_token.clone());
+        // Clone of TLS listener for hot-reload support (initialized inside if !self.no_bind block)
+        let mut tls_listener_clone: Option<rsipstack::transport::TlsListenerConnection> = None;
 
         if !self.no_bind {
             let local_addr = config
@@ -428,6 +432,8 @@ impl SipServerBuilder {
                                         cert_path,
                                         key_path
                                     );
+                                    // Clone for hot-reload support
+                                    tls_listener_clone = Some(conn.clone());
                                     transport_layer.add_transport(conn.into());
                                 }
                                 Err(e) => {
@@ -568,6 +574,7 @@ impl SipServerBuilder {
             presence_manager,
             addon_registry: self.addon_registry,
             rwi_gateway: self.rwi_gateway,
+            tls_listener: tls_listener_clone,
         });
 
         let inner_weak = Arc::downgrade(&inner);
@@ -656,6 +663,11 @@ impl SipServerBuilder {
 }
 
 impl SipServer {
+    /// Get a clone of the TLS listener for hot-reload support
+    pub fn get_tls_listener(&self) -> Option<rsipstack::transport::TlsListenerConnection> {
+        self.inner.tls_listener.clone()
+    }
+
     pub async fn serve(&self) -> Result<()> {
         let incoming = self.inner.endpoint.incoming_transactions()?;
         let cancel_token = self.inner.cancel_token.clone();

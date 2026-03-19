@@ -335,14 +335,16 @@ async fn build_forwarding_catalog(state: Arc<ConsoleState>) -> ForwardingCatalog
 async fn page_extensions(
     State(state): State<Arc<ConsoleState>>,
     headers: HeaderMap,
-    AuthRequired(_): AuthRequired,
+    AuthRequired(user): AuthRequired,
 ) -> Response {
+    let current_user = state.build_current_user_ctx(&user).await;
     state.render_with_headers(
         "console/extensions.html",
         json!({
             "nav_active": "extensions",
             "filters": build_filters(state.clone()).await,
             "create_url": state.url_for("/extensions/new"),
+            "current_user": current_user,
         }),
         &headers,
     )
@@ -352,7 +354,7 @@ async fn page_extension_detail(
     AxumPath(id): AxumPath<i64>,
     State(state): State<Arc<ConsoleState>>,
     headers: HeaderMap,
-    AuthRequired(_): AuthRequired,
+    AuthRequired(user): AuthRequired,
 ) -> Response {
     let db = state.db();
 
@@ -379,6 +381,7 @@ async fn page_extension_detail(
     let locator_info =
         fetch_extension_locator_summary(state.sip_server(), &realm, &model.extension).await;
     let forwarding_catalog = build_forwarding_catalog(state.clone()).await;
+    let current_user = state.build_current_user_ctx(&user).await;
 
     state.render_with_headers(
         "console/extension_detail.html",
@@ -391,6 +394,7 @@ async fn page_extension_detail(
             "registration_info": locator_info,
             "forwarding_catalog": forwarding_catalog,
             "addon_scripts": state.get_injected_scripts(&format!("/console/extensions/{}", model.id)),
+            "current_user": current_user,
         }),
         &headers,
     )
@@ -399,9 +403,10 @@ async fn page_extension_detail(
 async fn page_extension_create(
     State(state): State<Arc<ConsoleState>>,
     headers: HeaderMap,
-    AuthRequired(_): AuthRequired,
+    AuthRequired(user): AuthRequired,
 ) -> Response {
     let forwarding_catalog = build_forwarding_catalog(state.clone()).await;
+    let current_user = state.build_current_user_ctx(&user).await;
     state.render_with_headers(
         "console/extension_detail.html",
         json!({
@@ -411,6 +416,7 @@ async fn page_extension_create(
             "registration_info": ExtensionLocatorSummary::default(),
             "forwarding_catalog": forwarding_catalog,
             "addon_scripts": state.get_injected_scripts("/console/extensions/new"),
+            "current_user": current_user,
         }),
         &headers,
     )
@@ -418,9 +424,16 @@ async fn page_extension_create(
 
 async fn create_extension(
     State(state): State<Arc<ConsoleState>>,
-    AuthRequired(_): AuthRequired,
+    AuthRequired(user): AuthRequired,
     Json(payload): Json<ExtensionPayload>,
 ) -> Response {
+    if !state.has_permission(&user, "extensions", "write").await {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({"message": "Permission denied"})),
+        )
+            .into_response();
+    }
     let db = state.db();
     let extension = match payload.extension {
         Some(ref ext) if !ext.is_empty() => ext,
@@ -654,9 +667,16 @@ async fn query_extensions(
 async fn update_extension(
     AxumPath(id): AxumPath<i64>,
     State(state): State<Arc<ConsoleState>>,
-    AuthRequired(_): AuthRequired,
+    AuthRequired(user): AuthRequired,
     Json(payload): Json<ExtensionPayload>,
 ) -> Response {
+    if !state.has_permission(&user, "extensions", "write").await {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({"message": "Permission denied"})),
+        )
+            .into_response();
+    }
     let db = state.db();
     let model = match ExtensionEntity::find_by_id(id).one(db).await {
         Ok(Some(result)) => result,
@@ -737,8 +757,15 @@ async fn update_extension(
 async fn delete_extension(
     AxumPath(id): AxumPath<i64>,
     State(state): State<Arc<ConsoleState>>,
-    AuthRequired(_): AuthRequired,
+    AuthRequired(user): AuthRequired,
 ) -> Response {
+    if !state.has_permission(&user, "extensions", "delete").await {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({"message": "Permission denied"})),
+        )
+            .into_response();
+    }
     match ExtensionEntity::delete_by_id(id).exec(state.db()).await {
         Ok(r) => Json(json!({"status": r.rows_affected})).into_response(),
         Err(err) => {
@@ -889,5 +916,79 @@ mod tests {
 
         let combined_ids = fetch_extension_ids(state.clone(), vec![sales.id, support.id]).await;
         assert_eq!(combined_ids, vec![ext_both.id]);
+    }
+
+    fn unprivileged_user() -> user::Model {
+        let now = Utc::now();
+        user::Model {
+            id: 99,
+            email: "limited@rustpbx.com".into(),
+            username: "limited".into(),
+            password_hash: "hashed".into(),
+            reset_token: None,
+            reset_token_expires: None,
+            last_login_at: None,
+            last_login_ip: None,
+            created_at: now,
+            updated_at: now,
+            is_active: true,
+            is_staff: false,
+            is_superuser: false,
+            mfa_enabled: false,
+            mfa_secret: None,
+            auth_source: "local".into(),
+        }
+    }
+
+    #[tokio::test]
+    async fn create_extension_denied_without_permission() {
+        let state = setup_state().await;
+        let user = unprivileged_user();
+        let payload = ExtensionPayload {
+            extension: Some("5000".into()),
+            ..Default::default()
+        };
+        let resp = create_extension(State(state), AuthRequired(user), Json(payload)).await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn update_extension_denied_without_permission() {
+        let state = setup_state().await;
+        let ext = insert_extension(state.db(), "5001").await;
+        let user = unprivileged_user();
+        let payload = ExtensionPayload {
+            extension: Some("5001".into()),
+            ..Default::default()
+        };
+        let resp = update_extension(
+            AxumPath(ext.id),
+            State(state),
+            AuthRequired(user),
+            Json(payload),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn delete_extension_denied_without_permission() {
+        let state = setup_state().await;
+        let ext = insert_extension(state.db(), "5002").await;
+        let user = unprivileged_user();
+        let resp = delete_extension(AxumPath(ext.id), State(state), AuthRequired(user)).await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn create_extension_allowed_for_superuser() {
+        let state = setup_state().await;
+        let user = dummy_user();
+        let payload = ExtensionPayload {
+            extension: Some("5003".into()),
+            ..Default::default()
+        };
+        let resp = create_extension(State(state), AuthRequired(user), Json(payload)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 }

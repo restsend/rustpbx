@@ -8,6 +8,10 @@ use crate::console::{ConsoleState, middleware::AuthRequired};
 use crate::models::department::{
     ActiveModel as DepartmentActiveModel, Column as DepartmentColumn, Entity as DepartmentEntity,
 };
+use crate::models::rbac::{
+    ActiveModel as RoleActiveModel, Column as RoleColumn, Entity as RoleEntity, role_permission,
+    user_role,
+};
 use crate::models::user::{
     ActiveModel as UserActiveModel, Column as UserColumn, Entity as UserEntity, Model as UserModel,
 };
@@ -67,6 +71,25 @@ struct UserPayload {
     pub is_staff: Option<bool>,
     #[serde(default)]
     pub is_superuser: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct RolePayload {
+    pub name: String,
+    pub description: Option<String>,
+    #[serde(default)]
+    pub permissions: Vec<PermissionEntry>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct PermissionEntry {
+    pub resource: String,
+    pub action: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct AssignRolesPayload {
+    pub role_ids: Vec<i64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -164,6 +187,15 @@ pub fn urls() -> Router<Arc<ConsoleState>> {
             "/settings/users/{id}",
             get(get_user).patch(update_user).delete(delete_user),
         )
+        .route(
+            "/settings/users/{id}/roles",
+            get(get_user_roles).post(assign_user_roles),
+        )
+        .route("/settings/roles", get(list_roles).put(create_role))
+        .route(
+            "/settings/roles/{id}",
+            get(get_role).patch(update_role).delete(delete_role_handler),
+        )
 }
 
 pub async fn page_settings(
@@ -172,6 +204,7 @@ pub async fn page_settings(
     AuthRequired(user): AuthRequired,
 ) -> Response {
     let settings = build_settings_payload(&state).await;
+    let current_user = state.build_current_user_ctx(&user).await;
 
     state.render_with_headers(
         "console/settings.html",
@@ -181,14 +214,7 @@ pub async fn page_settings(
             "settings_data": settings,
             "username": user.username,
             "email": user.email,
-            "current_user": {
-                "id": user.id,
-                "username": user.username,
-                "email": user.email,
-                "is_superuser": user.is_superuser,
-                "is_staff": user.is_staff,
-                "is_active": user.is_active,
-            },
+            "current_user": current_user,
             "user_is_superuser": user.is_superuser,
         }),
         &headers,
@@ -620,9 +646,16 @@ fn build_storage_profiles(config: &crate::config::Config) -> (JsonValue, Vec<Jso
 
 async fn query_departments(
     State(state): State<Arc<ConsoleState>>,
-    AuthRequired(_): AuthRequired,
+    AuthRequired(user): AuthRequired,
     Json(payload): Json<forms::ListQuery<QueryDepartmentFilters>>,
 ) -> Response {
+    if !state.has_permission(&user, "departments", "read").await {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({"message": "Permission denied"})),
+        )
+            .into_response();
+    }
     let db = state.db();
     let mut selector = DepartmentEntity::find().order_by_asc(DepartmentColumn::Name);
     if let Some(filters) = payload.filters.as_ref() {
@@ -680,8 +713,15 @@ async fn query_departments(
 async fn get_department(
     AxumPath(id): AxumPath<i64>,
     State(state): State<Arc<ConsoleState>>,
-    AuthRequired(_): AuthRequired,
+    AuthRequired(user): AuthRequired,
 ) -> Response {
+    if !state.has_permission(&user, "departments", "read").await {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({"message": "Permission denied"})),
+        )
+            .into_response();
+    }
     match DepartmentEntity::find_by_id(id).one(state.db()).await {
         Ok(Some(model)) => Json(model).into_response(),
         Ok(None) => (
@@ -702,9 +742,16 @@ async fn get_department(
 
 async fn create_department(
     State(state): State<Arc<ConsoleState>>,
-    AuthRequired(_): AuthRequired,
+    AuthRequired(user): AuthRequired,
     Json(payload): Json<DepartmentPayload>,
 ) -> Response {
+    if !state.has_permission(&user, "departments", "write").await {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({"message": "Permission denied"})),
+        )
+            .into_response();
+    }
     let name = payload.name.trim();
     if name.is_empty() {
         return (
@@ -748,9 +795,16 @@ async fn create_department(
 async fn update_department(
     AxumPath(id): AxumPath<i64>,
     State(state): State<Arc<ConsoleState>>,
-    AuthRequired(_): AuthRequired,
+    AuthRequired(user): AuthRequired,
     Json(payload): Json<DepartmentPayload>,
 ) -> Response {
+    if !state.has_permission(&user, "departments", "write").await {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({"message": "Permission denied"})),
+        )
+            .into_response();
+    }
     let model = match DepartmentEntity::find_by_id(id).one(state.db()).await {
         Ok(Some(model)) => model,
         Ok(None) => {
@@ -804,8 +858,15 @@ async fn update_department(
 async fn delete_department(
     AxumPath(id): AxumPath<i64>,
     State(state): State<Arc<ConsoleState>>,
-    AuthRequired(_): AuthRequired,
+    AuthRequired(user): AuthRequired,
 ) -> Response {
+    if !state.has_permission(&user, "departments", "write").await {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({"message": "Permission denied"})),
+        )
+            .into_response();
+    }
     let model = match DepartmentEntity::find_by_id(id).one(state.db()).await {
         Ok(Some(model)) => model,
         Ok(None) => {
@@ -844,8 +905,8 @@ async fn query_users(
     AuthRequired(user): AuthRequired,
     Json(query): Json<forms::ListQuery<QueryUserFilters>>,
 ) -> Response {
-    if !user.is_superuser {
-        return json_error(StatusCode::FORBIDDEN, "Superuser privileges required");
+    if !state.has_permission(&user, "users", "manage").await {
+        return json_error(StatusCode::FORBIDDEN, "Permission denied");
     }
     let db = state.db();
     let mut selector = UserEntity::find().order_by_asc(UserColumn::Username);
@@ -912,8 +973,8 @@ async fn get_user(
     State(state): State<Arc<ConsoleState>>,
     AuthRequired(user): AuthRequired,
 ) -> Response {
-    if !user.is_superuser {
-        return json_error(StatusCode::FORBIDDEN, "Superuser privileges required");
+    if !state.has_permission(&user, "users", "manage").await {
+        return json_error(StatusCode::FORBIDDEN, "Permission denied");
     }
     match UserEntity::find_by_id(id).one(state.db()).await {
         Ok(Some(model)) => Json(UserView::from(model)).into_response(),
@@ -938,8 +999,8 @@ async fn create_user(
     AuthRequired(user): AuthRequired,
     Json(payload): Json<UserPayload>,
 ) -> Response {
-    if !user.is_superuser {
-        return json_error(StatusCode::FORBIDDEN, "Superuser privileges required");
+    if !state.has_permission(&user, "users", "manage").await {
+        return json_error(StatusCode::FORBIDDEN, "Permission denied");
     }
     let email = payload.email.trim();
     let username = payload.username.trim();
@@ -1027,8 +1088,8 @@ async fn update_user(
     AuthRequired(user): AuthRequired,
     Json(payload): Json<UserPayload>,
 ) -> Response {
-    if !user.is_superuser {
-        return json_error(StatusCode::FORBIDDEN, "Superuser privileges required");
+    if !state.has_permission(&user, "users", "manage").await {
+        return json_error(StatusCode::FORBIDDEN, "Permission denied");
     }
     let model = match UserEntity::find_by_id(id).one(state.db()).await {
         Ok(Some(model)) => model,
@@ -1119,8 +1180,8 @@ async fn delete_user(
     State(state): State<Arc<ConsoleState>>,
     AuthRequired(user): AuthRequired,
 ) -> Response {
-    if !user.is_superuser {
-        return json_error(StatusCode::FORBIDDEN, "Superuser privileges required");
+    if !state.has_permission(&user, "users", "manage").await {
+        return json_error(StatusCode::FORBIDDEN, "Permission denied");
     }
     let model = match UserEntity::find_by_id(id).one(state.db()).await {
         Ok(Some(model)) => model,
@@ -1358,9 +1419,12 @@ pub(crate) struct SecuritySettingsPayload {
 
 pub(crate) async fn update_platform_settings(
     State(state): State<Arc<ConsoleState>>,
-    AuthRequired(_): AuthRequired,
+    AuthRequired(user): AuthRequired,
     Json(payload): Json<PlatformSettingsPayload>,
 ) -> Response {
+    if !state.has_permission(&user, "system", "write").await {
+        return json_error(StatusCode::FORBIDDEN, "Permission denied");
+    }
     let config_path = match get_config_path(&state) {
         Ok(path) => path,
         Err(resp) => return resp,
@@ -1470,9 +1534,12 @@ pub(crate) async fn update_platform_settings(
 
 pub(crate) async fn update_proxy_settings(
     State(state): State<Arc<ConsoleState>>,
-    AuthRequired(_): AuthRequired,
+    AuthRequired(user): AuthRequired,
     Json(payload): Json<ProxySettingsPayload>,
 ) -> Response {
+    if !state.has_permission(&user, "system", "write").await {
+        return json_error(StatusCode::FORBIDDEN, "Permission denied");
+    }
     let config_path = match get_config_path(&state) {
         Ok(path) => path,
         Err(resp) => return resp,
@@ -1534,9 +1601,12 @@ pub(crate) async fn update_proxy_settings(
 
 pub(crate) async fn update_storage_settings(
     State(state): State<Arc<ConsoleState>>,
-    AuthRequired(_): AuthRequired,
+    AuthRequired(user): AuthRequired,
     Json(payload): Json<StorageSettingsPayload>,
 ) -> Response {
+    if !state.has_permission(&user, "system", "write").await {
+        return json_error(StatusCode::FORBIDDEN, "Permission denied");
+    }
     let config_path = match get_config_path(&state) {
         Ok(path) => path,
         Err(resp) => return resp,
@@ -1767,9 +1837,12 @@ pub(crate) async fn update_storage_settings(
 
 pub(crate) async fn update_security_settings(
     State(state): State<Arc<ConsoleState>>,
-    AuthRequired(_): AuthRequired,
+    AuthRequired(user): AuthRequired,
     Json(payload): Json<SecuritySettingsPayload>,
 ) -> Response {
+    if !state.has_permission(&user, "system", "write").await {
+        return json_error(StatusCode::FORBIDDEN, "Permission denied");
+    }
     let config_path = match get_config_path(&state) {
         Ok(path) => path,
         Err(resp) => return resp,
@@ -1859,9 +1932,14 @@ struct RwiContextPayload {
 
 pub(crate) async fn update_rwi_settings(
     State(state): State<Arc<ConsoleState>>,
-    AuthRequired(_): AuthRequired,
+    AuthRequired(user): AuthRequired,
     Json(payload): Json<RwiSettingsPayload>,
 ) -> Response {
+    if !state.has_permission(&user, "system", "write").await
+        && !state.has_permission(&user, "ami", "access").await
+    {
+        return json_error(StatusCode::FORBIDDEN, "Permission denied");
+    }
     let config_path = match get_config_path(&state) {
         Ok(path) => path,
         Err(resp) => return resp,
@@ -2069,9 +2147,13 @@ fn set_string_array(table: &mut Table, key: &str, values: Vec<String>) {
 }
 
 pub(crate) async fn test_storage_connection(
-    AuthRequired(_): AuthRequired,
+    State(state): State<Arc<ConsoleState>>,
+    AuthRequired(user): AuthRequired,
     Json(payload): Json<TestStoragePayload>,
 ) -> Response {
+    if !state.has_permission(&user, "system", "write").await {
+        return json_error(StatusCode::FORBIDDEN, "Permission denied");
+    }
     use crate::storage::{Storage, StorageConfig};
     use uuid::Uuid;
 
@@ -2121,9 +2203,13 @@ pub(crate) async fn test_storage_connection(
 }
 
 pub(crate) async fn test_locator_webhook(
-    AuthRequired(_): AuthRequired,
+    State(state): State<Arc<ConsoleState>>,
+    AuthRequired(user): AuthRequired,
     Json(payload): Json<TestLocatorWebhookPayload>,
 ) -> Response {
+    if !state.has_permission(&user, "system", "write").await {
+        return json_error(StatusCode::FORBIDDEN, "Permission denied");
+    }
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(5))
         .build()
@@ -2165,9 +2251,13 @@ pub(crate) async fn test_locator_webhook(
 }
 
 pub(crate) async fn test_http_router(
-    AuthRequired(_): AuthRequired,
+    State(state): State<Arc<ConsoleState>>,
+    AuthRequired(user): AuthRequired,
     Json(payload): Json<TestHttpRouterPayload>,
 ) -> Response {
+    if !state.has_permission(&user, "system", "write").await {
+        return json_error(StatusCode::FORBIDDEN, "Permission denied");
+    }
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(5))
         .build()
@@ -2212,9 +2302,13 @@ pub(crate) async fn test_http_router(
 }
 
 pub(crate) async fn test_user_backend(
-    AuthRequired(_): AuthRequired,
+    State(state): State<Arc<ConsoleState>>,
+    AuthRequired(user): AuthRequired,
     Json(payload): Json<TestUserBackendPayload>,
 ) -> Response {
+    if !state.has_permission(&user, "system", "write").await {
+        return json_error(StatusCode::FORBIDDEN, "Permission denied");
+    }
     match payload.backend {
         UserBackendConfig::Memory { .. } => Json(json!({
             "status": "ok",
@@ -2281,4 +2375,373 @@ fn json_error(status: StatusCode, message: impl Into<String>) -> Response {
         })),
     )
         .into_response()
+}
+
+async fn list_roles(
+    State(state): State<Arc<ConsoleState>>,
+    AuthRequired(user): AuthRequired,
+) -> Response {
+    if !state.has_permission(&user, "users", "manage").await {
+        return json_error(StatusCode::FORBIDDEN, "Permission denied");
+    }
+    match RoleEntity::find()
+        .order_by_asc(RoleColumn::Name)
+        .all(state.db())
+        .await
+    {
+        Ok(roles) => Json(json!({ "items": roles })).into_response(),
+        Err(err) => {
+            warn!("failed to list roles: {}", err);
+            json_error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string())
+        }
+    }
+}
+
+async fn get_role(
+    AxumPath(id): AxumPath<i64>,
+    State(state): State<Arc<ConsoleState>>,
+    AuthRequired(user): AuthRequired,
+) -> Response {
+    if !state.has_permission(&user, "users", "manage").await {
+        return json_error(StatusCode::FORBIDDEN, "Permission denied");
+    }
+    let db = state.db();
+    let role = match RoleEntity::find_by_id(id).one(db).await {
+        Ok(Some(r)) => r,
+        Ok(None) => return json_error(StatusCode::NOT_FOUND, "Role not found"),
+        Err(err) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
+    };
+    let perms = match role_permission::Entity::find()
+        .filter(role_permission::Column::RoleId.eq(id))
+        .all(db)
+        .await
+    {
+        Ok(p) => p,
+        Err(err) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
+    };
+    Json(json!({ "role": role, "permissions": perms })).into_response()
+}
+
+async fn create_role(
+    State(state): State<Arc<ConsoleState>>,
+    AuthRequired(user): AuthRequired,
+    Json(payload): Json<RolePayload>,
+) -> Response {
+    if !state.has_permission(&user, "users", "manage").await {
+        return json_error(StatusCode::FORBIDDEN, "Permission denied");
+    }
+    let name = payload.name.trim();
+    if name.is_empty() {
+        return json_error(StatusCode::BAD_REQUEST, "Role name is required");
+    }
+    let now = Utc::now();
+    let active = RoleActiveModel {
+        name: Set(name.to_string()),
+        description: Set(payload.description.unwrap_or_default()),
+        is_system: Set(false),
+        created_at: Set(now),
+        updated_at: Set(now),
+        ..Default::default()
+    };
+    let inserted = match RoleEntity::insert(active)
+        .exec_with_returning(state.db())
+        .await
+    {
+        Ok(r) => r,
+        Err(err) => {
+            warn!("failed to create role: {}", err);
+            return json_error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string());
+        }
+    };
+    for entry in &payload.permissions {
+        let perm = role_permission::ActiveModel {
+            role_id: Set(inserted.id),
+            resource: Set(entry.resource.clone()),
+            action: Set(entry.action.clone()),
+            ..Default::default()
+        };
+        if let Err(err) = role_permission::Entity::insert(perm).exec(state.db()).await {
+            warn!("failed to insert permission: {}", err);
+        }
+    }
+    (
+        StatusCode::CREATED,
+        Json(json!({ "status": "ok", "id": inserted.id })),
+    )
+        .into_response()
+}
+
+async fn update_role(
+    AxumPath(id): AxumPath<i64>,
+    State(state): State<Arc<ConsoleState>>,
+    AuthRequired(user): AuthRequired,
+    Json(payload): Json<RolePayload>,
+) -> Response {
+    if !state.has_permission(&user, "users", "manage").await {
+        return json_error(StatusCode::FORBIDDEN, "Permission denied");
+    }
+    let db = state.db();
+    let model = match RoleEntity::find_by_id(id).one(db).await {
+        Ok(Some(r)) => r,
+        Ok(None) => return json_error(StatusCode::NOT_FOUND, "Role not found"),
+        Err(err) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
+    };
+    if model.is_system {
+        return json_error(StatusCode::FORBIDDEN, "Cannot modify system roles");
+    }
+    let mut active: RoleActiveModel = model.into();
+    let name = payload.name.trim();
+    if !name.is_empty() {
+        active.name = Set(name.to_string());
+    }
+    if let Some(desc) = payload.description {
+        active.description = Set(desc);
+    }
+    active.updated_at = Set(Utc::now());
+    if let Err(err) = active.update(db).await {
+        return json_error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string());
+    }
+    if let Err(err) = role_permission::Entity::delete_many()
+        .filter(role_permission::Column::RoleId.eq(id))
+        .exec(db)
+        .await
+    {
+        warn!("failed to clear permissions for role {}: {}", id, err);
+    }
+    for entry in &payload.permissions {
+        let perm = role_permission::ActiveModel {
+            role_id: Set(id),
+            resource: Set(entry.resource.clone()),
+            action: Set(entry.action.clone()),
+            ..Default::default()
+        };
+        if let Err(err) = role_permission::Entity::insert(perm).exec(db).await {
+            warn!("failed to insert permission: {}", err);
+        }
+    }
+    Json(json!({ "status": "ok" })).into_response()
+}
+
+async fn delete_role_handler(
+    AxumPath(id): AxumPath<i64>,
+    State(state): State<Arc<ConsoleState>>,
+    AuthRequired(user): AuthRequired,
+) -> Response {
+    if !state.has_permission(&user, "users", "manage").await {
+        return json_error(StatusCode::FORBIDDEN, "Permission denied");
+    }
+    let db = state.db();
+    let model = match RoleEntity::find_by_id(id).one(db).await {
+        Ok(Some(r)) => r,
+        Ok(None) => return json_error(StatusCode::NOT_FOUND, "Role not found"),
+        Err(err) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
+    };
+    if model.is_system {
+        return json_error(StatusCode::FORBIDDEN, "Cannot delete system roles");
+    }
+    match RoleEntity::delete_by_id(id).exec(db).await {
+        Ok(_) => Json(json!({ "status": "ok" })).into_response(),
+        Err(err) => json_error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
+    }
+}
+
+async fn get_user_roles(
+    AxumPath(user_id): AxumPath<i64>,
+    State(state): State<Arc<ConsoleState>>,
+    AuthRequired(user): AuthRequired,
+) -> Response {
+    if !state.has_permission(&user, "users", "manage").await {
+        return json_error(StatusCode::FORBIDDEN, "Permission denied");
+    }
+    let db = state.db();
+    let assignments = match user_role::Entity::find()
+        .filter(user_role::Column::UserId.eq(user_id))
+        .all(db)
+        .await
+    {
+        Ok(rows) => rows,
+        Err(err) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
+    };
+    let role_ids: Vec<i64> = assignments.iter().map(|r| r.role_id).collect();
+    let roles = match RoleEntity::find()
+        .filter(RoleColumn::Id.is_in(role_ids))
+        .all(db)
+        .await
+    {
+        Ok(r) => r,
+        Err(err) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string()),
+    };
+    Json(json!({ "items": roles })).into_response()
+}
+
+async fn assign_user_roles(
+    AxumPath(user_id): AxumPath<i64>,
+    State(state): State<Arc<ConsoleState>>,
+    AuthRequired(user): AuthRequired,
+    Json(payload): Json<AssignRolesPayload>,
+) -> Response {
+    if !state.has_permission(&user, "users", "manage").await {
+        return json_error(StatusCode::FORBIDDEN, "Permission denied");
+    }
+    let db = state.db();
+    if let Err(err) = user_role::Entity::delete_many()
+        .filter(user_role::Column::UserId.eq(user_id))
+        .exec(db)
+        .await
+    {
+        return json_error(StatusCode::INTERNAL_SERVER_ERROR, err.to_string());
+    }
+    let now = Utc::now();
+    for role_id in &payload.role_ids {
+        let assignment = user_role::ActiveModel {
+            user_id: Set(user_id),
+            role_id: Set(*role_id),
+            created_at: Set(now),
+            ..Default::default()
+        };
+        if let Err(err) = user_role::Entity::insert(assignment).exec(db).await {
+            warn!(
+                "failed to assign role {} to user {}: {}",
+                role_id, user_id, err
+            );
+        }
+    }
+    Json(json!({ "status": "ok" })).into_response()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::ConsoleConfig;
+    use crate::models::migration::Migrator;
+    use crate::models::rbac;
+    use sea_orm::Database;
+    use sea_orm_migration::MigratorTrait;
+
+    fn superuser() -> UserModel {
+        let now = Utc::now();
+        UserModel {
+            id: 1,
+            email: "admin@test.com".into(),
+            username: "admin".into(),
+            password_hash: "x".into(),
+            reset_token: None,
+            reset_token_expires: None,
+            last_login_at: None,
+            last_login_ip: None,
+            created_at: now,
+            updated_at: now,
+            is_active: true,
+            is_staff: true,
+            is_superuser: true,
+            mfa_enabled: false,
+            mfa_secret: None,
+            auth_source: "local".into(),
+        }
+    }
+
+    async fn setup_state() -> Arc<ConsoleState> {
+        let db = Database::connect("sqlite::memory:")
+            .await
+            .expect("connect sqlite memory");
+        Migrator::up(&db, None).await.expect("run migrations");
+        ConsoleState::initialize(
+            Arc::new(crate::callrecord::DefaultCallRecordFormatter::default()),
+            db,
+            ConsoleConfig::default(),
+        )
+        .await
+        .expect("initialize console state")
+    }
+
+    #[tokio::test]
+    async fn list_roles_returns_seeded_roles() {
+        let state = setup_state().await;
+        let user = superuser();
+        let response = list_roles(State(state), AuthRequired(user)).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("read body");
+        let parsed: serde_json::Value = serde_json::from_slice(&body).expect("parse json");
+        let items = parsed["items"].as_array().expect("items");
+        assert_eq!(items.len(), rbac::SYSTEM_ROLES.len());
+    }
+
+    #[tokio::test]
+    async fn create_and_delete_custom_role() {
+        let state = setup_state().await;
+        let user = superuser();
+
+        let payload = RolePayload {
+            name: "test_custom".into(),
+            description: Some("Test role".into()),
+            permissions: vec![PermissionEntry {
+                resource: "extensions".into(),
+                action: "read".into(),
+            }],
+        };
+        let create_resp = create_role(
+            State(state.clone()),
+            AuthRequired(user.clone()),
+            Json(payload),
+        )
+        .await;
+        assert_eq!(create_resp.status(), StatusCode::CREATED);
+        let body = axum::body::to_bytes(create_resp.into_body(), usize::MAX)
+            .await
+            .expect("read body");
+        let parsed: serde_json::Value = serde_json::from_slice(&body).expect("parse json");
+        let role_id = parsed["id"].as_i64().expect("role id");
+
+        let del_resp =
+            delete_role_handler(AxumPath(role_id), State(state.clone()), AuthRequired(user)).await;
+        assert_eq!(del_resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn cannot_delete_system_role() {
+        let state = setup_state().await;
+        let user = superuser();
+        let roles = rbac::Entity::find()
+            .all(state.db())
+            .await
+            .expect("query roles");
+        let system_role = roles.first().expect("at least one role");
+        let resp =
+            delete_role_handler(AxumPath(system_role.id), State(state), AuthRequired(user)).await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn assign_and_fetch_user_roles() {
+        let state = setup_state().await;
+        let user = superuser();
+        let roles = rbac::Entity::find()
+            .all(state.db())
+            .await
+            .expect("query roles");
+        let viewer = roles.iter().find(|r| r.name == "viewer").expect("viewer");
+
+        let assign_resp = assign_user_roles(
+            AxumPath(42i64),
+            State(state.clone()),
+            AuthRequired(user.clone()),
+            Json(AssignRolesPayload {
+                role_ids: vec![viewer.id],
+            }),
+        )
+        .await;
+        assert_eq!(assign_resp.status(), StatusCode::OK);
+
+        let fetch_resp = get_user_roles(AxumPath(42i64), State(state), AuthRequired(user)).await;
+        assert_eq!(fetch_resp.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(fetch_resp.into_body(), usize::MAX)
+            .await
+            .expect("read body");
+        let parsed: serde_json::Value = serde_json::from_slice(&body).expect("parse json");
+        let items = parsed["items"].as_array().expect("items");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0]["name"], "viewer");
+    }
 }

@@ -471,6 +471,7 @@ async fn test_guest_call_allowed_extension() {
         presence_manager: Arc::new(crate::proxy::presence::PresenceManager::new(None)),
         addon_registry: None,
         rwi_gateway: None,
+        tls_listener: None,
     });
 
     let module = AuthModule::new(server_inner);
