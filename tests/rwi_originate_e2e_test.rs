@@ -705,7 +705,9 @@ async fn test_list_calls() {
     let v = ws_send_recv(&mut ws, &list_json).await;
     tracing::info!("list_calls (with call): {:?}", v);
     // Should contain at least one call
-    assert!(v.get("calls").is_some() || v.get("data").is_some());
+    assert!(v.get("data").is_some(), "list_calls response missing 'data': {:?}", v);
+    let calls = v["data"].as_array().expect("data should be an array");
+    assert!(!calls.is_empty(), "list_calls should return at least one call");
 
     ws.close(None).await.unwrap();
     bob.stop();

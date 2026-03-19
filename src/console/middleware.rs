@@ -42,6 +42,42 @@ where
     }
 }
 
+pub struct WholesaleScope {
+    pub user: crate::models::user::Model,
+    pub agent_id: Option<i64>,
+}
+
+impl<S> FromRequestParts<S> for WholesaleScope
+where
+    Arc<ConsoleState>: FromRef<S>,
+    S: Send + Sync,
+{
+    type Rejection = Response;
+
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        let AuthRequired(user) = AuthRequired::from_request_parts(parts, state).await?;
+        let console_state = Arc::<ConsoleState>::from_ref(state);
+        let agent_id = if user.is_superuser {
+            None
+        } else {
+            resolve_agent_id(&console_state, user.id).await
+        };
+        Ok(WholesaleScope { user, agent_id })
+    }
+}
+
+async fn resolve_agent_id(state: &ConsoleState, user_id: i64) -> Option<i64> {
+    use crate::models::wholesale_agent::{Column, Entity};
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+    Entity::find()
+        .filter(Column::UserId.eq(user_id))
+        .one(state.db())
+        .await
+        .ok()
+        .flatten()
+        .map(|a| a.id)
+}
+
 pub fn extract_session_cookie(headers: &HeaderMap) -> Option<String> {
     if let Some(auth_header) = headers.get(axum::http::header::AUTHORIZATION) {
         if let Ok(auth_str) = auth_header.to_str() {
@@ -102,5 +138,64 @@ impl IntoResponse for RenderTemplate<'_> {
                     .into_response()
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::ConsoleConfig;
+    use crate::models::migration::Migrator;
+    use crate::models::wholesale_agent;
+    use chrono::Utc;
+    use sea_orm::{ActiveValue::Set, Database, EntityTrait};
+    use sea_orm_migration::MigratorTrait;
+
+    async fn setup_state() -> Arc<ConsoleState> {
+        let db = Database::connect("sqlite::memory:")
+            .await
+            .expect("connect sqlite memory");
+        Migrator::up(&db, None).await.expect("run migrations");
+        ConsoleState::initialize(
+            Arc::new(crate::callrecord::DefaultCallRecordFormatter::default()),
+            db,
+            ConsoleConfig::default(),
+        )
+        .await
+        .expect("initialize console state")
+    }
+
+    #[tokio::test]
+    async fn superuser_has_no_agent_id() {
+        let state = setup_state().await;
+        let agent_id = resolve_agent_id(&state, 999).await;
+        assert!(agent_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn user_with_agent_record_resolves_agent_id() {
+        let state = setup_state().await;
+        let now = Utc::now();
+        let inserted = wholesale_agent::Entity::insert(wholesale_agent::ActiveModel {
+            user_id: Set(42),
+            name: Set("Agent Test".to_string()),
+            max_discount_bps: Set(500),
+            created_at: Set(now),
+            updated_at: Set(now),
+            ..Default::default()
+        })
+        .exec_with_returning(state.db())
+        .await
+        .expect("insert agent");
+
+        let agent_id = resolve_agent_id(&state, 42).await;
+        assert_eq!(agent_id, Some(inserted.id));
+    }
+
+    #[tokio::test]
+    async fn user_without_agent_record_returns_none() {
+        let state = setup_state().await;
+        let agent_id = resolve_agent_id(&state, 12345).await;
+        assert!(agent_id.is_none());
     }
 }

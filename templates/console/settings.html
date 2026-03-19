@@ -1922,6 +1922,7 @@
                                 <span class="rounded-full bg-slate-100 px-2 py-0.5 text-slate-600"
                                     x-text="userSummary"></span>
                                 <button type="button"
+                                    x-show="can('users:write')"
                                     class="inline-flex items-center gap-2 rounded-lg border border-dashed border-slate-300 px-3 py-1.5 font-semibold text-slate-600 transition hover:border-sky-300 hover:text-sky-700"
                                     @click="openUserCreate()">
                                     <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="none" stroke="currentColor"
@@ -2023,6 +2024,7 @@
                                                             x-text="userStatusLabel(selectedUser)"></span>
                                                         <div class="flex items-center gap-2">
                                                             <button type="button"
+                                                                x-show="can('users:write')"
                                                                 class="inline-flex items-center gap-1 rounded-md border border-slate-200 px-2 py-1 font-semibold text-slate-600 transition hover:border-slate-300 hover:text-slate-800"
                                                                 @click="openUserEdit(selectedUser.id)">
                                                                 <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="none"
@@ -2033,6 +2035,7 @@
                                                                 Edit
                                                             </button>
                                                             <button type="button"
+                                                                x-show="can('users:delete')"
                                                                 class="inline-flex items-center gap-1 rounded-md border border-rose-200 bg-rose-50 px-2 py-1 font-semibold text-rose-600 transition hover:border-rose-300 hover:bg-rose-100"
                                                                 @click="deleteUser(selectedUser.id)">
                                                                 <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="none"
@@ -2145,6 +2148,23 @@
                                                         {{ "settings_page.user_superuser_access" | t }}
                                                     </label>
                                                 </div>
+                                                <!-- Role Assignment -->
+                                                <div class="space-y-2" x-show="can('users:manage')">
+                                                    <div class="text-xs font-semibold text-slate-500">Roles</div>
+                                                    <div class="flex flex-wrap gap-2">
+                                                        <template x-for="role in availableRoles" :key="role.id">
+                                                            <label class="inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs font-medium cursor-pointer transition"
+                                                                :class="userDraft.role_ids.includes(role.id) ? 'border-sky-300 bg-sky-50 text-sky-700' : 'border-slate-200 bg-white text-slate-600 hover:border-slate-300'">
+                                                                <input type="checkbox" class="sr-only"
+                                                                    :checked="userDraft.role_ids.includes(role.id)"
+                                                                    @change="toggleUserRole(role.id)">
+                                                                <span x-text="role.name"></span>
+                                                                <span x-show="role.is_system" class="text-[10px] text-purple-500">(system)</span>
+                                                            </label>
+                                                        </template>
+                                                    </div>
+                                                    <p class="text-[11px] text-slate-400">Assign roles to control user permissions. Superusers bypass all permission checks.</p>
+                                                </div>
                                                 <div class="flex items-center justify-end gap-3">
                                                     <button type="button"
                                                         class="inline-flex items-center justify-center rounded-lg border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-600 transition hover:bg-slate-100"
@@ -2168,6 +2188,140 @@
                             </div>
                         </div>
                     </div>
+                </div>
+            </div>
+        </section>
+
+        <section x-show="activeTab === 'roles' && canManageUsers()" x-cloak x-transition.opacity class="space-y-6"
+            id="settings-tab-roles" role="tabpanel" tabindex="0">
+            <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+                <div class="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+                    <div>
+                        <h2 class="text-base font-semibold text-slate-900">Roles</h2>
+                        <p class="text-xs text-slate-500">Manage roles and their permissions. System roles cannot be deleted.</p>
+                    </div>
+                    <button type="button" x-show="can('users:manage')"
+                        class="inline-flex items-center gap-2 rounded-lg border border-dashed border-slate-300 px-3 py-1.5 text-xs font-semibold text-slate-600 transition hover:border-sky-300 hover:text-sky-700"
+                        @click="$dispatch('roles:create')">
+                        <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8">
+                            <path stroke-linecap="round" stroke-linejoin="round" d="M10 4v12m6-6H4" />
+                        </svg>
+                        New Role
+                    </button>
+                </div>
+                <div class="mt-4 space-y-2">
+                    <template x-if="rolesLoading">
+                        <div class="py-6 text-center text-xs text-slate-400">Loading roles…</div>
+                    </template>
+                    <template x-if="rolesError">
+                        <div class="rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700" x-text="rolesError"></div>
+                    </template>
+                    <template x-if="!rolesLoading">
+                        <div class="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+                            <div class="space-y-2">
+                                <template x-for="role in roles" :key="role.id">
+                                    <div class="flex items-center justify-between rounded-lg border px-3 py-2 text-sm cursor-pointer transition"
+                                        :class="selectedRole && selectedRole.id === role.id ? 'border-sky-300 bg-sky-50 text-sky-700 shadow-sm' : 'border-slate-200 bg-white text-slate-600 hover:border-slate-300'"
+                                        @click="selectRole(role.id)">
+                                        <div>
+                                            <div class="font-semibold text-slate-800" x-text="role.name"></div>
+                                            <div class="text-xs text-slate-400" x-text="role.description || ''"></div>
+                                        </div>
+                                        <div class="flex items-center gap-2 text-xs">
+                                            <span x-show="role.is_system"
+                                                class="rounded-full bg-purple-50 px-2 py-0.5 font-semibold text-purple-600 ring-1 ring-purple-100">
+                                                System
+                                            </span>
+                                            <button type="button" x-show="!role.is_system && can('users:manage')"
+                                                class="rounded-md border border-rose-200 bg-rose-50 px-2 py-0.5 font-semibold text-rose-600 transition hover:bg-rose-100"
+                                                @click.stop="deleteRole(role.id)">
+                                                Delete
+                                            </button>
+                                        </div>
+                                    </div>
+                                </template>
+                                <template x-if="roleCreateOpen">
+                                    <div class="rounded-xl border border-dashed border-slate-300 bg-slate-50/40 p-4 text-sm text-slate-600">
+                                        <div class="space-y-3">
+                                            <label class="flex flex-col gap-1 text-xs font-semibold text-slate-500">
+                                                Role name
+                                                <input type="text" x-model="newRoleName"
+                                                    class="rounded-md border border-slate-200 px-3 py-1.5 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                                    placeholder="e.g. billing_admin">
+                                            </label>
+                                            <label class="flex flex-col gap-1 text-xs font-semibold text-slate-500">
+                                                Description
+                                                <input type="text" x-model="newRoleDesc"
+                                                    class="rounded-md border border-slate-200 px-3 py-1.5 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                                    placeholder="Optional description">
+                                            </label>
+                                            <div class="flex items-center justify-end gap-2">
+                                                <button type="button" @click="roleCreateOpen = false"
+                                                    class="text-xs font-semibold text-slate-400 hover:text-slate-600">Cancel</button>
+                                                <button type="button" @click="saveRole()" :disabled="roleSaving"
+                                                    class="inline-flex items-center gap-1 rounded-lg bg-sky-600 px-3 py-1.5 text-xs font-semibold text-white transition hover:bg-sky-500 disabled:opacity-60">
+                                                    <span x-text="roleSaving ? 'Saving…' : 'Create role'"></span>
+                                                </button>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </template>
+                            </div>
+                            <div>
+                                <template x-if="selectedRole">
+                                    <div class="rounded-lg border border-slate-200 p-4 space-y-4 text-sm text-slate-600">
+                                        <div>
+                                            <div class="text-xs uppercase tracking-wide text-slate-400">Role</div>
+                                            <div class="mt-1 text-base font-semibold text-slate-900" x-text="selectedRole.name"></div>
+                                            <div class="text-xs text-slate-500" x-text="selectedRole.description || ''"></div>
+                                            <span x-show="selectedRole.is_system"
+                                                class="mt-1 inline-block rounded-full bg-purple-50 px-2 py-0.5 text-[10px] font-semibold text-purple-600 ring-1 ring-purple-100">
+                                                System role
+                                            </span>
+                                        </div>
+                                        <div x-show="can('users:manage')">
+                                            <div class="text-xs uppercase tracking-wide text-slate-400 mb-3">Permissions</div>
+                                            <div class="space-y-3 max-h-80 overflow-y-auto pr-1">
+                                                <template x-for="group in permissionGroups" :key="group.resource">
+                                                    <div class="rounded-lg border border-slate-100 bg-slate-50/50 p-2">
+                                                        <div class="text-xs font-semibold text-slate-500 mb-2" x-text="group.label"></div>
+                                                        <div class="flex flex-wrap gap-1.5">
+                                                            <template x-for="action in group.permissions" :key="group.resource + ':' + action">
+                                                                <label class="inline-flex items-center gap-1 rounded-lg border px-2 py-1 text-[11px] font-medium cursor-pointer transition"
+                                                                    :class="hasPermissionSelected(group.resource, action) ? 'border-sky-300 bg-sky-50 text-sky-700' : 'border-slate-200 bg-white text-slate-600 hover:border-slate-300'">
+                                                                    <input type="checkbox" class="sr-only"
+                                                                        :checked="hasPermissionSelected(group.resource, action)"
+                                                                        @change="togglePermission(group.resource, action)">
+                                                                    <span x-text="action"></span>
+                                                                </label>
+                                                            </template>
+                                                        </div>
+                                                    </div>
+                                                </template>
+                                            </div>
+                                            <div class="mt-3 flex items-center gap-2">
+                                                <span x-show="roleSaving" class="text-xs text-slate-400">Saving...</span>
+                                            </div>
+                                        </div>
+                                        <template x-if="!can('users:manage') && selectedRole.permissions && selectedRole.permissions.length">
+                                            <div>
+                                                <div class="text-xs uppercase tracking-wide text-slate-400 mb-2">Permissions</div>
+                                                <div class="flex flex-wrap gap-1.5">
+                                                    <template x-for="perm in selectedRole.permissions" :key="perm.id || (perm.resource + ':' + perm.action)">
+                                                        <span class="rounded-full bg-sky-50 px-2 py-0.5 text-[11px] font-semibold text-sky-700 ring-1 ring-sky-100"
+                                                            x-text="perm.resource + ':' + perm.action"></span>
+                                                    </template>
+                                                </div>
+                                            </div>
+                                        </template>
+                                        <template x-if="!can('users:manage') && (!selectedRole.permissions || !selectedRole.permissions.length)">
+                                            <div class="text-xs text-slate-400">No permissions assigned.</div>
+                                        </template>
+                                    </div>
+                                </template>
+                            </div>
+                        </div>
+                    </template>
                 </div>
             </div>
         </section>
@@ -2199,7 +2353,8 @@
                     { id: 'security', label: tget(tt, 'settings_page.security_posture') || 'Security posture' },
                     { id: 'rwi', label: tget(tt, 'settings_page.rwi_settings') || 'RWI' },
                     { id: 'departments', label: tget(tt, 'settings_page.departments') || 'Departments' },
-                    { id: 'users', label: tget(tt, 'settings_page.users_title') || 'Users', requiresSuperuser: true },
+                    { id: 'users', label: tget(tt, 'settings_page.users_title') || 'Users', requiresPermission: 'users:manage' },
+                    { id: 'roles', label: tget(tt, 'settings_page.roles_title') || 'Roles', requiresPermission: 'users:manage' },
                 ];
             })(),
             activeTab: 'platform',
@@ -2340,9 +2495,38 @@
                 is_active: true,
                 is_staff: false,
                 is_superuser: false,
+                role_ids: [],
             },
+            availableRoles: [],
+            // Roles tab state
+            roles: [],
+            rolesLoading: true,
+            rolesError: null,
+            selectedRole: null,
+            roleCreateOpen: false,
+            newRoleName: '',
+            newRoleDesc: '',
+            roleSaving: false,
+            permissionGroups: [
+                { resource: 'system', label: 'System', permissions: ['read', 'write', 'write:platform', 'write:proxy', 'write:storage', 'write:security', 'write:rwi'] },
+                { resource: 'users', label: 'Users', permissions: ['read', 'write', 'delete', 'manage'] },
+                { resource: 'departments', label: 'Departments', permissions: ['read', 'write', 'delete'] },
+                { resource: 'extensions', label: 'Extensions', permissions: ['read', 'write', 'delete'] },
+                { resource: 'trunks', label: 'SIP Trunks', permissions: ['read', 'write', 'delete'] },
+                { resource: 'routes', label: 'Routes', permissions: ['read', 'write', 'delete'] },
+                { resource: 'queues', label: 'Queues', permissions: ['read', 'write', 'delete', 'export', 'realtime'] },
+                { resource: 'ivr', label: 'IVR', permissions: ['read', 'write', 'publish', 'delete'] },
+                { resource: 'cdr', label: 'CDR/Recordings', permissions: ['read', 'read:recording', 'write', 'delete', 'export'] },
+                { resource: 'calls', label: 'Calls', permissions: ['read', 'control'] },
+                { resource: 'ami', label: 'AMI', permissions: ['access'] },
+                { resource: 'voicemail', label: 'Voicemail', permissions: ['read', 'read:audio', 'write', 'delete', 'settings'] },
+                { resource: 'endpoints', label: 'Endpoints', permissions: ['read', 'write', 'delete', 'reboot', 'settings'] },
+                { resource: 'wholesale', label: 'Wholesale', permissions: ['read', 'write', 'delete', 'billing', 'settings', 'agent'] },
+                { resource: 'metrics', label: 'Metrics', permissions: ['read'] },
+                { resource: 'diagnostics', label: 'Diagnostics', permissions: ['read'] },
+            ],
             canManageUsers() {
-                return Boolean(this.currentUser && this.currentUser.is_superuser);
+                return window.can('users:manage');
             },
             ensureCanManageUsers(notify = false) {
                 if (this.canManageUsers()) {
@@ -2464,11 +2648,13 @@
                 this.selectedUserId = '';
                 this.fetchDepartments();
                 this.fetchUsers();
+                this.fetchRoles();
                 this.resetAclReloadModal();
                 this.resetReloadModal();
+                window.addEventListener('roles:create', () => this.openRoleCreate());
             },
             get visibleTabs() {
-                return this.tabs.filter((tab) => !tab.requiresSuperuser || this.canManageUsers());
+                return this.tabs.filter((tab) => !tab.requiresPermission || window.can(tab.requiresPermission));
             },
             get storageProfiles() {
                 return Array.isArray(this.server.storage_profiles) ? this.server.storage_profiles : [];
@@ -3139,6 +3325,110 @@
                     return null;
                 }
             },
+            async fetchAvailableRoles() {
+                try {
+                    const resp = await fetch(this.basePath + '/settings/roles');
+                    if (resp.ok) {
+                        const data = await resp.json();
+                        this.availableRoles = data.roles || data.items || data || [];
+                    }
+                } catch (e) {
+                    console.error('Failed to load available roles:', e);
+                }
+            },
+            // Roles tab functions
+            async fetchRoles() {
+                this.rolesLoading = true;
+                this.rolesError = null;
+                try {
+                    const r = await fetch(this.basePath + '/settings/roles');
+                    const d = await r.json();
+                    this.roles = d.roles || d.items || d || [];
+                } catch (e) {
+                    this.rolesError = e.message;
+                } finally {
+                    this.rolesLoading = false;
+                }
+            },
+            openRoleCreate() {
+                this.roleCreateOpen = true;
+                this.newRoleName = '';
+                this.newRoleDesc = '';
+            },
+            async saveRole() {
+                if (!this.newRoleName.trim()) return;
+                this.roleSaving = true;
+                try {
+                    const r = await fetch(this.basePath + '/settings/roles', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ name: this.newRoleName.trim(), description: this.newRoleDesc.trim() }),
+                    });
+                    if (!r.ok) { const d = await r.json(); throw new Error(d.error || 'Failed to create role'); }
+                    this.roleCreateOpen = false;
+                    await this.fetchRoles();
+                } catch (e) {
+                    this.$dispatch('toast', { title: 'Error', message: e.message });
+                } finally {
+                    this.roleSaving = false;
+                }
+            },
+            async deleteRole(id) {
+                if (!confirm('Delete this role?')) return;
+                try {
+                    const r = await fetch(this.basePath + '/settings/roles/' + id, { method: 'DELETE' });
+                    if (!r.ok) { const d = await r.json(); throw new Error(d.error || 'Failed'); }
+                    if (this.selectedRole && this.selectedRole.id === id) this.selectedRole = null;
+                    await this.fetchRoles();
+                } catch (e) {
+                    this.$dispatch('toast', { title: 'Error', message: e.message });
+                }
+            },
+            async selectRole(id) {
+                try {
+                    const r = await fetch(this.basePath + '/settings/roles/' + id);
+                    this.selectedRole = await r.json();
+                } catch (e) {
+                    this.$dispatch('toast', { title: 'Error', message: e.message });
+                }
+            },
+            hasPermissionSelected(resource, action) {
+                if (!this.selectedRole || !this.selectedRole.permissions) return false;
+                return this.selectedRole.permissions.some(p => p.resource === resource && p.action === action);
+            },
+            async togglePermission(resource, action) {
+                if (!this.selectedRole) return;
+                const hasIt = this.hasPermissionSelected(resource, action);
+                if (hasIt) {
+                    this.selectedRole.permissions = this.selectedRole.permissions.filter(p => !(p.resource === resource && p.action === action));
+                } else {
+                    if (!this.selectedRole.permissions) this.selectedRole.permissions = [];
+                    this.selectedRole.permissions.push({ resource, action });
+                }
+                // Auto-save on toggle
+                await this.saveRolePermissions();
+            },
+            async saveRolePermissions() {
+                if (!this.selectedRole) return;
+                this.roleSaving = true;
+                try {
+                    const r = await fetch(this.basePath + '/settings/roles/' + this.selectedRole.id, {
+                        method: 'PATCH',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            name: this.selectedRole.name,
+                            description: this.selectedRole.description,
+                            permissions: (this.selectedRole.permissions || []).map(p => ({ resource: p.resource, action: p.action })),
+                        }),
+                    });
+                    if (!r.ok) { const d = await r.json(); throw new Error(d.error || 'Failed to save permissions'); }
+                    this.$dispatch('toast', { title: 'Success', message: 'Permissions saved' });
+                } catch (e) {
+                    this.$dispatch('toast', { title: 'Error', message: e.message });
+                } finally {
+                    this.roleSaving = false;
+                }
+            },
             defaultUserDraft() {
                 return {
                     email: '',
@@ -3147,6 +3437,7 @@
                     is_active: true,
                     is_staff: false,
                     is_superuser: false,
+                    role_ids: [],
                 };
             },
             userToDraft(user) {
@@ -3157,7 +3448,19 @@
                     is_active: !!user?.is_active,
                     is_staff: !!user?.is_staff,
                     is_superuser: !!user?.is_superuser,
+                    role_ids: user?.role_ids || [],
                 };
+            },
+            toggleUserRole(roleId) {
+                if (!this.userDraft.role_ids) {
+                    this.userDraft.role_ids = [];
+                }
+                const idx = this.userDraft.role_ids.indexOf(roleId);
+                if (idx >= 0) {
+                    this.userDraft.role_ids.splice(idx, 1);
+                } else {
+                    this.userDraft.role_ids.push(roleId);
+                }
             },
             openUserCreate() {
                 if (!this.ensureCanManageUsers(true)) {
@@ -3167,6 +3470,7 @@
                 this.userEditingId = '';
                 this.userDraft = this.defaultUserDraft();
                 this.userFormVisible = true;
+                this.fetchAvailableRoles();
             },
             async openUserEdit(id) {
                 if (!this.ensureCanManageUsers(true)) {
@@ -3175,6 +3479,18 @@
                 const detail = await this.loadUserDetail(id);
                 if (!detail) {
                     return;
+                }
+                await this.fetchAvailableRoles();
+                // Load user roles
+                try {
+                    const resp = await fetch(this.basePath + '/settings/users/' + id + '/roles');
+                    if (resp.ok) {
+                        const roleData = await resp.json();
+                        detail.role_ids = (roleData.roles || roleData || []).map(r => r.id);
+                    }
+                } catch (e) {
+                    console.error('Failed to load user roles:', e);
+                    detail.role_ids = [];
                 }
                 this.userFormMode = 'edit';
                 this.userEditingId = id;
@@ -3243,8 +3559,22 @@
                     if (!response.ok) {
                         throw new Error(data?.message || 'Failed to save user');
                     }
+                    let userId = this.userEditingId;
                     if (method === 'PUT' && data?.id !== undefined) {
+                        userId = data.id;
                         this.selectedUserId = data.id;
+                    }
+                    // Save role assignments
+                    if (userId && draft.role_ids) {
+                        try {
+                            await fetch(this.basePath + '/settings/users/' + userId + '/roles', {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ role_ids: draft.role_ids }),
+                            });
+                        } catch (roleErr) {
+                            console.error('Failed to save user roles:', roleErr);
+                        }
                     }
                     this.$dispatch('toast', {
                         title: 'Saved',

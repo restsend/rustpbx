@@ -27,7 +27,7 @@ pub fn urls() -> Router<Arc<ConsoleState>> {
 pub async fn list_notifications(
     State(state): State<Arc<ConsoleState>>,
     headers: HeaderMap,
-    AuthRequired(_): AuthRequired,
+    AuthRequired(user): AuthRequired,
 ) -> Response {
     let notifications = Entity::find()
         .order_by(Column::CreatedAt, Order::Desc)
@@ -35,11 +35,14 @@ pub async fn list_notifications(
         .await
         .unwrap_or_default();
 
+    let current_user = state.build_current_user_ctx(&user).await;
+
     state.render_with_headers(
         "console/notifications.html",
         json!({
             "nav_active": "notifications",
             "notifications": notifications,
+            "current_user": current_user,
         }),
         &headers,
     )

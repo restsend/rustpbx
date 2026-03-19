@@ -21,7 +21,7 @@ use tracing::warn;
 pub async fn dashboard(
     State(state): State<Arc<ConsoleState>>,
     headers: HeaderMap,
-    AuthRequired(_): AuthRequired,
+    AuthRequired(user): AuthRequired,
 ) -> Response {
     let range = resolve_time_range(None);
     let payload = match build_dashboard_payload(&state, &range).await {
@@ -32,6 +32,8 @@ pub async fn dashboard(
         }
     };
 
+    let current_user = state.build_current_user_ctx(&user).await;
+
     state.render_with_headers(
         "console/dashboard.html",
         json!({
@@ -40,6 +42,7 @@ pub async fn dashboard(
             "call_direction": payload.call_direction,
             "active_calls": payload.active_calls,
             "range": payload.range,
+            "current_user": current_user,
         }),
         &headers,
     )

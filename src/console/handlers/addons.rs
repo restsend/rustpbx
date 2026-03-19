@@ -1,5 +1,6 @@
 use crate::config::Config;
 use crate::console::ConsoleState;
+use crate::console::middleware::AuthRequired;
 use axum::{
     Router,
     extract::{Json, Path, State},
@@ -29,7 +30,13 @@ pub fn urls() -> Router<Arc<ConsoleState>> {
 pub async fn index(
     State(state): State<Arc<ConsoleState>>,
     headers: HeaderMap,
+    AuthRequired(user): AuthRequired,
 ) -> impl IntoResponse {
+    // Permission check - system:read required for addon management
+    if !state.has_permission(&user, "system", "read").await {
+        return (StatusCode::FORBIDDEN, "Permission denied").into_response();
+    }
+
     let addons = if let Some(app_state) = state.app_state() {
         // Try to load config from disk to get the latest state
         let config = if let Some(path) = &app_state.config_path {
@@ -94,6 +101,8 @@ pub async fn index(
     #[cfg(not(feature = "commerce"))]
     let commerce_enabled = false;
 
+    let current_user = state.build_current_user_ctx(&user).await;
+
     state.render_with_headers(
         "console/addons.html",
         serde_json::json!({
@@ -102,7 +111,8 @@ pub async fn index(
             "licenses": licenses,
             "commerce_enabled": commerce_enabled,
             "page_title": "Addons",
-            "nav_active": "addons"
+            "nav_active": "addons",
+            "current_user": current_user,
         }),
         &headers,
     )
@@ -113,8 +123,14 @@ pub async fn index(
 #[cfg(feature = "commerce")]
 pub async fn verify_addon(
     State(state): State<Arc<ConsoleState>>,
+    AuthRequired(user): AuthRequired,
     Json(payload): Json<serde_json::Value>,
 ) -> Response {
+    // Permission check - system:write required to verify licenses
+    if !state.has_permission(&user, "system", "write").await {
+        return (StatusCode::FORBIDDEN, "Permission denied").into_response();
+    }
+
     // Extract license_key from the payload regardless of whether the caller
     // also sent an `id` field (old clients may still send it; we ignore it).
     let license_key = payload
@@ -135,8 +151,14 @@ pub struct ToggleAddonPayload {
 
 pub async fn toggle_addon(
     State(state): State<Arc<ConsoleState>>,
+    AuthRequired(user): AuthRequired,
     Json(payload): Json<ToggleAddonPayload>,
 ) -> Response {
+    // Permission check - system:write required to modify addon state
+    if !state.has_permission(&user, "system", "write").await {
+        return (StatusCode::FORBIDDEN, "Permission denied").into_response();
+    }
+
     let config_path = match get_config_path(&state) {
         Ok(path) => path,
         Err(resp) => return resp,
@@ -209,7 +231,13 @@ pub async fn detail(
     State(state): State<Arc<ConsoleState>>,
     Path(id): Path<String>,
     headers: HeaderMap,
+    AuthRequired(user): AuthRequired,
 ) -> impl IntoResponse {
+    // Permission check - system:read required for addon management
+    if !state.has_permission(&user, "system", "read").await {
+        return (StatusCode::FORBIDDEN, "Permission denied").into_response();
+    }
+
     let addon = if let Some(app_state) = state.app_state() {
         let list = app_state.addon_registry.list_addons(app_state.clone());
         list.into_iter().find(|a| a.id == id)
@@ -253,6 +281,8 @@ pub async fn detail(
             }
         }
 
+        let current_user = state.build_current_user_ctx(&user).await;
+
         state.render_with_headers(
             "console/addon_detail.html",
             serde_json::json!({
@@ -260,6 +290,7 @@ pub async fn detail(
                 "page_title": format!("Addon: {}", addon.name),
                 "nav_active": "addons",
                 "commerce_enabled": cfg!(feature = "commerce"),
+                "current_user": current_user,
             }),
             &headers,
         )

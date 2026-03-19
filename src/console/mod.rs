@@ -1,15 +1,18 @@
 use crate::config::ConsoleConfig;
 use crate::console::i18n::{I18n, LocaleConfig, LocaleInfo, detect_locale};
 use crate::console::middleware::RenderTemplate;
+use crate::models::rbac::{role_permission, user_role};
 use crate::proxy::server::SipServerRef;
 use crate::{app::AppStateInner, callrecord::CallRecordFormatter};
 use anyhow::Result;
 use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
 use minijinja::Environment;
-use sea_orm::DatabaseConnection;
+use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter};
 use sha2::{Digest, Sha256};
-use std::sync::{Arc, RwLock, Weak};
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex, RwLock, Weak};
+use std::time::Instant;
 
 pub mod auth;
 pub mod handlers;
@@ -25,8 +28,8 @@ pub struct ConsoleState {
     sip_server: Arc<RwLock<Option<SipServerRef>>>,
     app_state: Arc<RwLock<Option<Weak<AppStateInner>>>>,
     callrecord_formatter: Arc<dyn CallRecordFormatter>,
-    /// Shared i18n manager
     i18n: Arc<I18n>,
+    perm_cache: Arc<Mutex<HashMap<i64, (Instant, HashSet<String>)>>>,
 }
 
 impl ConsoleState {
@@ -63,6 +66,7 @@ impl ConsoleState {
             app_state: Arc::new(RwLock::new(None)),
             callrecord_formatter,
             i18n,
+            perm_cache: Arc::new(Mutex::new(HashMap::new())),
         }))
     }
 
@@ -304,6 +308,94 @@ impl ConsoleState {
         .into_response()
     }
 
+    pub async fn user_permissions(&self, user: &crate::models::user::Model) -> HashSet<String> {
+        if user.is_superuser {
+            let mut s = HashSet::new();
+            s.insert("*".to_string());
+            return s;
+        }
+
+        const TTL_SECS: u64 = 300;
+        if let Ok(cache) = self.perm_cache.lock() {
+            if let Some((ts, perms)) = cache.get(&user.id) {
+                if ts.elapsed().as_secs() < TTL_SECS {
+                    return perms.clone();
+                }
+            }
+        }
+
+        let perms = self.load_permissions_from_db(user.id).await;
+
+        if let Ok(mut cache) = self.perm_cache.lock() {
+            cache.insert(user.id, (Instant::now(), perms.clone()));
+        }
+
+        perms
+    }
+
+    async fn load_permissions_from_db(&self, user_id: i64) -> HashSet<String> {
+        let role_ids = match user_role::Entity::find()
+            .filter(user_role::Column::UserId.eq(user_id))
+            .all(&self.db)
+            .await
+        {
+            Ok(rows) => rows.into_iter().map(|r| r.role_id).collect::<Vec<_>>(),
+            Err(_) => return HashSet::new(),
+        };
+
+        if role_ids.is_empty() {
+            return HashSet::new();
+        }
+
+        match role_permission::Entity::find()
+            .filter(role_permission::Column::RoleId.is_in(role_ids))
+            .all(&self.db)
+            .await
+        {
+            Ok(rows) => rows
+                .into_iter()
+                .map(|p| format!("{}:{}", p.resource, p.action))
+                .collect(),
+            Err(_) => HashSet::new(),
+        }
+    }
+
+    pub async fn has_permission(
+        &self,
+        user: &crate::models::user::Model,
+        resource: &str,
+        action: &str,
+    ) -> bool {
+        if user.is_superuser {
+            return true;
+        }
+        let perms = self.user_permissions(user).await;
+        perms.contains(&format!("{}:{}", resource, action))
+    }
+
+    pub async fn build_current_user_ctx(
+        &self,
+        user: &crate::models::user::Model,
+    ) -> serde_json::Value {
+        let perms = self.user_permissions(user).await;
+        let perm_list: Vec<String> = if user.is_superuser {
+            vec!["*".to_string()]
+        } else {
+            perms.iter().cloned().collect()
+        };
+        serde_json::json!({
+            "id": user.id,
+            "username": user.username,
+            "email": user.email,
+            "is_superuser": user.is_superuser,
+            "is_staff": user.is_staff,
+            "is_active": user.is_active,
+            "permissions": perm_list,
+            "can_manage_users": user.is_superuser || perms.contains("users:manage"),
+            "can_write_system": user.is_superuser || perms.contains("system:write"),
+        })
+    }
+
     // ------------------------------------------------------------------
     // Accessors
     // ------------------------------------------------------------------
@@ -401,6 +493,120 @@ impl ConsoleState {
 
     pub fn get_sip_server(&self) -> Option<SipServerRef> {
         self.sip_server.read().unwrap().clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::ConsoleConfig;
+    use crate::models::migration::Migrator;
+    use crate::models::rbac::{self, user_role};
+    use chrono::Utc;
+    use sea_orm::{ActiveValue::Set, Database};
+    use sea_orm_migration::MigratorTrait;
+
+    fn make_user(id: i64, is_superuser: bool) -> crate::models::user::Model {
+        let now = Utc::now();
+        crate::models::user::Model {
+            id,
+            email: format!("user{}@test.com", id),
+            username: format!("user{}", id),
+            password_hash: "x".into(),
+            reset_token: None,
+            reset_token_expires: None,
+            last_login_at: None,
+            last_login_ip: None,
+            created_at: now,
+            updated_at: now,
+            is_active: true,
+            is_staff: false,
+            is_superuser,
+            mfa_enabled: false,
+            mfa_secret: None,
+            auth_source: "local".into(),
+        }
+    }
+
+    async fn setup_state() -> Arc<ConsoleState> {
+        let db = Database::connect("sqlite::memory:")
+            .await
+            .expect("connect sqlite memory");
+        Migrator::up(&db, None).await.expect("run migrations");
+        ConsoleState::initialize(
+            Arc::new(crate::callrecord::DefaultCallRecordFormatter::default()),
+            db,
+            ConsoleConfig::default(),
+        )
+        .await
+        .expect("initialize console state")
+    }
+
+    #[tokio::test]
+    async fn superuser_has_wildcard_permission() {
+        let state = setup_state().await;
+        let user = make_user(1, true);
+        let perms = state.user_permissions(&user).await;
+        assert!(perms.contains("*"));
+        assert!(state.has_permission(&user, "extensions", "delete").await);
+        assert!(state.has_permission(&user, "ami", "access").await);
+    }
+
+    #[tokio::test]
+    async fn user_without_roles_has_no_permissions() {
+        let state = setup_state().await;
+        let user = make_user(99, false);
+        let perms = state.user_permissions(&user).await;
+        assert!(perms.is_empty());
+        assert!(!state.has_permission(&user, "extensions", "read").await);
+    }
+
+    #[tokio::test]
+    async fn user_with_viewer_role_has_read_permissions() {
+        let state = setup_state().await;
+        let db = state.db();
+
+        let roles = rbac::Entity::find().all(db).await.expect("query roles");
+        let viewer = roles.iter().find(|r| r.name == "viewer").expect("viewer");
+
+        let user = make_user(200, false);
+        user_role::Entity::insert(user_role::ActiveModel {
+            user_id: Set(user.id),
+            role_id: Set(viewer.id),
+            created_at: Set(Utc::now()),
+            ..Default::default()
+        })
+        .exec(db)
+        .await
+        .expect("assign viewer role");
+
+        let perms = state.user_permissions(&user).await;
+        assert!(perms.contains("extensions:read"));
+        assert!(perms.contains("cdr:read"));
+        assert!(!perms.contains("extensions:write"));
+        assert!(!perms.contains("extensions:delete"));
+    }
+
+    #[tokio::test]
+    async fn build_current_user_ctx_contains_expected_fields() {
+        let state = setup_state().await;
+        let user = make_user(1, true);
+        let ctx = state.build_current_user_ctx(&user).await;
+        assert_eq!(ctx["id"], 1);
+        assert_eq!(ctx["is_superuser"], true);
+        assert_eq!(ctx["can_manage_users"], true);
+        assert_eq!(ctx["can_write_system"], true);
+        let perms = ctx["permissions"].as_array().expect("permissions array");
+        assert!(perms.iter().any(|p| p == "*"));
+    }
+
+    #[tokio::test]
+    async fn permission_cache_is_populated() {
+        let state = setup_state().await;
+        let user = make_user(300, false);
+        state.user_permissions(&user).await;
+        let cache = state.perm_cache.lock().expect("lock cache");
+        assert!(cache.contains_key(&300));
     }
 }
 

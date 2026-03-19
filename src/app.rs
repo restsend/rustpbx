@@ -15,6 +15,7 @@ use crate::{
         server::{SipServer, SipServerBuilder},
         ws::sip_ws_handler,
     },
+    tls_reloader::TlsReloaderRegistry,
 };
 
 use anyhow::Result;
@@ -37,6 +38,7 @@ use std::{
 };
 use tokio::net::TcpListener;
 use tokio::select;
+use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 use tower_http::{
     compression::CompressionLayer,
@@ -71,6 +73,8 @@ pub struct AppStateInner {
     pub addon_registry: Arc<crate::addons::registry::AddonRegistry>,
     #[cfg(feature = "console")]
     pub console: Option<Arc<crate::console::ConsoleState>>,
+    /// TLS certificate reloaders for hot-reload after ACME renewal
+    pub tls_reloader: Arc<RwLock<Option<Arc<TlsReloaderRegistry>>>>,
 }
 
 pub type AppState = Arc<AppStateInner>;
@@ -170,11 +174,7 @@ impl AppStateBuilder {
     }
 
     pub fn with_config(mut self, mut config: Config) -> Self {
-        if config.ensure_recording_defaults() {
-            warn!(
-                "recorder_format=ogg requires compiling with the 'opus' feature; falling back to wav"
-            );
-        }
+        config.ensure_recording_defaults();
         self.config = Some(config);
         if self.config_loaded_at.is_none() {
             self.config_loaded_at = Some(Utc::now());
@@ -392,7 +392,16 @@ impl AppStateBuilder {
             addon_registry: addon_registry.clone(),
             #[cfg(feature = "console")]
             console: console_state,
+            tls_reloader: Arc::new(RwLock::new(Some(Arc::new(TlsReloaderRegistry::new())))),
         });
+
+        // Register SIP TLS reloader if TLS is enabled
+        if let Some(tls_listener) = app_state.sip_server().get_tls_listener() {
+            let reloader = Arc::new(crate::tls_reloader::RsipstackTlsReloader::new(tls_listener));
+            if let Some(registry_guard) = app_state.tls_reloader.read().await.as_ref() {
+                registry_guard.register_sip_tls(reloader);
+            }
+        }
 
         if let Some(mut manager) = callrecord_manager {
             tokio::spawn(async move {
@@ -526,6 +535,16 @@ pub async fn run(state: AppState, mut router: Router) -> Result<()> {
     } else {
         None
     };
+
+    // Register HTTPS reloader for ACME auto-renew hot-reload
+    if let Some(ref config) = https_config {
+        let reloader = Arc::new(crate::tls_reloader::AxumRustlsReloader::new(Arc::new(
+            config.clone(),
+        )));
+        if let Some(registry_guard) = state.tls_reloader.read().await.as_ref() {
+            registry_guard.register_https(reloader);
+        }
+    }
 
     let https_addr = if https_config.is_some() {
         let addr_str = state

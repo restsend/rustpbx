@@ -8,12 +8,13 @@ use std::sync::Arc;
 pub async fn metrics_page(
     State(state): State<Arc<ConsoleState>>,
     headers: HeaderMap,
-    AuthRequired(_): AuthRequired,
+    AuthRequired(user): AuthRequired,
 ) -> Response {
     let runtime_metrics = collect_runtime_metrics(&state);
 
     // Get Prometheus metrics endpoint configuration
     let prometheus_config = get_prometheus_config(&state);
+    let current_user = state.build_current_user_ctx(&user).await;
 
     state.render_with_headers(
         "console/metrics.html",
@@ -21,6 +22,7 @@ pub async fn metrics_page(
             "nav_active": "metrics",
             "metrics": runtime_metrics,
             "prometheus": prometheus_config,
+            "current_user": current_user,
         }),
         &headers,
     )

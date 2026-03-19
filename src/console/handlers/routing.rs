@@ -712,6 +712,7 @@ fn render_route_form(
     error_message: Option<String>,
     form_action: String,
     headers: &HeaderMap,
+    current_user: &serde_json::Value,
 ) -> Response {
     let route_value = serde_json::to_value(doc).unwrap_or(Value::Null);
     let trunk_options = Value::Array(build_trunk_options(trunks));
@@ -758,6 +759,7 @@ fn render_route_form(
             "back_url": state.url_for("/routing"),
             "error_message": error_message,
             "addon_scripts": state.get_injected_scripts(&script_path),
+            "current_user": current_user,
         }),
         headers,
     )
@@ -796,7 +798,7 @@ fn apply_document_to_active(
 pub async fn page_routing(
     State(state): State<Arc<ConsoleState>>,
     headers: HeaderMap,
-    AuthRequired(_): AuthRequired,
+    AuthRequired(user): AuthRequired,
 ) -> Response {
     let db = state.db();
     let trunk_options = match load_trunks(db).await {
@@ -806,6 +808,8 @@ pub async fn page_routing(
             Value::Array(vec![])
         }
     };
+
+    let current_user = state.build_current_user_ctx(&user).await;
 
     state.render_with_headers(
         "console/routing.html",
@@ -818,6 +822,7 @@ pub async fn page_routing(
                 "status_options": status_options_value(),
             },
             "create_url": state.url_for("/routing/new"),
+            "current_user": current_user,
         }),
         &headers,
     )
@@ -949,7 +954,7 @@ pub(crate) async fn query_routing(
 pub async fn page_routing_create(
     State(state): State<Arc<ConsoleState>>,
     headers: HeaderMap,
-    AuthRequired(_): AuthRequired,
+    AuthRequired(user): AuthRequired,
 ) -> Response {
     let db = state.db();
     let trunks = match load_trunks(db).await {
@@ -976,6 +981,7 @@ pub async fn page_routing_create(
     };
 
     let ivr_options = Value::Array(vec![]);
+    let current_user = state.build_current_user_ctx(&user).await;
 
     let doc = RouteDocument::default();
     render_route_form(
@@ -988,6 +994,7 @@ pub async fn page_routing_create(
         None,
         state.url_for("/routing"),
         &headers,
+        &current_user,
     )
 }
 
@@ -995,7 +1002,7 @@ pub async fn page_routing_edit(
     AxumPath(id): AxumPath<i64>,
     State(state): State<Arc<ConsoleState>>,
     headers: HeaderMap,
-    AuthRequired(_): AuthRequired,
+    AuthRequired(user): AuthRequired,
 ) -> Response {
     let db = state.db();
     let model = match RoutingEntity::find_by_id(id).one(db).await {
@@ -1042,6 +1049,7 @@ pub async fn page_routing_edit(
     };
 
     let ivr_options = Value::Array(vec![]);
+    let current_user = state.build_current_user_ctx(&user).await;
 
     let mut doc = RouteDocument::from_model(&model);
     doc.apply_trunk_context(&model, &trunk_map);
@@ -1056,6 +1064,7 @@ pub async fn page_routing_edit(
         None,
         state.url_for(&format!("/routing/{}", id)),
         &headers,
+        &current_user,
     )
 }
 
@@ -1318,9 +1327,16 @@ pub async fn toggle_routing(
 
 pub(crate) async fn create_routing(
     State(state): State<Arc<ConsoleState>>,
-    AuthRequired(_): AuthRequired,
+    AuthRequired(user): AuthRequired,
     Json(mut doc): Json<RouteDocument>,
 ) -> Response {
+    if !state.has_permission(&user, "routes", "write").await {
+        return (
+            StatusCode::FORBIDDEN,
+            axum::Json(serde_json::json!({"message": "Permission denied"})),
+        )
+            .into_response();
+    }
     let db = state.db();
     doc.id = None;
     doc.ensure_consistency();
@@ -1415,9 +1431,16 @@ pub(crate) async fn create_routing(
 pub(crate) async fn update_routing(
     AxumPath(id): AxumPath<i64>,
     State(state): State<Arc<ConsoleState>>,
-    AuthRequired(_): AuthRequired,
+    AuthRequired(user): AuthRequired,
     Json(mut doc): Json<RouteDocument>,
 ) -> Response {
+    if !state.has_permission(&user, "routes", "write").await {
+        return (
+            StatusCode::FORBIDDEN,
+            axum::Json(serde_json::json!({"message": "Permission denied"})),
+        )
+            .into_response();
+    }
     let db = state.db();
 
     let model = match RoutingEntity::find_by_id(id).one(db).await {
@@ -1535,8 +1558,15 @@ pub(crate) async fn update_routing(
 pub async fn delete_routing(
     AxumPath(id): AxumPath<i64>,
     State(state): State<Arc<ConsoleState>>,
-    AuthRequired(_): AuthRequired,
+    AuthRequired(user): AuthRequired,
 ) -> Response {
+    if !state.has_permission(&user, "routes", "write").await {
+        return (
+            StatusCode::FORBIDDEN,
+            axum::Json(serde_json::json!({"message": "Permission denied"})),
+        )
+            .into_response();
+    }
     let db = state.db();
     match RoutingEntity::delete_by_id(id).exec(db).await {
         Ok(result) => {
@@ -1558,5 +1588,126 @@ pub async fn delete_routing(
             )
                 .into_response()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        config::ConsoleConfig, console::middleware::AuthRequired, models::migration::Migrator,
+    };
+    use axum::{Json, extract::State, http::StatusCode};
+    use chrono::Utc;
+    use sea_orm::Database;
+    use sea_orm_migration::MigratorTrait;
+    use std::sync::Arc;
+
+    fn superuser() -> crate::models::user::Model {
+        let now = Utc::now();
+        crate::models::user::Model {
+            id: 1,
+            email: "admin@rustpbx.com".into(),
+            username: "admin".into(),
+            password_hash: "hashed".into(),
+            reset_token: None,
+            reset_token_expires: None,
+            last_login_at: None,
+            last_login_ip: None,
+            created_at: now,
+            updated_at: now,
+            is_active: true,
+            is_staff: true,
+            is_superuser: true,
+            mfa_enabled: false,
+            mfa_secret: None,
+            auth_source: "local".into(),
+        }
+    }
+
+    fn unprivileged_user() -> crate::models::user::Model {
+        let now = Utc::now();
+        crate::models::user::Model {
+            id: 99,
+            email: "limited@rustpbx.com".into(),
+            username: "limited".into(),
+            password_hash: "hashed".into(),
+            reset_token: None,
+            reset_token_expires: None,
+            last_login_at: None,
+            last_login_ip: None,
+            created_at: now,
+            updated_at: now,
+            is_active: true,
+            is_staff: false,
+            is_superuser: false,
+            mfa_enabled: false,
+            mfa_secret: None,
+            auth_source: "local".into(),
+        }
+    }
+
+    async fn setup_state() -> Arc<ConsoleState> {
+        let db = Database::connect("sqlite::memory:")
+            .await
+            .expect("connect sqlite memory");
+        Migrator::up(&db, None).await.expect("run migrations");
+        ConsoleState::initialize(
+            Arc::new(crate::callrecord::DefaultCallRecordFormatter::default()),
+            db,
+            ConsoleConfig::default(),
+        )
+        .await
+        .expect("initialize console state")
+    }
+
+    #[tokio::test]
+    async fn create_routing_denied_without_permission() {
+        let state = setup_state().await;
+        let user = unprivileged_user();
+        let doc = RouteDocument {
+            name: "test-route".into(),
+            ..Default::default()
+        };
+        let resp = create_routing(State(state), AuthRequired(user), Json(doc)).await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn update_routing_denied_without_permission() {
+        let state = setup_state().await;
+        let user = unprivileged_user();
+        let doc = RouteDocument {
+            name: "test-route".into(),
+            ..Default::default()
+        };
+        let resp = update_routing(
+            AxumPath(999i64),
+            State(state),
+            AuthRequired(user),
+            Json(doc),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn delete_routing_denied_without_permission() {
+        let state = setup_state().await;
+        let user = unprivileged_user();
+        let resp = delete_routing(AxumPath(999i64), State(state), AuthRequired(user)).await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn create_routing_allowed_for_superuser() {
+        let state = setup_state().await;
+        let user = superuser();
+        let doc = RouteDocument {
+            name: "allowed-route".into(),
+            ..Default::default()
+        };
+        let resp = create_routing(State(state), AuthRequired(user), Json(doc)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 }

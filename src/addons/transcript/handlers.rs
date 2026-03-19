@@ -789,10 +789,12 @@ pub async fn get_settings(
         false
     };
 
+    let current_user = state.build_current_user_ctx(&user).await;
+
     let ctx = json!({
         "config": cfg,
         "model_ready": model_ready,
-        "current_user": user,
+        "current_user": current_user,
         "base_path": state.base_path(),
         "nav_active": "Call Transcription",
     });
