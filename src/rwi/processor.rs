@@ -92,9 +92,7 @@ pub struct RwiCommandProcessor {
     supervisor_states: Arc<RwLock<HashMap<String, SupervisorState>>>,
     media_stream_states: Arc<RwLock<HashMap<String, MediaStreamState>>>,
     media_inject_states: Arc<RwLock<HashMap<String, MediaInjectState>>>,
-    /// Central registry for all audio mixers (supervisor and conference)
     mixer_registry: Arc<media::mixer_registry::MixerRegistry>,
-    /// Conference states tracked by RWI
     conference_states: Arc<RwLock<HashMap<String, ConferenceState>>>,
 }
 

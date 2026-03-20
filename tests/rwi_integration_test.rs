@@ -70,7 +70,6 @@ impl RwiRequest {
 
 struct RwiTestClient {
     ws: tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<TcpStream>>,
-    action_id_counter: usize,
 }
 
 impl RwiTestClient {
@@ -78,10 +77,7 @@ impl RwiTestClient {
         let url = format!("{}?token={}", RWI_URL, TEST_TOKEN);
         let (ws_stream, _) = timeout(Duration::from_secs(10), connect_async(&url)).await??;
 
-        Ok(Self {
-            ws: ws_stream,
-            action_id_counter: 0,
-        })
+        Ok(Self { ws: ws_stream })
     }
 
     async fn send_request(
