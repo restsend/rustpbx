@@ -73,6 +73,7 @@ struct MediaInjectState {
 }
 
 #[derive(Clone)]
+#[allow(unused)]
 struct ConferenceState {
     conf_id: String,
     backend: String,
