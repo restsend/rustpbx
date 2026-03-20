@@ -291,7 +291,7 @@ async fn test_originate_and_bridge() {
 
     // Originate to Alice
     let call_a = format!("e2e-bridge-a-{}", Uuid::new_v4());
-    let (orig_a_id, orig_a_json) = rwi_req(
+    let (_, orig_a_json) = rwi_req(
         "call.originate",
         serde_json::json!({
             "call_id": call_a,
@@ -310,7 +310,7 @@ async fn test_originate_and_bridge() {
 
     // Originate to Bob
     let call_b = format!("e2e-bridge-b-{}", Uuid::new_v4());
-    let (orig_b_id, orig_b_json) = rwi_req(
+    let (_, orig_b_json) = rwi_req(
         "call.originate",
         serde_json::json!({
             "call_id": call_b,
@@ -375,7 +375,7 @@ async fn test_media_play() {
     let call_id = format!("e2e-play-{}", Uuid::new_v4());
     let destination = bob.sip_uri("bob");
 
-    let (orig_id, orig_json) = rwi_req(
+    let (_, orig_json) = rwi_req(
         "call.originate",
         serde_json::json!({
             "call_id": call_id,
@@ -705,9 +705,16 @@ async fn test_list_calls() {
     let v = ws_send_recv(&mut ws, &list_json).await;
     tracing::info!("list_calls (with call): {:?}", v);
     // Should contain at least one call
-    assert!(v.get("data").is_some(), "list_calls response missing 'data': {:?}", v);
+    assert!(
+        v.get("data").is_some(),
+        "list_calls response missing 'data': {:?}",
+        v
+    );
     let calls = v["data"].as_array().expect("data should be an array");
-    assert!(!calls.is_empty(), "list_calls should return at least one call");
+    assert!(
+        !calls.is_empty(),
+        "list_calls should return at least one call"
+    );
 
     ws.close(None).await.unwrap();
     bob.stop();

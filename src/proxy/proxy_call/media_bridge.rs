@@ -10,7 +10,7 @@ use futures::stream::FuturesUnordered;
 use rustrtc::media::{MediaKind, MediaSample, MediaStreamTrack};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use tracing::{debug, info, warn};
+use tracing::{debug, info, trace, warn};
 
 pub struct MediaBridge {
     pub leg_a: Arc<dyn MediaPeer>,
@@ -230,7 +230,7 @@ impl MediaBridge {
              started_ids: &mut std::collections::HashSet<String>| {
                 let key = format!("{:?}-{}", leg_enum, track_id);
                 if started_ids.insert(key) {
-                    info!(
+                    debug!(
                         leg = ?leg_enum,
                         track_id,
                         "Starting track forwarder"
@@ -335,7 +335,7 @@ impl MediaBridge {
                                 if let Some(receiver) = transceiver.receiver() {
                                     let track = receiver.track();
                                     let track_id = track.id().to_string();
-                                    info!(
+                                    debug!(
                                         "Track event Leg A: track_id={} kind={:?}",
                                         track_id,
                                         track.kind()
@@ -375,7 +375,7 @@ impl MediaBridge {
                                 if let Some(receiver) = transceiver.receiver() {
                                     let track = receiver.track();
                                     let track_id = track.id().to_string();
-                                    info!(
+                                    trace!(
                                         "Track event Leg B: track_id={} kind={:?}",
                                         track_id,
                                         track.kind()

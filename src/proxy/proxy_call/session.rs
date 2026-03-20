@@ -998,7 +998,7 @@ impl CallSession {
 
     /// Create offer SDP for a specific target based on its WebRTC support
     async fn create_offer_for_target(&mut self, target: &Location) -> Option<Vec<u8>> {
-        info!(
+        debug!(
             session_id = %self.context.session_id,
             target = %target.aor,
             supports_webrtc = target.supports_webrtc,
@@ -1044,7 +1044,7 @@ impl CallSession {
     }
 
     pub async fn create_callee_track(&mut self, is_webrtc: bool) -> Result<String> {
-        info!(
+        debug!(
             session_id = %self.context.session_id,
             is_webrtc,
             "create_callee_track called"
@@ -1156,20 +1156,20 @@ impl CallSession {
 
         // Set mode based on is_webrtc flag
         if is_webrtc {
-            info!(
+            debug!(
                 session_id = %self.context.session_id,
                 "Setting callee track to WebRTC mode"
             );
             track_builder = track_builder.with_mode(rustrtc::TransportMode::WebRtc);
         } else {
-            info!(
+            debug!(
                 session_id = %self.context.session_id,
                 "Using default RTP mode for callee track"
             );
         }
 
         if let Some(existing) = self.find_track(&self.callee_peer, &track_id).await {
-            info!(
+            debug!(
                 session_id = %self.context.session_id,
                 %track_id,
                 "Reusing existing callee track for local description"
@@ -1178,7 +1178,7 @@ impl CallSession {
             let guard = existing.lock().await;
             guard.local_description().await
         } else {
-            info!(
+            debug!(
                 session_id = %self.context.session_id,
                 %track_id,
                 is_webrtc,
@@ -1684,7 +1684,7 @@ impl CallSession {
         if first_answer {
             self.answer_time = Some(Instant::now());
         }
-        info!(
+        debug!(
             server_dialog_id = %self.server_dialog.id(),
             use_media_proxy = self.use_media_proxy,
             has_answer = self.answer.is_some(),
@@ -2678,7 +2678,7 @@ impl CallSession {
         mut inbox: ActionInbox<'_>,
     ) -> Result<()> {
         self.process_pending_actions(inbox.as_deref_mut()).await?;
-        info!(
+        debug!(
             session_id = %self.context.session_id,
             strategy = %strategy,
             media_proxy = self.use_media_proxy,
@@ -3211,7 +3211,7 @@ impl CallSession {
                 })?;
             match route_result {
                 RouteResult::NotHandled(option, _) => {
-                    info!(session_id = self.context.session_id, %target,
+                    debug!(session_id = self.context.session_id, %target,
                         "Routing function returned NotHandled"
                     );
                     option
@@ -3302,7 +3302,7 @@ impl CallSession {
         self.note_invite_details(&invite_option);
 
         // Log client INVITE details
-        info!(
+        debug!(
             session_id = %self.context.session_id,
             callee = %invite_option.callee,
             destination = ?invite_option.destination,
@@ -3421,7 +3421,7 @@ impl CallSession {
             let dialog_id_val = dialog.id();
 
             // Log client dialog details after successful answer
-            info!(
+            debug!(
                 session_id = %self.context.session_id,
                 dialog_id = %dialog_id_val,
                 "Client dialog established after 200 OK from callee"
@@ -4453,7 +4453,7 @@ impl CallSession {
             } => { Ok(()) },
             r = async {
                 self.execute_dialplan(Some(&mut action_inbox)).await?;
-                info!(session_id = %self.context.session_id, "Dialplan execution finished, waiting for call termination");
+                debug!(session_id = %self.context.session_id, "Dialplan execution finished, waiting for call termination");
                 loop {
                     if let Some(action) = action_inbox.recv().await {
                         self.apply_session_action(action, Some(&mut action_inbox)).await?;
