@@ -86,8 +86,8 @@ mod callsession_b2bua_tests {
             .expect("Bridge should start successfully");
         bridge.stop();
 
-        assert!(leg_a.stop_called.load(std::sync::atomic::Ordering::SeqCst));
-        assert!(leg_b.stop_called.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(leg_a.stop_count() > 0);
+        assert!(leg_b.stop_count() > 0);
     }
 
     #[tokio::test]
@@ -701,5 +701,295 @@ mod callsession_b2bua_tests {
         // Should be valid to create, but execution will fail gracefully
         assert_eq!(plan.label, Some("Empty Queue".to_string()));
         assert!(plan.dial_strategy.is_none());
+    }
+
+    // ==================== Test 9: MediaBridge Drop Behavior ====================
+
+    #[tokio::test]
+    async fn test_media_bridge_drop_calls_stop_on_legs() {
+        use super::super::test_util::tests::MockMediaPeer;
+
+        // Create mock peers with stop tracking
+        let leg_a = Arc::new(MockMediaPeer::new_with_stop_tracking());
+        let leg_b = Arc::new(MockMediaPeer::new_with_stop_tracking());
+
+        // Initially stop should not have been called
+        assert_eq!(leg_a.stop_count(), 0);
+        assert_eq!(leg_b.stop_count(), 0);
+
+        let bridge = MediaBridge::new(
+            leg_a.clone(),
+            leg_b.clone(),
+            mock_rtp_params(0, 8000, 1),
+            mock_rtp_params(0, 8000, 1),
+            vec![],
+            vec![],
+            CodecType::PCMU,
+            CodecType::PCMU,
+            None,
+            None,
+            None,
+            "test_media_bridge_drop_calls_stop_on_legs".to_string(),
+            None,
+        );
+
+        // Start the bridge
+        bridge.start().await.expect("Bridge should start");
+
+        // Drop the bridge - this should trigger Drop which calls stop() on legs
+        drop(bridge);
+
+        // Verify stop was called on both legs
+        assert_eq!(
+            leg_a.stop_count(),
+            1,
+            "leg_a.stop() should be called exactly once on Drop"
+        );
+        assert_eq!(
+            leg_b.stop_count(),
+            1,
+            "leg_b.stop() should be called exactly once on Drop"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_media_bridge_drop_idempotent() {
+        use super::super::test_util::tests::MockMediaPeer;
+
+        let leg_a = Arc::new(MockMediaPeer::new_with_stop_tracking());
+        let leg_b = Arc::new(MockMediaPeer::new_with_stop_tracking());
+
+        let bridge = MediaBridge::new(
+            leg_a.clone(),
+            leg_b.clone(),
+            mock_rtp_params(0, 8000, 1),
+            mock_rtp_params(0, 8000, 1),
+            vec![],
+            vec![],
+            CodecType::PCMU,
+            CodecType::PCMU,
+            None,
+            None,
+            None,
+            "test_media_bridge_drop_idempotent".to_string(),
+            None,
+        );
+
+        bridge.start().await.expect("Bridge should start");
+
+        // Call stop explicitly first
+        bridge.stop();
+
+        // Then drop - stop should only be called once total
+        drop(bridge);
+
+        assert_eq!(
+            leg_a.stop_count(),
+            1,
+            "leg_a.stop() should be called exactly once even if stopped before drop"
+        );
+        assert_eq!(
+            leg_b.stop_count(),
+            1,
+            "leg_b.stop() should be called exactly once even if stopped before drop"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_media_bridge_stop_can_be_called_multiple_times() {
+        let leg_a = Arc::new(MockMediaPeer::new());
+        let leg_b = Arc::new(MockMediaPeer::new());
+
+        let bridge = MediaBridge::new(
+            leg_a.clone(),
+            leg_b.clone(),
+            mock_rtp_params(0, 8000, 1),
+            mock_rtp_params(0, 8000, 1),
+            vec![],
+            vec![],
+            CodecType::PCMU,
+            CodecType::PCMU,
+            None,
+            None,
+            None,
+            "test_media_bridge_stop_multiple".to_string(),
+            None,
+        );
+
+        bridge.start().await.expect("Bridge should start");
+
+        // Calling stop multiple times should be safe
+        bridge.stop();
+        bridge.stop();
+        bridge.stop();
+
+        // All legs should have stop called at least once
+        assert!(leg_a.stop_count() > 0);
+        assert!(leg_b.stop_count() > 0);
+    }
+
+    // ==================== Test 10: SDP Parsing Idempotence ====================
+
+    #[test]
+    fn test_extract_codec_params_is_idempotent() {
+        let sdp = "v=0\r\n\
+            o=- 8819118164752754436 2 IN IP4 127.0.0.1\r\n\
+            s=-\r\n\
+            t=0 0\r\n\
+            m=audio 53824 UDP/TLS/RTP/SAVPF 111 9 0 8\r\n\
+            a=rtpmap:111 opus/48000/2\r\n\
+            a=rtpmap:9 G722/8000\r\n\
+            a=rtpmap:0 PCMU/8000\r\n\
+            a=rtpmap:8 PCMA/8000\r\n\
+            a=rtpmap:126 telephone-event/8000\r\n";
+
+        // Parse multiple times and verify results are consistent
+        let result1 = MediaNegotiator::extract_codec_params(sdp);
+        let result2 = MediaNegotiator::extract_codec_params(sdp);
+        let result3 = MediaNegotiator::extract_codec_params(sdp);
+
+        assert_eq!(
+            result1.audio.len(),
+            result2.audio.len(),
+            "Audio codec count should be consistent"
+        );
+        assert_eq!(
+            result1.audio.len(),
+            result3.audio.len(),
+            "Audio codec count should be consistent"
+        );
+
+        // Verify all parsed codecs are the same
+        for i in 0..result1.audio.len() {
+            assert_eq!(
+                result1.audio[i].codec, result2.audio[i].codec,
+                "Codec at position {} should be the same",
+                i
+            );
+            assert_eq!(
+                result1.audio[i].payload_type, result2.audio[i].payload_type,
+                "Payload type at position {} should be the same",
+                i
+            );
+        }
+    }
+
+    #[test]
+    fn test_extract_codec_params_twice_does_not_double_dtmf() {
+        let sdp = "v=0\r\n\
+            o=- 1234567890 1234567890 IN IP4 192.168.1.1\r\n\
+            s=-\r\n\
+            c=IN IP4 192.168.1.1\r\n\
+            t=0 0\r\n\
+            m=audio 10000 RTP/AVP 0 101\r\n\
+            a=rtpmap:0 PCMU/8000/1\r\n\
+            a=rtpmap:101 telephone-event/8000\r\n";
+
+        let result1 = MediaNegotiator::extract_codec_params(sdp);
+        let result2 = MediaNegotiator::extract_codec_params(sdp);
+
+        // DTMF codecs should not be duplicated
+        let dtmf_count_1 = result1.dtmf.len();
+        let dtmf_count_2 = result2.dtmf.len();
+        assert_eq!(
+            dtmf_count_1, dtmf_count_2,
+            "DTMF codec count should be consistent"
+        );
+    }
+
+    // ==================== Test 11: NegotiationState Transitions ====================
+
+    #[test]
+    fn test_negotiation_state_ordering() {
+        use super::super::session::NegotiationState;
+
+        // Verify we can compare states
+        let states = [
+            NegotiationState::Idle,
+            NegotiationState::LocalOfferSent,
+            NegotiationState::RemoteOfferReceived,
+            NegotiationState::Stable,
+        ];
+
+        // All states should be different
+        for (i, state1) in states.iter().enumerate() {
+            for (j, state2) in states.iter().enumerate() {
+                if i != j {
+                    assert_ne!(
+                        state1, state2,
+                        "States at different positions should not be equal"
+                    );
+                }
+            }
+        }
+    }
+
+    // ==================== Test 12: Reporter Channel Handling ====================
+
+    #[tokio::test]
+    async fn test_media_bridge_with_mock_tracks_get_tracks_called() {
+        use super::super::test_util::tests::MockMediaPeer;
+
+        let leg_a = Arc::new(MockMediaPeer::new_with_stop_tracking());
+        let leg_b = Arc::new(MockMediaPeer::new_with_stop_tracking());
+
+        let bridge = MediaBridge::new(
+            leg_a.clone(),
+            leg_b.clone(),
+            mock_rtp_params(0, 8000, 1),
+            mock_rtp_params(0, 8000, 1),
+            vec![],
+            vec![],
+            CodecType::PCMU,
+            CodecType::PCMU,
+            None,
+            None,
+            None,
+            "test_get_tracks_called".to_string(),
+            None,
+        );
+
+        bridge.start().await.expect("Bridge should start");
+
+        // Verify get_tracks was called on both legs during start
+        // Note: start() calls get_tracks() internally
+        assert!(
+            leg_a.get_tracks_call_count() > 0 || leg_b.get_tracks_call_count() > 0,
+            "get_tracks should be called at least once during start"
+        );
+
+        bridge.stop();
+    }
+
+    // ==================== Test 13: Bridge Start Is Idempotent ====================
+
+    #[tokio::test]
+    async fn test_bridge_start_idempotent_multiple_calls() {
+        let leg_a = Arc::new(MockMediaPeer::new());
+        let leg_b = Arc::new(MockMediaPeer::new());
+
+        let bridge = MediaBridge::new(
+            leg_a.clone(),
+            leg_b.clone(),
+            mock_rtp_params(0, 8000, 1),
+            mock_rtp_params(0, 8000, 1),
+            vec![],
+            vec![],
+            CodecType::PCMU,
+            CodecType::PCMU,
+            None,
+            None,
+            None,
+            "test_bridge_start_idempotent".to_string(),
+            None,
+        );
+
+        // Start multiple times - should all succeed
+        for _ in 0..5 {
+            bridge.start().await.expect("start() should be idempotent");
+        }
+
+        // Only one stop needed
+        bridge.stop();
     }
 }

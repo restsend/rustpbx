@@ -10,7 +10,8 @@ use futures::stream::FuturesUnordered;
 use rustrtc::media::{MediaKind, MediaSample, MediaStreamTrack};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use tracing::{debug, info, trace, warn};
+use tokio::task::JoinHandle;
+use tracing::{debug, info, warn};
 
 pub struct MediaBridge {
     pub leg_a: Arc<dyn MediaPeer>,
@@ -27,6 +28,7 @@ pub struct MediaBridge {
     recorder: Arc<Mutex<Option<Recorder>>>,
     call_id: String,
     sipflow_backend: Option<Arc<dyn SipFlowBackend>>,
+    task_handle: Arc<Mutex<Option<JoinHandle<()>>>>,
 }
 
 impl MediaBridge {
@@ -116,6 +118,7 @@ impl MediaBridge {
             recorder: Arc::new(Mutex::new(recorder)),
             call_id,
             sipflow_backend,
+            task_handle: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -161,8 +164,9 @@ impl MediaBridge {
             let leg_b = self.leg_b.clone();
             let call_id = self.call_id.clone();
             let sipflow_backend = self.sipflow_backend.clone();
+            let task_handle = self.task_handle.clone();
 
-            crate::utils::spawn(async move {
+            let handle = crate::utils::spawn(async move {
                 tokio::select! {
                     _ = cancel_token.cancelled() => {},
                     _ = Self::bridge_pcs(
@@ -184,6 +188,7 @@ impl MediaBridge {
                     ) => {}
                 }
             });
+            *task_handle.lock().unwrap() = Some(handle);
         }
         Ok(())
     }
@@ -375,7 +380,7 @@ impl MediaBridge {
                                 if let Some(receiver) = transceiver.receiver() {
                                     let track = receiver.track();
                                     let track_id = track.id().to_string();
-                                    trace!(
+                                    debug!(
                                         "Track event Leg B: track_id={} kind={:?}",
                                         track_id,
                                         track.kind()
@@ -702,6 +707,14 @@ impl MediaBridge {
     }
 
     pub fn stop(&self) {
+        // Mark as not started first to make stop idempotent with Drop
+        self.started.store(false, Ordering::SeqCst);
+
+        // Abort the bridging task if it's still running
+        if let Some(handle) = self.task_handle.lock().unwrap().take() {
+            handle.abort();
+        }
+
         let mut guard = self.recorder.lock().unwrap();
         if let Some(ref mut r) = *guard {
             let _ = r.finalize();
@@ -710,6 +723,23 @@ impl MediaBridge {
         self.leg_b.stop();
     }
 
+    /// Returns true if the bridge has been started
+    pub fn is_started(&self) -> bool {
+        self.started.load(Ordering::SeqCst)
+    }
+}
+
+impl Drop for MediaBridge {
+    fn drop(&mut self) {
+        // Ensure stop is called when the bridge is dropped
+        // This prevents resource leaks if Drop is called without explicit stop()
+        if self.is_started() {
+            self.stop();
+        }
+    }
+}
+
+impl MediaBridge {
     pub async fn resume_forwarding(&self, track_id: &str) -> Result<()> {
         self.leg_a.resume_forwarding(track_id).await;
         self.leg_b.resume_forwarding(track_id).await;
@@ -753,8 +783,8 @@ mod tests {
         bridge.resume_forwarding("test-track").await.unwrap();
         bridge.suppress_forwarding("test-track").await.unwrap();
         bridge.stop();
-        assert!(leg_a.stop_called.load(std::sync::atomic::Ordering::SeqCst));
-        assert!(leg_b.stop_called.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(leg_a.stop_count() > 0);
+        assert!(leg_b.stop_count() > 0);
     }
 
     #[tokio::test]
