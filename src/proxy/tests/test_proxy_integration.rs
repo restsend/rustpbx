@@ -1,8 +1,9 @@
 use super::test_ua::{TestUa, TestUaConfig, TestUaEvent};
 use crate::call::user::SipUser;
+
 use crate::config::ProxyConfig;
 use crate::proxy::{
-    auth::AuthModule, call::CallModule, locator::MemoryLocator, registrar::RegistrarModule,
+    auth::AuthModule, call::CallModule, locator::{MemoryLocator, Locator}, registrar::RegistrarModule,
     server::SipServerBuilder, user::MemoryUserBackend,
 };
 use anyhow::Result;
@@ -66,6 +67,14 @@ fn create_test_users() -> Vec<SipUser> {
             realm: Some("other.com".to_string()),
             ..Default::default()
         },
+        SipUser {
+            id: 5,
+            username: "testuser".to_string(),
+            password: Some("testpassword".to_string()),
+            enabled: true,
+            realm: Some("127.0.0.1".to_string()),
+            ..Default::default()
+        },
     ]
 }
 
@@ -73,6 +82,7 @@ fn create_test_users() -> Vec<SipUser> {
 pub struct TestProxyServer {
     cancel_token: CancellationToken,
     port: u16,
+    server: Arc<crate::proxy::server::SipServer>,
 }
 
 impl TestProxyServer {
@@ -110,8 +120,9 @@ impl TestProxyServer {
         let server = Arc::new(builder.build().await?);
 
         // Start server
+        let server_clone = server.clone();
         tokio::spawn(async move {
-            if let Err(e) = server.serve().await {
+            if let Err(e) = server_clone.serve().await {
                 warn!("Proxy server error: {:?}", e);
             }
         });
@@ -121,7 +132,11 @@ impl TestProxyServer {
 
         info!("Test proxy server started on port {}", port);
 
-        Ok(Self { cancel_token, port })
+        Ok(Self { cancel_token, port, server })
+    }
+
+    pub fn get_locator(&self) -> Arc<Box<dyn Locator>> {
+        self.server.inner.locator.clone()
     }
 
     pub fn get_addr(&self) -> SocketAddr {
@@ -253,8 +268,10 @@ async fn test_multiple_user_registration() {
     proxy.stop();
 }
 
+// Test basic successful call flow with SDP
 #[tokio::test]
 async fn test_call_success() {
+    let _ = tracing_subscriber::fmt::try_init();
     let proxy = TestProxyServer::start().await.unwrap();
     let proxy_addr = proxy.get_addr();
 
@@ -274,8 +291,13 @@ async fn test_call_success() {
 
     sleep(Duration::from_millis(500)).await;
 
-    let call_task = tokio::spawn(async move { alice.make_call("bob", None).await });
+    // SDP is required for B2BUA call flow
+    let dummy_sdp = "v=0\r\no=- 123456 123456 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 1234 RTP/AVP 0 101\r\na=rtpmap:0 PCMU/8000\r\na=rtpmap:101 telephone-event/8000\r\na=fmtp:101 0-16\r\na=sendrecv\r\n".to_string();
 
+    let alice_sdp = dummy_sdp.clone();
+    let call_task = tokio::spawn(async move { alice.make_call("bob", Some(alice_sdp)).await });
+
+    let bob_sdp = dummy_sdp.clone();
     let answer_task = tokio::spawn(async move {
         for _ in 0..50 {
             let events = bob.process_dialog_events().await.unwrap_or_default();
@@ -283,7 +305,7 @@ async fn test_call_success() {
                 match event {
                     TestUaEvent::IncomingCall(dialog_id) => {
                         info!("Bob received incoming call: {}", dialog_id);
-                        bob.answer_call(&dialog_id, None).await.unwrap();
+                        bob.answer_call(&dialog_id, Some(bob_sdp.clone())).await.unwrap();
                         return Ok::<_, anyhow::Error>(dialog_id);
                     }
                     _ => {}
@@ -301,10 +323,6 @@ async fn test_call_success() {
         answer_result.is_ok(),
         "Call should be answered successfully"
     );
-
-    // Hang up call
-    // Note: alice and bob are already moved into the spawn tasks
-    // so we can't call hangup on them here
 
     proxy.stop();
 }
@@ -364,6 +382,7 @@ async fn test_call_to_different_realm() {
 
 #[tokio::test]
 async fn test_call_rejection() {
+    let _ = tracing_subscriber::fmt::try_init();
     let proxy = TestProxyServer::start().await.unwrap();
     let proxy_addr = proxy.get_addr();
 
@@ -385,8 +404,11 @@ async fn test_call_rejection() {
     // Wait for registration to take effect
     sleep(Duration::from_millis(500)).await;
 
+    // SDP is required for B2BUA call flow
+    let alice_sdp = "v=0\r\no=- 123456 123456 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 1234 RTP/AVP 0 101\r\na=rtpmap:0 PCMU/8000\r\na=rtpmap:101 telephone-event/8000\r\na=fmtp:101 0-16\r\na=sendrecv\r\n".to_string();
+
     // Alice calls Bob
-    let call_task = tokio::spawn(async move { alice.make_call("bob", None).await });
+    let call_task = tokio::spawn(async move { alice.make_call("bob", Some(alice_sdp)).await });
 
     // Bob waits for incoming call and rejects it
     let reject_task = tokio::spawn(async move {
@@ -420,8 +442,10 @@ async fn test_call_rejection() {
     proxy.stop();
 }
 
+// Test call hangup flow with SDP
 #[tokio::test]
 async fn test_call_hangup_flow() {
+    let _ = tracing_subscriber::fmt::try_init();
     let proxy = TestProxyServer::start().await.unwrap();
     let proxy_addr = proxy.get_addr();
 
@@ -443,10 +467,13 @@ async fn test_call_hangup_flow() {
     // Wait for registration to take effect
     sleep(Duration::from_millis(500)).await;
 
-    // Alice calls Bob
-    let call_task = tokio::spawn(async move { alice.make_call("bob", None).await });
+    // SDP is required for B2BUA call flow
+    let dummy_sdp = "v=0\r\no=- 123456 123456 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 1234 RTP/AVP 0 101\r\na=rtpmap:0 PCMU/8000\r\na=rtpmap:101 telephone-event/8000\r\na=fmtp:101 0-16\r\na=sendrecv\r\n".to_string();
 
-    // Bob waits for incoming call and answers it
+    let alice_sdp = dummy_sdp.clone();
+    let call_task = tokio::spawn(async move { alice.make_call("bob", Some(alice_sdp)).await });
+
+    let bob_sdp = dummy_sdp.clone();
     let answer_task = tokio::spawn(async move {
         for _ in 0..50 {
             let events = bob.process_dialog_events().await.unwrap_or_default();
@@ -454,7 +481,7 @@ async fn test_call_hangup_flow() {
                 match event {
                     TestUaEvent::IncomingCall(dialog_id) => {
                         info!("Bob received incoming call: {}", dialog_id);
-                        bob.answer_call(&dialog_id, None).await.unwrap();
+                        bob.answer_call(&dialog_id, Some(bob_sdp.clone())).await.unwrap();
 
                         // Wait for a while after answering, then hang up
                         sleep(Duration::from_millis(500)).await;
@@ -474,5 +501,61 @@ async fn test_call_hangup_flow() {
     assert!(call_result.is_ok(), "Call should be established");
     assert!(answer_result.is_ok(), "Call should be answered and hung up");
 
+    proxy.stop();
+}
+
+
+#[tokio::test]
+async fn test_locator_lookup() {
+    // Start the TestProxyServer
+    let proxy = TestProxyServer::start().await.unwrap();
+    let proxy_addr = proxy.get_addr();
+    let locator = proxy.get_locator();
+
+    // Create a TestUa for "testuser" with a specific port
+    let testuser_port = portpicker::pick_unused_port().unwrap_or(25070);
+    let testuser = create_test_ua("testuser", "testpassword", proxy_addr, testuser_port)
+        .await
+        .unwrap();
+
+    // Register the user
+    assert!(
+        testuser.register().await.is_ok(),
+        "Testuser registration should succeed"
+    );
+
+    // Wait for registration to take effect
+    sleep(Duration::from_millis(200)).await;
+
+    // Check if locator.lookup returns the registered location
+    let lookup_uri: rsip::Uri = format!("sip:testuser@127.0.0.1:{}", proxy.port)
+        .try_into()
+        .unwrap();
+    
+    let locations = locator.lookup(&lookup_uri).await;
+    
+    assert!(
+        locations.is_ok(),
+        "Locator lookup should succeed"
+    );
+    
+    let locations = locations.unwrap();
+    assert!(
+        !locations.is_empty(),
+        "Locator should return at least one location for registered user"
+    );
+    
+    // Verify the location contains the expected information
+    let location = &locations[0];
+    assert_eq!(
+        location.aor.user().unwrap_or_default(),
+        "testuser",
+        "Location AoR should have username 'testuser'"
+    );
+    
+    info!("Locator lookup test passed: found {} location(s)", locations.len());
+    info!("Location details: {:?}", location);
+
+    testuser.stop();
     proxy.stop();
 }

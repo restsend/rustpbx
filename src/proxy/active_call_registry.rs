@@ -1,4 +1,4 @@
-use crate::proxy::proxy_call::state::CallSessionHandle;
+use crate::proxy::proxy_call::sip_session::SipSessionHandle;
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use std::collections::HashMap;
@@ -33,8 +33,8 @@ pub struct ActiveProxyCallEntry {
 #[derive(Default)]
 struct RegistryState {
     entries: HashMap<String, ActiveProxyCallEntry>,
-    handles: HashMap<String, CallSessionHandle>,
-    handles_by_dialog: HashMap<String, CallSessionHandle>,
+    handles: HashMap<String, SipSessionHandle>,
+    handles_by_dialog: HashMap<String, SipSessionHandle>,
     // session_id -> all registered dialog_ids (multiple dialogs per session during failover)
     dialog_by_session: HashMap<String, Vec<String>>,
 }
@@ -50,7 +50,7 @@ impl ActiveProxyCallRegistry {
         }
     }
 
-    pub fn upsert(&self, entry: ActiveProxyCallEntry, handle: CallSessionHandle) {
+    pub fn upsert(&self, entry: ActiveProxyCallEntry, handle: SipSessionHandle) {
         let mut guard = self.inner.lock().unwrap();
         guard.entries.insert(entry.session_id.clone(), entry);
         guard
@@ -58,7 +58,7 @@ impl ActiveProxyCallRegistry {
             .insert(handle.session_id().to_string(), handle);
     }
 
-    pub fn register_dialog(&self, dialog_id: String, handle: CallSessionHandle) {
+    pub fn register_dialog(&self, dialog_id: String, handle: SipSessionHandle) {
         let mut guard = self.inner.lock().unwrap();
         guard
             .dialog_by_session
@@ -80,7 +80,7 @@ impl ActiveProxyCallRegistry {
         }
     }
 
-    pub fn get_handle_by_dialog(&self, dialog_id: &str) -> Option<CallSessionHandle> {
+    pub fn get_handle_by_dialog(&self, dialog_id: &str) -> Option<SipSessionHandle> {
         let guard = self.inner.lock().unwrap();
         guard.handles_by_dialog.get(dialog_id).cloned()
     }
@@ -130,8 +130,33 @@ impl ActiveProxyCallRegistry {
         self.inner.lock().unwrap().entries.get(session_id).cloned()
     }
 
-    pub fn get_handle(&self, session_id: &str) -> Option<CallSessionHandle> {
+    pub fn get_handle(&self, session_id: &str) -> Option<SipSessionHandle> {
         self.inner.lock().unwrap().handles.get(session_id).cloned()
+    }
+
+    /// Get all active session IDs
+    pub fn session_ids(&self) -> Vec<String> {
+        self.inner.lock().unwrap().entries.keys().cloned().collect()
+    }
+
+    /// Alias for count() for SessionRegistry compatibility
+    pub fn len(&self) -> usize {
+        self.count()
+    }
+
+    /// Register a unified session handle
+    /// This is used by SipSession to register itself
+    pub fn register_handle(&self, session_id: String, handle: SipSessionHandle) {
+        let entry = ActiveProxyCallEntry {
+            session_id: session_id.clone(),
+            caller: None,
+            callee: None,
+            direction: "inbound".to_string(),
+            started_at: Utc::now(),
+            answered_at: None,
+            status: ActiveProxyCallStatus::Ringing,
+        };
+        self.upsert(entry, handle);
     }
 
     #[cfg(test)]
@@ -148,18 +173,13 @@ impl ActiveProxyCallRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::call::DialDirection;
-    use crate::proxy::proxy_call::state::{CallSessionHandle, CallSessionShared};
+    use crate::proxy::proxy_call::sip_session::SipSession;
 
-    fn make_handle(session_id: &str) -> CallSessionHandle {
-        let shared = CallSessionShared::new(
-            session_id.to_string(),
-            DialDirection::Outbound,
-            Some("caller".to_string()),
-            Some("callee".to_string()),
-            None,
-        );
-        let (handle, _rx) = CallSessionHandle::with_shared(shared);
+    fn make_handle(session_id: &str) -> SipSessionHandle {
+        use crate::call::runtime::SessionId;
+
+        let id = SessionId::from(session_id);
+        let (handle, _cmd_rx) = SipSession::with_handle(id);
         handle
     }
 

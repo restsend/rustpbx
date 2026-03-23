@@ -1,5 +1,5 @@
 use crate::callrecord::CallRecordHangupReason;
-use crate::proxy::proxy_call::state::CallSessionHandle;
+use crate::proxy::proxy_call::state::SipSessionHandle;
 use crate::proxy::proxy_call::state::SessionAction;
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
@@ -39,7 +39,7 @@ pub struct RecordingInfo {
 
 /// High-level API for controlling a call from within a `CallApp`.
 ///
-/// Wraps the underlying `CallSessionHandle` but provides a simplified,
+/// Wraps the underlying `SipSessionHandle` but provides a simplified,
 /// async interface tailored for IVR/Voicemail logic.
 ///
 /// # Timer system
@@ -48,7 +48,7 @@ pub struct RecordingInfo {
 /// When the delay elapses, [`CallApp::on_timeout`] is invoked with the same id.
 /// Use [`cancel_timeout`](Self::cancel_timeout) to suppress a pending fire.
 pub struct CallController {
-    pub(crate) session: CallSessionHandle,
+    pub(crate) session: SipSessionHandle,
     pub(crate) event_rx: mpsc::UnboundedReceiver<ControllerEvent>,
     /// Sends fired timer IDs to the AppEventLoop.
     pub(crate) fired_timer_tx: mpsc::UnboundedSender<String>,
@@ -110,7 +110,7 @@ impl CallController {
     /// The returned `UnboundedReceiver<String>` **must** be passed to
     /// [`AppEventLoop::new`] so fired timer IDs reach `on_timeout`.
     pub fn new(
-        session: CallSessionHandle,
+        session: SipSessionHandle,
         event_rx: mpsc::UnboundedReceiver<ControllerEvent>,
     ) -> (Self, mpsc::UnboundedReceiver<String>) {
         let (fired_timer_tx, fired_timer_rx) = mpsc::unbounded_channel();
@@ -355,7 +355,7 @@ impl CallController {
 mod tests {
     use super::*;
     use crate::call::DialDirection;
-    use crate::proxy::proxy_call::state::{CallSessionHandle, CallSessionShared, SessionAction};
+    use crate::proxy::proxy_call::state::{SipSessionHandle, SipSessionShared, SessionAction};
     use tokio::time::{Duration, timeout};
 
     /// Creates a controller with access to both the event sender and command receiver.
@@ -365,14 +365,14 @@ mod tests {
         tokio::sync::mpsc::UnboundedSender<ControllerEvent>,
         tokio::sync::mpsc::UnboundedReceiver<SessionAction>,
     ) {
-        let shared = CallSessionShared::new(
+        let shared = SipSessionShared::new(
             "test-session".to_string(),
             DialDirection::Inbound,
             Some("caller".to_string()),
             Some("callee".to_string()),
             None,
         );
-        let (handle, cmd_rx) = CallSessionHandle::with_shared(shared);
+        let (handle, cmd_rx) = SipSessionHandle::with_shared(shared);
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
         let (controller, _timer_rx) = CallController::new(handle, event_rx);
         (controller, event_tx, cmd_rx)

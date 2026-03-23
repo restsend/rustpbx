@@ -382,10 +382,14 @@ save = "保存"
         };
 
         // Override the locales dir for this test
-        let original = std::env::current_dir().unwrap();
+        // Save the original directory as a String path for more robust restoration
+        let original_path = std::env::current_dir()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|_| "/".to_string());
         std::env::set_current_dir(tmp.path()).unwrap();
         let i18n = I18n::new(config);
-        std::env::set_current_dir(original).unwrap();
+        // Best effort restoration - ignore errors if original dir no longer exists
+        let _ = std::env::set_current_dir(&original_path);
         i18n
     }
 

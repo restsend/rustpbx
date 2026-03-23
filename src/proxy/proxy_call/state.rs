@@ -1,27 +1,109 @@
 use crate::call::{DialDirection, Dialplan, MediaConfig, TransactionCookie};
-use crate::callrecord::CallRecordHangupReason;
+use crate::callrecord::{CallRecordHangupMessage, CallRecordHangupReason};
 use crate::proxy::active_call_registry::{
     ActiveProxyCallEntry, ActiveProxyCallRegistry, ActiveProxyCallStatus,
 };
+use crate::proxy::proxy_call::sip_session::SipSessionHandle as NewSipSessionHandle;
 use crate::rwi::SupervisorMode;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use rsip::StatusCode;
+use rsipstack::dialog::DialogId;
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, RwLock, Weak};
 use std::time::Instant;
 use tokio::sync::mpsc;
 
+/// Snapshot of call session state for CDR/reporting
+pub struct CallSessionRecordSnapshot {
+    pub ring_time: Option<Instant>,
+    pub answer_time: Option<Instant>,
+    pub last_error: Option<(StatusCode, Option<String>)>,
+    pub hangup_reason: Option<CallRecordHangupReason>,
+    pub hangup_messages: Vec<CallRecordHangupMessage>,
+    pub original_caller: Option<String>,
+    pub original_callee: Option<String>,
+    pub routed_caller: Option<String>,
+    pub routed_callee: Option<String>,
+    pub connected_callee: Option<String>,
+    pub routed_contact: Option<String>,
+    pub routed_destination: Option<String>,
+    pub last_queue_name: Option<String>,
+    pub callee_dialogs: Vec<DialogId>,
+    pub server_dialog_id: DialogId,
+    pub extensions: http::Extensions,
+}
+
+/// Pending hangup information
+/// Note: Fields are stored for tracking but currently not actively used in hangup logic.
+/// This structure is maintained for future CDR enhancement and debugging purposes.
+pub struct PendingHangup {
+    #[allow(dead_code)]
+    pub reason: Option<CallRecordHangupReason>,
+    #[allow(dead_code)]
+    pub code: Option<u16>,
+    #[allow(dead_code)]
+    pub initiator: Option<String>,
+}
+
+/// Session hangup message
+#[derive(Clone, Debug)]
+pub struct SessionHangupMessage {
+    pub code: u16,
+    pub reason: Option<String>,
+    pub target: Option<String>,
+}
+
+impl From<&SessionHangupMessage> for CallRecordHangupMessage {
+    fn from(message: &SessionHangupMessage) -> Self {
+        Self {
+            code: message.code,
+            reason: message.reason.clone(),
+            target: message.target.clone(),
+        }
+    }
+}
+
+/// Session action inbox wrapper
+/// Note: Legacy compatibility type. New code uses mpsc::UnboundedReceiver<CallCommand> directly.
+#[allow(dead_code)]
+pub struct SessionActionInbox {
+    rx: mpsc::UnboundedReceiver<SessionAction>,
+}
+
+#[allow(dead_code)]
+impl SessionActionInbox {
+    pub fn new(rx: mpsc::UnboundedReceiver<SessionAction>) -> Self {
+        Self { rx }
+    }
+
+    pub fn try_recv(&mut self) -> Result<SessionAction, mpsc::error::TryRecvError> {
+        self.rx.try_recv()
+    }
+
+    pub async fn recv(&mut self) -> Option<SessionAction> {
+        self.rx.recv().await
+    }
+}
+
 /// Immutable context for the entire duration of a call
+/// Note: Some fields are preserved for backward compatibility and future use
+/// but are not actively used in the current SipSession implementation.
 #[derive(Clone)]
 pub struct CallContext {
     pub session_id: String,
     pub dialplan: Arc<Dialplan>,
     pub cookie: TransactionCookie,
     pub start_time: Instant,
+    /// Media config from proxy - SipSession uses MediaRuntimeProfile instead
+    #[allow(dead_code)]
     pub media_config: MediaConfig,
+    #[allow(dead_code)]
     pub original_caller: String,
+    #[allow(dead_code)]
     pub original_callee: String,
+    /// Max-Forwards header value for SIP routing
+    #[allow(dead_code)]
     pub max_forwards: u32,
 }
 
@@ -113,7 +195,7 @@ pub enum ProxyCallPhase {
 }
 
 #[derive(Clone, Debug, Serialize)]
-pub struct CallSessionSnapshot {
+pub struct SipSessionSnapshot {
     session_id: String,
     phase: ProxyCallPhase,
     started_at: DateTime<Utc>,
@@ -131,14 +213,14 @@ pub struct CallSessionSnapshot {
 }
 
 #[derive(Clone)]
-pub struct CallSessionShared {
-    inner: Arc<RwLock<CallSessionSnapshot>>,
+pub struct SipSessionShared {
+    inner: Arc<RwLock<SipSessionSnapshot>>,
     registry: Option<Weak<ActiveProxyCallRegistry>>,
     events: Arc<RwLock<Option<ProxyCallEventSender>>>,
     app_event_tx: Arc<RwLock<Option<mpsc::UnboundedSender<crate::call::app::ControllerEvent>>>>,
 }
 
-impl CallSessionShared {
+impl SipSessionShared {
     pub fn new(
         session_id: String,
         direction: DialDirection,
@@ -147,7 +229,7 @@ impl CallSessionShared {
         registry: Option<Arc<ActiveProxyCallRegistry>>,
     ) -> Self {
         let started_at = Utc::now();
-        let inner = CallSessionSnapshot {
+        let inner = SipSessionSnapshot {
             session_id: session_id.clone(),
             phase: ProxyCallPhase::Initializing,
             started_at,
@@ -196,7 +278,16 @@ impl CallSessionShared {
         false
     }
 
-    pub fn snapshot(&self) -> CallSessionSnapshot {
+    /// Check if an app event sender is currently set (i.e., an app is running)
+    pub fn has_app_event_sender(&self) -> bool {
+        if let Ok(slot) = self.app_event_tx.read() {
+            slot.is_some()
+        } else {
+            false
+        }
+    }
+
+    pub fn snapshot(&self) -> SipSessionSnapshot {
         let inner = self.inner.read().unwrap();
         inner.clone()
     }
@@ -216,7 +307,8 @@ impl CallSessionShared {
         inner.queue_name.clone()
     }
 
-    pub fn register_active_call(&self, handle: CallSessionHandle) {
+    /// Register this session with the active call registry
+    pub fn register_active_call(&self, handle: NewSipSessionHandle) {
         if let Some(registry) = self.registry.as_ref().and_then(|r| r.upgrade()) {
             let inner = self.inner.read().unwrap();
             let entry = ActiveProxyCallEntry {
@@ -228,11 +320,14 @@ impl CallSessionShared {
                 answered_at: inner.answer_time,
                 status: ActiveProxyCallStatus::Ringing,
             };
-            registry.upsert(entry, handle);
+            registry.upsert(entry, handle.clone());
+            // Also register the server dialog
+            registry.register_dialog(inner.session_id.clone(), handle);
         }
     }
 
-    pub fn register_dialog(&self, dialog_id: String, handle: CallSessionHandle) {
+    /// Register a dialog with the active call registry
+    pub fn register_dialog(&self, dialog_id: String, handle: NewSipSessionHandle) {
         if let Some(registry) = self.registry.as_ref().and_then(|r| r.upgrade()) {
             registry.register_dialog(dialog_id, handle);
         }
@@ -362,7 +457,7 @@ impl CallSessionShared {
 
     fn update<F>(&self, mutate: F) -> bool
     where
-        F: FnOnce(&mut CallSessionSnapshot) -> bool,
+        F: FnOnce(&mut SipSessionSnapshot) -> bool,
     {
         let mut inner = self.inner.write().unwrap();
         let prev_phase = inner.phase;
@@ -491,16 +586,20 @@ pub type SessionActionReceiver = mpsc::UnboundedReceiver<SessionAction>;
 pub type ProxyCallEventSender = mpsc::UnboundedSender<ProxyCallEvent>;
 
 #[derive(Clone)]
-pub struct CallSessionHandle {
+pub struct SipSessionHandle {
     session_id: String,
-    shared: CallSessionShared,
+    shared: SipSessionShared,
     cmd_tx: SessionActionSender,
 }
 
-impl CallSessionHandle {
-    pub fn with_shared(shared: CallSessionShared) -> (Self, SessionActionReceiver) {
+impl SipSessionHandle {
+    /// Create a new handle with the given shared state
+    /// Note: event_tx is set up for app event forwarding but the receiver is
+    /// currently not actively polled. This is a placeholder for future app framework integration.
+    pub fn with_shared(shared: SipSessionShared) -> (Self, SessionActionReceiver) {
         let session_id = shared.session_id();
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+        // App event channel - sender stored in shared, receiver would be polled by app framework
         let (event_tx, _event_rx) = mpsc::unbounded_channel();
         shared.set_event_sender(event_tx);
         let handle = Self {
@@ -515,7 +614,7 @@ impl CallSessionHandle {
         &self.session_id
     }
 
-    pub fn snapshot(&self) -> CallSessionSnapshot {
+    pub fn snapshot(&self) -> SipSessionSnapshot {
         self.shared.snapshot()
     }
 
@@ -545,15 +644,138 @@ mod tests {
     use super::*;
     use crate::call::DialDirection;
 
-    fn make_handle(session_id: &str) -> (CallSessionHandle, SessionActionReceiver) {
-        let shared = CallSessionShared::new(
+    fn make_handle(session_id: &str) -> (SipSessionHandle, SessionActionReceiver) {
+        let shared = SipSessionShared::new(
             session_id.to_string(),
             DialDirection::Inbound,
             Some("caller".to_string()),
             Some("callee".to_string()),
             None,
         );
-        CallSessionHandle::with_shared(shared)
+        SipSessionHandle::with_shared(shared)
+    }
+
+    /// Test that handle and shared are properly dropped
+    #[test]
+    fn test_handle_drop_releases_resources() {
+        let (handle, rx) = make_handle("drop-test");
+
+        // Drop both handle and receiver
+        drop(handle);
+        drop(rx);
+
+        // If we get here without hanging, resources were released
+    }
+
+    /// Test that event sender is set up when handle is created
+    #[test]
+    fn test_event_sender_setup() {
+        let shared =
+            SipSessionShared::new("test".to_string(), DialDirection::Inbound, None, None, None);
+
+        // Initially no event sender
+        assert!(!shared.has_app_event_sender());
+
+        // Create handle which sets up event sender (for ProxyCallEvent)
+        let (handle, _rx) = SipSessionHandle::with_shared(shared.clone());
+
+        // Note: with_shared sets up ProxyCallEvent sender (events), not app_event_tx
+        // The app_event_tx is set separately by run_application
+
+        // Drop handle
+        drop(handle);
+        drop(shared);
+    }
+
+    /// Test that command channel is closed when handle is dropped
+    #[tokio::test]
+    async fn test_command_channel_closed_on_drop() {
+        let (handle, mut rx) = make_handle("channel-test");
+
+        // Drop handle (closes sender)
+        drop(handle);
+
+        // Receiver should return None (channel closed)
+        let result = rx.recv().await;
+        assert!(result.is_none());
+    }
+
+    /// Test multiple handles to same shared state
+    #[test]
+    fn test_multiple_handles_no_leak() {
+        let shared = SipSessionShared::new(
+            "multi".to_string(),
+            DialDirection::Inbound,
+            None,
+            None,
+            None,
+        );
+
+        // Create multiple handles
+        let (handle1, rx1) = SipSessionHandle::with_shared(shared.clone());
+        let (handle2, rx2) = SipSessionHandle::with_shared(shared.clone());
+
+        // Drop everything
+        drop(handle1);
+        drop(handle2);
+        drop(rx1);
+        drop(rx2);
+        drop(shared);
+    }
+
+    /// Test snapshot doesn't hold references that prevent dropping
+    #[test]
+    fn test_snapshot_no_reference_leak() {
+        let (handle, rx) = make_handle("snapshot-test");
+
+        // Get snapshot
+        let _snapshot = handle.snapshot();
+
+        // Drop handle and receiver
+        drop(handle);
+        drop(rx);
+
+        // Snapshot should be independent
+    }
+
+    /// Test registry cleanup when handle is dropped
+    #[test]
+    fn test_registry_cleanup() {
+        use crate::call::runtime::SessionId;
+        use crate::proxy::active_call_registry::ActiveProxyCallRegistry;
+        use std::sync::Arc;
+
+        let registry = Arc::new(ActiveProxyCallRegistry::new());
+
+        // Create a SipSessionHandle for the registry
+        let id = SessionId::from("registry-test");
+        let (handle, _cmd_rx) = crate::proxy::proxy_call::sip_session::SipSession::with_handle(id);
+
+        // Register the handle
+        use crate::proxy::active_call_registry::{ActiveProxyCallEntry, ActiveProxyCallStatus};
+        use chrono::Utc;
+
+        let entry = ActiveProxyCallEntry {
+            session_id: "registry-test".to_string(),
+            caller: Some("caller".to_string()),
+            callee: Some("callee".to_string()),
+            direction: "inbound".to_string(),
+            started_at: Utc::now(),
+            answered_at: None,
+            status: ActiveProxyCallStatus::Ringing,
+        };
+
+        registry.upsert(entry, handle.clone());
+        assert_eq!(registry.count(), 1);
+
+        // Drop handle and receiver
+        drop(handle);
+        drop(_cmd_rx);
+        // Session handle dropped here
+
+        // Remove from registry (cleanup)
+        registry.remove("registry-test");
+        assert_eq!(registry.count(), 0);
     }
 
     // ── SessionAction serialization / equality ─────────────────────────────

@@ -25,7 +25,7 @@ use super::{AppEventLoop, CallApp, CallController, ControllerEvent, RecordingInf
 use crate::call::DialDirection;
 use crate::call::app::{ApplicationContext, CallInfo};
 use crate::config::Config;
-use crate::proxy::proxy_call::state::{CallSessionHandle, CallSessionShared, SessionAction};
+use crate::proxy::proxy_call::state::{SipSessionHandle, SipSessionShared, SessionAction};
 use chrono::Utc;
 use sea_orm::DatabaseConnection;
 use std::sync::Arc;
@@ -35,7 +35,7 @@ use tokio_util::sync::CancellationToken;
 /// Fully assembled, in-memory [`CallApp`] harness — no SIP stack required.
 ///
 /// The harness wires up:
-/// - A real [`CallSessionHandle`] backed by an in-memory channel (`cmd_rx`).
+/// - A real [`SipSessionHandle`] backed by an in-memory channel (`cmd_rx`).
 /// - A synthetic event channel (`event_tx`) for injecting DTMF, audio events, etc.
 /// - A real [`AppEventLoop`] running the app in a background Tokio task.
 pub struct MockCallStack {
@@ -57,15 +57,15 @@ impl MockCallStack {
     /// * `caller` – Simulated caller-ID (e.g. `"1001"` or `"sip:alice@test"`).
     /// * `callee` – Simulated callee-ID (e.g. `"1002"`).
     pub fn run(app: Box<dyn CallApp>, caller: &str, callee: &str) -> Self {
-        // Real CallSessionHandle — backed only by channels, no SIP socket.
-        let shared = CallSessionShared::new(
+        // Real SipSessionHandle — backed only by channels, no SIP socket.
+        let shared = SipSessionShared::new(
             "test-session".to_string(),
             DialDirection::Inbound,
             Some(caller.to_string()),
             Some(callee.to_string()),
             None,
         );
-        let (handle, cmd_rx) = CallSessionHandle::with_shared(shared);
+        let (handle, cmd_rx) = SipSessionHandle::with_shared(shared);
 
         // Synthetic event channel: test → controller.
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel::<ControllerEvent>();
