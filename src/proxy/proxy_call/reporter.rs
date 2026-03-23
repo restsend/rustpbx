@@ -6,7 +6,7 @@ use crate::{
     },
     models::call_record::extract_sip_username,
     proxy::{
-        proxy_call::{session::CallSessionRecordSnapshot, state::CallContext},
+        proxy_call::state::{CallContext, CallSessionRecordSnapshot},
         server::SipServerRef,
     },
 };

@@ -1,8 +1,6 @@
-use crate::callrecord::CallRecordHangupReason;
-use crate::console::handlers::bad_request;
+use crate::proxy::proxy_call::sip_session::SessionSnapshot;
 use crate::console::{ConsoleState, middleware::AuthRequired};
 use crate::proxy::active_call_registry::ActiveProxyCallRegistry;
-use crate::proxy::proxy_call::state::{CallSessionSnapshot, SessionAction};
 use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -10,7 +8,6 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::json;
-use std::str::FromStr;
 use std::sync::Arc;
 
 const DEFAULT_ACTIVE_CALL_LIMIT: usize = 50;
@@ -32,7 +29,7 @@ pub struct ActiveCallListQuery {
     limit: Option<usize>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum CallCommandPayload {
     Hangup {
@@ -121,7 +118,8 @@ pub async fn dispatch_call_command(
     };
     let registry = server.active_call_registry.clone();
 
-    let Some(handle) = registry.get_handle(&session_id) else {
+    // Verify session exists
+    let Some(_handle) = registry.get_handle(&session_id) else {
         return (
             StatusCode::NOT_FOUND,
             Json(json!({ "message": "Call not found" })),
@@ -129,42 +127,24 @@ pub async fn dispatch_call_command(
             .into_response();
     };
 
-    let action = match payload {
-        CallCommandPayload::Hangup {
-            reason,
-            code,
-            initiator,
-        } => {
-            let reason = match reason {
-                Some(text) if !text.trim().is_empty() => {
-                    match CallRecordHangupReason::from_str(text.trim()) {
-                        Ok(reason) => Some(reason),
-                        Err(_) => return bad_request("invalid hangup reason"),
-                    }
-                }
-                _ => None,
-            };
-            SessionAction::Hangup {
-                reason,
-                code,
-                initiator,
+    // Use unified dispatch path
+    use crate::call::runtime::dispatch_console_command;
+
+    match dispatch_console_command(&registry, &session_id, payload) {
+        Ok(result) => {
+            if result.success {
+                Json(json!({ "message": "Command dispatched" })).into_response()
+            } else {
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(json!({ "message": result.message })),
+                )
+                    .into_response()
             }
         }
-        CallCommandPayload::Accept { callee, sdp } => SessionAction::AcceptCall {
-            callee,
-            sdp,
-            dialog_id: None,
-        },
-        CallCommandPayload::Transfer { target } => SessionAction::from_transfer_target(&target),
-        CallCommandPayload::Mute { track_id } => SessionAction::MuteTrack(track_id),
-        CallCommandPayload::Unmute { track_id } => SessionAction::UnmuteTrack(track_id),
-    };
-
-    match handle.send_command(action) {
-        Ok(_) => Json(json!({ "message": "Command dispatched" })).into_response(),
-        Err(err) => (
+        Err(e) => (
             StatusCode::CONFLICT,
-            Json(json!({ "message": format!("Failed to deliver command: {}", err) })),
+            Json(json!({ "message": format!("Failed to deliver command: {}", e) })),
         )
             .into_response(),
     }
@@ -173,10 +153,8 @@ pub async fn dispatch_call_command(
 fn snapshot_for(
     registry: &Arc<ActiveProxyCallRegistry>,
     session_id: &str,
-) -> Option<CallSessionSnapshot> {
-    registry
-        .get_handle(session_id)
-        .map(|handle| handle.snapshot())
+) -> Option<SessionSnapshot> {
+    registry.get_handle(session_id).and_then(|handle| handle.snapshot())
 }
 
 fn service_unavailable() -> Response {

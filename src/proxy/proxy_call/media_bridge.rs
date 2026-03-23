@@ -12,6 +12,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tracing::{debug, info, trace, warn};
 
+#[allow(dead_code)]
 pub struct MediaBridge {
     pub leg_a: Arc<dyn MediaPeer>,
     pub leg_b: Arc<dyn MediaPeer>,
@@ -29,6 +30,7 @@ pub struct MediaBridge {
     sipflow_backend: Option<Arc<dyn SipFlowBackend>>,
 }
 
+#[allow(dead_code)]
 impl MediaBridge {
     fn rewrite_dtmf_duration(
         frame: &mut rustrtc::media::AudioFrame,

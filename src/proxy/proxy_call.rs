@@ -3,8 +3,8 @@ use crate::{
     call::MediaConfig,
     call::{Dialplan, TransactionCookie},
     callrecord::CallRecordSender,
-    proxy::proxy_call::session::CallSession,
     proxy::proxy_call::state::CallContext,
+    proxy::proxy_call::sip_session::SipSession,
     proxy::server::SipServerRef,
 };
 use anyhow::Result;
@@ -16,15 +16,12 @@ use tokio_util::sync::CancellationToken;
 pub(crate) mod media_bridge;
 pub(crate) mod media_peer;
 pub(crate) mod reporter;
-pub(crate) mod session;
 pub(crate) mod session_timer;
 pub(crate) mod state;
+pub(crate) mod sip_session;
 
 #[cfg(test)]
 pub(crate) mod test_util;
-
-#[cfg(test)]
-mod callsession_tests;
 
 pub struct CallSessionBuilder {
     cookie: TransactionCookie,
@@ -115,7 +112,7 @@ impl CallSessionBuilder {
             max_forwards: self.max_forwards,
         };
 
-        CallSession::serve(server, context, tx, cancel_token, self.call_record_sender).await
+        SipSession::serve(server, context, tx, cancel_token, self.call_record_sender).await
     }
 
     pub fn report_failure(
@@ -170,7 +167,7 @@ impl CallSessionBuilder {
             call_record_sender: self.call_record_sender,
         };
 
-        let snapshot = crate::proxy::proxy_call::session::CallSessionRecordSnapshot {
+        let snapshot = crate::proxy::proxy_call::state::CallSessionRecordSnapshot {
             ring_time: None,
             answer_time: None,
             last_error: Some((code, reason)),
