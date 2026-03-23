@@ -3385,6 +3385,13 @@ impl CallSession {
                 }
                 state = state_rx.recv() => {
                     match state {
+                        Some(DialogState::Calling(dialog_id)) => {
+                            info!(
+                                session_id = %session_id,
+                                dialog_id = %dialog_id,
+                                "callee entered Calling state"
+                            );
+                        }
                         Some(DialogState::Early(_, response)) => {
                             let sdp = String::from_utf8_lossy(response.body()).to_string();
                             let action = SessionAction::StartRinging{

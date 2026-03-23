@@ -849,6 +849,18 @@ reg_expires = "过期时间"
 reg_last_register = "上次注册"
 reg_error = "错误"
 
+# Circuit Breaker section
+section_circuit_breaker = "熔断器"
+cb_enabled = "已启用"
+cb_disabled = "已禁用"
+cb_state = "状态"
+cb_state_closed = "正常"
+cb_state_open = "熔断"
+cb_state_half_open = "半开"
+cb_auto_recover = "自动恢复于"
+cb_failures = "失败次数"
+btn_reset = "重置"
+
 # Form footer
 save_hint = "更改通过API保存，无需页面刷新。"
 btn_cancel = "取消"
