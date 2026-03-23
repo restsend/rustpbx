@@ -156,7 +156,7 @@ pub(crate) struct CallSessionRecordSnapshot {
     pub routed_contact: Option<String>,
     pub routed_destination: Option<String>,
     pub last_queue_name: Option<String>,
-    pub callee_dialogs: Vec<DialogId>,
+    pub outbound_call_ids: Vec<String>,
     pub server_dialog_id: DialogId,
     pub extensions: http::Extensions,
 }
@@ -170,6 +170,7 @@ pub(crate) struct CallSession {
     pub context: CallContext,
     pub server_dialog: ServerInviteDialog,
     pub callee_dialogs: Arc<Mutex<HashSet<DialogId>>>,
+    pub outbound_call_ids: Arc<Mutex<HashSet<String>>>,
     pub last_error: Option<(StatusCode, Option<String>)>,
     pub connected_callee: Option<String>,
     pub connected_dialog_id: Option<DialogId>,
@@ -271,6 +272,7 @@ impl CallSession {
             context,
             server_dialog,
             callee_dialogs: Arc::new(Mutex::new(HashSet::new())),
+            outbound_call_ids: Arc::new(Mutex::new(HashSet::new())),
             last_error: None,
             connected_callee: None,
             connected_dialog_id: None,
@@ -558,8 +560,8 @@ impl CallSession {
             routed_contact: self.routed_contact.clone(),
             routed_destination: self.routed_destination.clone(),
             last_queue_name: self.last_queue_name(),
-            callee_dialogs: self
-                .callee_dialogs
+            outbound_call_ids: self
+                .outbound_call_ids
                 .lock()
                 .unwrap()
                 .iter()
@@ -1278,6 +1280,10 @@ impl CallSession {
         Ok(())
     }
 
+    pub fn add_outbound_call_id(&self, call_id: String) {
+        self.outbound_call_ids.lock().unwrap().insert(call_id);
+    }
+
     pub fn add_callee_dialog(&mut self, dialog_id: DialogId) {
         let mut callee_dialogs = self.callee_dialogs.lock().unwrap();
         if callee_dialogs.contains(&dialog_id) {
@@ -1903,7 +1909,7 @@ impl CallSession {
             routed_contact: None,
             routed_destination: None,
             last_queue_name: None,
-            callee_dialogs: vec![],
+            outbound_call_ids: vec![],
             server_dialog_id,
             extensions: self.context.dialplan.extensions.clone(),
         };
@@ -3016,6 +3022,7 @@ impl CallSession {
                             _idx: idx,
                             dialog_id,
                         } => {
+                            self.add_outbound_call_id(dialog_id.call_id.clone());
                             known_dialogs[idx] = Some(dialog_id);
                         }
                         ParallelEvent::Early {
@@ -3386,6 +3393,7 @@ impl CallSession {
                 state = state_rx.recv() => {
                     match state {
                         Some(DialogState::Calling(dialog_id)) => {
+                            self.add_outbound_call_id(dialog_id.call_id.clone());
                             info!(
                                 session_id = %session_id,
                                 dialog_id = %dialog_id,

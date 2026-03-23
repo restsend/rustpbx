@@ -13,7 +13,7 @@ use crate::{
 use chrono::{Duration, Utc};
 use rsip::prelude::HeadersExt;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     fs,
 };
 
@@ -120,17 +120,11 @@ impl CallReporter {
         };
 
         let server_dialog_id = snapshot.server_dialog_id.clone();
-        let mut call_ids: HashSet<String> = HashSet::new();
-        call_ids.insert(server_dialog_id.call_id.clone());
-
-        for dialog_id in &snapshot.callee_dialogs {
-            call_ids.insert(dialog_id.call_id.clone());
-        }
 
         let mut sip_leg_roles = HashMap::new();
         sip_leg_roles.insert(server_dialog_id.call_id.clone(), "caller".to_string());
-        for dialog_id in &snapshot.callee_dialogs {
-            sip_leg_roles.insert(dialog_id.call_id.clone(), "callee".to_string());
+        for call_id in &snapshot.outbound_call_ids {
+            sip_leg_roles.insert(call_id.clone(), "callee".to_string());
         }
 
         let has_sipflow_backend = self.server.sip_flow.as_ref().is_some();
