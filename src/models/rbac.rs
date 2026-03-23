@@ -1,7 +1,7 @@
 use sea_orm::Set;
 use sea_orm::entity::prelude::*;
 use sea_orm_migration::prelude::*;
-use sea_orm_migration::schema::{big_integer, boolean, string, timestamp};
+use sea_orm_migration::schema::{big_integer, boolean, string, text_null, timestamp};
 use sea_orm_migration::sea_query::{ColumnDef, ForeignKeyAction};
 use serde::{Deserialize, Serialize};
 
@@ -12,7 +12,8 @@ pub struct Model {
     pub id: i64,
     #[sea_orm(unique)]
     pub name: String,
-    pub description: String,
+    #[sea_orm(nullable)]
+    pub description: Option<String>,
     pub is_system: bool,
     pub created_at: DateTimeUtc,
     pub updated_at: DateTimeUtc,
@@ -286,7 +287,7 @@ impl MigrationTrait for Migration {
                             .unique_key()
                             .not_null(),
                     )
-                    .col(string(Column::Description).char_len(500))
+                    .col(text_null(Column::Description))
                     .col(boolean(Column::IsSystem).default(false))
                     .col(timestamp(Column::CreatedAt).default(Expr::current_timestamp()))
                     .col(timestamp(Column::UpdatedAt).default(Expr::current_timestamp()))
@@ -348,7 +349,7 @@ impl MigrationTrait for Migration {
         for (name, description) in SYSTEM_ROLES {
             let role = ActiveModel {
                 name: Set(ToString::to_string(name)),
-                description: Set(ToString::to_string(description)),
+                description: Set(Some(ToString::to_string(description))),
                 is_system: Set(true),
                 created_at: Set(now),
                 updated_at: Set(now),
