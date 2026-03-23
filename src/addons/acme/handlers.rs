@@ -43,7 +43,7 @@ async fn reload_certificates(
     // Reload HTTPS if enabled
     if enable_https {
         if let Some(registry_guard) = app_state.tls_reloader.read().await.as_ref() {
-            if registry_guard.has_https_reloader() {
+            if registry_guard.has_https_reloader().await {
                 match registry_guard
                     .reload_https(&cert_path_str, &key_path_str)
                     .await
@@ -60,10 +60,10 @@ async fn reload_certificates(
     // Reload SIP TLS if enabled
     if enable_sip_tls {
         if let Some(registry_guard) = app_state.tls_reloader.read().await.as_ref() {
-            if registry_guard.has_sip_tls_reloader() {
+            if registry_guard.has_sip_tls_reloader().await {
                 let cert_data = tokio::fs::read(&cert_path).await?;
                 let key_data = tokio::fs::read(&key_path).await?;
-                match registry_guard.reload_sip_tls(cert_data, key_data) {
+                match registry_guard.reload_sip_tls(cert_data, key_data).await {
                     Ok(()) => info!("SIP TLS certificate reloaded for {}", domain),
                     Err(e) => warn!("Failed to reload SIP TLS certificate: {}", e),
                 }
