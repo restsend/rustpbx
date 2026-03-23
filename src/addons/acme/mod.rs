@@ -45,9 +45,9 @@ impl AcmeAddon {
     }
 
     /// Load auto-renew configuration from AppState config
-    pub fn load_config(&self, config: &crate::config::Config) {
+    pub async fn load_config(&self, config: &crate::config::Config) {
         if let Some(ref acme_config) = config.acme {
-            let mut auto_renew = self.state.auto_renew_config.blocking_write();
+            let mut auto_renew = self.state.auto_renew_config.write().await;
             *auto_renew = acme_config.clone();
             tracing::info!(
                 "ACME auto-renew config loaded: auto_renew={}",
@@ -77,7 +77,7 @@ impl Addon for AcmeAddon {
     }
     async fn initialize(&self, state: AppState) -> anyhow::Result<()> {
         // Load auto-renew configuration from config.toml
-        self.load_config(state.config());
+        self.load_config(state.config()).await;
 
         // Spawn background task for certificate expiry checking
         let state_clone = self.state.clone();

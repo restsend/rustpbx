@@ -6,7 +6,6 @@ pub mod tests {
     use async_trait::async_trait;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
-    use tokio::sync::mpsc;
     use tokio_util::sync::CancellationToken;
 
     /// Enhanced MockMediaPeer for comprehensive testing
