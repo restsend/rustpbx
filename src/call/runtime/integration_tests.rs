@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod tests {
-    use crate::call::domain::{CallCommand, HangupCommand, Leg, LegId, LegState};
+    use crate::call::domain::{CallCommand, HangupCommand, LegId};
     use crate::call::runtime::{
         ActiveCallView, CallDirection, CallStatus, RegistryAdapter, SessionId, SessionRegistry,
     };
@@ -166,11 +166,13 @@ mod tests {
     use crate::call::runtime::{AppRuntime, AppRuntimeError, AppStatus};
 
     /// Mock AppRuntime for integration tests
+    #[allow(dead_code)]
     struct MockAppRuntime {
         running: std::sync::atomic::AtomicBool,
     }
 
     impl MockAppRuntime {
+        #[allow(dead_code)]
         fn new() -> Self {
             Self {
                 running: std::sync::atomic::AtomicBool::new(false),
