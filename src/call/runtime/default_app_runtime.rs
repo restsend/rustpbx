@@ -86,12 +86,9 @@ impl AppRuntime for StubAppRuntime {
 
 /// State for a running application
 #[derive(Clone)]
-#[allow(dead_code)]
 struct RunningApp {
     name: String,
     cancel_token: CancellationToken,
-    /// Channel to receive events from the session
-    event_tx: mpsc::UnboundedSender<ControllerEvent>,
 }
 
 /// Configuration needed to create an AppRuntime
@@ -167,7 +164,7 @@ impl AppRuntime for DefaultAppRuntime {
         }
 
         // Create event channel
-        let (event_tx, event_rx) = mpsc::unbounded_channel();
+        let (_event_tx, event_rx) = mpsc::unbounded_channel();
         let (_fired_timer_tx, fired_timer_rx) = mpsc::unbounded_channel();
 
         // Create controller
@@ -195,7 +192,6 @@ impl AppRuntime for DefaultAppRuntime {
             *running = Some(RunningApp {
                 name: app_name.to_string(),
                 cancel_token: cancel_token.clone(),
-                event_tx: event_tx.clone(),
             });
         }
 

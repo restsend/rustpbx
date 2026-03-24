@@ -149,9 +149,7 @@ impl Drop for TestQueueServer {
 
 // --- Actual Test Case ---
 
-// TODO: Requires full B2BUA call routing implementation in SipSession
 #[tokio::test]
-#[ignore]
 async fn test_call_queue_routing() {
     tracing_subscriber::fmt()
         .with_file(true)

@@ -16,8 +16,6 @@
 //
 // Note: PCM / full MediaSession bridging tests are deferred (marked optional).
 
-#![allow(dead_code)]
-
 mod helpers;
 
 use futures::{SinkExt, StreamExt};

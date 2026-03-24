@@ -8,8 +8,6 @@
 // 2. Create supervisor call (originate to a special destination)
 // 3. Call supervisor.listen/whisper/barge
 
-#![allow(dead_code)]
-
 mod helpers;
 
 use futures::{SinkExt, StreamExt};

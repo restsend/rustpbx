@@ -1,4 +1,4 @@
-use crate::call::{DialDirection, Dialplan, MediaConfig, TransactionCookie};
+use crate::call::{DialDirection, Dialplan, TransactionCookie};
 use crate::callrecord::{CallRecordHangupMessage, CallRecordHangupReason};
 use crate::proxy::active_call_registry::{
     ActiveProxyCallEntry, ActiveProxyCallRegistry, ActiveProxyCallStatus,
@@ -34,17 +34,9 @@ pub struct CallSessionRecordSnapshot {
     pub extensions: http::Extensions,
 }
 
-/// Pending hangup information
-/// Note: Fields are stored for tracking but currently not actively used in hangup logic.
-/// This structure is maintained for future CDR enhancement and debugging purposes.
-pub struct PendingHangup {
-    #[allow(dead_code)]
-    pub reason: Option<CallRecordHangupReason>,
-    #[allow(dead_code)]
-    pub code: Option<u16>,
-    #[allow(dead_code)]
-    pub initiator: Option<String>,
-}
+/// Pending hangup marker type
+/// Currently used as a placeholder for tracking pending hangup state.
+pub struct PendingHangup;
 
 /// Session hangup message
 #[derive(Clone, Debug)]
@@ -64,47 +56,16 @@ impl From<&SessionHangupMessage> for CallRecordHangupMessage {
     }
 }
 
-/// Session action inbox wrapper
-/// Note: Legacy compatibility type. New code uses mpsc::UnboundedReceiver<CallCommand> directly.
-#[allow(dead_code)]
-pub struct SessionActionInbox {
-    rx: mpsc::UnboundedReceiver<SessionAction>,
-}
-
-#[allow(dead_code)]
-impl SessionActionInbox {
-    pub fn new(rx: mpsc::UnboundedReceiver<SessionAction>) -> Self {
-        Self { rx }
-    }
-
-    pub fn try_recv(&mut self) -> Result<SessionAction, mpsc::error::TryRecvError> {
-        self.rx.try_recv()
-    }
-
-    pub async fn recv(&mut self) -> Option<SessionAction> {
-        self.rx.recv().await
-    }
-}
-
 /// Immutable context for the entire duration of a call
-/// Note: Some fields are preserved for backward compatibility and future use
-/// but are not actively used in the current SipSession implementation.
+/// Immutable context for the entire duration of a call
 #[derive(Clone)]
 pub struct CallContext {
     pub session_id: String,
     pub dialplan: Arc<Dialplan>,
     pub cookie: TransactionCookie,
     pub start_time: Instant,
-    /// Media config from proxy - SipSession uses MediaRuntimeProfile instead
-    #[allow(dead_code)]
-    pub media_config: MediaConfig,
-    #[allow(dead_code)]
     pub original_caller: String,
-    #[allow(dead_code)]
     pub original_callee: String,
-    /// Max-Forwards header value for SIP routing
-    #[allow(dead_code)]
-    pub max_forwards: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

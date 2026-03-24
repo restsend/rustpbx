@@ -17,7 +17,6 @@ RWI is implemented as a built-in RustPBX module with core components:
 
 - **RwiGateway**: maintains authenticated WS sessions, routes commands/events by `call_id`
 - **RwiApp** (per call): bridges CallApp events to RWI events, executes validated RWI commands on `CallController`
-- **RwiMediaBridge** (optional): handles PCM stream subscription and injection
 
 ## 3. Authentication
 

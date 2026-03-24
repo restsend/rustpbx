@@ -1,6 +1,6 @@
 use crate::{
     addons::registry::AddonRegistry,
-    call::MediaConfig,
+
     call::{Dialplan, TransactionCookie},
     callrecord::CallRecordSender,
     proxy::proxy_call::state::CallContext,
@@ -13,7 +13,6 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio_util::sync::CancellationToken;
 
-pub(crate) mod media_bridge;
 pub(crate) mod media_peer;
 pub(crate) mod reporter;
 pub(crate) mod session_timer;
@@ -26,18 +25,16 @@ pub(crate) mod test_util;
 pub struct CallSessionBuilder {
     cookie: TransactionCookie,
     dialplan: Dialplan,
-    max_forwards: u32,
     cancel_token: Option<CancellationToken>,
     call_record_sender: Option<CallRecordSender>,
     addon_registry: Option<Arc<AddonRegistry>>,
 }
 
 impl CallSessionBuilder {
-    pub fn new(cookie: TransactionCookie, dialplan: Dialplan, max_forwards: u32) -> Self {
+    pub fn new(cookie: TransactionCookie, dialplan: Dialplan, _max_forwards: u32) -> Self {
         Self {
             cookie,
             dialplan,
-            max_forwards,
             cancel_token: None,
             call_record_sender: None,
             addon_registry: None,
@@ -97,19 +94,8 @@ impl CallSessionBuilder {
             dialplan: dialplan.clone(),
             cookie: self.cookie,
             start_time: Instant::now(),
-            media_config: MediaConfig {
-                proxy_mode: server.proxy_config.media_proxy,
-                external_ip: server.rtp_config.external_ip.clone(),
-                rtp_start_port: server.rtp_config.start_port,
-                rtp_end_port: server.rtp_config.end_port,
-                webrtc_port_start: server.rtp_config.webrtc_start_port,
-                webrtc_port_end: server.rtp_config.webrtc_end_port,
-                ice_servers: server.rtp_config.ice_servers.clone(),
-                enable_latching: server.proxy_config.enable_latching,
-            },
             original_caller,
             original_callee,
-            max_forwards: self.max_forwards,
         };
 
         SipSession::serve(server, context, tx, cancel_token, self.call_record_sender).await
@@ -146,19 +132,8 @@ impl CallSessionBuilder {
             dialplan: dialplan.clone(),
             cookie: self.cookie,
             start_time: Instant::now(),
-            media_config: MediaConfig {
-                proxy_mode: server.proxy_config.media_proxy,
-                external_ip: server.rtp_config.external_ip.clone(),
-                rtp_start_port: server.rtp_config.start_port,
-                rtp_end_port: server.rtp_config.end_port,
-                webrtc_port_start: server.rtp_config.webrtc_start_port,
-                webrtc_port_end: server.rtp_config.webrtc_end_port,
-                ice_servers: server.rtp_config.ice_servers.clone(),
-                enable_latching: server.proxy_config.enable_latching,
-            },
             original_caller: original_caller.clone(),
             original_callee: original_callee.clone(),
-            max_forwards: self.max_forwards,
         };
 
         let reporter = crate::proxy::proxy_call::reporter::CallReporter {

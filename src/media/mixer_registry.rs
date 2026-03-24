@@ -16,7 +16,7 @@
 use crate::media::mixer::{MediaMixer, SupervisorMixerMode};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use tokio_util::sync::CancellationToken;
+
 use tracing::{info, warn};
 
 /// Participant role in a mixer
@@ -69,9 +69,6 @@ pub struct MixerRegistry {
     mixers: Arc<Mutex<HashMap<String, MixerRegistryEntry>>>,
     /// session_id -> mixer_id (for quick lookup)
     participants: Arc<Mutex<HashMap<String, String>>>,
-    /// Cancellation token for shutdown
-    #[allow(dead_code)]
-    cancel_token: CancellationToken,
 }
 
 impl MixerRegistry {
@@ -80,7 +77,6 @@ impl MixerRegistry {
         Self {
             mixers: Arc::new(Mutex::new(HashMap::new())),
             participants: Arc::new(Mutex::new(HashMap::new())),
-            cancel_token: CancellationToken::new(),
         }
     }
 

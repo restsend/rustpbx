@@ -68,19 +68,19 @@ impl RwiRequest {
     }
 }
 
-struct RwiTestClient {
+pub struct RwiTestClient {
     ws: tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<TcpStream>>,
 }
 
 impl RwiTestClient {
-    async fn connect() -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+    pub async fn connect() -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let url = format!("{}?token={}", RWI_URL, TEST_TOKEN);
         let (ws_stream, _) = timeout(Duration::from_secs(10), connect_async(&url)).await??;
 
         Ok(Self { ws: ws_stream })
     }
 
-    async fn send_request(
+    pub async fn send_request(
         &mut self,
         request: RwiRequest,
     ) -> Result<RwiResponse, Box<dyn std::error::Error + Send + Sync>> {
@@ -105,7 +105,7 @@ impl RwiTestClient {
         }
     }
 
-    async fn subscribe(
+    pub async fn subscribe(
         &mut self,
         contexts: Vec<&str>,
     ) -> Result<RwiResponse, Box<dyn std::error::Error + Send + Sync>> {
@@ -114,14 +114,14 @@ impl RwiTestClient {
         self.send_request(request).await
     }
 
-    async fn list_calls(
+    pub async fn list_calls(
         &mut self,
     ) -> Result<RwiResponse, Box<dyn std::error::Error + Send + Sync>> {
         let request = RwiRequest::new("session.list_calls");
         self.send_request(request).await
     }
 
-    async fn answer_call(
+    pub async fn answer_call(
         &mut self,
         call_id: &str,
     ) -> Result<RwiResponse, Box<dyn std::error::Error + Send + Sync>> {
@@ -130,7 +130,7 @@ impl RwiTestClient {
         self.send_request(request).await
     }
 
-    async fn hangup_call(
+    pub async fn hangup_call(
         &mut self,
         call_id: &str,
         reason: Option<&str>,
@@ -143,7 +143,7 @@ impl RwiTestClient {
         self.send_request(request).await
     }
 
-    async fn reject_call(
+    pub async fn reject_call(
         &mut self,
         call_id: &str,
         reason: Option<&str>,
@@ -156,7 +156,7 @@ impl RwiTestClient {
         self.send_request(request).await
     }
 
-    async fn ring_call(
+    pub async fn ring_call(
         &mut self,
         call_id: &str,
     ) -> Result<RwiResponse, Box<dyn std::error::Error + Send + Sync>> {
@@ -165,7 +165,7 @@ impl RwiTestClient {
         self.send_request(request).await
     }
 
-    async fn transfer_call(
+    pub async fn transfer_call(
         &mut self,
         call_id: &str,
         target: &str,
@@ -175,7 +175,7 @@ impl RwiTestClient {
         self.send_request(request).await
     }
 
-    async fn originate(
+    pub async fn originate(
         &mut self,
         call_id: &str,
         destination: &str,
@@ -192,7 +192,7 @@ impl RwiTestClient {
         self.send_request(request).await
     }
 
-    async fn bridge(
+    pub async fn bridge(
         &mut self,
         leg_a: &str,
         leg_b: &str,
@@ -202,7 +202,7 @@ impl RwiTestClient {
         self.send_request(request).await
     }
 
-    async fn media_play(
+    pub async fn media_play(
         &mut self,
         call_id: &str,
         source_type: &str,
@@ -218,7 +218,7 @@ impl RwiTestClient {
         self.send_request(request).await
     }
 
-    async fn close(mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    pub async fn close(mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         self.ws.close(None).await?;
         Ok(())
     }
