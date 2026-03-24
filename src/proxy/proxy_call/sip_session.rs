@@ -387,6 +387,8 @@ impl SipSession {
                     if let Err(ref e) = r {
                         warn!(session_id = %session_id, error = %e, "Server dialog handle returned error");
                         cancel_token.cancel();
+                    } else if server_dialog_clone.state().is_terminated() {
+                        cancel_token.cancel();
                     }
                     break;
                 }
@@ -971,57 +973,50 @@ impl SipSession {
         let dialog_layer = self.server.dialog_layer.clone();
         let mut invitation = dialog_layer.do_invite(invite_option, state_tx).boxed();
 
-        // Wait for the invitation to complete or fail
-        let result = tokio::select! {
-            res = &mut invitation => {
-                match res {
-                    Ok((dialog, response)) => {
-                        // Check response status
-                        if let Some(ref resp) = response {
-                            if resp.status_code.kind() == rsip::StatusCodeKind::Successful {
-                                Ok((dialog.id(), response))
+        // Wait for the invitation to complete or fail. While the outbound INVITE
+        // is pending, the caller may cancel the inbound dialog. In that case we
+        // must stop awaiting the invite future so rsipstack can drop the
+        // unconfirmed dialog and emit CANCEL on the outbound leg.
+        let result = loop {
+            tokio::select! {
+                _ = self.cancel_token.cancelled() => {
+                    break Err((
+                        StatusCode::RequestTerminated,
+                        Some("Caller cancelled".to_string()),
+                    ));
+                }
+                res = &mut invitation => {
+                    break match res {
+                        Ok((dialog, response)) => {
+                            // Check response status
+                            if let Some(ref resp) = response {
+                                if resp.status_code.kind() == rsip::StatusCodeKind::Successful {
+                                    Ok((dialog.id(), response))
+                                } else {
+                                    // Pass through the actual SIP error code from callee
+                                    let code = StatusCode::from(resp.status_code.code() as u16);
+                                    // Use default reason for the status code
+                                    Err((code, None))
+                                }
                             } else {
-                                // Pass through the actual SIP error code from callee
-                                let code = StatusCode::from(resp.status_code.code() as u16);
-                                // Use default reason for the status code
-                                Err((code, None))
+                                Err((StatusCode::ServerInternalError, Some("No response from callee".to_string())))
                             }
+                        }
+                        Err(e) => Err((StatusCode::ServerInternalError, Some(format!("Invite failed: {}", e)))),
+                    };
+                }
+                // Handle early media / ringing while invite is still pending.
+                state = state_rx.recv() => {
+                    if let Some(DialogState::Early(_, ref response)) = state {
+                        // Forward 180/183 to caller if needed
+                        let sdp = String::from_utf8_lossy(response.body()).to_string();
+                        if !sdp.is_empty() && sdp.contains("v=0") {
+                            // Forward early media SDP
+                            let _ = self.server_dialog.ringing(None, Some(sdp.into_bytes()));
                         } else {
-                            Err((StatusCode::ServerInternalError, Some("No response from callee".to_string())))
+                            let _ = self.server_dialog.ringing(None, None);
                         }
                     }
-                    Err(e) => Err((StatusCode::ServerInternalError, Some(format!("Invite failed: {}", e)))),
-                }
-            }
-            // Handle early media / ringing
-            state = state_rx.recv() => {
-                if let Some(DialogState::Early(_, ref response)) = state {
-                    // Forward 180/183 to caller if needed
-                    let sdp = String::from_utf8_lossy(response.body()).to_string();
-                    if !sdp.is_empty() && sdp.contains("v=0") {
-                        // Forward early media SDP
-                        let _ = self.server_dialog.ringing(None, Some(sdp.into_bytes()));
-                    } else {
-                        let _ = self.server_dialog.ringing(None, None);
-                    }
-                }
-                // Continue waiting for the main result
-                match invitation.await {
-                    Ok((dialog, response)) => {
-                        if let Some(ref resp) = response {
-                            if resp.status_code.kind() == rsip::StatusCodeKind::Successful {
-                                Ok((dialog.id(), response))
-                            } else {
-                                // Pass through the actual SIP error code from callee
-                                let code = StatusCode::from(resp.status_code.code() as u16);
-                                // Use default reason for the status code
-                                Err((code, None))
-                            }
-                        } else {
-                            Err((StatusCode::ServerInternalError, Some("No response from callee".to_string())))
-                        }
-                    }
-                    Err(e) => Err((StatusCode::ServerInternalError, Some(format!("Invite failed: {}", e)))),
                 }
             }
         };
