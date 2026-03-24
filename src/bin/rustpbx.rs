@@ -13,7 +13,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use tokio::time::{Duration, sleep};
-use tracing::{info, level_filters::LevelFilter};
+use tracing::info;
 use tracing_subscriber::{
     EnvFilter, fmt::time::LocalTime, layer::SubscriberExt, util::SubscriberInitExt,
 };
@@ -164,21 +164,23 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    let mut env_filter = EnvFilter::from_default_env();
-    if let Some(Ok(level)) = config
-        .log_level
-        .as_ref()
-        .map(|level| level.parse::<LevelFilter>())
-    {
-        env_filter = env_filter.add_directive(level.into());
-    }
+    let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+        let mut env_filter = if let Some(level) = config.log_level.as_deref() {
+            EnvFilter::new(level)
+        } else {
+            EnvFilter::new("info")
+        };
 
-    // Suppress noisy third-party crates to warn level by default
-    for noisy in &["hyper_util", "rustls", "sqlx"] {
-        if let Ok(d) = format!("{}=warn", noisy).parse() {
-            env_filter = env_filter.add_directive(d);
+        // Suppress noisy third-party crates to warn level by default when
+        // the user did not provide an explicit RUST_LOG override.
+        for noisy in &["hyper_util", "rustls", "sqlx"] {
+            if let Ok(d) = format!("{}=warn", noisy).parse() {
+                env_filter = env_filter.add_directive(d);
+            }
         }
-    }
+
+        env_filter
+    });
 
     // Install the hot-swappable reload layer BEFORE the subscriber is built.
     // The commercial TelemetryAddon will inject an OTel layer into this slot
