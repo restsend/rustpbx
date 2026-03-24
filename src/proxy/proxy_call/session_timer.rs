@@ -104,9 +104,9 @@ impl Default for SessionTimerState {
     }
 }
 
-#[allow(dead_code)]
 impl SessionTimerState {
     /// Create a new session timer state with specific interval
+    #[allow(dead_code)]
     pub fn new(session_interval: Duration, min_se: Duration, refresher: SessionRefresher) -> Self {
         Self {
             enabled: true,
@@ -210,6 +210,7 @@ impl SessionTimerState {
     }
 
     /// Get session duration
+    #[allow(dead_code)]
     pub fn session_duration(&self) -> Duration {
         self.session_start.elapsed()
     }
@@ -225,6 +226,7 @@ impl SessionTimerState {
     }
 
     /// Check if we need to include timer in Require header
+    #[allow(dead_code)]
     pub fn require_timer(&self) -> bool {
         self.enabled && self.active
     }
@@ -245,6 +247,7 @@ impl SessionTimerState {
     }
 
     /// Reset the timer with new parameters
+    #[allow(dead_code)]
     pub fn reset(&mut self, interval: Duration, refresher: SessionRefresher) {
         self.session_interval = interval;
         self.refresher = refresher;
@@ -253,6 +256,7 @@ impl SessionTimerState {
     }
 
     /// Get timer statistics
+    #[allow(dead_code)]
     pub fn stats(&self) -> TimerStats {
         TimerStats {
             enabled: self.enabled,

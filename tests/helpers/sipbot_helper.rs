@@ -23,7 +23,6 @@ use tokio_util::sync::CancellationToken;
 /// A SIP UA backed by `sipbot`.
 pub struct TestUa {
     pub cancel_token: CancellationToken,
-    pub sip_port: u16,
     pub domain: String,
 }
 
@@ -78,7 +77,6 @@ impl TestUa {
 
         Self {
             cancel_token,
-            sip_port,
             domain,
         }
     }

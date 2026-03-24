@@ -21,7 +21,7 @@ pub struct SessionSnapshot {
     pub callee_dialogs: Vec<DialogId>,
 }
 use crate::call::sip::{DialogStateReceiverGuard, ServerDialogGuard};
-use crate::call::{DialplanFlow, TransferEndpoint};
+use crate::call::TransferEndpoint;
 use crate::callrecord::{CallRecordHangupMessage, CallRecordHangupReason, CallRecordSender};
 use crate::config::MediaProxyMode;
 use crate::media::mixer::MediaMixer;
@@ -78,7 +78,6 @@ pub struct SipSession {
     pub bridge: BridgeConfig,
     pub media_profile: MediaRuntimeProfile,
     pub app_runtime: Arc<dyn AppRuntime>,
-    #[allow(dead_code)]
     pub snapshot_cache: Arc<Mutex<Option<SessionSnapshot>>>,
 
     pub server: SipServerRef,
@@ -101,7 +100,6 @@ pub struct SipSession {
     pub callee_offer: Option<String>,
     pub answer: Option<String>,
     pub hangup_reason: Option<CallRecordHangupReason>,
-    #[allow(dead_code)]
     pub hangup_messages: Vec<SessionHangupMessage>,
     pub last_error: Option<(StatusCode, Option<String>)>,
     pub recording_state: Option<(String, Instant)>,
@@ -1138,7 +1136,7 @@ impl SipSession {
         Ok(())
     }
 
-    /// Start ringing
+    /// Start ringing - sends 180 Ringing response
     #[allow(dead_code)]
     pub async fn start_ringing(&mut self, ringback: String) {
         info!(ringback = %ringback, "Starting ringing");
@@ -1161,10 +1159,19 @@ impl SipSession {
             return Err(anyhow!("Expected INVITE method, got {:?}", method));
         }
 
+        // Check if this is a session refresh (RFC 4028)
+        // Session refresh re-INVITEs may not have SDP body
+        let headers = self.server_dialog.initial_request().headers.clone();
+        if let Err(e) = self.handle_session_refresh(&headers, sdp.clone()).await {
+            warn!(error = %e, "Failed to handle session refresh in re-INVITE");
+        }
+
         let offer_sdp = match sdp {
             Some(s) => s,
             None => {
-                return Err(anyhow!("re-INVITE without SDP not supported"));
+                // This might be a session refresh without SDP changes
+                // Return current answer SDP if available
+                return Ok(self.answer.clone());
             }
         };
 
@@ -1259,7 +1266,6 @@ impl SipSession {
     }
 
     /// Start recording
-    #[allow(dead_code)]
     pub async fn start_recording(
         &mut self,
         path: &str,
@@ -1348,12 +1354,6 @@ impl SipSession {
         self.answer_time.is_some()
     }
 
-    /// Set answer
-    #[allow(dead_code)]
-    pub fn set_answer(&mut self, sdp: String) {
-        self.answer = Some(sdp);
-    }
-
     /// Cleanup - ensures all resources are released to prevent memory leaks
     async fn cleanup(&mut self) {
         debug!(session_id = %self.context.session_id, "Cleaning up session");
@@ -1389,16 +1389,13 @@ impl SipSession {
             .active_call_registry
             .remove(&self.context.session_id);
 
-        debug!(session_id = %self.context.session_id, "Session cleanup complete");
-    }
-
-    /// Get retry codes
-    #[allow(dead_code)]
-    pub fn get_retry_codes(&self) -> Option<&Vec<u16>> {
-        match &self.context.dialplan.flow {
-            DialplanFlow::Queue { plan, .. } => plan.retry_codes.as_ref(),
-            _ => None,
+        // Report call record if reporter is available
+        if let Some(reporter) = &self.reporter {
+            let snapshot = self.record_snapshot();
+            reporter.report(snapshot);
         }
+
+        debug!(session_id = %self.context.session_id, "Session cleanup complete");
     }
 
     /// Init server timer
@@ -1539,7 +1536,6 @@ impl SipSession {
     }
 
     /// Handle incoming session refresh from remote party (re-INVITE or UPDATE)
-    #[allow(dead_code)]
     pub async fn handle_session_refresh(&mut self, headers: &rsip::Headers, body: Option<String>) -> Result<()> {
         debug!("Handling incoming session refresh");
 
@@ -1586,7 +1582,7 @@ impl SipSession {
         Ok(())
     }
 
-    /// Note invite details
+    /// Note invite details - stores routing information from the INVITE
     #[allow(dead_code)]
     pub fn note_invite_details(&mut self, invite: &InviteOption) {
         self.routed_caller = Some(invite.caller.to_string());
@@ -1595,8 +1591,7 @@ impl SipSession {
         self.routed_destination = invite.destination.as_ref().map(|addr| addr.to_string());
     }
 
-    /// Create record snapshot
-    #[allow(dead_code)]
+    /// Create record snapshot for call record reporting
     pub fn record_snapshot(&self) -> CallSessionRecordSnapshot {
         CallSessionRecordSnapshot {
             ring_time: self.ring_time,
@@ -1624,7 +1619,6 @@ impl SipSession {
         }
     }
 
-    #[allow(dead_code)]
     fn recorded_hangup_messages(&self) -> Vec<CallRecordHangupMessage> {
         self.hangup_messages
             .iter()

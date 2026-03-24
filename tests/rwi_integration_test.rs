@@ -38,16 +38,6 @@ pub struct RwiError {
     pub message: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RwiEvent {
-    #[serde(rename = "rwi")]
-    pub version: String,
-    pub event: String,
-    #[serde(rename = "call_id")]
-    pub call_id: Option<String>,
-    pub data: Option<serde_json::Value>,
-}
-
 impl RwiRequest {
     pub fn new(action: &str) -> Self {
         Self {

@@ -856,7 +856,7 @@ mod tests {
         let timer2 = timer.clone();
         
         // Thread 1: Check if refresh needed
-        let needs_refresh = {
+        let _needs_refresh = {
             let t = timer1.lock().unwrap();
             t.should_refresh()
         };

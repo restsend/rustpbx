@@ -106,6 +106,7 @@ mod tests {
     }
 
     /// Build a queue plan with parallel dialing.
+    #[allow(dead_code)]
     fn build_parallel_queue() -> QueuePlan {
         let agents: Vec<Location> = vec![
             "sip:agent1@example.com",

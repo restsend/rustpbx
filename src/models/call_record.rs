@@ -24,7 +24,6 @@ impl CallRecordHook for DatabaseHook {
     }
 }
 
-#[allow(unused_variables)]
 pub async fn persist_call_record(
     db: &DatabaseConnection,
     record: &mut CallRecord,

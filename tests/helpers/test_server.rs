@@ -43,8 +43,10 @@ pub struct TestPbx {
     /// `127.0.0.1` IP where the SIP server is bound.
     pub sip_addr: String,
     /// RWI gateway — can be used to inject events in tests.
+    #[allow(dead_code)]
     pub gateway: RwiGatewayRef,
     /// Shared call registry (same instance as in the SipServer).
+    #[allow(dead_code)]
     pub registry: Arc<ActiveProxyCallRegistry>,
     /// Cancellation token — cancel to shut everything down.
     pub cancel_token: CancellationToken,

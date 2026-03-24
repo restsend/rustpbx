@@ -3,7 +3,7 @@
 
 // Import test utilities from rwi_integration_test
 mod rwi_integration_test;
-use rwi_integration_test::{RwiRequest, RwiResponse, RwiTestClient};
+use rwi_integration_test::{RwiRequest, RwiTestClient};
 
 /// Test helper to create a test call and return its ID
 async fn create_test_call(client: &mut RwiTestClient) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
