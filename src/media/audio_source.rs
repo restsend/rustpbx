@@ -668,16 +668,6 @@ mod tests {
         tmp
     }
 
-    /// Write raw i16 PCM bytes to a temp file and return the path.
-    #[allow(dead_code)]
-    fn write_raw_pcm(samples: &[i16]) -> NamedTempFile {
-        let mut tmp = NamedTempFile::with_suffix(".pcmu").expect("tempfile");
-        for &s in samples {
-            tmp.write_all(&s.to_le_bytes()).expect("write");
-        }
-        tmp
-    }
-
     // ── SilenceSource ────────────────────────────────────────────────────────
 
     #[test]

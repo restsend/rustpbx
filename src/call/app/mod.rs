@@ -21,7 +21,7 @@
 //!                          ▲ sends SessionAction
 //! ┌─────────────────────────────────────────────────────┐
 //! │ Proxy Call Layer                                     │
-//! │  CallSession │ MediaBridge │ FileTrack │ Recorder    │
+//! │  CallSession │ BridgeConfig │ FileTrack │ Recorder   │
 //! └─────────────────────────────────────────────────────┘
 //! ```
 //!
@@ -85,6 +85,7 @@ mod event_loop;
 
 pub mod ivr;
 pub mod ivr_config;
+pub mod queue;
 
 /// Test helpers: build a mock call stack without a real SIP session.
 /// Only compiled in test builds.
@@ -96,6 +97,9 @@ mod app_test;
 
 #[cfg(test)]
 mod ivr_test;
+
+#[cfg(test)]
+mod queue_test;
 
 pub use app_context::{AppSharedState, ApplicationContext, CallInfo};
 pub use controller::{

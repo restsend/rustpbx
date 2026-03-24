@@ -1,5 +1,5 @@
 use crate::call::domain::{CallCommand, HangupCommand, LegId};
-use crate::callrecord::CallRecordHangupReason;
+
 use crate::media;
 use crate::media::mixer_registry::MixerParticipantRole;
 use crate::proxy::active_call_registry::ActiveProxyCallRegistry;
@@ -13,7 +13,7 @@ use crate::rwi::session::{
 };
 use futures::FutureExt;
 use std::collections::HashMap;
-use std::str::FromStr;
+
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::info;
@@ -49,29 +49,13 @@ struct SupervisorState {
     _mode: SupervisorMode,
 }
 
+// Marker type for tracking active media streams
 #[derive(Clone)]
-struct MediaStreamState {
-    #[allow(dead_code)]
-    call_id: String,
-    #[allow(dead_code)]
-    stream_id: String,
-    #[allow(dead_code)]
-    direction: String,
-}
+struct MediaStreamState;
 
+// Marker type for tracking active media injections
 #[derive(Clone)]
-struct MediaInjectState {
-    #[allow(dead_code)]
-    call_id: String,
-    #[allow(dead_code)]
-    stream_id: String,
-    #[allow(dead_code)]
-    codec: String,
-    #[allow(dead_code)]
-    sample_rate: u32,
-    #[allow(dead_code)]
-    channels: u32,
-}
+struct MediaInjectState;
 
 #[derive(Clone)]
 #[allow(unused)]
@@ -750,73 +734,9 @@ impl RwiCommandProcessor {
             .ok_or_else(|| CommandError::CallNotFound(call_id.to_string()))
     }
 
-    /// Answer a call (currently unused - handled via dispatch_unified_command)
-    #[allow(dead_code)]
-    async fn answer_call(&self, call_id: &str) -> Result<CommandResult, CommandError> {
-        let handle = self.get_handle(call_id).await?;
-        handle
-            .send_command(CallCommand::Answer {
-                leg_id: LegId::new(call_id),
-            })
-            .map_err(|e| CommandError::CommandFailed(e.to_string()))?;
-        Ok(CommandResult::Success)
-    }
-
-    /// Hangup a call (currently unused - handled via dispatch_unified_command)
-    #[allow(dead_code)]
-    async fn hangup_call(
-        &self,
-        call_id: &str,
-        reason: Option<String>,
-        code: Option<u16>,
-    ) -> Result<CommandResult, CommandError> {
-        let handle = self.get_handle(call_id).await?;
-        let hangup_reason = reason.and_then(|r| CallRecordHangupReason::from_str(&r).ok());
-        handle
-            .send_command(CallCommand::Hangup(HangupCommand::local(
-                "rwi",
-                hangup_reason,
-                code,
-            )))
-            .map_err(|e| CommandError::CommandFailed(e.to_string()))?;
-        Ok(CommandResult::Success)
-    }
-
-    /// Reject a call (currently unused - handled via dispatch_unified_command)
-    #[allow(dead_code)]
-    async fn reject_call(
-        &self,
-        call_id: &str,
-        reason: Option<String>,
-    ) -> Result<CommandResult, CommandError> {
-        let handle = self.get_handle(call_id).await?;
-        handle
-            .send_command(CallCommand::Reject {
-                leg_id: LegId::new(call_id),
-                reason,
-            })
-            .map_err(|e| CommandError::CommandFailed(e.to_string()))?;
-        Ok(CommandResult::Success)
-    }
-
-    /// Ring a call (currently unused - handled via dispatch_unified_command)
-    #[allow(dead_code)]
-    async fn ring_call(&self, call_id: &str) -> Result<CommandResult, CommandError> {
-        let handle = self.get_handle(call_id).await?;
-        handle
-            .send_command(CallCommand::Ring {
-                leg_id: LegId::new(call_id),
-                ringback: None,
-            })
-            .map_err(|e| CommandError::CommandFailed(e.to_string()))?;
-        Ok(CommandResult::Success)
-    }
-
-    /// Bridge two call legs together (currently unused - handled via dispatch_unified_command).
-    #[allow(dead_code)]
-    ///
+    /// Bridge two call legs together.
     /// Sends `CallCommand::Bridge` to leg_a, which causes the session to
-    /// retrieve leg_b's MediaPeer handle and create a cross-session MediaBridge.
+    /// establish a bridge between the two legs using BridgeConfig.
     /// On success, emits `CallBridged` events to all interested RWI sessions via gateway.
     async fn bridge_calls(&self, leg_a: &str, leg_b: &str) -> Result<CommandResult, CommandError> {
         use crate::call::domain::P2PMode;
@@ -825,7 +745,7 @@ impl RwiCommandProcessor {
         let _handle_b = self.get_handle(leg_b).await?;
 
         // Send Bridge command to leg_a — leg_a's session loop resolves leg_b
-        // from the active_call_registry and establishes the MediaBridge.
+        // from the active_call_registry and establishes the bridge.
         // Ignore channel-closed errors in test environments; the important thing
         // is that the gateway event fan-out still fires.
         let send_result = handle_a.send_command(CallCommand::Bridge {
@@ -853,6 +773,7 @@ impl RwiCommandProcessor {
         Ok(CommandResult::Success)
     }
 
+    #[allow(dead_code)]
     async fn unbridge_call(&self, call_id: &str) -> Result<CommandResult, CommandError> {
         let handle = self.get_handle(call_id).await?;
         handle
@@ -870,6 +791,7 @@ impl RwiCommandProcessor {
         Ok(CommandResult::Success)
     }
 
+    #[allow(dead_code)]
     async fn transfer_call(
         &self,
         call_id: &str,
@@ -890,6 +812,7 @@ impl RwiCommandProcessor {
     /// 1. Put original call on hold
     /// 2. Originate a new call to the transfer target
     /// 3. Return the consultation call_id so client can monitor and complete/cancel
+    #[allow(dead_code)]
     async fn transfer_attended(
         &self,
         call_id: &str,
@@ -930,6 +853,7 @@ impl RwiCommandProcessor {
     /// Complete an attended transfer:
     /// 1. Bridge original call to consultation call
     /// 2. Hang up the consultation call (which becomes the new leg)
+    #[allow(dead_code)]
     async fn transfer_complete(
         &self,
         call_id: &str,
@@ -951,6 +875,7 @@ impl RwiCommandProcessor {
     /// Cancel an attended transfer:
     /// 1. Hang up the consultation call
     /// 2. Take original call off hold
+    #[allow(dead_code)]
     async fn transfer_cancel(
         &self,
         consultation_call_id: &str,
@@ -970,6 +895,7 @@ impl RwiCommandProcessor {
         Ok(CommandResult::Success)
     }
 
+    #[allow(dead_code)]
     async fn media_play(
         &self,
         call_id: &str,
@@ -1050,6 +976,7 @@ impl RwiCommandProcessor {
         Ok(CommandResult::MediaPlay { track_id })
     }
 
+    #[allow(dead_code)]
     async fn media_stop(&self, call_id: &str) -> Result<CommandResult, CommandError> {
         let handle = self.get_handle(call_id).await?;
         handle
@@ -1262,6 +1189,7 @@ impl RwiCommandProcessor {
     }
 
     /// Place a call on hold with optional music.
+    #[allow(dead_code)]
     async fn call_hold(
         &self,
         call_id: &str,
@@ -1286,6 +1214,7 @@ impl RwiCommandProcessor {
     }
 
     /// Release a call from hold.
+    #[allow(dead_code)]
     async fn call_unhold(&self, call_id: &str) -> Result<CommandResult, CommandError> {
         let handle = self.get_handle(call_id).await?;
         handle
@@ -1819,6 +1748,7 @@ impl RwiCommandProcessor {
         Ok(CommandResult::Success)
     }
 
+    #[allow(dead_code)]
     async fn supervisor_listen(
         &self,
         supervisor_call_id: &str,
@@ -1916,6 +1846,7 @@ impl RwiCommandProcessor {
         Ok(CommandResult::Success)
     }
 
+    #[allow(dead_code)]
     async fn supervisor_whisper(
         &self,
         supervisor_call_id: &str,
@@ -2004,6 +1935,7 @@ impl RwiCommandProcessor {
         Ok(CommandResult::Success)
     }
 
+    #[allow(dead_code)]
     async fn supervisor_barge(
         &self,
         supervisor_call_id: &str,
@@ -2143,6 +2075,7 @@ impl RwiCommandProcessor {
     }
 
     /// Supervisor takeover - replaces the agent on the call
+    #[allow(dead_code)]
     async fn supervisor_takeover(
         &self,
         supervisor_call_id: &str,
@@ -2225,17 +2158,12 @@ impl RwiCommandProcessor {
     async fn media_stream_start(
         &self,
         call_id: &str,
-        stream_id: &str,
-        direction: &str,
+        _stream_id: &str,
+        _direction: &str,
     ) -> Result<CommandResult, CommandError> {
         self.get_handle(call_id).await?;
-        let state = MediaStreamState {
-            call_id: call_id.to_string(),
-            stream_id: stream_id.to_string(),
-            direction: direction.to_string(),
-        };
         let mut states = self.media_stream_states.write().await;
-        states.insert(call_id.to_string(), state);
+        states.insert(call_id.to_string(), MediaStreamState);
         let event = RwiEvent::MediaStreamStarted {
             call_id: call_id.to_string(),
         };
@@ -2259,19 +2187,12 @@ impl RwiCommandProcessor {
     async fn media_inject_start(
         &self,
         call_id: &str,
-        stream_id: &str,
-        format: &crate::rwi::session::MediaFormat,
+        _stream_id: &str,
+        _format: &crate::rwi::session::MediaFormat,
     ) -> Result<CommandResult, CommandError> {
         self.get_handle(call_id).await?;
-        let state = MediaInjectState {
-            call_id: call_id.to_string(),
-            stream_id: stream_id.to_string(),
-            codec: format.codec.clone(),
-            sample_rate: format.sample_rate,
-            channels: format.channels,
-        };
         let mut states = self.media_inject_states.write().await;
-        states.insert(call_id.to_string(), state);
+        states.insert(call_id.to_string(), MediaInjectState);
         let event = RwiEvent::MediaStreamStarted {
             call_id: call_id.to_string(),
         };

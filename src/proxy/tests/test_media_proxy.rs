@@ -52,11 +52,9 @@ fn create_test_users() -> Vec<SipUser> {
 }
 
 pub struct TestProxyServer {
-    #[allow(dead_code)]
-    cancel_token: CancellationToken,
+    _cancel_token: CancellationToken,
     pub port: u16,
-    #[allow(dead_code)]
-    pub server: Arc<crate::proxy::server::SipServer>,
+    _server: Arc<crate::proxy::server::SipServer>,
 }
 
 impl TestProxyServer {
@@ -97,9 +95,9 @@ impl TestProxyServer {
 
         sleep(Duration::from_millis(100)).await;
         Ok(Self {
-            cancel_token,
+            _cancel_token: cancel_token,
             port,
-            server,
+            _server: server,
         })
     }
 }

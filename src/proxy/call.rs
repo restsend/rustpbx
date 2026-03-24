@@ -20,6 +20,7 @@ use glob::Pattern;
 use rsip::headers::UntypedHeader;
 use rsip::prelude::HeadersExt;
 use rsipstack::dialog::DialogId;
+use rsipstack::dialog::dialog::Dialog;
 use rsipstack::dialog::dialog_layer::DialogLayer;
 use rsipstack::dialog::invitation::InviteOption;
 use rsipstack::transaction::key::TransactionRole;
@@ -941,21 +942,73 @@ impl CallModule {
         let has_sdp = !tx.original.body.is_empty();
 
         if (is_reinvite || is_update) && has_sdp {
+            debug!(%dialog_id, "Processing re-INVITE/UPDATE with SDP");
             if let Some(handle) = self
                 .inner
                 .server
                 .active_call_registry
                 .get_handle_by_dialog(&dialog_id.to_string())
             {
+                debug!(%dialog_id, "Found handle for dialog");
                 if let Some(snapshot) = handle.snapshot() {
+                    debug!(%dialog_id, callee_dialogs_count = snapshot.callee_dialogs.len(), "Got snapshot");
+                    let offer_sdp = String::from_utf8_lossy(&tx.original.body).to_string();
+                    let mut forwarded = false;
+
+                    for callee_dialog_id in &snapshot.callee_dialogs {
+                        debug!(%dialog_id, %callee_dialog_id, "Trying to forward to callee dialog");
+                        if let Some(mut callee_dialog) = self.inner.dialog_layer.get_dialog(callee_dialog_id) {
+                            debug!(%dialog_id, %callee_dialog_id, "Found callee dialog");
+                            let body = offer_sdp.clone().into_bytes();
+                            let headers = vec![rsip::Header::ContentType("application/sdp".into())];
+
+                            let resp = match &mut callee_dialog {
+                                Dialog::ClientInvite(d) => {
+                                    debug!(%dialog_id, "Calling reinvite on ClientInvite dialog");
+                                    match d.reinvite(Some(headers), Some(body)).await {
+                                        Ok(r) => {
+                                            debug!(%dialog_id, "reinvite succeeded");
+                                            Some(r)
+                                        }
+                                        Err(e) => {
+                                            debug!(%dialog_id, error = %e, "reinvite failed");
+                                            None
+                                        }
+                                    }
+                                }
+                                _ => {
+                                    debug!(%dialog_id, "Callee dialog is not ClientInvite type");
+                                    None
+                                }
+                            };
+
+                            if let Some(response_opt) = resp {
+                                if let Some(response) = response_opt {
+                                    if !response.body().is_empty() {
+                                        let answer_sdp = String::from_utf8_lossy(response.body()).to_string();
+                                        debug!(%dialog_id, ?tx.original.method, "Forwarding re-INVITE to callee, received SDP answer");
+                                        let headers = vec![rsip::Header::ContentType("application/sdp".into())];
+                                        tx.reply_with(rsip::StatusCode::OK, headers, Some(answer_sdp.into_bytes()))
+                                            .await
+                                            .map_err(|e| anyhow!(e))?;
+                                        forwarded = true;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if forwarded {
+                        return dialog.handle(tx).await.map_err(|e| anyhow!(e));
+                    }
+
                     if let Some(sdp) = snapshot.answer_sdp {
-                        info!(%dialog_id, ?tx.original.method, "Replying to mid-dialog request with SDP from shared state");
+                        debug!(%dialog_id, ?tx.original.method, "Replying to mid-dialog request with cached SDP");
                         let headers = vec![rsip::Header::ContentType("application/sdp".into())];
                         tx.reply_with(rsip::StatusCode::OK, headers, Some(sdp.into_bytes()))
                             .await
                             .map_err(|e| anyhow!(e))?;
-
-                        // Still pass it to the dialog so it can emit events and update its state
                         return dialog.handle(tx).await.map_err(|e| anyhow!(e));
                     }
                 }

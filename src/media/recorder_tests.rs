@@ -564,7 +564,6 @@ mod recorder_advanced_tests {
     }
 
     #[test]
-    #[ignore = "diagnostic reproducer for current recorder duration inflation bug"]
     fn repro_recorder_inflates_duration_when_frame_bytes_exceed_rtp_span() {
         let temp_path = std::env::temp_dir().join("test_recorder_inflated_duration.wav");
         let path_str = temp_path.to_str().unwrap();
