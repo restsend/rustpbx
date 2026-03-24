@@ -23,8 +23,8 @@ pub struct SessionSnapshot {
     #[serde(skip)]
     pub callee_dialogs: Vec<DialogId>,
 }
-use crate::call::sip::{DialogStateReceiverGuard, ServerDialogGuard};
 use crate::call::TransferEndpoint;
+use crate::call::sip::{DialogStateReceiverGuard, ServerDialogGuard};
 use crate::callrecord::{CallRecordHangupMessage, CallRecordHangupReason, CallRecordSender};
 use crate::config::MediaProxyMode;
 use crate::media::mixer::MediaMixer;
@@ -93,7 +93,6 @@ pub struct SipSession {
 
     pub cancel_token: CancellationToken,
     pub pending_hangup: HashSet<DialogId>,
-    pub finished_dialog: HashSet<DialogId>,
     pub connected_callee: Option<String>,
     pub ring_time: Option<Instant>,
     pub answer_time: Option<Instant>,
@@ -242,7 +241,6 @@ impl SipSession {
             server_dialog,
             callee_dialogs: Arc::new(Mutex::new(HashSet::new())),
             pending_hangup: HashSet::new(),
-            finished_dialog: HashSet::new(),
             caller_peer,
             callee_peer,
             supervisor_mixer: None,
@@ -447,21 +445,22 @@ impl SipSession {
         let mut timer_interval = self.calculate_timer_check_interval();
         let mut timer_tick = tokio::time::interval(timer_interval);
         timer_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let hangup_futures = FuturesUnordered::new();
+        tokio::pin!(hangup_futures);
         loop {
-            let hangup_dialogs = self
-                .pending_hangup
-                .difference(&self.finished_dialog)
-                .filter_map(|id| self.server.dialog_layer.get_dialog(id))
-                .collect::<Vec<_>>();
-            let hangup_futures: FuturesUnordered<_> = hangup_dialogs
-                .iter()
-                .map(|dialog| dialog.hangup().map(|res| res.map(|_| dialog.id())))
-                .collect();
-            tokio::pin!(hangup_futures);
+            for dialog_id in self.pending_hangup.drain() {
+                if let Some(dialog) = self.server.dialog_layer.get_dialog(&dialog_id) {
+                    let dialog = dialog.clone();
+                    hangup_futures.push(async move {
+                        let res = dialog.hangup().await;
+                        res.map(|_| dialog_id)
+                    });
+                }
+            }
             tokio::select! {
                 res = hangup_futures.next(), if !hangup_futures.is_empty() => {
-                    if let Some(Ok(dialog_id)) = res {
-                        self.finished_dialog.insert(dialog_id);
+                    if let Some(res) = res {
+                        tracing::info!("Hangup completed for dialog_id: {:?}", &res);
                     }
                 }
                 _ = self.cancel_token.cancelled() => {
@@ -560,7 +559,7 @@ impl SipSession {
             }
             DialogState::Terminated(terminated_dialog_id, _) => {
                 self.update_leg_state(&LegId::from("caller"), LegState::Ended);
-                self.finished_dialog.insert(terminated_dialog_id.clone());
+                self.pending_hangup.remove(&terminated_dialog_id);
 
                 let mut callee_dialogs: Vec<DialogId> = self
                     .callee_dialogs
@@ -587,7 +586,7 @@ impl SipSession {
             }
             DialogState::Terminated(terminated_dialog_id, reason) => {
                 self.update_leg_state(&LegId::from("callee"), LegState::Ended);
-                self.finished_dialog.insert(terminated_dialog_id.clone());
+                self.pending_hangup.remove(&terminated_dialog_id);
                 self.pending_hangup.insert(self.server_dialog.id());
 
                 // If callee was never connected and terminated with an error,
