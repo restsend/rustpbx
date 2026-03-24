@@ -9,7 +9,7 @@ use crate::proxy::data::ProxyDataContext;
 use crate::proxy::proxy_call::CallSessionBuilder;
 use crate::proxy::routing::{
     RouteRule, SourceTrunk, TrunkConfig, build_source_trunk,
-    matcher::{RouteResourceLookup, inspect_invite, match_invite},
+    matcher::{RouteResourceLookup, match_invite},
 };
 use anyhow::Error;
 use anyhow::{Result, anyhow};
@@ -173,7 +173,7 @@ impl RouteInvite for DefaultRouteInvite {
             self.build_context(origin, direction).await;
 
         let resource_lookup = self.data_context.as_ref() as &dyn RouteResourceLookup;
-        inspect_invite(
+        match_invite(
             if trunks_snapshot.is_empty() {
                 None
             } else {
@@ -443,10 +443,10 @@ impl CallModule {
                 )
             })?;
 
-        let (pending_queue, pending_app, dialplan_hints) = match preview_outcome {
-            RouteResult::Queue { queue, hints, .. } => (Some(queue), None, hints),
-            RouteResult::Forward(_, hints) => (None, None, hints),
-            RouteResult::NotHandled(_, hints) => (None, None, hints),
+        let (preview_forward, pending_queue, pending_app, dialplan_hints) = match preview_outcome {
+            RouteResult::Queue { queue, hints, .. } => (None, Some(queue), None, hints),
+            RouteResult::Forward(option, hints) => (Some(option), None, None, hints),
+            RouteResult::NotHandled(_, hints) => (None, None, None, hints),
             RouteResult::Abort(code, reason) => {
                 let err = anyhow::anyhow!(
                     reason.unwrap_or_else(|| "route aborted during preview".to_string())
@@ -454,17 +454,32 @@ impl CallModule {
                 return Err((err, Some(code)));
             }
             RouteResult::Application {
+                option: _,
                 app_name,
                 app_params,
                 auto_answer,
                 ..
-            } => (None, Some((app_name, app_params, auto_answer)), None),
+            } => (None, None, Some((app_name, app_params, auto_answer)), None),
         };
 
         let queue_targets = pending_queue
             .as_ref()
             .and_then(|plan| plan.dial_strategy.clone());
-        let targets = queue_targets.unwrap_or_else(|| DialStrategy::Sequential(locs));
+        let targets = if let Some(queue_targets) = queue_targets {
+            queue_targets
+        } else if let Some(option) = preview_forward.as_ref() {
+            let target = Location {
+                aor: option.callee.clone(),
+                destination: option.destination.clone(),
+                credential: option.credential.clone(),
+                headers: option.headers.clone(),
+                contact_raw: Some(option.callee.to_string()),
+                ..Default::default()
+            };
+            DialStrategy::Sequential(vec![target])
+        } else {
+            DialStrategy::Sequential(locs)
+        };
         let recording = self
             .inner
             .config
