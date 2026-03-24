@@ -34,10 +34,6 @@ pub struct CallSessionRecordSnapshot {
     pub extensions: http::Extensions,
 }
 
-/// Pending hangup marker type
-/// Currently used as a placeholder for tracking pending hangup state.
-pub struct PendingHangup;
-
 /// Session hangup message
 #[derive(Clone, Debug)]
 pub struct SessionHangupMessage {
