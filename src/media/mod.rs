@@ -17,6 +17,7 @@ pub use transcoder::Transcoder;
 use crate::media::recorder::RecorderOption;
 
 pub mod audio_source;
+pub mod bridge;
 #[cfg(test)]
 mod file_track_tests;
 pub mod mixer;
@@ -26,6 +27,7 @@ pub mod mixer_input;
 pub mod mixer_output;
 pub mod mixer_registry;
 pub mod negotiate;
+pub mod sdp_bridge;
 pub mod transcoder;
 #[cfg(test)]
 mod unified_pc_tests;

@@ -29,7 +29,7 @@ cdr/
 *.bak
 /.idea/
 .vscode/
-
+*.pyc
 
 #
 # ignore commerce addon files
