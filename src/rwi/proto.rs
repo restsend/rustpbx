@@ -89,12 +89,6 @@ pub enum RwiCommand {
     RecordStop {
         call_id: String,
     },
-    RecordMaskSegment {
-        call_id: String,
-        recording_id: String,
-        start_secs: u64,
-        end_secs: u64,
-    },
     QueueEnqueue(QueueEnqueueParams),
     QueueDequeue {
         call_id: String,
@@ -135,11 +129,6 @@ pub enum RwiCommand {
     SupervisorStop {
         supervisor_call_id: String,
         target_call_id: String,
-    },
-    SupervisorTakeover {
-        supervisor_call_id: String,
-        target_call_id: String,
-        agent_leg: String,
     },
     SipMessage {
         call_id: String,
@@ -419,12 +408,6 @@ pub enum RwiEvent {
         recording_id: String,
         error: String,
     },
-    RecordSegmentMasked {
-        call_id: String,
-        recording_id: String,
-        start_secs: u64,
-        end_secs: u64,
-    },
     QueueJoined {
         call_id: String,
         queue_id: String,
@@ -468,11 +451,6 @@ pub enum RwiEvent {
     SupervisorModeStopped {
         supervisor_call_id: String,
         target_call_id: String,
-    },
-    SupervisorTakeoverCompleted {
-        supervisor_call_id: String,
-        target_call_id: String,
-        previous_agent_call_id: String,
     },
     SipMessageReceived {
         call_id: String,

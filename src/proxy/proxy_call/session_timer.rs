@@ -30,17 +30,6 @@ pub enum SessionRefresher {
     Uas,
 }
 
-impl SessionRefresher {
-    /// Check if we are the refresher based on our role
-    #[allow(dead_code)]
-    pub fn is_our_role(&self, we_are_uac: bool) -> bool {
-        matches!(
-            (self, we_are_uac),
-            (SessionRefresher::Uac, true) | (SessionRefresher::Uas, false)
-        )
-    }
-}
-
 impl std::fmt::Display for SessionRefresher {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -62,6 +51,17 @@ impl FromStr for SessionRefresher {
     }
 }
 
+impl SessionRefresher {
+    /// Check if we are the refresher based on our role
+    #[cfg(test)]
+    pub fn is_our_role(&self, we_are_uac: bool) -> bool {
+        matches!(
+            (self, we_are_uac),
+            (SessionRefresher::Uac, true) | (SessionRefresher::Uas, false)
+        )
+    }
+}
+
 /// Session timer state machine
 #[derive(Debug, Clone)]
 pub struct SessionTimerState {
@@ -79,7 +79,8 @@ pub struct SessionTimerState {
     pub refreshing: bool,
     /// Last time the session was refreshed
     pub last_refresh: Instant,
-    /// Session start time
+    /// Session start time (used for testing)
+    #[cfg(test)]
     pub session_start: Instant,
     /// Number of successful refreshes
     pub refresh_count: u32,
@@ -97,6 +98,7 @@ impl Default for SessionTimerState {
             active: false,
             refreshing: false,
             last_refresh: Instant::now(),
+            #[cfg(test)]
             session_start: Instant::now(),
             refresh_count: 0,
             failed_refreshes: 0,
@@ -106,7 +108,7 @@ impl Default for SessionTimerState {
 
 impl SessionTimerState {
     /// Create a new session timer state with specific interval
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn new(session_interval: Duration, min_se: Duration, refresher: SessionRefresher) -> Self {
         Self {
             enabled: true,
@@ -209,12 +211,6 @@ impl SessionTimerState {
         self.refresh_count += 1;
     }
 
-    /// Get session duration
-    #[allow(dead_code)]
-    pub fn session_duration(&self) -> Duration {
-        self.session_start.elapsed()
-    }
-
     /// Generate Session-Expires header value
     pub fn get_session_expires_value(&self) -> String {
         format!("{};refresher={}", self.session_interval.as_secs(), self.refresher)
@@ -225,14 +221,8 @@ impl SessionTimerState {
         self.min_se.as_secs().to_string()
     }
 
-    /// Check if we need to include timer in Require header
-    #[allow(dead_code)]
-    pub fn require_timer(&self) -> bool {
-        self.enabled && self.active
-    }
-
     /// Activate the timer
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn activate(&mut self) {
         if self.enabled {
             self.active = true;
@@ -241,13 +231,13 @@ impl SessionTimerState {
     }
 
     /// Deactivate the timer
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn deactivate(&mut self) {
         self.active = false;
     }
 
     /// Reset the timer with new parameters
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn reset(&mut self, interval: Duration, refresher: SessionRefresher) {
         self.session_interval = interval;
         self.refresher = refresher;
@@ -255,8 +245,20 @@ impl SessionTimerState {
         self.refreshing = false;
     }
 
+    /// Check if we need to include timer in Require header
+    #[cfg(test)]
+    pub fn require_timer(&self) -> bool {
+        self.enabled && self.active
+    }
+
+    /// Get session duration
+    #[cfg(test)]
+    pub fn session_duration(&self) -> Duration {
+        self.session_start.elapsed()
+    }
+
     /// Get timer statistics
-    #[allow(dead_code)]
+    #[cfg(test)]
     pub fn stats(&self) -> TimerStats {
         TimerStats {
             enabled: self.enabled,
@@ -276,7 +278,7 @@ impl SessionTimerState {
 
 /// Timer statistics for diagnostics
 #[derive(Debug, Clone, serde::Serialize)]
-#[allow(dead_code)]
+#[cfg(test)]
 pub struct TimerStats {
     pub enabled: bool,
     pub active: bool,
@@ -327,13 +329,6 @@ pub fn parse_session_expires(value: &str) -> Option<(Duration, Option<SessionRef
     Some((Duration::from_secs(seconds), refresher))
 }
 
-/// Parse Min-SE header value
-#[allow(dead_code)]
-pub fn parse_min_se(value: &str) -> Option<Duration> {
-    let seconds = value.trim().parse::<u64>().ok()?;
-    Some(Duration::from_secs(seconds))
-}
-
 /// Check if the message has timer support (Supported: timer header)
 pub fn has_timer_support(headers: &rsip::Headers) -> bool {
     headers.iter().any(|h| match h {
@@ -345,8 +340,15 @@ pub fn has_timer_support(headers: &rsip::Headers) -> bool {
     })
 }
 
+/// Parse Min-SE header value
+#[cfg(test)]
+pub fn parse_min_se(value: &str) -> Option<Duration> {
+    let seconds = value.trim().parse::<u64>().ok()?;
+    Some(Duration::from_secs(seconds))
+}
+
 /// Check if timer is required (Require: timer header)
-#[allow(dead_code)]
+#[cfg(test)]
 pub fn is_timer_required(headers: &rsip::Headers) -> bool {
     headers.iter().any(|h| match h {
         rsip::Header::Require(s) => s.to_string().split(',').any(|v| v.trim() == TIMER_TAG),
@@ -358,21 +360,21 @@ pub fn is_timer_required(headers: &rsip::Headers) -> bool {
 }
 
 /// Build Session-Expires header
-#[allow(dead_code)]
+#[cfg(test)]
 pub fn build_session_expires_header(interval: Duration, refresher: SessionRefresher) -> rsip::Header {
     let value = format!("{};refresher={}", interval.as_secs(), refresher);
     rsip::Header::Other(HEADER_SESSION_EXPIRES.to_string(), value)
 }
 
 /// Build Min-SE header
-#[allow(dead_code)]
+#[cfg(test)]
 pub fn build_min_se_header(min_se: Duration) -> rsip::Header {
     rsip::Header::Other(HEADER_MIN_SE.to_string(), min_se.as_secs().to_string())
 }
 
 /// Calculate the appropriate session interval based on negotiation
 /// Returns Ok(interval) or Err(min_se) if the requested interval is too small
-#[allow(dead_code)]
+#[cfg(test)]
 pub fn negotiate_session_interval(
     requested: Duration,
     local_min_se: Duration,

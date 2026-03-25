@@ -134,6 +134,27 @@ pub struct CallRecord {
     pub extensions: http::Extensions,
 }
 
+impl Clone for CallRecord {
+    fn clone(&self) -> Self {
+        Self {
+            call_id: self.call_id.clone(),
+            start_time: self.start_time.clone(),
+            ring_time: self.ring_time.clone(),
+            answer_time: self.answer_time.clone(),
+            end_time: self.end_time.clone(),
+            caller: self.caller.clone(),
+            callee: self.callee.clone(),
+            status_code: self.status_code.clone(),
+            hangup_reason: self.hangup_reason.clone(),
+            hangup_messages: self.hangup_messages.clone(),
+            recorder: self.recorder.clone(),
+            sip_leg_roles: self.sip_leg_roles.clone(),
+            details: self.details.clone(),
+            extensions: http::Extensions::new(), // extensions cannot be cloned
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CallRecordMedia {

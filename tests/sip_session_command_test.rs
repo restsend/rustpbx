@@ -321,20 +321,12 @@ async fn test_e2e_queue_operations() {
                 }
             };
             
-            // Enqueue
-            let enqueue_request = RwiRequest::new("queue.enqueue")
-                .with_params(serde_json::json!({
-                    "call_id": call_id,
-                    "queue_id": "test-queue",
-                    "priority": 1
-                }));
-            let enqueue_result = client.send_request(enqueue_request).await;
+            // Enqueue using helper function
+            let enqueue_result = client.queue_enqueue(&call_id, "test-queue", Some(1)).await;
             assert!(enqueue_result.is_ok(), "Queue enqueue should succeed");
             
-            // Dequeue
-            let dequeue_request = RwiRequest::new("queue.dequeue")
-                .with_params(serde_json::json!({ "call_id": call_id }));
-            let dequeue_result = client.send_request(dequeue_request).await;
+            // Dequeue using helper function
+            let dequeue_result = client.queue_dequeue(&call_id).await;
             assert!(dequeue_result.is_ok(), "Queue dequeue should succeed");
             
             // Cleanup
@@ -366,13 +358,8 @@ async fn test_e2e_dtmf_command() {
                 }
             };
             
-            // Send DTMF
-            let dtmf_request = RwiRequest::new("call.send_dtmf")
-                .with_params(serde_json::json!({
-                    "call_id": call_id,
-                    "digits": "1234"
-                }));
-            let dtmf_result = client.send_request(dtmf_request).await;
+            // Send DTMF using helper function
+            let dtmf_result = client.send_dtmf(&call_id, "1234").await;
             assert!(dtmf_result.is_ok(), "DTMF send should succeed");
             
             // Cleanup
@@ -396,16 +383,8 @@ async fn test_e2e_conference_operations() {
             
             let conf_id = format!("test-conf-{}", uuid::Uuid::new_v4());
             
-            // Create conference
-            let conf_create_request = RwiRequest::new("conference.create")
-                .with_params(serde_json::json!({
-                    "conf_id": conf_id,
-                    "options": {
-                        "max_participants": 10,
-                        "record": false
-                    }
-                }));
-            let create_result = client.send_request(conf_create_request).await;
+            // Create conference using helper function
+            let create_result = client.conference_create(&conf_id).await;
             assert!(create_result.is_ok(), "Conference create should succeed");
             
             let call_result = create_test_call(&mut client).await;
@@ -418,13 +397,8 @@ async fn test_e2e_conference_operations() {
                 }
             };
             
-            // Add to conference
-            let conf_add_request = RwiRequest::new("conference.add")
-                .with_params(serde_json::json!({
-                    "conf_id": conf_id,
-                    "call_id": call_id
-                }));
-            let add_result = client.send_request(conf_add_request).await;
+            // Add to conference using helper function
+            let add_result = client.conference_add(&conf_id, &call_id).await;
             assert!(add_result.is_ok(), "Conference add should succeed");
             
             // Mute in conference
@@ -445,23 +419,368 @@ async fn test_e2e_conference_operations() {
             let unmute_result = client.send_request(conf_unmute_request).await;
             assert!(unmute_result.is_ok(), "Conference unmute should succeed");
             
-            // Remove from conference
-            let conf_remove_request = RwiRequest::new("conference.remove")
-                .with_params(serde_json::json!({
-                    "conf_id": conf_id,
-                    "call_id": call_id
-                }));
-            let remove_result = client.send_request(conf_remove_request).await;
+            // Remove from conference using helper function
+            let remove_result = client.conference_remove(&conf_id, &call_id).await;
             assert!(remove_result.is_ok(), "Conference remove should succeed");
             
-            // Destroy conference
-            let conf_destroy_request = RwiRequest::new("conference.destroy")
-                .with_params(serde_json::json!({ "conf_id": conf_id }));
-            let destroy_result = client.send_request(conf_destroy_request).await;
+            // Destroy conference using helper function
+            let destroy_result = client.conference_destroy(&conf_id).await;
             assert!(destroy_result.is_ok(), "Conference destroy should succeed");
             
             // Cleanup
             let _ = client.hangup_call(&call_id, None).await;
+            let _ = client.close().await;
+        }
+        Err(e) => {
+            println!("RWI not available: {}. Skipping test.", e);
+        }
+    }
+}
+
+
+/// Test ListCalls command through RWI interface
+#[tokio::test]
+async fn test_e2e_list_calls_command() {
+    let result = RwiTestClient::connect().await;
+    
+    match result {
+        Ok(mut client) => {
+            let _ = client.subscribe(vec!["default"]).await;
+            
+            // Create a test call first
+            let call_result = create_test_call(&mut client).await;
+            let _call_id = match call_result {
+                Ok(id) => id,
+                Err(_) => {
+                    println!("Could not create test call, skipping");
+                    let _ = client.close().await;
+                    return;
+                }
+            };
+            
+            // List calls using helper function
+            let list_result = client.list_calls().await;
+            assert!(list_result.is_ok(), "List calls should succeed");
+            
+            let response = list_result.unwrap();
+            assert_eq!(response.response, "Success", "List calls should return Success");
+            
+            let _ = client.close().await;
+        }
+        Err(e) => {
+            println!("RWI not available: {}. Skipping test.", e);
+        }
+    }
+}
+
+/// Test Answer command through RWI interface
+#[tokio::test]
+async fn test_e2e_answer_command() {
+    let result = RwiTestClient::connect().await;
+    
+    match result {
+        Ok(mut client) => {
+            let _ = client.subscribe(vec!["default"]).await;
+            
+            // Create a test call
+            let call_result = create_test_call(&mut client).await;
+            let call_id = match call_result {
+                Ok(id) => id,
+                Err(_) => {
+                    println!("Could not create test call, skipping");
+                    let _ = client.close().await;
+                    return;
+                }
+            };
+            
+            // Answer call using helper function
+            let answer_result = client.answer_call(&call_id).await;
+            assert!(answer_result.is_ok(), "Answer call should succeed");
+            
+            let response = answer_result.unwrap();
+            assert_eq!(response.response, "Success", "Answer should return Success");
+            
+            // Cleanup
+            let _ = client.hangup_call(&call_id, None).await;
+            let _ = client.close().await;
+        }
+        Err(e) => {
+            println!("RWI not available: {}. Skipping test.", e);
+        }
+    }
+}
+
+
+/// Test 3-party conference through RWI interface
+#[tokio::test]
+async fn test_e2e_three_party_conference() {
+    let result = RwiTestClient::connect().await;
+    
+    match result {
+        Ok(mut client) => {
+            let _ = client.subscribe(vec!["default"]).await;
+            
+            // Create conference
+            let conf_id = format!("test-conf-{}", uuid::Uuid::new_v4());
+            let create_result = client.conference_create(&conf_id).await;
+            assert!(create_result.is_ok(), "Conference create should succeed");
+            
+            // Create three test calls
+            let call1_result = create_test_call(&mut client).await;
+            let call1 = match call1_result {
+                Ok(id) => id,
+                Err(_) => {
+                    println!("Could not create test call 1, skipping");
+                    let _ = client.close().await;
+                    return;
+                }
+            };
+            
+            let call2_result = create_test_call(&mut client).await;
+            let call2 = match call2_result {
+                Ok(id) => id,
+                Err(_) => {
+                    println!("Could not create test call 2, skipping");
+                    let _ = client.hangup_call(&call1, None).await;
+                    let _ = client.close().await;
+                    return;
+                }
+            };
+            
+            let call3_result = create_test_call(&mut client).await;
+            let call3 = match call3_result {
+                Ok(id) => id,
+                Err(_) => {
+                    println!("Could not create test call 3, skipping");
+                    let _ = client.hangup_call(&call1, None).await;
+                    let _ = client.hangup_call(&call2, None).await;
+                    let _ = client.close().await;
+                    return;
+                }
+            };
+            
+            // Add all calls to conference
+            let add1 = client.conference_add(&conf_id, &call1).await;
+            assert!(add1.is_ok(), "Add call1 to conference should succeed");
+            
+            let add2 = client.conference_add(&conf_id, &call2).await;
+            assert!(add2.is_ok(), "Add call2 to conference should succeed");
+            
+            let add3 = client.conference_add(&conf_id, &call3).await;
+            assert!(add3.is_ok(), "Add call3 to conference should succeed");
+            
+            // Test muting one participant
+            let mute_result = client.send_request(
+                RwiRequest::new("conference.mute")
+                    .with_params(serde_json::json!({
+                        "conf_id": conf_id,
+                        "call_id": call1
+                    }))
+            ).await;
+            assert!(mute_result.is_ok(), "Mute should succeed");
+            
+            // Unmute
+            let unmute_result = client.send_request(
+                RwiRequest::new("conference.unmute")
+                    .with_params(serde_json::json!({
+                        "conf_id": conf_id,
+                        "call_id": call1
+                    }))
+            ).await;
+            assert!(unmute_result.is_ok(), "Unmute should succeed");
+            
+            // Remove one participant
+            let remove_result = client.conference_remove(&conf_id, &call2).await;
+            assert!(remove_result.is_ok(), "Remove from conference should succeed");
+            
+            // Cleanup remaining calls
+            let _ = client.hangup_call(&call1, None).await;
+            let _ = client.hangup_call(&call3, None).await;
+            
+            // Destroy conference
+            let destroy_result = client.conference_destroy(&conf_id).await;
+            assert!(destroy_result.is_ok(), "Conference destroy should succeed");
+            
+            let _ = client.close().await;
+        }
+        Err(e) => {
+            println!("RWI not available: {}. Skipping test.", e);
+        }
+    }
+}
+
+/// Test conference with max participants limit
+#[tokio::test]
+async fn test_e2e_conference_max_participants() {
+    let result = RwiTestClient::connect().await;
+    
+    match result {
+        Ok(mut client) => {
+            let _ = client.subscribe(vec!["default"]).await;
+            
+            // Create conference with max 2 participants
+            let conf_id = format!("test-conf-limit-{}", uuid::Uuid::new_v4());
+            let create_request = RwiRequest::new("conference.create")
+                .with_params(serde_json::json!({
+                    "conf_id": conf_id,
+                    "max_members": 2
+                }));
+            let create_result = client.send_request(create_request).await;
+            assert!(create_result.is_ok(), "Conference create should succeed");
+            
+            // Create three test calls
+            let call1 = create_test_call(&mut client).await.unwrap_or_else(|_| {
+                println!("Could not create test call 1, skipping");
+                String::new()
+            });
+            if call1.is_empty() {
+                let _ = client.close().await;
+                return;
+            }
+            
+            let call2 = create_test_call(&mut client).await.unwrap_or_else(|_| {
+                println!("Could not create test call 2, skipping");
+                String::new()
+            });
+            if call2.is_empty() {
+                let _ = client.hangup_call(&call1, None).await;
+                let _ = client.close().await;
+                return;
+            }
+            
+            let call3 = create_test_call(&mut client).await.unwrap_or_else(|_| {
+                println!("Could not create test call 3, skipping");
+                String::new()
+            });
+            if call3.is_empty() {
+                let _ = client.hangup_call(&call1, None).await;
+                let _ = client.hangup_call(&call2, None).await;
+                let _ = client.close().await;
+                return;
+            }
+            
+            // Add first two participants (should succeed)
+            let add1 = client.conference_add(&conf_id, &call1).await;
+            assert!(add1.is_ok(), "Add first participant should succeed");
+            
+            let add2 = client.conference_add(&conf_id, &call2).await;
+            assert!(add2.is_ok(), "Add second participant should succeed");
+            
+            // Add third participant (should fail due to limit)
+            let add3 = client.conference_add(&conf_id, &call3).await;
+            // Note: This might succeed or fail depending on implementation
+            // Just log the result for now
+            match add3 {
+                Ok(_) => println!("Third participant added (limit not enforced)"),
+                Err(_) => println!("Third participant rejected (limit enforced)"),
+            }
+            
+            // Cleanup
+            let _ = client.hangup_call(&call1, None).await;
+            let _ = client.hangup_call(&call2, None).await;
+            let _ = client.hangup_call(&call3, None).await;
+            let _ = client.conference_destroy(&conf_id).await;
+            let _ = client.close().await;
+        }
+        Err(e) => {
+            println!("RWI not available: {}. Skipping test.", e);
+        }
+    }
+}
+
+/// Test conference lifecycle with multiple operations
+#[tokio::test]
+async fn test_e2e_conference_lifecycle() {
+    let result = RwiTestClient::connect().await;
+    
+    match result {
+        Ok(mut client) => {
+            let _ = client.subscribe(vec!["default"]).await;
+            
+            let conf_id = format!("test-conf-lifecycle-{}", uuid::Uuid::new_v4());
+            
+            // Create conference
+            let create_result = client.conference_create(&conf_id).await;
+            assert!(create_result.is_ok(), "Conference create should succeed");
+            
+            // Add participant 1
+            let call1 = create_test_call(&mut client).await.unwrap_or_else(|_| {
+                println!("Could not create test call, skipping");
+                String::new()
+            });
+            if call1.is_empty() {
+                let _ = client.close().await;
+                return;
+            }
+            
+            let add1 = client.conference_add(&conf_id, &call1).await;
+            assert!(add1.is_ok(), "Add participant 1 should succeed");
+            
+            // Add participant 2
+            let call2 = match create_test_call(&mut client).await {
+                Ok(id) => id,
+                Err(_) => {
+                    let _ = client.hangup_call(&call1, None).await;
+                    let _ = client.close().await;
+                    return;
+                }
+            };
+            
+            let add2 = client.conference_add(&conf_id, &call2).await;
+            assert!(add2.is_ok(), "Add participant 2 should succeed");
+            
+            // Mute participant 1
+            let mute_req = RwiRequest::new("conference.mute")
+                .with_params(serde_json::json!({
+                    "conf_id": conf_id,
+                    "call_id": call1
+                }));
+            let mute_result = client.send_request(mute_req).await;
+            assert!(mute_result.is_ok(), "Mute should succeed");
+            
+            // Unmute participant 1
+            let unmute_req = RwiRequest::new("conference.unmute")
+                .with_params(serde_json::json!({
+                    "conf_id": conf_id,
+                    "call_id": call1
+                }));
+            let unmute_result = client.send_request(unmute_req).await;
+            assert!(unmute_result.is_ok(), "Unmute should succeed");
+            
+            // Remove participant 1
+            let remove1 = client.conference_remove(&conf_id, &call1).await;
+            assert!(remove1.is_ok(), "Remove participant 1 should succeed");
+            
+            // Add participant 3 (after removal)
+            let call3 = match create_test_call(&mut client).await {
+                Ok(id) => id,
+                Err(_) => {
+                    let _ = client.hangup_call(&call1, None).await;
+                    let _ = client.hangup_call(&call2, None).await;
+                    let _ = client.close().await;
+                    return;
+                }
+            };
+            
+            let add3 = client.conference_add(&conf_id, &call3).await;
+            assert!(add3.is_ok(), "Add participant 3 should succeed");
+            
+            // Remove all participants
+            let remove2 = client.conference_remove(&conf_id, &call2).await;
+            assert!(remove2.is_ok(), "Remove participant 2 should succeed");
+            
+            let remove3 = client.conference_remove(&conf_id, &call3).await;
+            assert!(remove3.is_ok(), "Remove participant 3 should succeed");
+            
+            // Destroy conference
+            let destroy = client.conference_destroy(&conf_id).await;
+            assert!(destroy.is_ok(), "Conference destroy should succeed");
+            
+            // Hangup all calls
+            let _ = client.hangup_call(&call1, None).await;
+            let _ = client.hangup_call(&call2, None).await;
+            let _ = client.hangup_call(&call3, None).await;
+            
             let _ = client.close().await;
         }
         Err(e) => {

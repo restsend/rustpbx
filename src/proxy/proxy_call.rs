@@ -96,6 +96,7 @@ impl CallSessionBuilder {
             start_time: Instant::now(),
             original_caller,
             original_callee,
+            dtmf_digits: Vec::new(),
         };
 
         SipSession::serve(server, context, tx, cancel_token, self.call_record_sender).await
@@ -134,6 +135,7 @@ impl CallSessionBuilder {
             start_time: Instant::now(),
             original_caller: original_caller.clone(),
             original_callee: original_callee.clone(),
+            dtmf_digits: Vec::new(),
         };
 
         let reporter = crate::proxy::proxy_call::reporter::CallReporter {

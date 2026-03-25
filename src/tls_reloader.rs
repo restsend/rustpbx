@@ -18,10 +18,10 @@ pub trait HttpsReloader: Send + Sync {
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send + '_>>;
 }
 
-/// Trait for SIP TLS certificate reloader (rsipstack)
+#[async_trait::async_trait]
 pub trait SipTlsReloader: Send + Sync {
     /// Reload SIP TLS certificate from PEM data
-    fn reload_sip_tls(&self, cert_pem: Vec<u8>, key_pem: Vec<u8>) -> anyhow::Result<()>;
+    async fn reload_sip_tls(&self, cert_pem: Vec<u8>, key_pem: Vec<u8>) -> anyhow::Result<()>;
 }
 
 /// Unified TLS Reloader Registry
@@ -84,11 +84,11 @@ impl TlsReloaderRegistry {
     }
 
     /// Reload SIP TLS certificate
-    pub fn reload_sip_tls(&self, cert_pem: Vec<u8>, key_pem: Vec<u8>) -> anyhow::Result<()> {
-        let guard = self.sip_tls.blocking_read();
+    pub async fn reload_sip_tls(&self, cert_pem: Vec<u8>, key_pem: Vec<u8>) -> anyhow::Result<()> {
+        let guard = self.sip_tls.read().await;
         if let Some(reloader) = guard.as_ref() {
             info!("Reloading SIP TLS certificate");
-            reloader.reload_sip_tls(cert_pem, key_pem)?;
+            reloader.reload_sip_tls(cert_pem, key_pem).await?;
             info!("SIP TLS certificate reloaded successfully");
             Ok(())
         } else {
@@ -146,14 +146,12 @@ impl RsipstackTlsReloader {
     }
 }
 
+#[async_trait::async_trait]
 impl SipTlsReloader for RsipstackTlsReloader {
-    fn reload_sip_tls(&self, cert_pem: Vec<u8>, key_pem: Vec<u8>) -> anyhow::Result<()> {
-        let rt = tokio::runtime::Handle::current();
-        rt.block_on(async {
-            self.listener
-                .reload_tls_config(cert_pem, key_pem)
-                .await
-                .map_err(|e| anyhow::anyhow!("Failed to reload SIP TLS certificate: {}", e))
-        })
+    async fn reload_sip_tls(&self, cert_pem: Vec<u8>, key_pem: Vec<u8>) -> anyhow::Result<()> {
+        self.listener
+            .reload_tls_config(cert_pem, key_pem)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to reload SIP TLS certificate: {}", e))
     }
 }

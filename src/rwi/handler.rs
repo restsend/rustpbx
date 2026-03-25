@@ -396,7 +396,6 @@ fn extract_call_id(cmd: &RwiCommandPayload) -> Option<String> {
         RwiCommandPayload::RecordPause { call_id } => Some(call_id.clone()),
         RwiCommandPayload::RecordResume { call_id } => Some(call_id.clone()),
         RwiCommandPayload::RecordStop { call_id } => Some(call_id.clone()),
-        RwiCommandPayload::RecordMaskSegment { call_id, .. } => Some(call_id.clone()),
         RwiCommandPayload::QueueEnqueue(r) => Some(r.call_id.clone()),
         RwiCommandPayload::QueueDequeue { call_id } => Some(call_id.clone()),
         RwiCommandPayload::QueueHold { call_id } => Some(call_id.clone()),
@@ -408,9 +407,6 @@ fn extract_call_id(cmd: &RwiCommandPayload) -> Option<String> {
         RwiCommandPayload::SupervisorWhisper { target_call_id, .. } => Some(target_call_id.clone()),
         RwiCommandPayload::SupervisorBarge { target_call_id, .. } => Some(target_call_id.clone()),
         RwiCommandPayload::SupervisorStop { target_call_id, .. } => Some(target_call_id.clone()),
-        RwiCommandPayload::SupervisorTakeover { target_call_id, .. } => {
-            Some(target_call_id.clone())
-        }
         RwiCommandPayload::SipMessage { call_id, .. } => Some(call_id.clone()),
         RwiCommandPayload::SipNotify { call_id, .. } => Some(call_id.clone()),
         RwiCommandPayload::SipOptionsPing { call_id } => Some(call_id.clone()),

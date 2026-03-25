@@ -54,6 +54,32 @@ where
     })
 }
 
+/// Get current active task count
+pub fn active_task_count() -> usize {
+    GLOBAL_TASK_METRICS.lock().unwrap().values().sum()
+}
+
+/// Get task count by location prefix (e.g., "src/rwi" for all RWI tasks)
+pub fn active_task_count_by_prefix(prefix: &str) -> usize {
+    GLOBAL_TASK_METRICS
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(loc, _)| loc.starts_with(prefix))
+        .map(|(_, count)| *count)
+        .sum()
+}
+
+/// Get detailed task metrics
+pub fn task_metrics_snapshot() -> HashMap<String, usize> {
+    GLOBAL_TASK_METRICS.lock().unwrap().clone()
+}
+
+/// Reset all metrics (useful for tests)
+pub fn reset_task_metrics() {
+    GLOBAL_TASK_METRICS.lock().unwrap().clear();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -69,4 +95,29 @@ mod tests {
         assert_eq!(sanitize_id("safe-id_123"), "safe-id_123");
         assert_eq!(sanitize_id("more:;*+#"), "more_____");
     }
+
+    #[tokio::test]
+    async fn test_task_guard_counts_spawns() {
+        reset_task_metrics();
+        
+        // Spawn a few tasks
+        let handle1 = spawn(async { 1 });
+        let handle2 = spawn(async { 2 });
+        let handle3 = spawn(async { 3 });
+        
+        // Wait for them to complete
+        let _ = handle1.await;
+        let _ = handle2.await;
+        let _ = handle3.await;
+        
+        // Give a small delay for Drop to be called
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        
+        // All tasks should be cleaned up
+        let count = active_task_count();
+        assert_eq!(count, 0, "All tasks should be cleaned up, got {}", count);
+    }
+
+    // Note: Active task counting is tested in E2E tests (test_originate_task_cleanup)
+    // because concurrent test execution makes unit testing unreliable
 }

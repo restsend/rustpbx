@@ -303,7 +303,7 @@ async fn test_call_success() {
             let events = bob.process_dialog_events().await.unwrap_or_default();
             for event in events {
                 match event {
-                    TestUaEvent::IncomingCall(dialog_id) => {
+                    TestUaEvent::IncomingCall(dialog_id, _) => {
                         info!("Bob received incoming call: {}", dialog_id);
                         bob.answer_call(&dialog_id, Some(bob_sdp.clone())).await.unwrap();
                         return Ok::<_, anyhow::Error>(dialog_id);
@@ -416,7 +416,7 @@ async fn test_call_rejection() {
             let events = bob.process_dialog_events().await.unwrap_or_default();
             for event in events {
                 match event {
-                    TestUaEvent::IncomingCall(dialog_id) => {
+                    TestUaEvent::IncomingCall(dialog_id, _) => {
                         info!("Bob received incoming call: {}", dialog_id);
                         bob.reject_call(&dialog_id).await.unwrap();
                         return Ok::<_, anyhow::Error>(());
@@ -479,7 +479,7 @@ async fn test_call_hangup_flow() {
             let events = bob.process_dialog_events().await.unwrap_or_default();
             for event in events {
                 match event {
-                    TestUaEvent::IncomingCall(dialog_id) => {
+                    TestUaEvent::IncomingCall(dialog_id, _) => {
                         info!("Bob received incoming call: {}", dialog_id);
                         bob.answer_call(&dialog_id, Some(bob_sdp.clone())).await.unwrap();
 

@@ -247,11 +247,6 @@ pub fn rwi_to_call_command(
 
         RwiCommandPayload::RecordStop { call_id: _ } => Ok(CallCommand::StopRecording),
 
-        RwiCommandPayload::RecordMaskSegment { .. } => {
-            // Recording mask is a specialized operation, not a standard CallCommand
-            Err(AdapterError::NotSupported("record_mask_segment".to_string()).into())
-        }
-
         // ========================================================================
         // Supervisor Operations
         // ========================================================================
@@ -287,11 +282,6 @@ pub fn rwi_to_call_command(
         } => Ok(CallCommand::SupervisorStop {
             supervisor_leg: LegId::new(supervisor_call_id),
         }),
-
-        RwiCommandPayload::SupervisorTakeover { .. } => {
-            // Supervisor takeover is a complex operation
-            Err(AdapterError::NotSupported("supervisor_takeover".to_string()).into())
-        }
 
         // ========================================================================
         // Queue Operations
