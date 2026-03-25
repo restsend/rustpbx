@@ -101,6 +101,7 @@ pub(crate) enum ParallelEvent {
     Accepted {
         _idx: usize,
         dialog_id: DialogId,
+        call_id: String,
         answer: String,
         aor: String,
         caller_uri: String,
@@ -111,6 +112,7 @@ pub(crate) enum ParallelEvent {
     Failed {
         #[allow(dead_code)]
         _idx: usize,
+        call_id: Option<String>,
         code: StatusCode,
         reason: Option<String>,
         target: Option<String>,
@@ -156,7 +158,7 @@ pub(crate) struct CallSessionRecordSnapshot {
     pub routed_contact: Option<String>,
     pub routed_destination: Option<String>,
     pub last_queue_name: Option<String>,
-    pub callee_dialogs: Vec<DialogId>,
+    pub outbound_call_ids: Vec<String>,
     pub server_dialog_id: DialogId,
     pub extensions: http::Extensions,
 }
@@ -170,6 +172,7 @@ pub(crate) struct CallSession {
     pub context: CallContext,
     pub server_dialog: ServerInviteDialog,
     pub callee_dialogs: Arc<Mutex<HashSet<DialogId>>>,
+    pub outbound_call_ids: Arc<Mutex<HashSet<String>>>,
     pub last_error: Option<(StatusCode, Option<String>)>,
     pub connected_callee: Option<String>,
     pub connected_dialog_id: Option<DialogId>,
@@ -271,6 +274,7 @@ impl CallSession {
             context,
             server_dialog,
             callee_dialogs: Arc::new(Mutex::new(HashSet::new())),
+            outbound_call_ids: Arc::new(Mutex::new(HashSet::new())),
             last_error: None,
             connected_callee: None,
             connected_dialog_id: None,
@@ -558,8 +562,8 @@ impl CallSession {
             routed_contact: self.routed_contact.clone(),
             routed_destination: self.routed_destination.clone(),
             last_queue_name: self.last_queue_name(),
-            callee_dialogs: self
-                .callee_dialogs
+            outbound_call_ids: self
+                .outbound_call_ids
                 .lock()
                 .unwrap()
                 .iter()
@@ -1278,6 +1282,10 @@ impl CallSession {
         Ok(())
     }
 
+    pub fn add_outbound_call_id(&self, call_id: String) {
+        self.outbound_call_ids.lock().unwrap().insert(call_id);
+    }
+
     pub fn add_callee_dialog(&mut self, dialog_id: DialogId) {
         let mut callee_dialogs = self.callee_dialogs.lock().unwrap();
         if callee_dialogs.contains(&dialog_id) {
@@ -1903,7 +1911,7 @@ impl CallSession {
             routed_contact: None,
             routed_destination: None,
             last_queue_name: None,
-            callee_dialogs: vec![],
+            outbound_call_ids: vec![],
             server_dialog_id,
             extensions: self.context.dialplan.extensions.clone(),
         };
@@ -2935,12 +2943,15 @@ impl CallSession {
                         .await;
                     match invite_result {
                         Ok((dialog, resp_opt)) => {
+                            let dialog_id = dialog.id();
+                            let call_id = dialog_id.call_id.clone();
                             if let Some(resp) = resp_opt {
                                 if resp.status_code.kind() == rsip::StatusCodeKind::Successful {
                                     let answer = String::from_utf8_lossy(resp.body()).to_string();
                                     let _ = ev_tx_c.send(ParallelEvent::Accepted {
                                         _idx: idx,
-                                        dialog_id: dialog.id(),
+                                        dialog_id,
+                                        call_id,
                                         answer,
                                         aor,
                                         caller_uri: invite_caller,
@@ -2952,6 +2963,7 @@ impl CallSession {
                                     let reason = resp.reason_phrase().clone().map(Into::into);
                                     let _ = ev_tx_c.send(ParallelEvent::Failed {
                                         _idx: idx,
+                                        call_id: Some(call_id),
                                         code: resp.status_code,
                                         reason,
                                         target: Some(invite_callee.clone()),
@@ -2960,6 +2972,7 @@ impl CallSession {
                             } else {
                                 let _ = ev_tx_c.send(ParallelEvent::Failed {
                                     _idx: idx,
+                                    call_id: Some(call_id),
                                     code: StatusCode::RequestTerminated,
                                     reason: Some("Cancelled by callee".to_string()),
                                     target: Some(invite_callee.clone()),
@@ -2978,6 +2991,7 @@ impl CallSession {
                             };
                             let _ = ev_tx_c.send(ParallelEvent::Failed {
                                 _idx: idx,
+                                call_id: None,
                                 code,
                                 reason,
                                 target: Some(invite_callee.clone()),
@@ -3016,6 +3030,7 @@ impl CallSession {
                             _idx: idx,
                             dialog_id,
                         } => {
+                            self.add_outbound_call_id(dialog_id.call_id.clone());
                             known_dialogs[idx] = Some(dialog_id);
                         }
                         ParallelEvent::Early {
@@ -3048,6 +3063,7 @@ impl CallSession {
                         ParallelEvent::Accepted {
                             _idx: idx,
                             dialog_id,
+                            call_id,
                             answer,
                             aor,
                             caller_uri,
@@ -3055,6 +3071,7 @@ impl CallSession {
                             contact,
                             destination,
                         } => {
+                            self.add_outbound_call_id(call_id);
                             self.routed_caller = Some(caller_uri.clone());
                             self.routed_callee = Some(callee_uri.clone());
                             self.routed_contact = Some(contact.clone());
@@ -3089,11 +3106,15 @@ impl CallSession {
                             }
                         }
                         ParallelEvent::Failed {
+                            call_id,
                             code,
                             reason,
                             target,
                             ..
                         } => {
+                            if let Some(call_id) = call_id {
+                                self.add_outbound_call_id(call_id);
+                            }
                             failures += 1;
                             self.set_error(code, reason, target);
                             if failures >= targets.len() && accepted_idx.is_none() {
@@ -3321,6 +3342,7 @@ impl CallSession {
                 res = &mut invitation => {
                     match res {
                         Ok((dialog_id, resp)) => {
+                            self.add_outbound_call_id(dialog_id.id().call_id.clone());
                             if let Some(resp) = resp {
                                 if resp.status_code == StatusCode::SessionIntervalTooSmall {
                                     if retry_count < 1 {
@@ -3386,6 +3408,7 @@ impl CallSession {
                 state = state_rx.recv() => {
                     match state {
                         Some(DialogState::Calling(dialog_id)) => {
+                            self.add_outbound_call_id(dialog_id.call_id.clone());
                             info!(
                                 session_id = %session_id,
                                 dialog_id = %dialog_id,

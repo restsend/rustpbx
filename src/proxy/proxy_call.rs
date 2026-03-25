@@ -185,7 +185,7 @@ impl CallSessionBuilder {
             routed_contact: None,
             routed_destination: None,
             last_queue_name: None,
-            callee_dialogs: vec![],
+            outbound_call_ids: vec![],
             server_dialog_id: rsipstack::dialog::DialogId {
                 call_id: "".into(),
                 local_tag: "".into(),
