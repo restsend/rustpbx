@@ -49,6 +49,8 @@ pub struct TestUa {
     contact_uri: Option<rsip::Uri>,
     /// Store answer SDP per dialog for re-INVITE responses
     answer_sdps: Arc<Mutex<HashMap<DialogId, String>>>,
+    /// Store received offer SDP per dialog from incoming INVITE
+    received_offer_sdps: Arc<Mutex<HashMap<DialogId, String>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -56,7 +58,8 @@ pub struct TestUa {
 pub enum TestUaEvent {
     Registered,
     RegistrationFailed(String),
-    IncomingCall(DialogId),
+    /// Incoming call with optional SDP from the INVITE request
+    IncomingCall(DialogId, Option<String>),
     CallRinging(DialogId),
     EarlyMedia(DialogId),
     CallEstablished(DialogId),
@@ -74,6 +77,7 @@ impl TestUa {
             state_receiver: None,
             contact_uri: None,
             answer_sdps: Arc::new(Mutex::new(HashMap::new())),
+            received_offer_sdps: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -126,6 +130,7 @@ impl TestUa {
             let state_sender_clone = state_sender.clone();
             let contact_clone = self.contact_uri.clone().unwrap();
             let cancel_token = self.cancel_token.clone();
+            let received_sdps_clone = self.received_offer_sdps.clone();
 
             tokio::spawn(async move {
                 Self::process_incoming_request(
@@ -134,6 +139,7 @@ impl TestUa {
                     state_sender_clone,
                     contact_clone,
                     cancel_token,
+                    received_sdps_clone,
                 )
                 .await
                 .ok();
@@ -471,11 +477,21 @@ impl TestUa {
                 match state {
                     DialogState::Calling(id) => {
                         debug!("TestUa: Received Calling state for {}", id);
-                        events.push(TestUaEvent::IncomingCall(id));
+                        // Get SDP from stored received offers
+                        let sdp = {
+                            let sdps = self.received_offer_sdps.lock().await;
+                            sdps.get(&id).cloned()
+                        };
+                        events.push(TestUaEvent::IncomingCall(id, sdp));
                     }
                     DialogState::Trying(id) => {
                         debug!("TestUa: Received Trying state for {}", id);
-                        events.push(TestUaEvent::IncomingCall(id));
+                        // Get SDP from stored received offers
+                        let sdp = {
+                            let sdps = self.received_offer_sdps.lock().await;
+                            sdps.get(&id).cloned()
+                        };
+                        events.push(TestUaEvent::IncomingCall(id, sdp));
                     }
                     DialogState::Early(id, resp) => {
                         debug!(
@@ -490,7 +506,12 @@ impl TestUa {
                                 }
                             }
                             _ => {
-                                events.push(TestUaEvent::IncomingCall(id));
+                                // Get SDP from stored received offers
+                                let sdp = {
+                                    let sdps = self.received_offer_sdps.lock().await;
+                                    sdps.get(&id).cloned()
+                                };
+                                events.push(TestUaEvent::IncomingCall(id, sdp));
                             }
                         }
                     }
@@ -542,6 +563,7 @@ impl TestUa {
         state_sender: DialogStateSender,
         contact: rsip::Uri,
         cancel_token: CancellationToken,
+        received_sdps: Arc<Mutex<HashMap<DialogId, String>>>,
     ) -> Result<()> {
         loop {
             select! {
@@ -562,7 +584,29 @@ impl TestUa {
 
                         // Handle new dialog
                         match tx.original.method {
-                            rsip::Method::Invite | rsip::Method::Ack => {
+                            rsip::Method::Invite => {
+                                // Extract SDP from INVITE body before creating dialog
+                                let sdp = if !tx.original.body.is_empty() {
+                                    Some(String::from_utf8_lossy(&tx.original.body).to_string())
+                                } else {
+                                    None
+                                };
+                                
+                                if let Ok(mut dialog) = dialog_layer.get_or_create_server_invite(
+                                    &tx, state_sender.clone(), None, Some(contact.clone())
+                                ) {
+                                    // Store SDP for later retrieval
+                                    if let Some(sdp_str) = sdp {
+                                        let dialog_id = dialog.id();
+                                        let mut sdps = received_sdps.lock().await;
+                                        sdps.insert(dialog_id, sdp_str);
+                                    }
+                                    tokio::spawn(async move {
+                                        dialog.handle(&mut tx).await.ok();
+                                    });
+                                }
+                            }
+                            rsip::Method::Ack => {
                                 if let Ok(mut dialog) = dialog_layer.get_or_create_server_invite(
                                     &tx, state_sender.clone(), None, Some(contact.clone())
                                 ) {
@@ -892,7 +936,7 @@ mod tests {
                 // up to ~2 seconds with 25ms sleeps
                 let bob_events = bob.process_dialog_events().await.unwrap();
                 for event in &bob_events {
-                    if let TestUaEvent::IncomingCall(incoming_id) = event {
+                    if let TestUaEvent::IncomingCall(incoming_id, _) = event {
                         // Send ringing
                         let early_sdp = create_test_sdp("192.168.1.200", 5006, true);
                         bob.send_ringing(incoming_id, Some(early_sdp)).await.ok();
@@ -967,7 +1011,7 @@ mod tests {
             });
             if wait_for_event(
                 &mut bob,
-                |e| matches!(e, TestUaEvent::IncomingCall(_)),
+                |e| matches!(e, TestUaEvent::IncomingCall(_, _)),
                 1000,
             )
             .await
@@ -975,7 +1019,7 @@ mod tests {
             {
                 let bob_events = bob.process_dialog_events().await.unwrap();
                 for event in &bob_events {
-                    if let TestUaEvent::IncomingCall(incoming_id) = event {
+                    if let TestUaEvent::IncomingCall(incoming_id, _) = event {
                         assert!(
                             bob.reject_call(incoming_id).await.is_ok(),
                             "Should be able to reject call"
@@ -995,7 +1039,7 @@ mod tests {
             });
             if wait_for_event(
                 &mut bob,
-                |e| matches!(e, TestUaEvent::IncomingCall(_)),
+                |e| matches!(e, TestUaEvent::IncomingCall(_, _)),
                 1000,
             )
             .await
@@ -1003,7 +1047,7 @@ mod tests {
             {
                 let bob_events = bob.process_dialog_events().await.unwrap();
                 for event in &bob_events {
-                    if let TestUaEvent::IncomingCall(incoming_id) = event {
+                    if let TestUaEvent::IncomingCall(incoming_id, _) = event {
                         bob.send_ringing(incoming_id, None).await.ok();
                         sleep(Duration::from_millis(300)).await;
                         assert!(
@@ -1176,7 +1220,7 @@ mod tests {
                 for _ in 0..iterations {
                     let bob_events = bob.process_dialog_events().await.unwrap();
                     for event in &bob_events {
-                        if let TestUaEvent::IncomingCall(incoming_id) = event {
+                        if let TestUaEvent::IncomingCall(incoming_id, _) = event {
                             bob.answer_call(incoming_id, None).await.ok();
                             println!("  {} processed successfully", test_name);
                             return;
@@ -1237,7 +1281,7 @@ mod tests {
                     let bob_events = bob.process_dialog_events().await.unwrap();
                     for event in &bob_events {
                         match event {
-                            TestUaEvent::IncomingCall(id) => {
+                            TestUaEvent::IncomingCall(id, _) => {
                                 states_observed.push("Calling".to_string());
                                 bob.answer_call(id, None).await.ok();
                                 established_id = Some(id.clone());
@@ -1331,7 +1375,7 @@ mod tests {
                 sleep(Duration::from_millis(100)).await;
                 let bob_events = bob.process_dialog_events().await.unwrap();
                 for event in &bob_events {
-                    if let TestUaEvent::IncomingCall(incoming_id) = event {
+                    if let TestUaEvent::IncomingCall(incoming_id, _) = event {
                         bob.answer_call(incoming_id, None).await.ok();
                         break;
                     }
@@ -1441,13 +1485,13 @@ mod tests {
                 tokio::spawn(async move { a.make_call("bob", None).await })
             };
 
-            if wait_for_event(&mut bob, |e| matches!(e, TestUaEvent::IncomingCall(_)), 800)
+            if wait_for_event(&mut bob, |e| matches!(e, TestUaEvent::IncomingCall(_, _)), 800)
                 .await
                 .unwrap()
             {
                 let events = bob.process_dialog_events().await.unwrap();
                 for e in &events {
-                    if let TestUaEvent::IncomingCall(id) = e {
+                    if let TestUaEvent::IncomingCall(id, _) = e {
                         // Answer quickly to let caller complete, then hang up immediately
                         bob.answer_call(id, None).await.ok();
                         break;
@@ -1506,7 +1550,7 @@ mod tests {
             // Wait for call establishment
             if wait_for_event(
                 &mut bob,
-                |e| matches!(e, TestUaEvent::IncomingCall(_)),
+                |e| matches!(e, TestUaEvent::IncomingCall(_, _)),
                 1000,
             )
             .await
@@ -1514,7 +1558,7 @@ mod tests {
             {
                 let bob_events = bob.process_dialog_events().await.unwrap();
                 for event in &bob_events {
-                    if let TestUaEvent::IncomingCall(incoming_id) = event {
+                    if let TestUaEvent::IncomingCall(incoming_id, _) = event {
                         bob.answer_call(incoming_id, None).await.ok();
                         break;
                     }
@@ -1584,7 +1628,7 @@ mod tests {
             // Establish call
             if wait_for_event(
                 &mut bob,
-                |e| matches!(e, TestUaEvent::IncomingCall(_)),
+                |e| matches!(e, TestUaEvent::IncomingCall(_, _)),
                 1000,
             )
             .await
@@ -1592,7 +1636,7 @@ mod tests {
             {
                 let bob_events = bob.process_dialog_events().await.unwrap();
                 for event in &bob_events {
-                    if let TestUaEvent::IncomingCall(incoming_id) = event {
+                    if let TestUaEvent::IncomingCall(incoming_id, _) = event {
                         bob.answer_call(incoming_id, None).await.ok();
 
                         sleep(Duration::from_millis(300)).await;
@@ -1672,13 +1716,13 @@ mod tests {
                     let s = offer_sdp.to_string();
                     async move { a.make_call("bob", Some(s)).await }
                 });
-                if wait_for_event(&mut bob, |e| matches!(e, TestUaEvent::IncomingCall(_)), 500)
+                if wait_for_event(&mut bob, |e| matches!(e, TestUaEvent::IncomingCall(_, _)), 500)
                     .await
                     .unwrap()
                 {
                     let bob_events = bob.process_dialog_events().await.unwrap();
                     for event in &bob_events {
-                        if let TestUaEvent::IncomingCall(incoming_id) = event {
+                        if let TestUaEvent::IncomingCall(incoming_id, _) = event {
                             // Answer with compatible codec
                             let answer_sdp = "v=0\ro=test 456 789 IN IP4 192.168.1.200\rs=-\rc=IN IP4 192.168.1.200\rt=0 0\rm=audio 5006 RTP/AVP 0\ra=rtpmap:0 PCMU/8000\r";
                             bob.answer_call(incoming_id, Some(answer_sdp.to_string()))
@@ -1741,7 +1785,7 @@ mod tests {
             // Establish call
             if wait_for_event(
                 &mut bob,
-                |e| matches!(e, TestUaEvent::IncomingCall(_)),
+                |e| matches!(e, TestUaEvent::IncomingCall(_, _)),
                 1000,
             )
             .await
@@ -1749,7 +1793,7 @@ mod tests {
             {
                 let bob_events = bob.process_dialog_events().await.unwrap();
                 for event in &bob_events {
-                    if let TestUaEvent::IncomingCall(incoming_id) = event {
+                    if let TestUaEvent::IncomingCall(incoming_id, _) = event {
                         bob.answer_call(incoming_id, None).await.ok();
                         sleep(Duration::from_millis(200)).await;
 
@@ -1879,13 +1923,13 @@ a=rtpmap:0 PCMU/8000"#;
             let s = ipv6_sdp.to_string();
             async move { a.make_call("bob", Some(s)).await }
         });
-        if wait_for_event(&mut bob, |e| matches!(e, TestUaEvent::IncomingCall(_)), 500)
+        if wait_for_event(&mut bob, |e| matches!(e, TestUaEvent::IncomingCall(_, _)), 500)
             .await
             .unwrap()
         {
             let bob_events = bob.process_dialog_events().await.unwrap();
             for event in &bob_events {
-                if let TestUaEvent::IncomingCall(incoming_id) = event {
+                if let TestUaEvent::IncomingCall(incoming_id, _) = event {
                     println!("IPv6 SDP call received and processed");
                     bob.answer_call(incoming_id, None).await.ok();
                     break;
@@ -1918,7 +1962,7 @@ a=candidate:2 1 udp 2130706430 2001:db8::1 54401 typ host"#;
         });
         if wait_for_event(
             &mut bob,
-            |e| matches!(e, TestUaEvent::IncomingCall(_)),
+            |e| matches!(e, TestUaEvent::IncomingCall(_, _)),
             1000,
         )
         .await
@@ -1926,7 +1970,7 @@ a=candidate:2 1 udp 2130706430 2001:db8::1 54401 typ host"#;
         {
             let bob_events = bob.process_dialog_events().await.unwrap();
             for event in &bob_events {
-                if let TestUaEvent::IncomingCall(incoming_id) = event {
+                if let TestUaEvent::IncomingCall(incoming_id, _) = event {
                     // Answer to complete the call setup
                     bob.answer_call(incoming_id, None).await.ok();
                     break;
@@ -1976,13 +2020,13 @@ a=candidate:2 1 udp 2130706430 2001:db8::1 54401 typ host"#;
                 let a = alice.clone();
                 tokio::spawn(async move { a.make_call("bob", None).await })
             };
-            if wait_for_event(&mut bob, |e| matches!(e, TestUaEvent::IncomingCall(_)), 800)
+            if wait_for_event(&mut bob, |e| matches!(e, TestUaEvent::IncomingCall(_, _)), 800)
                 .await
                 .unwrap()
             {
                 let events = bob.process_dialog_events().await.unwrap();
                 for e in &events {
-                    if let TestUaEvent::IncomingCall(id) = e {
+                    if let TestUaEvent::IncomingCall(id, _) = e {
                         // Bob answers to allow caller future to resolve with DialogId
                         bob.answer_call(id, None).await.ok();
                         break;
@@ -2008,7 +2052,7 @@ a=candidate:2 1 udp 2130706430 2001:db8::1 54401 typ host"#;
             };
             if wait_for_event(
                 &mut bob,
-                |e| matches!(e, TestUaEvent::IncomingCall(_)),
+                |e| matches!(e, TestUaEvent::IncomingCall(_, _)),
                 1000,
             )
             .await
@@ -2016,7 +2060,7 @@ a=candidate:2 1 udp 2130706430 2001:db8::1 54401 typ host"#;
             {
                 let events = bob.process_dialog_events().await.unwrap();
                 for e in &events {
-                    if let TestUaEvent::IncomingCall(id) = e {
+                    if let TestUaEvent::IncomingCall(id, _) = e {
                         // Bob sends ringing first
                         bob.send_ringing(id, None).await.ok();
                         sleep(Duration::from_millis(120)).await;
@@ -2073,7 +2117,7 @@ a=candidate:2 1 udp 2130706430 2001:db8::1 54401 typ host"#;
         });
         if wait_for_event(
             &mut bob,
-            |e| matches!(e, TestUaEvent::IncomingCall(_)),
+            |e| matches!(e, TestUaEvent::IncomingCall(_, _)),
             1000,
         )
         .await
@@ -2081,7 +2125,7 @@ a=candidate:2 1 udp 2130706430 2001:db8::1 54401 typ host"#;
         {
             let bob_events = bob.process_dialog_events().await.unwrap();
             for event in &bob_events {
-                if let TestUaEvent::IncomingCall(bob_dialog_id) = event {
+                if let TestUaEvent::IncomingCall(bob_dialog_id, _) = event {
                     // Bob answers the call
                     bob.answer_call(bob_dialog_id, None).await.ok();
                     sleep(Duration::from_millis(100)).await;
@@ -2157,7 +2201,7 @@ a=sendrecv"#;
                 });
                 if wait_for_event(
                     &mut bob,
-                    |e| matches!(e, TestUaEvent::IncomingCall(_)),
+                    |e| matches!(e, TestUaEvent::IncomingCall(_, _)),
                     1000,
                 )
                 .await
@@ -2165,7 +2209,7 @@ a=sendrecv"#;
                 {
                     let bob_events = bob.process_dialog_events().await.unwrap();
                     for event in &bob_events {
-                        if let TestUaEvent::IncomingCall(incoming_id) = event {
+                        if let TestUaEvent::IncomingCall(incoming_id, _) = event {
                             // Bob responds with RTP answer
                             let rtp_answer = r#"v=0
 o=test 654321 123456 IN IP4 192.168.1.200
@@ -2211,7 +2255,7 @@ a=rtpmap:0 PCMU/8000"#;
                 });
                 if wait_for_event(
                     &mut bob,
-                    |e| matches!(e, TestUaEvent::IncomingCall(_)),
+                    |e| matches!(e, TestUaEvent::IncomingCall(_, _)),
                     1000,
                 )
                 .await
@@ -2219,7 +2263,7 @@ a=rtpmap:0 PCMU/8000"#;
                 {
                     let bob_events = bob.process_dialog_events().await.unwrap();
                     for event in &bob_events {
-                        if let TestUaEvent::IncomingCall(incoming_id) = event {
+                        if let TestUaEvent::IncomingCall(incoming_id, _) = event {
                             // Bob responds with WebRTC-style answer
                             let webrtc_answer = r#"v=0
 o=test 654321 123456 IN IP4 192.168.1.200
@@ -2298,7 +2342,7 @@ a=rtpmap:0 PCMU/8000"#;
         });
         if wait_for_event(
             &mut bob,
-            |e| matches!(e, TestUaEvent::IncomingCall(_)),
+            |e| matches!(e, TestUaEvent::IncomingCall(_, _)),
             1000,
         )
         .await
@@ -2306,7 +2350,7 @@ a=rtpmap:0 PCMU/8000"#;
         {
             let bob_events = bob.process_dialog_events().await.unwrap();
             for event in &bob_events {
-                if let TestUaEvent::IncomingCall(incoming_id) = event {
+                if let TestUaEvent::IncomingCall(incoming_id, _) = event {
                     // Bob answers with another private IP
                     let bob_private_sdp = r#"v=0
 o=test 654321 123456 IN IP4 10.0.0.100
@@ -2348,7 +2392,7 @@ a=rtpmap:0 PCMU/8000"#;
         });
         if wait_for_event(
             &mut bob,
-            |e| matches!(e, TestUaEvent::IncomingCall(_)),
+            |e| matches!(e, TestUaEvent::IncomingCall(_, _)),
             1000,
         )
         .await
@@ -2356,7 +2400,7 @@ a=rtpmap:0 PCMU/8000"#;
         {
             let bob_events = bob.process_dialog_events().await.unwrap();
             for event in &bob_events {
-                if let TestUaEvent::IncomingCall(incoming_id) = event {
+                if let TestUaEvent::IncomingCall(incoming_id, _) = event {
                     // Bob answers with public IP as well
                     let bob_public_sdp = r#"v=0
 o=test 654321 123456 IN IP4 203.0.113.200
@@ -2444,7 +2488,7 @@ a=rtpmap:0 PCMU/8000"#;
         };
         if wait_for_event(
             &mut bob,
-            |e| matches!(e, TestUaEvent::IncomingCall(_)),
+            |e| matches!(e, TestUaEvent::IncomingCall(_, _)),
             1000,
         )
         .await
@@ -2452,7 +2496,7 @@ a=rtpmap:0 PCMU/8000"#;
         {
             let bob_events = bob.process_dialog_events().await.unwrap();
             for event in &bob_events {
-                if let TestUaEvent::IncomingCall(incoming_id) = event {
+                if let TestUaEvent::IncomingCall(incoming_id, _) = event {
                     // Send ringing for a bit, then answer to allow the caller future to resolve
                     bob.send_ringing(incoming_id, None).await.ok();
                     sleep(Duration::from_millis(300)).await;

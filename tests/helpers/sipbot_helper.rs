@@ -24,6 +24,8 @@ use tokio_util::sync::CancellationToken;
 pub struct TestUa {
     pub cancel_token: CancellationToken,
     pub domain: String,
+    /// Shared call statistics for RTP validation
+    pub stats: Arc<CallStats>,
 }
 
 impl TestUa {
@@ -33,11 +35,16 @@ impl TestUa {
     /// The underlying `SipBot::run_wait()` loop is spawned in a background
     /// task.  Drop (or call `stop()`) to terminate it.
     pub async fn callee(sip_port: u16, ring_secs: u64) -> Self {
+        Self::callee_with_username(sip_port, ring_secs, "bob").await
+    }
+
+    /// Create and start a callee UA with a specific username.
+    pub async fn callee_with_username(sip_port: u16, ring_secs: u64, username: &str) -> Self {
         let cancel_token = CancellationToken::new();
         let domain = format!("127.0.0.1:{}", sip_port);
 
         let account = AccountConfig {
-            username: "bob".to_string(),
+            username: username.to_string(),
             domain: domain.clone(),
             password: None,
             register: Some(false), // no registration needed in test
@@ -58,10 +65,11 @@ impl TestUa {
         };
 
         let stats = Arc::new(CallStats::new());
+        let stats_clone = stats.clone();
         let ct = cancel_token.clone();
 
         tokio::spawn(async move {
-            let mut bot = SipBot::new(account, global_config, stats, false, ct.clone());
+            let mut bot = SipBot::new(account, global_config, stats_clone, false, ct.clone());
             tokio::select! {
                 _ = ct.cancelled() => {}
                 res = bot.run_wait() => {
@@ -78,6 +86,7 @@ impl TestUa {
         Self {
             cancel_token,
             domain,
+            stats,
         }
     }
 
@@ -89,6 +98,28 @@ impl TestUa {
     /// Return a `sip:<user>@<host>:<port>` URI for this UA.
     pub fn sip_uri(&self, user: &str) -> String {
         format!("sip:{}@{}", user, self.domain)
+    }
+
+    /// Get RTP statistics summary as a string
+    pub fn rtp_stats_summary(&self) -> String {
+        use std::sync::atomic::Ordering;
+        let tx_p = self.stats.tx_packets.load(Ordering::Relaxed);
+        let tx_b = self.stats.tx_bytes.load(Ordering::Relaxed);
+        let rx_p = self.stats.rx_packets.load(Ordering::Relaxed);
+        let rx_b = self.stats.rx_bytes.load(Ordering::Relaxed);
+        format!("RX: {}p/{}b TX: {}p/{}b", rx_p, rx_b, tx_p, tx_b)
+    }
+
+    /// Check if any RTP packets were received (RX > 0)
+    pub fn has_rtp_rx(&self) -> bool {
+        use std::sync::atomic::Ordering;
+        self.stats.rx_packets.load(Ordering::Relaxed) > 0
+    }
+
+    /// Check if any RTP packets were transmitted (TX > 0)
+    pub fn has_rtp_tx(&self) -> bool {
+        use std::sync::atomic::Ordering;
+        self.stats.tx_packets.load(Ordering::Relaxed) > 0
     }
 }
 

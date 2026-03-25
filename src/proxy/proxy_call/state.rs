@@ -62,6 +62,7 @@ pub struct CallContext {
     pub start_time: Instant,
     pub original_caller: String,
     pub original_callee: String,
+    pub dtmf_digits: Vec<char>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

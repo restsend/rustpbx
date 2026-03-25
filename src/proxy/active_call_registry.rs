@@ -168,6 +168,36 @@ impl ActiveProxyCallRegistry {
     pub fn dialog_by_session_count(&self) -> usize {
         self.inner.lock().unwrap().dialog_by_session.len()
     }
+
+    /// Cleanup stale entries that have been inactive for longer than max_age
+    /// Returns the number of entries removed
+    pub fn cleanup_stale(&self, max_age: std::time::Duration) -> usize {
+        let cutoff = Utc::now() - chrono::Duration::from_std(max_age).unwrap_or_else(|_| chrono::Duration::hours(1));
+        let mut guard = self.inner.lock().unwrap();
+        
+        let stale_ids: Vec<String> = guard
+            .entries
+            .iter()
+            .filter(|(_, entry)| {
+                let last_activity = entry.answered_at.unwrap_or(entry.started_at);
+                last_activity < cutoff
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+        
+        let count = stale_ids.len();
+        for id in stale_ids {
+            guard.entries.remove(&id);
+            guard.handles.remove(&id);
+            if let Some(dialog_ids) = guard.dialog_by_session.remove(&id) {
+                for dialog_id in dialog_ids {
+                    guard.handles_by_dialog.remove(&dialog_id);
+                }
+            }
+        }
+        
+        count
+    }
 }
 
 #[cfg(test)]

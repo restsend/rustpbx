@@ -162,7 +162,7 @@ async fn test_b2bua_full_flow() {
             let events = bob.process_dialog_events().await.unwrap_or_default();
             for event in events {
                 match event {
-                    TestUaEvent::IncomingCall(dialog_id) => {
+                    TestUaEvent::IncomingCall(dialog_id, _) => {
                         info!("Bob received incoming call: {}", dialog_id);
                         bob.answer_call(&dialog_id, Some(bob_sdp.clone()))
                             .await
@@ -306,7 +306,7 @@ async fn test_rtp_to_webrtc_bridge() {
         for _ in 0..50 {
             let events = alice_ua.process_dialog_events().await.unwrap_or_default();
             for event in events {
-                if let TestUaEvent::IncomingCall(dialog_id) = event {
+                if let TestUaEvent::IncomingCall(dialog_id, _) = event {
                     info!(
                         "Alice (WebRTC) received incoming call from Bob (RTP): {}",
                         dialog_id
@@ -432,7 +432,7 @@ async fn test_webrtc_to_rtp_bridge() {
         for _ in 0..300 {
             let events = bob_ua.process_dialog_events().await.unwrap_or_default();
             for event in events {
-                if let TestUaEvent::IncomingCall(dialog_id) = event {
+                if let TestUaEvent::IncomingCall(dialog_id, _) = event {
                     info!(
                         "Bob (RTP) received incoming call from Alice (WebRTC): {}",
                         dialog_id
@@ -494,7 +494,7 @@ async fn test_callee_reject_passthrough_486_busy_here() {
             let events = bob.process_dialog_events().await.unwrap_or_default();
             for event in events {
                 match event {
-                    TestUaEvent::IncomingCall(dialog_id) => {
+                    TestUaEvent::IncomingCall(dialog_id, _) => {
                         info!("Bob received incoming call: {}", dialog_id);
                         // Reject with 486 BusyHere
                         bob.reject_call_with_reason(

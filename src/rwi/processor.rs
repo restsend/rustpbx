@@ -2,7 +2,9 @@ use crate::call::domain::{CallCommand, LegId};
 
 use crate::media;
 use crate::media::mixer_registry::MixerParticipantRole;
+use crate::media::Track as MediaTrackTrait;
 use crate::proxy::active_call_registry::ActiveProxyCallRegistry;
+use crate::proxy::proxy_call::media_peer::VoiceEnginePeer;
 use crate::proxy::proxy_call::sip_session::SipSessionHandle;
 use crate::proxy::server::SipServerRef;
 use crate::rwi::gateway::RwiGateway;
@@ -211,16 +213,6 @@ impl RwiCommandProcessor {
             RwiCommandPayload::RecordStop { call_id } => {
                 return self.record_stop(call_id).await;
             }
-            RwiCommandPayload::RecordMaskSegment {
-                call_id,
-                recording_id,
-                start_secs,
-                end_secs,
-            } => {
-                return self
-                    .record_mask_segment(call_id, recording_id, *start_secs, *end_secs)
-                    .await;
-            }
             _ => {}
         }
 
@@ -401,16 +393,6 @@ impl RwiCommandProcessor {
             RwiCommandPayload::RecordStop { call_id } => {
                 return self.record_stop(call_id).await;
             }
-            RwiCommandPayload::RecordMaskSegment {
-                call_id,
-                recording_id,
-                start_secs,
-                end_secs,
-            } => {
-                return self
-                    .record_mask_segment(call_id, recording_id, *start_secs, *end_secs)
-                    .await;
-            }
             // Other commands
             RwiCommandPayload::SetRingbackSource {
                 target_call_id,
@@ -483,7 +465,6 @@ impl RwiCommandProcessor {
             RwiCommandPayload::RecordPause { call_id } => Some(call_id.clone()),
             RwiCommandPayload::RecordResume { call_id } => Some(call_id.clone()),
             RwiCommandPayload::RecordStop { call_id } => Some(call_id.clone()),
-            RwiCommandPayload::RecordMaskSegment { call_id, .. } => Some(call_id.clone()),
             RwiCommandPayload::QueueEnqueue(req) => Some(req.call_id.clone()),
             RwiCommandPayload::QueueDequeue { call_id } => Some(call_id.clone()),
             RwiCommandPayload::QueueHold { call_id } => Some(call_id.clone()),
@@ -501,9 +482,6 @@ impl RwiCommandProcessor {
                 supervisor_call_id, ..
             } => Some(supervisor_call_id.clone()),
             RwiCommandPayload::SupervisorStop {
-                supervisor_call_id, ..
-            } => Some(supervisor_call_id.clone()),
-            RwiCommandPayload::SupervisorTakeover {
                 supervisor_call_id, ..
             } => Some(supervisor_call_id.clone()),
             RwiCommandPayload::SipMessage { call_id, .. } => Some(call_id.clone()),
@@ -552,13 +530,43 @@ impl RwiCommandProcessor {
             headers.push(rsip::Header::Other(k.clone().into(), v.clone()));
         }
 
-        // Construct InviteOption (no SDP offer — let the callee provide the offer)
+        // Get external IP from server config for SDP
+        let external_ip = server.rtp_config.external_ip.clone()
+            .unwrap_or_else(|| "127.0.0.1".to_string());
+
+        // Create media track for SDP offer/answer negotiation
+        let media_track = crate::media::RtpTrackBuilder::new(format!("rwi-originate-{}", req.call_id))
+            .with_cancel_token(tokio_util::sync::CancellationToken::new())
+            .with_external_ip(external_ip.clone())
+            .build();
+
+        tracing::info!(call_id = %req.call_id, external_ip = %external_ip, "Created media track for originate");
+
+        // Get SDP offer from media track
+        let sdp_offer = match media_track.local_description().await {
+            Ok(sdp) => {
+                tracing::info!(call_id = %req.call_id, sdp_len = %sdp.len(), "Generated SDP offer");
+                if sdp.is_empty() {
+                    return Err(CommandError::CommandFailed("SDP offer is empty".into()));
+                }
+                // Log first few lines of SDP for debugging
+                let preview: String = sdp.lines().take(5).collect::<Vec<_>>().join("\n");
+                tracing::debug!(call_id = %req.call_id, "SDP preview:\n{}", preview);
+                sdp
+            }
+            Err(e) => {
+                tracing::error!(call_id = %req.call_id, error = %e, "Failed to generate SDP offer");
+                return Err(CommandError::CommandFailed(format!("failed to create SDP offer: {}", e)));
+            }
+        };
+
+        // Construct InviteOption with SDP offer
         let invite_option = rsipstack::dialog::invitation::InviteOption {
             callee: destination_uri.clone(),
             caller: caller_uri.clone(),
             contact: caller_uri.clone(),
-            content_type: None,
-            offer: None,
+            content_type: Some("application/sdp".to_string()),
+            offer: Some(sdp_offer.clone().into_bytes()),
             destination: None,
             credential: None,
             headers: Some(headers),
@@ -574,6 +582,9 @@ impl RwiCommandProcessor {
         let caller_display = req.caller_id.unwrap_or_else(|| caller_str.clone());
         let callee_display = req.destination.clone();
 
+        // Create a cancel token to control task lifecycle
+        let cancel_token = tokio_util::sync::CancellationToken::new();
+        
         tokio::spawn(async move {
             let (state_tx, mut state_rx) = tokio::sync::mpsc::unbounded_channel();
 
@@ -581,6 +592,16 @@ impl RwiCommandProcessor {
             let mut invitation = dialog_layer.do_invite(invite_option, state_tx).boxed();
 
             // Register the call in the active_call_registry so it can be looked up by call_id
+            // Create media components for the call
+            let caller_media_builder = crate::media::MediaStreamBuilder::new()
+                .with_id(format!("{}-caller", call_id))
+                .with_cancel_token(cancel_token.clone());
+            let caller_peer: std::sync::Arc<dyn crate::proxy::proxy_call::media_peer::MediaPeer> =
+                std::sync::Arc::new(VoiceEnginePeer::new(std::sync::Arc::new(caller_media_builder.build())));
+
+            // Update the caller peer with the media track
+            caller_peer.update_track(Box::new(media_track), None).await;
+
             let (_handle, mut cmd_rx) = {
                 use crate::call::runtime::SessionId;
                 use crate::proxy::active_call_registry::{
@@ -605,13 +626,32 @@ impl RwiCommandProcessor {
             };
 
             // Spawn a task to handle commands from the handle
-            // Commands are processed via the dispatch mechanism
-            let _cmd_task = tokio::spawn(async move {
-                // Just keep the channel alive - commands are dispatched via registry
-                while let Some(cmd) = cmd_rx.recv().await {
-                    tracing::debug!(?cmd, "RWI originate command received");
+            // Use CancellationToken to ensure clean shutdown
+            let cmd_cancel = cancel_token.clone();
+            let cmd_task = tokio::spawn(async move {
+                loop {
+                    tokio::select! {
+                        _ = cmd_cancel.cancelled() => {
+                            tracing::debug!("Command task cancelled, exiting");
+                            break;
+                        }
+                        Some(cmd) = cmd_rx.recv() => {
+                            tracing::debug!(?cmd, "RWI originate command received");
+                        }
+                        else => {
+                            // Channel closed
+                            break;
+                        }
+                    }
                 }
             });
+
+            // Helper closure to cleanup resources
+            let cleanup = || async {
+                cancel_token.cancel();
+                // Wait for cmd_task to finish with a timeout
+                let _ = tokio::time::timeout(std::time::Duration::from_secs(5), cmd_task).await;
+            };
 
             // Drain state_rx events until the invitation resolves or times out
             tokio::select! {
@@ -619,7 +659,7 @@ impl RwiCommandProcessor {
                     let gw = gateway.read().await;
                     gw.send_event_to_call_owner(&call_id, &RwiEvent::CallNoAnswer { call_id: call_id.clone() });
                     registry.remove(&call_id);
-                    // Command task will be dropped when handle is dropped
+                    cleanup().await;
                 }
                 result = async {
                     loop {
@@ -636,7 +676,15 @@ impl RwiCommandProcessor {
                                             &RwiEvent::CallRinging { call_id: call_id.clone() },
                                         );
                                     }
-                                    Some(rsipstack::dialog::dialog::DialogState::Early(_, _)) => {
+                                    Some(rsipstack::dialog::dialog::DialogState::Early(_, ref response)) => {
+                                        // Handle early media SDP if present
+                                        let body = response.body();
+                                        if !body.is_empty() {
+                                            let sdp = String::from_utf8_lossy(body).to_string();
+                                            if sdp.contains("v=0") {
+                                                tracing::debug!(%call_id, "Early media SDP received");
+                                            }
+                                        }
                                         let gw = gateway.read().await;
                                         gw.send_event_to_call_owner(
                                             &call_id,
@@ -653,19 +701,75 @@ impl RwiCommandProcessor {
                     }
                 } => {
                     match result {
-                        Ok((_dialog_id, Some(resp))) if resp.status_code.kind() == rsip::StatusCodeKind::Successful => {
+                        Ok((dialog_id, Some(resp))) if resp.status_code.kind() == rsip::StatusCodeKind::Successful => {
+                            // Extract SDP answer from 200 OK response
+                            let sdp_answer = if resp.body().is_empty() {
+                                None
+                            } else {
+                                let body_str = String::from_utf8_lossy(resp.body()).to_string();
+                                if body_str.contains("v=0") {
+                                    Some(body_str)
+                                } else {
+                                    None
+                                }
+                            };
+
+                            // Complete SDP handshake with media track
+                            if let Some(answer) = sdp_answer {
+                                tracing::info!(%call_id, "Received SDP answer, completing media handshake");
+
+                                // Perform the SDP handshake on the caller peer's track
+                                // This properly establishes the media session
+                                let tracks = caller_peer.get_tracks().await;
+                                if let Some(first_track) = tracks.first() {
+                                    if let Err(e) = first_track.lock().await.set_remote_description(&answer).await {
+                                        tracing::error!(%call_id, "Failed to set remote description: {}", e);
+                                    } else {
+                                        tracing::info!(%call_id, "Media session established successfully");
+                                    }
+                                }
+                            } else {
+                                tracing::warn!(%call_id, "200 OK received without SDP answer");
+                            }
+
+                            // Keep the peer and dialog alive for the duration of the call
+                            let _ = caller_peer;
+                            let _ = dialog_id;
+
                             // Update the existing entry to mark as answered
                             use crate::proxy::active_call_registry::ActiveProxyCallStatus;
                             registry.update(&call_id, |entry| {
                                 entry.answered_at = Some(chrono::Utc::now());
                                 entry.status = ActiveProxyCallStatus::Talking;
                             });
-                            let gw = gateway.read().await;
-                            gw.send_event_to_call_owner(
-                                &call_id,
-                                &RwiEvent::CallAnswered { call_id: call_id.clone() },
-                            );
-                            // Keep session_task running - call is now active
+                            {
+                                let gw = gateway.read().await;
+                                gw.send_event_to_call_owner(
+                                    &call_id,
+                                    &RwiEvent::CallAnswered { call_id: call_id.clone() },
+                                );
+                            } // gw dropped here, releasing the read lock
+                            // Keep the task running to maintain the media session
+                            // The media session stays active as long as this task runs
+                            tokio::select! {
+                                _ = cancel_token.cancelled() => {
+                                    tracing::info!(%call_id, "Originate task cancelled");
+                                }
+                                _ = tokio::time::sleep(std::time::Duration::from_secs(3600)) => {
+                                    tracing::info!(%call_id, "Call timeout after 1 hour");
+                                }
+                                _ = async {
+                                    // Keepalive loop - check registry periodically
+                                    loop {
+                                        tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                                        if registry.get_handle(&call_id).is_none() {
+                                            tracing::info!(%call_id, "Call ended, stopping media task");
+                                            break;
+                                        }
+                                    }
+                                } => {}
+                            }
+                            cleanup().await;
                         }
                         Ok((_dialog_id, resp_opt)) => {
                             let sip_status = resp_opt.as_ref().map(|r| r.status_code.code());
@@ -686,7 +790,7 @@ impl RwiCommandProcessor {
                                 );
                             }
                             registry.remove(&call_id);
-                            // Command task will be dropped when handle is dropped
+                            cleanup().await;
                         }
                         Err(e) => {
                             let gw = gateway.read().await;
@@ -699,7 +803,7 @@ impl RwiCommandProcessor {
                                 },
                             );
                             registry.remove(&call_id);
-                            // Command task will be dropped when handle is dropped
+                            cleanup().await;
                         }
                     }
                 }
@@ -1092,41 +1196,6 @@ impl RwiCommandProcessor {
             let gw = self.gateway.read().await;
             gw.send_event_to_call_owner(&call_id.to_string(), &event);
         }
-        Ok(CommandResult::Success)
-    }
-
-    /// Mask a segment of a recording (for PCI compliance)
-    async fn record_mask_segment(
-        &self,
-        call_id: &str,
-        recording_id: &str,
-        start_secs: u64,
-        end_secs: u64,
-    ) -> Result<CommandResult, CommandError> {
-        // Verify call exists
-        self.get_handle(call_id).await?;
-
-        // Check if recording exists
-        {
-            let states = self.record_states.read().await;
-            if !states.contains_key(call_id) {
-                return Err(CommandError::CommandFailed(
-                    "No active recording for this call".to_string(),
-                ));
-            }
-        }
-
-        // Emit segment masked event (in a real implementation, this would trigger the actual masking)
-        let event = RwiEvent::RecordSegmentMasked {
-            call_id: call_id.to_string(),
-            recording_id: recording_id.to_string(),
-            start_secs,
-            end_secs,
-        };
-        let gw = self.gateway.read().await;
-        gw.send_event_to_call_owner(&call_id.to_string(), &event);
-
-        info!(call_id = %call_id, recording_id = %recording_id, start_secs = %start_secs, end_secs = %end_secs, "Recording segment masked");
         Ok(CommandResult::Success)
     }
 
@@ -3603,66 +3672,5 @@ mod tests {
             })
             .await;
         assert!(result.is_ok());
-    }
-
-    // Record mask segment test
-    #[tokio::test]
-    async fn test_record_mask_segment_success() {
-        let registry = Arc::new(ActiveProxyCallRegistry::new());
-        let gateway = Arc::new(RwLock::new(RwiGateway::new()));
-        let processor = Arc::new(RwiCommandProcessor::new(registry.clone(), gateway));
-
-        // Create a call and manually add to record_states (bypassing the actual recording command)
-        let _handle = create_test_call(&registry, "call-1", "1001", "2000", DialDirection::Inbound);
-        {
-            let mut states = processor.record_states.write().await;
-            states.insert(
-                "call-1".to_string(),
-                RecordState {
-                    recording_id: "rec-1".to_string(),
-                    _mode: "mixed".to_string(),
-                    _path: "/tmp/recording.wav".to_string(),
-                    is_paused: false,
-                },
-            );
-        }
-
-        // Mask a segment
-        let result = processor
-            .process_command(RwiCommandPayload::RecordMaskSegment {
-                call_id: "call-1".into(),
-                recording_id: "rec-1".into(),
-                start_secs: 30,
-                end_secs: 60,
-            })
-            .await;
-        assert!(result.is_ok());
-    }
-
-    #[tokio::test]
-    async fn test_record_mask_segment_no_recording_fails() {
-        let registry = Arc::new(ActiveProxyCallRegistry::new());
-        let gateway = Arc::new(RwLock::new(RwiGateway::new()));
-        let processor = Arc::new(RwiCommandProcessor::new(registry.clone(), gateway));
-
-        // Create a call but don't start recording
-        let _handle = create_test_call(&registry, "call-1", "1001", "2000", DialDirection::Inbound);
-
-        // Try to mask segment - should fail
-        let result = processor
-            .process_command(RwiCommandPayload::RecordMaskSegment {
-                call_id: "call-1".into(),
-                recording_id: "rec-1".into(),
-                start_secs: 30,
-                end_secs: 60,
-            })
-            .await;
-        assert!(result.is_err());
-        assert!(
-            result
-                .unwrap_err()
-                .to_string()
-                .contains("No active recording")
-        );
     }
 }

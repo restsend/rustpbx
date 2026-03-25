@@ -101,6 +101,8 @@ pub async fn create_test_server_with_config(
         addon_registry: None,
         rwi_gateway: None,
         tls_listener: None,
+        queue_manager: Arc::new(crate::call::runtime::QueueManager::new()),
+        conference_manager: Arc::new(crate::call::runtime::ConferenceManager::new()),
     });
 
     // Add test users

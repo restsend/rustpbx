@@ -161,7 +161,7 @@ async fn test_webrtc_to_rtp_media_proxy_auto() -> Result<()> {
         let events = bob.process_dialog_events().await.unwrap_or_default();
         for event in events {
             info!("Bob received event: {:?}", event);
-            if let TestUaEvent::IncomingCall(id) = event {
+            if let TestUaEvent::IncomingCall(id, _) = event {
                 bob_dialog_id = Some(id.clone());
                 // Answer immediately
                 bob.answer_call(&id, None).await?;
@@ -265,7 +265,7 @@ async fn test_codec_negotiation_optimization() -> Result<()> {
     for i in 0..50 {
         let events = bob.process_dialog_events().await.unwrap_or_default();
         for event in events {
-            if let TestUaEvent::IncomingCall(id) = event {
+            if let TestUaEvent::IncomingCall(id, _) = event {
                 bob_dialog_id = Some(id.clone());
 
                 // 6. Bob answers with PCMU only

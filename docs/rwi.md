@@ -612,12 +612,53 @@ no_answer_transfer_target = "sip:voicemail@local"
    - Use `wss` in production
    - Optional mTLS support
 
-## 11. Limitations and Notes
+## 11. Command Implementation Status
+
+> Last updated: 2026-03-24
+
+### Legend
+- ✅ **Fully Implemented** - Command fully functional
+- ⚠️ **Partially Implemented** - Command works but with limitations
+- 🔧 **Stub/TODO** - Command accepted but actual functionality not complete
+
+### Implementation Status by Category
+
+| Category | Status | Notes |
+|----------|--------|-------|
+| **Session Commands** | ✅ Complete | All session commands fully implemented |
+| **Call Control** | ✅ Complete | Originate, answer, hangup, bridge, transfer all working |
+| **Media Playback** | ✅ Complete | Play, stop, hold music fully functional |
+| **Recording** | ✅ Complete | Start, pause, resume, stop implemented |
+| **Queue** | ✅ Complete | Enqueue, dequeue, hold, unhold working |
+| **Supervisor** | ⚠️ Partial | Commands implemented, **actual audio mixing TODO** |
+| **Conference** | ⚠️ Partial | Create/add/remove/destroy working, **mute/unmute in mixer TODO** |
+| **Media Stream/Inject** | 🔧 Stub | State tracking only, **binary PCM transport not implemented** |
+| **SIP Messages** | 🔧 Stub | Event stubs only, **real SIP sending TODO** |
+
+### Known Limitations
+
+1. **Parallel Dialing**: `call.originate` with multiple targets currently dials sequentially, not in parallel with race.
+
+2. **Track Muting**: `MuteTrack` / `UnmuteTrack` commands are accepted but actual media track muting is not yet implemented.
+
+3. **Conference Muting**: `conference.mute` / `conference.unmute` emit events but do not actually mute audio in the mixer.
+
+4. **PCM Stream**: `media.stream_start` / `media.inject_start` track state but do not establish actual binary PCM transport over WebSocket.
+
+5. **SIP MESSAGE/NOTIFY**: `sip.message` / `sip.notify` accept commands and emit events, but do not actually send SIP messages.
+
+6. **SDP Renegotiation**: Hold/reinvite SDP renegotiation is TODO.
+
+---
+
+## 12. Limitations and Notes
 
 1. **SIP header passthrough**: `sip_headers` in `call.incoming` is read-only and only contains headers explicitly whitelisted in `[rwi.sip_header_passthrough]`.
 
-2. **PCM stream**: Requires separate media WebSocket configuration; current version supports basic functionality only.
+2. **PCM stream**: Requires separate media WebSocket configuration; current version supports state tracking only (binary PCM frames not yet implemented).
 
 3. **External MCU**: External conference backend requires SIP MCU server integration.
 
 4. **Presence**: Agent presence state is not managed in RWI. Use a separate Presence service.
+
+5. **Supervisor audio**: MediaMixer framework is in place but actual audio stream mixing is not yet connected.

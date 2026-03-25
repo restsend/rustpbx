@@ -875,5 +875,7 @@ impl Track for FileTrack {
     }
 }
 
+pub mod conference_mixer;
+
 #[cfg(test)]
 mod media_track_tests;

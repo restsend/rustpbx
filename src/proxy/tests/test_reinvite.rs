@@ -125,7 +125,7 @@ async fn test_update_with_sdp_flow() {
     let bob_events = bob.process_dialog_events().await.unwrap();
     let mut bob_call_id = None;
     for event in bob_events {
-        if let TestUaEvent::IncomingCall(id) = event {
+        if let TestUaEvent::IncomingCall(id, _) = event {
             let answer_sdp = "v=0\r\no=- 456 789 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 20000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\n".to_string();
             bob.answer_call(&id, Some(answer_sdp)).await.unwrap();
             bob_call_id = Some(id);

@@ -144,12 +144,6 @@ pub enum RwiCommandPayload {
     RecordStop {
         call_id: String,
     },
-    RecordMaskSegment {
-        call_id: String,
-        recording_id: String,
-        start_secs: u64,
-        end_secs: u64,
-    },
     QueueEnqueue(QueueEnqueueRequest),
     QueueDequeue {
         call_id: String,
@@ -172,11 +166,6 @@ pub enum RwiCommandPayload {
         call_id: String,
         queue_id: String,
         priority: Option<u32>,
-    },
-    SupervisorTakeover {
-        supervisor_call_id: String,
-        target_call_id: String,
-        agent_leg: String,
     },
     SupervisorListen {
         supervisor_call_id: String,
@@ -486,13 +475,6 @@ pub enum RwiRequest {
     RecordResume { call_id: Option<String> },
     #[serde(alias = "record.stop")]
     RecordStop { call_id: Option<String> },
-    #[serde(alias = "record.mask_segment")]
-    RecordMaskSegment {
-        call_id: Option<String>,
-        recording_id: Option<String>,
-        start_secs: Option<u64>,
-        end_secs: Option<u64>,
-    },
 
     // Queue commands
     #[serde(alias = "queue.enqueue")]
@@ -542,12 +524,6 @@ pub enum RwiRequest {
     SupervisorStop {
         supervisor_call_id: Option<String>,
         target_call_id: Option<String>,
-    },
-    #[serde(alias = "supervisor.takeover")]
-    SupervisorTakeover {
-        supervisor_call_id: Option<String>,
-        target_call_id: Option<String>,
-        agent_leg: Option<String>,
     },
 
     // SIP commands
@@ -735,17 +711,6 @@ impl From<RwiRequest> for RwiCommandPayload {
             RwiRequest::RecordStop { call_id } => RwiCommandPayload::RecordStop {
                 call_id: call_id.unwrap_or_default(),
             },
-            RwiRequest::RecordMaskSegment {
-                call_id,
-                recording_id,
-                start_secs,
-                end_secs,
-            } => RwiCommandPayload::RecordMaskSegment {
-                call_id: call_id.unwrap_or_default(),
-                recording_id: recording_id.unwrap_or_default(),
-                start_secs: start_secs.unwrap_or(0),
-                end_secs: end_secs.unwrap_or(0),
-            },
             RwiRequest::QueueEnqueue(mut r) => {
                 if r.call_id.is_empty() {
                     r.call_id = Uuid::new_v4().to_string();
@@ -813,15 +778,6 @@ impl From<RwiRequest> for RwiCommandPayload {
             } => RwiCommandPayload::SupervisorStop {
                 supervisor_call_id: supervisor_call_id.unwrap_or_default(),
                 target_call_id: target_call_id.unwrap_or_default(),
-            },
-            RwiRequest::SupervisorTakeover {
-                supervisor_call_id,
-                target_call_id,
-                agent_leg,
-            } => RwiCommandPayload::SupervisorTakeover {
-                supervisor_call_id: supervisor_call_id.unwrap_or_default(),
-                target_call_id: target_call_id.unwrap_or_default(),
-                agent_leg: agent_leg.unwrap_or_default(),
             },
             RwiRequest::SipMessage {
                 call_id,

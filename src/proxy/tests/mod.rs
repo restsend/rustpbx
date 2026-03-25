@@ -32,3 +32,15 @@ mod test_queue;
 #[cfg(test)]
 mod test_reinvite;
 pub mod test_ua;
+
+// E2E testing infrastructure
+#[cfg(test)]
+pub mod rtp_utils;
+#[cfg(test)]
+pub mod cdr_capture;
+#[cfg(test)]
+pub mod e2e_test_server;
+#[cfg(test)]
+mod test_call_e2e;
+#[cfg(test)]
+mod test_rtp_e2e;

@@ -225,7 +225,7 @@ async fn test_call_queue_routing() {
             // Try for 5 seconds
             let events = agent.process_dialog_events().await.unwrap_or_default();
             for event in events {
-                if let TestUaEvent::IncomingCall(dialog_id) = event {
+                if let TestUaEvent::IncomingCall(dialog_id, _) = event {
                     info!("Agent received call: {}", dialog_id);
 
                     // Generate a minimal SDP answer

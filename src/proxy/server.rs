@@ -78,8 +78,9 @@ pub struct SipServerInner {
     pub presence_manager: Arc<PresenceManager>,
     pub addon_registry: Option<Arc<crate::addons::registry::AddonRegistry>>,
     pub rwi_gateway: Option<Arc<tokio::sync::RwLock<crate::rwi::gateway::RwiGateway>>>,
-    /// Stored TLS listener for hot-reload support (cloned from the original)
     pub tls_listener: Option<rsipstack::transport::TlsListenerConnection>,
+    pub queue_manager: Arc<crate::call::runtime::QueueManager>,
+    pub conference_manager: Arc<crate::call::runtime::ConferenceManager>,
 }
 
 pub type SipServerRef = Arc<SipServerInner>;
@@ -548,6 +549,9 @@ impl SipServerBuilder {
         let presence_manager = Arc::new(PresenceManager::new(database.clone()));
         presence_manager.load_from_db().await.ok();
 
+        let queue_manager = Arc::new(crate::call::runtime::QueueManager::new());
+        let conference_manager = Arc::new(crate::call::runtime::ConferenceManager::new());
+
         let inner = Arc::new(SipServerInner {
             rtp_config,
             proxy_config: self.config.clone(),
@@ -575,6 +579,8 @@ impl SipServerBuilder {
             addon_registry: self.addon_registry,
             rwi_gateway: self.rwi_gateway,
             tls_listener: tls_listener_clone,
+            queue_manager,
+            conference_manager,
         });
 
         let inner_weak = Arc::downgrade(&inner);
@@ -681,6 +687,26 @@ impl SipServer {
                 ));
             }
         }
+
+        // Spawn registry cleanup task
+        let registry = self.inner.active_call_registry.clone();
+        let cleanup_cancel = cancel_token.clone();
+        crate::utils::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            
+            loop {
+                tokio::select! {
+                    _ = cleanup_cancel.cancelled() => break,
+                    _ = interval.tick() => {
+                        let removed = registry.cleanup_stale(std::time::Duration::from_secs(3600));
+                        if removed > 0 {
+                            tracing::warn!("Cleaned up {} stale registry entries", removed);
+                        }
+                    }
+                }
+            }
+        });
 
         tokio::select! {
             _ = cancel_token.cancelled() => {

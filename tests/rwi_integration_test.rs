@@ -208,6 +208,80 @@ impl RwiTestClient {
         self.send_request(request).await
     }
 
+    pub async fn queue_enqueue(
+        &mut self,
+        call_id: &str,
+        queue_id: &str,
+        priority: Option<u32>,
+    ) -> Result<RwiResponse, Box<dyn std::error::Error + Send + Sync>> {
+        let mut params = serde_json::json!({
+            "call_id": call_id,
+            "queue_id": queue_id,
+        });
+        if let Some(p) = priority {
+            params["priority"] = serde_json::json!(p);
+        }
+        let request = RwiRequest::new("queue.enqueue").with_params(params);
+        self.send_request(request).await
+    }
+
+    pub async fn queue_dequeue(
+        &mut self,
+        call_id: &str,
+    ) -> Result<RwiResponse, Box<dyn std::error::Error + Send + Sync>> {
+        let request = RwiRequest::new("queue.dequeue")
+            .with_params(serde_json::json!({ "call_id": call_id }));
+        self.send_request(request).await
+    }
+
+    pub async fn send_dtmf(
+        &mut self,
+        call_id: &str,
+        digits: &str,
+    ) -> Result<RwiResponse, Box<dyn std::error::Error + Send + Sync>> {
+        let request = RwiRequest::new("call.send_dtmf")
+            .with_params(serde_json::json!({ "call_id": call_id, "digits": digits }));
+        self.send_request(request).await
+    }
+
+    pub async fn conference_create(
+        &mut self,
+        conf_id: &str,
+    ) -> Result<RwiResponse, Box<dyn std::error::Error + Send + Sync>> {
+        let request = RwiRequest::new("conference.create")
+            .with_params(serde_json::json!({ "conference_id": conf_id }));
+        self.send_request(request).await
+    }
+
+    pub async fn conference_add(
+        &mut self,
+        conf_id: &str,
+        call_id: &str,
+    ) -> Result<RwiResponse, Box<dyn std::error::Error + Send + Sync>> {
+        let request = RwiRequest::new("conference.add")
+            .with_params(serde_json::json!({ "conference_id": conf_id, "call_id": call_id }));
+        self.send_request(request).await
+    }
+
+    pub async fn conference_remove(
+        &mut self,
+        conf_id: &str,
+        call_id: &str,
+    ) -> Result<RwiResponse, Box<dyn std::error::Error + Send + Sync>> {
+        let request = RwiRequest::new("conference.remove")
+            .with_params(serde_json::json!({ "conference_id": conf_id, "call_id": call_id }));
+        self.send_request(request).await
+    }
+
+    pub async fn conference_destroy(
+        &mut self,
+        conf_id: &str,
+    ) -> Result<RwiResponse, Box<dyn std::error::Error + Send + Sync>> {
+        let request = RwiRequest::new("conference.destroy")
+            .with_params(serde_json::json!({ "conference_id": conf_id }));
+        self.send_request(request).await
+    }
+
     pub async fn close(mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         self.ws.close(None).await?;
         Ok(())
