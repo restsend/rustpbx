@@ -18,6 +18,7 @@ use crate::media::recorder::RecorderOption;
 
 pub mod audio_source;
 pub mod bridge;
+pub mod forwarding_track;
 #[cfg(test)]
 mod file_track_tests;
 pub mod mixer;
@@ -138,7 +139,6 @@ impl MediaStreamBuilder {
             id: self.id.unwrap_or_else(|| "media-stream".to_string()),
             cancel_token: self.cancel_token.unwrap_or_else(CancellationToken::new),
             tracks: Mutex::new(HashMap::new()),
-            suppressed: Mutex::new(HashSet::new()),
             recorder_option: self.recorder_option,
         }
     }
@@ -148,7 +148,6 @@ pub struct MediaStream {
     pub id: String,
     pub cancel_token: CancellationToken,
     tracks: Mutex<HashMap<String, Arc<AsyncMutex<Box<dyn Track>>>>>,
-    suppressed: Mutex<HashSet<String>>,
     pub recorder_option: Option<RecorderOption>,
 }
 
@@ -188,21 +187,6 @@ impl MediaStream {
         };
         let guard = track.lock().await;
         guard.set_remote_description(remote).await
-    }
-
-    pub async fn suppress_forwarding(&self, track_id: &str) {
-        let mut suppressed = self.suppressed.lock().unwrap();
-        suppressed.insert(track_id.to_string());
-    }
-
-    pub async fn resume_forwarding(&self, track_id: &str) {
-        let mut suppressed = self.suppressed.lock().unwrap();
-        suppressed.remove(track_id);
-    }
-
-    pub fn is_suppressed(&self, track_id: &str) -> bool {
-        let suppressed = self.suppressed.lock().unwrap();
-        suppressed.contains(track_id)
     }
 
     pub async fn remove_track(&self, track_id: &str, _stop_audio_immediately: bool) {
