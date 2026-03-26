@@ -1271,18 +1271,14 @@ impl SipSession {
 
             // 2. Create a caller track and handshake it with the caller's original offer
             //    to produce the PBX's answer SDP (with PBX IP/port) for the caller.
+            //    The answer codec list must remain a subset of the original caller offer;
+            //    transcoding happens in the media path, not by advertising callee-only codecs
+            //    back to the caller.
             if let Some(ref caller_offer) = self.caller_offer {
-                // Extract codec info from the callee's answer to build the caller track
-                // with the negotiated codecs (mirroring what the callee accepted).
-                let codec_info = callee_sdp
-                    .as_ref()
-                    .map(|sdp| {
-                        let extracted = MediaNegotiator::extract_codec_params(sdp);
-                        let mut codecs = extracted.audio;
-                        codecs.extend(extracted.dtmf);
-                        codecs
-                    })
-                    .unwrap_or_default();
+                let codec_info = MediaNegotiator::build_caller_answer_codec_list(
+                    caller_offer,
+                    caller_is_webrtc,
+                );
 
                 let mut track_builder = RtpTrackBuilder::new(Self::CALLER_TRACK_ID.to_string())
                     .with_cancel_token(self.caller_peer.cancel_token())
@@ -1325,6 +1321,12 @@ impl SipSession {
             callee_sdp.clone()
         };
 
+        // Store callee's answer SDP for later use
+        self.answer = callee_sdp.clone();
+
+        // Clone bridged_sdp before accept_call consumes it
+        let caller_answer = bridged_sdp.clone();
+
         // Accept the call with the answer SDP
         self.accept_call(
             Some(callee_uri.to_string()),
@@ -1345,19 +1347,75 @@ impl SipSession {
         if self.media_profile.path == MediaPathMode::Anchored
             && self.media_bridge.is_none()
         {
-            self.start_anchored_media_forwarding().await;
+            self.start_anchored_media_forwarding(
+                caller_answer.as_deref(),
+                callee_sdp.as_deref(),
+            )
+            .await;
         }
 
         Ok(())
+    }
+
+    /// Build the per-direction forwarding state from the selected answer codecs.
+    fn build_forwarding_config(
+        source: &crate::media::negotiate::NegotiatedLegProfile,
+        target: &crate::media::negotiate::NegotiatedLegProfile,
+    ) -> (
+        Option<crate::media::transcoder::Transcoder>,
+        Option<crate::media::forwarding_track::AudioMapping>,
+        Option<crate::media::forwarding_track::DtmfMapping>,
+    ) {
+        use crate::media::forwarding_track::{AudioMapping, DtmfMapping};
+        use crate::media::transcoder::Transcoder;
+
+        let audio_mapping = match (&source.audio, &target.audio) {
+            (Some(source_audio), Some(target_audio)) => Some(AudioMapping {
+                source_pt: source_audio.payload_type,
+                target_pt: target_audio.payload_type,
+                source_clock_rate: source_audio.clock_rate,
+                target_clock_rate: target_audio.clock_rate,
+            }),
+            _ => None,
+        };
+
+        let transcoder = match (&source.audio, &target.audio) {
+            (Some(source_audio), Some(target_audio))
+                if source_audio.codec != target_audio.codec =>
+            {
+                Some(Transcoder::new(
+                    source_audio.codec,
+                    target_audio.codec,
+                    target_audio.payload_type,
+                ))
+            }
+            _ => None,
+        };
+
+        let dtmf_mapping = source.dtmf.as_ref().map(|source_dtmf| DtmfMapping {
+            source_pt: source_dtmf.payload_type,
+            target_pt: target.dtmf.as_ref().map(|codec| codec.payload_type),
+            source_clock_rate: source_dtmf.clock_rate,
+            target_clock_rate: target.dtmf.as_ref().map(|codec| codec.clock_rate),
+        });
+
+        (transcoder, audio_mapping, dtmf_mapping)
     }
 
     /// Start bidirectional media forwarding between caller and callee tracks.
     ///
     /// Inserts a ForwardingTrack wrapper between each PC's receiver and sender.
     /// RtpSender's built-in loop calls `recv()` on the ForwardingTrack, which
-    /// handles recording tee and optional transcoding — all
+    /// handles recording tee, payload remap, transcoding, and DTMF handling inline — all
     /// with zero additional spawned tasks.
-    async fn start_anchored_media_forwarding(&mut self) {
+    ///
+    /// `caller_answer_sdp` is the PBX's answer sent to the caller (negotiated caller leg).
+    /// `callee_answer_sdp` is the callee's answer to the PBX (negotiated callee leg).
+    async fn start_anchored_media_forwarding(
+        &mut self,
+        caller_answer_sdp: Option<&str>,
+        callee_answer_sdp: Option<&str>,
+    ) {
         use crate::media::recorder::Leg;
 
         let session_id = &self.context.session_id;
@@ -1373,14 +1431,47 @@ impl SipSession {
             return;
         };
 
+        // Extract negotiated per-leg profiles from the answer SDPs
+        let caller_profile = caller_answer_sdp
+            .map(|sdp| MediaNegotiator::extract_leg_profile(sdp))
+            .unwrap_or_default();
+        let callee_profile = callee_answer_sdp
+            .map(|sdp| MediaNegotiator::extract_leg_profile(sdp))
+            .unwrap_or_default();
+
+        if let (Some(ca), Some(ce)) = (&caller_profile.audio, &callee_profile.audio) {
+            info!(
+                session_id = %session_id,
+                caller_codec = ?ca.codec, caller_pt = ca.payload_type,
+                callee_codec = ?ce.codec, callee_pt = ce.payload_type,
+                caller_dtmf_pt = caller_profile.dtmf.as_ref().map(|codec| codec.payload_type),
+                callee_dtmf_pt = callee_profile.dtmf.as_ref().map(|codec| codec.payload_type),
+                needs_transcoding = (ca.codec != ce.codec),
+                "Anchored media: leg profiles extracted"
+            );
+        }
+
+        // Build forwarding config for each direction
+        let (caller_to_callee_tc, caller_to_callee_audio, caller_to_callee_dtmf) =
+            Self::build_forwarding_config(&caller_profile, &callee_profile);
+        let (callee_to_caller_tc, callee_to_caller_audio, callee_to_caller_dtmf) =
+            Self::build_forwarding_config(&callee_profile, &caller_profile);
+
         // Shared recorder for both directions (if recording is active)
         let shared_recorder = self.recorder.clone();
 
         // Caller→Callee: wire caller's receiver through ForwardingTrack to callee's sender
         if let Err(e) = Self::wire_with_forwarding_track(
             Self::CALLER_TRACK_ID,
-            &caller_pc, &callee_pc,
-            None, shared_recorder.clone(), Leg::A, session_id, "caller→callee",
+            &caller_pc,
+            &callee_pc,
+            caller_to_callee_tc,
+            caller_to_callee_audio,
+            shared_recorder.clone(),
+            Leg::A,
+            caller_to_callee_dtmf,
+            session_id,
+            "caller→callee",
         ) {
             warn!(session_id = %session_id, error = %e, "Failed to wire caller→callee");
         }
@@ -1388,8 +1479,15 @@ impl SipSession {
         // Callee→Caller: wire callee's receiver through ForwardingTrack to caller's sender
         if let Err(e) = Self::wire_with_forwarding_track(
             Self::CALLEE_TRACK_ID,
-            &callee_pc, &caller_pc,
-            None, shared_recorder, Leg::B, session_id, "callee→caller",
+            &callee_pc,
+            &caller_pc,
+            callee_to_caller_tc,
+            callee_to_caller_audio,
+            shared_recorder,
+            Leg::B,
+            callee_to_caller_dtmf,
+            session_id,
+            "callee→caller",
         ) {
             warn!(session_id = %session_id, error = %e, "Failed to wire callee→caller");
         }
@@ -1416,14 +1514,16 @@ impl SipSession {
     ///
     /// The ForwardingTrack wraps the receiver track and is passed to the target's
     /// RtpSender. RtpSender's internal loop calls `recv()` on it, which handles
-    /// recording and transcoding inline.
+    /// recording, transcoding, and DTMF handling inline.
     fn wire_with_forwarding_track(
         track_id: &str,
         source_pc: &rustrtc::PeerConnection,
         target_pc: &rustrtc::PeerConnection,
         transcoder: Option<crate::media::transcoder::Transcoder>,
+        audio_mapping: Option<crate::media::forwarding_track::AudioMapping>,
         recorder: Arc<Mutex<Option<crate::media::recorder::Recorder>>>,
         leg: crate::media::recorder::Leg,
+        dtmf_mapping: Option<crate::media::forwarding_track::DtmfMapping>,
         session_id: &str,
         direction: &str,
     ) -> Result<()> {
@@ -1454,8 +1554,13 @@ impl SipSession {
             .ok_or_else(|| anyhow!("{}: no sender on target audio transceiver", direction))?;
 
         let forwarding = Arc::new(ForwardingTrack::new(
-            track_id.to_string(), receiver_track,
-            transcoder, recorder, leg,
+            track_id.to_string(),
+            receiver_track,
+            transcoder,
+            audio_mapping,
+            recorder,
+            leg,
+            dtmf_mapping,
         ));
 
         // Create new sender using the ForwardingTrack

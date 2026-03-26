@@ -45,6 +45,23 @@ pub struct NegotiationResult {
     pub dtmf_pt: Option<u8>,
 }
 
+/// A single negotiated codec with its RTP parameters from SDP answer.
+#[derive(Debug, Clone)]
+pub struct NegotiatedCodec {
+    pub codec: CodecType,
+    pub payload_type: u8,
+    pub clock_rate: u32,
+    pub channels: u16,
+}
+
+/// Per-leg negotiated media profile extracted from an SDP answer.
+/// Contains the selected audio codec and the selected DTMF entry for that answer.
+#[derive(Debug, Clone, Default)]
+pub struct NegotiatedLegProfile {
+    pub audio: Option<NegotiatedCodec>,
+    pub dtmf: Option<NegotiatedCodec>,
+}
+
 /// Media negotiator for SDP parsing and codec selection
 pub struct MediaNegotiator;
 
@@ -272,17 +289,57 @@ impl MediaNegotiator {
         ]
     }
 
-    /// Check if transcoding is needed between two codecs
-    pub fn needs_transcoding(codec_a: CodecType, codec_b: CodecType) -> bool {
-        codec_a != codec_b
-    }
-
     /// Get preferred codec from a list
     pub fn get_preferred_codec(codecs: &[CodecType]) -> Option<CodecType> {
         codecs
             .iter()
             .find(|c| **c != CodecType::TelephoneEvent)
             .copied()
+    }
+
+    /// Extract a negotiated leg profile from an SDP answer.
+    /// Takes the first audio codec (the selected one in an answer) and selects
+    /// one DTMF entry using the current call assumptions.
+    pub fn extract_leg_profile(sdp: &str) -> NegotiatedLegProfile {
+        let extracted = Self::extract_codec_params(sdp);
+        let audio = extracted.audio.first().map(|c| NegotiatedCodec {
+            codec: c.codec,
+            payload_type: c.payload_type,
+            clock_rate: c.clock_rate,
+            channels: c.channels,
+        });
+        let dtmf = match extracted.dtmf.len() {
+            0 => None,
+            1 => extracted.dtmf.first().map(|c| NegotiatedCodec {
+                codec: c.codec,
+                payload_type: c.payload_type,
+                clock_rate: c.clock_rate,
+                channels: c.channels,
+            }),
+            _ => {
+                let preferred_rate = match audio.as_ref().map(|codec| codec.codec) {
+                    #[cfg(feature = "opus")]
+                    Some(CodecType::Opus) => 48000,
+                    _ => 8000,
+                };
+                extracted
+                    .dtmf
+                    .iter()
+                    .find(|codec| codec.clock_rate == preferred_rate)
+                    .or(extracted.dtmf.first())
+                    .map(|c| NegotiatedCodec {
+                        codec: c.codec,
+                        payload_type: c.payload_type,
+                        clock_rate: c.clock_rate,
+                        channels: c.channels,
+                    })
+            }
+        };
+
+        NegotiatedLegProfile {
+            audio,
+            dtmf,
+        }
     }
 
     /// Build codec list for callee offer in anchored media mode.
@@ -367,6 +424,29 @@ impl MediaNegotiator {
                     channels: 1,
                     codec: CodecType::TelephoneEvent,
                 });
+            }
+        }
+
+        result
+    }
+
+    /// Build codec list for answering the caller in anchored media mode.
+    ///
+    /// Unlike the callee offer builder, this must stay a strict subset of the
+    /// caller's original offer so the generated answer never advertises a codec
+    /// the caller did not offer. PT values are preserved from the caller's SDP.
+    pub fn build_caller_answer_codec_list(caller_sdp: &str, is_webrtc: bool) -> Vec<CodecInfo> {
+        let extracted = Self::extract_codec_params(caller_sdp);
+        let supported = if is_webrtc {
+            Self::default_webrtc_codecs()
+        } else {
+            Self::default_rtp_codecs()
+        };
+
+        let mut result = Vec::new();
+        for codec in extracted.audio.into_iter().chain(extracted.dtmf) {
+            if supported.contains(&codec.codec) {
+                result.push(codec);
             }
         }
 
@@ -522,18 +602,6 @@ mod tests {
 
         let result = MediaNegotiator::negotiate_codec(&local_codecs, remote_sdp);
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_needs_transcoding() {
-        assert!(!MediaNegotiator::needs_transcoding(
-            CodecType::PCMU,
-            CodecType::PCMU
-        ));
-        assert!(MediaNegotiator::needs_transcoding(
-            CodecType::PCMU,
-            CodecType::PCMA
-        ));
     }
 
     #[test]
