@@ -1286,7 +1286,7 @@ impl SipSession {
 
                 let mut track_builder = RtpTrackBuilder::new(Self::CALLER_TRACK_ID.to_string())
                     .with_cancel_token(self.caller_peer.cancel_token())
-                    .with_enable_latching(true);
+                    .with_enable_latching(self.server.proxy_config.enable_latching);
 
                 if !codec_info.is_empty() {
                     track_builder = track_builder.with_codec_info(codec_info);
@@ -1552,18 +1552,28 @@ impl SipSession {
                 Ok(sdp)
             }
         } else if media_proxy_enabled {
-            // Same transport type with media proxy enabled
-            // For now, create regular track (full B2BUA support for same-type needs separate implementation)
-            // TODO: implement RTP <-> RTP and WebRTC <-> WebRTC bridge for anchored media
+            // Same transport type with media proxy enabled (anchored media)
             info!(
                 session_id = %self.id,
                 caller_is_webrtc = caller_is_webrtc,
                 callee_is_webrtc = callee_is_webrtc,
-                "Media proxy enabled for same-type transport (using direct track, full bridge TODO)"
+                "Media proxy enabled for same-type transport (anchored media)"
             );
-            
+
             let mut track_builder = RtpTrackBuilder::new(track_id.clone())
-                .with_cancel_token(self.callee_peer.cancel_token());
+                .with_cancel_token(self.callee_peer.cancel_token())
+                .with_enable_latching(self.server.proxy_config.enable_latching);
+
+            // Build codec list from caller's offer: keep supported, append extras, ensure DTMF
+            if let Some(ref caller_offer) = self.caller_offer {
+                let codecs = MediaNegotiator::build_callee_codec_offer(
+                    caller_offer,
+                    callee_is_webrtc,
+                );
+                if !codecs.is_empty() {
+                    track_builder = track_builder.with_codec_info(codecs);
+                }
+            }
 
             if callee_is_webrtc {
                 track_builder = track_builder.with_mode(rustrtc::TransportMode::WebRtc);
