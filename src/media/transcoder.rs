@@ -74,15 +74,31 @@ impl RtpTiming {
     }
 }
 
+/// Rewrite the duration field inside a telephone-event (RFC 4733) payload.
+/// Duration is bytes [2..4] in network byte order, expressed in RTP clock ticks.
+pub fn rewrite_dtmf_duration(data: &[u8], source_rate: u32, target_rate: u32) -> bytes::Bytes {
+    if data.len() < 4 || source_rate == target_rate {
+        return bytes::Bytes::copy_from_slice(data);
+    }
+    let mut buf = data.to_vec();
+    let duration = u16::from_be_bytes([buf[2], buf[3]]);
+    let scaled = (duration as u32 * target_rate / source_rate) as u16;
+    buf[2..4].copy_from_slice(&scaled.to_be_bytes());
+    bytes::Bytes::from(buf)
+}
+
 pub struct Transcoder {
     decoder: Box<dyn Decoder>,
     encoder: Box<dyn Encoder>,
     source: CodecType,
+    target: CodecType,
+    /// The actual negotiated PT for the target codec (from SDP answer, not codec default)
+    target_pt: u8,
     resampler: Option<Resampler>,
 }
 
 impl Transcoder {
-    pub fn new(source: CodecType, target: CodecType) -> Self {
+    pub fn new(source: CodecType, target: CodecType, target_pt: u8) -> Self {
         let decoder = create_decoder(source);
         let encoder = create_encoder(target);
 
@@ -101,8 +117,18 @@ impl Transcoder {
             decoder,
             encoder,
             source,
+            target,
+            target_pt,
             resampler,
         }
+    }
+
+    pub fn source_clock_rate(&self) -> u32 {
+        self.source.clock_rate()
+    }
+
+    pub fn target_clock_rate(&self) -> u32 {
+        self.target.clock_rate()
     }
 
     pub fn transcode(&mut self, frame: &AudioFrame) -> AudioFrame {
@@ -115,10 +141,10 @@ impl Transcoder {
 
         AudioFrame {
             rtp_timestamp: frame.rtp_timestamp,
-            clock_rate: self.source.clock_rate(),
+            clock_rate: self.target.clock_rate(),
             data: encoded_data.into(),
             sequence_number: frame.sequence_number,
-            payload_type: frame.payload_type,
+            payload_type: Some(self.target_pt),
             marker: frame.marker,
             raw_packet: None,
             source_addr: frame.source_addr,
