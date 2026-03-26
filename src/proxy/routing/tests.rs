@@ -1,5 +1,6 @@
 use crate::call::{DialDirection, DialStrategy, RoutingState};
 use crate::call::{FailureAction, QueueFallbackAction};
+use crate::proxy::call::q850_reason_value;
 use crate::config::RouteResult;
 use crate::proxy::routing::matcher::{RouteResourceLookup, match_invite};
 use crate::proxy::routing::{
@@ -86,9 +87,9 @@ fn test_trunk_incoming_user_prefix_plain() {
             .unwrap()
     );
     assert!(
-        !trunk
+        trunk
             .matches_incoming_user_prefixes(Some("+853123456"), None)
-            .unwrap()
+            .is_err()
     );
 }
 
@@ -102,9 +103,9 @@ fn test_trunk_incoming_user_prefix_regex() {
             .unwrap()
     );
     assert!(
-        !trunk
+        trunk
             .matches_incoming_user_prefixes(None, Some("1234"))
-            .unwrap()
+            .is_err()
     );
 }
 
@@ -116,6 +117,65 @@ fn test_trunk_incoming_user_prefix_invalid_regex() {
         .matches_incoming_user_prefixes(Some("1001"), None)
         .unwrap_err();
     assert!(err.to_string().contains("invalid regex"));
+}
+
+#[test]
+fn test_trunk_incoming_user_prefix_mismatch_q850_reason_format() {
+    let mut trunk = TrunkConfig::default();
+    trunk.incoming_from_user_prefix = Some("+852".to_string());
+    trunk.incoming_to_user_prefix = Some("601285".to_string());
+
+    // Test from_user mismatch
+    let result = trunk.matches_incoming_user_prefixes(Some("+853123456"), None);
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    let reason = q850_reason_value(&StatusCode::Forbidden, Some(&err.to_string()));
+    assert!(
+        reason.starts_with("Q.850;cause=21;text="),
+        "reason should be Q.850 format with cause 21, got: {}",
+        reason
+    );
+    assert!(
+        reason.contains("from_user"),
+        "reason should mention field name, got: {}",
+        reason
+    );
+    assert!(
+        reason.contains("expected '+852'"),
+        "reason should show expected value, got: {}",
+        reason
+    );
+    assert!(
+        reason.contains("got '+853123456'"),
+        "reason should show actual value, got: {}",
+        reason
+    );
+
+    // Test to_user mismatch
+    let result = trunk.matches_incoming_user_prefixes(Some("+852123456"), Some("601286"));
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    let reason = q850_reason_value(&StatusCode::Forbidden, Some(&err.to_string()));
+    assert!(
+        reason.starts_with("Q.850;cause=21;text="),
+        "reason should be Q.850 format with cause 21, got: {}",
+        reason
+    );
+    assert!(
+        reason.contains("to_user"),
+        "reason should mention field name, got: {}",
+        reason
+    );
+    assert!(
+        reason.contains("expected '601285'"),
+        "reason should show expected value, got: {}",
+        reason
+    );
+    assert!(
+        reason.contains("got '601286'"),
+        "reason should show actual value, got: {}",
+        reason
+    );
 }
 
 #[tokio::test]
