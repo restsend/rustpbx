@@ -126,7 +126,7 @@ pub struct SipSession {
 
     /// Reporter - initialized but reporting is handled via process() cleanup
     pub reporter: Option<CallReporter>,
-    pub recorder: Option<Recorder>,
+    pub recorder: Arc<Mutex<Option<Recorder>>>,
     pub playback_tracks: std::collections::HashMap<String, FileTrack>,
     
     // === WebRTC ↔ RTP Bridge ===
@@ -178,6 +178,7 @@ impl SipSessionHandle {
 }
 
 impl SipSession {
+    pub const CALLER_TRACK_ID: &'static str = "caller-track";
     pub const CALLEE_TRACK_ID: &'static str = "callee-track";
 
     /// Create a lightweight handle for RWI originate (without full SIP session)
@@ -271,7 +272,7 @@ impl SipSession {
             callee_event_tx: None,
             callee_guards: Vec::new(),
             reporter: None,
-            recorder: None,
+            recorder: Arc::new(Mutex::new(None)),
             playback_tracks: std::collections::HashMap::new(),
             media_bridge: None,
             caller_is_webrtc: false,
@@ -1250,11 +1251,81 @@ impl SipSession {
             } else {
                 callee_sdp.clone()
             }
+        } else if self.media_profile.path == MediaPathMode::Anchored {
+            // Same transport type with anchored media — PBX must stay in the media path.
+            // 1. Feed callee's answer back to the callee track so its PeerConnection
+            //    knows the callee's RTP address/port.
+            if let Some(ref sdp) = callee_sdp {
+                if let Err(e) = self
+                    .callee_peer
+                    .update_remote_description(Self::CALLEE_TRACK_ID, sdp)
+                    .await
+                {
+                    warn!(
+                        session_id = %self.context.session_id,
+                        error = %e,
+                        "Failed to set callee answer on callee track"
+                    );
+                }
+            }
+
+            // 2. Create a caller track and handshake it with the caller's original offer
+            //    to produce the PBX's answer SDP (with PBX IP/port) for the caller.
+            if let Some(ref caller_offer) = self.caller_offer {
+                // Extract codec info from the callee's answer to build the caller track
+                // with the negotiated codecs (mirroring what the callee accepted).
+                let codec_info = callee_sdp
+                    .as_ref()
+                    .map(|sdp| {
+                        let extracted = MediaNegotiator::extract_codec_params(sdp);
+                        let mut codecs = extracted.audio;
+                        codecs.extend(extracted.dtmf);
+                        codecs
+                    })
+                    .unwrap_or_default();
+
+                let mut track_builder = RtpTrackBuilder::new(Self::CALLER_TRACK_ID.to_string())
+                    .with_cancel_token(self.caller_peer.cancel_token())
+                    .with_enable_latching(true);
+
+                if !codec_info.is_empty() {
+                    track_builder = track_builder.with_codec_info(codec_info);
+                }
+
+                if caller_is_webrtc {
+                    track_builder = track_builder.with_mode(rustrtc::TransportMode::WebRtc);
+                }
+
+                let track = track_builder.build();
+                match track.handshake(caller_offer.clone()).await {
+                    Ok(answer_sdp) => {
+                        debug!(
+                            session_id = %self.context.session_id,
+                            "Generated PBX answer SDP for caller (anchored media)"
+                        );
+                        self.caller_peer
+                            .update_track(Box::new(track), None)
+                            .await;
+                        Some(answer_sdp)
+                    }
+                    Err(e) => {
+                        warn!(
+                            session_id = %self.context.session_id,
+                            error = %e,
+                            "Failed to handshake caller track, falling back to callee SDP"
+                        );
+                        callee_sdp.clone()
+                    }
+                }
+            } else {
+                callee_sdp.clone()
+            }
         } else {
+            // Bypass mode — pass callee's SDP directly to caller
             callee_sdp.clone()
         };
 
-        // Accept the call with (possibly bridged) callee's SDP
+        // Accept the call with the answer SDP
         self.accept_call(
             Some(callee_uri.to_string()),
             bridged_sdp,
@@ -1268,6 +1339,141 @@ impl SipSession {
         }
 
         self.update_snapshot_cache();
+
+        // Start media forwarding for anchored same-type calls
+        // (WebRTC ↔ RTP bridging is handled by BridgePeer.start_bridge() in create_callee_track)
+        if self.media_profile.path == MediaPathMode::Anchored
+            && self.media_bridge.is_none()
+        {
+            self.start_anchored_media_forwarding().await;
+        }
+
+        Ok(())
+    }
+
+    /// Start bidirectional media forwarding between caller and callee tracks.
+    ///
+    /// Inserts a ForwardingTrack wrapper between each PC's receiver and sender.
+    /// RtpSender's built-in loop calls `recv()` on the ForwardingTrack, which
+    /// handles recording tee and optional transcoding — all
+    /// with zero additional spawned tasks.
+    async fn start_anchored_media_forwarding(&mut self) {
+        use crate::media::recorder::Leg;
+
+        let session_id = &self.context.session_id;
+
+        let caller_pc = Self::get_peer_pc(&self.caller_peer, Self::CALLER_TRACK_ID).await;
+        let callee_pc = Self::get_peer_pc(&self.callee_peer, Self::CALLEE_TRACK_ID).await;
+
+        let (Some(caller_pc), Some(callee_pc)) = (caller_pc, callee_pc) else {
+            warn!(
+                session_id = %session_id,
+                "Cannot start anchored forwarding: missing PeerConnection on caller or callee track"
+            );
+            return;
+        };
+
+        // Shared recorder for both directions (if recording is active)
+        let shared_recorder = self.recorder.clone();
+
+        // Caller→Callee: wire caller's receiver through ForwardingTrack to callee's sender
+        if let Err(e) = Self::wire_with_forwarding_track(
+            Self::CALLER_TRACK_ID,
+            &caller_pc, &callee_pc,
+            None, shared_recorder.clone(), Leg::A, session_id, "caller→callee",
+        ) {
+            warn!(session_id = %session_id, error = %e, "Failed to wire caller→callee");
+        }
+
+        // Callee→Caller: wire callee's receiver through ForwardingTrack to caller's sender
+        if let Err(e) = Self::wire_with_forwarding_track(
+            Self::CALLEE_TRACK_ID,
+            &callee_pc, &caller_pc,
+            None, shared_recorder, Leg::B, session_id, "callee→caller",
+        ) {
+            warn!(session_id = %session_id, error = %e, "Failed to wire callee→caller");
+        }
+
+        info!(session_id = %session_id, "Anchored media forwarding wired via ForwardingTrack");
+    }
+
+    /// Get PeerConnection from a MediaPeer's track
+    async fn get_peer_pc(
+        peer: &Arc<dyn MediaPeer>,
+        track_id: &str,
+    ) -> Option<rustrtc::PeerConnection> {
+        let tracks = peer.get_tracks().await;
+        for t in &tracks {
+            let guard = t.lock().await;
+            if guard.id() == track_id {
+                return guard.get_peer_connection().await;
+            }
+        }
+        None
+    }
+
+    /// Wire source PC's receiver track through a ForwardingTrack to target PC's sender.
+    ///
+    /// The ForwardingTrack wraps the receiver track and is passed to the target's
+    /// RtpSender. RtpSender's internal loop calls `recv()` on it, which handles
+    /// recording and transcoding inline.
+    fn wire_with_forwarding_track(
+        track_id: &str,
+        source_pc: &rustrtc::PeerConnection,
+        target_pc: &rustrtc::PeerConnection,
+        transcoder: Option<crate::media::transcoder::Transcoder>,
+        recorder: Arc<Mutex<Option<crate::media::recorder::Recorder>>>,
+        leg: crate::media::recorder::Leg,
+        session_id: &str,
+        direction: &str,
+    ) -> Result<()> {
+        use crate::media::forwarding_track::ForwardingTrack;
+
+        // Get receiver track from source PC
+        let source_transceiver = source_pc
+            .get_transceivers()
+            .into_iter()
+            .find(|t| t.kind() == rustrtc::MediaKind::Audio)
+            .ok_or_else(|| anyhow!("{}: no audio transceiver on source PC", direction))?;
+
+        let receiver = source_transceiver
+            .receiver()
+            .ok_or_else(|| anyhow!("{}: no receiver on source audio transceiver", direction))?;
+
+        let receiver_track = receiver.track();
+
+        // Get existing sender info from target PC
+        let target_transceiver = target_pc
+            .get_transceivers()
+            .into_iter()
+            .find(|t| t.kind() == rustrtc::MediaKind::Audio)
+            .ok_or_else(|| anyhow!("{}: no audio transceiver on target PC", direction))?;
+
+        let existing_sender = target_transceiver
+            .sender()
+            .ok_or_else(|| anyhow!("{}: no sender on target audio transceiver", direction))?;
+
+        let forwarding = Arc::new(ForwardingTrack::new(
+            track_id.to_string(), receiver_track,
+            transcoder, recorder, leg,
+        ));
+
+        // Create new sender using the ForwardingTrack
+        let sender = rustrtc::RtpSender::builder(
+            forwarding as Arc<dyn rustrtc::media::MediaStreamTrack>,
+            existing_sender.ssrc(),
+        )
+        .stream_id(existing_sender.stream_id().to_string())
+        .params(existing_sender.params())
+        .build();
+
+        target_transceiver.set_sender(Some(sender));
+
+        debug!(
+            session_id = %session_id,
+            direction = %direction,
+            "Wired ForwardingTrack (zero-task forwarding)"
+        );
 
         Ok(())
     }
@@ -1580,12 +1786,17 @@ impl SipSession {
         _max_duration: Option<Duration>,
         beep: bool,
     ) -> Result<()> {
-        if self.recorder.is_some() {
-            return Err(anyhow!("Recording already active"));
-        }
-
         let recorder = Recorder::new(path, CodecType::PCMU)?;
-        self.recorder = Some(recorder);
+        {
+            let mut guard = self
+                .recorder
+                .lock()
+                .map_err(|_| anyhow!("Recording lock poisoned"))?;
+            if guard.is_some() {
+                return Err(anyhow!("Recording already active"));
+            }
+            *guard = Some(recorder);
+        }
         self.recording_state = Some((path.to_string(), Instant::now()));
 
         if beep {
@@ -1615,7 +1826,9 @@ impl SipSession {
     pub async fn stop_recording(&mut self) -> Result<()> {
         if let Some((path, start_time)) = self.recording_state.take() {
             let duration = start_time.elapsed();
-            self.recorder = None;
+            if let Ok(mut guard) = self.recorder.lock() {
+                *guard = None;
+            }
             info!(path = %path, duration = ?duration, "Recording stopped");
         }
         Ok(())
