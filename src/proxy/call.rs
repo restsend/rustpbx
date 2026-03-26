@@ -118,10 +118,8 @@ impl RouteInvite for DefaultRouteInvite {
                                 from_user.as_deref().unwrap_or(""),
                                 to_user.as_deref().unwrap_or("")
                             );
-                            let reason = q850_reason_value(
-                                &rsip::StatusCode::Forbidden,
-                                Some(&detail),
-                            );
+                            let reason =
+                                q850_reason_value(&rsip::StatusCode::Forbidden, Some(&detail));
                             warn!(
                                 trunk = %source.name,
                                 from = from_user.as_deref().unwrap_or(""),
@@ -904,7 +902,13 @@ impl CallModule {
                 }
                 let code = code.unwrap_or(rsip::StatusCode::ServerInternalError);
                 let reason_text = e.to_string();
-                let reason_value = q850_reason_value(&code, Some(reason_text.as_str()));
+                // If error already contains ;cause= (e.g. "invite;cause=1234;text=\"xxx\""),
+                // treat it as pre-formatted Q850 and use directly.
+                let reason_value = if reason_text.contains(";cause=") {
+                    reason_text.clone()
+                } else {
+                    q850_reason_value(&code, Some(reason_text.as_str()))
+                };
                 warn!(%code, key = %tx.key, reason = %reason_value, "failed to build dialplan");
                 self.report_failure(tx, &cookie, code.clone(), Some(reason_text));
                 tx.reply_with(
