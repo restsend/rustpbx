@@ -1,7 +1,7 @@
 use anyhow::{Result, anyhow};
 use audio_codec::CodecType;
 use rustrtc::{MediaKind, SdpType, SessionDescription};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 /// Parsed RTP codec information from SDP
 #[derive(Debug, Clone)]
@@ -283,6 +283,94 @@ impl MediaNegotiator {
             .iter()
             .find(|c| **c != CodecType::TelephoneEvent)
             .copied()
+    }
+
+    /// Build codec list for callee offer in anchored media mode.
+    ///
+    /// Strategy:
+    /// 1. Keep caller's codecs that PBX supports (preserving caller's order and PT)
+    /// 2. Append PBX-supported codecs not already present (with default PT)
+    /// 3. For DTMF: keep caller's telephone-event entries, then append missing
+    ///    variants based on which audio codecs are in the offer
+    ///    (8000 for narrowband codecs, 48000 for Opus)
+    pub fn build_callee_codec_offer(caller_sdp: &str, is_webrtc: bool) -> Vec<CodecInfo> {
+        let extracted = Self::extract_codec_params(caller_sdp);
+        let supported = if is_webrtc {
+            Self::default_webrtc_codecs()
+        } else {
+            Self::default_rtp_codecs()
+        };
+
+        let mut result: Vec<CodecInfo> = Vec::new();
+        let mut seen_codecs: BTreeSet<CodecType> = BTreeSet::new();
+
+        // 1. Keep caller's audio codecs that PBX supports (preserve order & PT)
+        for codec in &extracted.audio {
+            if supported.contains(&codec.codec) {
+                result.push(codec.clone());
+                seen_codecs.insert(codec.codec);
+            }
+        }
+
+        // 2. Append PBX-supported audio codecs not already present
+        for codec_type in &supported {
+            if *codec_type == CodecType::TelephoneEvent {
+                continue; // handle DTMF separately
+            }
+            if !seen_codecs.contains(codec_type) {
+                result.push(CodecInfo {
+                    payload_type: codec_type.payload_type(),
+                    clock_rate: codec_type.clock_rate(),
+                    channels: codec_type.channels() as u16,
+                    codec: *codec_type,
+                });
+                seen_codecs.insert(*codec_type);
+            }
+        }
+
+        // 3. DTMF: keep caller's telephone-event entries, then append missing
+        //    variants based on audio codecs present in the offer.
+        let mut seen_dtmf_rates: HashSet<u32> = HashSet::new();
+        for dtmf in &extracted.dtmf {
+            result.push(dtmf.clone());
+            seen_dtmf_rates.insert(dtmf.clock_rate);
+        }
+        if supported.contains(&CodecType::TelephoneEvent) {
+            // Determine which DTMF clock rates are needed based on audio codecs
+            let has_opus = result.iter().any(|c| c.codec == CodecType::Opus);
+            let has_narrowband = result
+                .iter()
+                .any(|c| c.codec.is_audio() && c.codec != CodecType::Opus);
+
+            let mut needed_rates: Vec<u32> = Vec::new();
+            if has_narrowband && !seen_dtmf_rates.contains(&8000) {
+                needed_rates.push(8000);
+            }
+            if has_opus && !seen_dtmf_rates.contains(&48000) {
+                needed_rates.push(48000);
+            }
+
+            let mut used_pts: HashSet<u8> = result.iter().map(|c| c.payload_type).collect();
+            for rate in needed_rates {
+                let default_pt = CodecType::TelephoneEvent.payload_type();
+                let pt = if !used_pts.contains(&default_pt) {
+                    default_pt
+                } else {
+                    (96..=127)
+                        .find(|p| !used_pts.contains(p))
+                        .unwrap_or(default_pt)
+                };
+                used_pts.insert(pt);
+                result.push(CodecInfo {
+                    payload_type: pt,
+                    clock_rate: rate,
+                    channels: 1,
+                    codec: CodecType::TelephoneEvent,
+                });
+            }
+        }
+
+        result
     }
 
     pub fn extract_ssrc(sdp: &str) -> Option<u32> {
