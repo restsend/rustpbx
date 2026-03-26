@@ -9,7 +9,7 @@
         <div class="mb-6 rounded-2xl bg-white p-5 shadow-sm ring-1 ring-black/5">
             <div class="flex flex-col gap-4 md:flex-row md:items-center md:justify-end">
                 <div class="flex items-center gap-3">
-                    <label for="time-range" class="text-xs font-medium uppercase tracking-wide text-slate-500">{{ "dashboard.time_range" | t }}
+                    <label for="time-range" class="text-xs font-medium uppercase tracking-wide text-slate-500">{{ "dashboard.time_range" | t }}</label>
                     <div class="relative w-48">
                         <select id="time-range" name="time-range"
                             class="block w-full appearance-none rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 focus:border-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-200">
@@ -175,7 +175,7 @@
 <script defer
     src="{{chart_js|default('https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.5.0/chart.umd.min.js')|safe}}"></script>
 <script>
-    (function () {
+    function initDashboardPage() {
         const bootstrapNode = document.getElementById('dashboard-bootstrap');
         let payload = null;
         let endpoint = null;
@@ -485,6 +485,12 @@
                 }
             });
         }
-    })();
+    }
+
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', initDashboardPage, { once: true });
+    } else {
+        initDashboardPage();
+    }
 </script>
 {% endblock %}
