@@ -62,7 +62,7 @@ fn escape_reason_text(text: &str) -> String {
     text.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
-fn q850_reason_value(code: &rsip::StatusCode, detail: Option<&str>) -> String {
+pub fn q850_reason_value(code: &rsip::StatusCode, detail: Option<&str>) -> String {
     let fallback = format!("SIP {}", u16::from(code.clone()));
     let text = detail
         .map(|s| s.trim())
@@ -113,26 +113,42 @@ impl RouteInvite for DefaultRouteInvite {
                     {
                         Ok(true) => {}
                         Ok(false) => {
+                            let detail = format!(
+                                "caller='{}', callee='{}' rejected by prefix policy",
+                                from_user.as_deref().unwrap_or(""),
+                                to_user.as_deref().unwrap_or("")
+                            );
+                            let reason = q850_reason_value(
+                                &rsip::StatusCode::Forbidden,
+                                Some(&detail),
+                            );
                             warn!(
                                 trunk = %source.name,
                                 from = from_user.as_deref().unwrap_or(""),
                                 to = to_user.as_deref().unwrap_or(""),
+                                reason = %reason,
                                 "dropping inbound INVITE due to SIP trunk user prefix mismatch",
                             );
                             return Ok(RouteResult::Abort(
                                 rsip::StatusCode::Forbidden,
-                                Some("Inbound identity rejected".to_string()),
+                                Some(reason),
                             ));
                         }
-                        Err(err) => {
+                        Err(mismatch) => {
+                            let reason = q850_reason_value(
+                                &rsip::StatusCode::Forbidden,
+                                Some(&mismatch.to_string()),
+                            );
                             warn!(
                                 trunk = %source.name,
-                                error = %err,
-                                "failed to evaluate SIP trunk user prefix",
+                                from = from_user.as_deref().unwrap_or(""),
+                                to = to_user.as_deref().unwrap_or(""),
+                                reason = %reason,
+                                "dropping inbound INVITE due to SIP trunk user prefix mismatch",
                             );
                             return Ok(RouteResult::Abort(
-                                rsip::StatusCode::ServerInternalError,
-                                Some("Invalid trunk prefix configuration".to_string()),
+                                rsip::StatusCode::Forbidden,
+                                Some(reason),
                             ));
                         }
                     }
