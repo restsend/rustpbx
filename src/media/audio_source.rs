@@ -46,7 +46,7 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::Notify;
 use tracing::{debug, warn};
 
-pub trait AudioSource: Send + Sync {
+pub trait AudioSource: Send {
     fn read_samples(&mut self, buffer: &mut [i16]) -> usize;
     fn sample_rate(&self) -> u32;
     fn channels(&self) -> u16;

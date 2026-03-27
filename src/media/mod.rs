@@ -18,10 +18,11 @@ use crate::media::recorder::RecorderOption;
 
 pub mod audio_source;
 pub mod bridge;
-pub mod forwarding_track;
 #[cfg(test)]
 mod file_track_tests;
+pub mod endpoint;
 pub mod mixer;
+pub mod source;
 #[cfg(test)]
 mod mixer_e2e_tests;
 pub mod mixer_input;
@@ -65,13 +66,13 @@ fn codec_info_rtpmap(info: &negotiate::CodecInfo) -> String {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct AudioFrameTiming {
+pub(crate) struct AudioFrameTiming {
     pcm_sample_rate: u32,
     pcm_samples_per_frame: usize,
     rtp_ticks_per_frame: u32,
 }
 
-fn audio_frame_timing(codec: CodecType, rtp_clock_rate: u32) -> AudioFrameTiming {
+pub(crate) fn audio_frame_timing(codec: CodecType, rtp_clock_rate: u32) -> AudioFrameTiming {
     let frame_ms = 20u32;
     let pcm_sample_rate = codec.samplerate();
 
