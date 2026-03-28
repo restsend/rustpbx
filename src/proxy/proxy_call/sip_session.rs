@@ -29,10 +29,10 @@ use crate::callrecord::{CallRecordHangupMessage, CallRecordHangupReason, CallRec
 use crate::config::MediaProxyMode;
 use crate::media::bridge::{DirectionConfig, MediaBridge};
 use crate::media::endpoint::{PeerInput, PeerOutput, receiver_track_for_pc};
-use crate::media::source::FileInput;
 use crate::media::mixer::MediaMixer;
 use crate::media::negotiate::{CodecInfo, MediaNegotiator};
 use crate::media::recorder::Recorder;
+use crate::media::source::FileInput;
 use crate::media::{RtpTrackBuilder, Track};
 use crate::proxy::proxy_call::{
     media_peer::{MediaPeer, VoiceEnginePeer},
@@ -1417,9 +1417,12 @@ impl SipSession {
 
         // Build bridge
         match Self::build_bridge(
-            &caller_pc, &callee_pc,
-            caller_output, callee_output,
-            &caller_profile, &callee_profile,
+            &caller_pc,
+            &callee_pc,
+            caller_output,
+            callee_output,
+            &caller_profile,
+            &callee_profile,
             &session_id,
         ) {
             Ok(bridge) => {
@@ -1462,10 +1465,18 @@ impl SipSession {
 
         debug!(session_id = %session_id, "Built bidirectional anchored media bridge");
 
-        Ok(MediaBridge::builder(caller_input, caller_output, callee_input, callee_output)
-            .caller_to_callee(DirectionConfig::from_profiles(caller_profile, callee_profile))
-            .callee_to_caller(DirectionConfig::from_profiles(callee_profile, caller_profile))
-            .build())
+        Ok(
+            MediaBridge::builder(caller_input, caller_output, callee_input, callee_output)
+                .caller_to_callee(DirectionConfig::from_profiles(
+                    caller_profile,
+                    callee_profile,
+                ))
+                .callee_to_caller(DirectionConfig::from_profiles(
+                    callee_profile,
+                    caller_profile,
+                ))
+                .build(),
+        )
     }
 
     async fn ensure_leg_output(&mut self, target: PlaybackTarget) -> Result<Arc<PeerOutput>> {
@@ -1505,12 +1516,14 @@ impl SipSession {
                 .as_deref()
                 .map(MediaNegotiator::extract_leg_profile),
         }
-        .and_then(|profile| profile.audio.map(|audio| CodecInfo {
-            payload_type: audio.payload_type,
-            codec: audio.codec,
-            clock_rate: audio.clock_rate,
-            channels: audio.channels,
-        }));
+        .and_then(|profile| {
+            profile.audio.map(|audio| CodecInfo {
+                payload_type: audio.payload_type,
+                codec: audio.codec,
+                clock_rate: audio.clock_rate,
+                channels: audio.channels,
+            })
+        });
 
         if let Some(codec) = profile_codec {
             return Ok(codec);
@@ -1916,11 +1929,10 @@ impl SipSession {
     /// Check if caller is using WebRTC based on their SDP
     fn is_caller_webrtc(&self) -> bool {
         if let Some(ref offer) = self.caller_offer {
-            // Check for WebRTC-specific indicators in SDP
-            offer.contains("UDP/TLS/RTP/SAVPF") ||  // WebRTC transport
-            offer.contains("a=fingerprint:") ||      // DTLS fingerprint
-            offer.contains("a=ice-ufrag:") ||        // ICE credentials
-            offer.contains("a=setup:") // DTLS setup
+            // Only DTLS fingerprint or SAVPF transport are WebRTC-exclusive.
+            // ICE (ice-ufrag/ice-pwd) and setup are also used by regular SIP
+            // phones (MicroSIP, pjsip) for ICE-lite and must not trigger WebRTC mode.
+            offer.contains("UDP/TLS/RTP/SAVPF") || offer.contains("a=fingerprint:")
         } else {
             false
         }
@@ -1935,7 +1947,11 @@ impl SipSession {
             let _ = self.stop_recording().await;
         }
 
-        let playbacks: Vec<_> = self.playback_tracks.drain().map(|(_, playback)| playback).collect();
+        let playbacks: Vec<_> = self
+            .playback_tracks
+            .drain()
+            .map(|(_, playback)| playback)
+            .collect();
         for playback in playbacks {
             self.emit_playback_complete(playback.track_id, true);
             if let Ok(output) = self.ensure_leg_output(playback.target).await {
@@ -2914,7 +2930,12 @@ impl SipSession {
             .clone()
             .unwrap_or_else(|| target.output_key().to_string());
         let notify = self
-            .install_playback_source(target, track_id.clone(), file_path.clone(), options.loop_playback)
+            .install_playback_source(
+                target,
+                track_id.clone(),
+                file_path.clone(),
+                options.loop_playback,
+            )
             .await?;
 
         info!(

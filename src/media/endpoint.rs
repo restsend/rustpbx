@@ -14,6 +14,13 @@ use tokio::sync::{Mutex, watch};
 struct OutputRtpState {
     next_output_timestamp: u32,
     next_output_sequence: u16,
+    /// Same input timestamp always maps to the same output timestamp — this is
+    /// what RFC 4733 DTMF needs (all packets of one key-press share one RTP
+    /// timestamp).
+    last_timestamp_mapping: Option<(u32, u32)>,
+    /// Exact retransmission of the previously seen input packet maps back to
+    /// the same rewritten sequence number instead of being discarded.
+    last_sequence_mapping: Option<(u16, u16)>,
 }
 
 impl Default for OutputRtpState {
@@ -21,19 +28,46 @@ impl Default for OutputRtpState {
         Self {
             next_output_timestamp: rand::random(),
             next_output_sequence: rand::random(),
+            last_timestamp_mapping: None,
+            last_sequence_mapping: None,
         }
     }
 }
 
 impl OutputRtpState {
     fn rewrite(&mut self, frame: &mut AudioFrame) {
+        let input_timestamp = frame.rtp_timestamp;
+        let input_sequence = frame.sequence_number;
+
         let step = (frame.clock_rate / 50).max(1);
 
-        frame.rtp_timestamp = self.next_output_timestamp;
-        frame.sequence_number = Some(self.next_output_sequence);
+        if let Some((last_input_ts, last_output_ts)) = self.last_timestamp_mapping
+            && last_input_ts == input_timestamp
+        {
+            frame.rtp_timestamp = last_output_ts;
+        } else {
+            let out = self.next_output_timestamp;
+            self.next_output_timestamp = self.next_output_timestamp.wrapping_add(step);
+            frame.rtp_timestamp = out;
+            self.last_timestamp_mapping = Some((input_timestamp, out));
+        };
 
-        self.next_output_timestamp = self.next_output_timestamp.wrapping_add(step);
-        self.next_output_sequence = self.next_output_sequence.wrapping_add(1);
+        if let Some(input_sequence) = input_sequence {
+            if let Some((last_input_seq, last_output_seq)) = self.last_sequence_mapping
+                && input_sequence == last_input_seq
+            {
+                frame.sequence_number = Some(last_output_seq);
+            } else {
+                let out = self.next_output_sequence;
+                self.next_output_sequence = self.next_output_sequence.wrapping_add(1);
+                frame.sequence_number = Some(out);
+                self.last_sequence_mapping = Some((input_sequence, out));
+            }
+        } else {
+            let out = self.next_output_sequence;
+            self.next_output_sequence = self.next_output_sequence.wrapping_add(1);
+            frame.sequence_number = Some(out);
+        }
     }
 }
 
@@ -121,11 +155,11 @@ impl MediaStreamTrack for PeerOutput {
                 result = input.recv() => {
                     let mut sample = result?;
                     if let MediaSample::Audio(frame) = &mut sample {
-                        if self.mark_next.swap(false, std::sync::atomic::Ordering::Relaxed) {
-                            frame.marker = true;
-                        }
                         if let Ok(mut rtp_state) = self.rtp_state.lock() {
                             rtp_state.rewrite(frame);
+                        }
+                        if self.mark_next.swap(false, std::sync::atomic::Ordering::Relaxed) {
+                            frame.marker = true;
                         }
                     }
                     return Ok(sample);
@@ -217,9 +251,7 @@ impl PeerInput {
 }
 
 /// Extract the receiver track from a PeerConnection's audio transceiver.
-pub fn receiver_track_for_pc(
-    pc: &PeerConnection,
-) -> Result<Arc<dyn MediaStreamTrack>> {
+pub fn receiver_track_for_pc(pc: &PeerConnection) -> Result<Arc<dyn MediaStreamTrack>> {
     let transceiver = pc
         .get_transceivers()
         .into_iter()

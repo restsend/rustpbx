@@ -992,7 +992,9 @@ impl CallModule {
 
                     for callee_dialog_id in &snapshot.callee_dialogs {
                         debug!(%dialog_id, %callee_dialog_id, "Trying to forward to callee dialog");
-                        if let Some(mut callee_dialog) = self.inner.dialog_layer.get_dialog(callee_dialog_id) {
+                        if let Some(mut callee_dialog) =
+                            self.inner.dialog_layer.get_dialog(callee_dialog_id)
+                        {
                             debug!(%dialog_id, %callee_dialog_id, "Found callee dialog");
                             let body = offer_sdp.clone().into_bytes();
                             let headers = vec![rsip::Header::ContentType("application/sdp".into())];
@@ -1020,12 +1022,19 @@ impl CallModule {
                             if let Some(response_opt) = resp {
                                 if let Some(response) = response_opt {
                                     if !response.body().is_empty() {
-                                        let answer_sdp = String::from_utf8_lossy(response.body()).to_string();
+                                        let answer_sdp =
+                                            String::from_utf8_lossy(response.body()).to_string();
                                         debug!(%dialog_id, ?tx.original.method, "Forwarding re-INVITE to callee, received SDP answer");
-                                        let headers = vec![rsip::Header::ContentType("application/sdp".into())];
-                                        tx.reply_with(rsip::StatusCode::OK, headers, Some(answer_sdp.into_bytes()))
-                                            .await
-                                            .map_err(|e| anyhow!(e))?;
+                                        let headers = vec![rsip::Header::ContentType(
+                                            "application/sdp".into(),
+                                        )];
+                                        tx.reply_with(
+                                            rsip::StatusCode::OK,
+                                            headers,
+                                            Some(answer_sdp.into_bytes()),
+                                        )
+                                        .await
+                                        .map_err(|e| anyhow!(e))?;
                                         forwarded = true;
                                         break;
                                     }
