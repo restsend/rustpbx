@@ -399,7 +399,7 @@ impl AppStateBuilder {
         if let Some(tls_listener) = app_state.sip_server().get_tls_listener() {
             let reloader = Arc::new(crate::tls_reloader::RsipstackTlsReloader::new(tls_listener));
             if let Some(registry_guard) = app_state.tls_reloader.read().await.as_ref() {
-                registry_guard.register_sip_tls(reloader);
+                registry_guard.register_sip_tls(reloader).await;
             }
         }
 
@@ -542,7 +542,7 @@ pub async fn run(state: AppState, mut router: Router) -> Result<()> {
             config.clone(),
         )));
         if let Some(registry_guard) = state.tls_reloader.read().await.as_ref() {
-            registry_guard.register_https(reloader);
+            registry_guard.register_https(reloader).await;
         }
     }
 

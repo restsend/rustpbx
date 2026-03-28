@@ -1,5 +1,9 @@
 use serde::{Deserialize, Serialize};
-use tracing::{debug, info};
+use std::time::Instant;
+use tracing::debug;
+
+#[allow(unused_imports)]
+use tracing::info;
 
 pub const VERSION_INFO: &str = concat!(
     "rustpbx ",
@@ -45,17 +49,25 @@ pub struct UpdateInfo {
 
 /// Query `https://miuda.ai/api/check_update` with current version + edition.
 /// Returns `UpdateInfo` on success.
-pub async fn check_update() -> anyhow::Result<UpdateInfo> {
+pub async fn check_update(start_time: Instant) -> anyhow::Result<UpdateInfo> {
     let version = env!("CARGO_PKG_VERSION");
     let edition = if cfg!(feature = "commerce") {
         "commerce"
     } else {
         "community"
     };
+    let uptime_secs = start_time.elapsed().as_secs();
+    let build_time = env!("BUILD_TIME_FMT");
+
     let client = reqwest::Client::new();
     let resp = client
         .get("https://miuda.ai/api/check_update")
-        .query(&[("version", version), ("edition", edition)])
+        .query(&[
+            ("version", version),
+            ("edition", edition),
+            ("uptime", &uptime_secs.to_string()),
+            ("build_time", build_time),
+        ])
         .header("User-Agent", get_useragent())
         .timeout(std::time::Duration::from_secs(5))
         .send()
@@ -84,9 +96,20 @@ pub fn spawn_update_checker(
     db: sea_orm::DatabaseConnection,
     token: tokio_util::sync::CancellationToken,
 ) {
+    // Skip update check in debug/development mode
+    #[cfg(debug_assertions)]
+    {
+        debug!("Skipping update check in debug mode");
+        let _ = db;
+        let _ = token;
+        return;
+    }
+
+    #[cfg(not(debug_assertions))]
     tokio::spawn(async move {
+        let start_time = Instant::now();
         loop {
-            match check_update().await {
+            match check_update(start_time).await {
                 Ok(info) if info.has_update => {
                     use crate::models::system_notification::{ActiveModel, Column, Entity};
                     use sea_orm::{

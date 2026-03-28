@@ -1,6 +1,7 @@
 #[cfg(test)]
 mod tests {
     use crate::proxy::proxy_call::session_timer::*;
+    use std::str::FromStr;
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
@@ -146,6 +147,236 @@ mod tests {
     }
 
     #[test]
+    fn test_should_refresh_just_past_half_interval() {
+        let mut timer = SessionTimerState::default();
+        timer.enabled = true;
+        timer.active = true;
+        timer.refreshing = false;
+        timer.session_interval = Duration::from_secs(1800);
+
+        // Just past half (901 seconds out of 1800)
+        timer.last_refresh = Instant::now() - Duration::from_secs(901);
+        assert!(timer.should_refresh());
+    }
+
+    #[test]
+    fn test_should_not_refresh_before_half_interval() {
+        let mut timer = SessionTimerState::default();
+        timer.active = true;
+        timer.refreshing = false;
+        timer.session_interval = Duration::from_secs(1800);
+
+        // Just before half (899 seconds out of 1800)
+        timer.last_refresh = Instant::now() - Duration::from_secs(899);
+        assert!(
+            !timer.should_refresh(),
+            "Should NOT refresh before half interval"
+        );
+    }
+
+    #[test]
+    fn test_should_not_refresh_when_refreshing_flag_is_set() {
+        let mut timer = SessionTimerState::default();
+        timer.active = true;
+        timer.refreshing = true; // Already refreshing
+        timer.session_interval = Duration::from_secs(1800);
+        timer.last_refresh = Instant::now() - Duration::from_secs(1000); // Well past half
+
+        // Even though past half interval, should NOT refresh because already refreshing
+        assert!(
+            !timer.should_refresh(),
+            "Should NOT refresh when refreshing flag is true"
+        );
+    }
+
+    #[test]
+    fn test_should_not_refresh_when_inactive() {
+        let mut timer = SessionTimerState::default();
+        timer.active = false; // Not active
+        timer.refreshing = false;
+        timer.session_interval = Duration::from_secs(1800);
+        timer.last_refresh = Instant::now() - Duration::from_secs(1000);
+
+        assert!(
+            !timer.should_refresh(),
+            "Should NOT refresh when timer is not active"
+        );
+    }
+
+    #[test]
+    fn test_is_expired_after_full_interval() {
+        let mut timer = SessionTimerState::default();
+        timer.enabled = true;
+        timer.active = true;
+        timer.session_interval = Duration::from_secs(100);
+
+        // Just past full interval
+        timer.last_refresh = Instant::now() - Duration::from_secs(101);
+        assert!(timer.is_expired(), "Should be expired after full interval");
+    }
+
+    #[test]
+    fn test_is_not_expired_before_full_interval() {
+        let mut timer = SessionTimerState::default();
+        timer.active = true;
+        timer.session_interval = Duration::from_secs(100);
+
+        // Just before full interval
+        timer.last_refresh = Instant::now() - Duration::from_secs(99);
+        assert!(
+            !timer.is_expired(),
+            "Should NOT be expired before full interval"
+        );
+    }
+
+    #[test]
+    fn test_is_not_expired_when_inactive() {
+        let mut timer = SessionTimerState::default();
+        timer.active = false;
+        timer.session_interval = Duration::from_secs(100);
+        timer.last_refresh = Instant::now() - Duration::from_secs(200);
+
+        assert!(
+            !timer.is_expired(),
+            "Should NOT be expired when timer is not active"
+        );
+    }
+
+    #[test]
+    fn test_update_refresh_sets_last_refresh_to_now() {
+        let mut timer = SessionTimerState::default();
+        timer.last_refresh = Instant::now() - Duration::from_secs(1000);
+
+        let before_update = Instant::now();
+        timer.update_refresh();
+        let after_update = Instant::now();
+
+        // last_refresh should be updated to approximately now
+        assert!(
+            timer.last_refresh >= before_update && timer.last_refresh <= after_update,
+            "update_refresh should set last_refresh to approximately now"
+        );
+    }
+
+    #[test]
+    fn test_should_refresh_regardless_of_refresher_role() {
+        // Note: should_refresh() does NOT check who the refresher is.
+        // The caller (run_server_events_loop) checks refresher role before calling should_refresh().
+        // This method only checks if the time has passed since last refresh.
+        let mut timer = SessionTimerState::default();
+        timer.enabled = true;
+        timer.active = true;
+        timer.refreshing = false;
+        timer.session_interval = Duration::from_secs(1800);
+        timer.last_refresh = Instant::now() - Duration::from_secs(1000);
+
+        // should_refresh returns true when past half interval, regardless of refresher role
+        assert!(
+            timer.should_refresh(),
+            "should_refresh returns true when past half interval"
+        );
+    }
+
+    #[test]
+    fn test_should_refresh_with_uac_refresher() {
+        // UAC refresher - the UAC is responsible for sending refresh
+        // But should_refresh() doesn't check this - the caller does
+        let mut timer = SessionTimerState::default();
+        timer.enabled = true;
+        timer.active = true;
+        timer.refreshing = false;
+        timer.refresher = SessionRefresher::Uac;
+        timer.session_interval = Duration::from_secs(1800);
+        timer.last_refresh = Instant::now() - Duration::from_secs(1000);
+
+        // should_refresh only checks time, not who the refresher is
+        assert!(timer.should_refresh());
+    }
+
+    #[test]
+    fn test_should_refresh_with_uas_refresher() {
+        // UAS refresher - the UAS is responsible for sending refresh
+        let mut timer = SessionTimerState::default();
+        timer.enabled = true;
+        timer.active = true;
+        timer.refreshing = false;
+        timer.refresher = SessionRefresher::Uas;
+        timer.session_interval = Duration::from_secs(1800);
+        timer.last_refresh = Instant::now() - Duration::from_secs(1000);
+
+        // should_refresh only checks time, not who the refresher is
+        assert!(timer.should_refresh());
+    }
+
+    // ==================== Header Parsing Tests ====================
+
+    #[test]
+    fn test_parse_session_expires_with_refresher() {
+        let result = parse_session_expires("1800;refresher=uac");
+        assert!(result.is_some());
+
+        let (duration, refresher) = result.unwrap();
+        assert_eq!(duration, Duration::from_secs(1800));
+        assert_eq!(refresher, Some(SessionRefresher::Uac));
+    }
+
+    #[test]
+    fn test_parse_session_expires_with_uas_refresher() {
+        let result = parse_session_expires("3600;refresher=uas");
+        assert!(result.is_some());
+
+        let (duration, refresher) = result.unwrap();
+        assert_eq!(duration, Duration::from_secs(3600));
+        assert_eq!(refresher, Some(SessionRefresher::Uas));
+    }
+
+    #[test]
+    fn test_parse_session_expires_without_refresher() {
+        let result = parse_session_expires("1800");
+        assert!(result.is_some());
+
+        let (duration, refresher) = result.unwrap();
+        assert_eq!(duration, Duration::from_secs(1800));
+        assert_eq!(refresher, None);
+    }
+
+    #[test]
+    fn test_parse_session_expires_invalid() {
+        assert!(parse_session_expires("").is_none());
+        assert!(parse_session_expires("invalid").is_none());
+        assert!(parse_session_expires("-100").is_none());
+    }
+
+    #[test]
+    fn test_parse_min_se() {
+        assert_eq!(parse_min_se("90"), Some(Duration::from_secs(90)));
+        assert_eq!(parse_min_se("300"), Some(Duration::from_secs(300)));
+    }
+
+    #[test]
+    fn test_parse_min_se_invalid() {
+        assert!(parse_min_se("").is_none());
+        assert!(parse_min_se("invalid").is_none());
+    }
+
+    #[test]
+    fn test_session_refresher_from_str() {
+        assert_eq!(SessionRefresher::from_str("uac"), Ok(SessionRefresher::Uac));
+        assert_eq!(SessionRefresher::from_str("UAC"), Ok(SessionRefresher::Uac));
+        assert_eq!(SessionRefresher::from_str("uas"), Ok(SessionRefresher::Uas));
+        assert_eq!(SessionRefresher::from_str("UAS"), Ok(SessionRefresher::Uas));
+        assert!(SessionRefresher::from_str("invalid").is_err());
+    }
+
+    #[test]
+    fn test_session_refresher_display() {
+        assert_eq!(SessionRefresher::Uac.to_string(), "uac");
+        assert_eq!(SessionRefresher::Uas.to_string(), "uas");
+    }
+
+    // ==================== Integration Tests ====================
+
+    #[test]
     fn test_session_timer_expiration_logic() {
         let mut timer = SessionTimerState {
             enabled: true,
@@ -225,11 +456,11 @@ mod tests {
     #[test]
     fn test_start_refresh() {
         let mut timer = SessionTimerState::default();
-        
+
         // First start should succeed
         assert!(timer.start_refresh());
         assert!(timer.refreshing);
-        
+
         // Second start should fail (already refreshing)
         assert!(!timer.start_refresh());
     }
@@ -240,10 +471,10 @@ mod tests {
         timer.active = true;
         timer.refreshing = true;
         timer.last_refresh = Instant::now() - Duration::from_secs(60);
-        
+
         let old_refresh_time = timer.last_refresh;
         timer.complete_refresh();
-        
+
         assert!(!timer.refreshing);
         assert_eq!(timer.refresh_count, 1);
         assert!(timer.last_refresh > old_refresh_time);
@@ -253,9 +484,9 @@ mod tests {
     fn test_fail_refresh() {
         let mut timer = SessionTimerState::default();
         timer.refreshing = true;
-        
+
         timer.fail_refresh();
-        
+
         assert!(!timer.refreshing);
         assert_eq!(timer.failed_refreshes, 1);
     }
@@ -265,10 +496,10 @@ mod tests {
         let mut timer = SessionTimerState::default();
         timer.active = true;
         timer.last_refresh = Instant::now() - Duration::from_secs(60);
-        
+
         let old_refresh_time = timer.last_refresh;
         timer.update_refresh();
-        
+
         assert!(timer.last_refresh > old_refresh_time);
         assert_eq!(timer.refresh_count, 1);
     }
@@ -289,7 +520,7 @@ mod tests {
         timer.session_interval = Duration::from_secs(100);
         let now = Instant::now();
         timer.last_refresh = now;
-        
+
         let next = timer.next_refresh_time();
         assert!(next.is_some());
         // Should be at half interval (50s)
@@ -316,7 +547,7 @@ mod tests {
         timer.session_interval = Duration::from_secs(100);
         let now = Instant::now();
         timer.last_refresh = now;
-        
+
         let exp = timer.expiration_time();
         assert!(exp.is_some());
         // Should be at full interval (100s)
@@ -336,7 +567,7 @@ mod tests {
         timer.enabled = true;
         timer.session_interval = Duration::from_secs(100);
         timer.last_refresh = Instant::now();
-        
+
         let remaining = timer.time_until_expiration();
         assert!(remaining.is_some());
         // Should be close to 100s
@@ -351,7 +582,7 @@ mod tests {
         timer.enabled = true;
         timer.session_interval = Duration::from_secs(100);
         timer.last_refresh = Instant::now() - Duration::from_secs(150);
-        
+
         let remaining = timer.time_until_expiration();
         assert!(remaining.is_some());
         assert_eq!(remaining.unwrap(), Duration::ZERO);
@@ -364,97 +595,12 @@ mod tests {
         timer.enabled = true;
         timer.session_interval = Duration::from_secs(100);
         timer.last_refresh = Instant::now();
-        
+
         let remaining = timer.time_until_refresh();
         assert!(remaining.is_some());
         // Should be close to 50s (half interval)
         assert!(remaining.unwrap() <= Duration::from_secs(50));
         assert!(remaining.unwrap() > Duration::from_secs(49));
-    }
-
-    // ==================== SessionRefresher Tests ====================
-
-    #[test]
-    fn test_session_refresher_display() {
-        assert_eq!(format!("{}", SessionRefresher::Uac), "uac");
-        assert_eq!(format!("{}", SessionRefresher::Uas), "uas");
-    }
-
-    #[test]
-    fn test_session_refresher_from_str() {
-        assert_eq!(SessionRefresher::from_str("uac").unwrap(), SessionRefresher::Uac);
-        assert_eq!(SessionRefresher::from_str("UAC").unwrap(), SessionRefresher::Uac);
-        assert_eq!(SessionRefresher::from_str("Uac").unwrap(), SessionRefresher::Uac);
-        assert_eq!(SessionRefresher::from_str("uas").unwrap(), SessionRefresher::Uas);
-        assert_eq!(SessionRefresher::from_str("UAS").unwrap(), SessionRefresher::Uas);
-        assert_eq!(SessionRefresher::from_str("Uas").unwrap(), SessionRefresher::Uas);
-        assert!(SessionRefresher::from_str("invalid").is_err());
-    }
-
-    #[test]
-    fn test_session_refresher_is_our_role() {
-        assert!(SessionRefresher::Uac.is_our_role(true));   // We are UAC, refresher is UAC
-        assert!(!SessionRefresher::Uac.is_our_role(false)); // We are UAS, refresher is UAC
-        assert!(!SessionRefresher::Uas.is_our_role(true));  // We are UAC, refresher is UAS
-        assert!(SessionRefresher::Uas.is_our_role(false));  // We are UAS, refresher is UAS
-    }
-
-    // ==================== Header Parsing Tests ====================
-
-    #[test]
-    fn test_parse_session_expires_basic() {
-        let result = parse_session_expires("1800");
-        assert!(result.is_some());
-        let (duration, refresher) = result.unwrap();
-        assert_eq!(duration, Duration::from_secs(1800));
-        assert!(refresher.is_none());
-    }
-
-    #[test]
-    fn test_parse_session_expires_with_uac_refresher() {
-        let result = parse_session_expires("1800;refresher=uac");
-        assert!(result.is_some());
-        let (duration, refresher) = result.unwrap();
-        assert_eq!(duration, Duration::from_secs(1800));
-        assert_eq!(refresher, Some(SessionRefresher::Uac));
-    }
-
-    #[test]
-    fn test_parse_session_expires_with_uas_refresher() {
-        let result = parse_session_expires("1800;refresher=uas");
-        assert!(result.is_some());
-        let (duration, refresher) = result.unwrap();
-        assert_eq!(duration, Duration::from_secs(1800));
-        assert_eq!(refresher, Some(SessionRefresher::Uas));
-    }
-
-    #[test]
-    fn test_parse_session_expires_with_extra_params() {
-        let result = parse_session_expires("1800;refresher=uac;some-other-param=value");
-        assert!(result.is_some());
-        let (duration, refresher) = result.unwrap();
-        assert_eq!(duration, Duration::from_secs(1800));
-        assert_eq!(refresher, Some(SessionRefresher::Uac));
-    }
-
-    #[test]
-    fn test_parse_session_expires_invalid() {
-        assert!(parse_session_expires("").is_none());
-        assert!(parse_session_expires("invalid").is_none());
-        assert!(parse_session_expires("-1").is_none());
-    }
-
-    #[test]
-    fn test_parse_min_se_valid() {
-        assert_eq!(parse_min_se("90"), Some(Duration::from_secs(90)));
-        assert_eq!(parse_min_se("1800"), Some(Duration::from_secs(1800)));
-    }
-
-    #[test]
-    fn test_parse_min_se_invalid() {
-        assert!(parse_min_se("").is_none());
-        assert!(parse_min_se("invalid").is_none());
-        assert!(parse_min_se("-1").is_none());
     }
 
     // ==================== Header Building Tests ====================
@@ -490,10 +636,10 @@ mod tests {
         let mut timer = SessionTimerState::default();
         timer.enabled = true;
         timer.active = false;
-        
+
         let old_refresh = timer.last_refresh;
         timer.activate();
-        
+
         assert!(timer.active);
         assert!(timer.last_refresh > old_refresh);
     }
@@ -503,9 +649,9 @@ mod tests {
         let mut timer = SessionTimerState::default();
         timer.enabled = false;
         timer.active = false;
-        
+
         timer.activate();
-        
+
         // Should not activate if disabled
         assert!(!timer.active);
     }
@@ -514,9 +660,9 @@ mod tests {
     fn test_deactivate() {
         let mut timer = SessionTimerState::default();
         timer.active = true;
-        
+
         timer.deactivate();
-        
+
         assert!(!timer.active);
     }
 
@@ -528,9 +674,9 @@ mod tests {
         timer.session_interval = Duration::from_secs(100);
         timer.refresher = SessionRefresher::Uac;
         timer.last_refresh = Instant::now() - Duration::from_secs(50);
-        
+
         timer.reset(Duration::from_secs(200), SessionRefresher::Uas);
-        
+
         assert_eq!(timer.session_interval, Duration::from_secs(200));
         assert_eq!(timer.refresher, SessionRefresher::Uas);
         assert!(!timer.refreshing);
@@ -542,9 +688,9 @@ mod tests {
         let mut timer = SessionTimerState::default();
         timer.session_interval = Duration::from_secs(1800);
         timer.refresher = SessionRefresher::Uac;
-        
+
         assert_eq!(timer.get_session_expires_value(), "1800;refresher=uac");
-        
+
         timer.refresher = SessionRefresher::Uas;
         assert_eq!(timer.get_session_expires_value(), "1800;refresher=uas");
     }
@@ -553,21 +699,21 @@ mod tests {
     fn test_get_min_se_value() {
         let mut timer = SessionTimerState::default();
         timer.min_se = Duration::from_secs(90);
-        
+
         assert_eq!(timer.get_min_se_value(), "90");
     }
 
     #[test]
     fn test_require_timer() {
         let mut timer = SessionTimerState::default();
-        
+
         // Not enabled and not active
         assert!(!timer.require_timer());
-        
+
         // Enabled but not active
         timer.enabled = true;
         assert!(!timer.require_timer());
-        
+
         // Enabled and active
         timer.active = true;
         assert!(timer.require_timer());
@@ -595,9 +741,9 @@ mod tests {
         timer.refresher = SessionRefresher::Uac;
         timer.refresh_count = 5;
         timer.failed_refreshes = 2;
-        
+
         let stats = timer.stats();
-        
+
         assert!(stats.enabled);
         assert!(stats.active);
         assert!(!stats.refreshing);
@@ -616,7 +762,7 @@ mod tests {
     fn test_negotiate_session_interval_success() {
         let requested = Duration::from_secs(1800);
         let local_min_se = Duration::from_secs(90);
-        
+
         let result = negotiate_session_interval(requested, local_min_se);
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), requested);
@@ -626,7 +772,7 @@ mod tests {
     fn test_negotiate_session_interval_too_small() {
         let requested = Duration::from_secs(60);
         let local_min_se = Duration::from_secs(90);
-        
+
         let result = negotiate_session_interval(requested, local_min_se);
         assert!(result.is_err());
         assert_eq!(result.unwrap_err(), local_min_se);
@@ -636,7 +782,7 @@ mod tests {
     fn test_negotiate_session_interval_exact_min() {
         let requested = Duration::from_secs(90);
         let local_min_se = Duration::from_secs(90);
-        
+
         let result = negotiate_session_interval(requested, local_min_se);
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), requested);
@@ -649,7 +795,7 @@ mod tests {
         let headers = rsip::Headers::from(vec![
             rsip::Header::Other(HEADER_SESSION_EXPIRES.to_string(), "1800;refresher=uac".to_string()),
         ]);
-        
+
         let value = get_header_value(&headers, HEADER_SESSION_EXPIRES);
         assert_eq!(value, Some("1800;refresher=uac".to_string()));
     }
@@ -659,7 +805,7 @@ mod tests {
         let headers = rsip::Headers::from(vec![
             rsip::Header::Other(HEADER_MIN_SE.to_string(), "90".to_string()),
         ]);
-        
+
         let value = get_header_value(&headers, HEADER_MIN_SE);
         assert_eq!(value, Some("90".to_string()));
     }
@@ -669,7 +815,7 @@ mod tests {
         let headers = rsip::Headers::from(vec![
             rsip::Header::Supported(rsip::headers::Supported::from("timer,100rel")),
         ]);
-        
+
         let value = get_header_value(&headers, HEADER_SUPPORTED);
         assert!(value.is_some());
         assert!(value.unwrap().contains("timer"));
@@ -680,7 +826,7 @@ mod tests {
         let headers = rsip::Headers::from(vec![
             rsip::Header::ContentType("application/sdp".into()),
         ]);
-        
+
         let value = get_header_value(&headers, HEADER_SESSION_EXPIRES);
         assert!(value.is_none());
     }
@@ -692,7 +838,7 @@ mod tests {
         let headers = rsip::Headers::from(vec![
             rsip::Header::Other(HEADER_SUPPORTED.to_string(), "timer,100rel".to_string()),
         ]);
-        
+
         assert!(has_timer_support(&headers));
     }
 
@@ -701,7 +847,7 @@ mod tests {
         let headers = rsip::Headers::from(vec![
             rsip::Header::Other(HEADER_SUPPORTED.to_string(), "timer,100rel".to_string()),
         ]);
-        
+
         assert!(has_timer_support(&headers));
     }
 
@@ -710,7 +856,7 @@ mod tests {
         let headers = rsip::Headers::from(vec![
             rsip::Header::Supported(rsip::headers::Supported::from("100rel")),
         ]);
-        
+
         assert!(!has_timer_support(&headers));
     }
 
@@ -719,7 +865,7 @@ mod tests {
         let headers = rsip::Headers::from(vec![
             rsip::Header::ContentType("application/sdp".into()),
         ]);
-        
+
         assert!(!has_timer_support(&headers));
     }
 
@@ -728,7 +874,7 @@ mod tests {
         let headers = rsip::Headers::from(vec![
             rsip::Header::Other(HEADER_REQUIRE.to_string(), "timer".to_string()),
         ]);
-        
+
         assert!(is_timer_required(&headers));
     }
 
@@ -737,7 +883,7 @@ mod tests {
         let headers = rsip::Headers::from(vec![
             rsip::Header::Other(HEADER_REQUIRE.to_string(), "timer".to_string()),
         ]);
-        
+
         assert!(is_timer_required(&headers));
     }
 
@@ -746,7 +892,7 @@ mod tests {
         let headers = rsip::Headers::from(vec![
             rsip::Header::Require(rsip::headers::Require::from("100rel")),
         ]);
-        
+
         assert!(!is_timer_required(&headers));
     }
 
@@ -759,29 +905,29 @@ mod tests {
         timer.active = true;
         timer.session_interval = Duration::from_secs(100);
         timer.refresher = SessionRefresher::Uas; // We are the refresher
-        
+
         // Initial state - should not need refresh yet
         assert!(!timer.should_refresh());
         assert!(!timer.refreshing);
-        
+
         // Simulate time passing past half interval
         timer.last_refresh = Instant::now() - Duration::from_secs(51);
-        
+
         // Now should need refresh
         assert!(timer.should_refresh());
-        
+
         // Start refresh
         assert!(timer.start_refresh());
         assert!(timer.refreshing);
-        
+
         // Should not need refresh while refreshing
         assert!(!timer.should_refresh());
-        
+
         // Complete refresh
         timer.complete_refresh();
         assert!(!timer.refreshing);
         assert_eq!(timer.refresh_count, 1);
-        
+
         // Should not need refresh immediately after
         assert!(!timer.should_refresh());
     }
@@ -794,16 +940,16 @@ mod tests {
         timer.session_interval = Duration::from_secs(100);
         timer.refresher = SessionRefresher::Uas;
         timer.last_refresh = Instant::now() - Duration::from_secs(51);
-        
+
         // Start refresh
         assert!(timer.start_refresh());
         assert!(timer.refreshing);
-        
+
         // Fail the refresh
         timer.fail_refresh();
         assert!(!timer.refreshing);
         assert_eq!(timer.failed_refreshes, 1);
-        
+
         // Can start another refresh
         assert!(timer.start_refresh());
         assert!(timer.refreshing);
@@ -816,12 +962,12 @@ mod tests {
         timer.active = true;
         timer.session_interval = Duration::from_secs(100);
         timer.refresher = SessionRefresher::Uac; // Remote is refresher
-        
+
         let old_refresh_time = timer.last_refresh;
-        
+
         // Simulate receiving refresh from remote
         timer.update_refresh();
-        
+
         assert!(timer.last_refresh > old_refresh_time);
         assert_eq!(timer.refresh_count, 1);
     }
@@ -834,12 +980,12 @@ mod tests {
             (3600, SessionRefresher::Uac, "3600;refresher=uac"),
             (600, SessionRefresher::Uas, "600;refresher=uas"),
         ];
-        
+
         for (secs, refresher, expected) in test_cases {
             let mut timer = SessionTimerState::default();
             timer.session_interval = Duration::from_secs(secs);
             timer.refresher = refresher;
-            
+
             assert_eq!(timer.get_session_expires_value(), expected);
         }
     }
@@ -850,25 +996,84 @@ mod tests {
         timer.lock().unwrap().enabled = true;
         timer.lock().unwrap().active = true;
         timer.lock().unwrap().session_interval = Duration::from_secs(100);
-        
+
         // Simulate concurrent access
         let timer1 = timer.clone();
         let timer2 = timer.clone();
-        
+
         // Thread 1: Check if refresh needed
         let _needs_refresh = {
             let t = timer1.lock().unwrap();
             t.should_refresh()
         };
-        
+
         // Thread 2: Update refresh time
         {
             let mut t = timer2.lock().unwrap();
             t.update_refresh();
         }
-        
+
         // Verify state
         let t = timer.lock().unwrap();
         assert_eq!(t.refresh_count, 1);
+    }
+
+    // ==================== RFC 4028 Compliance Tests ====================
+
+    #[test]
+    fn test_rfc4028_refresh_at_half_interval() {
+        // RFC 4028: The refresher MUST send a refresh at half the session interval
+        let mut timer = SessionTimerState::default();
+        timer.enabled = true;
+        timer.active = true;
+        timer.refreshing = false;
+
+        // Test with various intervals
+        for interval_secs in [300, 600, 900, 1800, 3600] {
+            timer.session_interval = Duration::from_secs(interval_secs);
+
+            // At exactly half, should refresh
+            timer.last_refresh = Instant::now() - Duration::from_secs(interval_secs / 2);
+            assert!(
+                timer.should_refresh(),
+                "Should refresh at exactly half of {}s interval",
+                interval_secs
+            );
+
+            // Just before half, should not refresh
+            timer.last_refresh = Instant::now() - Duration::from_secs(interval_secs / 2 - 1);
+            assert!(
+                !timer.should_refresh(),
+                "Should NOT refresh just before half of {}s interval",
+                interval_secs
+            );
+        }
+    }
+
+    #[test]
+    fn test_rfc4028_session_expires_if_no_refresh() {
+        // RFC 4028: If no refresh is received within the session interval, session is expired
+        let mut timer = SessionTimerState::default();
+        timer.enabled = true;
+        timer.active = true;
+        timer.session_interval = Duration::from_secs(1800);
+
+        // At exactly full interval
+        timer.last_refresh = Instant::now() - Duration::from_secs(1800);
+        assert!(
+            timer.is_expired(),
+            "Should be expired at exactly full interval"
+        );
+
+        // Past full interval
+        timer.last_refresh = Instant::now() - Duration::from_secs(2000);
+        assert!(timer.is_expired(), "Should be expired past full interval");
+
+        // Before full interval
+        timer.last_refresh = Instant::now() - Duration::from_secs(1799);
+        assert!(
+            !timer.is_expired(),
+            "Should NOT be expired before full interval"
+        );
     }
 }

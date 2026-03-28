@@ -2437,7 +2437,7 @@ async fn create_role(
     let now = Utc::now();
     let active = RoleActiveModel {
         name: Set(name.to_string()),
-        description: Set(payload.description.unwrap_or_default()),
+        description: Set(Some(payload.description.unwrap_or_default())),
         is_system: Set(false),
         created_at: Set(now),
         updated_at: Set(now),
@@ -2495,7 +2495,7 @@ async fn update_role(
         active.name = Set(name.to_string());
     }
     if let Some(desc) = payload.description {
-        active.description = Set(desc);
+        active.description = Set(Some(desc));
     }
     active.updated_at = Set(Utc::now());
     if let Err(err) = active.update(db).await {
