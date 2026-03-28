@@ -43,27 +43,27 @@ impl TlsReloaderRegistry {
     }
 
     /// Register an HTTPS reloader
-    pub fn register_https(&self, reloader: Arc<dyn HttpsReloader>) {
-        let mut guard = self.https.blocking_write();
+    pub async fn register_https(&self, reloader: Arc<dyn HttpsReloader>) {
+        let mut guard = self.https.write().await;
         *guard = Some(reloader);
         info!("HTTPS TLS reloader registered");
     }
 
     /// Register a SIP TLS reloader
-    pub fn register_sip_tls(&self, reloader: Arc<dyn SipTlsReloader>) {
-        let mut guard = self.sip_tls.blocking_write();
+    pub async fn register_sip_tls(&self, reloader: Arc<dyn SipTlsReloader>) {
+        let mut guard = self.sip_tls.write().await;
         *guard = Some(reloader);
         info!("SIP TLS reloader registered");
     }
 
     /// Check if HTTPS reloader is registered
-    pub fn has_https_reloader(&self) -> bool {
-        self.https.blocking_read().is_some()
+    pub async fn has_https_reloader(&self) -> bool {
+        self.https.read().await.is_some()
     }
 
     /// Check if SIP TLS reloader is registered
-    pub fn has_sip_tls_reloader(&self) -> bool {
-        self.sip_tls.blocking_read().is_some()
+    pub async fn has_sip_tls_reloader(&self) -> bool {
+        self.sip_tls.read().await.is_some()
     }
 
     /// Reload HTTPS certificate

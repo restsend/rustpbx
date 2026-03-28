@@ -1,6 +1,7 @@
 use crate::call::{DialDirection, DialStrategy, RoutingState};
 use crate::call::{FailureAction, QueueFallbackAction};
 use crate::config::RouteResult;
+use crate::proxy::call::q850_reason_value;
 use crate::proxy::routing::matcher::{RouteResourceLookup, match_invite};
 use crate::proxy::routing::{
     DestConfig, MatchConditions, QueueDialMode, RejectConfig, RewriteRules, RouteAction,
@@ -86,9 +87,9 @@ fn test_trunk_incoming_user_prefix_plain() {
             .unwrap()
     );
     assert!(
-        !trunk
+        trunk
             .matches_incoming_user_prefixes(Some("+853123456"), None)
-            .unwrap()
+            .is_err()
     );
 }
 
@@ -102,9 +103,9 @@ fn test_trunk_incoming_user_prefix_regex() {
             .unwrap()
     );
     assert!(
-        !trunk
+        trunk
             .matches_incoming_user_prefixes(None, Some("1234"))
-            .unwrap()
+            .is_err()
     );
 }
 
@@ -116,6 +117,65 @@ fn test_trunk_incoming_user_prefix_invalid_regex() {
         .matches_incoming_user_prefixes(Some("1001"), None)
         .unwrap_err();
     assert!(err.to_string().contains("invalid regex"));
+}
+
+#[test]
+fn test_trunk_incoming_user_prefix_mismatch_q850_reason_format() {
+    let mut trunk = TrunkConfig::default();
+    trunk.incoming_from_user_prefix = Some("+852".to_string());
+    trunk.incoming_to_user_prefix = Some("601285".to_string());
+
+    // Test from_user mismatch
+    let result = trunk.matches_incoming_user_prefixes(Some("+853123456"), None);
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    let reason = q850_reason_value(&StatusCode::Forbidden, Some(&err.to_string()));
+    assert!(
+        reason.starts_with("Q.850;cause=21;text="),
+        "reason should be Q.850 format with cause 21, got: {}",
+        reason
+    );
+    assert!(
+        reason.contains("from_user"),
+        "reason should mention field name, got: {}",
+        reason
+    );
+    assert!(
+        reason.contains("expected '+852'"),
+        "reason should show expected value, got: {}",
+        reason
+    );
+    assert!(
+        reason.contains("got '+853123456'"),
+        "reason should show actual value, got: {}",
+        reason
+    );
+
+    // Test to_user mismatch
+    let result = trunk.matches_incoming_user_prefixes(Some("+852123456"), Some("601286"));
+    assert!(result.is_err());
+    let err = result.unwrap_err();
+    let reason = q850_reason_value(&StatusCode::Forbidden, Some(&err.to_string()));
+    assert!(
+        reason.starts_with("Q.850;cause=21;text="),
+        "reason should be Q.850 format with cause 21, got: {}",
+        reason
+    );
+    assert!(
+        reason.contains("to_user"),
+        "reason should mention field name, got: {}",
+        reason
+    );
+    assert!(
+        reason.contains("expected '601285'"),
+        "reason should show expected value, got: {}",
+        reason
+    );
+    assert!(
+        reason.contains("got '601286'"),
+        "reason should show actual value, got: {}",
+        reason
+    );
 }
 
 #[tokio::test]
@@ -1088,6 +1148,7 @@ async fn test_match_invite_rewrite_from_host_uses_match_capture() {
         "trunk1".to_string(),
         TrunkConfig {
             dest: "sip:gateway.rustpbx.com:5060".to_string(),
+            rewrite_hostport: false, // Don't override route rewrite rules
             ..Default::default()
         },
     );
@@ -1508,4 +1569,544 @@ fn test_route_action_get_action_type_application() {
         action_forward.get_action_type(),
         crate::proxy::routing::ActionType::Forward
     );
+}
+
+#[tokio::test]
+async fn test_apply_trunk_config_rewrites_callee_host() {
+    use crate::proxy::routing::matcher::apply_trunk_config;
+
+    let mut option = create_invite_option(
+        "sip:alice@rustpbx.com",
+        "sip:1001@rustpbx.com", // Original callee host is rustpbx.com
+        None,
+        Some("application/sdp"),
+        None,
+    );
+
+    let trunk = TrunkConfig {
+        dest: "sip:carrier.gateway.com:5060".to_string(),
+        username: Some("user".to_string()),
+        password: Some("pass".to_string()),
+        ..Default::default()
+    };
+
+    // Apply trunk config
+    apply_trunk_config(&mut option, &trunk).unwrap();
+
+    // Verify callee host is rewritten to trunk's dest
+    assert_eq!(
+        option.callee.host().to_string(),
+        "carrier.gateway.com",
+        "callee host should be rewritten to trunk's dest host"
+    );
+
+    // Verify callee port is preserved from trunk's dest
+    assert_eq!(
+        option.callee.host_with_port.port,
+        Some(5060.into()),
+        "callee port should be set from trunk's dest port"
+    );
+
+    // Verify destination is set
+    assert!(option.destination.is_some(), "destination should be set");
+    let dest = option.destination.unwrap();
+    assert_eq!(
+        dest.addr.host.to_string(),
+        "carrier.gateway.com",
+        "destination host should match trunk's dest"
+    );
+
+    // Verify credentials are set
+    assert!(option.credential.is_some(), "credential should be set");
+    let cred = option.credential.unwrap();
+    assert_eq!(cred.username, "user");
+    assert_eq!(cred.password, "pass");
+}
+
+#[tokio::test]
+async fn test_apply_trunk_config_with_ipv6_dest() {
+    use crate::proxy::routing::matcher::apply_trunk_config;
+
+    let mut option = create_invite_option(
+        "sip:alice@rustpbx.com",
+        "sip:1001@rustpbx.com",
+        None,
+        Some("application/sdp"),
+        None,
+    );
+
+    // Use a hostname that resolves to IPv6 instead of raw IPv6 literal
+    let trunk = TrunkConfig {
+        dest: "sip:ipv6.carrier.com:5060".to_string(),
+        ..Default::default()
+    };
+
+    apply_trunk_config(&mut option, &trunk).unwrap();
+
+    assert_eq!(
+        option.callee.host().to_string(),
+        "ipv6.carrier.com",
+        "callee host should be rewritten to trunk dest"
+    );
+}
+
+#[tokio::test]
+async fn test_apply_trunk_config_preserves_callee_user() {
+    use crate::proxy::routing::matcher::apply_trunk_config;
+
+    let mut option = create_invite_option(
+        "sip:alice@rustpbx.com",
+        "sip:1001@rustpbx.com",
+        None,
+        Some("application/sdp"),
+        None,
+    );
+
+    let trunk = TrunkConfig {
+        dest: "sip:carrier.com:5060".to_string(),
+        ..Default::default()
+    };
+
+    apply_trunk_config(&mut option, &trunk).unwrap();
+
+    // Verify callee user is preserved
+    assert_eq!(
+        option.callee.user().unwrap_or_default(),
+        "1001",
+        "callee user should be preserved during trunk rewrite"
+    );
+}
+
+#[tokio::test]
+async fn test_match_invite_queue_with_trunk_rewrites_callee() {
+    let routing_state = Arc::new(RoutingState::new());
+    let mut trunks = HashMap::new();
+    trunks.insert(
+        "wholesale_carrier".to_string(),
+        TrunkConfig {
+            dest: "sip:sip.carrier.com:5060".to_string(),
+            username: Some("carrier_user".to_string()),
+            password: Some("carrier_pass".to_string()),
+            ..Default::default()
+        },
+    );
+
+    // Create a queue route that uses the wholesale trunk
+    // Note: when queue has explicit targets, trunk config is NOT applied
+    // When queue has NO targets (dial_strategy is None), trunk config IS applied
+    let routes = vec![RouteRule {
+        name: "wholesale_route".to_string(),
+        priority: 100,
+        match_conditions: MatchConditions {
+            to_user: Some("^\\d+$".to_string()), // Match numeric destinations
+            ..Default::default()
+        },
+        action: RouteAction {
+            action: Some("queue".to_string()),
+            queue: Some("sales".to_string()),
+            dest: Some(DestConfig::Single("wholesale_carrier".to_string())),
+            ..Default::default()
+        },
+        ..Default::default()
+    }];
+
+    // Queue config WITHOUT targets - will use trunk from route's dest
+    let mut lookup = TestResourceLookup::default();
+    lookup.add_queue(
+        "sales",
+        RouteQueueConfig {
+            name: Some("sales".to_string()),
+            accept_immediately: true,
+            // No strategy.targets - will rely on trunk from route
+            ..Default::default()
+        },
+    );
+
+    let option = create_invite_option(
+        "sip:alice@rustpbx.com",
+        "sip:8613888888888@rustpbx.com", // Original callee has local domain
+        None,
+        Some("application/sdp"),
+        None,
+    );
+
+    let origin = create_sip_request(
+        rsip::Method::Invite,
+        "sip:8613888888888@rustpbx.com",
+        "Alice <sip:alice@rustpbx.com>",
+        "Bob <sip:8613888888888@rustpbx.com>",
+        "test-call-id@rustpbx.com",
+        1,
+        None,
+    );
+
+    let result = match_invite(
+        Some(&trunks),
+        Some(&routes),
+        Some(&lookup),
+        option,
+        &origin,
+        None,
+        routing_state,
+        &DialDirection::Outbound,
+    )
+    .await
+    .unwrap();
+
+    match result {
+        RouteResult::Queue { option, .. } => {
+            // Verify callee is rewritten to trunk's dest
+            assert_eq!(
+                option.callee.host().to_string(),
+                "sip.carrier.com",
+                "callee host should be rewritten to trunk's sip_server"
+            );
+
+            // Verify destination is set (this triggers skip of same_realm check)
+            assert!(
+                option.destination.is_some(),
+                "destination should be set for trunk routing"
+            );
+
+            // Verify credentials are set from trunk
+            assert!(
+                option.credential.is_some(),
+                "credential should be set from trunk config"
+            );
+
+            // Verify callee user is preserved
+            assert_eq!(
+                option.callee.user().unwrap_or_default(),
+                "8613888888888",
+                "callee user should be preserved"
+            );
+        }
+        _ => panic!("Expected Queue result, got non-queue result"),
+    }
+}
+
+#[tokio::test]
+async fn test_match_invite_forward_with_trunk_rewrites_callee() {
+    let routing_state = Arc::new(RoutingState::new());
+    let mut trunks = HashMap::new();
+    trunks.insert(
+        "carrier1".to_string(),
+        TrunkConfig {
+            dest: "sip:10.0.0.1:5060".to_string(),
+            username: Some("user1".to_string()),
+            password: Some("pass1".to_string()),
+            ..Default::default()
+        },
+    );
+
+    let routes = vec![RouteRule {
+        name: "route_to_carrier".to_string(),
+        priority: 100,
+        match_conditions: MatchConditions {
+            to_user: Some("^9\\d+$".to_string()), // Match outbound dialing prefix
+            ..Default::default()
+        },
+        action: RouteAction {
+            dest: Some(DestConfig::Single("carrier1".to_string())),
+            select: "rr".to_string(),
+            ..Default::default()
+        },
+        ..Default::default()
+    }];
+
+    let option = create_invite_option(
+        "sip:alice@rustpbx.com",
+        "sip:91234567890@rustpbx.com", // Local domain, but should route to trunk
+        None,
+        Some("application/sdp"),
+        None,
+    );
+
+    let origin = create_sip_request(
+        rsip::Method::Invite,
+        "sip:91234567890@rustpbx.com",
+        "Alice <sip:alice@rustpbx.com>",
+        "Bob <sip:91234567890@rustpbx.com>",
+        "test-call-id@rustpbx.com",
+        1,
+        None,
+    );
+
+    let result = match_invite(
+        Some(&trunks),
+        Some(&routes),
+        None,
+        option,
+        &origin,
+        None,
+        routing_state,
+        &DialDirection::Outbound,
+    )
+    .await
+    .unwrap();
+
+    match result {
+        RouteResult::Forward(option, _) => {
+            // Verify callee is rewritten to trunk's dest
+            assert_eq!(
+                option.callee.host().to_string(),
+                "10.0.0.1",
+                "callee host should be rewritten to trunk's IP"
+            );
+
+            // Verify port is set correctly
+            assert_eq!(
+                option.callee.host_with_port.port,
+                Some(5060.into()),
+                "callee port should be set from trunk's dest"
+            );
+
+            // Verify destination is set
+            assert!(option.destination.is_some(), "destination should be set");
+
+            // Verify callee user is preserved
+            assert_eq!(
+                option.callee.user().unwrap_or_default(),
+                "91234567890",
+                "callee user should be preserved during trunk rewrite"
+            );
+        }
+        _ => panic!("Expected Forward result"),
+    }
+}
+
+#[tokio::test]
+async fn test_trunk_transport_preserved_in_destination() {
+    use crate::proxy::routing::matcher::apply_trunk_config;
+
+    let mut option = create_invite_option(
+        "sip:alice@rustpbx.com",
+        "sip:1001@rustpbx.com",
+        None,
+        Some("application/sdp"),
+        None,
+    );
+
+    // Test TLS transport
+    let trunk_tls = TrunkConfig {
+        dest: "sip:secure.carrier.com:5061".to_string(),
+        transport: Some("tls".to_string()),
+        ..Default::default()
+    };
+
+    apply_trunk_config(&mut option, &trunk_tls).unwrap();
+
+    let dest = option.destination.unwrap();
+    assert_eq!(dest.r#type, Some(rsip::transport::Transport::Tls));
+}
+
+#[test]
+fn test_apply_trunk_config_adds_p_asserted_identity() {
+    use crate::proxy::routing::matcher::apply_trunk_config;
+
+    let mut option = create_invite_option(
+        "sip:alice@rustpbx.com",
+        "sip:1001@rustpbx.com",
+        None,
+        Some("application/sdp"),
+        None,
+    );
+
+    let trunk = TrunkConfig {
+        dest: "sip:carrier.com:5060".to_string(),
+        username: Some("auth_user".to_string()),
+        password: Some("auth_pass".to_string()),
+        ..Default::default()
+    };
+
+    apply_trunk_config(&mut option, &trunk).unwrap();
+
+    // Verify P-Asserted-Identity header is added when username is present
+    assert!(option.headers.is_some());
+    let headers = option.headers.unwrap();
+
+    let has_pai = headers.iter().any(|h| {
+        if let rsip::Header::Other(name, value) = h {
+            name.to_lowercase() == "p-asserted-identity" && value.contains("sip:alice@rustpbx.com")
+        } else {
+            false
+        }
+    });
+
+    assert!(
+        has_pai,
+        "P-Asserted-Identity header should be added when trunk has username"
+    );
+}
+
+// ============================================================================
+// rewrite_hostport tests
+// ============================================================================
+
+#[tokio::test]
+async fn test_apply_trunk_config_rewrite_hostport_true() {
+    use crate::proxy::routing::matcher::apply_trunk_config;
+
+    let mut option = create_invite_option(
+        "sip:alice@original.com",
+        "sip:1001@original.com:5060", // Original callee host
+        None,
+        Some("application/sdp"),
+        None,
+    );
+
+    // trunk with rewrite_hostport = true (default)
+    let trunk = TrunkConfig {
+        dest: "sip:carrier.gateway.com:5080".to_string(),
+        rewrite_hostport: true,
+        ..Default::default()
+    };
+
+    apply_trunk_config(&mut option, &trunk).unwrap();
+
+    // Verify callee host is rewritten to trunk's dest
+    assert_eq!(
+        option.callee.host().to_string(),
+        "carrier.gateway.com",
+        "callee host should be rewritten when rewrite_hostport is true"
+    );
+    assert_eq!(
+        option.callee.host_with_port.port,
+        Some(5080.into()),
+        "callee port should be rewritten when rewrite_hostport is true"
+    );
+
+    // Verify caller host is also rewritten to trunk's dest
+    assert_eq!(
+        option.caller.host().to_string(),
+        "carrier.gateway.com",
+        "caller host should be rewritten when rewrite_hostport is true"
+    );
+    assert_eq!(
+        option.caller.host_with_port.port,
+        Some(5080.into()),
+        "caller port should be rewritten when rewrite_hostport is true"
+    );
+
+    // Verify destination is still set
+    assert!(option.destination.is_some());
+}
+
+#[tokio::test]
+async fn test_apply_trunk_config_rewrite_hostport_false() {
+    use crate::proxy::routing::matcher::apply_trunk_config;
+
+    let mut option = create_invite_option(
+        "sip:alice@original.com",
+        "sip:1001@original.com:5060", // Original callee host
+        None,
+        Some("application/sdp"),
+        None,
+    );
+
+    // trunk with rewrite_hostport = false
+    let trunk = TrunkConfig {
+        dest: "sip:carrier.gateway.com:5080".to_string(),
+        rewrite_hostport: false,
+        ..Default::default()
+    };
+
+    apply_trunk_config(&mut option, &trunk).unwrap();
+
+    // Verify callee host is NOT rewritten
+    assert_eq!(
+        option.callee.host().to_string(),
+        "original.com",
+        "callee host should NOT be rewritten when rewrite_hostport is false"
+    );
+    assert_eq!(
+        option.callee.host_with_port.port,
+        Some(5060.into()),
+        "callee port should NOT be rewritten when rewrite_hostport is false"
+    );
+
+    // Verify caller host is also NOT rewritten
+    assert_eq!(
+        option.caller.host().to_string(),
+        "original.com",
+        "caller host should NOT be rewritten when rewrite_hostport is false"
+    );
+    assert_eq!(
+        option.caller.host_with_port.port,
+        None,
+        "caller port should NOT be rewritten when rewrite_hostport is false"
+    );
+
+    // Verify destination is still set to trunk's dest
+    assert!(option.destination.is_some());
+    let dest = option.destination.unwrap();
+    assert_eq!(
+        dest.addr.host.to_string(),
+        "carrier.gateway.com",
+        "destination should still be set to trunk's dest"
+    );
+}
+
+#[tokio::test]
+async fn test_apply_trunk_config_rewrite_hostport_default() {
+    use crate::proxy::routing::matcher::apply_trunk_config;
+
+    let mut option = create_invite_option(
+        "sip:alice@original.com",
+        "sip:1001@original.com:5060",
+        None,
+        Some("application/sdp"),
+        None,
+    );
+
+    // trunk with default TrunkConfig (rewrite_hostport should default to true)
+    let trunk = TrunkConfig {
+        dest: "sip:carrier.gateway.com:5080".to_string(),
+        ..Default::default()
+    };
+
+    apply_trunk_config(&mut option, &trunk).unwrap();
+
+    // Verify callee host is rewritten (default behavior)
+    assert_eq!(
+        option.callee.host().to_string(),
+        "carrier.gateway.com",
+        "callee host should be rewritten by default (rewrite_hostport defaults to true)"
+    );
+}
+
+#[tokio::test]
+async fn test_apply_trunk_config_rewrite_hostport_preserves_user() {
+    use crate::proxy::routing::matcher::apply_trunk_config;
+
+    // Test that callee user is preserved regardless of rewrite_hostport setting
+    let test_cases = vec![
+        (true, "callee user should be preserved with rewrite_hostport=true"),
+        (false, "callee user should be preserved with rewrite_hostport=false"),
+    ];
+
+    for (rewrite, msg) in test_cases {
+        let mut option = create_invite_option(
+            "sip:alice@original.com",
+            "sip:12345@original.com:5060",
+            None,
+            Some("application/sdp"),
+            None,
+        );
+
+        let trunk = TrunkConfig {
+            dest: "sip:carrier.com:5080".to_string(),
+            rewrite_hostport: rewrite,
+            ..Default::default()
+        };
+
+        apply_trunk_config(&mut option, &trunk).unwrap();
+
+        assert_eq!(
+            option.callee.user().unwrap_or_default(),
+            "12345",
+            "{}",
+            msg
+        );
+    }
 }

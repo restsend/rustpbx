@@ -849,6 +849,18 @@ reg_expires = "Expires"
 reg_last_register = "Last register"
 reg_error = "Error"
 
+# Circuit Breaker section
+section_circuit_breaker = "Circuit Breaker"
+cb_enabled = "Enabled"
+cb_disabled = "Disabled"
+cb_state = "State"
+cb_state_closed = "Closed"
+cb_state_open = "Open"
+cb_state_half_open = "Half-Open"
+cb_auto_recover = "Auto-recover in"
+cb_failures = "Failures"
+btn_reset = "Reset"
+
 # Form footer
 save_hint = "Changes are saved via the API without page reloads."
 btn_cancel = "Cancel"
