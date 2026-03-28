@@ -28,11 +28,11 @@ use crate::call::sip::{DialogStateReceiverGuard, ServerDialogGuard};
 use crate::callrecord::{CallRecordHangupMessage, CallRecordHangupReason, CallRecordSender};
 use crate::config::MediaProxyMode;
 use crate::media::bridge::{DirectionConfig, MediaBridge};
-use crate::media::endpoint::{MediaPeer as EndpointMediaPeer, PeerOutput};
-use crate::media::source::FileOutputProvider;
+use crate::media::endpoint::{PeerInput, PeerOutput, receiver_track_for_pc};
+use crate::media::source::FileInput;
 use crate::media::mixer::MediaMixer;
 use crate::media::negotiate::{CodecInfo, MediaNegotiator};
-use crate::media::recorder::{Leg as RecorderLeg, Recorder};
+use crate::media::recorder::Recorder;
 use crate::media::{RtpTrackBuilder, Track};
 use crate::proxy::proxy_call::{
     media_peer::{MediaPeer, VoiceEnginePeer},
@@ -1036,17 +1036,21 @@ impl SipSession {
         // Build headers
         let headers: Vec<rsip::Header> = vec![rsip::headers::MaxForwards::from(70u32).into()];
 
-        // Determine which SDP offer to use for callee
-        // If caller and callee have different codec requirements (e.g., WebRTC vs RTP),
-        // we need to convert SDP using the SDP bridge and create media bridge
+        // Determine which SDP offer to use for callee.
+        // In anchored mode, the PBX always offers its own callee leg so media can
+        // be bridged through MediaBridge after establishment. In bypass mode, mixed
+        // RTP/WebRTC calls still use SDP conversion directly between the legs.
         let caller_is_webrtc = self.is_caller_webrtc();
         let callee_is_webrtc = target.supports_webrtc;
+        let media_proxy_enabled = self.media_profile.path == MediaPathMode::Anchored;
 
         // Create callee track with appropriate media handling
         let callee_sdp = self.create_callee_track(callee_is_webrtc).await.ok();
         self.callee_offer = callee_sdp.clone();
 
-        let offer = if caller_is_webrtc && !callee_is_webrtc {
+        let offer = if media_proxy_enabled {
+            self.callee_offer.clone().map(|s| s.into_bytes())
+        } else if caller_is_webrtc && !callee_is_webrtc {
             // WebRTC caller -> RTP callee: convert offer to RTP format
             if let Some(ref caller_sdp) = self.caller_offer {
                 match crate::media::sdp_bridge::SdpBridge::webrtc_to_rtp(caller_sdp) {
@@ -1197,63 +1201,10 @@ impl SipSession {
             }
         });
 
-        // SDP Answer bridge: convert callee's answer to caller's format if needed
-        // Also handle media bridge if active
-        let bridged_sdp = if caller_is_webrtc && !callee_is_webrtc {
-            // Callee is RTP but caller is WebRTC
-            if let Some(ref sdp) = callee_sdp {
-                // SDP conversion for caller
-                debug!(session_id = %self.context.session_id, "SDP bridge: converting RTP Answer -> WebRTC Answer");
-
-                // Generate dynamic ICE credentials and DTLS info for the bridge
-                let ice_creds = crate::media::sdp_bridge::IceCredentials::generate();
-                let dtls_info = crate::media::sdp_bridge::DtlsInfo::generate_placeholder();
-
-                debug!(
-                    session_id = %self.context.session_id,
-                    ice_ufrag = %ice_creds.ufrag,
-                    fingerprint = %dtls_info.fingerprint[..16],
-                    "SDP bridge: Generated WebRTC credentials for Answer"
-                );
-
-                match crate::media::sdp_bridge::SdpBridge::rtp_to_webrtc(
-                    sdp,
-                    &dtls_info.fingerprint,
-                    &ice_creds.ufrag,
-                    &ice_creds.pwd,
-                ) {
-                    Ok(webrtc_sdp) => {
-                        debug!(session_id = %self.context.session_id, "SDP bridge: RTP -> WebRTC Answer conversion successful");
-                        Some(webrtc_sdp)
-                    }
-                    Err(e) => {
-                        warn!(session_id = %self.context.session_id, error = %e, "SDP bridge: RTP -> WebRTC Answer conversion failed, using original");
-                        callee_sdp.clone()
-                    }
-                }
-            } else {
-                callee_sdp.clone()
-            }
-        } else if !caller_is_webrtc && callee_is_webrtc {
-            // Callee is WebRTC but caller is RTP
-            if let Some(ref sdp) = callee_sdp {
-                // SDP conversion for caller
-                debug!(session_id = %self.context.session_id, "SDP bridge: converting WebRTC Answer -> RTP Answer");
-                match crate::media::sdp_bridge::SdpBridge::webrtc_to_rtp(sdp) {
-                    Ok(rtp_sdp) => {
-                        debug!(session_id = %self.context.session_id, "SDP bridge: WebRTC -> RTP Answer conversion successful");
-                        Some(rtp_sdp)
-                    }
-                    Err(e) => {
-                        warn!(session_id = %self.context.session_id, error = %e, "SDP bridge: WebRTC -> RTP Answer conversion failed, using original");
-                        callee_sdp.clone()
-                    }
-                }
-            } else {
-                callee_sdp.clone()
-            }
-        } else if self.media_profile.path == MediaPathMode::Anchored {
-            // Same transport type with anchored media — PBX must stay in the media path.
+        // In anchored mode, both caller and callee negotiate against PBX-owned
+        // tracks regardless of transport type. Bypass mode keeps the direct RTP/WebRTC
+        // SDP conversion behavior.
+        let bridged_sdp = if self.media_profile.path == MediaPathMode::Anchored {
             // 1. Feed callee's answer back to the callee track so its PeerConnection
             //    knows the callee's RTP address/port.
             if let Some(ref sdp) = callee_sdp {
@@ -1313,6 +1264,56 @@ impl SipSession {
             } else {
                 callee_sdp.clone()
             }
+        } else if caller_is_webrtc && !callee_is_webrtc {
+            // Callee is RTP but caller is WebRTC
+            if let Some(ref sdp) = callee_sdp {
+                debug!(session_id = %self.context.session_id, "SDP bridge: converting RTP Answer -> WebRTC Answer");
+
+                let ice_creds = crate::media::sdp_bridge::IceCredentials::generate();
+                let dtls_info = crate::media::sdp_bridge::DtlsInfo::generate_placeholder();
+
+                debug!(
+                    session_id = %self.context.session_id,
+                    ice_ufrag = %ice_creds.ufrag,
+                    fingerprint = %dtls_info.fingerprint[..16],
+                    "SDP bridge: Generated WebRTC credentials for Answer"
+                );
+
+                match crate::media::sdp_bridge::SdpBridge::rtp_to_webrtc(
+                    sdp,
+                    &dtls_info.fingerprint,
+                    &ice_creds.ufrag,
+                    &ice_creds.pwd,
+                ) {
+                    Ok(webrtc_sdp) => {
+                        debug!(session_id = %self.context.session_id, "SDP bridge: RTP -> WebRTC Answer conversion successful");
+                        Some(webrtc_sdp)
+                    }
+                    Err(e) => {
+                        warn!(session_id = %self.context.session_id, error = %e, "SDP bridge: RTP -> WebRTC Answer conversion failed, using original");
+                        callee_sdp.clone()
+                    }
+                }
+            } else {
+                callee_sdp.clone()
+            }
+        } else if !caller_is_webrtc && callee_is_webrtc {
+            // Callee is WebRTC but caller is RTP
+            if let Some(ref sdp) = callee_sdp {
+                debug!(session_id = %self.context.session_id, "SDP bridge: converting WebRTC Answer -> RTP Answer");
+                match crate::media::sdp_bridge::SdpBridge::webrtc_to_rtp(sdp) {
+                    Ok(rtp_sdp) => {
+                        debug!(session_id = %self.context.session_id, "SDP bridge: WebRTC -> RTP Answer conversion successful");
+                        Some(rtp_sdp)
+                    }
+                    Err(e) => {
+                        warn!(session_id = %self.context.session_id, error = %e, "SDP bridge: WebRTC -> RTP Answer conversion failed, using original");
+                        callee_sdp.clone()
+                    }
+                }
+            } else {
+                callee_sdp.clone()
+            }
         } else {
             // Bypass mode — pass callee's SDP directly to caller
             callee_sdp.clone()
@@ -1340,8 +1341,8 @@ impl SipSession {
 
         self.update_snapshot_cache();
 
-        // Start media forwarding for anchored same-type calls.
-        // Mixed WebRTC ↔ RTP transport bridging is handled separately.
+        // Start anchored media forwarding for all transport combinations through
+        // the same MediaBridge abstraction.
         if self.media_profile.path == MediaPathMode::Anchored && self.media_bridge.is_none() {
             self.start_anchored_media_forwarding(caller_answer.as_deref(), callee_sdp.as_deref())
                 .await;
@@ -1418,7 +1419,6 @@ impl SipSession {
         match Self::build_bridge(
             &caller_pc, &callee_pc,
             caller_output, callee_output,
-            &self.recorder,
             &caller_profile, &callee_profile,
             &session_id,
         ) {
@@ -1448,56 +1448,21 @@ impl SipSession {
         None
     }
 
-    fn receiver_track_for_pc(
-        source_pc: &rustrtc::PeerConnection,
-    ) -> Result<Arc<dyn rustrtc::media::MediaStreamTrack>> {
-        let source_transceiver = source_pc
-            .get_transceivers()
-            .into_iter()
-            .find(|t| t.kind() == rustrtc::MediaKind::Audio)
-            .ok_or_else(|| anyhow!("no audio transceiver on source pc"))?;
-
-        let receiver = source_transceiver
-            .receiver()
-            .ok_or_else(|| anyhow!("no receiver on source audio transceiver"))?;
-
-        Ok(receiver.track())
-    }
-
     fn build_bridge(
         caller_pc: &rustrtc::PeerConnection,
         callee_pc: &rustrtc::PeerConnection,
         caller_output: Arc<PeerOutput>,
         callee_output: Arc<PeerOutput>,
-        recorder: &Arc<Mutex<Option<Recorder>>>,
         caller_profile: &crate::media::negotiate::NegotiatedLegProfile,
         callee_profile: &crate::media::negotiate::NegotiatedLegProfile,
         session_id: &str,
     ) -> Result<MediaBridge> {
-        let caller_track = Self::receiver_track_for_pc(caller_pc)?;
-        let callee_track = Self::receiver_track_for_pc(callee_pc)?;
-
-        let mut caller_peer = EndpointMediaPeer::new(caller_track, caller_output);
-        let mut callee_peer = EndpointMediaPeer::new(callee_track, callee_output);
-
-        caller_peer.set_recorder(
-            recorder.clone(),
-            RecorderLeg::A,
-            caller_profile.dtmf.as_ref().map(|d| d.payload_type),
-            caller_profile.dtmf.as_ref().map(|d| d.clock_rate),
-            caller_profile.audio.as_ref().map(|a| a.codec),
-        );
-        callee_peer.set_recorder(
-            recorder.clone(),
-            RecorderLeg::B,
-            callee_profile.dtmf.as_ref().map(|d| d.payload_type),
-            callee_profile.dtmf.as_ref().map(|d| d.clock_rate),
-            callee_profile.audio.as_ref().map(|a| a.codec),
-        );
+        let caller_input = PeerInput::from_track(receiver_track_for_pc(caller_pc)?);
+        let callee_input = PeerInput::from_track(receiver_track_for_pc(callee_pc)?);
 
         debug!(session_id = %session_id, "Built bidirectional anchored media bridge");
 
-        Ok(MediaBridge::builder(caller_peer, callee_peer)
+        Ok(MediaBridge::builder(caller_input, caller_output, callee_input, callee_output)
             .caller_to_callee(DirectionConfig::from_profiles(caller_profile, callee_profile))
             .callee_to_caller(DirectionConfig::from_profiles(callee_profile, caller_profile))
             .build())
@@ -1624,7 +1589,7 @@ impl SipSession {
         let output = self.ensure_leg_output(target).await?;
         let codec_info = self.negotiated_playback_codec(target).await?;
         let completion_notify = Arc::new(tokio::sync::Notify::new());
-        let source = FileOutputProvider::new(
+        let input = FileInput::new(
             audio_file.clone(),
             loop_playback,
             codec_info,
@@ -1655,15 +1620,11 @@ impl SipSession {
             }));
         });
 
-        output.install_file_provider(source);
+        output.set_input(PeerInput::from_file(input));
         Ok(completion_notify)
     }
 
-    /// Create callee track with optional WebRTC ↔ RTP SDP conversion.
-    ///
-    /// The media-path refactor currently only wires the same-transport anchored
-    /// bridge through `MediaBridge`. Mixed WebRTC ↔ RTP media bridging still
-    /// needs to be reintroduced on top of the new source-centric abstraction.
+    /// Create the callee-side PBX track for the current transport mode.
     pub async fn create_callee_track(&mut self, callee_is_webrtc: bool) -> Result<String> {
         let track_id = Self::CALLEE_TRACK_ID.to_string();
 
@@ -1679,25 +1640,14 @@ impl SipSession {
             "Creating callee track"
         );
 
-        // Check if media proxy is enabled (i.e., media should anchor at PBX)
         let media_proxy_enabled = self.media_profile.path == MediaPathMode::Anchored;
 
-        // Check if bridging is needed for different transport types
-        let transport_bridge_needed = caller_is_webrtc != callee_is_webrtc;
-
-        let need_transport_bridge = transport_bridge_needed;
-
-        if need_transport_bridge {
-            Err(anyhow!(
-                "WebRTC ↔ RTP media bridge is not wired to the new source-centric abstraction yet"
-            ))
-        } else if media_proxy_enabled {
-            // Same transport type with media proxy enabled (anchored media)
+        if media_proxy_enabled {
             info!(
                 session_id = %self.id,
                 caller_is_webrtc = caller_is_webrtc,
                 callee_is_webrtc = callee_is_webrtc,
-                "Media proxy enabled for same-type transport (anchored media)"
+                "Media proxy enabled for anchored media"
             );
 
             let mut track_builder = RtpTrackBuilder::new(track_id.clone())
@@ -1989,7 +1939,7 @@ impl SipSession {
         for playback in playbacks {
             self.emit_playback_complete(playback.track_id, true);
             if let Ok(output) = self.ensure_leg_output(playback.target).await {
-                output.clear_provider();
+                output.clear_input();
             }
         }
 
@@ -2988,7 +2938,7 @@ impl SipSession {
             if let Some(state) = self.playback_tracks.remove(&key) {
                 self.emit_playback_complete(state.track_id.clone(), true);
                 let output = self.ensure_leg_output(state.target).await?;
-                output.clear_provider();
+                output.clear_input();
                 info!(track_id = %state.track_id, target = %key, "Playback stopped");
             }
         } else {
@@ -2996,7 +2946,7 @@ impl SipSession {
             for (key, state) in playbacks {
                 self.emit_playback_complete(state.track_id.clone(), true);
                 let output = self.ensure_leg_output(state.target).await?;
-                output.clear_provider();
+                output.clear_input();
                 info!(track_id = %state.track_id, target = %key, "Playback stopped");
             }
         }

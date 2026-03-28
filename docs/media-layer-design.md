@@ -4,10 +4,8 @@ This document describes the current media-layer design after the peer/input/outp
 
 It focuses on:
 
-- the bidirectional `MediaPeer` abstraction for SIP/WebRTC legs
-- `PeerInput` and `PeerOutput` as the two first-class poll-based sides
-- `OutputProvider` as the outbound media producer abstraction
-- the current anchored bridge shape
+- `PeerInput` and `PeerOutput` as the two first-class poll-based abstractions
+- `MediaBridge` as the thin bidirectional coordinator
 - playback on the same output model
 - what is still deferred
 
@@ -16,8 +14,8 @@ It focuses on:
 The current media layer has three distinct shapes:
 
 1. Anchored same-transport bridge
-   - Core provider types in [`src/media/source.rs`](../src/media/source.rs)
-   - Peer abstraction in [`src/media/endpoint.rs`](../src/media/endpoint.rs)
+   - Core source types in [`src/media/source.rs`](../src/media/source.rs)
+   - Peer abstractions in [`src/media/endpoint.rs`](../src/media/endpoint.rs)
    - Bridge coordinator in [`src/media/bridge.rs`](../src/media/bridge.rs)
    - This is the current design direction
 
@@ -39,193 +37,165 @@ So the system is still hybrid:
 
 - keep the sender-poll model
 - make peer direction explicit
-- model each media participant as one bidirectional peer
 - keep outbound switching at the peer output boundary
-- keep per-direction media adaptation with the provider built from peer input
+- keep per-direction media adaptation with the input adapted for the target output
 - avoid generic stage pipelines as the design center
 
 ## File Layout
 
 - `src/media/source.rs`
-  - `OutputProvider`
-  - `PeerInputProvider`
-  - `FileOutputProvider`
-  - `IdleOutputProvider`
-  - per-direction mapping/transcode config types
+  - `PeerInputSource` trait
+  - `MappedTrackInput` — per-direction PT admission, DTMF remap, transcode
+  - `FileInput` — self-paced file playback
+  - `IdleInput` — detached/silent source
+  - per-direction mapping/transcode config types (`AudioMapping`, `DtmfMapping`, `TranscodeSpec`)
 
 - `src/media/endpoint.rs`
-  - `PeerInput`
-  - `PeerOutput`
-  - media-layer `MediaPeer`
-  - output RTP continuity state
+  - `PeerInput` — inbound media abstraction (track or source)
+  - `PeerOutput` — outbound media with switchable input and RTP continuity
+  - `OutputRtpState` — outbound RTP timestamp/sequence rewriting
+  - `receiver_track_for_pc()` — helper to extract receiver track from a PeerConnection
 
 - `src/media/bridge.rs`
-  - `DirectionConfig`
-  - `MediaBridge`
+  - `DirectionConfig` — per-direction transform config
+  - `MediaBridge` — bidirectional bridge coordinator
 
 ## Core Concepts
 
-### `MediaPeer`
-
-`MediaPeer` is the top-level media object for one call leg.
-
-It owns:
-
-- one `PeerInput`
-- one `PeerOutput`
-
-Meaning:
-
-- `PeerInput` is media coming from the remote side into the system
-- `PeerOutput` is media going from the system to the remote side
-
-This is the target vocabulary for SIP/WebRTC peers in the current media layer.
-
 ### `PeerInput`
 
-`PeerInput` is the inbound side of a media peer.
+`PeerInput` is the inbound media abstraction for one call leg.
 
-Current shape:
-
-- wraps one inbound `Arc<dyn MediaStreamTrack>`
-- is single-consumer in intent
-- can build a direction-specific `OutputProvider` for some other peer’s output
+It wraps either:
+- an `Arc<dyn MediaStreamTrack>` (real inbound RTP from a peer connection)
+- a `Box<dyn PeerInputSource>` (synthetic source like file playback or idle)
 
 Key method:
 
 ```rust
-provider_for_output(audio_mapping, dtmf_mapping, transcode) -> Box<dyn OutputProvider>
+pub fn adapted_for_output(
+    &self,
+    audio_mapping: Option<AudioMapping>,
+    dtmf_mapping: Option<DtmfMapping>,
+    transcode: Option<TranscodeSpec>,
+) -> PeerInput
 ```
 
-That method is where per-direction adaptation is currently attached.
+This builds a new `PeerInput` with per-direction adaptation (PT remapping, DTMF handling, transcoding) suitable for feeding into another peer's output.
+
+Factory methods:
+- `PeerInput::from_track(track)` — wrap an inbound media track
+- `PeerInput::from_source(source)` — wrap a `PeerInputSource`
+- `PeerInput::idle()` — silent/detached input
+- `PeerInput::from_file(file_input)` — file playback input
 
 ### `PeerOutput`
 
-`PeerOutput` is the outbound side of a media peer.
+`PeerOutput` is the outbound media abstraction for one call leg.
 
 Responsibilities:
 
-- stay attached to the target peer’s sender/transceiver
-- hold the current `OutputProvider`
-- allow replacement of that provider without replacing the output object
+- stay attached to the target peer's sender/transceiver
+- hold the current `PeerInput` as its active source
+- allow replacement of that input without replacing the output object
 - own outbound RTP continuity state
 
 It implements `MediaStreamTrack`, so `rustrtc::RtpSender` polls it directly.
 
-Current switching API:
+Switching API:
 
-- `install_provider(...)`
-- `install_file_provider(...)`
-- `clear_provider()`
+- `set_input(input: PeerInput)` — replace the active input
+- `clear_input()` — switch to idle
 
-Internally it uses `watch` to swap providers safely while staying sender-polled.
+Internally uses a `watch` channel to swap inputs safely while staying sender-polled.
 
-### `OutputProvider`
+Construction:
 
-`OutputProvider` is the poll-based producer that feeds `PeerOutput`.
+```rust
+PeerOutput::attach(track_id, target_pc) -> Result<Arc<PeerOutput>>
+```
+
+This finds the audio transceiver on the target PeerConnection, builds a new RtpSender with the output as its track, and attaches it.
+
+### `PeerInputSource`
+
+`PeerInputSource` is the poll-based producer trait:
 
 ```rust
 #[async_trait]
-pub trait OutputProvider: Send {
+pub trait PeerInputSource: Send {
     async fn recv(&mut self) -> MediaResult<MediaSample>;
 }
 ```
 
-Current provider kinds:
+Current implementations:
 
-- `PeerInputProvider`
-  - built from another peer’s inbound media
-  - owns PT admission, DTMF remap/drop, and optional transcoding for one direction
-
-- `FileOutputProvider`
-  - playback from file
-  - self-paced
-
-- `IdleOutputProvider`
-  - detached output state
-  - produces no media
-
-So the design-center abstraction is now:
-
-- peer input
-- peer output
-- outbound provider
-
-not generic pipeline stages.
+- `MappedTrackInput` — reads from a peer's inbound track with PT filtering, DTMF remapping, and optional transcoding
+- `FileInput` — self-paced file playback with encoder
+- `IdleInput` — waits forever (detached state)
 
 ## Bridge Model
 
-`MediaBridge` is now a thin coordinator.
+`MediaBridge` is a thin bidirectional coordinator.
 
-It owns:
+It holds:
 
-- caller `MediaPeer`
-- callee `MediaPeer`
+- caller `PeerInput` + `PeerOutput`
+- callee `PeerInput` + `PeerOutput`
 - one `DirectionConfig` for each direction
 
-Its job is only to wire:
+Its job is to wire:
 
-- caller `input()` into callee `output()`
-- callee `input()` into caller `output()`
-
-by building direction-specific `PeerInputProvider`s.
+- caller input → (adapted) → callee output
+- callee input → (adapted) → caller output
 
 Conceptually:
 
 ```text
-caller.input -> PeerInputProvider(caller->callee mapping) -> callee.output
-callee.input -> PeerInputProvider(callee->caller mapping) -> caller.output
+caller.input → adapted_for_output(caller→callee config) → callee.output
+callee.input → adapted_for_output(callee→caller config) → caller.output
 ```
 
-No generic stage chain is required in the bridge layer.
+Construction uses a builder pattern:
+
+```rust
+MediaBridge::builder(caller_input, caller_output, callee_input, callee_output)
+    .caller_to_callee(DirectionConfig::from_profiles(caller_profile, callee_profile))
+    .callee_to_caller(DirectionConfig::from_profiles(callee_profile, caller_profile))
+    .build()
+```
+
+`bridge()` wires both directions. `unbridge()` sets both outputs to idle.
 
 ## Playback Model
 
 Playback uses the same `PeerOutput` switching model as bridging.
 
-`SipSession` builds a `FileOutputProvider` and installs it on the target leg output:
+The session layer builds a `FileInput` and installs it on the target leg output:
 
 ```text
-FileOutputProvider -> PeerOutput -> RtpSender
+FileInput → PeerInput::from_file() → PeerOutput → RtpSender
 ```
 
 That means:
 
 - playback and peer bridging use the same outbound switching boundary
-- `PeerOutput` remains stable while the provider changes
+- `PeerOutput` remains stable while the input changes
 
 ## RTP Continuity
 
-Outbound RTP continuity is currently held in `PeerOutput` as `OutputRtpState`.
+Outbound RTP continuity is held in `PeerOutput` as `OutputRtpState`.
 
 Current behavior:
 
-- when `PeerOutput.recv()` gets an audio frame from the active provider
+- when `PeerOutput.recv()` gets an audio frame from the active input
 - it rewrites the frame timestamp and sequence fields before returning it
 
-This keeps continuity policy at the sender-facing boundary rather than inside:
-
-- `MediaBridge`
-- `PeerInputProvider`
-- `FileOutputProvider`
-
-This document does not claim that final wire ownership is fully solved yet relative to `rustrtc`; it only documents the current abstraction boundary in this repository.
-
-## Recorder Status
-
-Recorder behavior is not considered finished in this design.
-
-Current code still allows `PeerInput` to carry recorder metadata and wrap a provider with recording behavior, but recorder ownership is not yet the finalized abstraction boundary.
-
-So recorder should be treated as:
-
-- present in code
-- not the design center
-- still subject to later cleanup
+This keeps continuity policy at the sender-facing boundary rather than inside any source implementation.
 
 ## Negotiation Assumptions
 
-Same assumptions as before from [`src/media/negotiate.rs`](../src/media/negotiate.rs):
+Same assumptions from [`src/media/negotiate.rs`](../src/media/negotiate.rs):
 
 - the first answered audio codec is treated as the negotiated audio codec
 - one DTMF entry is selected per leg
@@ -238,18 +208,17 @@ Same assumptions as before from [`src/media/negotiate.rs`](../src/media/negotiat
 - multi-consumer input fanout
 - app/AVR peer kinds
 - RWI media peer kind
+- DTMF detection from RTP (IVR use case)
 - migration/removal of all legacy track/media-stream compatibility code
 
 ## Current Mental Model
 
 If you ignore the deferred pieces, the current media layer should be read like this:
 
-1. Every SIP/WebRTC leg is a `MediaPeer`
-2. A `MediaPeer` has:
-   - a `PeerInput`
-   - a `PeerOutput`
-3. `PeerOutput` is always polled by the transport sender
-4. `PeerInput` is used to build an `OutputProvider` for some other peer’s `PeerOutput`
-5. `MediaBridge` just connects those two sides in each direction
+1. Every SIP/WebRTC leg has a `PeerInput` and a `PeerOutput`
+2. `PeerOutput` is always polled by the transport sender
+3. `PeerInput` is adapted and set as the input on another peer's `PeerOutput`
+4. `MediaBridge` just connects those two sides in each direction
+5. File playback, idle, and peer media all use the same `PeerInput` → `PeerOutput` path
 
 That is the current abstraction center of the media layer.

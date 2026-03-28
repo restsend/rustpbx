@@ -13,7 +13,7 @@ use tokio::sync::Notify;
 use tokio::time::{Duration, Interval, MissedTickBehavior};
 
 #[async_trait]
-pub trait OutputProvider: Send {
+pub trait PeerInputSource: Send {
     async fn recv(&mut self) -> MediaResult<MediaSample>;
 }
 
@@ -42,18 +42,18 @@ pub struct TranscodeSpec {
     pub target_pt: u8,
 }
 
-/// Output provider built from a peer's inbound media.
+/// Input adapter built from a peer's inbound media track.
 ///
 /// This owns all per-direction adaptation for a single bridge direction:
 /// selected PT admission, DTMF remap/drop, and optional transcoding.
-pub struct PeerInputProvider {
+pub struct MappedTrackInput {
     track: Arc<dyn MediaStreamTrack>,
     audio_mapping: Option<AudioMapping>,
     dtmf_mapping: Option<DtmfMapping>,
     transcoder: Option<Transcoder>,
 }
 
-impl PeerInputProvider {
+impl MappedTrackInput {
     pub fn new(
         track: Arc<dyn MediaStreamTrack>,
         audio_mapping: Option<AudioMapping>,
@@ -73,7 +73,7 @@ impl PeerInputProvider {
 }
 
 #[async_trait]
-impl OutputProvider for PeerInputProvider {
+impl PeerInputSource for MappedTrackInput {
     async fn recv(&mut self) -> MediaResult<MediaSample> {
         loop {
             let mut sample = self.track.recv().await?;
@@ -123,22 +123,22 @@ impl OutputProvider for PeerInputProvider {
     }
 }
 
-pub struct IdleOutputProvider;
+pub struct IdleInput;
 
-impl IdleOutputProvider {
+impl IdleInput {
     pub fn new() -> Self {
         Self
     }
 }
 
 #[async_trait]
-impl OutputProvider for IdleOutputProvider {
+impl PeerInputSource for IdleInput {
     async fn recv(&mut self) -> MediaResult<MediaSample> {
         std::future::pending::<MediaResult<MediaSample>>().await
     }
 }
 
-pub struct FileOutputProvider {
+pub struct FileInput {
     audio_source_manager: Arc<AudioSourceManager>,
     encoder: Box<dyn audio_codec::Encoder>,
     codec_info: CodecInfo,
@@ -153,7 +153,7 @@ pub struct FileOutputProvider {
     finished: bool,
 }
 
-impl FileOutputProvider {
+impl FileInput {
     pub fn new(
         file_path: String,
         loop_playback: bool,
@@ -202,7 +202,7 @@ impl FileOutputProvider {
 }
 
 #[async_trait]
-impl OutputProvider for FileOutputProvider {
+impl PeerInputSource for FileInput {
     async fn recv(&mut self) -> MediaResult<MediaSample> {
         if self.finished {
             return std::future::pending::<MediaResult<MediaSample>>().await;
@@ -299,11 +299,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn peer_input_provider_remaps_audio_payload_type() {
+    async fn mapped_track_input_remaps_audio_payload_type() {
         let track = Arc::new(FakeTrack {
             samples: tokio::sync::Mutex::new(VecDeque::from([pcmu_frame(0, 10, 1234)])),
         });
-        let mut provider = PeerInputProvider::new(
+        let mut input = MappedTrackInput::new(
             track,
             Some(AudioMapping {
                 source_pt: 0,
@@ -317,7 +317,7 @@ mod tests {
             None,
         );
 
-        let sample = provider.recv().await.unwrap();
+        let sample = input.recv().await.unwrap();
         let MediaSample::Audio(frame) = sample else {
             panic!("expected audio sample");
         };
@@ -326,14 +326,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn peer_input_provider_drops_unselected_payload_type() {
+    async fn mapped_track_input_drops_unselected_payload_type() {
         let track = Arc::new(FakeTrack {
             samples: tokio::sync::Mutex::new(VecDeque::from([
                 pcmu_frame(111, 1, 1000),
                 pcmu_frame(0, 2, 1160),
             ])),
         });
-        let mut provider = PeerInputProvider::new(
+        let mut input = MappedTrackInput::new(
             track,
             Some(AudioMapping {
                 source_pt: 0,
@@ -347,7 +347,7 @@ mod tests {
             None,
         );
 
-        let sample = provider.recv().await.unwrap();
+        let sample = input.recv().await.unwrap();
         let MediaSample::Audio(frame) = sample else {
             panic!("expected audio sample");
         };
@@ -356,7 +356,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn peer_input_provider_rewrites_dtmf() {
+    async fn mapped_track_input_rewrites_dtmf() {
         let dtmf = MediaSample::Audio(AudioFrame {
             rtp_timestamp: 480,
             clock_rate: 48000,
@@ -370,7 +370,7 @@ mod tests {
         let track = Arc::new(FakeTrack {
             samples: tokio::sync::Mutex::new(VecDeque::from([dtmf])),
         });
-        let mut provider = PeerInputProvider::new(
+        let mut input = MappedTrackInput::new(
             track,
             None,
             Some(DtmfMapping {
@@ -382,7 +382,7 @@ mod tests {
             None,
         );
 
-        let sample = provider.recv().await.unwrap();
+        let sample = input.recv().await.unwrap();
         let MediaSample::Audio(frame) = sample else {
             panic!("expected audio sample");
         };

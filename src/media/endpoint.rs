@@ -1,41 +1,15 @@
-use crate::media::recorder::{Leg, Recorder};
 use crate::media::source::{
-    AudioMapping, DtmfMapping, FileOutputProvider, IdleOutputProvider, OutputProvider,
-    PeerInputProvider, TranscodeSpec,
+    AudioMapping, DtmfMapping, FileInput, IdleInput, MappedTrackInput, PeerInputSource,
+    TranscodeSpec,
 };
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
-use audio_codec::CodecType;
 use rustrtc::media::error::MediaResult;
 use rustrtc::media::frame::{AudioFrame, MediaKind as TrackMediaKind, MediaSample};
 use rustrtc::media::track::{MediaStreamTrack, TrackState};
 use rustrtc::{MediaKind, PeerConnection, RtpSender};
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::Arc;
 use tokio::sync::{Mutex, watch};
-
-struct RecordingOutputProvider {
-    inner: Box<dyn OutputProvider>,
-    binding: RecorderBinding,
-}
-
-#[async_trait]
-impl OutputProvider for RecordingOutputProvider {
-    async fn recv(&mut self) -> MediaResult<MediaSample> {
-        let sample = self.inner.recv().await?;
-        if let Ok(mut guard) = self.binding.recorder.lock() {
-            if let Some(recorder) = guard.as_mut() {
-                let _ = recorder.write_sample(
-                    self.binding.leg,
-                    &sample,
-                    self.binding.dtmf_pt,
-                    self.binding.dtmf_clock_rate,
-                    self.binding.codec_hint,
-                );
-            }
-        }
-        Ok(sample)
-    }
-}
 
 struct OutputRtpState {
     next_output_timestamp: u32,
@@ -95,25 +69,30 @@ impl OutputRtpState {
     }
 }
 
+/// Outbound media for one peer.
+///
+/// Contract: this is a single-producer output. Source/provider switching keeps
+/// one stable sender-facing output object while replacing the active input
+/// behind it. `PeerOutput` itself is the `MediaStreamTrack` polled by the
+/// sender on this leg.
 pub struct PeerOutput {
     id: String,
     kind: TrackMediaKind,
-    provider_tx: watch::Sender<Arc<Mutex<Box<dyn OutputProvider>>>>,
-    provider_rx: Mutex<watch::Receiver<Arc<Mutex<Box<dyn OutputProvider>>>>>,
-    rtp_state: StdMutex<OutputRtpState>,
+    input_tx: watch::Sender<Arc<PeerInput>>,
+    input_rx: Mutex<watch::Receiver<Arc<PeerInput>>>,
+    rtp_state: std::sync::Mutex<OutputRtpState>,
 }
 
 impl PeerOutput {
     pub fn attach(track_id: &str, target_pc: &PeerConnection) -> Result<Arc<Self>> {
-        let idle_provider: Arc<Mutex<Box<dyn OutputProvider>>> =
-            Arc::new(Mutex::new(Box::new(IdleOutputProvider::new())));
-        let (provider_tx, provider_rx) = watch::channel(idle_provider);
+        let idle_input = Arc::new(PeerInput::idle());
+        let (input_tx, input_rx) = watch::channel(idle_input);
         let output = Arc::new(Self {
             id: track_id.to_string(),
             kind: TrackMediaKind::Audio,
-            provider_tx,
-            provider_rx: Mutex::new(provider_rx),
-            rtp_state: StdMutex::new(OutputRtpState::default()),
+            input_tx,
+            input_rx: Mutex::new(input_rx),
+            rtp_state: std::sync::Mutex::new(OutputRtpState::default()),
         });
 
         let target_transceiver = target_pc
@@ -139,16 +118,12 @@ impl PeerOutput {
         Ok(output)
     }
 
-    pub fn install_provider(&self, provider: Box<dyn OutputProvider>) {
-        let _ = self.provider_tx.send(Arc::new(Mutex::new(provider)));
+    pub fn set_input(&self, input: PeerInput) {
+        let _ = self.input_tx.send(Arc::new(input));
     }
 
-    pub fn clear_provider(&self) {
-        self.install_provider(Box::new(IdleOutputProvider::new()));
-    }
-
-    pub fn install_file_provider(&self, provider: FileOutputProvider) {
-        self.install_provider(Box::new(provider));
+    pub fn clear_input(&self) {
+        self.set_input(PeerInput::idle());
     }
 }
 
@@ -167,12 +142,11 @@ impl MediaStreamTrack for PeerOutput {
     }
 
     async fn recv(&self) -> MediaResult<MediaSample> {
-        let mut provider_rx = self.provider_rx.lock().await;
+        let mut input_rx = self.input_rx.lock().await;
         loop {
-            let provider = provider_rx.borrow_and_update().clone();
-            let mut provider = provider.lock().await;
+            let input = input_rx.borrow_and_update().clone();
             tokio::select! {
-                result = provider.recv() => {
+                result = input.recv() => {
                     let mut sample = result?;
                     if let MediaSample::Audio(frame) = &mut sample {
                         if let Ok(mut rtp_state) = self.rtp_state.lock() {
@@ -181,7 +155,7 @@ impl MediaStreamTrack for PeerOutput {
                     }
                     return Ok(sample);
                 },
-                changed = provider_rx.changed() => {
+                changed = input_rx.changed() => {
                     if changed.is_err() {
                         continue;
                     }
@@ -197,106 +171,89 @@ impl MediaStreamTrack for PeerOutput {
 }
 
 #[derive(Clone)]
-struct RecorderBinding {
-    recorder: Arc<StdMutex<Option<Recorder>>>,
-    leg: Leg,
-    dtmf_pt: Option<u8>,
-    dtmf_clock_rate: Option<u32>,
-    codec_hint: Option<CodecType>,
+enum PeerInputKind {
+    Track(Arc<dyn MediaStreamTrack>),
+    Source(Arc<Mutex<Box<dyn PeerInputSource>>>),
 }
 
+/// Inbound media for one peer.
+///
+/// Contract: this is a single-consumer input. The inner track may be owned
+/// through `Arc`, but the media abstraction assumes one logical consumer for
+/// each peer input at a time.
+#[derive(Clone)]
 pub struct PeerInput {
-    track: Arc<dyn MediaStreamTrack>,
-    recorder: Option<RecorderBinding>,
+    kind: PeerInputKind,
 }
 
 impl PeerInput {
-    pub fn new(track: Arc<dyn MediaStreamTrack>) -> Self {
+    pub fn from_track(track: Arc<dyn MediaStreamTrack>) -> Self {
         Self {
-            track,
-            recorder: None,
+            kind: PeerInputKind::Track(track),
         }
     }
 
-    pub fn track(&self) -> Arc<dyn MediaStreamTrack> {
-        self.track.clone()
+    pub fn from_source(source: Box<dyn PeerInputSource>) -> Self {
+        Self {
+            kind: PeerInputKind::Source(Arc::new(Mutex::new(source))),
+        }
     }
 
-    pub fn set_recorder(
-        &mut self,
-        recorder: Arc<StdMutex<Option<Recorder>>>,
-        leg: Leg,
-        dtmf_pt: Option<u8>,
-        dtmf_clock_rate: Option<u32>,
-        codec_hint: Option<CodecType>,
-    ) {
-        self.recorder = Some(RecorderBinding {
-            recorder,
-            leg,
-            dtmf_pt,
-            dtmf_clock_rate,
-            codec_hint,
-        });
+    pub fn idle() -> Self {
+        Self::from_source(Box::new(IdleInput::new()))
     }
 
-    pub fn provider_for_output(
+    pub fn from_file(input: FileInput) -> Self {
+        Self::from_source(Box::new(input))
+    }
+
+    pub async fn recv(&self) -> MediaResult<MediaSample> {
+        match &self.kind {
+            PeerInputKind::Track(track) => track.recv().await,
+            PeerInputKind::Source(source) => {
+                let mut source = source.lock().await;
+                source.recv().await
+            }
+        }
+    }
+
+    pub fn adapted_for_output(
         &self,
         audio_mapping: Option<AudioMapping>,
         dtmf_mapping: Option<DtmfMapping>,
         transcode: Option<TranscodeSpec>,
-    ) -> Box<dyn OutputProvider> {
-        let provider: Box<dyn OutputProvider> = Box::new(PeerInputProvider::new(
-            self.track.clone(),
-            audio_mapping,
-            dtmf_mapping,
-            transcode,
-        ));
-
-        if let Some(binding) = &self.recorder {
-            Box::new(RecordingOutputProvider {
-                inner: provider,
-                binding: binding.clone(),
-            })
-        } else {
-            provider
+    ) -> Self {
+        match &self.kind {
+            PeerInputKind::Track(track) => Self::from_source(Box::new(MappedTrackInput::new(
+                track.clone(),
+                audio_mapping,
+                dtmf_mapping,
+                transcode,
+            ))),
+            PeerInputKind::Source(_) => {
+                if audio_mapping.is_none() && dtmf_mapping.is_none() && transcode.is_none() {
+                    self.clone()
+                } else {
+                    panic!("cannot apply directional mapping to a non-track peer input");
+                }
+            }
         }
     }
 }
 
-pub struct MediaPeer {
-    input: PeerInput,
-    output: Arc<PeerOutput>,
-}
+/// Extract the receiver track from a PeerConnection's audio transceiver.
+pub fn receiver_track_for_pc(
+    pc: &PeerConnection,
+) -> Result<Arc<dyn MediaStreamTrack>> {
+    let transceiver = pc
+        .get_transceivers()
+        .into_iter()
+        .find(|t| t.kind() == MediaKind::Audio)
+        .ok_or_else(|| anyhow!("no audio transceiver on pc"))?;
 
-impl MediaPeer {
-    pub fn new(track: Arc<dyn MediaStreamTrack>, output: Arc<PeerOutput>) -> Self {
-        Self {
-            input: PeerInput::new(track),
-            output,
-        }
-    }
+    let receiver = transceiver
+        .receiver()
+        .ok_or_else(|| anyhow!("no receiver on audio transceiver"))?;
 
-    pub fn input(&self) -> &PeerInput {
-        &self.input
-    }
-
-    pub fn input_mut(&mut self) -> &mut PeerInput {
-        &mut self.input
-    }
-
-    pub fn output(&self) -> &Arc<PeerOutput> {
-        &self.output
-    }
-
-    pub fn set_recorder(
-        &mut self,
-        recorder: Arc<StdMutex<Option<Recorder>>>,
-        leg: Leg,
-        dtmf_pt: Option<u8>,
-        dtmf_clock_rate: Option<u32>,
-        codec_hint: Option<CodecType>,
-    ) {
-        self.input
-            .set_recorder(recorder, leg, dtmf_pt, dtmf_clock_rate, codec_hint);
-    }
+    Ok(receiver.track())
 }
