@@ -870,6 +870,7 @@ fn convert_trunk(model: sip_trunk::Model) -> Option<(String, TrunkConfig)> {
         register_extra_headers: model
             .register_extra_headers
             .and_then(|v| serde_json::from_value(v).ok()),
+        rewrite_hostport: model.rewrite_hostport,
         origin: ConfigOrigin::embedded(),
     };
 

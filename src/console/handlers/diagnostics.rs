@@ -635,6 +635,7 @@ fn trunk_config_from_model(model: &sip_trunk::Model) -> Option<routing::TrunkCon
             .register_extra_headers
             .as_ref()
             .and_then(|v| serde_json::from_value(v.clone()).ok()),
+        rewrite_hostport: model.rewrite_hostport,
     })
 }
 

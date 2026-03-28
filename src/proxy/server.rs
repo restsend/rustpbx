@@ -46,7 +46,7 @@ use std::{
         Arc,
         atomic::{AtomicUsize, Ordering},
     },
-    time::Instant,
+    time::{Duration, Instant},
 };
 use tokio::select;
 use tokio_util::sync::CancellationToken;
@@ -470,10 +470,18 @@ impl SipServerBuilder {
             endpoint_builder.with_user_agent(user_agent.as_str());
         }
 
-        let endpoint_option = EndpointOption {
+        let mut endpoint_option = EndpointOption {
             callid_suffix: config.callid_suffix.clone(),
             ..Default::default()
         };
+
+        if let Some(t1_timer) = config.t1_timer {
+            endpoint_option.t1 = Duration::from_millis(t1_timer);
+        }
+
+        if let Some(t1x64_timer) = config.t1x64_timer {
+            endpoint_option.t1x64 = Duration::from_millis(t1x64_timer);
+        }
 
         let mut endpoint_builder = endpoint_builder
             .with_cancel_token(cancel_token.clone())
@@ -948,11 +956,13 @@ impl SipServerInner {
                 }
                 if self.endpoint.get_addrs().iter().any(|addr| {
                     if addr.addr.host.to_string() == host {
-                        return port
+                        let matched = port
                             .map(|p| addr.addr.port == Some(p.into()))
                             .unwrap_or(true);
+                        matched
+                    } else {
+                        false
                     }
-                    false
                 }) {
                     return true;
                 }

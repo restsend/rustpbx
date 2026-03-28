@@ -130,6 +130,7 @@ pub struct Model {
     pub register_expires: Option<i32>,
     pub register_extra_headers: Option<Json>,
     pub metadata: Option<Json>,
+    pub rewrite_hostport: bool,
     pub created_at: DateTimeUtc,
     pub updated_at: DateTimeUtc,
     pub last_health_check_at: Option<DateTimeUtc>,
@@ -198,6 +199,7 @@ impl MigrationTrait for Migration {
                     .col(integer_null(Column::RegisterExpires))
                     .col(json_null(Column::RegisterExtraHeaders))
                     .col(json_null(Column::Metadata))
+                    .col(boolean(Column::RewriteHostport).default(true))
                     .col(timestamp(Column::CreatedAt).default(Expr::current_timestamp()))
                     .col(timestamp(Column::UpdatedAt).default(Expr::current_timestamp()))
                     .col(timestamp_null(Column::LastHealthCheckAt))
