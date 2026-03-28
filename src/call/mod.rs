@@ -468,10 +468,20 @@ impl DialplanFlow {
         match self {
             DialplanFlow::Targets(strategy) => match strategy {
                 DialStrategy::Sequential(targets) | DialStrategy::Parallel(targets) => {
-                    targets.iter().all(|loc| loc.supports_webrtc)
+                    !targets.is_empty() && targets.iter().all(|loc| loc.supports_webrtc)
                 }
             },
-            DialplanFlow::Queue { next, .. } => next.all_webrtc_target(),
+            DialplanFlow::Queue { plan, next } => {
+                if let Some(strategy) = &plan.dial_strategy {
+                    let targets = match strategy {
+                        DialStrategy::Sequential(t) | DialStrategy::Parallel(t) => t,
+                    };
+                    if !targets.is_empty() {
+                        return targets.iter().all(|loc| loc.supports_webrtc);
+                    }
+                }
+                next.all_webrtc_target()
+            }
             DialplanFlow::Application { .. } => false,
         }
     }
@@ -1052,6 +1062,178 @@ mod tests {
 
         assert!(dp.voicemail_enabled);
         assert!(dp.call_forwarding.is_some());
+    }
+
+    // ── DialplanFlow::all_webrtc_target ────────────────────────────────────────
+
+    fn make_location(aor: &str, supports_webrtc: bool) -> Location {
+        Location {
+            aor: aor.try_into().unwrap(),
+            supports_webrtc,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn empty_targets_returns_false_for_all_webrtc() {
+        // Empty targets should return false, not true (vacuous truth bug fix)
+        let flow = DialplanFlow::Targets(DialStrategy::Sequential(vec![]));
+        assert!(
+            !flow.all_webrtc_target(),
+            "empty targets should return false"
+        );
+    }
+
+    #[test]
+    fn single_webrtc_target_returns_true() {
+        let flow = DialplanFlow::Targets(DialStrategy::Sequential(vec![make_location(
+            "sip:webrtc@example.com",
+            true,
+        )]));
+        assert!(flow.all_webrtc_target());
+    }
+
+    #[test]
+    fn single_non_webrtc_target_returns_false() {
+        let flow = DialplanFlow::Targets(DialStrategy::Sequential(vec![make_location(
+            "sip:trunk@example.com",
+            false,
+        )]));
+        assert!(!flow.all_webrtc_target());
+    }
+
+    #[test]
+    fn mixed_targets_return_false() {
+        let flow = DialplanFlow::Targets(DialStrategy::Sequential(vec![
+            make_location("sip:webrtc@example.com", true),
+            make_location("sip:trunk@example.com", false),
+        ]));
+        assert!(
+            !flow.all_webrtc_target(),
+            "mixed targets should return false"
+        );
+    }
+
+    #[test]
+    fn all_webrtc_targets_return_true() {
+        let flow = DialplanFlow::Targets(DialStrategy::Sequential(vec![
+            make_location("sip:a@example.com", true),
+            make_location("sip:b@example.com", true),
+        ]));
+        assert!(flow.all_webrtc_target());
+    }
+
+    #[test]
+    fn queue_with_empty_dial_strategy_and_empty_next_returns_false() {
+        // This is the bug case: Queue with empty dial_strategy and empty next
+        // was incorrectly returning true due to vacuous truth
+        let queue_plan = QueuePlan {
+            accept_immediately: false,
+            passthrough_ringback: false,
+            hold: None,
+            dial_strategy: None,
+            ring_timeout: None,
+            fallback: None,
+            label: None,
+            retry_codes: None,
+            no_trying_timeout: None,
+        };
+        let flow = DialplanFlow::Queue {
+            plan: queue_plan,
+            next: Box::new(DialplanFlow::Targets(DialStrategy::Sequential(vec![]))),
+        };
+        assert!(
+            !flow.all_webrtc_target(),
+            "queue with empty targets should return false"
+        );
+    }
+
+    #[test]
+    fn queue_with_webrtc_targets_in_dial_strategy_returns_true() {
+        let queue_plan = QueuePlan {
+            accept_immediately: false,
+            passthrough_ringback: false,
+            hold: None,
+            dial_strategy: Some(DialStrategy::Sequential(vec![make_location(
+                "sip:webrtc@example.com",
+                true,
+            )])),
+            ring_timeout: None,
+            fallback: None,
+            label: None,
+            retry_codes: None,
+            no_trying_timeout: None,
+        };
+        let flow = DialplanFlow::Queue {
+            plan: queue_plan,
+            next: Box::new(DialplanFlow::Targets(DialStrategy::Sequential(vec![]))),
+        };
+        assert!(
+            flow.all_webrtc_target(),
+            "queue with webrtc dial_strategy should return true"
+        );
+    }
+
+    #[test]
+    fn queue_with_non_webrtc_targets_in_dial_strategy_returns_false() {
+        let queue_plan = QueuePlan {
+            accept_immediately: false,
+            passthrough_ringback: false,
+            hold: None,
+            dial_strategy: Some(DialStrategy::Sequential(vec![make_location(
+                "sip:trunk@example.com",
+                false,
+            )])),
+            ring_timeout: None,
+            fallback: None,
+            label: None,
+            retry_codes: None,
+            no_trying_timeout: None,
+        };
+        let flow = DialplanFlow::Queue {
+            plan: queue_plan,
+            next: Box::new(DialplanFlow::Targets(DialStrategy::Sequential(vec![]))),
+        };
+        assert!(
+            !flow.all_webrtc_target(),
+            "queue with non-webrtc dial_strategy should return false"
+        );
+    }
+
+    #[test]
+    fn queue_fallback_to_next_when_dial_strategy_is_empty() {
+        // When dial_strategy is empty/None, should check next
+        let queue_plan = QueuePlan {
+            accept_immediately: false,
+            passthrough_ringback: false,
+            hold: None,
+            dial_strategy: Some(DialStrategy::Sequential(vec![])),
+            ring_timeout: None,
+            fallback: None,
+            label: None,
+            retry_codes: None,
+            no_trying_timeout: None,
+        };
+        let flow = DialplanFlow::Queue {
+            plan: queue_plan,
+            next: Box::new(DialplanFlow::Targets(DialStrategy::Sequential(vec![
+                make_location("sip:webrtc@example.com", true),
+            ]))),
+        };
+        assert!(
+            flow.all_webrtc_target(),
+            "should fallback to next which has webrtc target"
+        );
+    }
+
+    #[test]
+    fn application_flow_returns_false() {
+        let flow = DialplanFlow::Application {
+            app_name: "voicemail".to_string(),
+            app_params: None,
+            auto_answer: false,
+        };
+        assert!(!flow.all_webrtc_target());
     }
 }
 

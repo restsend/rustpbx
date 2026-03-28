@@ -3254,7 +3254,14 @@ impl CallSession {
 
         let callee_uri = &invite_option.callee;
         let callee_realm = callee_uri.host_with_port.to_string();
-        if self.server.is_same_realm(&callee_realm).await {
+
+        let has_explicit_destination = invite_option.destination.is_some();
+        let is_same_realm = if has_explicit_destination {
+            false
+        } else {
+            self.server.is_same_realm(&callee_realm).await
+        };
+        if is_same_realm {
             let dialplan = &self.context.dialplan;
             let locations = self.server.locator.lookup(&callee_uri).await.map_err(|e| {
                 (

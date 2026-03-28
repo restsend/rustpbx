@@ -659,6 +659,8 @@ pub struct ProxyConfig {
     pub useragent: Option<String>,
     #[serde(default = "default_callid_suffix")]
     pub callid_suffix: Option<String>,
+    pub t1_timer: Option<u64>,
+    pub t1x64_timer: Option<u64>,
     pub ssl_private_key: Option<String>,
     pub ssl_certificate: Option<String>,
     pub udp_port: Option<u16>,
@@ -886,6 +888,8 @@ impl Default for ProxyConfig {
             ]),
             useragent: default_useragent(),
             callid_suffix: default_callid_suffix(),
+            t1_timer: None,
+            t1x64_timer: None,
             ssl_private_key: None,
             ssl_certificate: None,
             udp_port: Some(5060),

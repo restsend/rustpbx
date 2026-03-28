@@ -1058,7 +1058,7 @@ fn select_trunk(
 }
 
 /// Apply trunk configuration
-fn apply_trunk_config(option: &mut InviteOption, trunk: &TrunkConfig) -> Result<()> {
+pub(crate) fn apply_trunk_config(option: &mut InviteOption, trunk: &TrunkConfig) -> Result<()> {
     // Set destination
     let dest_uri: rsip::Uri = trunk
         .dest
@@ -1084,8 +1084,13 @@ fn apply_trunk_config(option: &mut InviteOption, trunk: &TrunkConfig) -> Result<
         addr: dest_uri.host_with_port.clone(),
     });
 
-    // Update callee host to match trunk destination
-    option.callee.host_with_port = dest_uri.host_with_port.clone();
+    // Save original caller before potential rewrite for P-Asserted-Identity header
+    let original_caller = option.caller.clone();
+
+    if trunk.rewrite_hostport {
+        option.callee.host_with_port = dest_uri.host_with_port.clone();
+        option.caller.host_with_port = dest_uri.host_with_port.clone();
+    }
 
     // Set authentication info
     if let (Some(username), Some(password)) = (&trunk.username, &trunk.password) {
@@ -1103,11 +1108,11 @@ fn apply_trunk_config(option: &mut InviteOption, trunk: &TrunkConfig) -> Result<
 
     let headers = option.headers.as_mut().unwrap();
 
-    // Add P-Asserted-Identity header
+    // Add P-Asserted-Identity header (using original caller, not rewritten)
     if trunk.username.is_some() {
         let pai_header = rsip::Header::Other(
             "P-Asserted-Identity".to_string(),
-            format!("<{}>", option.caller),
+            format!("<{}>", original_caller),
         );
         headers.push(pai_header);
     }
