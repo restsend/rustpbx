@@ -27,9 +27,9 @@ use crate::call::domain::SessionPolicy;
 use crate::call::sip::{DialogStateReceiverGuard, ServerDialogGuard};
 use crate::callrecord::{CallRecordHangupMessage, CallRecordHangupReason, CallRecordSender};
 use crate::config::MediaProxyMode;
-use crate::media::bridge::BridgePeerBuilder;
-use crate::media::endpoint::{BidirectionalBridge, DirectionConfig, PeerEndpoint, PeerOutput};
-use crate::media::source::FileSource;
+use crate::media::bridge::{DirectionConfig, MediaBridge};
+use crate::media::endpoint::{MediaPeer as EndpointMediaPeer, PeerOutput};
+use crate::media::source::FileOutputProvider;
 use crate::media::mixer::MediaMixer;
 use crate::media::negotiate::{CodecInfo, MediaNegotiator};
 use crate::media::recorder::{Leg as RecorderLeg, Recorder};
@@ -132,11 +132,8 @@ pub struct SipSession {
     pub recorder: Arc<Mutex<Option<Recorder>>>,
     playback_tracks: std::collections::HashMap<String, PlaybackState>,
 
-    // === WebRTC ↔ RTP Bridge ===
-    /// Media bridge for WebRTC ↔ RTP interop
-    pub media_bridge: Option<Arc<crate::media::bridge::BridgePeer>>,
-    /// Anchored same-transport media bridge
-    pub anchored_bridge: Option<BidirectionalBridge>,
+    // === Media Bridge ===
+    pub media_bridge: Option<MediaBridge>,
     pub caller_output: Option<Arc<PeerOutput>>,
     pub callee_output: Option<Arc<PeerOutput>>,
     /// Whether caller is WebRTC
@@ -303,7 +300,6 @@ impl SipSession {
             recorder: Arc::new(Mutex::new(None)),
             playback_tracks: std::collections::HashMap::new(),
             media_bridge: None,
-            anchored_bridge: None,
             caller_output: None,
             callee_output: None,
             caller_is_webrtc: false,
@@ -1206,19 +1202,6 @@ impl SipSession {
         let bridged_sdp = if caller_is_webrtc && !callee_is_webrtc {
             // Callee is RTP but caller is WebRTC
             if let Some(ref sdp) = callee_sdp {
-                // If media bridge is active, set remote description on bridge RTP side
-                if let Some(ref bridge) = self.media_bridge {
-                    debug!(session_id = %self.context.session_id, "Media bridge: Setting RTP side remote description from callee answer");
-                    use rustrtc::sdp::{SdpType, SessionDescription};
-                    if let Ok(desc) = SessionDescription::parse(SdpType::Answer, sdp) {
-                        if let Err(e) = bridge.rtp_pc().set_remote_description(desc).await {
-                            warn!(session_id = %self.context.session_id, error = %e, "Failed to set bridge RTP remote description");
-                        } else {
-                            debug!(session_id = %self.context.session_id, "Media bridge: RTP side remote description set successfully");
-                        }
-                    }
-                }
-
                 // SDP conversion for caller
                 debug!(session_id = %self.context.session_id, "SDP bridge: converting RTP Answer -> WebRTC Answer");
 
@@ -1254,19 +1237,6 @@ impl SipSession {
         } else if !caller_is_webrtc && callee_is_webrtc {
             // Callee is WebRTC but caller is RTP
             if let Some(ref sdp) = callee_sdp {
-                // If media bridge is active, set remote description on bridge WebRTC side
-                if let Some(ref bridge) = self.media_bridge {
-                    debug!(session_id = %self.context.session_id, "Media bridge: Setting WebRTC side remote description from callee answer");
-                    use rustrtc::sdp::{SdpType, SessionDescription};
-                    if let Ok(desc) = SessionDescription::parse(SdpType::Answer, sdp) {
-                        if let Err(e) = bridge.webrtc_pc().set_remote_description(desc).await {
-                            warn!(session_id = %self.context.session_id, error = %e, "Failed to set bridge WebRTC remote description");
-                        } else {
-                            debug!(session_id = %self.context.session_id, "Media bridge: WebRTC side remote description set successfully");
-                        }
-                    }
-                }
-
                 // SDP conversion for caller
                 debug!(session_id = %self.context.session_id, "SDP bridge: converting WebRTC Answer -> RTP Answer");
                 match crate::media::sdp_bridge::SdpBridge::webrtc_to_rtp(sdp) {
@@ -1370,8 +1340,8 @@ impl SipSession {
 
         self.update_snapshot_cache();
 
-        // Start media forwarding for anchored same-type calls
-        // (WebRTC ↔ RTP bridging is handled by BridgePeer.start_bridge() in create_callee_track)
+        // Start media forwarding for anchored same-type calls.
+        // Mixed WebRTC ↔ RTP transport bridging is handled separately.
         if self.media_profile.path == MediaPathMode::Anchored && self.media_bridge.is_none() {
             self.start_anchored_media_forwarding(caller_answer.as_deref(), callee_sdp.as_deref())
                 .await;
@@ -1384,7 +1354,7 @@ impl SipSession {
 
     /// Start bidirectional anchored media forwarding between caller and callee tracks.
     ///
-    /// Builds PeerEndpoints for caller and callee, wires a BidirectionalBridge
+    /// Builds media peers for caller and callee, then wires a MediaBridge
     /// between them. Each direction is polled by the target leg's sender,
     /// so forwarding stays inline with zero additional spawned tasks.
     ///
@@ -1454,11 +1424,11 @@ impl SipSession {
         ) {
             Ok(bridge) => {
                 bridge.bridge();
-                self.anchored_bridge = Some(bridge);
-                info!(session_id = %session_id, "Anchored media forwarding wired via BidirectionalBridge");
+                self.media_bridge = Some(bridge);
+                info!(session_id = %session_id, "Anchored media forwarding wired via MediaBridge");
             }
             Err(e) => {
-                warn!(session_id = %session_id, error = %e, "Failed to install BidirectionalBridge");
+                warn!(session_id = %session_id, error = %e, "Failed to install MediaBridge");
             }
         }
     }
@@ -1503,21 +1473,21 @@ impl SipSession {
         caller_profile: &crate::media::negotiate::NegotiatedLegProfile,
         callee_profile: &crate::media::negotiate::NegotiatedLegProfile,
         session_id: &str,
-    ) -> Result<BidirectionalBridge> {
+    ) -> Result<MediaBridge> {
         let caller_track = Self::receiver_track_for_pc(caller_pc)?;
         let callee_track = Self::receiver_track_for_pc(callee_pc)?;
 
-        let mut caller_endpoint = PeerEndpoint::new(caller_track, caller_output);
-        let mut callee_endpoint = PeerEndpoint::new(callee_track, callee_output);
+        let mut caller_peer = EndpointMediaPeer::new(caller_track, caller_output);
+        let mut callee_peer = EndpointMediaPeer::new(callee_track, callee_output);
 
-        caller_endpoint.set_recorder(
+        caller_peer.set_recorder(
             recorder.clone(),
             RecorderLeg::A,
             caller_profile.dtmf.as_ref().map(|d| d.payload_type),
             caller_profile.dtmf.as_ref().map(|d| d.clock_rate),
             caller_profile.audio.as_ref().map(|a| a.codec),
         );
-        callee_endpoint.set_recorder(
+        callee_peer.set_recorder(
             recorder.clone(),
             RecorderLeg::B,
             callee_profile.dtmf.as_ref().map(|d| d.payload_type),
@@ -1527,7 +1497,7 @@ impl SipSession {
 
         debug!(session_id = %session_id, "Built bidirectional anchored media bridge");
 
-        Ok(BidirectionalBridge::builder(caller_endpoint, callee_endpoint)
+        Ok(MediaBridge::builder(caller_peer, callee_peer)
             .caller_to_callee(DirectionConfig::from_profiles(caller_profile, callee_profile))
             .callee_to_caller(DirectionConfig::from_profiles(callee_profile, caller_profile))
             .build())
@@ -1654,7 +1624,7 @@ impl SipSession {
         let output = self.ensure_leg_output(target).await?;
         let codec_info = self.negotiated_playback_codec(target).await?;
         let completion_notify = Arc::new(tokio::sync::Notify::new());
-        let source = FileSource::new(
+        let source = FileOutputProvider::new(
             audio_file.clone(),
             loop_playback,
             codec_info,
@@ -1685,14 +1655,15 @@ impl SipSession {
             }));
         });
 
-        output.set_file_source(source);
+        output.install_file_provider(source);
         Ok(completion_notify)
     }
 
-    /// Create callee track with optional WebRTC ↔ RTP bridging
+    /// Create callee track with optional WebRTC ↔ RTP SDP conversion.
     ///
-    /// When caller and callee have different transport modes (WebRTC vs RTP),
-    /// a BridgePeer is created to handle media translation.
+    /// The media-path refactor currently only wires the same-transport anchored
+    /// bridge through `MediaBridge`. Mixed WebRTC ↔ RTP media bridging still
+    /// needs to be reintroduced on top of the new source-centric abstraction.
     pub async fn create_callee_track(&mut self, callee_is_webrtc: bool) -> Result<String> {
         let track_id = Self::CALLEE_TRACK_ID.to_string();
 
@@ -1714,56 +1685,12 @@ impl SipSession {
         // Check if bridging is needed for different transport types
         let transport_bridge_needed = caller_is_webrtc != callee_is_webrtc;
 
-        // Create bridge for WebRTC <-> RTP interop
-        // For same-type transport with media proxy, we need a different approach
-        // TODO: extend BridgePeer to support RTP <-> RTP and WebRTC <-> WebRTC
         let need_transport_bridge = transport_bridge_needed;
 
         if need_transport_bridge {
-            info!(
-                session_id = %self.id,
-                "WebRTC ↔ RTP bridge needed for media interop"
-            );
-
-            // Create bridge
-            let bridge = BridgePeerBuilder::new(format!("{}-bridge", self.id))
-                .with_rtp_port_range(20000, 30000)
-                .build();
-
-            // Setup bridge tracks
-            bridge.setup_bridge().await?;
-
-            // Generate offers for both sides
-            let webrtc_offer = bridge.webrtc_pc().create_offer().await?;
-            let rtp_offer = bridge.rtp_pc().create_offer().await?;
-
-            bridge.webrtc_pc().set_local_description(webrtc_offer)?;
-            bridge.rtp_pc().set_local_description(rtp_offer)?;
-
-            // Start bridge forwarding
-            bridge.start_bridge().await;
-
-            // Store bridge
-            self.media_bridge = Some(bridge.clone());
-
-            // Return appropriate SDP based on callee type
-            if callee_is_webrtc {
-                // Callee is WebRTC, give them WebRTC side SDP
-                let sdp = bridge
-                    .webrtc_pc()
-                    .local_description()
-                    .ok_or_else(|| anyhow!("No WebRTC local description"))?
-                    .to_sdp_string();
-                Ok(sdp)
-            } else {
-                // Callee is RTP, give them RTP side SDP
-                let sdp = bridge
-                    .rtp_pc()
-                    .local_description()
-                    .ok_or_else(|| anyhow!("No RTP local description"))?
-                    .to_sdp_string();
-                Ok(sdp)
-            }
+            Err(anyhow!(
+                "WebRTC ↔ RTP media bridge is not wired to the new source-centric abstraction yet"
+            ))
         } else if media_proxy_enabled {
             // Same transport type with media proxy enabled (anchored media)
             info!(
@@ -2062,7 +1989,7 @@ impl SipSession {
         for playback in playbacks {
             self.emit_playback_complete(playback.track_id, true);
             if let Ok(output) = self.ensure_leg_output(playback.target).await {
-                output.clear_source();
+                output.clear_provider();
             }
         }
 
@@ -2071,7 +1998,7 @@ impl SipSession {
             drop(mixer);
         }
 
-        if let Some(bridge) = self.anchored_bridge.take() {
+        if let Some(bridge) = self.media_bridge.take() {
             bridge.unbridge();
         }
 
@@ -2751,7 +2678,7 @@ impl SipSession {
     async fn setup_bridge(&mut self, leg_a: LegId, leg_b: LegId) -> bool {
         if self.legs.contains_key(&leg_a) && self.legs.contains_key(&leg_b) {
             self.bridge = BridgeConfig::bridge(leg_a, leg_b);
-            if let Some(bridge) = &self.anchored_bridge {
+            if let Some(bridge) = &mut self.media_bridge {
                 bridge.bridge();
             }
             true
@@ -2763,7 +2690,7 @@ impl SipSession {
     /// Clear bridge
     async fn clear_bridge(&mut self) {
         self.bridge.clear();
-        if let Some(bridge) = &self.anchored_bridge {
+        if let Some(bridge) = &self.media_bridge {
             bridge.unbridge();
         }
     }
@@ -3061,7 +2988,7 @@ impl SipSession {
             if let Some(state) = self.playback_tracks.remove(&key) {
                 self.emit_playback_complete(state.track_id.clone(), true);
                 let output = self.ensure_leg_output(state.target).await?;
-                output.clear_source();
+                output.clear_provider();
                 info!(track_id = %state.track_id, target = %key, "Playback stopped");
             }
         } else {
@@ -3069,7 +2996,7 @@ impl SipSession {
             for (key, state) in playbacks {
                 self.emit_playback_complete(state.track_id.clone(), true);
                 let output = self.ensure_leg_output(state.target).await?;
-                output.clear_source();
+                output.clear_provider();
                 info!(track_id = %state.track_id, target = %key, "Playback stopped");
             }
         }

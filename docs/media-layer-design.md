@@ -1,228 +1,255 @@
 # Current Media Layer Design
 
-This document describes the current media-layer design in this repository after the PeerEndpoint refactor on branch `unified-session`.
+This document describes the current media-layer design after the peer/input/output refactor on branch `unified-session`.
 
 It focuses on:
 
-- the PeerEndpoint abstraction for phone legs
-- the MediaSource trait and composable pipeline
-- recorder placement (source side)
-- RTP timing placement (output side)
-- playback on the same sender-polled output model
-- the remaining legacy media pieces that are still outside this refactor
+- the bidirectional `MediaPeer` abstraction for SIP/WebRTC legs
+- `PeerInput` and `PeerOutput` as the two first-class poll-based sides
+- `OutputProvider` as the outbound media producer abstraction
+- the current anchored bridge shape
+- playback on the same output model
+- what is still deferred
 
 ## Overview
 
-The media layer currently has three shapes:
+The current media layer has three distinct shapes:
 
-1. Anchored proxy-call bridge (PeerEndpoint model)
-   - Core traits and sources in [`src/media/source.rs`](../src/media/source.rs)
-   - Endpoint abstraction in [`src/media/endpoint.rs`](../src/media/endpoint.rs)
+1. Anchored same-transport bridge
+   - Core provider types in [`src/media/source.rs`](../src/media/source.rs)
+   - Peer abstraction in [`src/media/endpoint.rs`](../src/media/endpoint.rs)
+   - Bridge coordinator in [`src/media/bridge.rs`](../src/media/bridge.rs)
    - This is the current design direction
-   - It is sender-polled and does not spawn a forwarding task
 
-2. WebRTC <-> RTP transport bridge
-   - Still implemented by the older task-based bridge in [`src/media/bridge.rs`](../src/media/bridge.rs)
-   - This path is not migrated yet
+2. Legacy media-stream / track layer
+   - Still present in [`src/media/mod.rs`](../src/media/mod.rs)
+   - Still used by older compatibility paths
 
-3. Legacy track/media-stream layer
-   - Still present for compatibility in [`src/media/mod.rs`](../src/media/mod.rs)
-   - No longer the design center for anchored proxy bridging or playback
+3. Mixed WebRTC ↔ RTP transport bridge
+   - Not yet reintroduced on top of the new peer abstraction
+   - The session layer currently treats it as deferred work
 
 So the system is still hybrid:
 
-- anchored bridge and playback use the new PeerEndpoint model
-- transport bridge remains legacy
+- anchored SIP↔SIP and WebRTC↔WebRTC media now use the peer/input/output model
+- older media objects still exist for compatibility
+- mixed transport bridging is intentionally not solved in this abstraction yet
 
 ## Main Design Goal
 
 - keep the sender-poll model
-- keep media packet-oriented
-- make source switching explicit
-- keep outbound RTP continuity stable across source switching
-- recording on the source (input) side, RTP timing on the output side
-- clear PeerEndpoint abstraction for each phone leg
-- composable pipeline via generic wrappers, boxed once at the PeerOutput boundary
+- make peer direction explicit
+- model each media participant as one bidirectional peer
+- keep outbound switching at the peer output boundary
+- keep per-direction media adaptation with the provider built from peer input
+- avoid generic stage pipelines as the design center
 
 ## File Layout
 
-- `src/media/source.rs` — core `MediaSource` trait, mapping config types, reusable sources and filters
-- `src/media/endpoint.rs` — B2BUA phone-leg abstraction: `PeerOutput`, `PeerEndpoint`, `BidirectionalBridge`
+- `src/media/source.rs`
+  - `OutputProvider`
+  - `PeerInputProvider`
+  - `FileOutputProvider`
+  - `IdleOutputProvider`
+  - per-direction mapping/transcode config types
+
+- `src/media/endpoint.rs`
+  - `PeerInput`
+  - `PeerOutput`
+  - media-layer `MediaPeer`
+  - output RTP continuity state
+
+- `src/media/bridge.rs`
+  - `DirectionConfig`
+  - `MediaBridge`
 
 ## Core Concepts
 
-### `MediaSource` (`source.rs`)
+### `MediaPeer`
+
+`MediaPeer` is the top-level media object for one call leg.
+
+It owns:
+
+- one `PeerInput`
+- one `PeerOutput`
+
+Meaning:
+
+- `PeerInput` is media coming from the remote side into the system
+- `PeerOutput` is media going from the system to the remote side
+
+This is the target vocabulary for SIP/WebRTC peers in the current media layer.
+
+### `PeerInput`
+
+`PeerInput` is the inbound side of a media peer.
+
+Current shape:
+
+- wraps one inbound `Arc<dyn MediaStreamTrack>`
+- is single-consumer in intent
+- can build a direction-specific `OutputProvider` for some other peer’s output
+
+Key method:
+
+```rust
+provider_for_output(audio_mapping, dtmf_mapping, transcode) -> Box<dyn OutputProvider>
+```
+
+That method is where per-direction adaptation is currently attached.
+
+### `PeerOutput`
+
+`PeerOutput` is the outbound side of a media peer.
+
+Responsibilities:
+
+- stay attached to the target peer’s sender/transceiver
+- hold the current `OutputProvider`
+- allow replacement of that provider without replacing the output object
+- own outbound RTP continuity state
+
+It implements `MediaStreamTrack`, so `rustrtc::RtpSender` polls it directly.
+
+Current switching API:
+
+- `install_provider(...)`
+- `install_file_provider(...)`
+- `clear_provider()`
+
+Internally it uses `watch` to swap providers safely while staying sender-polled.
+
+### `OutputProvider`
+
+`OutputProvider` is the poll-based producer that feeds `PeerOutput`.
 
 ```rust
 #[async_trait]
-pub trait MediaSource: Send {
+pub trait OutputProvider: Send {
     async fn recv(&mut self) -> MediaResult<MediaSample>;
 }
 ```
 
-Pull-based media production. Any component producing or transforming packets implements this.
+Current provider kinds:
 
-### Sources (`source.rs`)
+- `PeerInputProvider`
+  - built from another peer’s inbound media
+  - owns PT admission, DTMF remap/drop, and optional transcoding for one direction
 
-- `TrackSource` — adapts `Arc<dyn MediaStreamTrack>` into `MediaSource`
-- `FileSource` — playback from audio files, self-paced with 20ms ticker
-- `IdleSource` — detached source, `recv()` waits forever
+- `FileOutputProvider`
+  - playback from file
+  - self-paced
 
-### Filters (`source.rs`)
+- `IdleOutputProvider`
+  - detached output state
+  - produces no media
 
-- `TransformFilter<S: MediaSource>` — generic composable filter: PT filtering, DTMF remapping, transcoding. Wraps any upstream `MediaSource`.
+So the design-center abstraction is now:
 
-### Taps (`endpoint.rs`, internal)
+- peer input
+- peer output
+- outbound provider
 
-- `RecordingTap<S: MediaSource>` — generic tap: records each sample inline, passes through unmodified
+not generic pipeline stages.
 
-### Composition
+## Bridge Model
 
-Pipeline stages are generic over their upstream source. Composition is zero-cost (monomorphized). Only one `Box<dyn MediaSource>` allocation happens when the final pipeline is installed on `PeerOutput`.
-
-```
-TrackSource → RecordingTap<TrackSource> → TransformFilter<RecordingTap<TrackSource>> → box → PeerOutput
-```
-
-Without recorder:
-```
-TrackSource → TransformFilter<TrackSource> → box → PeerOutput
-```
-
-### `PeerOutput` (`endpoint.rs`)
-
-Output side of a phone endpoint.
+`MediaBridge` is now a thin coordinator.
 
 It owns:
-- the currently active `Box<dyn MediaSource>` (switchable)
-- a `Notify` + `StdMutex<Option<...>>` for source replacement (latest always wins)
-- one persistent outbound RTP continuity state (`OutputRtpState`)
 
-It implements `MediaStreamTrack` so rustrtc's `RtpSender` can poll it.
+- caller `MediaPeer`
+- callee `MediaPeer`
+- one `DirectionConfig` for each direction
 
-Its job is:
-- let `RtpSender` poll media via `recv()`
-- switch to a new source when commanded (`set_source()`)
-- keep outbound RTP sequence/timestamp continuity stable across source switches
+Its job is only to wire:
 
-Key method: `PeerOutput::attach(track_id, target_pc)` creates the output and installs it on the PeerConnection's audio transceiver.
+- caller `input()` into callee `output()`
+- callee `input()` into caller `output()`
 
-Source switching uses one async Mutex (for the current source) and `Notify` to wake `recv()` when a replacement arrives — even if the current source is stuck (e.g. `IdleSource`).
+by building direction-specific `PeerInputProvider`s.
 
-### `PeerEndpoint` (`endpoint.rs`)
+Conceptually:
 
-Represents one phone leg (caller or callee).
-
-It owns:
-- `receiver_track` — the peer's incoming RTP (single reader)
-- `recorder` — optional recording binding (source side, pre-transform)
-- `output` — `Arc<PeerOutput>` for sending RTP to this peer
-
-Key method: `bridge_to(target_output, audio, dtmf, transcode)` builds a recording+transform pipeline from this endpoint's input and installs it as the source on the target output:
-
-```
-this.receiver_track → RecordingTap(recorder) → TransformFilter(remap/transcode) → target.output
+```text
+caller.input -> PeerInputProvider(caller->callee mapping) -> callee.output
+callee.input -> PeerInputProvider(callee->caller mapping) -> caller.output
 ```
 
-### `DirectionConfig` (`endpoint.rs`)
+No generic stage chain is required in the bridge layer.
 
-Groups per-direction transform config (audio mapping, DTMF mapping, transcode spec).
+## Playback Model
 
-`DirectionConfig::from_profiles(source, target)` builds the config from `NegotiatedLegProfile`s.
+Playback uses the same `PeerOutput` switching model as bridging.
 
-### `BidirectionalBridge` (`endpoint.rs`)
+`SipSession` builds a `FileOutputProvider` and installs it on the target leg output:
 
-Holds two `PeerEndpoint`s and per-direction `DirectionConfig`s.
-
-Built via builder pattern:
-```rust
-BidirectionalBridge::builder(caller, callee)
-    .caller_to_callee(DirectionConfig::from_profiles(&caller_profile, &callee_profile))
-    .callee_to_caller(DirectionConfig::from_profiles(&callee_profile, &caller_profile))
-    .build()
+```text
+FileOutputProvider -> PeerOutput -> RtpSender
 ```
 
-- `bridge()` — wires both directions
-- `unbridge()` — clears both outputs to idle
+That means:
 
-## Pipeline Examples
-
-### Anchored proxy bridge (caller → callee):
-```
-caller.receiver_track → RecordingTap → TransformFilter → callee.PeerOutput → RtpSender
-callee.receiver_track → RecordingTap → TransformFilter → caller.PeerOutput → RtpSender
-```
-
-### Playback (e.g. hold music to caller):
-```
-FileSource → caller.PeerOutput → RtpSender
-```
-RTP timing continues across source switch (peer → file → peer).
-
-### IVR (future, no callee):
-```
-caller.receiver_track → RecordingTap → DtmfDetector (future)
-FileSource → caller.PeerOutput → RtpSender
-```
+- playback and peer bridging use the same outbound switching boundary
+- `PeerOutput` remains stable while the provider changes
 
 ## RTP Continuity
 
-Outbound RTP continuity is owned by `PeerOutput` (`OutputRtpState`).
+Outbound RTP continuity is currently held in `PeerOutput` as `OutputRtpState`.
 
-For each outgoing audio sample, the output:
-- rewrites sequence number
-- rewrites RTP timestamp onto a continuous outbound timeline
+Current behavior:
 
-Source switching does not reset the outbound sender timeline. `OutputRtpState` is the timestamp authority — sources set `sequence_number = Some(...)` so rustrtc treats frames as app-controlled and doesn't apply its own rewriting.
+- when `PeerOutput.recv()` gets an audio frame from the active provider
+- it rewrites the frame timestamp and sequence fields before returning it
 
-## Recording
+This keeps continuity policy at the sender-facing boundary rather than inside:
 
-Recording is source-side on the `PeerEndpoint` input.
+- `MediaBridge`
+- `PeerInputProvider`
+- `FileOutputProvider`
 
-When `PeerEndpoint::bridge_to()` builds the pipeline, if a recorder is attached, a `RecordingTap` wraps the `TrackSource` and records each packet before passing it to the `TransformFilter`.
+This document does not claim that final wire ownership is fully solved yet relative to `rustrtc`; it only documents the current abstraction boundary in this repository.
 
-Recording captures:
-- pre-transcode
-- pre-output-remap
-- original incoming media for that leg
+## Recorder Status
 
-The recorder is shared (`Arc<StdMutex<Option<Recorder>>>`) between caller (leg A) and callee (leg B) for stereo WAV output.
+Recorder behavior is not considered finished in this design.
 
-## Concurrency Model
+Current code still allows `PeerInput` to carry recorder metadata and wrap a provider with recording behavior, but recorder ownership is not yet the finalized abstraction boundary.
 
-The current anchored bridge path does not spawn a forwarding worker.
+So recorder should be treated as:
 
-`PeerOutput.recv()`:
-- holds one async Mutex on the current source
-- `select!`s between:
-  - current source producing a sample
-  - `Notify` signaling a replacement is pending
-
-If a replacement arrives:
-- the new source is swapped in from `StdMutex<Option<...>>`
-- the old source is dropped
-- latest source always wins (no channel backpressure)
+- present in code
+- not the design center
+- still subject to later cleanup
 
 ## Negotiation Assumptions
 
-Same as before — from [`src/media/negotiate.rs`](../src/media/negotiate.rs):
+Same assumptions as before from [`src/media/negotiate.rs`](../src/media/negotiate.rs):
+
 - the first answered audio codec is treated as the negotiated audio codec
 - one DTMF entry is selected per leg
+- direction config is derived from source-leg profile vs target-leg profile
 
-## What Is Still Legacy
+## What Is Deferred
 
-- [`src/media/bridge.rs`](../src/media/bridge.rs) — task-based WebRTC <-> RTP bridge
-- legacy `Track` / `MediaStream` compatibility in [`src/media/mod.rs`](../src/media/mod.rs)
-- broader `MediaPeer` redesign
+- mixed WebRTC ↔ RTP transport bridge on top of this peer abstraction
+- recorder ownership redesign
+- multi-consumer input fanout
+- app/AVR peer kinds
+- RWI media peer kind
+- migration/removal of all legacy track/media-stream compatibility code
 
-## Types Removed in This Refactor
+## Current Mental Model
 
-- `DirectedLink` — was just a box around `Box<dyn MediaSource>`, now held directly by `PeerOutput`
-- `LegOutput` — absorbed into `PeerOutput`
-- `SenderTrackAdapter` — renamed to `PeerOutput`
-- `PeerSourceConfig` — replaced by `DirectionConfig` + builder pattern
-- `AdapterRtpState` — renamed to `OutputRtpState`
-- `PeerSource` — merged into generic `TransformFilter<TrackSource>`
-- `TransformSource` — merged into generic `TransformFilter<S>`
-- `RecordingSource` — replaced by generic `RecordingTap<S>`
-- `MediaSink` — removed (premature, no implementations)
+If you ignore the deferred pieces, the current media layer should be read like this:
+
+1. Every SIP/WebRTC leg is a `MediaPeer`
+2. A `MediaPeer` has:
+   - a `PeerInput`
+   - a `PeerOutput`
+3. `PeerOutput` is always polled by the transport sender
+4. `PeerInput` is used to build an `OutputProvider` for some other peer’s `PeerOutput`
+5. `MediaBridge` just connects those two sides in each direction
+
+That is the current abstraction center of the media layer.
