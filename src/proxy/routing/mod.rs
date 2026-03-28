@@ -84,8 +84,14 @@ pub struct TrunkConfig {
     pub register_expires: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub register_extra_headers: Option<std::collections::HashMap<String, String>>,
+    #[serde(default = "default_rewrite_hostport")]
+    pub rewrite_hostport: bool,
     #[serde(skip)]
     pub origin: ConfigOrigin,
+}
+
+fn default_rewrite_hostport() -> bool {
+    true
 }
 
 impl Default for TrunkConfig {
@@ -112,6 +118,7 @@ impl Default for TrunkConfig {
             register_enabled: None,
             register_expires: None,
             register_extra_headers: None,
+            rewrite_hostport: true,
             origin: ConfigOrigin::embedded(),
         }
     }
@@ -148,10 +155,10 @@ impl TrunkConfig {
             if pattern.trim().is_empty() {
                 // Treat empty string as unset
             } else if !matches_user_prefix(pattern, candidate).map_err(|e| PrefixMismatch {
-                    field: "from_user".to_string(),
-                    expected: pattern.clone(),
-                    actual: format!("{} (pattern error: {})", candidate, e),
-                })? {
+                field: "from_user".to_string(),
+                expected: pattern.clone(),
+                actual: format!("{} (pattern error: {})", candidate, e),
+            })? {
                 return Err(PrefixMismatch {
                     field: "from_user".to_string(),
                     expected: pattern.clone(),
@@ -165,10 +172,10 @@ impl TrunkConfig {
             if pattern.trim().is_empty() {
                 // Treat empty string as unset
             } else if !matches_user_prefix(pattern, candidate).map_err(|e| PrefixMismatch {
-                    field: "to_user".to_string(),
-                    expected: pattern.clone(),
-                    actual: format!("{} (pattern error: {})", candidate, e),
-                })? {
+                field: "to_user".to_string(),
+                expected: pattern.clone(),
+                actual: format!("{} (pattern error: {})", candidate, e),
+            })? {
                 return Err(PrefixMismatch {
                     field: "to_user".to_string(),
                     expected: pattern.clone(),
