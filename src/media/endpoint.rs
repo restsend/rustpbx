@@ -14,9 +14,6 @@ use tokio::sync::{Mutex, watch};
 struct OutputRtpState {
     next_output_timestamp: u32,
     next_output_sequence: u16,
-    last_input_timestamp: Option<u32>,
-    last_input_sequence: Option<u16>,
-    last_clock_rate: Option<u32>,
 }
 
 impl Default for OutputRtpState {
@@ -24,48 +21,19 @@ impl Default for OutputRtpState {
         Self {
             next_output_timestamp: rand::random(),
             next_output_sequence: rand::random(),
-            last_input_timestamp: None,
-            last_input_sequence: None,
-            last_clock_rate: None,
         }
     }
 }
 
 impl OutputRtpState {
-    fn estimate_step(frame: &AudioFrame) -> u32 {
-        (frame.clock_rate / 50).max(1)
-    }
-
     fn rewrite(&mut self, frame: &mut AudioFrame) {
-        let input_timestamp = frame.rtp_timestamp;
-        let input_sequence = frame.sequence_number;
-        let step = match (
-            self.last_input_timestamp,
-            self.last_input_sequence,
-            self.last_clock_rate,
-            input_sequence,
-        ) {
-            (Some(last_ts), Some(last_seq), Some(last_rate), Some(input_seq))
-                if last_rate == frame.clock_rate && input_seq == last_seq.wrapping_add(1) =>
-            {
-                let delta = input_timestamp.wrapping_sub(last_ts);
-                if delta > 0 && delta < frame.clock_rate.saturating_mul(5) {
-                    delta
-                } else {
-                    Self::estimate_step(frame)
-                }
-            }
-            _ => Self::estimate_step(frame),
-        };
+        let step = (frame.clock_rate / 50).max(1);
 
         frame.rtp_timestamp = self.next_output_timestamp;
         frame.sequence_number = Some(self.next_output_sequence);
 
         self.next_output_timestamp = self.next_output_timestamp.wrapping_add(step);
         self.next_output_sequence = self.next_output_sequence.wrapping_add(1);
-        self.last_input_timestamp = Some(input_timestamp);
-        self.last_input_sequence = input_sequence;
-        self.last_clock_rate = Some(frame.clock_rate);
     }
 }
 
@@ -81,6 +49,7 @@ pub struct PeerOutput {
     input_tx: watch::Sender<Arc<PeerInput>>,
     input_rx: Mutex<watch::Receiver<Arc<PeerInput>>>,
     rtp_state: std::sync::Mutex<OutputRtpState>,
+    mark_next: std::sync::atomic::AtomicBool,
 }
 
 impl PeerOutput {
@@ -93,6 +62,7 @@ impl PeerOutput {
             input_tx,
             input_rx: Mutex::new(input_rx),
             rtp_state: std::sync::Mutex::new(OutputRtpState::default()),
+            mark_next: std::sync::atomic::AtomicBool::new(true),
         });
 
         let target_transceiver = target_pc
@@ -119,6 +89,8 @@ impl PeerOutput {
     }
 
     pub fn set_input(&self, input: PeerInput) {
+        self.mark_next
+            .store(true, std::sync::atomic::Ordering::Relaxed);
         let _ = self.input_tx.send(Arc::new(input));
     }
 
@@ -149,6 +121,9 @@ impl MediaStreamTrack for PeerOutput {
                 result = input.recv() => {
                     let mut sample = result?;
                     if let MediaSample::Audio(frame) = &mut sample {
+                        if self.mark_next.swap(false, std::sync::atomic::Ordering::Relaxed) {
+                            frame.marker = true;
+                        }
                         if let Ok(mut rtp_state) = self.rtp_state.lock() {
                             rtp_state.rewrite(frame);
                         }
