@@ -176,6 +176,7 @@
     src="{{chart_js|default('https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.5.0/chart.umd.min.js')|safe}}"></script>
 <script>
     (function () {
+        const dashboardT = {{ (t.dashboard | default({})) | tojson | safe }};
         const bootstrapNode = document.getElementById('dashboard-bootstrap');
         let payload = null;
         let endpoint = null;
@@ -212,6 +213,40 @@
         const ctxDirection = document.getElementById('callDirectionChart');
         let timelineChart = null;
         let directionChart = null;
+
+        function localizedRangeLabel(range) {
+            switch (range?.key) {
+                case 'today':
+                    return dashboardT.today || range?.period_label_short || 'Today';
+                case 'yesterday':
+                    return dashboardT.yesterday || range?.period_label_short || 'Yesterday';
+                case 'week':
+                    return dashboardT.this_week || range?.period_label_short || 'This week';
+                case '7days':
+                    return dashboardT.last_7_days || range?.period_label_short || 'Last 7 days';
+                case '30days':
+                    return dashboardT.last_30_days || range?.period_label_short || 'Last 30 days';
+                default:
+                    return dashboardT.last_10_minutes || range?.period_label_short || 'Last 10 minutes';
+            }
+        }
+
+        function localizedTimelineTitle(range) {
+            switch (range?.key) {
+                case 'today':
+                    return `${dashboardT.today || 'Today'} ${dashboardT.timeline || 'Timeline'}`;
+                case 'yesterday':
+                    return `${dashboardT.yesterday || 'Yesterday'} ${dashboardT.timeline || 'Timeline'}`;
+                case 'week':
+                    return `${dashboardT.this_week || 'This week'} ${dashboardT.timeline || 'Timeline'}`;
+                case '7days':
+                    return `${dashboardT.last_7_days || 'Last 7 days'} ${dashboardT.timeline || 'Timeline'}`;
+                case '30days':
+                    return `${dashboardT.last_30_days || 'Last 30 days'} ${dashboardT.timeline || 'Timeline'}`;
+                default:
+                    return dashboardT.last_10_minutes_timeline || `${dashboardT.last_10_minutes || 'Last 10 minutes'} ${dashboardT.timeline || 'Timeline'}`;
+            }
+        }
 
         function initCharts(initialData) {
             if (!window.Chart) {
@@ -338,8 +373,9 @@
             const metrics = data.metrics?.recent10 || {};
             const today = data.metrics?.today || {};
             const active = data.metrics || {};
+            const rangeLabel = localizedRangeLabel(data.range);
             rangeLabels.forEach((node) => {
-                node.textContent = data.range?.period_label_short || 'last 10 minutes';
+                node.textContent = rangeLabel;
             });
             if (elements.total) {
                 elements.total.textContent = metrics.total ?? 0;
@@ -380,7 +416,7 @@
                 elements.activeUtilBar.style.setProperty('--v', active.active_util ?? 0);
             }
             if (elements.timelineTitle) {
-                elements.timelineTitle.textContent = data.range?.timeline_title || 'Timeline';
+                elements.timelineTitle.textContent = localizedTimelineTitle(data.range);
             }
             if (elements.activeUpdated) {
                 const ts = new Date();
