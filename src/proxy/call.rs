@@ -423,9 +423,11 @@ impl CallModule {
             aor: callee_uri.clone(),
             ..Default::default()
         };
+        let mut internal_lookup_empty = false;
 
         if callee_is_same_realm {
             if let Ok(results) = self.inner.server.locator.lookup(&callee_uri).await {
+                internal_lookup_empty = results.is_empty();
                 loc.supports_webrtc |= results.iter().any(|item| item.supports_webrtc);
             }
         }
@@ -492,6 +494,12 @@ impl CallModule {
             };
             DialStrategy::Sequential(vec![target])
         } else {
+            if callee_is_same_realm && internal_lookup_empty {
+                return Err((
+                    anyhow!("target user is offline"),
+                    Some(rsip::StatusCode::TemporarilyUnavailable),
+                ));
+            }
             DialStrategy::Sequential(locs)
         };
         let recording = self
