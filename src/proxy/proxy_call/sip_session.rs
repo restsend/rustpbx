@@ -1423,6 +1423,7 @@ impl SipSession {
             callee_output,
             &caller_profile,
             &callee_profile,
+            self.recorder.clone(),
             &session_id,
         ) {
             Ok(bridge) => {
@@ -1458,6 +1459,7 @@ impl SipSession {
         callee_output: Arc<PeerOutput>,
         caller_profile: &crate::media::negotiate::NegotiatedLegProfile,
         callee_profile: &crate::media::negotiate::NegotiatedLegProfile,
+        recorder: Arc<Mutex<Option<Recorder>>>,
         session_id: &str,
     ) -> Result<MediaBridge> {
         let caller_input = PeerInput::from_track(receiver_track_for_pc(caller_pc)?);
@@ -1470,11 +1472,13 @@ impl SipSession {
                 .caller_to_callee(DirectionConfig::from_profiles(
                     caller_profile,
                     callee_profile,
-                ))
+                )
+                .with_recorder(recorder.clone(), crate::media::recorder::Leg::A))
                 .callee_to_caller(DirectionConfig::from_profiles(
                     callee_profile,
                     caller_profile,
-                ))
+                )
+                .with_recorder(recorder, crate::media::recorder::Leg::B))
                 .build(),
         )
     }

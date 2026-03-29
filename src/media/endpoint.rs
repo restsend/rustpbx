@@ -1,75 +1,12 @@
-use crate::media::source::{
-    AudioMapping, DtmfMapping, FileInput, IdleInput, MappedTrackInput, PeerInputSource,
-    TranscodeSpec,
-};
+use crate::media::source::{BridgeInputAdapter, BridgeInputConfig, FileInput, IdleInput, PeerInputSource};
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use rustrtc::media::error::MediaResult;
-use rustrtc::media::frame::{AudioFrame, MediaKind as TrackMediaKind, MediaSample};
+use rustrtc::media::frame::{MediaKind as TrackMediaKind, MediaSample};
 use rustrtc::media::track::{MediaStreamTrack, TrackState};
 use rustrtc::{MediaKind, PeerConnection, RtpSender};
 use std::sync::Arc;
 use tokio::sync::{Mutex, watch};
-
-struct OutputRtpState {
-    next_output_timestamp: u32,
-    next_output_sequence: u16,
-    /// Same input timestamp always maps to the same output timestamp — this is
-    /// what RFC 4733 DTMF needs (all packets of one key-press share one RTP
-    /// timestamp).
-    last_timestamp_mapping: Option<(u32, u32)>,
-    /// Exact retransmission of the previously seen input packet maps back to
-    /// the same rewritten sequence number instead of being discarded.
-    last_sequence_mapping: Option<(u16, u16)>,
-}
-
-impl Default for OutputRtpState {
-    fn default() -> Self {
-        Self {
-            next_output_timestamp: rand::random(),
-            next_output_sequence: rand::random(),
-            last_timestamp_mapping: None,
-            last_sequence_mapping: None,
-        }
-    }
-}
-
-impl OutputRtpState {
-    fn rewrite(&mut self, frame: &mut AudioFrame) {
-        let input_timestamp = frame.rtp_timestamp;
-        let input_sequence = frame.sequence_number;
-
-        let step = (frame.clock_rate / 50).max(1);
-
-        if let Some((last_input_ts, last_output_ts)) = self.last_timestamp_mapping
-            && last_input_ts == input_timestamp
-        {
-            frame.rtp_timestamp = last_output_ts;
-        } else {
-            let out = self.next_output_timestamp;
-            self.next_output_timestamp = self.next_output_timestamp.wrapping_add(step);
-            frame.rtp_timestamp = out;
-            self.last_timestamp_mapping = Some((input_timestamp, out));
-        };
-
-        if let Some(input_sequence) = input_sequence {
-            if let Some((last_input_seq, last_output_seq)) = self.last_sequence_mapping
-                && input_sequence == last_input_seq
-            {
-                frame.sequence_number = Some(last_output_seq);
-            } else {
-                let out = self.next_output_sequence;
-                self.next_output_sequence = self.next_output_sequence.wrapping_add(1);
-                frame.sequence_number = Some(out);
-                self.last_sequence_mapping = Some((input_sequence, out));
-            }
-        } else {
-            let out = self.next_output_sequence;
-            self.next_output_sequence = self.next_output_sequence.wrapping_add(1);
-            frame.sequence_number = Some(out);
-        }
-    }
-}
 
 /// Outbound media for one peer.
 ///
@@ -82,7 +19,6 @@ pub struct PeerOutput {
     kind: TrackMediaKind,
     input_tx: watch::Sender<Arc<PeerInput>>,
     input_rx: Mutex<watch::Receiver<Arc<PeerInput>>>,
-    rtp_state: std::sync::Mutex<OutputRtpState>,
     mark_next: std::sync::atomic::AtomicBool,
 }
 
@@ -95,7 +31,6 @@ impl PeerOutput {
             kind: TrackMediaKind::Audio,
             input_tx,
             input_rx: Mutex::new(input_rx),
-            rtp_state: std::sync::Mutex::new(OutputRtpState::default()),
             mark_next: std::sync::atomic::AtomicBool::new(true),
         });
 
@@ -155,9 +90,6 @@ impl MediaStreamTrack for PeerOutput {
                 result = input.recv() => {
                     let mut sample = result?;
                     if let MediaSample::Audio(frame) = &mut sample {
-                        if let Ok(mut rtp_state) = self.rtp_state.lock() {
-                            rtp_state.rewrite(frame);
-                        }
                         if self.mark_next.swap(false, std::sync::atomic::Ordering::Relaxed) {
                             frame.marker = true;
                         }
@@ -226,24 +158,16 @@ impl PeerInput {
         }
     }
 
-    pub fn adapted_for_output(
-        &self,
-        audio_mapping: Option<AudioMapping>,
-        dtmf_mapping: Option<DtmfMapping>,
-        transcode: Option<TranscodeSpec>,
-    ) -> Self {
+    pub fn adapted_for_output(&self, config: BridgeInputConfig) -> Self {
         match &self.kind {
-            PeerInputKind::Track(track) => Self::from_source(Box::new(MappedTrackInput::new(
-                track.clone(),
-                audio_mapping,
-                dtmf_mapping,
-                transcode,
-            ))),
+            PeerInputKind::Track(track) => {
+                Self::from_source(Box::new(BridgeInputAdapter::new(track.clone(), config)))
+            }
             PeerInputKind::Source(_) => {
-                if audio_mapping.is_none() && dtmf_mapping.is_none() && transcode.is_none() {
+                if config.is_passthrough() {
                     self.clone()
                 } else {
-                    panic!("cannot apply directional mapping to a non-track peer input");
+                    panic!("cannot apply directional adaptation to a non-track peer input");
                 }
             }
         }
@@ -263,4 +187,106 @@ pub fn receiver_track_for_pc(pc: &PeerConnection) -> Result<Arc<dyn MediaStreamT
         .ok_or_else(|| anyhow!("no receiver on audio transceiver"))?;
 
     Ok(receiver.track())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bytes::Bytes;
+    use rustrtc::media::error::MediaError;
+    use rustrtc::media::frame::AudioFrame;
+    use std::collections::VecDeque;
+    use std::sync::Arc;
+
+    struct FakeTrack {
+        id: &'static str,
+        samples: tokio::sync::Mutex<VecDeque<MediaSample>>,
+    }
+
+    #[async_trait]
+    impl MediaStreamTrack for FakeTrack {
+        fn id(&self) -> &str {
+            self.id
+        }
+
+        fn kind(&self) -> TrackMediaKind {
+            TrackMediaKind::Audio
+        }
+
+        fn state(&self) -> TrackState {
+            TrackState::Live
+        }
+
+        async fn recv(&self) -> MediaResult<MediaSample> {
+            self.samples
+                .lock()
+                .await
+                .pop_front()
+                .ok_or(MediaError::EndOfStream)
+        }
+
+        async fn request_key_frame(&self) -> MediaResult<()> {
+            Ok(())
+        }
+    }
+
+    fn frame(
+        timestamp: u32,
+        sequence_number: u16,
+        payload: &[u8],
+    ) -> AudioFrame {
+        AudioFrame {
+            rtp_timestamp: timestamp,
+            clock_rate: 8000,
+            data: Bytes::copy_from_slice(payload),
+            sequence_number: Some(sequence_number),
+            payload_type: Some(101),
+            marker: false,
+            raw_packet: None,
+            source_addr: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn peer_output_marks_first_packet_after_input_switch() {
+        let first_input = PeerInput::from_track(Arc::new(FakeTrack {
+            id: "track-a",
+            samples: tokio::sync::Mutex::new(VecDeque::from([MediaSample::Audio(frame(
+                1000,
+                1,
+                &[0u8; 4],
+            ))])),
+        }));
+        let second_input = PeerInput::from_track(Arc::new(FakeTrack {
+            id: "track-b",
+            samples: tokio::sync::Mutex::new(VecDeque::from([MediaSample::Audio(frame(
+                1160,
+                2,
+                &[0u8; 4],
+            ))])),
+        }));
+        let idle_input = Arc::new(PeerInput::idle());
+        let (input_tx, input_rx) = watch::channel(idle_input);
+        let output = PeerOutput {
+            id: "test-output".to_string(),
+            kind: TrackMediaKind::Audio,
+            input_tx,
+            input_rx: Mutex::new(input_rx),
+            mark_next: std::sync::atomic::AtomicBool::new(true),
+        };
+
+        output.set_input(first_input);
+        let first = output.recv().await.unwrap();
+        let MediaSample::Audio(first) = first else {
+            panic!("expected audio sample");
+        };
+        assert!(first.marker);
+
+        output.set_input(second_input);
+        let second = output.recv().await.unwrap();
+        let MediaSample::Audio(second) = second else {
+            panic!("expected audio sample");
+        };
+        assert!(second.marker);
+    }
 }

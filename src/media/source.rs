@@ -1,6 +1,7 @@
 use crate::media::audio_frame_timing;
 use crate::media::audio_source::AudioSourceManager;
-use crate::media::negotiate::CodecInfo;
+use crate::media::negotiate::{CodecInfo, NegotiatedCodec, NegotiatedLegProfile};
+use crate::media::recorder::{Leg, Recorder};
 use crate::media::transcoder::{Transcoder, rewrite_dtmf_duration};
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
@@ -8,7 +9,7 @@ use bytes::Bytes;
 use rustrtc::media::error::MediaResult;
 use rustrtc::media::frame::{AudioFrame, MediaSample};
 use rustrtc::media::track::MediaStreamTrack;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tokio::sync::Notify;
 use tokio::time::{Duration, Interval, MissedTickBehavior};
 
@@ -17,63 +18,124 @@ pub trait PeerInputSource: Send {
     async fn recv(&mut self) -> MediaResult<MediaSample>;
 }
 
-#[derive(Clone, Debug)]
-pub struct AudioMapping {
-    pub source_pt: u8,
-    pub target_pt: u8,
-    pub source_clock_rate: u32,
-    pub target_clock_rate: u32,
-    pub source_codec: audio_codec::CodecType,
-    pub target_codec: audio_codec::CodecType,
+#[derive(Clone, Default)]
+pub struct BridgeInputConfig {
+    pub source: NegotiatedLegProfile,
+    pub target: NegotiatedLegProfile,
+    pub recorder: Option<SharedRecorder>,
+    pub record_leg: Option<Leg>,
 }
 
-#[derive(Clone, Debug)]
-pub struct DtmfMapping {
-    pub source_pt: u8,
-    pub target_pt: Option<u8>,
-    pub source_clock_rate: u32,
-    pub target_clock_rate: Option<u32>,
-}
+pub type SharedRecorder = Arc<Mutex<Option<Recorder>>>;
 
-#[derive(Clone)]
-pub struct TranscodeSpec {
-    pub source_codec: audio_codec::CodecType,
-    pub target_codec: audio_codec::CodecType,
-    pub target_pt: u8,
+impl BridgeInputConfig {
+    pub fn from_profiles(source: &NegotiatedLegProfile, target: &NegotiatedLegProfile) -> Self {
+        Self {
+            source: source.clone(),
+            target: target.clone(),
+            recorder: None,
+            record_leg: None,
+        }
+    }
+
+    pub fn with_recorder(mut self, recorder: SharedRecorder, record_leg: Leg) -> Self {
+        self.recorder = Some(recorder);
+        self.record_leg = Some(record_leg);
+        self
+    }
+
+    pub fn is_passthrough(&self) -> bool {
+        self.source.audio.is_none()
+            && self.source.dtmf.is_none()
+            && self.target.audio.is_none()
+            && self.target.dtmf.is_none()
+            && self.recorder.is_none()
+            && self.record_leg.is_none()
+    }
 }
 
 /// Input adapter built from a peer's inbound media track.
 ///
 /// This owns all per-direction adaptation for a single bridge direction:
-/// selected PT admission, DTMF remap/drop, and optional transcoding.
-pub struct MappedTrackInput {
+/// selected PT admission, recorder tap, optional transcoding, and RTP
+/// timestamp rescaling.
+pub struct BridgeInputAdapter {
     track: Arc<dyn MediaStreamTrack>,
-    audio_mapping: Option<AudioMapping>,
-    dtmf_mapping: Option<DtmfMapping>,
+    config: BridgeInputConfig,
     transcoder: Option<Transcoder>,
+    timestamp_anchor: Option<(u32, u32)>,
 }
 
-impl MappedTrackInput {
-    pub fn new(
-        track: Arc<dyn MediaStreamTrack>,
-        audio_mapping: Option<AudioMapping>,
-        dtmf_mapping: Option<DtmfMapping>,
-        transcode: Option<TranscodeSpec>,
-    ) -> Self {
-        let transcoder = transcode.map(|spec| {
-            Transcoder::new(spec.source_codec, spec.target_codec, spec.target_pt)
-        });
+impl BridgeInputAdapter {
+    pub fn new(track: Arc<dyn MediaStreamTrack>, config: BridgeInputConfig) -> Self {
+        let transcoder = match (&config.source.audio, &config.target.audio) {
+            (Some(source), Some(target)) if source.codec != target.codec => {
+                Some(Transcoder::new(source.codec, target.codec, target.payload_type))
+            }
+            _ => None,
+        };
         Self {
             track,
-            audio_mapping,
-            dtmf_mapping,
+            config,
             transcoder,
+            timestamp_anchor: None,
         }
+    }
+
+    fn source_audio(&self) -> Option<&NegotiatedCodec> {
+        self.config.source.audio.as_ref()
+    }
+
+    fn target_audio(&self) -> Option<&NegotiatedCodec> {
+        self.config.target.audio.as_ref()
+    }
+
+    fn source_dtmf(&self) -> Option<&NegotiatedCodec> {
+        self.config.source.dtmf.as_ref()
+    }
+
+    fn target_dtmf(&self) -> Option<&NegotiatedCodec> {
+        self.config.target.dtmf.as_ref()
+    }
+
+    fn rewrite_timestamp(&mut self, frame: &mut AudioFrame, source_clock_rate: u32, target_clock_rate: u32) {
+        frame.clock_rate = target_clock_rate;
+        if source_clock_rate == 0 || source_clock_rate == target_clock_rate {
+            return;
+        }
+
+        let (input_anchor, output_anchor) = self
+            .timestamp_anchor
+            .get_or_insert((frame.rtp_timestamp, frame.rtp_timestamp));
+        let input_delta = frame.rtp_timestamp.wrapping_sub(*input_anchor);
+        let output_delta =
+            (input_delta as u64 * target_clock_rate as u64 / source_clock_rate as u64) as u32;
+        frame.rtp_timestamp = output_anchor.wrapping_add(output_delta);
+    }
+
+    fn write_to_recorder(
+        &self,
+        sample: &MediaSample,
+        source_codec: Option<audio_codec::CodecType>,
+        source_dtmf: Option<&NegotiatedCodec>,
+    ) {
+        let (Some(recorder), Some(record_leg)) = (&self.config.recorder, self.config.record_leg) else {
+            return;
+        };
+        let Ok(mut guard) = recorder.lock() else {
+            return;
+        };
+        let Some(recorder) = guard.as_mut() else {
+            return;
+        };
+        let dtmf_pt = source_dtmf.map(|codec| codec.payload_type);
+        let dtmf_clock_rate = source_dtmf.map(|codec| codec.clock_rate);
+        let _ = recorder.write_sample(record_leg, sample, dtmf_pt, dtmf_clock_rate, source_codec);
     }
 }
 
 #[async_trait]
-impl PeerInputSource for MappedTrackInput {
+impl PeerInputSource for BridgeInputAdapter {
     async fn recv(&mut self) -> MediaResult<MediaSample> {
         loop {
             let mut sample = self.track.recv().await?;
@@ -81,42 +143,66 @@ impl PeerInputSource for MappedTrackInput {
                 return Ok(sample);
             };
 
-            if let Some(mapping) = self.dtmf_mapping.as_ref() {
-                if frame.payload_type == Some(mapping.source_pt) {
-                    let Some(target_pt) = mapping.target_pt else {
-                        continue;
-                    };
-                    frame.payload_type = Some(target_pt);
-                    if let Some(target_rate) = mapping.target_clock_rate {
-                        if mapping.source_clock_rate != target_rate {
-                            frame.data = rewrite_dtmf_duration(
-                                &frame.data,
-                                mapping.source_clock_rate,
-                                target_rate,
-                            );
-                        }
-                        frame.clock_rate = target_rate;
-                    }
-                    return Ok(sample);
-                }
-            }
-
-            if let Some(mapping) = self.audio_mapping.as_ref() {
-                if frame.payload_type != Some(mapping.source_pt) {
+            let source_dtmf = self.source_dtmf().cloned();
+            if source_dtmf
+                .as_ref()
+                .is_some_and(|codec| frame.payload_type == Some(codec.payload_type))
+            {
+                let Some(target_dtmf) = self.target_dtmf().cloned() else {
                     continue;
-                }
+                };
 
-                if let Some(transcoder) = self.transcoder.as_mut() {
-                    let output = transcoder.transcode(frame);
-                    return Ok(MediaSample::Audio(output));
-                }
+                let original = MediaSample::Audio(frame.clone());
+                self.write_to_recorder(&original, None, source_dtmf.as_ref());
 
-                frame.payload_type = Some(mapping.target_pt);
-                frame.clock_rate = mapping.target_clock_rate;
+                frame.payload_type = Some(target_dtmf.payload_type);
+                if source_dtmf.as_ref().map(|codec| codec.clock_rate) != Some(target_dtmf.clock_rate)
+                {
+                    frame.data = rewrite_dtmf_duration(
+                        &frame.data,
+                        source_dtmf.as_ref().map(|codec| codec.clock_rate).unwrap_or(frame.clock_rate),
+                        target_dtmf.clock_rate,
+                    );
+                }
+                self.rewrite_timestamp(
+                    frame,
+                    source_dtmf.as_ref().map(|codec| codec.clock_rate).unwrap_or(frame.clock_rate),
+                    target_dtmf.clock_rate,
+                );
+                frame.raw_packet = None;
                 return Ok(sample);
             }
 
-            if self.dtmf_mapping.is_none() {
+            if let Some(source_audio) = self.source_audio().cloned() {
+                if frame.payload_type != Some(source_audio.payload_type) {
+                    continue;
+                }
+
+                let original = MediaSample::Audio(frame.clone());
+                self.write_to_recorder(&original, Some(source_audio.codec), None);
+
+                let Some(target_audio) = self.target_audio().cloned() else {
+                    continue;
+                };
+                if let Some(transcoder) = self.transcoder.as_mut() {
+                    let mut output = transcoder.transcode(frame);
+                    self.rewrite_timestamp(
+                        &mut output,
+                        source_audio.clock_rate,
+                        target_audio.clock_rate,
+                    );
+                    output.payload_type = Some(target_audio.payload_type);
+                    output.raw_packet = None;
+                    return Ok(MediaSample::Audio(output));
+                }
+
+                frame.payload_type = Some(target_audio.payload_type);
+                self.rewrite_timestamp(frame, source_audio.clock_rate, target_audio.clock_rate);
+                frame.raw_packet = None;
+                return Ok(sample);
+            }
+
+            if self.source_dtmf().is_none() {
                 return Ok(sample);
             }
         }
@@ -251,6 +337,7 @@ mod tests {
     use rustrtc::media::frame::AudioFrame;
     use std::collections::VecDeque;
     use std::sync::Arc;
+    use tempfile::NamedTempFile;
 
     struct FakeTrack {
         samples: tokio::sync::Mutex<VecDeque<MediaSample>>,
@@ -298,23 +385,43 @@ mod tests {
         })
     }
 
+    fn audio_profile(payload_type: u8, codec: CodecType, clock_rate: u32) -> NegotiatedLegProfile {
+        NegotiatedLegProfile {
+            audio: Some(NegotiatedCodec {
+                codec,
+                payload_type,
+                clock_rate,
+                channels: 1,
+            }),
+            dtmf: None,
+        }
+    }
+
+    fn dtmf_profile(payload_type: u8, clock_rate: u32) -> NegotiatedLegProfile {
+        NegotiatedLegProfile {
+            audio: None,
+            dtmf: Some(NegotiatedCodec {
+                codec: CodecType::TelephoneEvent,
+                payload_type,
+                clock_rate,
+                channels: 1,
+            }),
+        }
+    }
+
     #[tokio::test]
-    async fn mapped_track_input_remaps_audio_payload_type() {
+    async fn bridge_input_adapter_remaps_audio_payload_type() {
         let track = Arc::new(FakeTrack {
             samples: tokio::sync::Mutex::new(VecDeque::from([pcmu_frame(0, 10, 1234)])),
         });
-        let mut input = MappedTrackInput::new(
+        let mut input = BridgeInputAdapter::new(
             track,
-            Some(AudioMapping {
-                source_pt: 0,
-                target_pt: 8,
-                source_clock_rate: 8000,
-                target_clock_rate: 8000,
-                source_codec: CodecType::PCMU,
-                target_codec: CodecType::PCMA,
-            }),
-            None,
-            None,
+            BridgeInputConfig {
+                source: audio_profile(0, CodecType::PCMU, 8000),
+                target: audio_profile(8, CodecType::PCMA, 8000),
+                recorder: None,
+                record_leg: None,
+            },
         );
 
         let sample = input.recv().await.unwrap();
@@ -326,25 +433,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mapped_track_input_drops_unselected_payload_type() {
+    async fn bridge_input_adapter_drops_unselected_payload_type() {
         let track = Arc::new(FakeTrack {
             samples: tokio::sync::Mutex::new(VecDeque::from([
                 pcmu_frame(111, 1, 1000),
                 pcmu_frame(0, 2, 1160),
             ])),
         });
-        let mut input = MappedTrackInput::new(
+        let mut input = BridgeInputAdapter::new(
             track,
-            Some(AudioMapping {
-                source_pt: 0,
-                target_pt: 8,
-                source_clock_rate: 8000,
-                target_clock_rate: 8000,
-                source_codec: CodecType::PCMU,
-                target_codec: CodecType::PCMA,
-            }),
-            None,
-            None,
+            BridgeInputConfig {
+                source: audio_profile(0, CodecType::PCMU, 8000),
+                target: audio_profile(8, CodecType::PCMA, 8000),
+                recorder: None,
+                record_leg: None,
+            },
         );
 
         let sample = input.recv().await.unwrap();
@@ -356,7 +459,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn mapped_track_input_rewrites_dtmf() {
+    async fn bridge_input_adapter_rewrites_dtmf() {
         let dtmf = MediaSample::Audio(AudioFrame {
             rtp_timestamp: 480,
             clock_rate: 48000,
@@ -370,16 +473,14 @@ mod tests {
         let track = Arc::new(FakeTrack {
             samples: tokio::sync::Mutex::new(VecDeque::from([dtmf])),
         });
-        let mut input = MappedTrackInput::new(
+        let mut input = BridgeInputAdapter::new(
             track,
-            None,
-            Some(DtmfMapping {
-                source_pt: 101,
-                target_pt: Some(97),
-                source_clock_rate: 48000,
-                target_clock_rate: Some(8000),
-            }),
-            None,
+            BridgeInputConfig {
+                source: dtmf_profile(101, 48000),
+                target: dtmf_profile(97, 8000),
+                recorder: None,
+                record_leg: None,
+            },
         );
 
         let sample = input.recv().await.unwrap();
@@ -389,5 +490,93 @@ mod tests {
         assert_eq!(frame.payload_type, Some(97));
         assert_eq!(frame.clock_rate, 8000);
         assert_eq!(&frame.data[..], &[1, 0x80, 0x03, 0x20]);
+        assert_eq!(frame.rtp_timestamp, 480);
+        assert_eq!(frame.sequence_number, Some(7));
+    }
+
+    #[tokio::test]
+    async fn bridge_input_adapter_rescales_audio_timestamp_from_anchor() {
+        let track = Arc::new(FakeTrack {
+            samples: tokio::sync::Mutex::new(VecDeque::from([
+                MediaSample::Audio(AudioFrame {
+                    rtp_timestamp: 48_000,
+                    clock_rate: 48_000,
+                    data: Bytes::from_static(&[1, 2, 3]),
+                    sequence_number: Some(9),
+                    payload_type: Some(96),
+                    marker: false,
+                    raw_packet: None,
+                    source_addr: None,
+                }),
+                MediaSample::Audio(AudioFrame {
+                    rtp_timestamp: 48_960,
+                    clock_rate: 48_000,
+                    data: Bytes::from_static(&[4, 5, 6]),
+                    sequence_number: Some(10),
+                    payload_type: Some(96),
+                    marker: false,
+                    raw_packet: None,
+                    source_addr: None,
+                }),
+            ])),
+        });
+        let mut input = BridgeInputAdapter::new(
+            track,
+            BridgeInputConfig {
+                source: audio_profile(96, CodecType::Opus, 48_000),
+                target: audio_profile(9, CodecType::G722, 8_000),
+                recorder: None,
+                record_leg: None,
+            },
+        );
+
+        let first = input.recv().await.unwrap();
+        let MediaSample::Audio(first) = first else {
+            panic!("expected audio sample");
+        };
+        assert_eq!(first.rtp_timestamp, 48_000);
+        assert_eq!(first.sequence_number, Some(9));
+
+        let second = input.recv().await.unwrap();
+        let MediaSample::Audio(second) = second else {
+            panic!("expected audio sample");
+        };
+        assert_eq!(second.rtp_timestamp, 48_160);
+        assert_eq!(second.sequence_number, Some(10));
+    }
+
+    #[tokio::test]
+    async fn bridge_input_adapter_records_original_sample_before_rewrite() {
+        let temp = NamedTempFile::with_suffix(".wav").unwrap();
+        let path = temp.path().to_string_lossy().to_string();
+        let recorder = Arc::new(Mutex::new(Some(Recorder::new(&path, CodecType::PCMU).unwrap())));
+        let track = Arc::new(FakeTrack {
+            samples: tokio::sync::Mutex::new(VecDeque::from([pcmu_frame(0, 10, 1234)])),
+        });
+        let mut input = BridgeInputAdapter::new(
+            track,
+            BridgeInputConfig {
+                source: audio_profile(0, CodecType::PCMU, 8000),
+                target: audio_profile(0, CodecType::PCMU, 8000),
+                recorder: Some(recorder.clone()),
+                record_leg: Some(Leg::A),
+            },
+        );
+
+        let sample = input.recv().await.unwrap();
+        let MediaSample::Audio(frame) = sample else {
+            panic!("expected audio sample");
+        };
+        assert_eq!(frame.payload_type, Some(0));
+        assert_eq!(frame.rtp_timestamp, 1234);
+        assert_eq!(frame.sequence_number, Some(10));
+
+        let mut guard = recorder.lock().unwrap();
+        let recorder = guard.as_mut().expect("recorder");
+        recorder.finalize().unwrap();
+        drop(guard);
+
+        let metadata = std::fs::metadata(&path).unwrap();
+        assert!(metadata.len() > 44);
     }
 }
