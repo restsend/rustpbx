@@ -595,6 +595,26 @@ impl SipSession {
             DialogState::Confirmed(_, _) => {
                 // Update session state
                 self.update_leg_state(&LegId::from("caller"), LegState::Connected);
+                let auto_record_path = self
+                    .context
+                    .dialplan
+                    .recording
+                    .option
+                    .as_ref()
+                    .map(|option| option.recorder_file.clone());
+                if self.context.dialplan.recording.enabled
+                    && self.recording_state.is_none()
+                    && let Some(path) = auto_record_path
+                    && !path.is_empty()
+                    && let Err(err) = self.start_recording(&path, None, false).await
+                {
+                    warn!(
+                        session_id = %self.context.session_id,
+                        path = %path,
+                        error = %err,
+                        "Failed to auto-start recording after caller confirmation",
+                    );
+                }
             }
             DialogState::Terminated(_, reason) => {
                 self.update_leg_state(&LegId::from("caller"), LegState::Ended);

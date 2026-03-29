@@ -37,7 +37,7 @@ impl Default for RecorderOption {
         Self {
             recorder_file: "".to_string(),
             samplerate: 16000,
-            ptime: 200,
+            ptime: 1000,
         }
     }
 }
@@ -46,6 +46,14 @@ impl Default for RecorderOption {
 pub enum Leg {
     A,
     B,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct DtmfEventState {
+    digit_code: u8,
+    rtp_timestamp: u32,
+    absolute_timestamp: u32,
+    duration_samples: u32,
 }
 
 pub struct Recorder {
@@ -74,8 +82,8 @@ pub struct Recorder {
     start_offset_b: u32, // in samples
     last_ssrc_a: Option<u32>,
     last_ssrc_b: Option<u32>,
-    last_dtmf_event_a: Option<(u8, u32)>,
-    last_dtmf_event_b: Option<(u8, u32)>,
+    dtmf_state_a: Option<DtmfEventState>,
+    dtmf_state_b: Option<DtmfEventState>,
 
     next_flush_ts: u32, // The next timestamp to be flushed
     ptime: Duration,
@@ -132,12 +140,12 @@ impl Recorder {
             start_offset_b: 0,
             last_ssrc_a: None,
             last_ssrc_b: None,
-            last_dtmf_event_a: None,
-            last_dtmf_event_b: None,
+            dtmf_state_a: None,
+            dtmf_state_b: None,
             next_flush_ts: 0,
             written_samples: 0,
             writer,
-            ptime: Duration::from_millis(200),
+            ptime: Duration::from_millis(1000),
         })
     }
 
@@ -211,53 +219,8 @@ impl Recorder {
             packet_ssrc,
             &encoded,
         );
-        let absolute_ts = match leg {
-            Leg::A => {
-                if self.base_timestamp_a.is_none() {
-                    self.base_timestamp_a = Some(frame.rtp_timestamp);
-                    self.start_offset_a = (self.start_instant.elapsed().as_millis() as u64
-                        * self.sample_rate as u64
-                        / 1000) as u32;
-                    debug!(
-                        "Recorder Leg A: base_timestamp={} offset={}",
-                        frame.rtp_timestamp, self.start_offset_a
-                    );
-                }
-                let relative = frame
-                    .rtp_timestamp
-                    .wrapping_sub(self.base_timestamp_a.unwrap());
-                let scaled_relative =
-                    (relative as u64 * self.sample_rate as u64 / frame_clock_rate as u64) as u32;
-                self.start_offset_a.wrapping_add(scaled_relative)
-            }
-            Leg::B => {
-                if self.base_timestamp_b.is_none() {
-                    self.base_timestamp_b = Some(frame.rtp_timestamp);
-                    self.start_offset_b = (self.start_instant.elapsed().as_millis() as u64
-                        * self.sample_rate as u64
-                        / 1000) as u32;
-                    debug!(
-                        "Recorder Leg B: base_timestamp={} offset={}",
-                        frame.rtp_timestamp, self.start_offset_b
-                    );
-                }
-                let relative = frame
-                    .rtp_timestamp
-                    .wrapping_sub(self.base_timestamp_b.unwrap());
-                let scaled_relative =
-                    (relative as u64 * self.sample_rate as u64 / frame_clock_rate as u64) as u32;
-                self.start_offset_b.wrapping_add(scaled_relative)
-            }
-        };
-
-        match leg {
-            Leg::A => {
-                self.buffer_a.insert(absolute_ts, encoded);
-            }
-            Leg::B => {
-                self.buffer_b.insert(absolute_ts, encoded);
-            }
-        }
+        let absolute_ts = self.timestamp_to_absolute(leg, frame.rtp_timestamp, frame_clock_rate);
+        self.insert_audio_block(leg, absolute_ts, encoded);
         if self.last_flush.elapsed() >= self.ptime {
             self.flush()?;
         }
@@ -339,6 +302,192 @@ impl Recorder {
         buffered_end.max(self.next_flush_ts)
     }
 
+    fn block_span_samples(&self, data: &[u8]) -> u32 {
+        let (samples_per_block, bytes_per_block) = self.block_info();
+        (data.len() / bytes_per_block) as u32 * samples_per_block
+    }
+
+    fn timestamp_to_absolute(&mut self, leg: Leg, timestamp: u32, clock_rate: u32) -> u32 {
+        let timestamp_clock_rate = clock_rate.max(1);
+        match leg {
+            Leg::A => {
+                if self.base_timestamp_a.is_none() {
+                    self.base_timestamp_a = Some(timestamp);
+                    self.start_offset_a = (self.start_instant.elapsed().as_millis() as u64
+                        * self.sample_rate as u64
+                        / 1000) as u32;
+                }
+                let relative = timestamp.wrapping_sub(self.base_timestamp_a.unwrap());
+                let scaled_relative =
+                    (relative as u64 * self.sample_rate as u64 / timestamp_clock_rate as u64)
+                        as u32;
+                self.start_offset_a.wrapping_add(scaled_relative)
+            }
+            Leg::B => {
+                if self.base_timestamp_b.is_none() {
+                    self.base_timestamp_b = Some(timestamp);
+                    self.start_offset_b = (self.start_instant.elapsed().as_millis() as u64
+                        * self.sample_rate as u64
+                        / 1000) as u32;
+                }
+                let relative = timestamp.wrapping_sub(self.base_timestamp_b.unwrap());
+                let scaled_relative =
+                    (relative as u64 * self.sample_rate as u64 / timestamp_clock_rate as u64)
+                        as u32;
+                self.start_offset_b.wrapping_add(scaled_relative)
+            }
+        }
+    }
+
+    fn active_dtmf_state(&self, leg: Leg) -> Option<DtmfEventState> {
+        match leg {
+            Leg::A => self.dtmf_state_a,
+            Leg::B => self.dtmf_state_b,
+        }
+    }
+
+    fn set_dtmf_state(&mut self, leg: Leg, state: DtmfEventState) {
+        match leg {
+            Leg::A => self.dtmf_state_a = Some(state),
+            Leg::B => self.dtmf_state_b = Some(state),
+        }
+    }
+
+    fn trim_front(&self, data: &Bytes, drop_samples: u32) -> Option<(u32, Bytes)> {
+        let (samples_per_block, bytes_per_block) = self.block_info();
+        let drop_blocks = drop_samples.div_ceil(samples_per_block) as usize;
+        let drop_bytes = drop_blocks * bytes_per_block;
+        if drop_bytes >= data.len() {
+            None
+        } else {
+            Some((
+                drop_blocks as u32 * samples_per_block,
+                Bytes::copy_from_slice(&data[drop_bytes..]),
+            ))
+        }
+    }
+
+    fn trim_back(&self, data: &Bytes, keep_samples: u32) -> Option<Bytes> {
+        let (samples_per_block, bytes_per_block) = self.block_info();
+        let keep_blocks = (keep_samples / samples_per_block) as usize;
+        let keep_bytes = keep_blocks * bytes_per_block;
+        if keep_bytes == 0 {
+            None
+        } else {
+            Some(Bytes::copy_from_slice(&data[..keep_bytes.min(data.len())]))
+        }
+    }
+
+    fn overlay_dtmf_range(&mut self, leg: Leg, start_ts: u32, end_ts: u32, encoded: Bytes) {
+        let overlapping_keys: Vec<u32> = match leg {
+            Leg::A => self.buffer_a.range(..end_ts).map(|(k, _)| *k).collect(),
+            Leg::B => self.buffer_b.range(..end_ts).map(|(k, _)| *k).collect(),
+        };
+
+        for key in overlapping_keys {
+            let data = match leg {
+                Leg::A => self.buffer_a.remove(&key),
+                Leg::B => self.buffer_b.remove(&key),
+            };
+            let Some(data) = data else {
+                continue;
+            };
+            let block_end = key.saturating_add(self.block_span_samples(&data));
+            if block_end <= start_ts || key >= end_ts {
+                match leg {
+                    Leg::A => {
+                        self.buffer_a.insert(key, data);
+                    }
+                    Leg::B => {
+                        self.buffer_b.insert(key, data);
+                    }
+                }
+                continue;
+            }
+
+            if key < start_ts
+                && let Some(prefix) = self.trim_back(&data, start_ts - key)
+            {
+                match leg {
+                    Leg::A => {
+                        self.buffer_a.insert(key, prefix);
+                    }
+                    Leg::B => {
+                        self.buffer_b.insert(key, prefix);
+                    }
+                }
+            }
+
+            if block_end > end_ts
+                && let Some((trimmed_samples, suffix)) =
+                    self.trim_front(&data, end_ts.saturating_sub(key))
+            {
+                let suffix_ts = key.saturating_add(trimmed_samples);
+                match leg {
+                    Leg::A => {
+                        self.buffer_a.insert(suffix_ts, suffix);
+                    }
+                    Leg::B => {
+                        self.buffer_b.insert(suffix_ts, suffix);
+                    }
+                }
+            }
+        }
+
+        match leg {
+            Leg::A => {
+                self.buffer_a.insert(start_ts, encoded);
+            }
+            Leg::B => {
+                self.buffer_b.insert(start_ts, encoded);
+            }
+        }
+    }
+
+    fn insert_audio_block(&mut self, leg: Leg, start_ts: u32, encoded: Bytes) {
+        let mut inserts = vec![(start_ts, encoded)];
+        if let Some(state) = self.active_dtmf_state(leg) {
+            let dtmf_start = state.absolute_timestamp;
+            let dtmf_end = state
+                .absolute_timestamp
+                .saturating_add(state.duration_samples);
+            let mut next_inserts = Vec::new();
+
+            for (ts, data) in inserts {
+                let block_end = ts.saturating_add(self.block_span_samples(&data));
+                if block_end <= dtmf_start || ts >= dtmf_end {
+                    next_inserts.push((ts, data));
+                    continue;
+                }
+
+                if ts < dtmf_start
+                    && let Some(prefix) = self.trim_back(&data, dtmf_start - ts)
+                {
+                    next_inserts.push((ts, prefix));
+                }
+
+                if block_end > dtmf_end
+                    && let Some((trimmed_samples, suffix)) =
+                        self.trim_front(&data, dtmf_end.saturating_sub(ts))
+                {
+                    next_inserts.push((ts.saturating_add(trimmed_samples), suffix));
+                }
+            }
+            inserts = next_inserts;
+        }
+
+        for (ts, data) in inserts {
+            match leg {
+                Leg::A => {
+                    self.buffer_a.insert(ts, data);
+                }
+                Leg::B => {
+                    self.buffer_b.insert(ts, data);
+                }
+            }
+        }
+    }
+
     pub fn write_dtmf_payload(
         &mut self,
         leg: Leg,
@@ -359,24 +508,61 @@ impl Recorder {
         };
 
         let end_bit = (payload[1] & 0x80) != 0;
-        if end_bit {
-            let last_dtmf_event = match leg {
-                Leg::A => &mut self.last_dtmf_event_a,
-                Leg::B => &mut self.last_dtmf_event_b,
-            };
-            if last_dtmf_event.is_some_and(|(last_digit, last_ts)| {
-                last_digit == digit_code && last_ts == timestamp
-            }) {
-                return Ok(());
-            }
-            *last_dtmf_event = Some((digit_code, timestamp));
-            let duration = u16::from_be_bytes([payload[2], payload[3]]);
-            let duration_ms = (duration as u32 * 1000) / clock_rate.max(1);
-            debug!(leg = ?leg, digit = %digit, duration_ms = %duration_ms, "Recording DTMF digit");
-            self.write_dtmf(leg, digit, duration_ms, Some(timestamp), Some(clock_rate))
-        } else {
-            Ok(())
+        let duration = u16::from_be_bytes([payload[2], payload[3]]) as u32;
+        let duration_samples =
+            (duration as u64 * self.sample_rate as u64).div_ceil(clock_rate.max(1) as u64) as u32;
+        let duration_ms = (duration as u64 * 1000).div_ceil(clock_rate.max(1) as u64) as u32;
+        let absolute_ts = self.timestamp_to_absolute(leg, timestamp, clock_rate);
+
+        if let Some(state) = self.active_dtmf_state(leg)
+            && state.digit_code == digit_code
+            && state.rtp_timestamp == timestamp
+            && duration_samples < state.duration_samples
+        {
+            return Ok(());
         }
+
+        let state = self.active_dtmf_state(leg);
+        let should_regenerate = !matches!(
+            state,
+            Some(existing)
+                if existing.digit_code == digit_code
+                    && existing.rtp_timestamp == timestamp
+                    && existing.duration_samples == duration_samples
+        );
+
+        if should_regenerate {
+            debug!(
+                leg = ?leg,
+                digit = %digit,
+                duration_ms = %duration_ms,
+                duration_samples,
+                "Recording DTMF digit"
+            );
+            let pcm = self.dtmf_gen.generate_samples(digit, duration_samples as usize);
+            let encoded = if let Some(enc) = self.encoder.as_mut() {
+                enc.encode(&pcm).into()
+            } else {
+                audio_codec::samples_to_bytes(&pcm).into()
+            };
+            let end_ts = absolute_ts.saturating_add(duration_samples);
+            self.overlay_dtmf_range(leg, absolute_ts, end_ts, encoded);
+        }
+
+        self.set_dtmf_state(
+            leg,
+            DtmfEventState {
+                digit_code,
+                rtp_timestamp: timestamp,
+                absolute_timestamp: absolute_ts,
+                duration_samples,
+            },
+        );
+
+        if end_bit {
+            self.flush()?;
+        }
+        Ok(())
     }
 
     pub fn write_dtmf(
@@ -398,35 +584,7 @@ impl Recorder {
 
         // Determine absolute timestamp
         let ts = if let Some(t) = timestamp {
-            let timestamp_clock_rate = timestamp_clock_rate.unwrap_or(self.sample_rate).max(1);
-            match leg {
-                Leg::A => {
-                    if self.base_timestamp_a.is_none() {
-                        self.base_timestamp_a = Some(t);
-                        self.start_offset_a = (self.start_instant.elapsed().as_millis() as u64
-                            * self.sample_rate as u64
-                            / 1000) as u32;
-                    }
-                    let relative = t.wrapping_sub(self.base_timestamp_a.unwrap());
-                    let scaled_relative = (relative as u64 * self.sample_rate as u64
-                        / timestamp_clock_rate as u64)
-                        as u32;
-                    self.start_offset_a.wrapping_add(scaled_relative)
-                }
-                Leg::B => {
-                    if self.base_timestamp_b.is_none() {
-                        self.base_timestamp_b = Some(t);
-                        self.start_offset_b = (self.start_instant.elapsed().as_millis() as u64
-                            * self.sample_rate as u64
-                            / 1000) as u32;
-                    }
-                    let relative = t.wrapping_sub(self.base_timestamp_b.unwrap());
-                    let scaled_relative = (relative as u64 * self.sample_rate as u64
-                        / timestamp_clock_rate as u64)
-                        as u32;
-                    self.start_offset_b.wrapping_add(scaled_relative)
-                }
-            }
+            self.timestamp_to_absolute(leg, t, timestamp_clock_rate.unwrap_or(self.sample_rate))
         } else {
             // If no timestamp provided, append to the end of the buffer
             match leg {
@@ -444,19 +602,13 @@ impl Recorder {
         };
 
         let encoded = if let Some(enc) = self.encoder.as_mut() {
-            enc.encode(&pcm).into()
+            Bytes::from(enc.encode(&pcm))
         } else {
-            audio_codec::samples_to_bytes(&pcm).into()
+            Bytes::from(audio_codec::samples_to_bytes(&pcm))
         };
 
-        match leg {
-            Leg::A => {
-                self.buffer_a.insert(ts, encoded);
-            }
-            Leg::B => {
-                self.buffer_b.insert(ts, encoded);
-            }
-        }
+        let end_ts = ts.saturating_add(self.block_span_samples(&encoded));
+        self.overlay_dtmf_range(leg, ts, end_ts, encoded);
 
         self.flush()?;
         Ok(())
@@ -724,6 +876,11 @@ impl DtmfGenerator {
     }
 
     pub fn generate(&self, digit: char, duration_ms: u32) -> Vec<i16> {
+        let num_samples = (self.sample_rate as f32 * (duration_ms as f32 / 1000.0)) as usize;
+        self.generate_samples(digit, num_samples)
+    }
+
+    pub fn generate_samples(&self, digit: char, num_samples: usize) -> Vec<i16> {
         let freqs = match digit {
             '1' => (697.0, 1209.0),
             '2' => (697.0, 1336.0),
@@ -743,8 +900,6 @@ impl DtmfGenerator {
             'D' => (941.0, 1633.0),
             _ => return Vec::new(),
         };
-
-        let num_samples = (self.sample_rate as f32 * (duration_ms as f32 / 1000.0)) as usize;
         let mut samples = Vec::with_capacity(num_samples);
 
         for i in 0..num_samples {
@@ -1022,8 +1177,8 @@ mod tests {
             written_samples: 0,
             writer: Box::new(TestWriter::new()),
             ptime: Duration::from_millis(20),
-            last_dtmf_event_a: None,
-            last_dtmf_event_b: None,
+            dtmf_state_a: None,
+            dtmf_state_b: None,
         }
     }
 

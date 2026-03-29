@@ -267,40 +267,58 @@ mod recorder_advanced_tests {
     }
 
     #[test]
-    fn test_recorder_dtmf_ignores_duplicate_terminal_packets() {
-        let temp_path_single = std::env::temp_dir().join("test_recorder_dtmf_single.wav");
-        let temp_path_dup = std::env::temp_dir().join("test_recorder_dtmf_duplicate.wav");
+    fn test_recorder_dtmf_starts_before_end_bit() {
+        let temp_path = std::env::temp_dir().join("test_recorder_dtmf_starts_early.wav");
+        let path_str = temp_path.to_str().unwrap();
 
-        let mut recorder_single =
-            Recorder::new(temp_path_single.to_str().unwrap(), CodecType::PCMU).unwrap();
-        let mut recorder_dup =
-            Recorder::new(temp_path_dup.to_str().unwrap(), CodecType::PCMU).unwrap();
+        let mut recorder = Recorder::new(path_str, CodecType::PCMU).unwrap();
 
-        let dtmf_payload = [5, 0x80, 0x06, 0x40];
+        recorder
+            .write_dtmf_payload(Leg::A, &[5, 0x00, 0x03, 0x20], 0, 8000)
+            .expect("non-terminal DTMF should be written");
 
-        recorder_single
-            .write_dtmf_payload(Leg::A, &dtmf_payload, 12_345, 8000)
-            .expect("single terminal DTMF should be written");
+        recorder.finalize().expect("Should finalize");
 
-        for _ in 0..3 {
-            recorder_dup
-                .write_dtmf_payload(Leg::A, &dtmf_payload, 12_345, 8000)
-                .expect("duplicate terminal DTMF packets should be accepted");
-        }
+        let metadata = std::fs::metadata(&temp_path).unwrap();
+        assert!(metadata.len() > 44, "Should have recorded early DTMF tone");
 
-        recorder_single.finalize().expect("single finalize should succeed");
-        recorder_dup.finalize().expect("duplicate finalize should succeed");
+        let _ = std::fs::remove_file(&temp_path);
+    }
 
-        let len_single = std::fs::metadata(&temp_path_single).unwrap().len();
-        let len_dup = std::fs::metadata(&temp_path_dup).unwrap().len();
+    #[test]
+    fn test_recorder_dtmf_later_packets_extend_event() {
+        let temp_path_short = std::env::temp_dir().join("test_recorder_dtmf_short.wav");
+        let temp_path_long = std::env::temp_dir().join("test_recorder_dtmf_long.wav");
 
-        assert_eq!(
-            len_dup, len_single,
-            "retransmitted terminal DTMF packets should not duplicate recorded tones"
+        let mut recorder_short =
+            Recorder::new(temp_path_short.to_str().unwrap(), CodecType::PCMU).unwrap();
+        let mut recorder_long =
+            Recorder::new(temp_path_long.to_str().unwrap(), CodecType::PCMU).unwrap();
+
+        recorder_short
+            .write_dtmf_payload(Leg::A, &[5, 0x00, 0x03, 0x20], 800, 8000)
+            .expect("short DTMF should be written");
+
+        recorder_long
+            .write_dtmf_payload(Leg::A, &[5, 0x00, 0x03, 0x20], 800, 8000)
+            .expect("initial DTMF should be written");
+        recorder_long
+            .write_dtmf_payload(Leg::A, &[5, 0x80, 0x06, 0x40], 800, 8000)
+            .expect("later DTMF should extend event");
+
+        recorder_short.finalize().expect("short finalize should succeed");
+        recorder_long.finalize().expect("long finalize should succeed");
+
+        let len_short = std::fs::metadata(&temp_path_short).unwrap().len();
+        let len_long = std::fs::metadata(&temp_path_long).unwrap().len();
+
+        assert!(
+            len_long > len_short,
+            "later DTMF packets should extend the recorded event"
         );
 
-        let _ = std::fs::remove_file(&temp_path_single);
-        let _ = std::fs::remove_file(&temp_path_dup);
+        let _ = std::fs::remove_file(&temp_path_short);
+        let _ = std::fs::remove_file(&temp_path_long);
     }
 
     #[test]

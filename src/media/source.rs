@@ -114,7 +114,7 @@ impl BridgeInputAdapter {
     }
 
     fn write_to_recorder(
-        &self,
+        &mut self,
         sample: &MediaSample,
         source_codec: Option<audio_codec::CodecType>,
         source_dtmf: Option<&NegotiatedCodec>,
