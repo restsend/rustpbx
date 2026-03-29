@@ -164,7 +164,7 @@ impl PeerInput {
                 Self::from_source(Box::new(BridgeInputAdapter::new(track.clone(), config)))
             }
             PeerInputKind::Source(_) => {
-                if config.is_passthrough() {
+                if config.is_identity_config() {
                     self.clone()
                 } else {
                     panic!("cannot apply directional adaptation to a non-track peer input");

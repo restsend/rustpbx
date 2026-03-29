@@ -567,7 +567,7 @@ impl AudioSourceManager {
 /// - **G.729**: 8000 Hz encoded, 10 bytes per 10 ms frame.
 /// - **Unknown**: defaults to 5 seconds.
 ///
-/// Used by [`crate::proxy::proxy_call::session::CallSession::play_audio_file`] to
+/// Used by [`crate::proxy::proxy_call::sip_session::SipSession::play_audio_file`] to
 /// schedule the `AudioComplete` event at the right time.
 pub fn estimate_audio_duration(file_path: &str) -> std::time::Duration {
     use std::path::Path;

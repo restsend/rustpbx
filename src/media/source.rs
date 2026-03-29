@@ -44,7 +44,7 @@ impl BridgeInputConfig {
         self
     }
 
-    pub fn is_passthrough(&self) -> bool {
+    pub fn is_identity_config(&self) -> bool {
         self.source.audio.is_none()
             && self.source.dtmf.is_none()
             && self.target.audio.is_none()
