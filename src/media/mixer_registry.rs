@@ -1,17 +1,4 @@
-// src/media/mixer_registry.rs
-//
-// MixerRegistry - Central registry for all audio mixers (supervisor and conference)
-//
-// This module provides a unified interface for managing audio mixers:
-// - SupervisorMixer: for listen/whisper/barge operations
-// - ConferenceMixer: for MCU-style conferences
-//
-// Architecture:
-// ┌─────────────────────────────────────────────────────────┐
-// │                  MixerRegistry                          │
-// │  - mixer_id -> MediaMixer                               │
-// │  - session_id -> mixer_id (participant tracking)         │
-// └─────────────────────────────────────────────────────────┘
+
 
 use crate::media::mixer::{MediaMixer, SupervisorMixerMode};
 use std::collections::HashMap;
@@ -19,29 +6,23 @@ use std::sync::{Arc, Mutex};
 
 use tracing::{info, warn};
 
-/// Participant role in a mixer
 #[derive(Clone, Debug, PartialEq)]
 pub enum MixerParticipantRole {
-    /// Supervisor in a call
     Supervisor,
-    /// Agent (caller) in a call
     Agent,
-    /// Customer (callee) in a call
     Customer,
-    /// Conference participant
     ConferenceParticipant,
 }
 
-/// Information about a participant in a mixer
 #[derive(Clone, Debug)]
 pub struct MixerParticipant {
     pub session_id: String,
     pub role: MixerParticipantRole,
     pub input_enabled: bool,
     pub output_enabled: bool,
+    pub muted: bool,
 }
 
-/// Registry state for a single mixer
 #[derive(Clone)]
 pub struct MixerRegistryEntry {
     pub mixer: Arc<MediaMixer>,
@@ -50,7 +31,6 @@ pub struct MixerRegistryEntry {
     pub created_at: std::time::Instant,
 }
 
-/// Mixer mode - either supervisor or conference
 #[derive(Clone, Debug, PartialEq)]
 pub enum MixerMode {
     Supervisor {
@@ -63,16 +43,12 @@ pub enum MixerMode {
     },
 }
 
-/// Main registry for all active mixers
 pub struct MixerRegistry {
-    /// mixer_id -> mixer entry
     mixers: Arc<Mutex<HashMap<String, MixerRegistryEntry>>>,
-    /// session_id -> mixer_id (for quick lookup)
     participants: Arc<Mutex<HashMap<String, String>>>,
 }
 
 impl MixerRegistry {
-    /// Create a new MixerRegistry
     pub fn new() -> Self {
         Self {
             mixers: Arc::new(Mutex::new(HashMap::new())),
@@ -80,16 +56,6 @@ impl MixerRegistry {
         }
     }
 
-    /// Create a supervisor mixer
-    ///
-    /// # Arguments
-    /// * `mixer_id` - Unique identifier for this mixer
-    /// * `supervisor_session_id` - Session ID of the supervisor
-    /// * `target_session_id` - Session ID of the target call
-    /// * `mode` - Supervisor mode (Listen/Whisper/Barge)
-    ///
-    /// # Returns
-    /// The created MediaMixer instance
     pub fn create_supervisor_mixer(
         &self,
         mixer_id: String,
@@ -99,22 +65,24 @@ impl MixerRegistry {
     ) -> Arc<MediaMixer> {
         let mixer = Arc::new(MediaMixer::new(mixer_id.clone(), 8000));
 
-        // Configure supervisor mode
+        
         mixer.set_mode(mode.clone());
 
-        // Create participants for supervisor and target
+        
         let participants = vec![
             MixerParticipant {
                 session_id: supervisor_session_id.clone(),
                 role: MixerParticipantRole::Supervisor,
                 input_enabled: true,
                 output_enabled: true,
+                muted: false,
             },
             MixerParticipant {
                 session_id: target_session_id.clone(),
-                role: MixerParticipantRole::Agent, // target is the agent/customer
+                role: MixerParticipantRole::Agent, 
                 input_enabled: true,
                 output_enabled: true,
+                muted: false,
             },
         ];
 
@@ -129,13 +97,13 @@ impl MixerRegistry {
             created_at: std::time::Instant::now(),
         };
 
-        // Register mixer
+        
         {
             let mut mixers = self.mixers.lock().unwrap();
             mixers.insert(mixer_id.clone(), entry);
         }
 
-        // Register participants for quick lookup
+        
         {
             let mut participants = self.participants.lock().unwrap();
             participants.insert(supervisor_session_id.clone(), mixer_id.clone());
@@ -153,14 +121,6 @@ impl MixerRegistry {
         mixer
     }
 
-    /// Create a conference mixer
-    ///
-    /// # Arguments
-    /// * `room_id` - Unique room/conference identifier
-    /// * `sample_rate` - Audio sample rate (default 8000)
-    ///
-    /// # Returns
-    /// The created MediaMixer instance
     pub fn create_conference_mixer(&self, room_id: String, sample_rate: u32) -> Arc<MediaMixer> {
         let mixer = Arc::new(MediaMixer::new(room_id.clone(), sample_rate));
 
@@ -183,15 +143,6 @@ impl MixerRegistry {
         mixer
     }
 
-    /// Add a participant to a mixer
-    ///
-    /// # Arguments
-    /// * `mixer_id` - ID of the mixer to add the participant to
-    /// * `session_id` - Session ID of the participant
-    /// * `role` - Role of the participant
-    ///
-    /// # Returns
-    /// true if participant was added successfully
     pub fn add_participant(
         &self,
         mixer_id: &str,
@@ -203,6 +154,7 @@ impl MixerRegistry {
             role,
             input_enabled: true,
             output_enabled: true,
+            muted: false,
         };
 
         let mut success = false;
@@ -235,13 +187,6 @@ impl MixerRegistry {
         success
     }
 
-    /// Remove a participant from a mixer
-    ///
-    /// # Arguments
-    /// * `session_id` - Session ID of the participant to remove
-    ///
-    /// # Returns
-    /// true if participant was removed successfully
     pub fn remove_participant(&self, session_id: &str) -> bool {
         let mixer_id = {
             let participants = self.participants.lock().unwrap();
@@ -276,25 +221,11 @@ impl MixerRegistry {
         }
     }
 
-    /// Get a mixer by ID
-    ///
-    /// # Arguments
-    /// * `mixer_id` - ID of the mixer to retrieve
-    ///
-    /// # Returns
-    /// Option containing the MediaMixer if found
     pub fn get_mixer(&self, mixer_id: &str) -> Option<Arc<MediaMixer>> {
         let mixers = self.mixers.lock().unwrap();
         mixers.get(mixer_id).map(|e| e.mixer.clone())
     }
 
-    /// Get a mixer by participant session ID
-    ///
-    /// # Arguments
-    /// * `session_id` - Session ID of a participant
-    ///
-    /// # Returns
-    /// Option containing the MediaMixer if the participant is in a mixer
     pub fn get_mixer_by_session(&self, session_id: &str) -> Option<Arc<MediaMixer>> {
         let mixer_id = {
             let participants = self.participants.lock().unwrap();
@@ -309,7 +240,6 @@ impl MixerRegistry {
         }
     }
 
-    /// Get mixer info by session ID
     pub fn get_mixer_info(&self, session_id: &str) -> Option<MixerRegistryEntry> {
         let mixer_id = {
             let participants = self.participants.lock().unwrap();
@@ -324,20 +254,13 @@ impl MixerRegistry {
         }
     }
 
-    /// Stop and remove a mixer
-    ///
-    /// # Arguments
-    /// * `mixer_id` - ID of the mixer to remove
-    ///
-    /// # Returns
-    /// true if mixer was stopped and removed
     pub fn remove_mixer(&self, mixer_id: &str) -> bool {
-        // Stop the mixer first
+        
         if let Some(mixer) = self.get_mixer(mixer_id) {
             mixer.stop();
         }
 
-        // Get participants to clean up
+        
         let participant_ids: Vec<String> = {
             let mixers = self.mixers.lock().unwrap();
             if let Some(entry) = mixers.get(mixer_id) {
@@ -351,13 +274,13 @@ impl MixerRegistry {
             }
         };
 
-        // Remove mixer
+        
         let removed = {
             let mut mixers = self.mixers.lock().unwrap();
             mixers.remove(mixer_id).is_some()
         };
 
-        // Clean up participant mappings
+        
         {
             let mut participants = self.participants.lock().unwrap();
             for session_id in participant_ids {
@@ -372,13 +295,11 @@ impl MixerRegistry {
         removed
     }
 
-    /// Get all active mixers
     pub fn list_mixers(&self) -> Vec<(String, MixerRegistryEntry)> {
         let mixers = self.mixers.lock().unwrap();
         mixers.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
     }
 
-    /// Get participant count for a mixer
     pub fn participant_count(&self, mixer_id: &str) -> usize {
         let mixers = self.mixers.lock().unwrap();
         mixers
@@ -387,10 +308,54 @@ impl MixerRegistry {
             .unwrap_or(0)
     }
 
-    /// Check if a session is in any mixer
     pub fn is_in_mixer(&self, session_id: &str) -> bool {
         let participants = self.participants.lock().unwrap();
         participants.contains_key(session_id)
+    }
+
+    pub fn set_participant_muted(&self, session_id: &str, muted: bool) -> bool {
+        let mixer_id = {
+            let participants = self.participants.lock().unwrap();
+            participants.get(session_id).cloned()
+        };
+
+        if let Some(mixer_id) = mixer_id {
+            let mut mixers = self.mixers.lock().unwrap();
+            if let Some(entry) = mixers.get_mut(&mixer_id) {
+                if let Some(participant) = entry.participants.iter_mut().find(|p| p.session_id == session_id) {
+                    participant.muted = muted;
+                    info!(
+                        mixer_id = %mixer_id,
+                        session_id = %session_id,
+                        muted = muted,
+                        "Participant mute state updated"
+                    );
+                    return true;
+                }
+            }
+        }
+
+        warn!(
+            session_id = %session_id,
+            "Failed to set mute state - participant not found in any mixer"
+        );
+        false
+    }
+
+    pub fn is_participant_muted(&self, session_id: &str) -> Option<bool> {
+        let mixer_id = {
+            let participants = self.participants.lock().unwrap();
+            participants.get(session_id).cloned()
+        };
+
+        if let Some(mixer_id) = mixer_id {
+            let mixers = self.mixers.lock().unwrap();
+            if let Some(entry) = mixers.get(&mixer_id) {
+                return entry.participants.iter().find(|p| p.session_id == session_id).map(|p| p.muted);
+            }
+        }
+
+        None
     }
 }
 
@@ -431,7 +396,7 @@ mod tests {
             SupervisorMixerMode::Barge,
         );
 
-        // Add another participant
+        
         let result = registry.add_participant(
             "test-mixer",
             "customer-1".to_string(),
@@ -441,7 +406,7 @@ mod tests {
 
         assert_eq!(registry.participant_count("test-mixer"), 3);
 
-        // Remove participant
+        
         let result = registry.remove_participant("customer-1");
         assert!(result);
         assert_eq!(registry.participant_count("test-mixer"), 2);
@@ -474,7 +439,7 @@ mod tests {
 
         assert!(registry.get_mixer("room-1").is_some());
 
-        // Add participants
+        
         registry.add_participant(
             "room-1",
             "user-1".to_string(),
@@ -488,7 +453,7 @@ mod tests {
 
         assert_eq!(registry.participant_count("room-1"), 2);
 
-        // Get mixer by session
+        
         let found = registry.get_mixer_by_session("user-1");
         assert!(found.is_some());
     }

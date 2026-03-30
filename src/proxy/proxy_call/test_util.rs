@@ -29,6 +29,7 @@ pub mod tests {
         }
 
         /// Creates a MockMediaPeer that tracks stop() call count
+        #[allow(dead_code)]
         pub fn new_with_stop_tracking() -> Self {
             Self::new()
         }
@@ -83,6 +84,14 @@ pub mod tests {
         fn stop(&self) {
             self.stop_called.fetch_add(1, Ordering::SeqCst);
             self.cancel_token.cancel();
+        }
+
+        async fn mute_track(&self, _track_id: &str) -> bool {
+            true
+        }
+
+        async fn unmute_track(&self, _track_id: &str) -> bool {
+            true
         }
     }
 

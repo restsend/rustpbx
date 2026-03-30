@@ -646,7 +646,7 @@ async def test_list_calls(rwi: RwiClient) -> TestResult:
     
     try:
         resp = await rwi.list_calls()
-        if resp.get('response') == 'success':
+        if resp.get('status') == 'success':
             result.finish(True)
         else:
             result.add_error(f"List calls failed: {resp.get('error')}")
@@ -691,7 +691,7 @@ async def test_originate_and_answer() -> TestResult:
                 timeout_secs=15
             )
             
-            if orig_resp.get('response') != 'success':
+            if orig_resp.get('status') != 'success':
                 result.add_error(f"Originate failed: {orig_resp.get('error')}")
                 result.finish(False)
                 return result
@@ -699,12 +699,16 @@ async def test_originate_and_answer() -> TestResult:
             # Wait for call to complete
             await asyncio.sleep(3)
             
-            # Verify events
-            event_types = [e.get('event') for e in events]
-            if 'CallRinging' not in event_types:
-                result.add_error("Expected CallRinging event not received")
-            if 'CallAnswered' not in event_types:
-                result.add_error("Expected CallAnswered event not received")
+            # Verify events - events are sent as {event_type: {...}} format
+            event_types = []
+            for e in events:
+                # Event structure is {"call_ringing": {...}} or {"call_answered": {...}}
+                event_types.extend(e.keys())
+
+            if 'call_ringing' not in event_types:
+                result.add_error(f"Expected call_ringing event not received. Got: {event_types}")
+            if 'call_answered' not in event_types:
+                result.add_error(f"Expected call_answered event not received. Got: {event_types}")
             
             # Get RTP stats
             bob_stats = bob.get_rtp_stats()
@@ -763,15 +767,15 @@ async def test_hold_unhold() -> TestResult:
             # Hold
             print("Putting call on hold...")
             hold_resp = await rwi.hold(call_id)
-            if hold_resp.get('response') != 'success':
+            if hold_resp.get('status') != 'success':
                 result.add_error(f"Hold failed: {hold_resp.get('error')}")
-            
+
             await asyncio.sleep(2)
-            
+
             # Unhold
             print("Resuming call from hold...")
             unhold_resp = await rwi.unhold(call_id)
-            if unhold_resp.get('response') != 'success':
+            if unhold_resp.get('status') != 'success':
                 result.add_error(f"Unhold failed: {unhold_resp.get('error')}")
             
             await asyncio.sleep(2)
@@ -843,7 +847,7 @@ async def test_bridge() -> TestResult:
             # Bridge
             print(f"Bridging {leg_a} <-> {leg_b}...")
             bridge_resp = await rwi.bridge(leg_a, leg_b)
-            if bridge_resp.get('response') != 'success':
+            if bridge_resp.get('status') != 'success':
                 result.add_error(f"Bridge failed: {bridge_resp.get('error')}")
             
             # Let bridged call run
@@ -899,7 +903,7 @@ async def test_conference() -> TestResult:
             # Create conference
             print(f"Creating conference {conf_id}...")
             create_resp = await rwi.conference_create(conf_id)
-            if create_resp.get('response') != 'success':
+            if create_resp.get('status') != 'success':
                 result.add_error(f"Conference create failed: {create_resp.get('error')}")
                 result.finish(False)
                 return result
@@ -925,7 +929,7 @@ async def test_conference() -> TestResult:
             for name, call_id in calls:
                 print(f"Adding {name} to conference...")
                 add_resp = await rwi.conference_add(conf_id, call_id)
-                if add_resp.get('response') != 'success':
+                if add_resp.get('status') != 'success':
                     result.add_error(f"Failed to add {name}: {add_resp.get('error')}")
             
             # Let conference run
@@ -1003,8 +1007,8 @@ async def test_media_play() -> TestResult:
             play_resp = await rwi.media_play(call_id, "file", audio_file)
             
             # Media play may fail if file doesn't exist, that's ok for this test
-            if play_resp.get('response') != 'success':
-                print(f"Media play returned: {play_resp.get('response')} (may be expected if file missing)")
+            if play_resp.get('status') != 'success':
+                print(f"Media play returned: {play_resp.get('status')} (may be expected if file missing)")
             
             await asyncio.sleep(3)
             
@@ -1055,14 +1059,14 @@ async def test_queue() -> TestResult:
             # Agent login first
             print(f"Agent {agent_id} logging in...")
             login_resp = await rwi.queue_agent_login(agent_id, queue_id)
-            if login_resp.get('response') != 'success':
+            if login_resp.get('status') != 'success':
                 result.add_error(f"Agent login failed: {login_resp.get('error')}")
             else:
                 print(f"✓ Agent {agent_id} logged in to queue {queue_id}")
             
             # Set agent ready
             ready_resp = await rwi.queue_agent_ready(agent_id, True)
-            if ready_resp.get('response') != 'success':
+            if ready_resp.get('status') != 'success':
                 result.add_error(f"Agent ready failed: {ready_resp.get('error')}")
             
             # Originate
@@ -1078,25 +1082,25 @@ async def test_queue() -> TestResult:
             # Enqueue
             print(f"Enqueueing call to {queue_id}...")
             enqueue_resp = await rwi.queue_enqueue(call_id, queue_id, priority=1)
-            if enqueue_resp.get('response') != 'success':
+            if enqueue_resp.get('status') != 'success':
                 result.add_error(f"Enqueue failed: {enqueue_resp.get('error')}")
             
             await asyncio.sleep(2)
             
             # Check queue status
             status_resp = await rwi.queue_status(queue_id)
-            if status_resp.get('response') == 'success':
+            if status_resp.get('status') == 'success':
                 print(f"Queue status: {status_resp.get('result', {})}")
             
             # Dequeue
             print(f"Dequeueing call...")
             dequeue_resp = await rwi.queue_dequeue(call_id)
-            if dequeue_resp.get('response') != 'success':
+            if dequeue_resp.get('status') != 'success':
                 result.add_error(f"Dequeue failed: {dequeue_resp.get('error')}")
             
             # Agent logout
             logout_resp = await rwi.queue_agent_logout(agent_id)
-            if logout_resp.get('response') != 'success':
+            if logout_resp.get('status') != 'success':
                 result.add_error(f"Agent logout failed: {logout_resp.get('error')}")
             
             # Get RTP stats
@@ -1138,7 +1142,7 @@ async def test_ivr_dtmf() -> TestResult:
             timeout_secs=15
         )
         
-        if orig_resp.get('response') != 'success':
+        if orig_resp.get('status') != 'success':
             result.add_error(f"Originate to IVR failed: {orig_resp.get('error')}")
             result.finish(False)
             return result
@@ -1148,7 +1152,7 @@ async def test_ivr_dtmf() -> TestResult:
         # Send DTMF "1" to select menu option
         print("Sending DTMF '1'...")
         dtmf_resp = await rwi.send_dtmf(call_id, "1")
-        if dtmf_resp.get('response') != 'success':
+        if dtmf_resp.get('status') != 'success':
             result.add_error(f"DTMF send failed: {dtmf_resp.get('error')}")
         
         await asyncio.sleep(2)
@@ -1198,7 +1202,7 @@ async def test_call_routing_dialplan() -> TestResult:
                 timeout_secs=15
             )
             
-            if orig_resp.get('response') != 'success':
+            if orig_resp.get('status') != 'success':
                 result.add_error(f"Originate failed: {orig_resp.get('error')}")
                 result.finish(False)
                 return result
@@ -1207,7 +1211,7 @@ async def test_call_routing_dialplan() -> TestResult:
             
             # Get call info
             info_resp = await rwi.get_call_info(call_id)
-            if info_resp.get('response') == 'success':
+            if info_resp.get('status') == 'success':
                 print(f"Call info: {info_resp.get('result', {})}")
             
             # Cleanup
@@ -1256,7 +1260,7 @@ async def test_call_reject() -> TestResult:
             # Reject the call
             print("Rejecting call...")
             reject_resp = await rwi.reject(call_id, reason="busy")
-            if reject_resp.get('response') != 'success':
+            if reject_resp.get('status') != 'success':
                 result.add_error(f"Reject failed: {reject_resp.get('error')}")
             
             result.finish(len(result.errors) == 0)
@@ -1300,7 +1304,7 @@ async def test_call_ring() -> TestResult:
             # Send ringing
             print("Sending ringing...")
             ring_resp = await rwi.ring(call_id)
-            if ring_resp.get('response') != 'success':
+            if ring_resp.get('status') != 'success':
                 result.add_error(f"Ring failed: {ring_resp.get('error')}")
             
             await asyncio.sleep(2)
@@ -1340,7 +1344,7 @@ async def test_conference_mute_unmute() -> TestResult:
             # Create conference
             print(f"Creating conference {conf_id}...")
             create_resp = await rwi.conference_create(conf_id, max_members=5)
-            if create_resp.get('response') != 'success':
+            if create_resp.get('status') != 'success':
                 result.add_error(f"Conference create failed: {create_resp.get('error')}")
                 result.finish(False)
                 return result
@@ -1373,7 +1377,7 @@ async def test_conference_mute_unmute() -> TestResult:
             # Mute Bob
             print("Muting Bob...")
             mute_resp = await rwi.conference_mute(conf_id, bob_call)
-            if mute_resp.get('response') != 'success':
+            if mute_resp.get('status') != 'success':
                 result.add_error(f"Mute failed: {mute_resp.get('error')}")
             
             await asyncio.sleep(2)
@@ -1381,7 +1385,7 @@ async def test_conference_mute_unmute() -> TestResult:
             # Unmute Bob
             print("Unmuting Bob...")
             unmute_resp = await rwi.conference_unmute(conf_id, bob_call)
-            if unmute_resp.get('response') != 'success':
+            if unmute_resp.get('status') != 'success':
                 result.add_error(f"Unmute failed: {unmute_resp.get('error')}")
             
             await asyncio.sleep(2)
@@ -1442,7 +1446,7 @@ async def test_transfer() -> TestResult:
             transfer_resp = await rwi.transfer(call_id, target)
             
             # Transfer may complete asynchronously
-            print(f"Transfer response: {transfer_resp.get('response')}")
+            print(f"Transfer response: {transfer_resp.get('status')}")
             
             await asyncio.sleep(3)
             

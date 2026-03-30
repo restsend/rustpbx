@@ -39,8 +39,10 @@ pub struct TestPbx {
     /// Base WebSocket URL for connecting RWI clients, e.g. `ws://127.0.0.1:<port>/rwi/v1`.
     pub rwi_url: String,
     /// SIP port this server is listening on (UDP).
+    #[allow(dead_code)]
     pub sip_port: u16,
     /// `127.0.0.1` IP where the SIP server is bound.
+    #[allow(dead_code)]
     pub sip_addr: String,
     /// RWI gateway — can be used to inject events in tests.
     #[allow(dead_code)]
@@ -63,6 +65,7 @@ impl TestPbx {
         let proxy_config = Arc::new(ProxyConfig {
             addr: "127.0.0.1".to_string(),
             udp_port: Some(sip_port),
+            enable_latching: true,
             ..Default::default()
         });
 
@@ -160,11 +163,13 @@ impl TestPbx {
     }
 
     /// Return the SIP address string: `127.0.0.1:<sip_port>`.
+    #[allow(dead_code)]
     pub fn sip_host(&self) -> String {
         format!("{}:{}", self.sip_addr, self.sip_port)
     }
 
     /// Shut down the server.
+    #[allow(dead_code)]
     pub fn stop(&self) {
         self.cancel_token.cancel();
     }

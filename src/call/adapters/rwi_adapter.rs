@@ -42,9 +42,6 @@ pub fn rwi_to_call_command(
     session_id: Option<&str>,
 ) -> Result<CallCommand> {
     match payload {
-        // ========================================================================
-        // Session management commands (not converted to CallCommand)
-        // ========================================================================
         RwiCommandPayload::Subscribe { .. }
         | RwiCommandPayload::Unsubscribe { .. }
         | RwiCommandPayload::ListCalls
@@ -52,13 +49,12 @@ pub fn rwi_to_call_command(
         | RwiCommandPayload::DetachCall { .. }
         | RwiCommandPayload::SipMessage { .. }
         | RwiCommandPayload::SipNotify { .. }
-        | RwiCommandPayload::SipOptionsPing { .. } => {
+        | RwiCommandPayload::SipOptionsPing { .. }
+        | RwiCommandPayload::SessionResume { .. }
+        | RwiCommandPayload::CallResume { .. } => {
             Err(AdapterError::NotSupported("session management command".to_string()).into())
         }
 
-        // ========================================================================
-        // Originate (creates new session, not a session command)
-        // ========================================================================
         RwiCommandPayload::Originate(_) => {
             Err(AdapterError::NotSupported("originate requires separate handling".to_string()).into())
         }
@@ -363,6 +359,13 @@ pub fn rwi_to_call_command(
         }
 
         // ========================================================================
+        // Conference Merge (handled at processor level, not session level)
+        // ========================================================================
+        RwiCommandPayload::ConferenceMerge { .. } => {
+            Err(AdapterError::NotSupported("conference merge requires separate handling".to_string()).into())
+        }
+
+        // ========================================================================
         // Media Streaming (not directly convertible to CallCommand)
         // ========================================================================
         RwiCommandPayload::MediaStreamStart { .. }
@@ -370,6 +373,13 @@ pub fn rwi_to_call_command(
         | RwiCommandPayload::MediaInjectStart { .. }
         | RwiCommandPayload::MediaInjectStop { .. } => {
             Err(AdapterError::NotSupported("media streaming requires separate handling".to_string()).into())
+        }
+
+        // ========================================================================
+        // Parallel Originate (handled at processor level)
+        // ========================================================================
+        RwiCommandPayload::ParallelOriginate { .. } => {
+            Err(AdapterError::NotSupported("parallel originate requires processor-level handling".to_string()).into())
         }
     }
 }

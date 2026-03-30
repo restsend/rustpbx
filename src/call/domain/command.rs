@@ -49,10 +49,6 @@ pub enum CallCommand {
     /// Hangup the session or a specific leg
     Hangup(HangupCommand),
 
-    // ============================================================================
-    // Bridging and Transfer
-    // ============================================================================
-
     /// Bridge two legs together
     Bridge {
         /// First leg (A-leg)
@@ -91,10 +87,6 @@ pub enum CallCommand {
         consult_leg: LegId,
     },
 
-    // ============================================================================
-    // Hold
-    // ============================================================================
-
     /// Place a leg on hold
     Hold {
         /// The leg to hold
@@ -108,10 +100,6 @@ pub enum CallCommand {
         /// The leg to unhold
         leg_id: LegId,
     },
-
-    // ============================================================================
-    // Media Operations
-    // ============================================================================
 
     /// Play audio to a leg or all legs
     Play {
@@ -137,10 +125,6 @@ pub enum CallCommand {
         digits: String,
     },
 
-    // ============================================================================
-    // Recording
-    // ============================================================================
-
     /// Start recording
     StartRecording {
         /// Recording configuration
@@ -156,9 +140,6 @@ pub enum CallCommand {
     /// Stop recording
     StopRecording,
 
-    // ============================================================================
-    // Supervisor / Monitoring
-    // ============================================================================
 
     /// Supervisor listen mode (monitoring only)
     SupervisorListen {
@@ -190,9 +171,6 @@ pub enum CallCommand {
         supervisor_leg: LegId,
     },
 
-    // ============================================================================
-    // Conference
-    // ============================================================================
 
     /// Create a conference
     ConferenceCreate {
@@ -240,10 +218,6 @@ pub enum CallCommand {
         conf_id: String,
     },
 
-    // ============================================================================
-    // Queue Operations
-    // ============================================================================
-
     /// Enqueue a leg into a queue
     QueueEnqueue {
         /// Leg to enqueue
@@ -259,10 +233,6 @@ pub enum CallCommand {
         /// Leg to dequeue
         leg_id: LegId,
     },
-
-    // ============================================================================
-    // Application Control
-    // ============================================================================
 
     /// Start an application (IVR, Voicemail, etc.)
     StartApp {
@@ -286,10 +256,6 @@ pub enum CallCommand {
         event: AppEvent,
     },
 
-    // ============================================================================
-    // Internal Operations
-    // ============================================================================
-
     /// Handle a re-INVITE
     HandleReInvite {
         /// Target leg
@@ -312,6 +278,27 @@ pub enum CallCommand {
         /// Track ID
         track_id: String,
     },
+
+    /// Send a SIP MESSAGE request
+    SendSipMessage {
+        /// Content-Type header value
+        content_type: String,
+        /// Message body
+        body: String,
+    },
+
+    /// Send a SIP NOTIFY request
+    SendSipNotify {
+        /// Event header value
+        event: String,
+        /// Content-Type header value
+        content_type: String,
+        /// Notify body
+        body: String,
+    },
+
+    /// Send a SIP OPTIONS ping
+    SendSipOptionsPing,
 }
 
 /// Point-to-point bridge mode

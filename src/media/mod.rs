@@ -102,6 +102,20 @@ pub trait Track: Send + Sync {
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
         unimplemented!("as_any_mut not implemented for this Track type")
     }
+
+    /// Set muted state for this track
+    /// Returns true if the operation was successful
+    async fn set_muted(&self, _muted: bool) -> bool {
+        // Default implementation does nothing
+        // Concrete types should override this
+        false
+    }
+
+    /// Get current muted state
+    fn is_muted(&self) -> bool {
+        // Default implementation returns false
+        false
+    }
 }
 
 pub struct MediaStreamBuilder {
@@ -193,6 +207,40 @@ impl MediaStream {
         let mut tracks = self.tracks.lock().unwrap();
         tracks.remove(track_id);
     }
+
+    /// Mute a track by ID
+    /// Returns true if the track was found and muted
+    pub async fn mute_track(&self, track_id: &str) -> bool {
+        // Get track handle while holding the lock, then release the lock before await
+        let track_handle = {
+            let tracks = self.tracks.lock().unwrap();
+            tracks.get(track_id).cloned()
+        };
+        
+        if let Some(track) = track_handle {
+            let guard = track.lock().await;
+            guard.set_muted(true).await
+        } else {
+            false
+        }
+    }
+
+    /// Unmute a track by ID
+    /// Returns true if the track was found and unmuted
+    pub async fn unmute_track(&self, track_id: &str) -> bool {
+        // Get track handle while holding the lock, then release the lock before await
+        let track_handle = {
+            let tracks = self.tracks.lock().unwrap();
+            tracks.get(track_id).cloned()
+        };
+        
+        if let Some(track) = track_handle {
+            let guard = track.lock().await;
+            guard.set_muted(false).await
+        } else {
+            false
+        }
+    }
 }
 
 pub struct RtcTrack {
@@ -200,6 +248,7 @@ pub struct RtcTrack {
     pc: PeerConnection,
     pub recorder_option: Option<RecorderOption>,
     rtp_map: Vec<negotiate::CodecInfo>,
+    muted: std::sync::atomic::AtomicBool,
 }
 
 impl RtcTrack {
@@ -226,6 +275,7 @@ impl RtcTrack {
             pc,
             recorder_option: None,
             rtp_map,
+            muted: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -341,6 +391,17 @@ impl Track for RtcTrack {
 
     fn preferred_codec_info(&self) -> Option<negotiate::CodecInfo> {
         self.rtp_map.first().cloned()
+    }
+
+    async fn set_muted(&self, muted: bool) -> bool {
+        self.muted.store(muted, std::sync::atomic::Ordering::Relaxed);
+        // Note: Actual RTP mute is handled at the media stream level
+        // by dropping or zeroing audio packets
+        true
+    }
+
+    fn is_muted(&self) -> bool {
+        self.muted.load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 
@@ -458,7 +519,6 @@ impl RtpTrackBuilder {
 /// Audio file playback track with loop support
 ///
 /// Used for playing audio files (e.g., ringback tones, hold music, announcements).
-#[derive(Clone)]
 pub struct FileTrack {
     track_id: String,
     file_path: Option<String>,
@@ -473,6 +533,30 @@ pub struct FileTrack {
     rtp_end_port: Option<u16>,
     external_ip: Option<String>,
     audio_source_manager: Option<Arc<audio_source::AudioSourceManager>>,
+    muted: std::sync::atomic::AtomicBool,
+}
+
+impl Clone for FileTrack {
+    fn clone(&self) -> Self {
+        Self {
+            track_id: self.track_id.clone(),
+            file_path: self.file_path.clone(),
+            loop_playback: self.loop_playback,
+            cancel_token: self.cancel_token.clone(),
+            pc: self.pc.clone(),
+            completion_notify: self.completion_notify.clone(),
+            codec_preference: self.codec_preference.clone(),
+            codec_info: self.codec_info.clone(),
+            mode: self.mode.clone(),
+            rtp_start_port: self.rtp_start_port,
+            rtp_end_port: self.rtp_end_port,
+            external_ip: self.external_ip.clone(),
+            audio_source_manager: self.audio_source_manager.clone(),
+            muted: std::sync::atomic::AtomicBool::new(
+                self.muted.load(std::sync::atomic::Ordering::Relaxed)
+            ),
+        }
+    }
 }
 
 impl FileTrack {
@@ -499,6 +583,7 @@ impl FileTrack {
             rtp_end_port: None,
             external_ip: None,
             audio_source_manager: None,
+            muted: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -858,6 +943,15 @@ impl Track for FileTrack {
 
     fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
         self
+    }
+
+    async fn set_muted(&self, muted: bool) -> bool {
+        self.muted.store(muted, std::sync::atomic::Ordering::Relaxed);
+        true
+    }
+
+    fn is_muted(&self) -> bool {
+        self.muted.load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 

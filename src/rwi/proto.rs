@@ -164,6 +164,11 @@ pub enum RwiCommand {
     ConferenceDestroy {
         conf_id: String,
     },
+    ConferenceMerge {
+        conf_id: String,
+        call_id: String,
+        consultation_call_id: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -345,6 +350,7 @@ pub enum RwiEvent {
     CallTransferFailed {
         call_id: String,
         sip_status: Option<u16>,
+        reason: Option<String>,
     },
     CallHangup {
         call_id: String,
@@ -436,6 +442,17 @@ pub enum RwiEvent {
         call_id: String,
         queue_id: String,
     },
+    QueueOverflowed {
+        call_id: String,
+        original_queue_id: String,
+        overflow_queue_id: String,
+        reason: String,
+    },
+    QueueVoicemailRedirected {
+        call_id: String,
+        queue_id: String,
+        reason: String,
+    },
     SupervisorListenStarted {
         supervisor_call_id: String,
         target_call_id: String,
@@ -493,6 +510,132 @@ pub enum RwiEvent {
         conf_id: String,
         error: String,
     },
+    ConferenceConsultDialing {
+        call_id: String,
+        target: String,
+    },
+    ConferenceConsultConnected {
+        call_id: String,
+        target: String,
+    },
+    ConferenceMergeRequested {
+        call_id: String,
+        consultation_call_id: String,
+    },
+    ConferenceMerged {
+        conf_id: String,
+        call_id: String,
+    },
+    ConferenceMergeFailed {
+        conf_id: String,
+        call_id: String,
+        reason: String,
+    },
+    CallOwnershipChanged {
+        call_id: String,
+        session_id: String,
+        mode: String,
+    },
+    SessionResumed {
+        session_id: String,
+        last_sequence: u64,
+    },
+    ParallelOriginateStarted {
+        operation_id: String,
+        leg_count: u32,
+    },
+    ParallelOriginateLegRinging {
+        operation_id: String,
+        call_id: String,
+        destination: String,
+    },
+    ParallelOriginateWinner {
+        operation_id: String,
+        call_id: String,
+        destination: String,
+    },
+    ParallelOriginateLegCancelled {
+        operation_id: String,
+        call_id: String,
+        reason: String,
+    },
+    ParallelOriginateCompleted {
+        operation_id: String,
+        winning_call_id: String,
+    },
+    ParallelOriginateFailed {
+        operation_id: String,
+        reason: String,
+    },
+}
+
+impl RwiEvent {
+    pub fn call_id(&self) -> Option<&str> {
+        match self {
+            RwiEvent::CallIncoming(data) => Some(&data.call_id),
+            RwiEvent::CallRinging { call_id } => Some(call_id),
+            RwiEvent::CallEarlyMedia { call_id } => Some(call_id),
+            RwiEvent::CallAnswered { call_id } => Some(call_id),
+            RwiEvent::CallUnbridged { call_id } => Some(call_id),
+            RwiEvent::CallTransferred { call_id } => Some(call_id),
+            RwiEvent::CallTransferAccepted { call_id } => Some(call_id),
+            RwiEvent::CallTransferFailed { call_id, .. } => Some(call_id),
+            RwiEvent::CallHangup { call_id, .. } => Some(call_id),
+            RwiEvent::CallNoAnswer { call_id } => Some(call_id),
+            RwiEvent::CallBusy { call_id } => Some(call_id),
+            RwiEvent::MediaHoldStarted { call_id } => Some(call_id),
+            RwiEvent::MediaHoldStopped { call_id } => Some(call_id),
+            RwiEvent::MediaRingbackPassthroughStarted { source, .. } => Some(source),
+            RwiEvent::MediaRingbackPassthroughStopped { source, .. } => Some(source),
+            RwiEvent::MediaPlayStarted { call_id, .. } => Some(call_id),
+            RwiEvent::MediaPlayFinished { call_id, .. } => Some(call_id),
+            RwiEvent::MediaStreamStarted { call_id } => Some(call_id),
+            RwiEvent::MediaStreamStopped { call_id } => Some(call_id),
+            RwiEvent::RecordStarted { call_id, .. } => Some(call_id),
+            RwiEvent::RecordPaused { call_id, .. } => Some(call_id),
+            RwiEvent::RecordResumed { call_id, .. } => Some(call_id),
+            RwiEvent::RecordStopped { call_id, .. } => Some(call_id),
+            RwiEvent::RecordFailed { call_id, .. } => Some(call_id),
+            RwiEvent::QueueJoined { call_id, .. } => Some(call_id),
+            RwiEvent::QueuePositionChanged { call_id, .. } => Some(call_id),
+            RwiEvent::QueueAgentOffered { call_id, .. } => Some(call_id),
+            RwiEvent::QueueAgentConnected { call_id, .. } => Some(call_id),
+            RwiEvent::QueueLeft { call_id, .. } => Some(call_id),
+            RwiEvent::QueueWaitTimeout { call_id, .. } => Some(call_id),
+            RwiEvent::QueueOverflowed { call_id, .. } => Some(call_id),
+            RwiEvent::QueueVoicemailRedirected { call_id, .. } => Some(call_id),
+            RwiEvent::SupervisorListenStarted { supervisor_call_id, .. } => Some(supervisor_call_id),
+            RwiEvent::SupervisorWhisperStarted { supervisor_call_id, .. } => Some(supervisor_call_id),
+            RwiEvent::SupervisorBargeStarted { supervisor_call_id, .. } => Some(supervisor_call_id),
+            RwiEvent::SupervisorModeStopped { supervisor_call_id, .. } => Some(supervisor_call_id),
+            RwiEvent::SipMessageReceived { call_id, .. } => Some(call_id),
+            RwiEvent::SipNotifyReceived { call_id, .. } => Some(call_id),
+            RwiEvent::Dtmf { call_id, .. } => Some(call_id),
+            RwiEvent::ConferenceMemberJoined { call_id, .. } => Some(call_id),
+            RwiEvent::ConferenceMemberLeft { call_id, .. } => Some(call_id),
+            RwiEvent::ConferenceMemberMuted { call_id, .. } => Some(call_id),
+            RwiEvent::ConferenceMemberUnmuted { call_id, .. } => Some(call_id),
+            RwiEvent::ConferenceConsultDialing { call_id, .. } => Some(call_id),
+            RwiEvent::ConferenceConsultConnected { call_id, .. } => Some(call_id),
+            RwiEvent::ConferenceMergeRequested { call_id, .. } => Some(call_id),
+            RwiEvent::ConferenceMerged { call_id, .. } => Some(call_id),
+            RwiEvent::ConferenceMergeFailed { call_id, .. } => Some(call_id),
+            RwiEvent::CallOwnershipChanged { call_id, .. } => Some(call_id),
+            
+            RwiEvent::ParallelOriginateStarted { .. } => None,
+            RwiEvent::ParallelOriginateLegRinging { call_id, .. } => Some(call_id),
+            RwiEvent::ParallelOriginateWinner { call_id, .. } => Some(call_id),
+            RwiEvent::ParallelOriginateLegCancelled { call_id, .. } => Some(call_id),
+            RwiEvent::ParallelOriginateCompleted { winning_call_id, .. } => Some(winning_call_id),
+            RwiEvent::ParallelOriginateFailed { .. } => None,
+            
+            RwiEvent::CallBridged { leg_a, .. } => Some(leg_a),
+            RwiEvent::ConferenceCreated { .. } => None,
+            RwiEvent::ConferenceDestroyed { .. } => None,
+            RwiEvent::ConferenceError { .. } => None,
+            RwiEvent::SessionResumed { .. } => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -507,58 +650,6 @@ pub struct CallIncomingData {
     pub sip_headers: std::collections::HashMap<String, String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RwiResponse {
-    pub action_id: String,
-    pub response: ResponseStatus,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub data: Option<serde_json::Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<RwiError>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ResponseStatus {
-    Success,
-    Error,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RwiError {
-    pub code: String,
-    pub message: String,
-}
-
-impl RwiError {
-    pub fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
-        Self {
-            code: code.into(),
-            message: message.into(),
-        }
-    }
-
-    pub fn invalid_state(message: impl Into<String>) -> Self {
-        Self::new("invalid_state", message)
-    }
-
-    pub fn not_found(message: impl Into<String>) -> Self {
-        Self::new("not_found", message)
-    }
-
-    pub fn already_owned() -> Self {
-        Self::new("already_owned", "call is owned by another session")
-    }
-
-    pub fn forbidden() -> Self {
-        Self::new("forbidden", "insufficient scope for this action")
-    }
-
-    pub fn rate_limited() -> Self {
-        Self::new("rate_limited", "too many requests")
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -567,25 +658,6 @@ mod tests {
     fn test_rwi_envelope_new() {
         let envelope = RwiEnvelope::new(RwiCommand::SessionListCalls);
         assert_eq!(envelope.version, RWI_VERSION);
-    }
-
-    #[test]
-    fn test_rwi_error_factory_methods() {
-        let err = RwiError::invalid_state("call is not ringing");
-        assert_eq!(err.code, "invalid_state");
-        assert_eq!(err.message, "call is not ringing");
-
-        let err = RwiError::not_found("call not found");
-        assert_eq!(err.code, "not_found");
-
-        let err = RwiError::already_owned();
-        assert_eq!(err.code, "already_owned");
-
-        let err = RwiError::forbidden();
-        assert_eq!(err.code, "forbidden");
-
-        let err = RwiError::rate_limited();
-        assert_eq!(err.code, "rate_limited");
     }
 
     #[test]
@@ -681,31 +753,6 @@ mod tests {
     }
 
     #[test]
-    fn test_rwi_response_success() {
-        let response = RwiResponse {
-            action_id: "test-id".to_string(),
-            response: ResponseStatus::Success,
-            data: Some(serde_json::json!("call_id")),
-            error: None,
-        };
-        assert!(matches!(response.response, ResponseStatus::Success));
-        assert!(response.error.is_none());
-    }
-
-    #[test]
-    fn test_rwi_response_error() {
-        let error = RwiError::not_found("call not found");
-        let response = RwiResponse {
-            action_id: "test-id".to_string(),
-            response: ResponseStatus::Error,
-            data: None,
-            error: Some(error),
-        };
-        assert!(matches!(response.response, ResponseStatus::Error));
-        assert!(response.error.is_some());
-    }
-
-    #[test]
     fn test_call_incoming_data_serialization() {
         let json = r#"{
             "call_id": "c_123",
@@ -719,16 +766,5 @@ mod tests {
         assert_eq!(data.caller, "1001");
         assert_eq!(data.callee, "2000");
         assert_eq!(data.direction, "inbound");
-    }
-
-    #[test]
-    fn test_response_status_serialization() {
-        let json = r#""success""#;
-        let status: ResponseStatus = serde_json::from_str(json).unwrap();
-        assert!(matches!(status, ResponseStatus::Success));
-
-        let json = r#""error""#;
-        let status: ResponseStatus = serde_json::from_str(json).unwrap();
-        assert!(matches!(status, ResponseStatus::Error));
     }
 }

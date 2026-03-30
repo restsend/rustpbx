@@ -357,6 +357,7 @@ mod tests {
             hangup_messages: vec![],
             recorder: vec![],
             sip_leg_roles: Default::default(),
+            leg_timeline: Default::default(),
             details: crate::callrecord::CallDetails {
                 direction: "outbound".to_string(),
                 status: "completed".to_string(),

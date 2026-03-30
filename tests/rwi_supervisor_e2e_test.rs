@@ -128,7 +128,7 @@ async fn test_supervisor_listen_command_accepted() {
         serde_json::json!({"contexts": ["default"]}),
     );
     let v = ws_send_recv_with_id(&mut ws, &sub_json, &sub_id).await;
-    assert_eq!(v["response"], "success", "subscribe failed: {v}");
+    assert_eq!(v["status"], "success", "subscribe failed: {v}");
 
     // Originate to Agent
     let agent_call_id = format!("e2e-sup-agent-{}", Uuid::new_v4());
@@ -143,7 +143,7 @@ async fn test_supervisor_listen_command_accepted() {
         }),
     );
     let v = ws_send_recv_with_id(&mut ws, &orig_json, &agent_orig_id).await;
-    assert_eq!(v["response"], "success", "originate agent failed: {v}");
+    assert_eq!(v["status"], "success", "originate agent failed: {v}");
 
     // Wait for agent to answer
     let _answered = recv_until(&mut ws, 10, |v| {
@@ -155,7 +155,7 @@ async fn test_supervisor_listen_command_accepted() {
     // Now try to send supervisor.listen - this verifies the command is accepted
     // Note: The actual audio mixing requires additional implementation
     let supervisor_call_id = format!("e2e-supervisor-{}", Uuid::new_v4());
-    let (_listen_id, listen_json) = rwi_req(
+    let (listen_id, listen_json) = rwi_req(
         "supervisor.listen",
         serde_json::json!({
             "supervisor_call_id": supervisor_call_id,
@@ -163,22 +163,13 @@ async fn test_supervisor_listen_command_accepted() {
         }),
     );
 
-    // Send the command and check the response
-    ws.send(Message::Text(listen_json.into())).await.unwrap();
-    let msg = timeout(Duration::from_secs(10), ws.next())
-        .await
-        .expect("recv timeout")
-        .expect("stream ended")
-        .expect("ws error");
-    let v: serde_json::Value = match msg {
-        Message::Text(t) => serde_json::from_str(&t).expect("not JSON"),
-        other => panic!("unexpected frame: {other:?}"),
-    };
+    // Send the command and wait for response matching the action_id
+    let v = ws_send_recv_with_id(&mut ws, &listen_json, &listen_id).await;
 
     // The command should be accepted (not return unknown_action error)
     // It may return error if the target session doesn't exist, but that's expected
     tracing::info!("supervisor.listen response: {:?}", v);
-    let response = v["response"].as_str().unwrap_or("");
+    let response = v["status"].as_str().unwrap_or("");
     assert!(
         response == "success" || response == "error" || response == "not_found",
         "Expected success/error/not_found, got: {response}"
@@ -215,7 +206,7 @@ async fn test_supervisor_whisper_command_accepted() {
         serde_json::json!({"contexts": ["default"]}),
     );
     let v = ws_send_recv_with_id(&mut ws, &sub_json, &sub_id).await;
-    assert_eq!(v["response"], "success");
+    assert_eq!(v["status"], "success");
 
     // Originate agent
     let agent_call_id = format!("e2e-whisper-agent-{}", Uuid::new_v4());
@@ -234,7 +225,7 @@ async fn test_supervisor_whisper_command_accepted() {
 
     // Try supervisor.whisper
     let supervisor_call_id = format!("e2e-whisper-sup-{}", Uuid::new_v4());
-    let (_, whisper_json) = rwi_req(
+    let (whisper_id, whisper_json) = rwi_req(
         "supervisor.whisper",
         serde_json::json!({
             "supervisor_call_id": supervisor_call_id,
@@ -242,19 +233,10 @@ async fn test_supervisor_whisper_command_accepted() {
             "agent_leg": "",
         }),
     );
-    ws.send(Message::Text(whisper_json.into())).await.unwrap();
-    let msg = timeout(Duration::from_secs(10), ws.next())
-        .await
-        .expect("recv timeout")
-        .expect("stream ended")
-        .expect("ws error");
-    let v: serde_json::Value = match msg {
-        Message::Text(t) => serde_json::from_str(&t).expect("not JSON"),
-        other => panic!("unexpected frame: {other:?}"),
-    };
+    let v = ws_send_recv_with_id(&mut ws, &whisper_json, &whisper_id).await;
 
     tracing::info!("supervisor.whisper response: {:?}", v);
-    let response = v["response"].as_str().unwrap_or("");
+    let response = v["status"].as_str().unwrap_or("");
     assert!(
         response == "success" || response == "error" || response == "not_found",
         "Expected success/error/not_found, got: {response}"
@@ -282,7 +264,7 @@ async fn test_supervisor_barge_command_accepted() {
         serde_json::json!({"contexts": ["default"]}),
     );
     let v = ws_send_recv_with_id(&mut ws, &sub_json, &sub_id).await;
-    assert_eq!(v["response"], "success");
+    assert_eq!(v["status"], "success");
 
     // Originate agent
     let agent_call_id = format!("e2e-barge-agent-{}", Uuid::new_v4());
@@ -301,7 +283,7 @@ async fn test_supervisor_barge_command_accepted() {
 
     // Try supervisor.barge
     let supervisor_call_id = format!("e2e-barge-sup-{}", Uuid::new_v4());
-    let (_, barge_json) = rwi_req(
+    let (barge_id, barge_json) = rwi_req(
         "supervisor.barge",
         serde_json::json!({
             "supervisor_call_id": supervisor_call_id,
@@ -309,19 +291,10 @@ async fn test_supervisor_barge_command_accepted() {
             "agent_leg": "",
         }),
     );
-    ws.send(Message::Text(barge_json.into())).await.unwrap();
-    let msg = timeout(Duration::from_secs(10), ws.next())
-        .await
-        .expect("recv timeout")
-        .expect("stream ended")
-        .expect("ws error");
-    let v: serde_json::Value = match msg {
-        Message::Text(t) => serde_json::from_str(&t).expect("not JSON"),
-        other => panic!("unexpected frame: {other:?}"),
-    };
+    let v = ws_send_recv_with_id(&mut ws, &barge_json, &barge_id).await;
 
     tracing::info!("supervisor.barge response: {:?}", v);
-    let response = v["response"].as_str().unwrap_or("");
+    let response = v["status"].as_str().unwrap_or("");
     assert!(
         response == "success" || response == "error" || response == "not_found",
         "Expected success/error/not_found, got: {response}"
@@ -360,7 +333,7 @@ async fn test_supervisor_listen_full_flow() {
         serde_json::json!({"contexts": ["default"]}),
     );
     let v = ws_send_recv_with_id(&mut ws, &sub_json, &sub_id).await;
-    assert_eq!(v["response"], "success", "subscribe failed: {v}");
+    assert_eq!(v["status"], "success", "subscribe failed: {v}");
 
     // Step 1: Originate agent call
     let agent_call_id = format!("e2e-full-agent-{}", Uuid::new_v4());
@@ -375,7 +348,7 @@ async fn test_supervisor_listen_full_flow() {
         }),
     );
     let v = ws_send_recv_with_id(&mut ws, &agent_orig_json, &agent_orig_id).await;
-    assert_eq!(v["response"], "success", "originate agent failed: {v}");
+    assert_eq!(v["status"], "success", "originate agent failed: {v}");
 
     // Wait for agent to answer (or timeout)
     let agent_result = tokio::time::timeout(
@@ -407,7 +380,7 @@ async fn test_supervisor_listen_full_flow() {
     );
     let v = ws_send_recv_with_id(&mut ws, &sup_orig_json, &sup_orig_id).await;
     tracing::info!("Supervisor originate response: {:?}", v);
-    assert_eq!(v["response"], "success", "originate supervisor failed: {v}");
+    assert_eq!(v["status"], "success", "originate supervisor failed: {v}");
 
     // Wait for supervisor to answer (or timeout)
     let sup_result = tokio::time::timeout(
@@ -439,7 +412,7 @@ async fn test_supervisor_listen_full_flow() {
     tracing::info!("supervisor.listen response: {:?}", v);
 
     // Should return success (both sessions exist and are bridged)
-    assert_eq!(v["response"], "success", "Expected success, got: {v}");
+    assert_eq!(v["status"], "success", "Expected success, got: {v}");
 
     // Step 4: Verify events are emitted
     // After successful supervisor.listen, we should see call bridged events
@@ -471,7 +444,7 @@ async fn test_supervisor_whisper_full_flow() {
         serde_json::json!({"contexts": ["default"]}),
     );
     let v = ws_send_recv_with_id(&mut ws, &sub_json, &sub_id).await;
-    assert_eq!(v["response"], "success");
+    assert_eq!(v["status"], "success");
 
     // Originate agent
     let agent_call_id = format!("e2e-whisper-agent-{}", Uuid::new_v4());
@@ -515,7 +488,7 @@ async fn test_supervisor_whisper_full_flow() {
     let v = ws_send_recv_with_id(&mut ws, &whisper_json, &whisper_id).await;
 
     tracing::info!("supervisor.whisper response: {:?}", v);
-    assert_eq!(v["response"], "success", "Expected success, got: {v}");
+    assert_eq!(v["status"], "success", "Expected success, got: {v}");
 
     ws.close(None).await.unwrap();
     agent.stop();
@@ -542,7 +515,7 @@ async fn test_supervisor_barge_full_flow() {
         serde_json::json!({"contexts": ["default"]}),
     );
     let v = ws_send_recv_with_id(&mut ws, &sub_json, &sub_id).await;
-    assert_eq!(v["response"], "success");
+    assert_eq!(v["status"], "success");
 
     // Originate agent
     let agent_call_id = format!("e2e-barge-agent-{}", Uuid::new_v4());
@@ -586,7 +559,7 @@ async fn test_supervisor_barge_full_flow() {
     let v = ws_send_recv_with_id(&mut ws, &barge_json, &barge_id).await;
 
     tracing::info!("supervisor.barge response: {:?}", v);
-    assert_eq!(v["response"], "success", "Expected success, got: {v}");
+    assert_eq!(v["status"], "success", "Expected success, got: {v}");
 
     ws.close(None).await.unwrap();
     agent.stop();
