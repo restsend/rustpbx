@@ -211,6 +211,7 @@ impl CallReporter {
             hangup_messages: hangup_messages.clone(),
             recorder,
             sip_leg_roles,
+            leg_timeline: crate::callrecord::LegTimeline::default(),
             details,
             extensions: snapshot.extensions,
         };
@@ -343,6 +344,7 @@ mod tests {
             hangup_messages: vec![],
             recorder: vec![],
             sip_leg_roles: std::collections::HashMap::new(),
+            leg_timeline: crate::callrecord::LegTimeline::default(),
             details: crate::callrecord::CallDetails::default(),
             extensions: http::Extensions::new(),
         };

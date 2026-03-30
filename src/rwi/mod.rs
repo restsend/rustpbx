@@ -4,7 +4,10 @@ pub mod gateway;
 pub mod handler;
 pub mod processor;
 pub mod proto;
+pub mod routing;
+pub mod rule_engine;
 pub mod session;
+pub mod transfer;
 
 pub use app::*;
 pub use auth::*;
@@ -13,4 +16,4 @@ pub use handler::*;
 pub use processor::*;
 pub use session::*;
 
-pub use proto::{CallIncomingData, ResponseStatus, RwiCommand, RwiError, RwiEvent, RwiResponse};
+pub use proto::{CallIncomingData, RwiCommand, RwiEvent};

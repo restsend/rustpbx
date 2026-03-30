@@ -23,8 +23,10 @@ use tokio_util::sync::CancellationToken;
 /// A SIP UA backed by `sipbot`.
 pub struct TestUa {
     pub cancel_token: CancellationToken,
+    #[allow(dead_code)]
     pub domain: String,
     /// Shared call statistics for RTP validation
+    #[allow(dead_code)]
     pub stats: Arc<CallStats>,
 }
 
@@ -40,6 +42,22 @@ impl TestUa {
 
     /// Create and start a callee UA with a specific username.
     pub async fn callee_with_username(sip_port: u16, ring_secs: u64, username: &str) -> Self {
+        Self::callee_with_options(sip_port, ring_secs, username, None).await
+    }
+
+    /// Create and start a callee UA with REFER rejection (for 3PCC fallback testing).
+    #[allow(dead_code)]
+    pub async fn callee_with_refer_reject(sip_port: u16, ring_secs: u64, refer_reject_code: u16) -> Self {
+        Self::callee_with_options(sip_port, ring_secs, "bob", Some(refer_reject_code)).await
+    }
+
+    /// Create and start a callee UA with configurable options.
+    async fn callee_with_options(
+        sip_port: u16,
+        ring_secs: u64,
+        username: &str,
+        refer_reject: Option<u16>,
+    ) -> Self {
         let cancel_token = CancellationToken::new();
         let domain = format!("127.0.0.1:{}", sip_port);
 
@@ -54,6 +72,7 @@ impl TestUa {
                 local: None,
             }),
             answer: Some(AnswerConfig::Echo),
+            refer_reject,
             ..Default::default()
         };
 
@@ -96,11 +115,13 @@ impl TestUa {
     }
 
     /// Return a `sip:<user>@<host>:<port>` URI for this UA.
+    #[allow(dead_code)]
     pub fn sip_uri(&self, user: &str) -> String {
         format!("sip:{}@{}", user, self.domain)
     }
 
     /// Get RTP statistics summary as a string
+    #[allow(dead_code)]
     pub fn rtp_stats_summary(&self) -> String {
         use std::sync::atomic::Ordering;
         let tx_p = self.stats.tx_packets.load(Ordering::Relaxed);
@@ -111,12 +132,14 @@ impl TestUa {
     }
 
     /// Check if any RTP packets were received (RX > 0)
+    #[allow(dead_code)]
     pub fn has_rtp_rx(&self) -> bool {
         use std::sync::atomic::Ordering;
         self.stats.rx_packets.load(Ordering::Relaxed) > 0
     }
 
     /// Check if any RTP packets were transmitted (TX > 0)
+    #[allow(dead_code)]
     pub fn has_rtp_tx(&self) -> bool {
         use std::sync::atomic::Ordering;
         self.stats.tx_packets.load(Ordering::Relaxed) > 0

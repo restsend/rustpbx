@@ -87,7 +87,9 @@ impl RwiApp {
         if let Some(session_id) = &self.session_id {
             gw.send_event_to_session(session_id, &event);
         }
-        gw.fan_out_event_to_context(&self.context_name, &event);
+        // Get call_id from event if available
+        let call_id = event.call_id().map(|s| s.to_string()).unwrap_or_else(|| self.context_name.clone());
+        gw.fan_out_event_to_context(&self.context_name, &event, &call_id);
     }
 }
 

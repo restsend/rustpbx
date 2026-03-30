@@ -48,12 +48,21 @@ All fields use snake_case consistently:
 | Field | Direction | Purpose |
 |-------|-----------|---------|
 | `rwi` | both | Protocol version (optional, for future compatibility) |
-| `action` | client → server | Command name |
-| `action_id` | client → server | Client-generated correlation ID |
+| `action` | client → server | Command name (required) |
+| `action_id` | client → server | Client-generated correlation ID (required) |
 | `event` | server → client | Async push event name |
-| `response` | server → client | `success` or `error` |
 
 Note: The `rwi` field is optional and currently ignored. Version is already encoded in the WebSocket URL path (`/rwi/v1`).
+
+### 4.2 Async Command Model
+
+RWI uses a fully asynchronous event-driven model (similar to FreeSWITCH ESL). **All commands receive their results via events** - there are no synchronous responses.
+
+**Command flow:**
+1. Client sends command with `action_id`
+2. Server validates and executes asynchronously
+3. Server sends `command_completed` or `command_failed` event with matching `action_id`
+4. Client correlates the response via `action_id`
 
 **Client command format:**
 
@@ -67,34 +76,45 @@ Note: The `rwi` field is optional and currently ignored. Version is already enco
 }
 ```
 
-The `rwi` field is optional and can be omitted.
-
-**Success response:**
+**Command completed event:**
 
 ```json
 {
+  "type": "command_completed",
   "action_id": "b0e31d3a-5f7c-4fd9-b987-f5ec7e7e5c49",
-  "response": "success",
+  "action": "call.answer",
+  "call_id": "c_92f4",
+  "status": "success"
+}
+```
+
+**Command with data result:**
+
+```json
+{
+  "type": "command_completed",
+  "action_id": "req-001",
+  "action": "call.originate",
+  "status": "success",
   "data": {
     "call_id": "c_92f4"
   }
 }
 ```
 
-**Error response:**
+**Command failed event:**
 
 ```json
 {
+  "type": "command_failed",
   "action_id": "b0e31d3a-5f7c-4fd9-b987-f5ec7e7e5c49",
-  "response": "error",
-  "error": {
-    "code": "invalid_state",
-    "message": "call is not in ringing state"
-  }
+  "action": "call.answer",
+  "call_id": "c_92f4",
+  "error": "Call not found: c_92f4"
 }
 ```
 
-**Server event (async, no action_id):**
+**Server async event (no action_id):**
 
 ```json
 {
@@ -114,7 +134,7 @@ The `rwi` field is optional and can be omitted.
 }
 ```
 
-### 4.2 Command Format
+### 4.3 Command Format
 
 RWI commands use JSON tagged union format. The `action` field identifies the command type, and `params` contains command-specific parameters:
 
@@ -442,7 +462,29 @@ Valid `backend` values: `internal`, `external` (external MCU)
 
 ## 6. Event Reference
 
-### 6.1 Call Events
+### 6.1 Command Result Events
+
+| Event | Description |
+|-------|-------------|
+| `command_completed` | Command executed successfully (contains `action_id`, `action`, optional `data`) |
+| `command_failed` | Command execution failed (contains `action_id`, `action`, `error`) |
+
+**Command completed with data:**
+
+```json
+{
+  "type": "command_completed",
+  "action_id": "req-001",
+  "action": "call.originate",
+  "call_id": "c_92f4",
+  "status": "success",
+  "data": {
+    "call_id": "c_92f4"
+  }
+}
+```
+
+### 6.2 Call Events
 
 | Event | Description |
 |-------|-------------|
@@ -459,7 +501,7 @@ Valid `backend` values: `internal`, `external` (external MCU)
 | `call.no_answer` | Outbound leg timed out |
 | `call.busy` | Outbound leg returned 486 Busy |
 
-### 6.2 Media Events
+### 6.3 Media Events
 
 | Event | Description |
 |-------|-------------|
@@ -472,7 +514,7 @@ Valid `backend` values: `internal`, `external` (external MCU)
 | `media.stream.started` | PCM stream started |
 | `media.stream.stopped` | PCM stream stopped |
 
-### 6.3 Recording Events
+### 6.4 Recording Events
 
 | Event | Description |
 |-------|-------------|
@@ -483,7 +525,7 @@ Valid `backend` values: `internal`, `external` (external MCU)
 | `record.failed` | Recording failed |
 | `record.segment_masked` | Segment masked |
 
-### 6.4 Queue Events
+### 6.5 Queue Events
 
 | Event | Description |
 |-------|-------------|
@@ -494,7 +536,7 @@ Valid `backend` values: `internal`, `external` (external MCU)
 | `queue.left` | Left queue |
 | `queue.wait_timeout` | Wait timeout |
 
-### 6.5 Supervisor Events
+### 6.6 Supervisor Events
 
 | Event | Description |
 |-------|-------------|
@@ -504,7 +546,7 @@ Valid `backend` values: `internal`, `external` (external MCU)
 | `supervisor.mode.stopped` | Supervisor mode stopped |
 | `supervisor.takeover.completed` | Takeover completed |
 
-### 6.6 SIP Events
+### 6.7 SIP Events
 
 | Event | Description |
 |-------|-------------|
@@ -512,7 +554,7 @@ Valid `backend` values: `internal`, `external` (external MCU)
 | `sip.notify.received` | SIP NOTIFY received |
 | `dtmf` | DTMF digit |
 
-### 6.7 Conference Events
+### 6.8 Conference Events
 
 | Event | Description |
 |-------|-------------|
@@ -524,17 +566,31 @@ Valid `backend` values: `internal`, `external` (external MCU)
 | `conference.destroyed` | Conference destroyed |
 | `conference.error` | Conference error |
 
-## 7. Error Codes
+## 7. Error Handling
 
-| Code | Description |
-|------|-------------|
-| `invalid_state` | Call state does not allow this operation |
-| `not_found` | Call or resource not found |
-| `already_owned` | Call is owned by another session |
-| `forbidden` | Insufficient scope |
-| `rate_limited` | Too many requests |
+Command failures are reported via `command_failed` events:
 
-## 8. Multi-Client Session Model
+```json
+{
+  "type": "command_failed",
+  "action_id": "req-001",
+  "action": "call.answer",
+  "call_id": "c_92f4",
+  "error": "Call not found: c_92f4"
+}
+```
+
+Common error messages:
+
+| Error Pattern | Description |
+|---------------|-------------|
+| `Call not found: <id>` | Call ID does not exist |
+| `Command failed: <reason>` | Generic command execution failure |
+| `Not implemented: <feature>` | Feature is not yet implemented |
+| `invalid state` | Call state does not allow this operation |
+| `already owned` | Call is owned by another session |
+
+## 8. Event Types
 
 ### 8.1 Context Subscription
 
@@ -651,7 +707,142 @@ no_answer_transfer_target = "sip:voicemail@local"
 
 ---
 
-## 12. Limitations and Notes
+## 12. Smart Routing and Rule Engine
+
+RWI supports intelligent in-dialog message routing and local rule execution for high-reliability call center scenarios.
+
+### 12.1 Three-Layer Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│ Layer 3: RWI Application                                    │
+│         Complex business logic, real-time AI decision        │
+├─────────────────────────────────────────────────────────────┤
+│ Layer 2: Local Rule Engine                                  │
+│         Fallback rules when RWI disconnected                 │
+│         Hotkey-triggered local actions                       │
+├─────────────────────────────────────────────────────────────┤
+│ Layer 1: Realtime Processing (SIP/RTP)                      │
+│         DTMF auto-forward, INFO/OPTIONS passthrough          │
+│         <10ms latency, always available                      │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### 12.2 Message Routing Configuration
+
+```toml
+[rwi.smart_routing]
+enabled = true
+
+# DTMF handling
+[rwi.smart_routing.dtmf]
+handling = "smart_forward"  # passthrough, local_rules, smart_forward, rwi_controlled
+log_to_cdr = true
+
+[[rwi.smart_routing.dtmf.hotkeys]]
+sequence = "*9"
+action = "forward_rwi"      # forward_leg, forward_rwi, execute_rule, auto_reply, drop
+
+[[rwi.smart_routing.dtmf.hotkeys]]
+sequence = "*0"
+action = "execute_rule"
+rule_id = "emergency_escalation"
+
+# In-dialog INFO/OPTIONS/MESSAGE routing
+[rwi.smart_routing.in_dialog]
+enabled = true
+notify_rwi = true           # Notify RWI even when forwarding
+
+[[rwi.smart_routing.in_dialog.rules]]
+name = "Route INFO to RWI"
+priority = 100
+enabled = true
+method = "INFO"
+content_type = "application/*"
+action = { type = "forward_rwi", wait_response = true, timeout_ms = 5000 }
+
+[[rwi.smart_routing.in_dialog.rules]]
+name = "Auto-reply OPTIONS"
+priority = 200
+enabled = true
+method = "OPTIONS"
+action = { type = "auto_reply", code = 200 }
+```
+
+### 12.3 DTMF Handling Modes
+
+| Mode | Behavior | Use Case |
+|------|----------|----------|
+| `passthrough` | Forward all DTMF to peer | Default, minimal latency |
+| `local_rules` | Execute local rules only | Self-contained IVR |
+| `smart_forward` | Passthrough + hotkey detection | Contact center with hotkeys |
+| `rwi_controlled` | Buffer and forward to RWI | Complex multi-digit input |
+
+### 12.4 Local Rule Engine
+
+When RWI is disconnected or `action = "execute_rule"` is triggered, the Local Rule Engine executes predefined actions:
+
+**Available Actions:**
+- `originate` - Originate new call
+- `bridge` - Bridge to another call
+- `hangup` - Hangup with optional reason
+- `play_prompt` - Play audio file
+- `send_dtmf` - Send DTMF to peer
+- `conference_add` - Add to conference
+- `sequence` - Execute multiple actions in order
+- `conditional` - Branch based on conditions
+
+**Example Rule:**
+```toml
+[[rwi.local_rules]]
+id = "emergency_escalation"
+enabled = true
+
+[[rwi.local_rules.actions]]
+action = "play_prompt"
+audio_file = "sounds/transferring.wav"
+
+[[rwi.local_rules.actions]]
+action = "originate"
+destination = "sip:supervisor@backup-pbx.local"
+caller_id = "Emergency Hotkey"
+timeout_secs = 30
+```
+
+### 12.5 Graceful Degradation
+
+When RWI connection is lost:
+1. Active calls continue (Layer 1)
+2. Fallback rules auto-execute for new events (Layer 2)
+3. Calls can be recovered on RWI reconnection
+
+```toml
+[rwi.smart_routing.fallback]
+when_rwi_disconnected = "execute_rules"  # passthrough, execute_rules, auto_hangup
+rules = ["maintain_call", "log_cdr"]
+```
+
+### 12.6 RWI Subscription Levels
+
+Clients can subscribe at different levels:
+
+| Level | Events | Use Case |
+|-------|--------|----------|
+| `events_only` | call.incoming, call.hangup | Monitoring |
+| `control` | + control commands | Normal agent |
+| `full_control` | + in-dialog messages | Advanced control |
+
+```json
+{
+  "action": "session.subscribe",
+  "params": {
+    "contexts": ["support_queue"],
+    "level": "full_control"
+  }
+}
+```
+
+## 13. Limitations and Notes
 
 1. **SIP header passthrough**: `sip_headers` in `call.incoming` is read-only and only contains headers explicitly whitelisted in `[rwi.sip_header_passthrough]`.
 
@@ -662,3 +853,5 @@ no_answer_transfer_target = "sip:voicemail@local"
 4. **Presence**: Agent presence state is not managed in RWI. Use a separate Presence service.
 
 5. **Supervisor audio**: MediaMixer framework is in place but actual audio stream mixing is not yet connected.
+
+6. **3PCC Originate**: TransferController 3PCC fallback integration with originate is TODO (marked in code).

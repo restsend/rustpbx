@@ -54,6 +54,7 @@ impl FromStr for SessionRefresher {
 impl SessionRefresher {
     /// Check if we are the refresher based on our role
     #[cfg(test)]
+    #[allow(dead_code)]
     pub fn is_our_role(&self, we_are_uac: bool) -> bool {
         matches!(
             (self, we_are_uac),

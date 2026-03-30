@@ -379,15 +379,15 @@ async fn test_webrtc_to_rtp_sdp_bridge() -> Result<()> {
 
     // Wait for Bob to receive call and answer
     let mut bob_dialog_id = None;
-    let mut received_sdp = None;
-    
+    let mut _received_sdp: Option<String> = None;
+
     for i in 0..50 {
         let events = bob.process_dialog_events().await.unwrap_or_default();
         for event in events {
             if let TestUaEvent::IncomingCall(id, sdp) = event {
                 bob_dialog_id = Some(id.clone());
-                received_sdp = sdp.clone();
-                
+                _received_sdp = sdp.clone();
+
                 // Verify Bob received converted RTP SDP (not WebRTC)
                 if let Some(ref sdp_str) = sdp {
                     info!("Bob received SDP:\n{}", sdp_str);
@@ -574,15 +574,15 @@ async fn test_rtp_to_webrtc_sdp_bridge() -> Result<()> {
 
     // Wait for Bob to receive call
     let mut bob_dialog_id = None;
-    let mut received_sdp = None;
-    
+    let mut _received_sdp: Option<String> = None;
+
     for i in 0..50 {
         let events = bob.process_dialog_events().await.unwrap_or_default();
         for event in events {
             if let TestUaEvent::IncomingCall(id, sdp) = event {
                 bob_dialog_id = Some(id.clone());
-                received_sdp = sdp.clone();
-                
+                _received_sdp = sdp.clone();
+
                 // Verify Bob received converted WebRTC SDP
                 if let Some(ref sdp_str) = sdp {
                     info!("Bob received SDP:\n{}", sdp_str);

@@ -128,6 +128,8 @@ pub struct CallRecord {
     pub recorder: Vec<CallRecordMedia>,
     #[serde(skip_serializing_if = "HashMap::is_empty", default)]
     pub sip_leg_roles: HashMap<String, String>,
+    #[serde(skip_serializing_if = "LegTimeline::is_empty", default)]
+    pub leg_timeline: LegTimeline,
     #[serde(flatten, default)]
     pub details: CallDetails,
     #[serde(skip_serializing, skip_deserializing, default)]
@@ -149,6 +151,7 @@ impl Clone for CallRecord {
             hangup_messages: self.hangup_messages.clone(),
             recorder: self.recorder.clone(),
             sip_leg_roles: self.sip_leg_roles.clone(),
+            leg_timeline: self.leg_timeline.clone(),
             details: self.details.clone(),
             extensions: http::Extensions::new(), // extensions cannot be cloned
         }
@@ -191,6 +194,56 @@ pub struct CallRecordHangupMessage {
     pub reason: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub target: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum LegTimelineEventType {
+    Added,
+    Bridged,
+    Unbridged,
+    Transferred,
+    TransferAccepted,
+    TransferFailed,
+    Removed,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LegTimelineEvent {
+    pub timestamp: DateTimeUtc,
+    pub leg_id: String,
+    pub event_type: LegTimelineEventType,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub peer_leg_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub details: Option<Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct LegTimeline {
+    pub events: Vec<LegTimelineEvent>,
+}
+
+impl LegTimeline {
+    pub fn new() -> Self {
+        Self { events: Vec::new() }
+    }
+
+    pub fn add_event(&mut self, leg_id: String, event_type: LegTimelineEventType, peer_leg_id: Option<String>, details: Option<Value>) {
+        self.events.push(LegTimelineEvent {
+            timestamp: chrono::Utc::now(),
+            leg_id,
+            event_type,
+            peer_leg_id,
+            details,
+        });
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.events.is_empty()
+    }
 }
 
 impl std::str::FromStr for CallRecordHangupReason {

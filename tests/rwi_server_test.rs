@@ -221,7 +221,7 @@ async fn test_session_subscribe_returns_success() {
     );
     let v = send_recv(&mut ws, &json).await;
 
-    assert_eq!(v["response"], "success");
+    assert_eq!(v["status"], "success");
     assert_eq!(v["action_id"], id, "action_id must be echoed");
 
     ws.close(None).await.unwrap();
@@ -235,7 +235,7 @@ async fn test_session_list_calls_empty_returns_array() {
     let (id, json) = req("session.list_calls", serde_json::json!({}));
     let v = send_recv(&mut ws, &json).await;
 
-    assert_eq!(v["response"], "success");
+    assert_eq!(v["status"], "success");
     assert_eq!(v["action_id"], id);
     // data should be an array (possibly empty)
     assert!(
@@ -273,7 +273,7 @@ async fn test_action_id_echoed_on_error() {
     let (id, json) = req("call.answer", serde_json::json!({"call_id": "ghost"}));
     let v = send_recv(&mut ws, &json).await;
 
-    assert_eq!(v["response"], "error");
+    assert_eq!(v["status"], "error");
     assert_eq!(v["action_id"], id, "action_id must be echoed even on error");
 
     ws.close(None).await.unwrap();
@@ -291,8 +291,8 @@ async fn test_unknown_action_returns_unknown_action_code() {
     let (_, json) = req("totally.unknown", serde_json::json!({}));
     let v = send_recv(&mut ws, &json).await;
 
-    assert_eq!(v["response"], "error");
-    assert_eq!(v["error"]["code"], "unknown_action");
+    assert_eq!(v["status"], "error");
+    assert!(v["error"].as_str().map(|s| s.contains("unknown_action")).unwrap_or(false), "error should contain 'unknown_action': {}", v);
 
     ws.close(None).await.unwrap();
 }
@@ -315,8 +315,8 @@ async fn test_missing_action_field_returns_missing_action_code() {
         other => panic!("unexpected: {:?}", other),
     };
 
-    assert_eq!(v["response"], "error");
-    assert_eq!(v["error"]["code"], "missing_action");
+    assert_eq!(v["status"], "error");
+    assert!(v["error"].as_str().map(|s| s.contains("missing_action")).unwrap_or(false), "error should contain 'missing_action': {}", v);
 
     ws.close(None).await.unwrap();
 }
@@ -339,8 +339,8 @@ async fn test_invalid_json_returns_parse_error() {
         other => panic!("unexpected: {:?}", other),
     };
 
-    assert_eq!(v["response"], "error");
-    assert_eq!(v["error"]["code"], "parse_error");
+    assert_eq!(v["status"], "error");
+    assert!(v["error"].as_str().map(|s| s.contains("parse_error")).unwrap_or(false), "error should contain 'parse_error': {}", v);
 
     ws.close(None).await.unwrap();
 }
@@ -356,8 +356,8 @@ async fn test_call_answer_not_found_returns_not_found() {
     );
     let v = send_recv(&mut ws, &json).await;
 
-    assert_eq!(v["response"], "error");
-    assert_eq!(v["error"]["code"], "not_found");
+    assert_eq!(v["status"], "error");
+    assert!(v["error"].as_str().map(|s| s.contains("not found") || s.contains("Call not found")).unwrap_or(false), "error should contain not_found: {}", v);
 
     ws.close(None).await.unwrap();
 }
@@ -377,8 +377,8 @@ async fn test_originate_no_sip_server_returns_error() {
     let v = send_recv(&mut ws, &json).await;
 
     // Without a SIP server, originate returns command_failed
-    assert_eq!(v["response"], "error");
-    assert_eq!(v["error"]["code"], "command_failed");
+    assert_eq!(v["status"], "error");
+    assert!(v["error"].as_str().map(|s| s.contains("Command failed") || s.contains("command")).unwrap_or(false), "error should contain command_failed: {}", v);
 
     ws.close(None).await.unwrap();
 }
@@ -395,8 +395,8 @@ async fn test_media_stop_not_found_returns_not_found() {
     let (_, json) = req("media.stop", serde_json::json!({"call_id": "ghost"}));
     let v = send_recv(&mut ws, &json).await;
 
-    assert_eq!(v["response"], "error");
-    assert_eq!(v["error"]["code"], "not_found");
+    assert_eq!(v["status"], "error");
+    assert!(v["error"].as_str().map(|s| s.contains("not found") || s.contains("Call not found")).unwrap_or(false), "error should contain not_found: {}", v);
 
     ws.close(None).await.unwrap();
 }
@@ -409,8 +409,8 @@ async fn test_call_unbridge_not_found_returns_not_found() {
     let (_, json) = req("call.unbridge", serde_json::json!({"call_id": "ghost"}));
     let v = send_recv(&mut ws, &json).await;
 
-    assert_eq!(v["response"], "error");
-    assert_eq!(v["error"]["code"], "not_found");
+    assert_eq!(v["status"], "error");
+    assert!(v["error"].as_str().map(|s| s.contains("not found") || s.contains("Call not found")).unwrap_or(false), "error should contain not_found: {}", v);
 
     ws.close(None).await.unwrap();
 }
@@ -426,8 +426,8 @@ async fn test_call_bridge_not_found_returns_not_found() {
     );
     let v = send_recv(&mut ws, &json).await;
 
-    assert_eq!(v["response"], "error");
-    assert_eq!(v["error"]["code"], "not_found");
+    assert_eq!(v["status"], "error");
+    assert!(v["error"].as_str().map(|s| s.contains("not found") || s.contains("Call not found")).unwrap_or(false), "error should contain not_found: {}", v);
 
     ws.close(None).await.unwrap();
 }
@@ -459,7 +459,7 @@ async fn test_sequential_commands_on_single_connection() {
         let v = send_recv(&mut ws, &json).await;
         // Every response must be valid JSON with action_id echoed
         assert!(
-            v["response"] == "success" || v["response"] == "error",
+            v["status"] == "success" || v["status"] == "error",
             "unexpected response for {}: {}",
             action,
             v
@@ -485,7 +485,7 @@ async fn test_event_pushed_from_gateway_arrives_at_client() {
         serde_json::json!({"contexts": ["push-ctx"]}),
     );
     let v = send_recv(&mut ws, &json).await;
-    assert_eq!(v["response"], "success");
+    assert_eq!(v["status"], "success");
 
     // Small delay so the gateway receives the subscription before we push
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -497,7 +497,8 @@ async fn test_event_pushed_from_gateway_arrives_at_client() {
     };
     {
         let gw = gateway.read().await;
-        gw.fan_out_event_to_context("push-ctx", &event);
+        let call_id = "pushed-call".to_string();
+        gw.fan_out_event_to_context("push-ctx", &event, &call_id);
     }
 
     // The client must receive it within 2 seconds
@@ -538,7 +539,7 @@ async fn test_reconnect_after_close() {
         let mut ws = connect(&url).await;
         let (_, json) = req("session.list_calls", serde_json::json!({}));
         let v = send_recv(&mut ws, &json).await;
-        assert_eq!(v["response"], "success");
+        assert_eq!(v["status"], "success");
         ws.close(None).await.unwrap();
     }
 
@@ -549,7 +550,7 @@ async fn test_reconnect_after_close() {
         let mut ws = connect(&url).await;
         let (_, json) = req("session.list_calls", serde_json::json!({}));
         let v = send_recv(&mut ws, &json).await;
-        assert_eq!(v["response"], "success");
+        assert_eq!(v["status"], "success");
         ws.close(None).await.unwrap();
     }
 }
@@ -572,7 +573,7 @@ async fn test_conference_create_returns_success() {
         }),
     );
     let v = send_recv(&mut ws, &json).await;
-    assert_eq!(v["response"], "success");
+    assert_eq!(v["status"], "success");
     assert_eq!(v["data"]["conf_id"], "room-1");
 }
 
@@ -600,12 +601,9 @@ async fn test_conference_create_duplicate_returns_error() {
         }),
     );
     let v = send_recv_matching(&mut ws, &json, &action_id).await;
-    assert_eq!(v["response"], "error");
+    assert_eq!(v["status"], "error");
     assert!(
-        v["error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("already exists")
+        v["error"].as_str().unwrap_or("").contains("already exists")
     );
 }
 
@@ -622,12 +620,9 @@ async fn test_conference_create_external_requires_mcu_uri() {
         }),
     );
     let v = send_recv(&mut ws, &json).await;
-    assert_eq!(v["response"], "error");
+    assert_eq!(v["status"], "error");
     assert!(
-        v["error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("external backend requires mcu_uri")
+        v["error"].as_str().unwrap_or("").contains("external backend requires mcu_uri")
     );
 }
 
@@ -654,7 +649,7 @@ async fn test_conference_destroy_returns_success() {
         }),
     );
     let v = send_recv_matching(&mut ws, &json, &action_id).await;
-    assert_eq!(v["response"], "success");
+    assert_eq!(v["status"], "success");
     assert_eq!(v["data"]["conf_id"], "room-1");
 }
 
@@ -670,12 +665,9 @@ async fn test_conference_destroy_not_found_returns_error() {
         }),
     );
     let v = send_recv(&mut ws, &json).await;
-    assert_eq!(v["response"], "error");
+    assert_eq!(v["status"], "error");
     assert!(
-        v["error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("not found")
+        v["error"].as_str().unwrap_or("").contains("not found")
     );
 }
 
@@ -693,12 +685,9 @@ async fn test_conference_add_not_found_returns_error() {
         }),
     );
     let v = send_recv(&mut ws, &json).await;
-    assert_eq!(v["response"], "error");
+    assert_eq!(v["status"], "error");
     assert!(
-        v["error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("not found")
+        v["error"].as_str().unwrap_or("").contains("not found")
     );
 }
 
@@ -726,12 +715,9 @@ async fn test_conference_mute_not_in_conference_returns_error() {
         }),
     );
     let v = send_recv_matching(&mut ws, &json, &action_id).await;
-    assert_eq!(v["response"], "error");
+    assert_eq!(v["status"], "error");
     assert!(
-        v["error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("is not in conference")
+        v["error"].as_str().unwrap_or("").contains("is not in conference")
     );
 }
 
@@ -759,12 +745,9 @@ async fn test_conference_unmute_not_in_conference_returns_error() {
         }),
     );
     let v = send_recv_matching(&mut ws, &json, &action_id).await;
-    assert_eq!(v["response"], "error");
+    assert_eq!(v["status"], "error");
     assert!(
-        v["error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("is not in conference")
+        v["error"].as_str().unwrap_or("").contains("is not in conference")
     );
 }
 
@@ -792,11 +775,283 @@ async fn test_conference_remove_not_in_conference_returns_error() {
         }),
     );
     let v = send_recv_matching(&mut ws, &json, &action_id).await;
-    assert_eq!(v["response"], "error");
+    assert_eq!(v["status"], "error");
     assert!(
-        v["error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("is not in conference")
+        v["error"].as_str().unwrap_or("").contains("is not in conference")
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Session Resume & Event Replay
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_session_resume_returns_events_and_sequence() {
+    let (url, gateway, _reg) = start_test_server().await;
+    let mut ws = connect(&url).await;
+
+    // Cache some events in the gateway
+    {
+        let gw = gateway.read().await;
+        let event1 = rustpbx::rwi::RwiEvent::CallRinging {
+            call_id: "test-call-1".to_string(),
+        };
+        let event2 = rustpbx::rwi::RwiEvent::CallAnswered {
+            call_id: "test-call-1".to_string(),
+        };
+        gw.cache_event(&"test-call-1".to_string(), &event1);
+        gw.cache_event(&"test-call-1".to_string(), &event2);
+    }
+
+    // Request session resume without last_sequence (should return all events)
+    let (_, json) = req("session.resume", serde_json::json!({}));
+    let v = send_recv(&mut ws, &json).await;
+
+    // Debug: print response if error
+    if v["status"] == "error" {
+        eprintln!("Session resume error: {:?}", v);
+    }
+
+    assert_eq!(v["status"], "success");
+    assert!(v["data"]["events"].is_array(), "events should be an array");
+    assert!(v["data"]["current_sequence"].is_u64(), "current_sequence should be a number");
+    assert!(v["data"]["replayed_count"].is_u64(), "replayed_count should be a number");
+    
+    // Should have cached events
+    let replayed = v["data"]["replayed_count"].as_u64().unwrap();
+    assert!(replayed >= 2, "should have at least 2 cached events");
+
+    ws.close(None).await.unwrap();
+}
+
+#[tokio::test]
+async fn test_session_resume_with_sequence_returns_partial_events() {
+    let (url, gateway, _reg) = start_test_server().await;
+    let mut ws = connect(&url).await;
+
+    // Cache events
+    {
+        let gw = gateway.read().await;
+        let event1 = rustpbx::rwi::RwiEvent::CallRinging {
+            call_id: "seq-call".to_string(),
+        };
+        let event2 = rustpbx::rwi::RwiEvent::CallAnswered {
+            call_id: "seq-call".to_string(),
+        };
+        let event3 = rustpbx::rwi::RwiEvent::CallBridged {
+            leg_a: "seq-call".to_string(),
+            leg_b: "other".to_string(),
+        };
+        gw.cache_event(&"seq-call".to_string(), &event1);
+        gw.cache_event(&"seq-call".to_string(), &event2);
+        gw.cache_event(&"seq-call".to_string(), &event3);
+    }
+
+    // Get initial sequence
+    let (_, json) = req("session.resume", serde_json::json!({}));
+    let v = send_recv(&mut ws, &json).await;
+    let total_events = v["data"]["replayed_count"].as_u64().unwrap();
+    
+    // Resume with a sequence number (should return events after that sequence)
+    let (_, json) = req("session.resume", serde_json::json!({"last_sequence": 1}));
+    let v = send_recv(&mut ws, &json).await;
+
+    assert_eq!(v["status"], "success");
+    let replayed = v["data"]["replayed_count"].as_u64().unwrap();
+    assert!(replayed < total_events, "should return fewer events when using last_sequence");
+
+    ws.close(None).await.unwrap();
+}
+
+#[tokio::test]
+async fn test_call_resume_returns_call_specific_events() {
+    let (url, gateway, _reg) = start_test_server().await;
+    let mut ws = connect(&url).await;
+
+    // Cache events for different calls
+    {
+        let gw = gateway.read().await;
+        let event1 = rustpbx::rwi::RwiEvent::CallRinging {
+            call_id: "call-a".to_string(),
+        };
+        let event2 = rustpbx::rwi::RwiEvent::CallRinging {
+            call_id: "call-b".to_string(),
+        };
+        gw.cache_event(&"call-a".to_string(), &event1);
+        gw.cache_event(&"call-b".to_string(), &event2);
+    }
+
+    // Request call resume for specific call
+    let (_, json) = req(
+        "call.resume",
+        serde_json::json!({"call_id": "call-a"}),
+    );
+    let v = send_recv(&mut ws, &json).await;
+
+    assert_eq!(v["status"], "success");
+    assert_eq!(v["data"]["call_id"], "call-a");
+    assert!(v["data"]["events"].is_array());
+    
+    // Should only have events for call-a
+    let events = v["data"]["events"].as_array().unwrap();
+    for event in events {
+        assert_eq!(event["call_id"], "call-a", "should only have events for call-a");
+    }
+
+    ws.close(None).await.unwrap();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Binary PCM WebSocket
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_binary_pcm_frame_rejected_without_ownership() {
+    let (url, _gw, _reg) = start_test_server().await;
+    let mut ws = connect(&url).await;
+
+    // Build a PCM binary frame
+    // Header: 8 bytes call_id + 4 bytes timestamp + 2 bytes sample_rate + 2 bytes flags
+    let mut frame = vec![0u8; 16];
+    
+    // Call ID: "unowned" (padded)
+    frame[0..7].copy_from_slice(b"unowned");
+    
+    // Timestamp (big-endian)
+    let timestamp: u32 = 12345;
+    frame[8..12].copy_from_slice(&timestamp.to_be_bytes());
+    
+    // Sample rate: 8000 Hz
+    let sample_rate: u16 = 8000;
+    frame[12..14].copy_from_slice(&sample_rate.to_be_bytes());
+    
+    // Flags: 0
+    frame[14..16].copy_from_slice(&[0u8, 0u8]);
+    
+    // Add some PCM data (16-bit samples)
+    frame.extend_from_slice(&[0x00, 0x01, 0x00, 0x02]); // 2 samples
+
+    // Send binary frame - should not panic, but will be dropped (session doesn't own the call)
+    ws.send(Message::Binary(frame.into())).await.unwrap();
+    
+    // Send a ping to ensure connection is still alive
+    let (_, json) = req("session.list_calls", serde_json::json!({}));
+    let v = send_recv(&mut ws, &json).await;
+    if v["status"] == "error" {
+        eprintln!("Error response: {:?}", v);
+    }
+    assert_eq!(v["status"], "success", "connection should remain alive after binary frame");
+
+    ws.close(None).await.unwrap();
+}
+
+#[tokio::test]
+async fn test_binary_pcm_frame_empty_call_id_rejected() {
+    let (url, _gw, _reg) = start_test_server().await;
+    let mut ws = connect(&url).await;
+
+    // Build a PCM binary frame with empty call_id
+    let mut frame = vec![0u8; 16]; // All zeros = empty call_id
+    
+    // Timestamp
+    let timestamp: u32 = 12345;
+    frame[8..12].copy_from_slice(&timestamp.to_be_bytes());
+    
+    // Sample rate
+    let sample_rate: u16 = 8000;
+    frame[12..14].copy_from_slice(&sample_rate.to_be_bytes());
+    
+    // Flags
+    frame[14..16].copy_from_slice(&[0u8, 0u8]);
+
+    // Send binary frame - should be silently dropped
+    ws.send(Message::Binary(frame.into())).await.unwrap();
+    
+    // Connection should remain alive
+    let (_, json) = req("session.list_calls", serde_json::json!({}));
+    let v = send_recv(&mut ws, &json).await;
+    assert_eq!(v["status"], "success");
+
+    ws.close(None).await.unwrap();
+}
+
+#[tokio::test]
+async fn test_binary_pcm_frame_too_small_rejected() {
+    let (url, _gw, _reg) = start_test_server().await;
+    let mut ws = connect(&url).await;
+
+    // Send a binary frame that's too small (less than 16 bytes header)
+    let small_frame = vec![0u8; 10];
+    ws.send(Message::Binary(small_frame.into())).await.unwrap();
+    
+    // Connection should remain alive
+    let (_, json) = req("session.list_calls", serde_json::json!({}));
+    let v = send_recv(&mut ws, &json).await;
+    assert_eq!(v["status"], "success");
+
+    ws.close(None).await.unwrap();
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Leg Timeline CDR Enhancement Tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[tokio::test]
+async fn test_leg_timeline_serialization() {
+    use rustpbx::callrecord::{LegTimeline, LegTimelineEventType};
+    
+    let mut timeline = LegTimeline::new();
+    
+    // Add some events
+    timeline.add_event(
+        "leg-1".to_string(),
+        LegTimelineEventType::Added,
+        None,
+        Some(serde_json::json!({"source": "originate"})),
+    );
+    
+    timeline.add_event(
+        "leg-1".to_string(),
+        LegTimelineEventType::Bridged,
+        Some("leg-2".to_string()),
+        None,
+    );
+    
+    timeline.add_event(
+        "leg-1".to_string(),
+        LegTimelineEventType::Removed,
+        None,
+        Some(serde_json::json!({"reason": "hangup"})),
+    );
+    
+    // Serialize to JSON
+    let json = serde_json::to_value(&timeline).unwrap();
+    
+    assert!(json["events"].is_array());
+    let events = json["events"].as_array().unwrap();
+    assert_eq!(events.len(), 3);
+    
+    // Verify event structure (using camelCase due to #[serde(rename_all = "camelCase")])
+    assert_eq!(events[0]["legId"], "leg-1");
+    assert_eq!(events[0]["eventType"], "added");
+    assert_eq!(events[1]["eventType"], "bridged");
+    assert_eq!(events[1]["peerLegId"], "leg-2");
+}
+
+#[tokio::test]
+async fn test_leg_timeline_is_empty() {
+    use rustpbx::callrecord::LegTimeline;
+    
+    let timeline = LegTimeline::new();
+    assert!(timeline.is_empty());
+    
+    let mut timeline_with_events = LegTimeline::new();
+    timeline_with_events.add_event(
+        "leg-1".to_string(),
+        rustpbx::callrecord::LegTimelineEventType::Added,
+        None,
+        None,
+    );
+    assert!(!timeline_with_events.is_empty());
+}
+

@@ -239,6 +239,12 @@ pub fn call_command_to_session_action(cmd: CallCommand) -> Result<SessionAction>
         | CallCommand::InjectAppEvent { .. } => {
             Err(AdapterError::NotSupported("app commands".to_string()).into())
         }
+
+        CallCommand::SendSipMessage { .. }
+        | CallCommand::SendSipNotify { .. }
+        | CallCommand::SendSipOptionsPing => {
+            Err(AdapterError::NotSupported("SIP message commands".to_string()).into())
+        }
     }
 }
 

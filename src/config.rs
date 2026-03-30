@@ -156,6 +156,66 @@ impl RecordingPolicy {
     }
 }
 
+/// Transfer configuration for RWI call transfer features
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct TransferConfig {
+    /// Enable SIP REFER transfer method
+    #[serde(default = "default_transfer_refer_enabled")]
+    pub refer_enabled: bool,
+    /// Enable attended transfer (consultation transfer)
+    #[serde(default = "default_transfer_attended_enabled")]
+    pub attended_enabled: bool,
+    /// Enable 3PCC fallback when REFER is not supported
+    #[serde(default = "default_transfer_3pcc_fallback_enabled")]
+    pub three_pcc_fallback_enabled: bool,
+    /// REFER timeout in seconds
+    #[serde(default = "default_transfer_refer_timeout_secs")]
+    pub refer_timeout_secs: u64,
+    /// 3PCC timeout in seconds
+    #[serde(default = "default_transfer_3pcc_timeout_secs")]
+    pub three_pcc_timeout_secs: u64,
+    /// Maximum concurrent transfers
+    #[serde(default = "default_transfer_max_concurrent")]
+    pub max_concurrent: usize,
+}
+
+fn default_transfer_refer_enabled() -> bool {
+    true
+}
+
+fn default_transfer_attended_enabled() -> bool {
+    true
+}
+
+fn default_transfer_3pcc_fallback_enabled() -> bool {
+    true
+}
+
+fn default_transfer_refer_timeout_secs() -> u64 {
+    30
+}
+
+fn default_transfer_3pcc_timeout_secs() -> u64 {
+    60
+}
+
+fn default_transfer_max_concurrent() -> usize {
+    1000
+}
+
+impl Default for TransferConfig {
+    fn default() -> Self {
+        Self {
+            refer_enabled: default_transfer_refer_enabled(),
+            attended_enabled: default_transfer_attended_enabled(),
+            three_pcc_fallback_enabled: default_transfer_3pcc_fallback_enabled(),
+            refer_timeout_secs: default_transfer_refer_timeout_secs(),
+            three_pcc_timeout_secs: default_transfer_3pcc_timeout_secs(),
+            max_concurrent: default_transfer_max_concurrent(),
+        }
+    }
+}
+
 #[derive(Debug, Deserialize, Serialize)]
 pub struct Config {
     #[serde(default = "default_config_http_addr")]
@@ -216,6 +276,9 @@ pub struct Config {
     /// ACME Let's Encrypt configuration for auto-certificate renewal
     #[serde(default)]
     pub acme: Option<AcmeConfig>,
+    /// Transfer configuration for call transfer features
+    #[serde(default)]
+    pub transfer: Option<TransferConfig>,
 }
 
 /// ACME Let's Encrypt configuration
@@ -987,6 +1050,7 @@ impl Default for Config {
             #[cfg(feature = "commerce")]
             licenses: None,
             acme: None,
+            transfer: None,
         }
     }
 }

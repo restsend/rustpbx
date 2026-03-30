@@ -86,7 +86,7 @@ chrono-tz = "0.10.4"
 rsipstack = "0.4.14"
 #rsipstack = { path = "../rsipstack" }
 audio-codec = { version = "0.3.30", default-features = false }
-rustrtc = "0.3.33"
+rustrtc = "0.3.36"
 #rustrtc = { path = "../rustrtc" }
 reqwest = { version = "0.13", features = [
     "json",
@@ -177,7 +177,7 @@ warp = { version = "0.4.1", features = ["server", "websocket"] }
 portpicker = "0.1.1"
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
-sipbot = { version = "0.2.24", default-features = false }
+sipbot = { version = "0.2.25", default-features = false }
 
 [build-dependencies]
 chrono = "0.4"

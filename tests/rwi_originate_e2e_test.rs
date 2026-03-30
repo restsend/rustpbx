@@ -41,13 +41,23 @@ async fn ws_connect(rwi_url: &str) -> WsStream {
     ws
 }
 
-/// Send a JSON message and wait for the next text frame.
+/// Send a JSON message and wait for the command_completed or command_failed event.
 async fn ws_send_recv(ws: &mut WsStream, json: &str) -> serde_json::Value {
+    let req: serde_json::Value = serde_json::from_str(json).expect("invalid JSON");
+    let action_id = req["action_id"].as_str().expect("missing action_id").to_string();
+
     ws.send(Message::Text(json.into())).await.unwrap();
-    recv_next(ws).await
+
+    // Wait for command_completed or command_failed event with matching action_id
+    recv_until(ws, 5, |v| {
+        (v["type"] == "command_completed" || v["type"] == "command_failed")
+            && v["action_id"] == action_id
+    })
+    .await
 }
 
 /// Wait for the next text frame (up to 5 s).
+#[allow(dead_code)]
 async fn recv_next(ws: &mut WsStream) -> serde_json::Value {
     let msg = timeout(Duration::from_secs(5), ws.next())
         .await
@@ -85,6 +95,7 @@ async fn recv_until(
             Message::Ping(_) | Message::Pong(_) => continue,
             other => panic!("unexpected frame: {other:?}"),
         };
+        eprintln!("[recv_until] checking: type={}, action_id={}", v["type"], v["action_id"]);
         if predicate(&v) {
             return v;
         }
@@ -128,7 +139,7 @@ async fn test_originate_single_bob_answers() {
         serde_json::json!({"contexts": ["default"]}),
     );
     let v = ws_send_recv(&mut ws, &sub_json).await;
-    assert_eq!(v["response"], "success", "subscribe failed: {v}");
+    assert_eq!(v["type"], "command_completed", "subscribe failed: {v}");
 
     // Originate to Bob
     let call_id = format!("e2e-bob-{}", Uuid::new_v4());
@@ -146,10 +157,7 @@ async fn test_originate_single_bob_answers() {
         }),
     );
     let v = ws_send_recv(&mut ws, &orig_json).await;
-    assert_eq!(
-        v["response"], "success",
-        "originate response should be success: {v}"
-    );
+    assert_eq!(v["type"], "command_completed", "originate response should be success: {v}");
     assert_eq!(v["action_id"], orig_id, "action_id not echoed");
 
     // Expect CallRinging within 5 s
@@ -193,7 +201,7 @@ async fn test_originate_sends_proper_sdp() {
         serde_json::json!({"contexts": ["default"]}),
     );
     let v = ws_send_recv(&mut ws, &sub_json).await;
-    assert_eq!(v["response"], "success");
+    assert_eq!(v["status"], "success");
 
     // Originate to Bob
     let call_id = format!("e2e-sdp-{}", Uuid::new_v4());
@@ -210,7 +218,7 @@ async fn test_originate_sends_proper_sdp() {
         }),
     );
     let v = ws_send_recv(&mut ws, &orig_json).await;
-    assert_eq!(v["response"], "success", "originate should succeed: {v}");
+    assert_eq!(v["type"], "command_completed", "originate should succeed: {v}");
 
     // Wait for ringing - this proves the INVITE was sent and processed
     let ringing = recv_until(&mut ws, 5, |v| v.get("call_ringing").is_some()).await;
@@ -248,7 +256,7 @@ async fn test_originate_no_answer() {
         serde_json::json!({"contexts": ["default"]}),
     );
     let v = ws_send_recv(&mut ws, &sub_json).await;
-    assert_eq!(v["response"], "success");
+    assert_eq!(v["status"], "success");
 
     let call_id = format!("e2e-noanswer-{}", Uuid::new_v4());
     let destination = format!("sip:nobody@127.0.0.1:{}", dead_port);
@@ -262,7 +270,7 @@ async fn test_originate_no_answer() {
         }),
     );
     let v = ws_send_recv(&mut ws, &orig_json).await;
-    assert_eq!(v["response"], "success", "originate accept failed: {v}");
+    assert_eq!(v["status"], "success", "originate accept failed: {v}");
 
     // Expect some kind of failure event within 10 s
     let fail_event = recv_until(&mut ws, 10, |v| {
@@ -297,7 +305,7 @@ async fn test_originate_then_hangup() {
         serde_json::json!({"contexts": ["default"]}),
     );
     let v = ws_send_recv(&mut ws, &sub_json).await;
-    assert_eq!(v["response"], "success");
+    assert_eq!(v["status"], "success");
 
     // Originate to Bob
     let call_id = format!("e2e-hangup-{}", Uuid::new_v4());
@@ -314,7 +322,7 @@ async fn test_originate_then_hangup() {
         }),
     );
     let v = ws_send_recv(&mut ws, &orig_json).await;
-    assert_eq!(v["response"], "success");
+    assert_eq!(v["status"], "success");
 
     // Wait for ringing
     let _ringing = recv_until(&mut ws, 5, |v| v.get("call_ringing").is_some()).await;
@@ -345,7 +353,7 @@ async fn test_originate_and_bridge() {
         serde_json::json!({"contexts": ["default"]}),
     );
     let v = ws_send_recv(&mut ws, &sub_json).await;
-    assert_eq!(v["response"], "success");
+    assert_eq!(v["status"], "success");
 
     // Originate to Alice
     let call_a = format!("e2e-bridge-a-{}", Uuid::new_v4());
@@ -360,7 +368,7 @@ async fn test_originate_and_bridge() {
         }),
     );
     let v = ws_send_recv(&mut ws, &orig_a_json).await;
-    assert_eq!(v["response"], "success");
+    assert_eq!(v["status"], "success");
 
     // Wait for Alice to answer
     let answered_a = recv_until(&mut ws, 10, |v| v.get("call_answered").is_some()).await;
@@ -381,7 +389,7 @@ async fn test_originate_and_bridge() {
     );
     let v = ws_send_recv(&mut ws, &orig_b_json).await;
     tracing::info!("Bob originate response: {:?}", v);
-    assert_eq!(v["response"], "success");
+    assert_eq!(v["status"], "success");
 
     // Wait for Bob's ringing event first
     let ringing_b = recv_until(&mut ws, 10, |v| {
@@ -419,7 +427,7 @@ async fn test_originate_and_bridge() {
     tracing::info!("bridge response: {:?}", v);
     
     // Check if bridge command succeeded
-    assert_eq!(v["response"], "success", "Bridge command should succeed: {:?}", v);
+    assert_eq!(v["status"], "success", "Bridge command should succeed: {:?}", v);
 
     // Expect CallBridged event
     let bridged = recv_until(&mut ws, 10, |v| {
@@ -450,7 +458,7 @@ async fn test_media_play() {
         serde_json::json!({"contexts": ["default"]}),
     );
     let v = ws_send_recv(&mut ws, &sub_json).await;
-    assert_eq!(v["response"], "success");
+    assert_eq!(v["status"], "success");
 
     // Originate to Bob
     let call_id = format!("e2e-play-{}", Uuid::new_v4());
@@ -467,7 +475,7 @@ async fn test_media_play() {
         }),
     );
     let v = ws_send_recv(&mut ws, &orig_json).await;
-    assert_eq!(v["response"], "success");
+    assert_eq!(v["status"], "success");
 
     // Wait for answer
     let _answered = recv_until(&mut ws, 10, |v| v.get("call_answered").is_some()).await;
@@ -509,7 +517,7 @@ async fn test_call_hold_unhold() {
         serde_json::json!({"contexts": ["default"]}),
     );
     let v = ws_send_recv(&mut ws, &sub_json).await;
-    assert_eq!(v["response"], "success");
+    assert_eq!(v["status"], "success");
 
     // Originate to Bob
     let call_id = format!("e2e-hold-{}", Uuid::new_v4());
@@ -526,7 +534,7 @@ async fn test_call_hold_unhold() {
         }),
     );
     let v = ws_send_recv(&mut ws, &orig_json).await;
-    assert_eq!(v["response"], "success");
+    assert_eq!(v["status"], "success");
 
     // Wait for answer
     let _answered = recv_until(&mut ws, 10, |v| v.get("call_answered").is_some()).await;
@@ -565,7 +573,7 @@ async fn test_call_transfer() {
         serde_json::json!({"contexts": ["default"]}),
     );
     let v = ws_send_recv(&mut ws, &sub_json).await;
-    assert_eq!(v["response"], "success");
+    assert_eq!(v["status"], "success");
 
     // Originate to Bob
     let call_id = format!("e2e-transfer-{}", Uuid::new_v4());
@@ -582,7 +590,7 @@ async fn test_call_transfer() {
         }),
     );
     let v = ws_send_recv(&mut ws, &orig_json).await;
-    assert_eq!(v["response"], "success");
+    assert_eq!(v["status"], "success");
 
     // Wait for answer
     let _answered = recv_until(&mut ws, 10, |v| v.get("call_answered").is_some()).await;
@@ -625,7 +633,7 @@ async fn test_call_ring() {
         serde_json::json!({"contexts": ["default"]}),
     );
     let v = ws_send_recv(&mut ws, &sub_json).await;
-    assert_eq!(v["response"], "success");
+    assert_eq!(v["status"], "success");
 
     // Originate to Bob
     let call_id = format!("e2e-ring-{}", Uuid::new_v4());
@@ -642,7 +650,7 @@ async fn test_call_ring() {
         }),
     );
     let v = ws_send_recv(&mut ws, &orig_json).await;
-    assert_eq!(v["response"], "success");
+    assert_eq!(v["status"], "success");
 
     // Wait for ringing (should come automatically from sipbot)
     let _ringing = recv_until(&mut ws, 5, |v| v.get("call_ringing").is_some()).await;
@@ -682,7 +690,7 @@ async fn test_parallel_originate_first_answer() {
         serde_json::json!({"contexts": ["default"]}),
     );
     let v = ws_send_recv(&mut ws, &sub_json).await;
-    assert_eq!(v["response"], "success");
+    assert_eq!(v["status"], "success");
 
     // Originate to Alice
     let call_a = format!("e2e-parallel-a-{}", Uuid::new_v4());
@@ -697,8 +705,8 @@ async fn test_parallel_originate_first_answer() {
         }),
     );
     ws.send(Message::Text(orig_a_json.into())).await.unwrap();
-    let v = recv_until(&mut ws, 5, |v| v.get("response").is_some()).await;
-    assert_eq!(v["response"], "success");
+    let v = recv_until(&mut ws, 5, |v| v.get("type").is_some() && v["type"] == "command_completed").await;
+    assert_eq!(v["status"], "success");
 
     // Originate to Bob (parallel)
     let call_b = format!("e2e-parallel-b-{}", Uuid::new_v4());
@@ -713,9 +721,9 @@ async fn test_parallel_originate_first_answer() {
         }),
     );
     ws.send(Message::Text(orig_b_json.into())).await.unwrap();
-    let v = recv_until(&mut ws, 5, |v| v.get("response").is_some()).await;
+    let v = recv_until(&mut ws, 5, |v| v.get("type").is_some() && v["type"] == "command_completed").await;
     tracing::info!("second originate response: {:?}", v);
-    assert_eq!(v["response"], "success", "second originate failed: {:?}", v);
+    assert_eq!(v["status"], "success", "second originate failed: {:?}", v);
 
     // Wait for first answer (either Alice or Bob)
     let answered = recv_until(&mut ws, 10, |v| v.get("call_answered").is_some()).await;
@@ -754,7 +762,7 @@ async fn test_list_calls() {
         serde_json::json!({"contexts": ["default"]}),
     );
     let v = ws_send_recv(&mut ws, &sub_json).await;
-    assert_eq!(v["response"], "success");
+    assert_eq!(v["status"], "success");
 
     // List calls before originate (should be empty)
     let (_, list_json) = rwi_req("session.list_calls", serde_json::json!({}));
@@ -776,7 +784,7 @@ async fn test_list_calls() {
         }),
     );
     let v = ws_send_recv(&mut ws, &orig_json).await;
-    assert_eq!(v["response"], "success");
+    assert_eq!(v["status"], "success");
 
     // Wait for answer
     let _answered = recv_until(&mut ws, 10, |v| v.get("call_answered").is_some()).await;
@@ -828,7 +836,7 @@ async fn test_originate_task_cleanup() {
         serde_json::json!({"contexts": ["default"]}),
     );
     let v = ws_send_recv(&mut ws, &sub_json).await;
-    assert_eq!(v["response"], "success");
+    assert_eq!(v["status"], "success");
 
     // Originate to Bob
     let call_id = format!("e2e-cleanup-{}", Uuid::new_v4());
@@ -843,7 +851,7 @@ async fn test_originate_task_cleanup() {
         }),
     );
     let v = ws_send_recv(&mut ws, &orig_json).await;
-    assert_eq!(v["response"], "success");
+    assert_eq!(v["status"], "success");
 
     // Wait for answer
     let _answered = recv_until(&mut ws, 10, |v| v.get("call_answered").is_some()).await;
