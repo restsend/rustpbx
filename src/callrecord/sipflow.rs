@@ -29,7 +29,7 @@ impl SipFlow {
             } {
                 let call_id = id.value().to_string();
                 let msg_str = msg.to_string();
-                let msg_bytes = Bytes::from(msg_str);
+                let msg_bytes = Bytes::from(msg_str.clone());
 
                 // Extract addresses
                 let (src_addr, dst_addr) = if let Some(addr) = addr {
@@ -41,6 +41,11 @@ impl SipFlow {
                         // We received from addr
                         (addr_str, String::new())
                     }
+                } else if is_outgoing {
+                    let dest = rsipstack::transport::SipConnection::get_destination(msg)
+                        .map(|addr| addr.to_string())
+                        .unwrap_or_default();
+                    (String::new(), dest)
                 } else {
                     (String::new(), String::new())
                 };

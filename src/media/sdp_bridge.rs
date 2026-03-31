@@ -63,17 +63,17 @@ impl DtlsInfo {
         
         Self {
             fingerprint,
-            setup: "actpass".to_string(),
+            setup: "passive".to_string(),
         }
     }
-    
+
     /// Get fingerprint from server configuration
-    /// 
+    ///
     /// This should be called with the server's TLS certificate fingerprint
     pub fn from_certificate(fingerprint: &str) -> Self {
         Self {
             fingerprint: fingerprint.to_string(),
-            setup: "actpass".to_string(),
+            setup: "passive".to_string(),
         }
     }
 }
@@ -275,7 +275,7 @@ impl SdpBridge {
 
             // Add WebRTC-specific attributes
             webrtc_attrs.push(format!("a=fingerprint:sha-256 {}\r\n", fingerprint));
-            webrtc_attrs.push("a=setup:actpass\r\n".to_string());
+            webrtc_attrs.push("a=setup:passive\r\n".to_string());
             webrtc_attrs.push(format!("a=ice-ufrag:{}\r\n", ice_ufrag));
             webrtc_attrs.push(format!("a=ice-pwd:{}\r\n", ice_pwd));
             webrtc_attrs.push("a=rtcp-mux\r\n".to_string());
@@ -391,7 +391,7 @@ a=sendrecv\r\n";
         assert!(webrtc_sdp.contains("ice-ufrag:ufrag123"));
         assert!(webrtc_sdp.contains("ice-pwd:pwd456"));
         assert!(webrtc_sdp.contains("rtcp-mux"));
-        assert!(webrtc_sdp.contains("setup:actpass"));
+        assert!(webrtc_sdp.contains("setup:passive"));
         
         // Should keep PCMU
         assert!(webrtc_sdp.contains("PCMU/8000"));
