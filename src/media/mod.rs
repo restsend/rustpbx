@@ -405,6 +405,13 @@ impl Track for RtcTrack {
     }
 }
 
+impl Drop for RtcTrack {
+    fn drop(&mut self) {
+        debug!(track_id = %self.track_id, "RtcTrack dropping, closing PeerConnection");
+        self.pc.close();
+    }
+}
+
 pub mod recorder;
 
 #[cfg(test)]
@@ -952,6 +959,14 @@ impl Track for FileTrack {
 
     fn is_muted(&self) -> bool {
         self.muted.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+impl Drop for FileTrack {
+    fn drop(&mut self) {
+        debug!(track_id = %self.track_id, "FileTrack dropping, closing PeerConnection");
+        self.cancel_token.cancel();
+        self.pc.close();
     }
 }
 

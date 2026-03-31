@@ -973,56 +973,13 @@ impl SipSession {
         let callee_sdp = self.create_callee_track(callee_is_webrtc).await.ok();
         self.callee_offer = callee_sdp.clone();
 
-        let offer = if caller_is_webrtc && !callee_is_webrtc {
-            
-            if let Some(ref caller_sdp) = self.caller_offer {
-                match crate::media::sdp_bridge::SdpBridge::webrtc_to_rtp(caller_sdp) {
-                    Ok(rtp_sdp) => {
-                        debug!(session_id = %self.context.session_id, "SDP bridge: WebRTC -> RTP conversion successful");
-                        Some(rtp_sdp.into_bytes())
-                    }
-                    Err(e) => {
-                        warn!(session_id = %self.context.session_id, error = %e, "SDP bridge: WebRTC -> RTP conversion failed, using original");
-                        self.callee_offer.clone().map(|s| s.into_bytes())
-                    }
-                }
-            } else {
-                self.callee_offer.clone().map(|s| s.into_bytes())
-            }
-        } else if !caller_is_webrtc && callee_is_webrtc {
-            
-            if let Some(ref caller_sdp) = self.caller_offer {
-                
-                let ice_creds = crate::media::sdp_bridge::IceCredentials::generate();
-                let dtls_info = crate::media::sdp_bridge::DtlsInfo::generate_placeholder();
-                
-                debug!(
-                    session_id = %self.context.session_id,
-                    ice_ufrag = %ice_creds.ufrag,
-                    fingerprint = %dtls_info.fingerprint[..16],
-                    "SDP bridge: Generated WebRTC credentials for RTP -> WebRTC conversion"
-                );
-                
-                match crate::media::sdp_bridge::SdpBridge::rtp_to_webrtc(
-                    caller_sdp,
-                    &dtls_info.fingerprint,
-                    &ice_creds.ufrag,
-                    &ice_creds.pwd,
-                ) {
-                    Ok(webrtc_sdp) => {
-                        debug!(session_id = %self.context.session_id, "SDP bridge: RTP -> WebRTC conversion successful");
-                        Some(webrtc_sdp.into_bytes())
-                    }
-                    Err(e) => {
-                        warn!(session_id = %self.context.session_id, error = %e, "SDP bridge: RTP -> WebRTC conversion failed, using original");
-                        self.callee_offer.clone().map(|s| s.into_bytes())
-                    }
-                }
-            } else {
-                self.callee_offer.clone().map(|s| s.into_bytes())
-            }
+        let offer = if self.media_bridge.is_some() {
+            // Bridge handles transport conversion — use bridge's callee-facing PC SDP directly.
+            // The callee connects to the bridge's PC, not to the caller.
+            debug!(session_id = %self.context.session_id, "Using bridge callee-facing SDP for INVITE");
+            self.callee_offer.clone().map(|s| s.into_bytes())
         } else {
-            
+            // No bridge (same transport type or bridge creation failed) — pass through directly
             self.callee_offer.clone().map(|s| s.into_bytes())
         };
 
@@ -1127,80 +1084,128 @@ impl SipSession {
         
         
         let bridged_sdp = if caller_is_webrtc && !callee_is_webrtc {
-            
+            // WebRTC caller, RTP callee — bridge must convert media
             if let Some(ref sdp) = callee_sdp {
-                
                 if let Some(ref bridge) = self.media_bridge {
-                    debug!(session_id = %self.context.session_id, "Media bridge: Setting RTP side remote description from callee answer");
                     use rustrtc::sdp::{SessionDescription, SdpType};
+
+                    // 1. Set callee's RTP answer on bridge's RTP side
+                    debug!(session_id = %self.context.session_id, "Bridge: Setting RTP side remote from callee answer");
                     if let Ok(desc) = SessionDescription::parse(SdpType::Answer, sdp) {
                         if let Err(e) = bridge.rtp_pc().set_remote_description(desc).await {
                             warn!(session_id = %self.context.session_id, error = %e, "Failed to set bridge RTP remote description");
-                        } else {
-                            debug!(session_id = %self.context.session_id, "Media bridge: RTP side remote description set successfully");
                         }
                     }
-                }
-                
-                
-                debug!(session_id = %self.context.session_id, "SDP bridge: converting RTP Answer -> WebRTC Answer");
-                
-                
-                let ice_creds = crate::media::sdp_bridge::IceCredentials::generate();
-                let dtls_info = crate::media::sdp_bridge::DtlsInfo::generate_placeholder();
-                
-                debug!(
-                    session_id = %self.context.session_id,
-                    ice_ufrag = %ice_creds.ufrag,
-                    fingerprint = %dtls_info.fingerprint[..16],
-                    "SDP bridge: Generated WebRTC credentials for Answer"
-                );
-                
-                match crate::media::sdp_bridge::SdpBridge::rtp_to_webrtc(
-                    sdp,
-                    &dtls_info.fingerprint,
-                    &ice_creds.ufrag,
-                    &ice_creds.pwd,
-                ) {
-                    Ok(webrtc_sdp) => {
-                        debug!(session_id = %self.context.session_id, "SDP bridge: RTP -> WebRTC Answer conversion successful");
-                        Some(webrtc_sdp)
-                    }
-                    Err(e) => {
-                        warn!(session_id = %self.context.session_id, error = %e, "SDP bridge: RTP -> WebRTC Answer conversion failed, using original");
+
+                    // 2. Set caller's WebRTC offer on bridge's WebRTC side and create answer
+                    if let Some(ref caller_offer) = self.caller_offer {
+                        debug!(session_id = %self.context.session_id, "Bridge: Creating WebRTC answer from caller offer");
+                        match SessionDescription::parse(SdpType::Offer, caller_offer) {
+                            Ok(caller_desc) => {
+                                match bridge.webrtc_pc().set_remote_description(caller_desc).await {
+                                    Ok(_) => {
+                                        match bridge.webrtc_pc().create_answer().await {
+                                            Ok(answer) => {
+                                                if let Err(e) = bridge.webrtc_pc().set_local_description(answer) {
+                                                    warn!(session_id = %self.context.session_id, error = %e, "Failed to set bridge WebRTC local description");
+                                                    callee_sdp.clone()
+                                                } else {
+                                                    // Wait for ICE gathering to complete so the SDP
+                                                    // contains real candidates (not 0.0.0.0:9)
+                                                    bridge.webrtc_pc().wait_for_gathering_complete().await;
+                                                    debug!(session_id = %self.context.session_id, "Bridge: WebRTC answer created with ICE candidates");
+                                                    bridge.webrtc_pc().local_description()
+                                                        .map(|d| d.to_sdp_string())
+                                                        .or_else(|| callee_sdp.clone())
+                                                }
+                                            }
+                                            Err(e) => {
+                                                warn!(session_id = %self.context.session_id, error = %e, "Failed to create bridge WebRTC answer");
+                                                callee_sdp.clone()
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        warn!(session_id = %self.context.session_id, error = %e, "Failed to set bridge WebRTC remote description");
+                                        callee_sdp.clone()
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                warn!(session_id = %self.context.session_id, error = %e, "Failed to parse caller offer SDP");
+                                callee_sdp.clone()
+                            }
+                        }
+                    } else {
                         callee_sdp.clone()
                     }
+                } else {
+                    // No bridge — should not happen for WebRTC↔RTP bridging,
+                    // but pass through callee SDP as-is
+                    warn!(session_id = %self.context.session_id, "No media bridge for WebRTC↔RTP — SDP may be incorrect");
+                    callee_sdp.clone()
                 }
             } else {
                 callee_sdp.clone()
             }
         } else if !caller_is_webrtc && callee_is_webrtc {
-            
+            // RTP caller, WebRTC callee — bridge must convert media
             if let Some(ref sdp) = callee_sdp {
-                
                 if let Some(ref bridge) = self.media_bridge {
-                    debug!(session_id = %self.context.session_id, "Media bridge: Setting WebRTC side remote description from callee answer");
                     use rustrtc::sdp::{SessionDescription, SdpType};
+
+                    // 1. Set callee's WebRTC answer on bridge's WebRTC side
+                    debug!(session_id = %self.context.session_id, "Bridge: Setting WebRTC side remote from callee answer");
                     if let Ok(desc) = SessionDescription::parse(SdpType::Answer, sdp) {
                         if let Err(e) = bridge.webrtc_pc().set_remote_description(desc).await {
                             warn!(session_id = %self.context.session_id, error = %e, "Failed to set bridge WebRTC remote description");
-                        } else {
-                            debug!(session_id = %self.context.session_id, "Media bridge: WebRTC side remote description set successfully");
                         }
                     }
-                }
-                
-                
-                debug!(session_id = %self.context.session_id, "SDP bridge: converting WebRTC Answer -> RTP Answer");
-                match crate::media::sdp_bridge::SdpBridge::webrtc_to_rtp(sdp) {
-                    Ok(rtp_sdp) => {
-                        debug!(session_id = %self.context.session_id, "SDP bridge: WebRTC -> RTP Answer conversion successful");
-                        Some(rtp_sdp)
-                    }
-                    Err(e) => {
-                        warn!(session_id = %self.context.session_id, error = %e, "SDP bridge: WebRTC -> RTP Answer conversion failed, using original");
+
+                    // 2. Set caller's RTP offer on bridge's RTP side and create answer
+                    if let Some(ref caller_offer) = self.caller_offer {
+                        debug!(session_id = %self.context.session_id, "Bridge: Creating RTP answer from caller offer");
+                        match SessionDescription::parse(SdpType::Offer, caller_offer) {
+                            Ok(caller_desc) => {
+                                match bridge.rtp_pc().set_remote_description(caller_desc).await {
+                                    Ok(_) => {
+                                        match bridge.rtp_pc().create_answer().await {
+                                            Ok(answer) => {
+                                                if let Err(e) = bridge.rtp_pc().set_local_description(answer) {
+                                                    warn!(session_id = %self.context.session_id, error = %e, "Failed to set bridge RTP local description");
+                                                    callee_sdp.clone()
+                                                } else {
+                                                    debug!(session_id = %self.context.session_id, "Bridge: RTP answer created successfully");
+                                                    bridge.rtp_pc().local_description()
+                                                        .map(|d| d.to_sdp_string())
+                                                        .or_else(|| callee_sdp.clone())
+                                                }
+                                            }
+                                            Err(e) => {
+                                                warn!(session_id = %self.context.session_id, error = %e, "Failed to create bridge RTP answer");
+                                                callee_sdp.clone()
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        warn!(session_id = %self.context.session_id, error = %e, "Failed to set bridge RTP remote description");
+                                        callee_sdp.clone()
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                warn!(session_id = %self.context.session_id, error = %e, "Failed to parse caller offer SDP");
+                                callee_sdp.clone()
+                            }
+                        }
+                    } else {
                         callee_sdp.clone()
                     }
+                } else {
+                    // No bridge — should not happen for WebRTC↔RTP bridging,
+                    // but pass through callee SDP as-is
+                    warn!(session_id = %self.context.session_id, "No media bridge for RTP↔WebRTC — SDP may be incorrect");
+                    callee_sdp.clone()
                 }
             } else {
                 callee_sdp.clone()
@@ -1552,21 +1557,82 @@ impl SipSession {
                 session_id = %self.id,
                 "WebRTC ↔ RTP bridge needed for media interop"
             );
-            
-            
-            let bridge = BridgePeerBuilder::new(format!("{}-bridge", self.id))
+
+
+            let mut bridge_builder = BridgePeerBuilder::new(format!("{}-bridge", self.id))
                 .with_rtp_port_range(20000, 30000)
-                .build();
+                .with_enable_latching(self.server.proxy_config.enable_latching);
+
+            if let Some(ref external_ip) = self.server.rtp_config.external_ip {
+                bridge_builder = bridge_builder.with_external_ip(external_ip.clone());
+            }
+
+            // Configure codecs from allow_codecs + caller's SDP
+            if let Some(ref caller_sdp) = self.caller_offer {
+                let allow_codecs = &self.context.dialplan.allow_codecs;
+                let codec_lists = MediaNegotiator::build_bridge_codec_lists(
+                    caller_sdp, caller_is_webrtc, callee_is_webrtc, allow_codecs,
+                );
+
+                let webrtc_side = if caller_is_webrtc {
+                    &codec_lists.caller_side
+                } else {
+                    &codec_lists.callee_side
+                };
+                let rtp_side = if callee_is_webrtc {
+                    &codec_lists.caller_side
+                } else {
+                    &codec_lists.callee_side
+                };
+
+                let webrtc_caps: Vec<_> = webrtc_side
+                    .iter()
+                    .filter_map(|c| c.to_audio_capability())
+                    .collect();
+                let rtp_caps: Vec<_> = rtp_side
+                    .iter()
+                    .filter_map(|c| c.to_audio_capability())
+                    .collect();
+
+                bridge_builder = bridge_builder
+                    .with_webrtc_audio_capabilities(webrtc_caps)
+                    .with_rtp_audio_capabilities(rtp_caps);
+
+                // Sender codecs: first non-DTMF codec for each side
+                let webrtc_sender = webrtc_side.iter()
+                    .find(|c| !c.is_dtmf()).map(|c| c.to_params());
+                let rtp_sender = rtp_side.iter()
+                    .find(|c| !c.is_dtmf()).map(|c| c.to_params());
+
+                if let (Some(w), Some(r)) = (webrtc_sender, rtp_sender) {
+                    bridge_builder = bridge_builder.with_sender_codecs(w, r);
+                }
+
+                info!(
+                    session_id = %self.id,
+                    webrtc_codecs = ?webrtc_side.iter().map(|c| format!("{:?}", c.codec)).collect::<Vec<_>>(),
+                    rtp_codecs = ?rtp_side.iter().map(|c| format!("{:?}", c.codec)).collect::<Vec<_>>(),
+                    "Bridge codecs configured from allow_codecs"
+                );
+            }
+
+            let bridge = bridge_builder.build();
             
             
             bridge.setup_bridge().await?;
             
-            
-            let webrtc_offer = bridge.webrtc_pc().create_offer().await?;
-            let rtp_offer = bridge.rtp_pc().create_offer().await?;
-            
-            bridge.webrtc_pc().set_local_description(webrtc_offer)?;
-            bridge.rtp_pc().set_local_description(rtp_offer)?;
+
+            // Only create offer on the callee-facing PC.
+            // The caller-facing PC will answer the caller's INVITE offer later.
+            if callee_is_webrtc {
+                let offer = bridge.webrtc_pc().create_offer().await?;
+                bridge.webrtc_pc().set_local_description(offer)?;
+                // Wait for ICE gathering so SDP contains real candidates
+                bridge.webrtc_pc().wait_for_gathering_complete().await;
+            } else {
+                let offer = bridge.rtp_pc().create_offer().await?;
+                bridge.rtp_pc().set_local_description(offer)?;
+            }
             
             
             bridge.start_bridge().await;
@@ -1895,20 +1961,26 @@ impl SipSession {
     async fn cleanup(&mut self) {
         debug!(session_id = %self.context.session_id, "Cleaning up session");
 
-        
         if self.recording_state.is_some() {
             let _ = self.stop_recording().await;
         }
 
-        
+        // Stop media bridge (closes both WebRTC + RTP PeerConnections)
+        if let Some(bridge) = self.media_bridge.take() {
+            info!(session_id = %self.context.session_id, "Stopping media bridge during cleanup");
+            bridge.stop().await;
+        }
+
+        // Stop caller and callee media peers (cancels their tasks)
+        self.caller_peer.stop();
+        self.callee_peer.stop();
+
         if let Some(mixer) = self.supervisor_mixer.take() {
             drop(mixer);
         }
 
-        
         self.callee_guards.clear();
 
-        
         self.callee_event_tx = None;
 
         let mut dialogs_to_hangup = self.pending_hangup.clone();
