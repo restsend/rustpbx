@@ -25,16 +25,18 @@ pub(crate) mod test_util;
 pub struct CallSessionBuilder {
     cookie: TransactionCookie,
     dialplan: Dialplan,
+    max_forwards: u32,
     cancel_token: Option<CancellationToken>,
     call_record_sender: Option<CallRecordSender>,
     addon_registry: Option<Arc<AddonRegistry>>,
 }
 
 impl CallSessionBuilder {
-    pub fn new(cookie: TransactionCookie, dialplan: Dialplan, _max_forwards: u32) -> Self {
+    pub fn new(cookie: TransactionCookie, dialplan: Dialplan, max_forwards: u32) -> Self {
         Self {
             cookie,
             dialplan,
+            max_forwards,
             cancel_token: None,
             call_record_sender: None,
             addon_registry: None,
@@ -96,6 +98,7 @@ impl CallSessionBuilder {
             start_time: Instant::now(),
             original_caller,
             original_callee,
+            max_forwards: self.max_forwards,
             dtmf_digits: Vec::new(),
         };
 
@@ -135,6 +138,7 @@ impl CallSessionBuilder {
             start_time: Instant::now(),
             original_caller: original_caller.clone(),
             original_callee: original_callee.clone(),
+            max_forwards: 70,
             dtmf_digits: Vec::new(),
         };
 

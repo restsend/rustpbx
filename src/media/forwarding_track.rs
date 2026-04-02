@@ -1,10 +1,11 @@
 use crate::media::recorder::{Leg, Recorder};
 use crate::media::transcoder::{RtpTiming, Transcoder, rewrite_dtmf_duration};
 use async_trait::async_trait;
+use parking_lot::{Mutex, RwLock};
 use rustrtc::media::error::MediaResult;
 use rustrtc::media::frame::{MediaKind, MediaSample};
 use rustrtc::media::track::{MediaStreamTrack, TrackState};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 #[derive(Clone, Debug)]
 pub struct AudioMapping {
@@ -36,7 +37,7 @@ pub struct ForwardingTrack {
     audio_timing: Mutex<Option<RtpTiming>>,
     /// Timestamp rewriting for DTMF frames (when DTMF clock rates differ)
     dtmf_timing: Mutex<Option<RtpTiming>>,
-    recorder: Arc<Mutex<Option<Recorder>>>,
+    recorder: Arc<RwLock<Option<Recorder>>>,
     recorder_leg: Leg,
     dtmf_mapping: Option<DtmfMapping>,
 }
@@ -47,7 +48,7 @@ impl ForwardingTrack {
         inner: Arc<dyn MediaStreamTrack>,
         transcoder: Option<Transcoder>,
         audio_mapping: Option<AudioMapping>,
-        recorder: Arc<Mutex<Option<Recorder>>>,
+        recorder: Arc<RwLock<Option<Recorder>>>,
         recorder_leg: Leg,
         dtmf_mapping: Option<DtmfMapping>,
     ) -> Self {
@@ -104,10 +105,8 @@ impl MediaStreamTrack for ForwardingTrack {
             let sample = self.inner.recv().await?;
 
             // Tee to recorder (raw incoming, before transcode)
-            if let Ok(mut recorder_guard) = self.recorder.lock() {
-                if let Some(recorder) = recorder_guard.as_mut() {
-                    let _ = recorder.write_sample(self.recorder_leg, &sample, None, None, None);
-                }
+            if let Some(recorder) = self.recorder.write().as_mut() {
+                let _ = recorder.write_sample(self.recorder_leg, &sample, None, None, None);
             }
 
             if let MediaSample::Audio(ref frame) = sample {
@@ -143,15 +142,14 @@ impl MediaStreamTrack for ForwardingTrack {
                                     mapping.source_clock_rate,
                                     target_clock_rate,
                                 );
-                                if let Ok(mut guard) = self.dtmf_timing.lock() {
-                                    if let Some(timing) = guard.as_mut() {
-                                        timing.rewrite(
-                                            &mut dtmf_frame,
-                                            mapping.source_clock_rate,
-                                            target_clock_rate,
-                                            target_pt,
-                                        );
-                                    }
+                                let mut guard = self.dtmf_timing.lock();
+                                if let Some(timing) = guard.as_mut() {
+                                    timing.rewrite(
+                                        &mut dtmf_frame,
+                                        mapping.source_clock_rate,
+                                        target_clock_rate,
+                                        target_pt,
+                                    );
                                 }
                             }
                         }
@@ -168,41 +166,35 @@ impl MediaStreamTrack for ForwardingTrack {
                     .as_ref()
                     .filter(|_| matched_audio)
                 {
-                    if let Ok(mut guard) = self.transcoder.lock() {
-                        if let Some(transcoder) = guard.as_mut() {
-                            let mut output = transcoder.transcode(frame);
+                    let mut guard = self.transcoder.lock();
+                    if let Some(transcoder) = guard.as_mut() {
+                        let mut output = transcoder.transcode(frame);
 
-                            if let Ok(mut timing_guard) = self.audio_timing.lock() {
-                                if let Some(timing) = timing_guard.as_mut() {
-                                    timing.rewrite(
-                                        &mut output,
-                                        audio_mapping.source_clock_rate,
-                                        audio_mapping.target_clock_rate,
-                                        audio_mapping.target_pt,
-                                    );
-                                }
-                            }
-
-                            return Ok(MediaSample::Audio(output));
+                        let mut timing_guard = self.audio_timing.lock();
+                        if let Some(timing) = timing_guard.as_mut() {
+                            timing.rewrite(
+                                &mut output,
+                                audio_mapping.source_clock_rate,
+                                audio_mapping.target_clock_rate,
+                                audio_mapping.target_pt,
+                            );
                         }
+
+                        return Ok(MediaSample::Audio(output));
                     }
 
                     if frame.payload_type != Some(audio_mapping.target_pt)
                         || audio_mapping.source_clock_rate != audio_mapping.target_clock_rate
                     {
                         let mut output = frame.clone();
-                        if let Ok(mut timing_guard) = self.audio_timing.lock() {
-                            if let Some(timing) = timing_guard.as_mut() {
-                                timing.rewrite(
-                                    &mut output,
-                                    audio_mapping.source_clock_rate,
-                                    audio_mapping.target_clock_rate,
-                                    audio_mapping.target_pt,
-                                );
-                            } else {
-                                output.payload_type = Some(audio_mapping.target_pt);
-                                output.clock_rate = audio_mapping.target_clock_rate;
-                            }
+                        let mut timing_guard = self.audio_timing.lock();
+                        if let Some(timing) = timing_guard.as_mut() {
+                            timing.rewrite(
+                                &mut output,
+                                audio_mapping.source_clock_rate,
+                                audio_mapping.target_clock_rate,
+                                audio_mapping.target_pt,
+                            );
                         } else {
                             output.payload_type = Some(audio_mapping.target_pt);
                             output.clock_rate = audio_mapping.target_clock_rate;
