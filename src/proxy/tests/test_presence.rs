@@ -14,18 +14,18 @@ async fn test_presence_workflow() {
 
     // 2. Alice subscribes to Bob
     let mut alice_subscribe =
-        create_test_request(rsip::Method::Subscribe, "alice", None, "rustpbx.com", None);
-    let to_bob = rsip::typed::To {
+        create_test_request(rsipstack::sip::Method::Subscribe, "alice", None, "rustpbx.com", None);
+    let to_bob = rsipstack::sip::typed::To {
         display_name: None,
         uri: "sip:bob@rustpbx.com".try_into().unwrap(),
         params: vec![],
     };
     alice_subscribe
         .headers
-        .retain(|h| !matches!(h, rsip::Header::To(_)));
+        .retain(|h| !matches!(h, rsipstack::sip::Header::To(_)));
     alice_subscribe
         .headers
-        .push(rsip::Header::To(to_bob.into()));
+        .push(rsipstack::sip::Header::To(to_bob.into()));
 
     let module = PresenceModule::create(server.clone(), config.clone()).unwrap();
 
@@ -47,7 +47,7 @@ async fn test_presence_workflow() {
 
     // 3. Bob publishes Busy
     let mut bob_publish_busy =
-        create_test_request(rsip::Method::Publish, "bob", None, "rustpbx.com", None);
+        create_test_request(rsipstack::sip::Method::Publish, "bob", None, "rustpbx.com", None);
     bob_publish_busy.body = "status: busy".as_bytes().to_vec();
 
     let (mut tx_pub, _) = create_transaction(bob_publish_busy).await;

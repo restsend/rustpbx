@@ -46,11 +46,11 @@ use audio_codec::CodecType;
 
 use dashmap::DashMap;
 use parking_lot::RwLock;
-use rsip::StatusCode;
 use rsipstack::dialog::{
     DialogId, dialog::Dialog, dialog::DialogState, dialog::TerminatedReason,
     server_dialog::ServerInviteDialog,
 };
+use rsipstack::sip::StatusCode;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -63,6 +63,7 @@ use tracing::{debug, error, info, warn};
 enum TimerAction {
     Refresh,
     Expired,
+    #[allow(unused)]
     Reschedule(Duration),
 }
 
@@ -898,8 +899,8 @@ impl SipSession {
 
         info!(session_id = %self.context.session_id, %caller, %callee_uri, "Sending INVITE to callee");
 
-        let headers: Vec<rsip::Header> =
-            vec![rsip::headers::MaxForwards::from(self.context.max_forwards).into()];
+        let headers: Vec<rsipstack::sip::Header> =
+            vec![rsipstack::sip::headers::MaxForwards::from(self.context.max_forwards).into()];
 
         let caller_is_webrtc = self.is_caller_webrtc();
         let callee_is_webrtc = target.supports_webrtc;
@@ -964,7 +965,7 @@ impl SipSession {
                         Ok((dialog, response)) => {
 
                             if let Some(ref resp) = response {
-                                if resp.status_code.kind() == rsip::StatusCodeKind::Successful {
+                                if resp.status_code.kind() == rsipstack::sip::StatusCodeKind::Successful {
                                     Ok((dialog.id(), response))
                                 } else {
 
@@ -995,9 +996,9 @@ impl SipSession {
             }
         };
 
-        let (dialog_id, response): (DialogId, Option<rsip::Response>) = result?;
+        let (dialog_id, response): (DialogId, Option<rsipstack::sip::Response>) = result?;
 
-        let callee_sdp = response.as_ref().and_then(|r: &rsip::Response| {
+        let callee_sdp = response.as_ref().and_then(|r: &rsipstack::sip::Response| {
             let body = r.body();
             if body.is_empty() {
                 None
@@ -1619,16 +1620,16 @@ impl SipSession {
                 Ok(()) => {
                     let timer = self.server_timer.read();
                     if timer.enabled {
-                        timer_headers.push(rsip::Header::Other(
+                        timer_headers.push(rsipstack::sip::Header::Other(
                             HEADER_SESSION_EXPIRES.to_string(),
                             timer.get_session_expires_value(),
                         ));
-                        timer_headers.push(rsip::Header::Other(
+                        timer_headers.push(rsipstack::sip::Header::Other(
                             HEADER_MIN_SE.to_string(),
                             timer.get_min_se_value(),
                         ));
-                        timer_headers.push(rsip::Header::Supported(
-                            rsip::headers::Supported::from(TIMER_TAG),
+                        timer_headers.push(rsipstack::sip::Header::Supported(
+                            rsipstack::sip::headers::Supported::from(TIMER_TAG),
                         ));
                         info!(
                             session_expires = %timer.get_session_expires_value(),
@@ -1644,7 +1645,9 @@ impl SipSession {
         }
 
         if let Some(answer_sdp) = sdp {
-            let mut headers = vec![rsip::Header::ContentType("application/sdp".into())];
+            let mut headers = vec![rsipstack::sip::Header::ContentType(
+                "application/sdp".into(),
+            )];
             headers.extend(timer_headers);
             self.server_dialog
                 .accept(Some(headers), Some(answer_sdp.into_bytes()))
@@ -1658,7 +1661,7 @@ impl SipSession {
 
     pub async fn handle_reinvite(
         &mut self,
-        method: rsip::Method,
+        method: rsipstack::sip::Method,
         sdp: Option<String>,
     ) -> Result<Option<String>> {
         debug!(
@@ -1667,7 +1670,7 @@ impl SipSession {
             "Handling re-INVITE in B2BUA mode"
         );
 
-        if method != rsip::Method::Invite {
+        if method != rsipstack::sip::Method::Invite {
             return Err(anyhow!("Expected INVITE method, got {:?}", method));
         }
 
@@ -1699,9 +1702,11 @@ impl SipSession {
         for callee_dialog_id in callee_dialogs {
             if let Some(mut dialog) = dialog_layer.get_dialog(&callee_dialog_id) {
                 let body = offer_sdp.clone().into_bytes();
-                let headers = vec![rsip::Header::ContentType("application/sdp".into())];
+                let headers = vec![rsipstack::sip::Header::ContentType(
+                    "application/sdp".into(),
+                )];
 
-                let resp: Option<rsip::Response> = match &mut dialog {
+                let resp: Option<rsipstack::sip::Response> = match &mut dialog {
                     Dialog::ClientInvite(d) => d
                         .reinvite(Some(headers), Some(body))
                         .await
@@ -1720,7 +1725,9 @@ impl SipSession {
         }
 
         if let Some(ref answer_sdp) = final_answer {
-            let headers = vec![rsip::Header::ContentType("application/sdp".into())];
+            let headers = vec![rsipstack::sip::Header::ContentType(
+                "application/sdp".into(),
+            )];
             self.server_dialog
                 .accept(Some(headers), Some(answer_sdp.clone().into_bytes()))
                 .map_err(|e| anyhow!("Failed to send 200 OK for re-INVITE: {}", e))?;
@@ -2011,10 +2018,10 @@ impl SipSession {
         };
 
         let headers = vec![
-            rsip::Header::ContentType("application/sdp".into()),
-            rsip::Header::Other(HEADER_SESSION_EXPIRES.to_string(), session_expires),
-            rsip::Header::Other(HEADER_MIN_SE.to_string(), min_se),
-            rsip::Header::Supported(rsip::headers::Supported::from(TIMER_TAG)),
+            rsipstack::sip::Header::ContentType("application/sdp".into()),
+            rsipstack::sip::Header::Other(HEADER_SESSION_EXPIRES.to_string(), session_expires),
+            rsipstack::sip::Header::Other(HEADER_MIN_SE.to_string(), min_se),
+            rsipstack::sip::Header::Supported(rsipstack::sip::headers::Supported::from(TIMER_TAG)),
         ];
 
         let body = self.answer.clone().map(|sdp| sdp.into_bytes());
@@ -2035,7 +2042,7 @@ impl SipSession {
 
     pub async fn handle_session_refresh(
         &mut self,
-        headers: &rsip::Headers,
+        headers: &rsipstack::sip::Headers,
         body: Option<String>,
     ) -> Result<()> {
         debug!("Handling incoming session refresh");
@@ -2068,7 +2075,9 @@ impl SipSession {
             self.server_timer.write().update_refresh();
         }
 
-        let response_headers = vec![rsip::Header::ContentType("application/sdp".into())];
+        let response_headers = vec![rsipstack::sip::Header::ContentType(
+            "application/sdp".into(),
+        )];
         let response_body = body.map(|sdp| sdp.into_bytes());
 
         self.server_dialog
@@ -2588,7 +2597,7 @@ impl SipSession {
         } else {
             format!("sip:{}", target)
         };
-        let refer_to_uri = rsip::Uri::try_from(refer_to_str.as_str())
+        let refer_to_uri = rsipstack::sip::Uri::try_from(refer_to_str.as_str())
             .map_err(|e| anyhow!("Invalid transfer target URI: {}", e))?;
 
         let referred_by = self
@@ -2598,7 +2607,7 @@ impl SipSession {
             .clone()
             .map(|c| c.to_string())
             .unwrap_or_else(|| format!("sip:rustpbx@localhost"));
-        let headers = vec![rsip::Header::Other(
+        let headers = vec![rsipstack::sip::Header::Other(
             "Referred-By".to_string(),
             format!("<{}>", referred_by),
         )];
@@ -3272,9 +3281,9 @@ impl SipSession {
             .map(|d| format!("Signal={}\nDuration=160", d))
             .collect::<Vec<_>>()
             .join("\n");
-        let headers = vec![rsip::Header::ContentType(rsip::headers::ContentType::from(
-            "application/dtmf-relay",
-        ))];
+        let headers = vec![rsipstack::sip::Header::ContentType(
+            rsipstack::sip::headers::ContentType::from("application/dtmf-relay"),
+        )];
 
         match self
             .server_dialog
@@ -3303,7 +3312,7 @@ impl SipSession {
             return Err(anyhow!("Leg not found: {}", leg_id));
         }
 
-        self.handle_reinvite(rsip::Method::Invite, Some(sdp))
+        self.handle_reinvite(rsipstack::sip::Method::Invite, Some(sdp))
             .await?;
 
         info!(%leg_id, "Re-INVITE command handled");
@@ -3343,7 +3352,7 @@ impl SipSession {
     async fn handle_send_sip_message(&mut self, content_type: String, body: String) -> Result<()> {
         info!(content_type = %content_type, body_len = body.len(), "Sending SIP MESSAGE");
 
-        let headers = vec![rsip::Header::ContentType(content_type.into())];
+        let headers = vec![rsipstack::sip::Header::ContentType(content_type.into())];
         let body_bytes = body.into_bytes();
 
         match self
@@ -3375,8 +3384,8 @@ impl SipSession {
         info!(event = %event, content_type = %content_type, body_len = body.len(), "Sending SIP NOTIFY");
 
         let headers = vec![
-            rsip::Header::Other("Event".into(), event.into()),
-            rsip::Header::ContentType(content_type.into()),
+            rsipstack::sip::Header::Other("Event".into(), event.into()),
+            rsipstack::sip::Header::ContentType(content_type.into()),
         ];
         let body_bytes = body.into_bytes();
 
@@ -3405,7 +3414,7 @@ impl SipSession {
 
         match self
             .server_dialog
-            .request(rsip::Method::Options, None, None)
+            .request(rsipstack::sip::Method::Options, None, None)
             .await
         {
             Ok(Some(response)) => {
@@ -3519,7 +3528,9 @@ impl SipSession {
     }
 
     async fn send_reinvite_to_caller(&self, sdp: String) -> Result<()> {
-        let headers = vec![rsip::Header::ContentType("application/sdp".into())];
+        let headers = vec![rsipstack::sip::Header::ContentType(
+            "application/sdp".into(),
+        )];
 
         match self
             .server_dialog

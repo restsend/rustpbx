@@ -10,7 +10,7 @@ use crate::proxy::routing::{
     TrunkDirection,
 };
 use async_trait::async_trait;
-use rsip::StatusCode;
+use rsipstack::sip::StatusCode;
 use rsipstack::dialog::invitation::InviteOption;
 use std::sync::Arc;
 use std::{collections::HashMap, net::IpAddr};
@@ -685,7 +685,7 @@ async fn test_match_invite_reject_rule() {
 
     match result {
         RouteResult::Abort(code, reason) => {
-            assert_eq!(code, rsip::StatusCode::Forbidden);
+            assert_eq!(code, rsipstack::sip::StatusCode::Forbidden);
             assert_eq!(reason, Some("Emergency calls not allowed".to_string()));
         }
         RouteResult::Forward(_, _) => panic!("Expected abort, got forward"),
@@ -900,13 +900,13 @@ async fn test_match_invite_header_matching() {
 
     let option = create_test_invite_option();
     let origin = create_sip_request(
-        rsip::Method::Invite,
+        rsipstack::sip::Method::Invite,
         "sip:1001@rustpbx.com",
         "Alice <sip:alice@rustpbx.com>",
         "Bob <sip:1001@rustpbx.com>",
         &format!("{}@rustpbx.com", generate_random_string(8)),
         1,
-        Some(vec![rsip::Header::Other(
+        Some(vec![rsipstack::sip::Header::Other(
             "X-VIP".to_string(),
             "gold".to_string(),
         )]),
@@ -1242,7 +1242,7 @@ fn create_invite_option(
     callee: &str,
     contact: Option<&str>,
     content_type: Option<&str>,
-    headers: Option<Vec<rsip::Header>>,
+    headers: Option<Vec<rsipstack::sip::Header>>,
 ) -> InviteOption {
     let default_contact = format!(
         "sip:{}@192.168.1.1:5060",
@@ -1264,57 +1264,57 @@ fn create_invite_option(
 }
 
 fn create_sip_request(
-    method: rsip::Method,
+    method: rsipstack::sip::Method,
     request_uri: &str,
     from: &str,
     to: &str,
     call_id: &str,
     cseq_num: u32,
-    additional_headers: Option<Vec<rsip::Header>>,
-) -> rsip::Request {
+    additional_headers: Option<Vec<rsipstack::sip::Header>>,
+) -> rsipstack::sip::Request {
     let branch = format!("z9hG4bK{}", generate_random_string(16));
     let from_tag = generate_random_string(8);
 
     let mut headers = vec![
-        rsip::Header::Via(
+        rsipstack::sip::Header::Via(
             format!("SIP/2.0/UDP 192.168.1.1:5060;branch={}", branch)
                 .try_into()
                 .expect("Invalid Via header"),
         ),
-        rsip::Header::From(
+        rsipstack::sip::Header::From(
             format!("{};tag={}", from, from_tag)
                 .try_into()
                 .expect("Invalid From header"),
         ),
-        rsip::Header::To(to.try_into().expect("Invalid To header")),
-        rsip::Header::CallId(call_id.into()),
-        rsip::Header::CSeq(
+        rsipstack::sip::Header::To(to.try_into().expect("Invalid To header")),
+        rsipstack::sip::Header::CallId(call_id.into()),
+        rsipstack::sip::Header::CSeq(
             format!("{} {}", cseq_num, method)
                 .try_into()
                 .expect("Invalid CSeq header"),
         ),
-        rsip::Header::MaxForwards(70.into()),
+        rsipstack::sip::Header::MaxForwards(70.into()),
     ];
 
     if let Some(additional) = additional_headers {
         headers.extend(additional);
     }
 
-    let body = if method == rsip::Method::Invite {
+    let body = if method == rsipstack::sip::Method::Invite {
         create_minimal_sdp(from).into_bytes()
     } else {
         Vec::new()
     };
 
     if !body.is_empty() {
-        headers.push(rsip::Header::ContentType("application/sdp".into()));
-        headers.push(rsip::Header::ContentLength((body.len() as u32).into()));
+        headers.push(rsipstack::sip::Header::ContentType("application/sdp".into()));
+        headers.push(rsipstack::sip::Header::ContentLength((body.len() as u32).into()));
     }
 
-    rsip::Request {
+    rsipstack::sip::Request {
         method,
         uri: request_uri.try_into().expect("Invalid request URI"),
-        version: rsip::Version::V2,
+        version: rsipstack::sip::Version::V2,
         headers: headers.into(),
         body,
     }
@@ -1360,9 +1360,9 @@ fn create_test_invite_option() -> InviteOption {
     )
 }
 
-fn create_test_request() -> rsip::Request {
+fn create_test_request() -> rsipstack::sip::Request {
     create_sip_request(
-        rsip::Method::Invite,
+        rsipstack::sip::Method::Invite,
         "sip:1001@rustpbx.com",
         "Alice <sip:alice@rustpbx.com>",
         "Bob <sip:1001@rustpbx.com>",
@@ -1731,7 +1731,7 @@ async fn test_match_invite_queue_with_trunk_rewrites_callee() {
     );
 
     let origin = create_sip_request(
-        rsip::Method::Invite,
+        rsipstack::sip::Method::Invite,
         "sip:8613888888888@rustpbx.com",
         "Alice <sip:alice@rustpbx.com>",
         "Bob <sip:8613888888888@rustpbx.com>",
@@ -1823,7 +1823,7 @@ async fn test_match_invite_forward_with_trunk_rewrites_callee() {
     );
 
     let origin = create_sip_request(
-        rsip::Method::Invite,
+        rsipstack::sip::Method::Invite,
         "sip:91234567890@rustpbx.com",
         "Alice <sip:alice@rustpbx.com>",
         "Bob <sip:91234567890@rustpbx.com>",
@@ -1897,7 +1897,7 @@ async fn test_trunk_transport_preserved_in_destination() {
     apply_trunk_config(&mut option, &trunk_tls).unwrap();
 
     let dest = option.destination.unwrap();
-    assert_eq!(dest.r#type, Some(rsip::transport::Transport::Tls));
+    assert_eq!(dest.r#type, Some(rsipstack::sip::transport::Transport::Tls));
 }
 
 #[test]
@@ -1926,7 +1926,7 @@ fn test_apply_trunk_config_adds_p_asserted_identity() {
     let headers = option.headers.unwrap();
 
     let has_pai = headers.iter().any(|h| {
-        if let rsip::Header::Other(name, value) = h {
+        if let rsipstack::sip::Header::Other(name, value) = h {
             name.to_lowercase() == "p-asserted-identity" && value.contains("sip:alice@rustpbx.com")
         } else {
             false

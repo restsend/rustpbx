@@ -10,7 +10,7 @@ mod tests {
     use crate::call::app::CallApp;
     use crate::call::{DialStrategy, FailureAction, Location, QueueFallbackAction, QueueHoldConfig, QueuePlan};
     use crate::proxy::proxy_call::state::SessionAction;
-    use rsip::Uri;
+    use rsipstack::sip::Uri;
     use std::time::Duration;
 
     /// Build a minimal queue plan with a single agent for testing.
@@ -45,7 +45,7 @@ mod tests {
                 loop_playback: true,
             }),
             fallback: Some(QueueFallbackAction::Failure(FailureAction::Hangup {
-                code: Some(rsip::StatusCode::TemporarilyUnavailable),
+                code: Some(rsipstack::sip::StatusCode::TemporarilyUnavailable),
                 reason: Some("All agents busy".to_string()),
             })),
             dial_strategy: Some(DialStrategy::Sequential(vec![location])),
@@ -94,7 +94,7 @@ mod tests {
                 loop_playback: true,
             }),
             fallback: Some(QueueFallbackAction::Failure(FailureAction::Hangup {
-                code: Some(rsip::StatusCode::TemporarilyUnavailable),
+                code: Some(rsipstack::sip::StatusCode::TemporarilyUnavailable),
                 reason: Some("All agents busy".to_string()),
             })),
             dial_strategy: Some(DialStrategy::Sequential(agents)),
@@ -143,7 +143,7 @@ mod tests {
                 loop_playback: true,
             }),
             fallback: Some(QueueFallbackAction::Failure(FailureAction::Hangup {
-                code: Some(rsip::StatusCode::TemporarilyUnavailable),
+                code: Some(rsipstack::sip::StatusCode::TemporarilyUnavailable),
                 reason: Some("All agents busy".to_string()),
             })),
             dial_strategy: Some(DialStrategy::Parallel(agents)),
@@ -226,7 +226,7 @@ mod tests {
         plan.fallback = Some(QueueFallbackAction::Failure(FailureAction::PlayThenHangup {
             audio_file: "sounds/all_busy.wav".to_string(),
             use_early_media: false,
-            status_code: rsip::StatusCode::TemporarilyUnavailable,
+            status_code: rsipstack::sip::StatusCode::TemporarilyUnavailable,
             reason: Some("All agents are busy".to_string()),
         }));
         plan.dial_strategy = Some(DialStrategy::Sequential(vec![]));
@@ -509,7 +509,7 @@ mod tests {
                 loop_playback: true,
             }),
             fallback: Some(QueueFallbackAction::Failure(FailureAction::Hangup {
-                code: Some(rsip::StatusCode::TemporarilyUnavailable),
+                code: Some(rsipstack::sip::StatusCode::TemporarilyUnavailable),
                 reason: None,
             })),
             agents: vec![Location {

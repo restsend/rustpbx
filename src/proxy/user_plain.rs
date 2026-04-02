@@ -90,7 +90,7 @@ impl UserBackend for PlainTextBackend {
         &self,
         username: &str,
         realm: Option<&str>,
-        _request: Option<&rsip::Request>,
+        _request: Option<&rsipstack::sip::Request>,
     ) -> Result<Option<SipUser>, AuthError> {
         let mut user = match self.users.lock().unwrap().get(username) {
             Some(user) => user.clone(),

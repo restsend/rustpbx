@@ -4,7 +4,7 @@ use crate::{
 };
 use anyhow::Result;
 use audio_codec::CodecType;
-use rsip::{StatusCode, Transport};
+use rsipstack::sip::{StatusCode, Transport};
 use rsipstack::{
     dialog::{authenticate::Credential, invitation::InviteOption},
     transport::SipAddr,
@@ -30,9 +30,9 @@ pub use cookie::{CalleeDisplayName, TenantId, TransactionCookie, TrunkContext};
 pub use user::SipUser;
 
 pub struct RouteContext<'a> {
-    pub caller: rsip::Uri,
-    pub callee: rsip::Uri,
-    pub original_request: &'a rsip::Request,
+    pub caller: rsipstack::sip::Uri,
+    pub callee: rsipstack::sip::Uri,
+    pub original_request: &'a rsipstack::sip::Request,
     pub captures: &'a std::collections::HashMap<String, Vec<String>>,
 }
 
@@ -71,18 +71,18 @@ pub const DEFAULT_QUEUE_FAILURE_AUDIO: &str = "config/sounds/unavailable-phone.w
 
 #[derive(Clone, Default)]
 pub struct Location {
-    pub aor: rsip::Uri,
+    pub aor: rsipstack::sip::Uri,
     pub expires: u32,
     pub destination: Option<SipAddr>,
     pub last_modified: Option<Instant>,
     pub supports_webrtc: bool,
     pub credential: Option<Credential>,
-    pub headers: Option<Vec<rsip::Header>>,
-    pub registered_aor: Option<rsip::Uri>,
+    pub headers: Option<Vec<rsipstack::sip::Header>>,
+    pub registered_aor: Option<rsipstack::sip::Uri>,
     pub contact_raw: Option<String>,
     pub contact_params: Option<HashMap<String, String>>,
-    pub path: Option<Vec<rsip::Uri>>,
-    pub service_route: Option<Vec<rsip::Uri>>,
+    pub path: Option<Vec<rsipstack::sip::Uri>>,
+    pub service_route: Option<Vec<rsipstack::sip::Uri>>,
     pub instance_id: Option<String>,
     pub gruu: Option<String>,
     pub temp_gruu: Option<String>,
@@ -364,7 +364,7 @@ pub enum QueueFallbackAction {
     /// Reuse existing failure behaviors
     Failure(FailureAction),
     /// Redirect to a specific SIP URI (e.g., external voicemail)
-    Redirect { target: rsip::Uri },
+    Redirect { target: rsipstack::sip::Uri },
     /// Transfer caller to another named queue
     Queue { name: String },
 }
@@ -669,12 +669,12 @@ pub struct Dialplan {
     pub direction: DialDirection,
     pub call_id: Option<String>,
     pub session_id: Option<String>,
-    pub caller_contact: Option<rsip::typed::Contact>,
+    pub caller_contact: Option<rsipstack::sip::typed::Contact>,
     pub caller_display_name: Option<String>,
-    pub caller: Option<rsip::Uri>,
+    pub caller: Option<rsipstack::sip::Uri>,
     pub flow: DialplanFlow,
     pub max_ring_time: u32,
-    pub original: Arc<rsip::Request>,
+    pub original: Arc<rsipstack::sip::Request>,
     // Enhanced call control options
     /// Recording configuration
     pub recording: CallRecordingConfig,
@@ -729,7 +729,7 @@ impl Dialplan {
         self.flow.all_webrtc_target()
     }
     /// Create a new dialplan with basic configuration
-    pub fn new(session_id: String, original: rsip::Request, direction: DialDirection) -> Self {
+    pub fn new(session_id: String, original: rsipstack::sip::Request, direction: DialDirection) -> Self {
         Self {
             direction,
             session_id: Some(session_id),
@@ -766,7 +766,7 @@ impl Dialplan {
     }
 
     /// Set the caller URI
-    pub fn with_caller(mut self, caller: rsip::Uri) -> Self {
+    pub fn with_caller(mut self, caller: rsipstack::sip::Uri) -> Self {
         self.caller = Some(caller);
         self
     }
@@ -841,7 +841,7 @@ impl Dialplan {
         self
     }
 
-    pub fn with_caller_contact(mut self, contact: rsip::typed::Contact) -> Self {
+    pub fn with_caller_contact(mut self, contact: rsipstack::sip::typed::Contact) -> Self {
         self.caller_contact = Some(contact);
         self
     }
@@ -886,8 +886,8 @@ impl Dialplan {
         self.flow = DialplanFlow::replace_terminal(current, new_terminal);
     }
 
-    pub fn should_forward_header(header: &rsip::Header) -> bool {
-        use rsip::Header;
+    pub fn should_forward_header(header: &rsipstack::sip::Header) -> bool {
+        use rsipstack::sip::Header;
 
         match header {
             Header::Via(_)
@@ -936,7 +936,7 @@ impl Dialplan {
         }
     }
 
-    pub fn build_invite_headers(&self, target: &Location) -> Option<Vec<rsip::Header>> {
+    pub fn build_invite_headers(&self, target: &Location) -> Option<Vec<rsipstack::sip::Header>> {
         let mut headers = target.headers.clone().unwrap_or_default();
         if self.with_original_headers {
             for header in self.original.headers.iter() {
@@ -960,7 +960,7 @@ pub trait RouteInvite: Sync + Send {
     async fn route_invite(
         &self,
         option: InviteOption,
-        origin: &rsip::Request,
+        origin: &rsipstack::sip::Request,
         direction: &DialDirection,
         cookie: &TransactionCookie,
     ) -> Result<RouteResult>;
@@ -968,7 +968,7 @@ pub trait RouteInvite: Sync + Send {
     async fn preview_route(
         &self,
         option: InviteOption,
-        origin: &rsip::Request,
+        origin: &rsipstack::sip::Request,
         direction: &DialDirection,
         cookie: &TransactionCookie,
     ) -> Result<RouteResult> {
@@ -994,24 +994,24 @@ impl Default for RoutingState {
 mod tests {
     use super::*;
 
-    fn minimal_request() -> rsip::Request {
-        let uri = rsip::Uri {
-            scheme: Some(rsip::Scheme::Sip),
-            auth: Some(rsip::Auth {
+    fn minimal_request() -> rsipstack::sip::Request {
+        let uri = rsipstack::sip::Uri {
+            scheme: Some(rsipstack::sip::Scheme::Sip),
+            auth: Some(rsipstack::sip::Auth {
                 user: "1001".into(),
                 password: None,
             }),
-            host_with_port: rsip::HostWithPort {
+            host_with_port: rsipstack::sip::HostWithPort {
                 host: "pbx.local".parse().unwrap(),
                 port: None,
             },
             params: vec![],
             headers: vec![],
         };
-        rsip::Request {
-            method: rsip::Method::Invite,
+        rsipstack::sip::Request {
+            method: rsipstack::sip::Method::Invite,
             uri,
-            version: rsip::Version::V2,
+            version: rsipstack::sip::Version::V2,
             headers: Default::default(),
             body: vec![],
         }

@@ -15,9 +15,9 @@ use crate::proxy::locator::{Locator, MemoryLocator};
 use crate::proxy::server::SipServerInner;
 use crate::proxy::user::MemoryUserBackend;
 use crate::proxy::{ProxyAction, ProxyModule};
-use rsip::Header;
-use rsip::prelude::{HasHeaders, HeadersExt, UntypedHeader};
-use rsip::services::DigestGenerator;
+use rsipstack::sip::Header;
+use rsipstack::sip::prelude::{HasHeaders, HeadersExt};
+use rsipstack::sip::services::DigestGenerator;
 use rsipstack::EndpointBuilder;
 use rsipstack::dialog::dialog_layer::DialogLayer;
 use rsipstack::transaction::endpoint::EndpointInner;
@@ -33,7 +33,7 @@ async fn test_auth_module_invite_success() {
     let (server_inner, _) = create_test_server().await;
     let module = AuthModule::new(server_inner.clone());
 
-    let request = create_test_request(rsip::Method::Invite, "alice", None, "rustpbx.com", None);
+    let request = create_test_request(rsipstack::sip::Method::Invite, "alice", None, "rustpbx.com", None);
     let (mut tx, _) = create_transaction(request).await;
     let result = module
         .on_transaction_begin(
@@ -45,9 +45,9 @@ async fn test_auth_module_invite_success() {
         .unwrap();
     assert!(matches!(result, ProxyAction::Abort));
     if tx.last_response.is_none() {
-        let mut response = rsip::Response {
-            version: rsip::Version::V2,
-            status_code: rsip::StatusCode::Unauthorized,
+        let mut response = rsipstack::sip::Response {
+            version: rsipstack::sip::Version::V2,
+            status_code: rsipstack::sip::StatusCode::Unauthorized,
             headers: tx.original.headers().clone(),
             body: vec![],
         };
@@ -84,13 +84,13 @@ async fn test_auth_module_invite_success() {
 
     // Step 2: Request with authentication
     let request_with_auth = {
-        let host_with_port = rsip::HostWithPort {
+        let host_with_port = rsipstack::sip::HostWithPort {
             host: "rustpbx.com".parse().unwrap(),
             port: Some(5060.into()),
         };
-        let uri = rsip::Uri {
-            scheme: Some(rsip::Scheme::Sip),
-            auth: Some(rsip::Auth {
+        let uri = rsipstack::sip::Uri {
+            scheme: Some(rsipstack::sip::Scheme::Sip),
+            auth: Some(rsipstack::sip::Auth {
                 user: "alice".to_string(),
                 password: None,
             }),
@@ -98,28 +98,28 @@ async fn test_auth_module_invite_success() {
             params: vec![],
             headers: vec![],
         };
-        let from = rsip::typed::From {
+        let from = rsipstack::sip::typed::From {
             display_name: None,
             uri: uri.clone(),
-            params: vec![rsip::Param::Tag(rsip::param::Tag::new(random_text(8)))],
+            params: vec![rsipstack::sip::Param::Tag(rsipstack::sip::param::Tag::new(random_text(8)))],
         };
-        let to = rsip::typed::To {
+        let to = rsipstack::sip::typed::To {
             display_name: None,
             uri: uri.clone(),
             params: vec![],
         };
-        let via = rsip::headers::Via::new(format!(
+        let via = rsipstack::sip::headers::Via::new(format!(
             "SIP/2.0/UDP rustpbx.com:5060;branch=z9hG4bK{}",
             random_text(8)
         ));
-        let call_id = rsip::headers::CallId::new(random_text(16));
-        let cseq = rsip::headers::typed::CSeq {
+        let call_id = rsipstack::sip::headers::CallId::new(random_text(16));
+        let cseq = rsipstack::sip::headers::typed::CSeq {
             seq: 1u32.into(),
-            method: rsip::Method::Invite,
+            method: rsipstack::sip::Method::Invite,
         };
-        let contact_uri = rsip::Uri {
-            scheme: Some(rsip::Scheme::Sip),
-            auth: Some(rsip::Auth {
+        let contact_uri = rsipstack::sip::Uri {
+            scheme: Some(rsipstack::sip::Scheme::Sip),
+            auth: Some(rsipstack::sip::Auth {
                 user: "alice".to_string(),
                 password: Some("password".to_string()),
             }),
@@ -127,7 +127,7 @@ async fn test_auth_module_invite_success() {
             params: vec![],
             headers: vec![],
         };
-        let contact = rsip::typed::Contact {
+        let contact = rsipstack::sip::typed::Contact {
             display_name: None,
             uri: contact_uri,
             params: vec![],
@@ -144,24 +144,24 @@ async fn test_auth_module_invite_success() {
         let digest = DigestGenerator {
             username: "alice",
             password: "password",
-            algorithm: rsip::headers::auth::Algorithm::Md5,
+            algorithm: rsipstack::sip::headers::auth::Algorithm::Md5,
             nonce: &nonce,
-            method: &rsip::Method::Invite,
+            method: &rsipstack::sip::Method::Invite,
             uri: &uri,
             realm: "rustpbx.com",
             qop: None,
         };
-        let auth_header = rsip::headers::Authorization::new(format!(
+        let auth_header = rsipstack::sip::headers::Authorization::new(format!(
             "Digest username=\"alice\", realm=\"rustpbx.com\", nonce=\"{}\", uri=\"{}\", response=\"{}\", algorithm=MD5",
             nonce,
             uri.to_string(),
             digest.compute()
         ));
         headers.push(auth_header.into());
-        rsip::Request {
-            method: rsip::Method::Invite,
+        rsipstack::sip::Request {
+            method: rsipstack::sip::Method::Invite,
             uri: uri.clone(),
-            version: rsip::Version::V2,
+            version: rsipstack::sip::Version::V2,
             headers: headers.into(),
             body: vec![],
         }
@@ -184,7 +184,7 @@ async fn test_auth_module_register_success() {
     let (server_inner, _) = create_test_server().await;
     let module = AuthModule::new(server_inner.clone());
 
-    let request = create_test_request(rsip::Method::Register, "alice", None, "rustpbx.com", None);
+    let request = create_test_request(rsipstack::sip::Method::Register, "alice", None, "rustpbx.com", None);
     let (mut tx, _) = create_transaction(request).await;
     let result = module
         .on_transaction_begin(
@@ -196,9 +196,9 @@ async fn test_auth_module_register_success() {
         .unwrap();
     assert!(matches!(result, ProxyAction::Abort));
     if tx.last_response.is_none() {
-        let mut response = rsip::Response {
-            version: rsip::Version::V2,
-            status_code: rsip::StatusCode::Unauthorized,
+        let mut response = rsipstack::sip::Response {
+            version: rsipstack::sip::Version::V2,
+            status_code: rsipstack::sip::StatusCode::Unauthorized,
             headers: tx.original.headers().clone(),
             body: vec![],
         };
@@ -235,13 +235,13 @@ async fn test_auth_module_register_success() {
 
     // Step 2: Request with authentication
     let request_with_auth = {
-        let host_with_port = rsip::HostWithPort {
+        let host_with_port = rsipstack::sip::HostWithPort {
             host: "rustpbx.com".parse().unwrap(),
             port: Some(5060.into()),
         };
-        let uri = rsip::Uri {
-            scheme: Some(rsip::Scheme::Sip),
-            auth: Some(rsip::Auth {
+        let uri = rsipstack::sip::Uri {
+            scheme: Some(rsipstack::sip::Scheme::Sip),
+            auth: Some(rsipstack::sip::Auth {
                 user: "alice".to_string(),
                 password: None,
             }),
@@ -249,28 +249,28 @@ async fn test_auth_module_register_success() {
             params: vec![],
             headers: vec![],
         };
-        let from = rsip::typed::From {
+        let from = rsipstack::sip::typed::From {
             display_name: None,
             uri: uri.clone(),
-            params: vec![rsip::Param::Tag(rsip::param::Tag::new(random_text(8)))],
+            params: vec![rsipstack::sip::Param::Tag(rsipstack::sip::param::Tag::new(random_text(8)))],
         };
-        let to = rsip::typed::To {
+        let to = rsipstack::sip::typed::To {
             display_name: None,
             uri: uri.clone(),
             params: vec![],
         };
-        let via = rsip::headers::Via::new(format!(
+        let via = rsipstack::sip::headers::Via::new(format!(
             "SIP/2.0/UDP rustpbx.com:5060;branch=z9hG4bK{}",
             random_text(8)
         ));
-        let call_id = rsip::headers::CallId::new(random_text(16));
-        let cseq = rsip::headers::typed::CSeq {
+        let call_id = rsipstack::sip::headers::CallId::new(random_text(16));
+        let cseq = rsipstack::sip::headers::typed::CSeq {
             seq: 1u32.into(),
-            method: rsip::Method::Register,
+            method: rsipstack::sip::Method::Register,
         };
-        let contact_uri = rsip::Uri {
-            scheme: Some(rsip::Scheme::Sip),
-            auth: Some(rsip::Auth {
+        let contact_uri = rsipstack::sip::Uri {
+            scheme: Some(rsipstack::sip::Scheme::Sip),
+            auth: Some(rsipstack::sip::Auth {
                 user: "alice".to_string(),
                 password: Some("password".to_string()),
             }),
@@ -278,7 +278,7 @@ async fn test_auth_module_register_success() {
             params: vec![],
             headers: vec![],
         };
-        let contact = rsip::typed::Contact {
+        let contact = rsipstack::sip::typed::Contact {
             display_name: None,
             uri: contact_uri,
             params: vec![],
@@ -294,24 +294,24 @@ async fn test_auth_module_register_success() {
         let digest = DigestGenerator {
             username: "alice",
             password: "password",
-            algorithm: rsip::headers::auth::Algorithm::Md5,
+            algorithm: rsipstack::sip::headers::auth::Algorithm::Md5,
             nonce: &nonce,
-            method: &rsip::Method::Register,
+            method: &rsipstack::sip::Method::Register,
             uri: &uri,
             realm: "rustpbx.com",
             qop: None,
         };
-        let auth_header = rsip::headers::Authorization::new(format!(
+        let auth_header = rsipstack::sip::headers::Authorization::new(format!(
             "Digest username=\"alice\", realm=\"rustpbx.com\", nonce=\"{}\", uri=\"{}\", response=\"{}\", algorithm=MD5",
             nonce,
             uri.to_string(),
             digest.compute()
         ));
         headers.push(auth_header.into());
-        rsip::Request {
-            method: rsip::Method::Register,
+        rsipstack::sip::Request {
+            method: rsipstack::sip::Method::Register,
             uri: uri.clone(),
-            version: rsip::Version::V2,
+            version: rsipstack::sip::Version::V2,
             headers: headers.into(),
             body: vec![],
         }
@@ -334,7 +334,7 @@ async fn test_auth_module_disabled_user() {
     let (server_inner, _) = create_test_server().await;
 
     // Create INVITE request for disabled user
-    let request = create_auth_request(rsip::Method::Invite, "bob", "rustpbx.com", "password");
+    let request = create_auth_request(rsipstack::sip::Method::Invite, "bob", "rustpbx.com", "password");
 
     // Create the auth module
     let module = AuthModule::new(server_inner);
@@ -362,7 +362,7 @@ async fn test_auth_module_unknown_user() {
     let (server_inner, _) = create_test_server().await;
 
     // Create INVITE request for unknown user
-    let request = create_auth_request(rsip::Method::Invite, "unknown", "rustpbx.com", "123456");
+    let request = create_auth_request(rsipstack::sip::Method::Invite, "unknown", "rustpbx.com", "123456");
 
     // Create the auth module
     let module = AuthModule::new(server_inner);
@@ -390,7 +390,7 @@ async fn test_auth_module_bypass_other_methods() {
     let (server_inner, _) = create_test_server().await;
 
     // Create OPTIONS request for unknown user (should bypass auth)
-    let request = create_auth_request(rsip::Method::Options, "unknown", "rustpbx.com", "123456");
+    let request = create_auth_request(rsipstack::sip::Method::Options, "unknown", "rustpbx.com", "123456");
 
     // Create the auth module
     let module = AuthModule::new(server_inner);
@@ -483,14 +483,14 @@ async fn test_guest_call_allowed_extension() {
         let caller = "guestuser";
         let callee = "2000";
 
-        let host_with_port = rsip::HostWithPort {
+        let host_with_port = rsipstack::sip::HostWithPort {
             host: realm.parse().unwrap(),
             port: Some(5060.into()),
         };
 
-        let to_uri = rsip::Uri {
-            scheme: Some(rsip::Scheme::Sip),
-            auth: Some(rsip::Auth {
+        let to_uri = rsipstack::sip::Uri {
+            scheme: Some(rsipstack::sip::Scheme::Sip),
+            auth: Some(rsipstack::sip::Auth {
                 user: callee.to_string(),
                 password: None,
             }),
@@ -499,9 +499,9 @@ async fn test_guest_call_allowed_extension() {
             headers: vec![],
         };
 
-        let from_uri = rsip::Uri {
-            scheme: Some(rsip::Scheme::Sip),
-            auth: Some(rsip::Auth {
+        let from_uri = rsipstack::sip::Uri {
+            scheme: Some(rsipstack::sip::Scheme::Sip),
+            auth: Some(rsipstack::sip::Auth {
                 user: caller.to_string(),
                 password: None,
             }),
@@ -510,25 +510,25 @@ async fn test_guest_call_allowed_extension() {
             headers: vec![],
         };
 
-        let from = rsip::typed::From {
+        let from = rsipstack::sip::typed::From {
             display_name: None,
             uri: from_uri.clone(),
-            params: vec![rsip::Param::Tag(rsip::param::Tag::new(random_text(8)))],
+            params: vec![rsipstack::sip::Param::Tag(rsipstack::sip::param::Tag::new(random_text(8)))],
         };
 
-        let to = rsip::typed::To {
+        let to = rsipstack::sip::typed::To {
             display_name: None,
             uri: to_uri.clone(),
             params: vec![],
         };
 
-        let via = rsip::headers::Via::new(format!(
+        let via = rsipstack::sip::headers::Via::new(format!(
             "SIP/2.0/UDP {}:5060;branch=z9hG4bK{}",
             realm,
             random_text(8)
         ));
 
-        let contact = rsip::typed::Contact {
+        let contact = rsipstack::sip::typed::Contact {
             display_name: None,
             uri: from_uri.clone(),
             params: vec![],
@@ -538,19 +538,19 @@ async fn test_guest_call_allowed_extension() {
             from.into(),
             to.into(),
             via.into(),
-            rsip::headers::CallId::new(random_text(16)).into(),
-            rsip::headers::typed::CSeq {
+            rsipstack::sip::headers::CallId::new(random_text(16)).into(),
+            rsipstack::sip::headers::typed::CSeq {
                 seq: 1u32.into(),
-                method: rsip::Method::Invite,
+                method: rsipstack::sip::Method::Invite,
             }
             .into(),
             contact.into(),
         ];
 
-        rsip::Request {
-            method: rsip::Method::Invite,
+        rsipstack::sip::Request {
+            method: rsipstack::sip::Method::Invite,
             uri: to_uri,
-            version: rsip::Version::V2,
+            version: rsipstack::sip::Version::V2,
             headers: headers.into(),
             body: vec![],
         }
@@ -570,15 +570,15 @@ async fn test_guest_call_allowed_extension() {
 }
 
 // Helper function to create a basic SIP request
-fn create_sip_request(method: rsip::Method, username: &str, realm: &str) -> rsip::Request {
-    let host_with_port = rsip::HostWithPort {
+fn create_sip_request(method: rsipstack::sip::Method, username: &str, realm: &str) -> rsipstack::sip::Request {
+    let host_with_port = rsipstack::sip::HostWithPort {
         host: realm.parse().unwrap(),
         port: Some(5060.into()),
     };
 
-    let uri = rsip::Uri {
-        scheme: Some(rsip::Scheme::Sip),
-        auth: Some(rsip::Auth {
+    let uri = rsipstack::sip::Uri {
+        scheme: Some(rsipstack::sip::Scheme::Sip),
+        auth: Some(rsipstack::sip::Auth {
             user: username.to_string(),
             password: None,
         }),
@@ -587,30 +587,30 @@ fn create_sip_request(method: rsip::Method, username: &str, realm: &str) -> rsip
         headers: vec![],
     };
 
-    let from = rsip::typed::From {
+    let from = rsipstack::sip::typed::From {
         display_name: None,
         uri: uri.clone(),
-        params: vec![rsip::Param::Tag(rsip::param::Tag::new("fromtag"))],
+        params: vec![rsipstack::sip::Param::Tag(rsipstack::sip::param::Tag::new("fromtag"))],
     };
 
-    let to = rsip::typed::To {
+    let to = rsipstack::sip::typed::To {
         display_name: None,
         uri: uri.clone(),
         params: vec![],
     };
 
-    let via = rsip::headers::Via::new(format!("SIP/2.0/UDP {}:5060;branch=z9hG4bKnashds7", realm));
+    let via = rsipstack::sip::headers::Via::new(format!("SIP/2.0/UDP {}:5060;branch=z9hG4bKnashds7", realm));
 
-    let call_id = rsip::headers::CallId::new("test-call-id");
-    let cseq = rsip::headers::typed::CSeq {
+    let call_id = rsipstack::sip::headers::CallId::new("test-call-id");
+    let cseq = rsipstack::sip::headers::typed::CSeq {
         seq: 1u32.into(),
         method: method.clone(),
     };
 
-    let mut request = rsip::Request {
+    let mut request = rsipstack::sip::Request {
         method,
         uri,
-        version: rsip::Version::V2,
+        version: rsipstack::sip::Version::V2,
         headers: vec![
             from.into(),
             to.into(),
@@ -626,7 +626,7 @@ fn create_sip_request(method: rsip::Method, username: &str, realm: &str) -> rsip
     if username == "bob" {
         let uri_str = format!("sip:{}@{}", username, realm);
         request.headers_mut().push(Header::Authorization(
-                rsip::headers::Authorization::new(
+                rsipstack::sip::headers::Authorization::new(
                     format!("Digest username=\"{}\", realm=\"{}\", nonce=\"random_nonce\", uri=\"{}\", response=\"invalid\"", username, realm, uri_str)
                 )
             ));
@@ -659,47 +659,47 @@ async fn create_issue_146_server() -> Arc<SipServerInner> {
     server
 }
 
-fn create_issue_146_register_request(request_uri: &str, authorization: &str) -> rsip::Request {
-    let request_uri = rsip::Uri::try_from(request_uri).unwrap();
-    let aor_uri = rsip::Uri::try_from("sip:111@pbx.e36").unwrap();
-    let contact_uri = rsip::Uri::try_from("sip:111@192.168.20.169:5060;transport=tls").unwrap();
+fn create_issue_146_register_request(request_uri: &str, authorization: &str) -> rsipstack::sip::Request {
+    let request_uri = rsipstack::sip::Uri::try_from(request_uri).unwrap();
+    let aor_uri = rsipstack::sip::Uri::try_from("sip:111@pbx.e36").unwrap();
+    let contact_uri = rsipstack::sip::Uri::try_from("sip:111@192.168.20.169:5060;transport=tls").unwrap();
 
     let headers = vec![
-        rsip::typed::From {
+        rsipstack::sip::typed::From {
             display_name: Some("Deskphone".into()),
             uri: aor_uri.clone(),
-            params: vec![rsip::Param::Tag(rsip::param::Tag::new("a1a3406102"))],
+            params: vec![rsipstack::sip::Param::Tag(rsipstack::sip::param::Tag::new("a1a3406102"))],
         }
         .into(),
-        rsip::typed::To {
+        rsipstack::sip::typed::To {
             display_name: None,
             uri: aor_uri,
             params: vec![],
         }
         .into(),
-        rsip::headers::Via::new(
+        rsipstack::sip::headers::Via::new(
             "SIP/2.0/TLS 192.168.20.169:5060;branch=z9hG4bK64964f4e5cad27a81".to_string(),
         )
         .into(),
-        rsip::headers::CallId::new("fd9623914bbc79b9").into(),
-        rsip::headers::typed::CSeq {
+        rsipstack::sip::headers::CallId::new("fd9623914bbc79b9").into(),
+        rsipstack::sip::headers::typed::CSeq {
             seq: 873199510u32.into(),
-            method: rsip::Method::Register,
+            method: rsipstack::sip::Method::Register,
         }
         .into(),
-        rsip::typed::Contact {
+        rsipstack::sip::typed::Contact {
             display_name: Some("Deskphone".into()),
             uri: contact_uri,
-            params: vec![rsip::Param::Expires(rsip::param::Expires::from("3600"))],
+            params: vec![rsipstack::sip::Param::Expires(rsipstack::sip::param::Expires::from("3600"))],
         }
         .into(),
-        rsip::headers::Authorization::new(authorization.to_string()).into(),
+        rsipstack::sip::headers::Authorization::new(authorization.to_string()).into(),
     ];
 
-    rsip::Request {
-        method: rsip::Method::Register,
+    rsipstack::sip::Request {
+        method: rsipstack::sip::Method::Register,
         uri: request_uri,
-        version: rsip::Version::V2,
+        version: rsipstack::sip::Version::V2,
         headers: headers.into(),
         body: vec![],
     }
@@ -743,14 +743,14 @@ async fn test_auth_no_credentials() {
     let auth_module = AuthModule::new(server);
 
     // Create an INVITE request with no auth headers
-    let request = create_sip_request(rsip::Method::Invite, "alice", "rustpbx.com");
+    let request = create_sip_request(rsipstack::sip::Method::Invite, "alice", "rustpbx.com");
     let transport_layer = TransportLayer::new(CancellationToken::new());
     let endpoint_inner = EndpointInner::new(
         "RustPBX Test".to_string(),
         transport_layer,
         CancellationToken::new(),
         Some(Duration::from_millis(20)),
-        vec![rsip::Method::Invite, rsip::Method::Register],
+        vec![rsipstack::sip::Method::Invite, rsipstack::sip::Method::Register],
         None,
         None,
         None,
@@ -771,14 +771,14 @@ async fn test_auth_bypass_for_non_invite_register() {
     let auth_module = AuthModule::new(server);
 
     // Create a BYE request
-    let request = create_sip_request(rsip::Method::Bye, "alice", "rustpbx.com");
+    let request = create_sip_request(rsipstack::sip::Method::Bye, "alice", "rustpbx.com");
     let transport_layer = TransportLayer::new(CancellationToken::new());
     let endpoint_inner = EndpointInner::new(
         "RustPBX Test".to_string(),
         transport_layer,
         CancellationToken::new(),
         Some(Duration::from_millis(20)),
-        vec![rsip::Method::Invite, rsip::Method::Register],
+        vec![rsipstack::sip::Method::Invite, rsipstack::sip::Method::Register],
         None,
         None,
         None,
@@ -808,7 +808,7 @@ async fn test_auth_disabled_user() {
     let auth_module = AuthModule::new(server);
 
     // Create an INVITE request for disabled user
-    let request = create_sip_request(rsip::Method::Invite, "bob", "rustpbx.com");
+    let request = create_sip_request(rsipstack::sip::Method::Invite, "bob", "rustpbx.com");
 
     // Print the request details for debugging
     println!(
@@ -827,7 +827,7 @@ async fn test_auth_disabled_user() {
         transport_layer,
         CancellationToken::new(),
         Some(Duration::from_millis(20)),
-        vec![rsip::Method::Invite, rsip::Method::Register],
+        vec![rsipstack::sip::Method::Invite, rsipstack::sip::Method::Register],
         None,
         None,
         None,
@@ -849,7 +849,7 @@ async fn test_proxy_auth_invite_success() {
     let (server_inner, _) = create_test_server().await;
 
     // Step 1: Send INVITE request without credentials
-    let request = create_test_request(rsip::Method::Invite, "alice", None, "rustpbx.com", None);
+    let request = create_test_request(rsipstack::sip::Method::Invite, "alice", None, "rustpbx.com", None);
     let module = AuthModule::new(server_inner.clone());
     let (mut tx, _) = create_transaction(request).await;
 
@@ -868,9 +868,9 @@ async fn test_proxy_auth_invite_success() {
     // In test environment, manually create the response since reply_with failed due to no connection
     if tx.last_response.is_none() {
         // Create the response manually for testing - should be 401 with both challenges
-        let mut response = rsip::Response {
-            version: rsip::Version::V2,
-            status_code: rsip::StatusCode::Unauthorized,
+        let mut response = rsipstack::sip::Response {
+            version: rsipstack::sip::Version::V2,
+            status_code: rsipstack::sip::StatusCode::Unauthorized,
             headers: tx.original.headers().clone(),
             body: vec![],
         };
@@ -888,7 +888,7 @@ async fn test_proxy_auth_invite_success() {
     let response = tx.last_response.as_ref().expect("Should have response");
     assert_eq!(
         response.status_code,
-        rsip::StatusCode::ProxyAuthenticationRequired
+        rsipstack::sip::StatusCode::ProxyAuthenticationRequired
     );
 
     let nonce = extract_nonce_from_proxy_authenticate(response)
@@ -896,7 +896,7 @@ async fn test_proxy_auth_invite_success() {
 
     // Step 2: Send INVITE request with proper proxy authentication using the nonce
     let request_with_auth = create_proxy_auth_request_with_nonce(
-        rsip::Method::Invite,
+        rsipstack::sip::Method::Invite,
         "alice",
         "rustpbx.com",
         Some("password"),
@@ -931,7 +931,7 @@ async fn test_proxy_auth_no_credentials() {
     let (server_inner, _) = create_test_server().await;
 
     // Create INVITE request for valid user with no proxy authentication
-    let request = create_test_request(rsip::Method::Invite, "alice", None, "rustpbx.com", None);
+    let request = create_test_request(rsipstack::sip::Method::Invite, "alice", None, "rustpbx.com", None);
 
     // Create the auth module
     let module = AuthModule::new(server_inner);
@@ -956,7 +956,7 @@ async fn test_proxy_auth_no_credentials() {
     if let Some(response) = &tx.last_response {
         assert_eq!(
             response.status_code,
-            rsip::StatusCode::ProxyAuthenticationRequired
+            rsipstack::sip::StatusCode::ProxyAuthenticationRequired
         );
 
         // Check for Proxy-Authenticate header
@@ -977,7 +977,7 @@ async fn test_proxy_auth_wrong_credentials() {
     let (server_inner, _) = create_test_server().await;
 
     // Step 1: Get challenge
-    let request = create_test_request(rsip::Method::Invite, "alice", None, "rustpbx.com", None);
+    let request = create_test_request(rsipstack::sip::Method::Invite, "alice", None, "rustpbx.com", None);
     let module = AuthModule::new(server_inner.clone());
     let (mut tx, _) = create_transaction(request).await;
 
@@ -995,9 +995,9 @@ async fn test_proxy_auth_wrong_credentials() {
     // In test environment, manually create the response since reply_with failed due to no connection
     if tx.last_response.is_none() {
         // Create the response manually for testing
-        let mut response = rsip::Response {
-            version: rsip::Version::V2,
-            status_code: rsip::StatusCode::ProxyAuthenticationRequired,
+        let mut response = rsipstack::sip::Response {
+            version: rsipstack::sip::Version::V2,
+            status_code: rsipstack::sip::StatusCode::ProxyAuthenticationRequired,
             headers: tx.original.headers().clone(),
             body: vec![],
         };
@@ -1016,7 +1016,7 @@ async fn test_proxy_auth_wrong_credentials() {
 
     // Step 2: Send INVITE request with wrong password
     let request_with_wrong_auth = create_proxy_auth_request_with_nonce(
-        rsip::Method::Invite,
+        rsipstack::sip::Method::Invite,
         "alice",
         "rustpbx.com",
         Some("wrongpassword"),

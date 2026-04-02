@@ -6,9 +6,8 @@ use crate::metrics;
 use crate::proxy::locator::LocatorEvent;
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
-use rsip::headers::UntypedHeader;
-use rsip::prelude::HeadersExt;
-use rsip::{Header, Param, Transport, Uri};
+use rsipstack::sip::prelude::HeadersExt;
+use rsipstack::sip::{Header, Param, Transport, Uri};
 use rsipstack::{transaction::transaction::Transaction, transport::SipAddr};
 use std::{collections::HashMap, sync::Arc, time::Instant};
 use tokio_util::sync::CancellationToken;
@@ -184,7 +183,7 @@ impl ParsedContact {
     }
 }
 
-fn parse_contact_headers(request: &rsip::Request) -> Result<Vec<ParsedContact>> {
+fn parse_contact_headers(request: &rsipstack::sip::Request) -> Result<Vec<ParsedContact>> {
     let mut contacts = Vec::new();
     for value in collect_header_values(request, "Contact") {
         for entry in split_contact_entries(&value) {
@@ -197,7 +196,7 @@ fn parse_contact_headers(request: &rsip::Request) -> Result<Vec<ParsedContact>> 
     Ok(contacts)
 }
 
-fn collect_header_values(request: &rsip::Request, name: &str) -> Vec<String> {
+fn collect_header_values(request: &rsipstack::sip::Request, name: &str) -> Vec<String> {
     let header_name = name.to_ascii_lowercase();
     request
         .headers
@@ -366,7 +365,7 @@ fn build_contact_param(value: &str) -> Option<ContactParam> {
     }
 }
 
-fn parse_route_header(request: &rsip::Request, header: &str) -> Vec<Uri> {
+fn parse_route_header(request: &rsipstack::sip::Request, header: &str) -> Vec<Uri> {
     collect_header_values(request, header)
         .into_iter()
         .flat_map(|value| {
@@ -452,8 +451,8 @@ impl ProxyModule for RegistrarModule {
     fn name(&self) -> &str {
         "registrar"
     }
-    fn allow_methods(&self) -> Vec<rsip::Method> {
-        vec![rsip::Method::Register]
+    fn allow_methods(&self) -> Vec<rsipstack::sip::Method> {
+        vec![rsipstack::sip::Method::Register]
     }
     async fn on_start(&mut self) -> Result<()> {
         debug!("Registrar module started");
@@ -471,7 +470,7 @@ impl ProxyModule for RegistrarModule {
         _cookie: TransactionCookie,
     ) -> Result<ProxyAction> {
         let method = tx.original.method();
-        if !matches!(method, rsip::Method::Register) {
+        if !matches!(method, rsipstack::sip::Method::Register) {
             return Ok(ProxyAction::Continue);
         }
 
@@ -490,7 +489,7 @@ impl ProxyModule for RegistrarModule {
             Err(e) => {
                 info!("failed to parse user: {:?}", e);
                 metrics::sip::registration_failed(&realm, "invalid_user");
-                tx.reply(rsip::StatusCode::BadRequest).await.ok();
+                tx.reply(rsipstack::sip::StatusCode::BadRequest).await.ok();
                 return Ok(ProxyAction::Abort);
             }
         };
@@ -500,13 +499,13 @@ impl ProxyModule for RegistrarModule {
                 Ok(uri) => uri,
                 Err(e) => {
                     info!("invalid To header uri: {:?}", e);
-                    tx.reply(rsip::StatusCode::BadRequest).await.ok();
+                    tx.reply(rsipstack::sip::StatusCode::BadRequest).await.ok();
                     return Ok(ProxyAction::Abort);
                 }
             },
             Err(e) => {
                 info!("missing To header: {:?}", e);
-                tx.reply(rsip::StatusCode::BadRequest).await.ok();
+                tx.reply(rsipstack::sip::StatusCode::BadRequest).await.ok();
                 return Ok(ProxyAction::Abort);
             }
         };
@@ -521,14 +520,14 @@ impl ProxyModule for RegistrarModule {
             Ok(entries) => entries,
             Err(e) => {
                 info!("failed to parse contact headers: {:?}", e);
-                tx.reply(rsip::StatusCode::BadRequest).await.ok();
+                tx.reply(rsipstack::sip::StatusCode::BadRequest).await.ok();
                 return Ok(ProxyAction::Abort);
             }
         };
 
         if contact_entries.is_empty() {
             info!("REGISTER missing Contact header");
-            tx.reply(rsip::StatusCode::BadRequest).await.ok();
+            tx.reply(rsipstack::sip::StatusCode::BadRequest).await.ok();
             return Ok(ProxyAction::Abort);
         }
 
@@ -536,13 +535,13 @@ impl ProxyModule for RegistrarModule {
         if wildcard_count > 0 {
             if wildcard_count > 1 || contact_entries.len() > 1 {
                 info!("invalid REGISTER with multiple wildcard contacts");
-                tx.reply(rsip::StatusCode::BadRequest).await.ok();
+                tx.reply(rsipstack::sip::StatusCode::BadRequest).await.ok();
                 return Ok(ProxyAction::Abort);
             }
             let expires = contact_entries[0].expires().or(global_expires).unwrap_or(0);
             if expires != 0 {
                 info!("wildcard contact must have expires=0");
-                tx.reply(rsip::StatusCode::BadRequest).await.ok();
+                tx.reply(rsipstack::sip::StatusCode::BadRequest).await.ok();
                 return Ok(ProxyAction::Abort);
             }
 
@@ -566,9 +565,9 @@ impl ProxyModule for RegistrarModule {
             }
 
             let mut headers = Vec::new();
-            if let Some(allows) = tx.endpoint_inner.allows.lock().unwrap().as_ref() {
+            if let Some(allows) = tx.endpoint_inner.allows.lock().as_deref() {
                 if !allows.is_empty() {
-                    headers.push(rsip::Header::Allow(
+                    headers.push(rsipstack::sip::Header::Allow(
                         allows
                             .iter()
                             .map(|m| m.to_string())
@@ -578,7 +577,7 @@ impl ProxyModule for RegistrarModule {
                     ));
                 }
             }
-            tx.reply_with(rsip::StatusCode::OK, headers, None)
+            tx.reply_with(rsipstack::sip::StatusCode::OK, headers, None)
                 .await
                 .ok();
             return Ok(ProxyAction::Abort);
@@ -602,7 +601,7 @@ impl ProxyModule for RegistrarModule {
                 Some(dest) => dest,
                 None => {
                     info!("unable to determine network destination for REGISTER");
-                    tx.reply(rsip::StatusCode::ServiceUnavailable).await.ok();
+                    tx.reply(rsipstack::sip::StatusCode::ServiceUnavailable).await.ok();
                     return Ok(ProxyAction::Abort);
                 }
             };
@@ -663,7 +662,7 @@ impl ProxyModule for RegistrarModule {
                 Err(e) => {
                     info!("failed to register user: {:?}", e);
                     metrics::sip::registration_failed(&realm, "storage_error");
-                    tx.reply(rsip::StatusCode::ServiceUnavailable).await.ok();
+                    tx.reply(rsipstack::sip::StatusCode::ServiceUnavailable).await.ok();
                     return Ok(ProxyAction::Abort);
                 }
             }
@@ -671,7 +670,7 @@ impl ProxyModule for RegistrarModule {
             response_headers.push(Header::Other("Contact".into(), rendered_contact.into()));
         }
 
-        if let Some(allows) = tx.endpoint_inner.allows.lock().unwrap().as_ref() {
+        if let Some(allows) = tx.endpoint_inner.allows.lock().as_deref() {
             if !allows.is_empty() {
                 response_headers.push(Header::Allow(
                     allows
@@ -687,7 +686,7 @@ impl ProxyModule for RegistrarModule {
             global_expires.unwrap_or(default_expires).into(),
         ));
 
-        tx.reply_with(rsip::StatusCode::OK, response_headers, None)
+        tx.reply_with(rsipstack::sip::StatusCode::OK, response_headers, None)
             .await
             .ok();
         Ok(ProxyAction::Abort)

@@ -6,7 +6,7 @@ use crate::models::presence;
 use crate::proxy::locator::LocatorEvent;
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
-use rsip::prelude::{HeadersExt, ToTypedHeader, UntypedHeader};
+use rsipstack::sip::prelude::{HeadersExt, ToTypedHeader};
 use rsipstack::dialog::DialogId;
 use rsipstack::transaction::transaction::Transaction;
 use sea_orm::{DatabaseConnection, EntityTrait, Set};
@@ -110,7 +110,7 @@ impl Default for PresenceState {
 /// A SIP subscription record for PRESENCE (RFC 3856).
 #[derive(Clone, Debug)]
 pub struct Subscriber {
-    pub aor: rsip::Uri,
+    pub aor: rsipstack::sip::Uri,
     pub dialog_id: DialogId,
     pub expires: std::time::Instant,
 }
@@ -119,7 +119,7 @@ pub struct Subscriber {
 #[derive(Clone, Debug)]
 pub struct MwiSubscriber {
     /// Address of the subscriber (used as To: in NOTIFY).
-    pub aor: rsip::Uri,
+    pub aor: rsipstack::sip::Uri,
     pub dialog_id: DialogId,
     /// Account URI for the `Message-Account:` header (e.g. "sip:1001@pbx").
     pub account_uri: String,
@@ -389,11 +389,11 @@ impl ProxyModule for PresenceModule {
     fn name(&self) -> &str {
         "presence"
     }
-    fn allow_methods(&self) -> Vec<rsip::Method> {
+    fn allow_methods(&self) -> Vec<rsipstack::sip::Method> {
         vec![
-            rsip::Method::Subscribe,
-            rsip::Method::Publish,
-            rsip::Method::Notify,
+            rsipstack::sip::Method::Subscribe,
+            rsipstack::sip::Method::Publish,
+            rsipstack::sip::Method::Notify,
         ]
     }
     async fn on_start(&mut self) -> Result<()> {
@@ -459,14 +459,14 @@ impl ProxyModule for PresenceModule {
         cookie: TransactionCookie,
     ) -> Result<ProxyAction> {
         match tx.original.method {
-            rsip::Method::Subscribe => {
+            rsipstack::sip::Method::Subscribe => {
                 // Dispatch based on the Event header value.
                 let event_val = tx
                     .original
                     .headers
                     .iter()
                     .find_map(|h| {
-                        if let rsip::Header::Event(ev) = h {
+                        if let rsipstack::sip::Header::Event(ev) = h {
                             Some(ev.value().to_ascii_lowercase())
                         } else {
                             None
@@ -481,7 +481,7 @@ impl ProxyModule for PresenceModule {
                 }
                 Ok(ProxyAction::Abort)
             }
-            rsip::Method::Publish => {
+            rsipstack::sip::Method::Publish => {
                 self.handle_publish(tx, &cookie).await?;
                 Ok(ProxyAction::Abort)
             }
@@ -516,7 +516,7 @@ impl PresenceModule {
         let expires = tx
             .original
             .expires_header()
-            .and_then(|h| h.seconds().ok())
+            .and_then(|h| h.value().parse::<u32>().ok())
             .unwrap_or(3600);
 
         let sub = Subscriber {
@@ -528,7 +528,7 @@ impl PresenceModule {
         self.manager.add_subscriber(&identity, sub.clone());
 
         // Send 200 OK
-        tx.reply(rsip::StatusCode::OK).await.ok();
+        tx.reply(rsipstack::sip::StatusCode::OK).await.ok();
 
         // Send initial NOTIFY
         let state = self.manager.get_state(&identity);
@@ -558,7 +558,7 @@ impl PresenceModule {
         let expires = tx
             .original
             .expires_header()
-            .and_then(|h| h.seconds().ok())
+            .and_then(|h| h.value().parse::<u32>().ok())
             .unwrap_or(3600);
 
         let mut current = self.manager.get_state(&identity);
@@ -620,7 +620,7 @@ impl PresenceModule {
         }
 
         self.manager.update_state(&identity, current).await;
-        tx.reply(rsip::StatusCode::OK).await.ok();
+        tx.reply(rsipstack::sip::StatusCode::OK).await.ok();
 
         Ok(())
     }
@@ -697,16 +697,16 @@ impl PresenceModule {
             .saturating_duration_since(std::time::Instant::now())
             .as_secs();
         let headers = vec![
-            rsip::Header::Event(rsip::headers::Event::new("presence")),
-            rsip::Header::SubscriptionState(rsip::headers::SubscriptionState::new(format!(
+            rsipstack::sip::Header::Event(rsipstack::sip::headers::Event::new("presence")),
+            rsipstack::sip::Header::SubscriptionState(rsipstack::sip::headers::SubscriptionState::new(format!(
                 "active;expires={}",
                 expires_left
             ))),
-            rsip::Header::ContentType(rsip::headers::ContentType::from("application/pidf+xml")),
+            rsipstack::sip::Header::ContentType(rsipstack::sip::headers::ContentType::from("application/pidf+xml")),
         ];
 
         dialog
-            .request(rsip::Method::Notify, Some(headers), Some(body.into_bytes()))
+            .request(rsipstack::sip::Method::Notify, Some(headers), Some(body.into_bytes()))
             .await
             .map_err(|e| anyhow!("{:?}", e))?;
 
@@ -741,7 +741,7 @@ impl PresenceModule {
         let expires = tx
             .original
             .expires_header()
-            .and_then(|h| h.seconds().ok())
+            .and_then(|h| h.value().parse::<u32>().ok())
             .unwrap_or(3600);
 
         let (state_tx, _) = tokio::sync::mpsc::unbounded_channel();
@@ -761,7 +761,7 @@ impl PresenceModule {
         self.manager.add_mwi_subscriber(&extension, sub.clone());
 
         // Send 200 OK then an immediate NOTIFY with 0 new messages.
-        tx.reply(rsip::StatusCode::OK).await.ok();
+        tx.reply(rsipstack::sip::StatusCode::OK).await.ok();
 
         let initial_trigger = MwiTrigger {
             extension: extension.clone(),
@@ -806,18 +806,18 @@ impl PresenceModule {
             .as_secs();
 
         let headers = vec![
-            rsip::Header::Event(rsip::headers::Event::new("message-summary")),
-            rsip::Header::SubscriptionState(rsip::headers::SubscriptionState::new(format!(
+            rsipstack::sip::Header::Event(rsipstack::sip::headers::Event::new("message-summary")),
+            rsipstack::sip::Header::SubscriptionState(rsipstack::sip::headers::SubscriptionState::new(format!(
                 "active;expires={}",
                 expires_left
             ))),
-            rsip::Header::ContentType(rsip::headers::ContentType::from(
+            rsipstack::sip::Header::ContentType(rsipstack::sip::headers::ContentType::from(
                 "application/simple-message-summary",
             )),
         ];
 
         dialog
-            .request(rsip::Method::Notify, Some(headers), Some(body.into_bytes()))
+            .request(rsipstack::sip::Method::Notify, Some(headers), Some(body.into_bytes()))
             .await
             .map_err(|e| anyhow!("{:?}", e))?;
 
@@ -829,7 +829,7 @@ impl PresenceModule {
 mod tests {
     use super::*;
     use crate::call::Location;
-    use rsip::Uri;
+    use rsipstack::sip::Uri;
 
     #[tokio::test]
     async fn test_presence_manager_state() {

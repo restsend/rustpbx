@@ -11,7 +11,7 @@ use crate::{
     },
 };
 use chrono::{Duration, Utc};
-use rsip::prelude::HeadersExt;
+use rsipstack::sip::prelude::HeadersExt;
 use std::{
     collections::HashMap,
     fs,

@@ -164,7 +164,7 @@ pub fn extract_sip_username(input: &str) -> Option<String> {
         return None;
     }
 
-    if let Ok(uri) = rsip::Uri::try_from(trimmed) {
+    if let Ok(uri) = rsipstack::sip::Uri::try_from(trimmed) {
         if let Some(user) = uri.user() {
             let value = user.to_string();
             if !value.is_empty() {

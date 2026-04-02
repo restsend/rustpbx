@@ -193,7 +193,7 @@ impl Locator for DbLocator {
         let transport = location
             .transport
             .or_else(|| r#type.clone())
-            .unwrap_or(rsip::transport::Transport::Udp);
+            .unwrap_or(rsipstack::sip::transport::Transport::Udp);
         let host = addr.to_string();
 
         let now = SystemTime::now()
@@ -296,17 +296,17 @@ impl Locator for DbLocator {
 
         let mut locations = Vec::new();
         for loc in removed_locations {
-            let aor = rsip::Uri::try_from(loc.aor.as_str())
+            let aor = rsipstack::sip::Uri::try_from(loc.aor.as_str())
                 .map_err(|e| anyhow::anyhow!("Error parsing aor: {}", e))?;
             let registered_aor = aor.clone();
             // Parse transport from string
             let transport = match loc.transport.to_uppercase().as_str() {
-                "UDP" => rsip::transport::Transport::Udp,
-                "TCP" => rsip::transport::Transport::Tcp,
-                "TLS" => rsip::transport::Transport::Tls,
-                "WS" => rsip::transport::Transport::Ws,
-                "WSS" => rsip::transport::Transport::Wss,
-                _ => rsip::transport::Transport::Udp, // Default to UDP
+                "UDP" => rsipstack::sip::transport::Transport::Udp,
+                "TCP" => rsipstack::sip::transport::Transport::Tcp,
+                "TLS" => rsipstack::sip::transport::Transport::Tls,
+                "WS" => rsipstack::sip::transport::Transport::Ws,
+                "WSS" => rsipstack::sip::transport::Transport::Wss,
+                _ => rsipstack::sip::transport::Transport::Udp, // Default to UDP
             };
 
             // Parse destination host to HostWithPort
@@ -361,7 +361,7 @@ impl Locator for DbLocator {
         Ok(())
     }
 
-    async fn lookup(&self, uri: &rsip::Uri) -> Result<Vec<Location>> {
+    async fn lookup(&self, uri: &rsipstack::sip::Uri) -> Result<Vec<Location>> {
         let now_epoch = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap_or_default()
@@ -429,7 +429,7 @@ impl Locator for DbLocator {
                     continue;
                 }
             }
-            let aor = rsip::Uri::try_from(model.aor.as_str())
+            let aor = rsipstack::sip::Uri::try_from(model.aor.as_str())
                 .map_err(|e| anyhow::anyhow!("Error parsing aor: {}", e))?;
 
             if !uri_matches(&aor, uri) {
@@ -439,12 +439,12 @@ impl Locator for DbLocator {
             let registered_aor = aor.clone();
             // Parse transport from string
             let transport = match model.transport.to_uppercase().as_str() {
-                "UDP" => rsip::transport::Transport::Udp,
-                "TCP" => rsip::transport::Transport::Tcp,
-                "TLS" => rsip::transport::Transport::Tls,
-                "WS" => rsip::transport::Transport::Ws,
-                "WSS" => rsip::transport::Transport::Wss,
-                _ => rsip::transport::Transport::Udp, // Default to UDP
+                "UDP" => rsipstack::sip::transport::Transport::Udp,
+                "TCP" => rsipstack::sip::transport::Transport::Tcp,
+                "TLS" => rsipstack::sip::transport::Transport::Tls,
+                "WS" => rsipstack::sip::transport::Transport::Ws,
+                "WSS" => rsipstack::sip::transport::Transport::Wss,
+                _ => rsipstack::sip::transport::Transport::Udp, // Default to UDP
             };
 
             // Parse destination host to HostWithPort

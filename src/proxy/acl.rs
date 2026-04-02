@@ -3,7 +3,7 @@ use crate::call::{TransactionCookie, TrunkContext};
 use crate::{config::ProxyConfig, proxy::routing::TrunkConfig};
 use anyhow::Result;
 use async_trait::async_trait;
-use rsip::prelude::{HeadersExt, UntypedHeader};
+use rsipstack::sip::prelude::HeadersExt;
 use rsipstack::{transaction::transaction::Transaction, transport::SipConnection};
 use std::{collections::HashSet, net::IpAddr, str::FromStr, sync::Arc};
 use tokio_util::sync::CancellationToken;

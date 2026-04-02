@@ -1,9 +1,9 @@
 use crate::sipflow::{SipFlowBackend, SipFlowItem, SipFlowMsgType};
 use bytes::Bytes;
 use crossbeam_channel::{RecvTimeoutError, Sender, bounded};
-use rsip::{
+use rsipstack::sip::{
     SipMessage,
-    prelude::{HeadersExt, UntypedHeader},
+    prelude::HeadersExt,
 };
 use rsipstack::{transaction::endpoint::MessageInspector, transport::SipAddr};
 use std::sync::{Arc, Mutex};
@@ -241,8 +241,8 @@ impl SipFlow {
 
         // Fast path: extract call_id header without full parsing
         let call_id_result = match msg {
-            rsip::SipMessage::Request(req) => req.call_id_header(),
-            rsip::SipMessage::Response(resp) => resp.call_id_header(),
+            rsipstack::sip::SipMessage::Request(req) => req.call_id_header(),
+            rsipstack::sip::SipMessage::Response(resp) => resp.call_id_header(),
         };
 
         if let Ok(id) = call_id_result {

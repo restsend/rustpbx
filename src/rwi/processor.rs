@@ -779,8 +779,8 @@ impl RwiCommandProcessor {
             .clone();
 
         
-        let destination_uri: rsip::Uri =
-            rsip::Uri::try_from(req.destination.as_str()).map_err(|_| {
+        let destination_uri: rsipstack::sip::Uri =
+            rsipstack::sip::Uri::try_from(req.destination.as_str()).map_err(|_| {
                 CommandError::CommandFailed(format!("invalid destination: {}", req.destination))
             })?;
 
@@ -795,13 +795,13 @@ impl RwiCommandProcessor {
             .caller_id
             .clone()
             .unwrap_or_else(|| format!("sip:rwi@{}", realm));
-        let caller_uri: rsip::Uri = rsip::Uri::try_from(caller_str.as_str())
+        let caller_uri: rsipstack::sip::Uri = rsipstack::sip::Uri::try_from(caller_str.as_str())
             .map_err(|_| CommandError::CommandFailed("invalid caller_id".into()))?;
 
         
-        let mut headers: Vec<rsip::Header> = vec![rsip::headers::MaxForwards::from(70u32).into()];
+        let mut headers: Vec<rsipstack::sip::Header> = vec![rsipstack::sip::headers::MaxForwards::from(70u32).into()];
         for (k, v) in &req.extra_headers {
-            headers.push(rsip::Header::Other(k.clone().into(), v.clone()));
+            headers.push(rsipstack::sip::Header::Other(k.clone().into(), v.clone()));
         }
 
         
@@ -975,7 +975,7 @@ impl RwiCommandProcessor {
                     }
                 } => {
                     match result {
-                        Ok((dialog_id, Some(resp))) if resp.status_code.kind() == rsip::StatusCodeKind::Successful => {
+                        Ok((dialog_id, Some(resp))) if resp.status_code.kind() == rsipstack::sip::StatusCodeKind::Successful => {
                             
                             let sdp_answer = if resp.body().is_empty() {
                                 None
@@ -1309,7 +1309,7 @@ impl RwiCommandProcessor {
         let target_uri_str = target.destination.clone();
         
         
-        let destination_uri = rsip::Uri::try_from(target_uri_str.clone())
+        let destination_uri = rsipstack::sip::Uri::try_from(target_uri_str.clone())
             .map_err(|e| format!("Invalid target URI: {}", e))?;
 
         let caller_str = caller_id.clone().unwrap_or_else(|| "RustPBX".to_string());
@@ -1339,13 +1339,13 @@ impl RwiCommandProcessor {
         };
 
         
-        let caller_uri: rsip::Uri = rsip::Uri::try_from(format!("sip:{}@{}", caller_str, external_ip).as_str())
+        let caller_uri: rsipstack::sip::Uri = rsipstack::sip::Uri::try_from(format!("sip:{}@{}", caller_str, external_ip).as_str())
             .map_err(|e| format!("Invalid caller URI: {:?}", e))?;
 
         
-        let mut headers: Vec<rsip::Header> = vec![rsip::headers::MaxForwards::from(70u32).into()];
+        let mut headers: Vec<rsipstack::sip::Header> = vec![rsipstack::sip::headers::MaxForwards::from(70u32).into()];
         for (k, v) in extra_headers {
-            headers.push(rsip::Header::Other(k.into(), v));
+            headers.push(rsipstack::sip::Header::Other(k.into(), v));
         }
 
         
@@ -1424,7 +1424,7 @@ impl RwiCommandProcessor {
 
         match result {
             Ok(Ok((dialog_id, Some(resp)))) 
-                if resp.status_code.kind() == rsip::StatusCodeKind::Successful => {
+                if resp.status_code.kind() == rsipstack::sip::StatusCodeKind::Successful => {
                 
                 
                 let sdp_answer = if resp.body().is_empty() {

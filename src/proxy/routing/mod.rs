@@ -5,7 +5,7 @@ use crate::{
 use anyhow::{Result, anyhow};
 use ipnetwork::IpNetwork;
 use regex::Regex;
-use rsip::{StatusCode, Uri};
+use rsipstack::sip::{StatusCode, Uri};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -716,7 +716,7 @@ async fn candidate_matches(candidate: &str, addr: &IpAddr) -> bool {
         return ip == *addr;
     }
 
-    if let Ok(uri) = rsip::Uri::try_from(trimmed) {
+    if let Ok(uri) = rsipstack::sip::Uri::try_from(trimmed) {
         return host_matches(&uri.host_with_port.host.to_string(), addr).await;
     }
 

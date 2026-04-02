@@ -27,7 +27,7 @@ pub trait UserBackend: Send + Sync {
         &self,
         username: &str,
         realm: Option<&str>,
-        request: Option<&rsip::Request>,
+        request: Option<&rsipstack::sip::Request>,
     ) -> Result<Option<SipUser>, AuthError>;
     async fn create_user(&self, _user: SipUser) -> Result<()> {
         Ok(())
@@ -146,7 +146,7 @@ impl UserBackend for MemoryUserBackend {
         &self,
         username: &str,
         realm: Option<&str>,
-        _request: Option<&rsip::Request>,
+        _request: Option<&rsipstack::sip::Request>,
     ) -> Result<Option<SipUser>, AuthError> {
         let users = self.users.lock().await;
         let identifier = self.get_identifier(username, realm);
@@ -270,7 +270,7 @@ impl UserBackend for ChainedUserBackend {
         &self,
         username: &str,
         realm: Option<&str>,
-        request: Option<&rsip::Request>,
+        request: Option<&rsipstack::sip::Request>,
     ) -> Result<Option<SipUser>, AuthError> {
         let mut last_err: Option<AuthError> = None;
         for backend in &self.backends {

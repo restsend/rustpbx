@@ -6,8 +6,8 @@ use crate::{
 };
 use anyhow::{Error, Result};
 use clap::Parser;
-use rsip::StatusCode;
 use rsipstack::dialog::invitation::InviteOption;
+use rsipstack::sip::StatusCode;
 use rustrtc::IceServer;
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, path::PathBuf};
@@ -29,7 +29,9 @@ pub(crate) fn default_config_recorder_path() -> String {
 fn default_config_http_addr() -> String {
     "0.0.0.0:8080".to_string()
 }
-
+fn default_ami_config() -> Option<AmiConfig> {
+    Some(AmiConfig::default())
+}
 fn default_database_url() -> String {
     "sqlite://rustpbx.sqlite3".to_string()
 }
@@ -244,7 +246,7 @@ pub struct Config {
 
     pub callrecord: Option<CallRecordConfig>,
     pub ice_servers: Option<Vec<IceServer>>,
-    #[serde(default)]
+    #[serde(default = "default_ami_config")]
     pub ami: Option<AmiConfig>,
     #[cfg(feature = "console")]
     pub console: Option<ConsoleConfig>,

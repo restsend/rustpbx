@@ -63,7 +63,7 @@ pub trait Locator: Send + Sync {
     -> Result<()>;
     async fn unregister(&self, username: &str, realm: Option<&str>) -> Result<()>;
     async fn unregister_with_address(&self, addr: &SipAddr) -> Result<Option<Vec<Location>>>;
-    async fn lookup(&self, uri: &rsip::Uri) -> Result<Vec<Location>>;
+    async fn lookup(&self, uri: &rsipstack::sip::Uri) -> Result<Vec<Location>>;
 }
 
 pub struct DialogTargetLocator {
@@ -78,7 +78,7 @@ impl DialogTargetLocator {
 
 #[async_trait]
 impl TargetLocator for DialogTargetLocator {
-    async fn locate(&self, uri: &rsip::Uri) -> Result<SipAddr, rsipstack::Error> {
+    async fn locate(&self, uri: &rsipstack::sip::Uri) -> Result<SipAddr, rsipstack::Error> {
         match self.locator.lookup(uri).await {
             Ok(locs) => {
                 if let Some(loc) = locs.first() {
@@ -266,7 +266,7 @@ impl Locator for MemoryLocator {
         }
     }
 
-    async fn lookup(&self, uri: &rsip::Uri) -> Result<Vec<Location>> {
+    async fn lookup(&self, uri: &rsipstack::sip::Uri) -> Result<Vec<Location>> {
         let mut locations = self.locations.lock().await;
         let now: Instant = Instant::now();
         let uri_string = uri.to_string();
@@ -449,7 +449,7 @@ async fn realm_matches(
     requested_host == candidate_host
 }
 
-pub fn uri_matches(a: &rsip::Uri, b: &rsip::Uri) -> bool {
+pub fn uri_matches(a: &rsipstack::sip::Uri, b: &rsipstack::sip::Uri) -> bool {
     if a == b {
         return true;
     }
@@ -497,15 +497,15 @@ pub async fn create_locator(config: &LocatorConfig) -> Result<Box<dyn Locator>> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rsip::HostWithPort;
-    use rsip::transport::Transport;
+    use rsipstack::sip::HostWithPort;
+    use rsipstack::sip::transport::Transport;
     use rsipstack::transport::SipAddr;
     use std::time::Duration;
 
     #[tokio::test]
     async fn memory_locator_orders_by_last_modified() {
         let locator = MemoryLocator::new();
-        let uri: rsip::Uri = "sip:alice@rustpbx.com".try_into().unwrap();
+        let uri: rsipstack::sip::Uri = "sip:alice@rustpbx.com".try_into().unwrap();
 
         let now = Instant::now();
         let older = now - Duration::from_secs(120);
@@ -561,8 +561,8 @@ mod tests {
     #[tokio::test]
     async fn memory_locator_matches_localhost_alias() {
         let locator = MemoryLocator::new();
-        let registered_uri: rsip::Uri = "sip:alice@192.168.3.181".try_into().unwrap();
-        let lookup_uri: rsip::Uri = "sip:alice@localhost".try_into().unwrap();
+        let registered_uri: rsipstack::sip::Uri = "sip:alice@192.168.3.181".try_into().unwrap();
+        let lookup_uri: rsipstack::sip::Uri = "sip:alice@localhost".try_into().unwrap();
 
         let destination = SipAddr {
             r#type: Some(Transport::Udp),
@@ -636,8 +636,8 @@ mod tests {
             Box::pin(async move { is_special || is_local_realm(&realm) })
         }));
 
-        let registered_uri: rsip::Uri = "sip:alice@my-special-realm.com".try_into().unwrap();
-        let lookup_uri: rsip::Uri = "sip:alice@localhost".try_into().unwrap();
+        let registered_uri: rsipstack::sip::Uri = "sip:alice@my-special-realm.com".try_into().unwrap();
+        let lookup_uri: rsipstack::sip::Uri = "sip:alice@localhost".try_into().unwrap();
 
         locator
             .register(
@@ -659,8 +659,8 @@ mod tests {
     #[tokio::test]
     async fn test_uri_matches_relaxed() {
         let locator = MemoryLocator::new();
-        let registered_uri: rsip::Uri = "sip:3sf0hatf@eee3se8lru7o.invalid".try_into().unwrap();
-        let lookup_uri: rsip::Uri = "sip:3sf0hatf@eee3se8lru7o.invalid;transport=ws"
+        let registered_uri: rsipstack::sip::Uri = "sip:3sf0hatf@eee3se8lru7o.invalid".try_into().unwrap();
+        let lookup_uri: rsipstack::sip::Uri = "sip:3sf0hatf@eee3se8lru7o.invalid;transport=ws"
             .try_into()
             .unwrap();
 
@@ -681,7 +681,7 @@ mod tests {
         let locations = locator.lookup(&lookup_uri).await.unwrap();
         assert_eq!(locations.len(), 1);
 
-        let lookup_uri_no_transport: rsip::Uri =
+        let lookup_uri_no_transport: rsipstack::sip::Uri =
             "sip:3sf0hatf@eee3se8lru7o.invalid".try_into().unwrap();
         let locations = locator.lookup(&lookup_uri_no_transport).await.unwrap();
         assert_eq!(locations.len(), 1);

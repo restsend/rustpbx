@@ -30,8 +30,8 @@ use crate::{
 use anyhow::{Result, anyhow};
 use audio_codec::CodecType;
 use futures::{FutureExt, future::BoxFuture};
-use rsip::StatusCode;
-use rsip::Uri;
+use rsipstack::sip::StatusCode;
+use rsipstack::sip::Uri;
 use rsipstack::dialog::{
     DialogId, dialog::DialogState, dialog_layer::DialogLayer, invitation::InviteOption,
     server_dialog::ServerInviteDialog,
@@ -483,7 +483,7 @@ impl CallSession {
         Ok(())
     }
 
-    pub fn init_client_timer(&mut self, response: &rsip::Response, default_expires: u64) {
+    pub fn init_client_timer(&mut self, response: &rsipstack::sip::Response, default_expires: u64) {
         let headers = &response.headers;
         let session_expires_value = get_header_value(headers, HEADER_SESSION_EXPIRES);
 
@@ -1523,7 +1523,7 @@ impl CallSession {
         };
 
         let (headers, body) = if has_early_media && should_passthrough {
-            let headers = vec![rsip::Header::ContentType("application/sdp".into())];
+            let headers = vec![rsipstack::sip::Header::ContentType("application/sdp".into())];
             (Some(headers), Some(answer.into_bytes()))
         } else {
             (None, None)
@@ -1545,7 +1545,7 @@ impl CallSession {
         }
     }
 
-    pub async fn handle_reinvite(&mut self, method: rsip::Method, sdp: Option<String>) {
+    pub async fn handle_reinvite(&mut self, method: rsipstack::sip::Method, sdp: Option<String>) {
         if self.answer.is_none() {
             self.answer = self.shared.answer_sdp();
         }
@@ -1573,13 +1573,13 @@ impl CallSession {
                 if let Some(dialog) = self.dialog_layer.get_dialog(callee_dialog_id) {
                     if let rsipstack::dialog::dialog::Dialog::ClientInvite(client_dialog) = dialog {
                         debug!(%callee_dialog_id, "Forwarding re-INVITE/UPDATE offer to callee");
-                        let headers = vec![rsip::Header::ContentType("application/sdp".into())];
+                        let headers = vec![rsipstack::sip::Header::ContentType("application/sdp".into())];
                         let method_clone = method.clone();
                         let offer_clone = offer.clone();
 
                         // Spawn this so we don't block the session event loop
                         crate::utils::spawn(async move {
-                            if method_clone == rsip::Method::Invite {
+                            if method_clone == rsipstack::sip::Method::Invite {
                                 let _ = client_dialog
                                     .reinvite(Some(headers), Some(offer_clone.into_bytes()))
                                     .await;
@@ -1595,9 +1595,9 @@ impl CallSession {
 
             // For re-INVITE, we reply with current answer SDP using server_dialog.accept()
             // Note: If CallModule already replied to the transaction, this will just fail gracefully
-            if method == rsip::Method::Invite {
+            if method == rsipstack::sip::Method::Invite {
                 if let Some(sdp) = &self.answer {
-                    let headers = vec![rsip::Header::ContentType("application/sdp".into())];
+                    let headers = vec![rsipstack::sip::Header::ContentType("application/sdp".into())];
                     if let Err(e) = self
                         .server_dialog
                         .accept(Some(headers), Some(sdp.clone().into_bytes()))
@@ -1631,7 +1631,7 @@ impl CallSession {
             self.negotiation_state = NegotiationState::LocalOfferSent;
 
             if let Some(sdp) = &self.answer {
-                let headers = vec![rsip::Header::ContentType("application/sdp".into())];
+                let headers = vec![rsipstack::sip::Header::ContentType("application/sdp".into())];
                 if let Err(e) = self
                     .server_dialog
                     .accept(Some(headers), Some(sdp.clone().into_bytes()))
@@ -1836,17 +1836,17 @@ impl CallSession {
         }
 
         let mut headers = if self.answer.is_some() {
-            vec![rsip::Header::ContentType("application/sdp".into())]
+            vec![rsipstack::sip::Header::ContentType("application/sdp".into())]
         } else {
             vec![]
         };
 
         let server_timer = self.server_timer.lock().unwrap();
         if server_timer.active {
-            headers.push(rsip::Header::Supported(
-                rsip::headers::Supported::from(TIMER_TAG).into(),
+            headers.push(rsipstack::sip::Header::Supported(
+                rsipstack::sip::headers::Supported::from(TIMER_TAG).into(),
             ));
-            headers.push(rsip::Header::Other(
+            headers.push(rsipstack::sip::Header::Other(
                 HEADER_SESSION_EXPIRES.into(),
                 format!(
                     "{};refresher={}",
@@ -2124,9 +2124,9 @@ impl CallSession {
                 SessionAction::HandleReInvite(method_str, sdp) => {
                     let sdp_opt = if sdp.is_empty() { None } else { Some(sdp) };
                     let method = match method_str.to_uppercase().as_str() {
-                        "INVITE" => rsip::Method::Invite,
-                        "UPDATE" => rsip::Method::Update,
-                        _ => rsip::Method::Invite, // Default to Invite for now
+                        "INVITE" => rsipstack::sip::Method::Invite,
+                        "UPDATE" => rsipstack::sip::Method::Update,
+                        _ => rsipstack::sip::Method::Invite, // Default to Invite for now
                     };
                     self.handle_reinvite(method, sdp_opt).await;
                     Ok(())
@@ -2865,7 +2865,7 @@ impl CallSession {
                 .dialplan
                 .build_invite_headers(&target)
                 .unwrap_or_default();
-            headers.push(rsip::headers::MaxForwards::from(self.context.max_forwards).into());
+            headers.push(rsipstack::sip::headers::MaxForwards::from(self.context.max_forwards).into());
 
             let invite_option = InviteOption {
                 callee: target.aor.clone(),
@@ -2946,7 +2946,7 @@ impl CallSession {
                             let dialog_id = dialog.id();
                             let call_id = dialog_id.call_id.clone();
                             if let Some(resp) = resp_opt {
-                                if resp.status_code.kind() == rsip::StatusCodeKind::Successful {
+                                if resp.status_code.kind() == rsipstack::sip::StatusCodeKind::Successful {
                                     let answer = String::from_utf8_lossy(resp.body()).to_string();
                                     let _ = ev_tx_c.send(ParallelEvent::Accepted {
                                         _idx: idx,
@@ -3190,11 +3190,11 @@ impl CallSession {
             .dialplan
             .build_invite_headers(&target)
             .unwrap_or_default();
-        headers.push(rsip::headers::MaxForwards::from(self.context.max_forwards).into());
+        headers.push(rsipstack::sip::headers::MaxForwards::from(self.context.max_forwards).into());
         if self.server.proxy_config.session_timer {
             let session_expires = self.server.proxy_config.session_expires.unwrap_or(1800);
-            headers.push(rsip::headers::Supported::from(TIMER_TAG).into());
-            headers.push(rsip::Header::Other(
+            headers.push(rsipstack::sip::headers::Supported::from(TIMER_TAG).into());
+            headers.push(rsipstack::sip::Header::Other(
                 HEADER_SESSION_EXPIRES.into(),
                 session_expires.to_string(),
             ));
@@ -3265,7 +3265,7 @@ impl CallSession {
             let dialplan = &self.context.dialplan;
             let locations = self.server.locator.lookup(&callee_uri).await.map_err(|e| {
                 (
-                    rsip::StatusCode::TemporarilyUnavailable,
+                    rsipstack::sip::StatusCode::TemporarilyUnavailable,
                     Some(e.to_string()),
                 )
             })?;
@@ -3284,20 +3284,20 @@ impl CallSession {
                     Ok(Some(_)) => {
                         info!(session_id = ?dialplan.session_id, callee = %callee_uri, %callee_realm, "user offline in locator, abort now");
                         return Err((
-                            rsip::StatusCode::TemporarilyUnavailable,
+                            rsipstack::sip::StatusCode::TemporarilyUnavailable,
                             Some("User offline".to_string()),
                         ));
                     }
                     Ok(None) => {
                         info!(session_id = ?dialplan.session_id, callee = %callee_uri, %callee_realm, "user not found in auth backend, reject");
                         return Err((
-                            rsip::StatusCode::NotFound,
+                            rsipstack::sip::StatusCode::NotFound,
                             Some("User not found".to_string()),
                         ));
                     }
                     Err(e) => {
                         warn!(session_id = ?dialplan.session_id, callee = %callee_uri, %callee_realm, "failed to lookup user in auth backend: {}", e);
-                        return Err((rsip::StatusCode::ServerInternalError, Some(e.to_string())));
+                        return Err((rsipstack::sip::StatusCode::ServerInternalError, Some(e.to_string())));
                     }
                 }
             } else {
@@ -3366,13 +3366,13 @@ impl CallSession {
                                                     &mut invite_option.headers
                                                 {
                                                     headers.retain(|h| match h {
-                                                        rsip::Header::Other(n, _) => !n
+                                                        rsipstack::sip::Header::Other(n, _) => !n
                                                             .eq_ignore_ascii_case(
                                                                 HEADER_SESSION_EXPIRES,
                                                             ),
                                                         _ => true,
                                                     });
-                                                    headers.push(rsip::Header::Other(
+                                                    headers.push(rsipstack::sip::Header::Other(
                                                         HEADER_SESSION_EXPIRES.into(),
                                                         min_se.as_secs().to_string(),
                                                     ));
@@ -3385,7 +3385,7 @@ impl CallSession {
                                     }
                                 }
 
-                                if resp.status_code.kind() != rsip::StatusCodeKind::Successful {
+                                if resp.status_code.kind() != rsipstack::sip::StatusCodeKind::Successful {
                                     let reason = resp.reason_phrase().clone().map(Into::into);
                                     return Err((resp.status_code, reason));
                                 } else {
@@ -3445,7 +3445,7 @@ impl CallSession {
         }
 
         if self.answer_time.is_none()
-            && response.status_code.kind() == rsip::StatusCodeKind::Successful
+            && response.status_code.kind() == rsipstack::sip::StatusCodeKind::Successful
         {
             // Extract SDP from response body, if present
             let answer_body = response.body();
@@ -3948,14 +3948,14 @@ impl CallSession {
                                 }
                                 DialogState::Info(dialog_id, _request, tx_handle) => {
                                     debug!(session_id = %context.session_id, %dialog_id, "Received INFO on server dialog");
-                                    tx_handle.reply(rsip::StatusCode::OK).await.ok();
+                                    tx_handle.reply(rsipstack::sip::StatusCode::OK).await.ok();
                                 }
                                 DialogState::Updated(dialog_id, request, tx_handle) => {
                                     debug!(session_id = %context.session_id, %dialog_id, "Received UPDATE/INVITE on server dialog");
 
                                     let has_sdp = !request.body.is_empty();
-                                    let is_reinvite = request.method == rsip::Method::Invite;
-                                    let is_update = request.method == rsip::Method::Update;
+                                    let is_reinvite = request.method == rsipstack::sip::Method::Invite;
+                                    let is_update = request.method == rsipstack::sip::Method::Update;
 
                                     // Handle Re-INVITE or UPDATE with SDP
                                     if (is_reinvite || is_update) && has_sdp {
@@ -3968,7 +3968,7 @@ impl CallSession {
                                             // For UPDATE, we reply here using the transaction handle
                                             // Note: rsipstack 0.4.3 TransactionHandle::reply only takes status,
                                             // cannot send body. Re-INVITE is preferred if SDP answer is required.
-                                            tx_handle.reply(rsip::StatusCode::OK).await.ok();
+                                            tx_handle.reply(rsipstack::sip::StatusCode::OK).await.ok();
                                             debug!(session_id = %context.session_id, "Replied to UPDATE (200 OK)");
                                         }
                                         // For re-INVITE, handle_reinvite will call server_dialog.accept()
@@ -3990,16 +3990,16 @@ impl CallSession {
                                             }
                                         }
                                         // For requests without SDP, reply with 200 OK
-                                        tx_handle.reply(rsip::StatusCode::OK).await.ok();
+                                        tx_handle.reply(rsipstack::sip::StatusCode::OK).await.ok();
                                     }
                                 }
                                 DialogState::Notify(dialog_id, _request, tx_handle) => {
                                     debug!(session_id = %context.session_id, %dialog_id, "Received NOTIFY on server dialog");
-                                    tx_handle.reply(rsip::StatusCode::OK).await.ok();
+                                    tx_handle.reply(rsipstack::sip::StatusCode::OK).await.ok();
                                 }
                                 DialogState::Options(dialog_id, _request, tx_handle) => {
                                     debug!(session_id = %context.session_id, %dialog_id, "Received Option on server dialog");
-                                    tx_handle.reply(rsip::StatusCode::OK).await.ok();
+                                    tx_handle.reply(rsipstack::sip::StatusCode::OK).await.ok();
                                 }
                                 DialogState::Calling(dialog_id) => {
                                     debug!(session_id = %context.session_id, %dialog_id, "Server dialog in calling state");
@@ -4116,8 +4116,8 @@ impl CallSession {
                         };
 
                         let headers = vec![
-                            rsip::Header::Supported(rsip::headers::Supported::from(TIMER_TAG).into()),
-                            rsip::Header::Other(
+                            rsipstack::sip::Header::Supported(rsipstack::sip::headers::Supported::from(TIMER_TAG).into()),
+                            rsipstack::sip::Header::Other(
                                 HEADER_SESSION_EXPIRES.into(),
                                 format!("{};refresher=uas", session_interval.as_secs()),
                             ),
@@ -4144,7 +4144,7 @@ impl CallSession {
                                             warn!(session_id = %session_id, "UPDATE for session refresh returned no response");
                                         }
                                         Ok(Some(resp)) => {
-                                            if matches!(resp.status_code.kind(), rsip::status_code::StatusCodeKind::Successful) {
+                                            if matches!(resp.status_code.kind(), rsipstack::sip::status_code::StatusCodeKind::Successful) {
                                                 timer.update_refresh();
                                             } else {
                                                 warn!(session_id = %session_id, status = %resp.status_code, "UPDATE for session refresh failed");
@@ -4166,8 +4166,8 @@ impl CallSession {
                         };
 
                         let headers = vec![
-                            rsip::Header::Supported(rsip::headers::Supported::from(TIMER_TAG).into()),
-                            rsip::Header::Other(
+                            rsipstack::sip::Header::Supported(rsipstack::sip::headers::Supported::from(TIMER_TAG).into()),
+                            rsipstack::sip::Header::Other(
                                 HEADER_SESSION_EXPIRES.into(),
                                 format!("{};refresher=uac", session_interval.as_secs()),
                             ),
@@ -4203,7 +4203,7 @@ impl CallSession {
                                                             warn!(session_id = %session_id, %dialog_id, "UPDATE for session refresh returned no response");
                                                         }
                                                         Ok(Some(resp)) => {
-                                                            if matches!(resp.status_code.kind(), rsip::status_code::StatusCodeKind::Successful) {
+                                                            if matches!(resp.status_code.kind(), rsipstack::sip::status_code::StatusCodeKind::Successful) {
                                                                 timer.update_refresh();
                                                             } else {
                                                                 warn!(session_id = %session_id, %dialog_id, status = %resp.status_code, "UPDATE for session refresh failed");

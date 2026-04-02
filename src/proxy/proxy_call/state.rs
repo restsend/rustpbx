@@ -7,7 +7,7 @@ use crate::proxy::proxy_call::sip_session::SipSessionHandle as NewSipSessionHand
 use crate::rwi::SupervisorMode;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use rsip::StatusCode;
+use rsipstack::sip::StatusCode;
 use rsipstack::dialog::DialogId;
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, RwLock, Weak};

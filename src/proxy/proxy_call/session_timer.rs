@@ -295,13 +295,13 @@ pub struct TimerStats {
 }
 
 /// Get header value by name (case-insensitive)
-pub fn get_header_value(headers: &rsip::Headers, name: &str) -> Option<String> {
+pub fn get_header_value(headers: &rsipstack::sip::Headers, name: &str) -> Option<String> {
     headers.iter().find_map(|h| match h {
-        rsip::Header::Other(n, v) if n.eq_ignore_ascii_case(name) => Some(v.clone()),
-        rsip::Header::Supported(h) if name.eq_ignore_ascii_case(HEADER_SUPPORTED) => {
+        rsipstack::sip::Header::Other(n, v) if n.eq_ignore_ascii_case(name) => Some(v.clone()),
+        rsipstack::sip::Header::Supported(h) if name.eq_ignore_ascii_case(HEADER_SUPPORTED) => {
             Some(h.to_string())
         }
-        rsip::Header::Require(h) if name.eq_ignore_ascii_case(HEADER_REQUIRE) => {
+        rsipstack::sip::Header::Require(h) if name.eq_ignore_ascii_case(HEADER_REQUIRE) => {
             Some(h.to_string())
         }
         _ => None,
@@ -331,10 +331,10 @@ pub fn parse_session_expires(value: &str) -> Option<(Duration, Option<SessionRef
 }
 
 /// Check if the message has timer support (Supported: timer header)
-pub fn has_timer_support(headers: &rsip::Headers) -> bool {
+pub fn has_timer_support(headers: &rsipstack::sip::Headers) -> bool {
     headers.iter().any(|h| match h {
-        rsip::Header::Supported(s) => s.to_string().split(',').any(|v| v.trim() == TIMER_TAG),
-        rsip::Header::Other(n, v) if n.eq_ignore_ascii_case(HEADER_SUPPORTED) => {
+        rsipstack::sip::Header::Supported(s) => s.to_string().split(',').any(|v| v.trim() == TIMER_TAG),
+        rsipstack::sip::Header::Other(n, v) if n.eq_ignore_ascii_case(HEADER_SUPPORTED) => {
             v.split(',').any(|v| v.trim() == TIMER_TAG)
         }
         _ => false,
@@ -350,10 +350,10 @@ pub fn parse_min_se(value: &str) -> Option<Duration> {
 
 /// Check if timer is required (Require: timer header)
 #[cfg(test)]
-pub fn is_timer_required(headers: &rsip::Headers) -> bool {
+pub fn is_timer_required(headers: &rsipstack::sip::Headers) -> bool {
     headers.iter().any(|h| match h {
-        rsip::Header::Require(s) => s.to_string().split(',').any(|v| v.trim() == TIMER_TAG),
-        rsip::Header::Other(n, v) if n.eq_ignore_ascii_case(HEADER_REQUIRE) => {
+        rsipstack::sip::Header::Require(s) => s.to_string().split(',').any(|v| v.trim() == TIMER_TAG),
+        rsipstack::sip::Header::Other(n, v) if n.eq_ignore_ascii_case(HEADER_REQUIRE) => {
             v.split(',').any(|v| v.trim() == TIMER_TAG)
         }
         _ => false,
@@ -362,15 +362,15 @@ pub fn is_timer_required(headers: &rsip::Headers) -> bool {
 
 /// Build Session-Expires header
 #[cfg(test)]
-pub fn build_session_expires_header(interval: Duration, refresher: SessionRefresher) -> rsip::Header {
+pub fn build_session_expires_header(interval: Duration, refresher: SessionRefresher) -> rsipstack::sip::Header {
     let value = format!("{};refresher={}", interval.as_secs(), refresher);
-    rsip::Header::Other(HEADER_SESSION_EXPIRES.to_string(), value)
+    rsipstack::sip::Header::Other(HEADER_SESSION_EXPIRES.to_string(), value)
 }
 
 /// Build Min-SE header
 #[cfg(test)]
-pub fn build_min_se_header(min_se: Duration) -> rsip::Header {
-    rsip::Header::Other(HEADER_MIN_SE.to_string(), min_se.as_secs().to_string())
+pub fn build_min_se_header(min_se: Duration) -> rsipstack::sip::Header {
+    rsipstack::sip::Header::Other(HEADER_MIN_SE.to_string(), min_se.as_secs().to_string())
 }
 
 /// Calculate the appropriate session interval based on negotiation
