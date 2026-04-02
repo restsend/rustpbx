@@ -149,7 +149,7 @@ async fn test_update_with_sdp_flow() {
             if let Ok(events) = bob_clone.process_dialog_events().await {
                 for event in &events {
                     if let TestUaEvent::CallUpdated(_, method, _) = event {
-                        if *method == rsip::Method::Invite {
+                        if *method == rsipstack::sip::Method::Invite {
                             info!("Bob's background task processed re-INVITE");
                             return true;
                         }

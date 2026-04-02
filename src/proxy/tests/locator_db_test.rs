@@ -2,16 +2,16 @@ use crate::{
     call::Location,
     proxy::{locator::Locator, locator_db::DbLocator},
 };
-use rsip::{HostWithPort, Scheme};
+use rsipstack::sip::{HostWithPort, Scheme};
 use rsipstack::transport::SipAddr;
 use std::time::Instant;
 
 #[tokio::test]
 async fn test_db_locator() {
     // Create a test location
-    let aor = rsip::Uri {
+    let aor = rsipstack::sip::Uri {
         scheme: Some(Scheme::Sip),
-        auth: Some(rsip::Auth {
+        auth: Some(rsipstack::sip::Auth {
             user: "alice".to_string(),
             password: None,
         }),
@@ -22,7 +22,7 @@ async fn test_db_locator() {
 
     let host_with_port = HostWithPort::try_from("127.0.0.1:5060").unwrap();
     let destination = SipAddr {
-        r#type: Some(rsip::transport::Transport::Udp),
+        r#type: Some(rsipstack::sip::transport::Transport::Udp),
         addr: host_with_port,
     };
 
@@ -55,9 +55,9 @@ async fn test_db_locator() {
     // Match the relevant components of the SipAddr
     match &locations[0].destination {
         Some(SipAddr { r#type, addr }) => {
-            assert_eq!(r#type, &Some(rsip::transport::Transport::Udp));
+            assert_eq!(r#type, &Some(rsipstack::sip::transport::Transport::Udp));
             match &addr.host {
-                rsip::host_with_port::Host::IpAddr(ip) => {
+                rsipstack::sip::Host::IpAddr(ip) => {
                     assert_eq!(ip.to_string(), "127.0.0.1");
                 }
                 _ => panic!("Expected IP address"),
@@ -89,9 +89,9 @@ async fn test_db_locator_with_custom_table() {
     let locator = DbLocator::new("sqlite::memory:".to_string()).await.unwrap();
 
     // Create a test location
-    let aor = rsip::Uri {
+    let aor = rsipstack::sip::Uri {
         scheme: Some(Scheme::Sip),
-        auth: Some(rsip::Auth {
+        auth: Some(rsipstack::sip::Auth {
             user: "bob".to_string(),
             password: None,
         }),
@@ -102,7 +102,7 @@ async fn test_db_locator_with_custom_table() {
 
     let host_with_port = HostWithPort::try_from("192.168.1.1:5080").unwrap();
     let destination = SipAddr {
-        r#type: Some(rsip::transport::Transport::Tcp),
+        r#type: Some(rsipstack::sip::transport::Transport::Tcp),
         addr: host_with_port,
     };
 
@@ -132,9 +132,9 @@ async fn test_db_locator_with_custom_table() {
     // Match the relevant components of the SipAddr
     match &locations[0].destination {
         Some(SipAddr { r#type, addr }) => {
-            assert_eq!(r#type, &Some(rsip::transport::Transport::Tcp));
+            assert_eq!(r#type, &Some(rsipstack::sip::transport::Transport::Tcp));
             match &addr.host {
-                rsip::host_with_port::Host::IpAddr(ip) => {
+                rsipstack::sip::Host::IpAddr(ip) => {
                     assert_eq!(ip.to_string(), "192.168.1.1");
                 }
                 _ => panic!("Expected IP address"),
@@ -166,9 +166,9 @@ async fn test_db_locator_multiple_lookups() {
     let locator = DbLocator::new("sqlite::memory:".to_string()).await.unwrap();
 
     // Create different transport type locations for the same user
-    let aor1 = rsip::Uri {
+    let aor1 = rsipstack::sip::Uri {
         scheme: Some(Scheme::Sip),
-        auth: Some(rsip::Auth {
+        auth: Some(rsipstack::sip::Auth {
             user: "carol".to_string(),
             password: None,
         }),
@@ -179,7 +179,7 @@ async fn test_db_locator_multiple_lookups() {
 
     let host_with_port1 = HostWithPort::try_from("127.0.0.1:5060").unwrap();
     let destination1 = SipAddr {
-        r#type: Some(rsip::transport::Transport::Udp),
+        r#type: Some(rsipstack::sip::transport::Transport::Udp),
         addr: host_with_port1,
     };
 
@@ -207,9 +207,9 @@ async fn test_db_locator_multiple_lookups() {
     assert_eq!(locations.len(), 1);
 
     // Test with a different realm
-    let aor2 = rsip::Uri {
+    let aor2 = rsipstack::sip::Uri {
         scheme: Some(Scheme::Sip),
-        auth: Some(rsip::Auth {
+        auth: Some(rsipstack::sip::Auth {
             user: "carol".to_string(),
             password: None,
         }),
@@ -220,7 +220,7 @@ async fn test_db_locator_multiple_lookups() {
 
     let host_with_port2 = HostWithPort::try_from("192.168.1.10:5080").unwrap();
     let destination2 = SipAddr {
-        r#type: Some(rsip::transport::Transport::Tcp),
+        r#type: Some(rsipstack::sip::transport::Transport::Tcp),
         addr: host_with_port2,
     };
 
@@ -293,9 +293,9 @@ async fn test_db_locator_multiple_lookups() {
 async fn test_db_locator_localhost_alias() {
     let locator = DbLocator::new("sqlite::memory:".to_string()).await.unwrap();
 
-    let aor = rsip::Uri {
+    let aor = rsipstack::sip::Uri {
         scheme: Some(Scheme::Sip),
-        auth: Some(rsip::Auth {
+        auth: Some(rsipstack::sip::Auth {
             user: "dave".to_string(),
             password: None,
         }),
@@ -305,7 +305,7 @@ async fn test_db_locator_localhost_alias() {
     };
 
     let destination = SipAddr {
-        r#type: Some(rsip::transport::Transport::Udp),
+        r#type: Some(rsipstack::sip::transport::Transport::Udp),
         addr: HostWithPort::try_from("192.168.3.181:5060").unwrap(),
     };
 

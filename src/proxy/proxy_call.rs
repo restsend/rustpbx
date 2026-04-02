@@ -8,7 +8,7 @@ use crate::{
     proxy::server::SipServerRef,
 };
 use anyhow::Result;
-use rsip::prelude::{HeadersExt, UntypedHeader};
+use rsipstack::sip::prelude::HeadersExt;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio_util::sync::CancellationToken;
@@ -108,7 +108,7 @@ impl CallSessionBuilder {
     pub fn report_failure(
         self,
         server: SipServerRef,
-        code: rsip::StatusCode,
+        code: rsipstack::sip::StatusCode,
         reason: Option<String>,
     ) -> Result<()> {
         let dialplan = Arc::new(self.dialplan);

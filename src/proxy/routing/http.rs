@@ -7,7 +7,7 @@ use crate::config::{HttpRouterConfig, MediaProxyMode};
 use crate::proxy::call::CallRouter;
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
-use rsip::prelude::*;
+use rsipstack::sip::prelude::*;
 use rsipstack::transport::SipConnection;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -83,11 +83,11 @@ struct HttpResponsePayload {
 impl CallRouter for HttpCallRouter {
     async fn resolve(
         &self,
-        original: &rsip::Request,
+        original: &rsipstack::sip::Request,
         _route_invite: Box<dyn RouteInvite>,
         caller: &SipUser,
         cookie: &TransactionCookie,
-    ) -> Result<Dialplan, (anyhow::Error, Option<rsip::StatusCode>)> {
+    ) -> Result<Dialplan, (anyhow::Error, Option<rsipstack::sip::StatusCode>)> {
         let direction = if cookie.get_extension::<TrunkContext>().is_some() {
             DialDirection::Inbound
         } else {
@@ -159,7 +159,7 @@ impl CallRouter for HttpCallRouter {
             );
             (
                 anyhow!("HTTP router request failed: {}", e),
-                Some(rsip::StatusCode::ServiceUnavailable),
+                Some(rsipstack::sip::StatusCode::ServiceUnavailable),
             )
         })?;
 
@@ -178,14 +178,14 @@ impl CallRouter for HttpCallRouter {
             }
             return Err((
                 anyhow!("HTTP router returned error: {}", response.status()),
-                Some(rsip::StatusCode::ServiceUnavailable),
+                Some(rsipstack::sip::StatusCode::ServiceUnavailable),
             ));
         }
 
         let result: HttpResponsePayload = response.json().await.map_err(|e| {
             (
                 anyhow!("Failed to parse HTTP router response: {}", e),
-                Some(rsip::StatusCode::ServerInternalError),
+                Some(rsipstack::sip::StatusCode::ServerInternalError),
             )
         })?;
 
@@ -207,14 +207,14 @@ impl CallRouter for HttpCallRouter {
                             .reason
                             .unwrap_or_else(|| "marked as spam by HTTP router".to_string())
                     ),
-                    Some(rsip::StatusCode::Forbidden),
+                    Some(rsipstack::sip::StatusCode::Forbidden),
                 ));
             }
             HttpRouteAction::Reject | HttpRouteAction::Abort => {
                 let status = result
                     .status
-                    .and_then(|s| rsip::StatusCode::try_from(s).ok())
-                    .unwrap_or(rsip::StatusCode::Forbidden);
+                    .and_then(|s| rsipstack::sip::StatusCode::try_from(s).ok())
+                    .unwrap_or(rsipstack::sip::StatusCode::Forbidden);
                 return Err((
                     anyhow!(
                         result
@@ -231,13 +231,13 @@ impl CallRouter for HttpCallRouter {
                 let mut locs = Vec::new();
                 let custom_headers = result.headers.map(|h| {
                     h.iter()
-                        .map(|(k, v)| rsip::Header::Other(k.clone(), v.clone()))
+                        .map(|(k, v)| rsipstack::sip::Header::Other(k.clone(), v.clone()))
                         .collect::<Vec<_>>()
                 });
 
                 if let Some(targets) = result.targets {
                     for target in targets {
-                        if let Ok(uri) = rsip::Uri::try_from(target.clone()) {
+                        if let Ok(uri) = rsipstack::sip::Uri::try_from(target.clone()) {
                             locs.push(Location {
                                 aor: uri,
                                 headers: custom_headers.clone(),

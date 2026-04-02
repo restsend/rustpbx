@@ -45,16 +45,16 @@ mod tests {
 
         let router = HttpCallRouter::new(config);
 
-        let request = rsip::Request {
-            method: rsip::Method::Invite,
+        let request = rsipstack::sip::Request {
+            method: rsipstack::sip::Method::Invite,
             uri: "sip:target@example.com".try_into().unwrap(),
             headers: vec![
-                rsip::Header::From("sip:caller@example.com".try_into().unwrap()),
-                rsip::Header::To("sip:target@example.com".try_into().unwrap()),
-                rsip::Header::CallId("test-call-id".into()),
+                rsipstack::sip::Header::From("sip:caller@example.com".try_into().unwrap()),
+                rsipstack::sip::Header::To("sip:target@example.com".try_into().unwrap()),
+                rsipstack::sip::Header::CallId("test-call-id".into()),
             ]
             .into(),
-            version: rsip::Version::V2,
+            version: rsipstack::sip::Version::V2,
             body: b"v=0\r\nc=IN IP4 127.0.0.1\r\nm=audio 4000 RTP/AVP 0".to_vec(),
         };
 
@@ -74,7 +74,7 @@ mod tests {
             async fn route_invite(
                 &self,
                 _: rsipstack::dialog::invitation::InviteOption,
-                _: &rsip::Request,
+                _: &rsipstack::sip::Request,
                 _: &crate::call::DialDirection,
                 _: &TransactionCookie,
             ) -> anyhow::Result<crate::config::RouteResult> {
@@ -86,7 +86,7 @@ mod tests {
             async fn preview_route(
                 &self,
                 _: rsipstack::dialog::invitation::InviteOption,
-                _: &rsip::Request,
+                _: &rsipstack::sip::Request,
                 _: &crate::call::DialDirection,
                 _: &TransactionCookie,
             ) -> anyhow::Result<crate::config::RouteResult> {
@@ -142,16 +142,16 @@ mod tests {
 
         let router = HttpCallRouter::new(config);
 
-        let request = rsip::Request {
-            method: rsip::Method::Invite,
+        let request = rsipstack::sip::Request {
+            method: rsipstack::sip::Method::Invite,
             uri: "sip:target@example.com".try_into().unwrap(),
             headers: vec![
-                rsip::Header::From("sip:caller@example.com".try_into().unwrap()),
-                rsip::Header::To("sip:target@example.com".try_into().unwrap()),
-                rsip::Header::CallId("test-call-id".into()),
+                rsipstack::sip::Header::From("sip:caller@example.com".try_into().unwrap()),
+                rsipstack::sip::Header::To("sip:target@example.com".try_into().unwrap()),
+                rsipstack::sip::Header::CallId("test-call-id".into()),
             ]
             .into(),
-            version: rsip::Version::V2,
+            version: rsipstack::sip::Version::V2,
             body: vec![],
         };
 
@@ -170,7 +170,7 @@ mod tests {
             async fn route_invite(
                 &self,
                 _: rsipstack::dialog::invitation::InviteOption,
-                _: &rsip::Request,
+                _: &rsipstack::sip::Request,
                 _: &crate::call::DialDirection,
                 _: &TransactionCookie,
             ) -> anyhow::Result<crate::config::RouteResult> {
@@ -182,7 +182,7 @@ mod tests {
             async fn preview_route(
                 &self,
                 _: rsipstack::dialog::invitation::InviteOption,
-                _: &rsip::Request,
+                _: &rsipstack::sip::Request,
                 _: &crate::call::DialDirection,
                 _: &TransactionCookie,
             ) -> anyhow::Result<crate::config::RouteResult> {
@@ -201,7 +201,7 @@ mod tests {
 
         match result {
             Err((err, Some(status))) => {
-                assert_eq!(status, rsip::StatusCode::Forbidden);
+                assert_eq!(status, rsipstack::sip::StatusCode::Forbidden);
                 assert!(err.to_string().contains("Forbidden by test"));
             }
             _ => panic!("Expected rejection"),
@@ -244,16 +244,16 @@ mod tests {
 
         let router = HttpCallRouter::new(config);
 
-        let request = rsip::Request {
-            method: rsip::Method::Invite,
+        let request = rsipstack::sip::Request {
+            method: rsipstack::sip::Method::Invite,
             uri: "sip:target@example.com".try_into().unwrap(),
             headers: vec![
-                rsip::Header::From("sip:caller@example.com".try_into().unwrap()),
-                rsip::Header::To("sip:target@example.com".try_into().unwrap()),
-                rsip::Header::CallId("test-id".into()),
+                rsipstack::sip::Header::From("sip:caller@example.com".try_into().unwrap()),
+                rsipstack::sip::Header::To("sip:target@example.com".try_into().unwrap()),
+                rsipstack::sip::Header::CallId("test-id".into()),
             ]
             .into(),
-            version: rsip::Version::V2,
+            version: rsipstack::sip::Version::V2,
             body: vec![],
         };
 
@@ -266,7 +266,7 @@ mod tests {
             async fn route_invite(
                 &self,
                 _: rsipstack::dialog::invitation::InviteOption,
-                _: &rsip::Request,
+                _: &rsipstack::sip::Request,
                 _: &crate::call::DialDirection,
                 _: &TransactionCookie,
             ) -> anyhow::Result<crate::config::RouteResult> {

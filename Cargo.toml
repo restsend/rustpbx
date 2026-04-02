@@ -53,7 +53,6 @@ wav2text-bin = []
 
 [dependencies]
 instant-acme = { version = "0.8.4", optional = true }
-rsip = "0.4.0"
 anyhow = "1"
 async-trait = "0.1.88"
 async-stream = "0.3.6"
@@ -65,7 +64,7 @@ minijinja = { version = "2", features = ["loader", "json"], optional = true }
 serde = { version = "1", features = ["derive"] }
 glob = "0.3.3"
 serde_json = "1"
-thiserror = "1"
+thiserror = "2"
 tokio = { version = "1.49.0", features = ["full", "tracing"] }
 tokio-stream = { version = "0.1.18", features = ["net", "sync"] }
 parking_lot = "0.12"
@@ -80,12 +79,12 @@ tracing-appender = "0.2.4"
 url = "2.5.8"
 uuid = { version = "1.22.0", features = ["v4"] }
 clap = { version = "4.5.54", features = ["derive"] }
-toml = "1.1.2+spec-1.1.0"
+toml = "1.1.2"
 toml_edit = { version = "0.23.9", features = ["serde"] }
 rand = "0.10.0"
 chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = "0.10.4"
-rsipstack = "0.4.14"
+rsipstack = "0.5.2"
 #rsipstack = { path = "../rsipstack" }
 audio-codec = { version = "0.3.30", default-features = false }
 rustrtc = "0.3.40"
@@ -101,11 +100,11 @@ reqwest = { version = "0.13", features = [
     "blocking",
 ] }
 base64 = "0.22.1"
-hmac = "0.12"
-sha2 = "0.10.9"
+hmac = "0.13.0"
+sha2 = "0.11.0"
 hex = "0.4.3"
 dotenvy = "0.15.7"
-md-5 = "0.10.6"
+md-5 = "0.11.0"
 once_cell = "1.21.4"
 regex = "1.12.3"
 http = "1.4.0"
@@ -119,18 +118,18 @@ sqlx = { version = "0.8.6", features = [
     "mysql",
     "any",
 ] }
-sea-orm = { version = "1.1.19", features = [
+sea-orm = { version = "1.1.20", features = [
     "runtime-tokio-rustls",
     "sqlx-sqlite",
     "sqlx-mysql",
 ] }
-sea-orm-migration = { version = "1.1.19", features = [
+sea-orm-migration = { version = "1.1.20", features = [
     "runtime-tokio-rustls",
     "sqlx-sqlite",
     "sqlx-mysql",
 ] }
 argon2 = { version = "0.5.3", features = ["password-hash"] }
-object_store = { version = "0.13.1", features = ["aws", "azure", "gcp"] }
+object_store = { version = "0.13.2", features = ["aws", "azure", "gcp"] }
 humantime = "2.3.0"
 serde_with = "3.18.0"
 async-compression = { version = "0.4", features = [
@@ -142,10 +141,10 @@ console-subscriber = "0.5.0"
 crossbeam-channel = "0.5"
 lru = "0.16.3"
 metrics = "0.24"
-metrics-exporter-prometheus = { version = "0.16", optional = true }
+metrics-exporter-prometheus = { version = "0.18.1", optional = true }
 # OTel stack — only pulled in for the commercial `addon-telemetry` feature.
 opentelemetry = { version = "0.31.0", optional = true }
-opentelemetry-otlp = { version = "0.31.0", features = [
+opentelemetry-otlp = { version = "0.31.1", features = [
     "grpc-tonic",
     "trace",
     "metrics",
@@ -154,7 +153,7 @@ opentelemetry_sdk = { version = "0.31.0", features = [
     "rt-tokio",
 ], optional = true }
 tracing-opentelemetry = { version = "0.32", optional = true }
-phonenumber = "0.3.7"
+phonenumber = "0.3.9"
 tower-http = { version = "0.6.8", features = [
     "fs",
     "cors",
@@ -163,24 +162,24 @@ tower-http = { version = "0.6.8", features = [
 rcgen = "0.14.7"
 axum-server = { version = "0.8.0", features = ["tls-rustls"] }
 csv = "1.4.0"
-quick-xml = { version = "0.39.0", features = ["serialize"] }
+quick-xml = { version = "0.39.2", features = ["serialize"] }
 zstd = "0.13"
 hound = "3.5"
 minimp3 = "0.6.1"
 aws-lc-rs = { version = "1", optional = true }
 totp-rs = { version = "5.7.0", features = ["qr", "gen_secret"] }
-ldap3 = { version = "0.11", optional = true }
+ldap3 = { version = "0.12.1", optional = true }
 ring = { version = "0.17", optional = true }
 
 [dev-dependencies]
-tempfile = "3.24.0"
-tokio-test = "0.4"
+tempfile = "3.27.0"
+tokio-test = "0.4.5"
 mockall = "0.14.0"
-warp = { version = "0.4.1", features = ["server", "websocket"] }
+warp = { version = "0.4.2", features = ["server", "websocket"] }
 portpicker = "0.1.1"
 tower = { version = "0.5", features = ["util"] }
 http-body-util = "0.1"
-sipbot = { version = "0.2.25", default-features = false }
+sipbot = { version = "0.2.28", default-features = false }
 
 [build-dependencies]
 chrono = "0.4"

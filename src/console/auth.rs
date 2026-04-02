@@ -10,7 +10,7 @@ use argon2::{
 use axum::http::HeaderValue;
 use base64::engine::{Engine, general_purpose::STANDARD_NO_PAD};
 use chrono::{DateTime, Utc};
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use sea_orm::sea_query::Condition;
 use sea_orm::{
     ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter,

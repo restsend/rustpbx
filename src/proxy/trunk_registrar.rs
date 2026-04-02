@@ -10,7 +10,7 @@
 use crate::proxy::routing::TrunkConfig;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use rsip::StatusCode;
+use rsipstack::sip::StatusCode;
 use rsipstack::{
     dialog::{authenticate::Credential, registration::Registration},
     transaction::endpoint::EndpointInnerRef,
@@ -160,19 +160,19 @@ impl TrunkRegistrar {
     }
 }
 
-/// Normalize a trunk destination string into an `rsip::Uri`.
+/// Normalize a trunk destination string into an `rsipstack::sip::Uri`.
 ///
 /// Handles bare `host:port`, strips angle brackets, and prepends `sip:` if no
 /// scheme is present.  The `user@` part (if any) is kept — `Registration`
 /// overwrites `to.uri.auth` from the credential anyway.
-fn parse_server_uri(dest: &str) -> Result<rsip::Uri> {
+fn parse_server_uri(dest: &str) -> Result<rsipstack::sip::Uri> {
     let trimmed = dest.trim().trim_matches(|c| c == '<' || c == '>');
     let uri_str = if trimmed.starts_with("sip:") || trimmed.starts_with("sips:") {
         trimmed.to_string()
     } else {
         format!("sip:{}", trimmed)
     };
-    rsip::Uri::try_from(uri_str.as_str())
+    rsipstack::sip::Uri::try_from(uri_str.as_str())
         .map_err(|e| anyhow::anyhow!("invalid SIP URI '{}': {}", uri_str, e))
 }
 
@@ -276,7 +276,7 @@ async fn registration_loop(
 async fn do_register(
     trunk_name: &str,
     registration: &mut Registration,
-    server_uri: &rsip::Uri,
+    server_uri: &rsipstack::sip::Uri,
     expires: u32,
 ) -> Result<u32> {
     let response = registration

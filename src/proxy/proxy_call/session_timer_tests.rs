@@ -609,7 +609,7 @@ mod tests {
     fn test_build_session_expires_header() {
         let header = build_session_expires_header(Duration::from_secs(1800), SessionRefresher::Uac);
         match header {
-            rsip::Header::Other(name, value) => {
+            rsipstack::sip::Header::Other(name, value) => {
                 assert_eq!(name, HEADER_SESSION_EXPIRES);
                 assert_eq!(value, "1800;refresher=uac");
             }
@@ -621,7 +621,7 @@ mod tests {
     fn test_build_min_se_header() {
         let header = build_min_se_header(Duration::from_secs(90));
         match header {
-            rsip::Header::Other(name, value) => {
+            rsipstack::sip::Header::Other(name, value) => {
                 assert_eq!(name, HEADER_MIN_SE);
                 assert_eq!(value, "90");
             }
@@ -792,8 +792,8 @@ mod tests {
 
     #[test]
     fn test_get_header_value_session_expires() {
-        let headers = rsip::Headers::from(vec![
-            rsip::Header::Other(HEADER_SESSION_EXPIRES.to_string(), "1800;refresher=uac".to_string()),
+        let headers = rsipstack::sip::Headers::from(vec![
+            rsipstack::sip::Header::Other(HEADER_SESSION_EXPIRES.to_string(), "1800;refresher=uac".to_string()),
         ]);
 
         let value = get_header_value(&headers, HEADER_SESSION_EXPIRES);
@@ -802,8 +802,8 @@ mod tests {
 
     #[test]
     fn test_get_header_value_min_se() {
-        let headers = rsip::Headers::from(vec![
-            rsip::Header::Other(HEADER_MIN_SE.to_string(), "90".to_string()),
+        let headers = rsipstack::sip::Headers::from(vec![
+            rsipstack::sip::Header::Other(HEADER_MIN_SE.to_string(), "90".to_string()),
         ]);
 
         let value = get_header_value(&headers, HEADER_MIN_SE);
@@ -812,8 +812,8 @@ mod tests {
 
     #[test]
     fn test_get_header_value_supported() {
-        let headers = rsip::Headers::from(vec![
-            rsip::Header::Supported(rsip::headers::Supported::from("timer,100rel")),
+        let headers = rsipstack::sip::Headers::from(vec![
+            rsipstack::sip::Header::Supported(rsipstack::sip::headers::Supported::from("timer,100rel")),
         ]);
 
         let value = get_header_value(&headers, HEADER_SUPPORTED);
@@ -823,8 +823,8 @@ mod tests {
 
     #[test]
     fn test_get_header_value_not_found() {
-        let headers = rsip::Headers::from(vec![
-            rsip::Header::ContentType("application/sdp".into()),
+        let headers = rsipstack::sip::Headers::from(vec![
+            rsipstack::sip::Header::ContentType("application/sdp".into()),
         ]);
 
         let value = get_header_value(&headers, HEADER_SESSION_EXPIRES);
@@ -835,8 +835,8 @@ mod tests {
 
     #[test]
     fn test_has_timer_support_with_supported_header() {
-        let headers = rsip::Headers::from(vec![
-            rsip::Header::Other(HEADER_SUPPORTED.to_string(), "timer,100rel".to_string()),
+        let headers = rsipstack::sip::Headers::from(vec![
+            rsipstack::sip::Header::Other(HEADER_SUPPORTED.to_string(), "timer,100rel".to_string()),
         ]);
 
         assert!(has_timer_support(&headers));
@@ -844,8 +844,8 @@ mod tests {
 
     #[test]
     fn test_has_timer_support_with_other_header() {
-        let headers = rsip::Headers::from(vec![
-            rsip::Header::Other(HEADER_SUPPORTED.to_string(), "timer,100rel".to_string()),
+        let headers = rsipstack::sip::Headers::from(vec![
+            rsipstack::sip::Header::Other(HEADER_SUPPORTED.to_string(), "timer,100rel".to_string()),
         ]);
 
         assert!(has_timer_support(&headers));
@@ -853,8 +853,8 @@ mod tests {
 
     #[test]
     fn test_has_timer_support_without_timer() {
-        let headers = rsip::Headers::from(vec![
-            rsip::Header::Supported(rsip::headers::Supported::from("100rel")),
+        let headers = rsipstack::sip::Headers::from(vec![
+            rsipstack::sip::Header::Supported(rsipstack::sip::headers::Supported::from("100rel")),
         ]);
 
         assert!(!has_timer_support(&headers));
@@ -862,8 +862,8 @@ mod tests {
 
     #[test]
     fn test_has_timer_support_no_supported_header() {
-        let headers = rsip::Headers::from(vec![
-            rsip::Header::ContentType("application/sdp".into()),
+        let headers = rsipstack::sip::Headers::from(vec![
+            rsipstack::sip::Header::ContentType("application/sdp".into()),
         ]);
 
         assert!(!has_timer_support(&headers));
@@ -871,8 +871,8 @@ mod tests {
 
     #[test]
     fn test_is_timer_required_with_require_header() {
-        let headers = rsip::Headers::from(vec![
-            rsip::Header::Other(HEADER_REQUIRE.to_string(), "timer".to_string()),
+        let headers = rsipstack::sip::Headers::from(vec![
+            rsipstack::sip::Header::Other(HEADER_REQUIRE.to_string(), "timer".to_string()),
         ]);
 
         assert!(is_timer_required(&headers));
@@ -880,8 +880,8 @@ mod tests {
 
     #[test]
     fn test_is_timer_required_with_other_header() {
-        let headers = rsip::Headers::from(vec![
-            rsip::Header::Other(HEADER_REQUIRE.to_string(), "timer".to_string()),
+        let headers = rsipstack::sip::Headers::from(vec![
+            rsipstack::sip::Header::Other(HEADER_REQUIRE.to_string(), "timer".to_string()),
         ]);
 
         assert!(is_timer_required(&headers));
@@ -889,8 +889,8 @@ mod tests {
 
     #[test]
     fn test_is_timer_required_without_timer() {
-        let headers = rsip::Headers::from(vec![
-            rsip::Header::Require(rsip::headers::Require::from("100rel")),
+        let headers = rsipstack::sip::Headers::from(vec![
+            rsipstack::sip::Header::Require(rsipstack::sip::headers::Require::from("100rel")),
         ]);
 
         assert!(!is_timer_required(&headers));

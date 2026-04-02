@@ -25,7 +25,7 @@ use axum::{
 };
 use chrono::Utc;
 use rand::random;
-use rsip::{Header as SipHeader, Method, Scheme, Transport, Uri, Version};
+use rsipstack::sip::{Header as SipHeader, Method, Scheme, Transport, Uri, Version};
 use rsipstack::dialog::{
     client_dialog::ClientInviteDialog,
     dialog::{Dialog, DialogState},
@@ -1139,15 +1139,15 @@ async fn route_evaluate(
         .map(|value| build_sip_uri(value, default_host))
         .unwrap_or_else(|| callee_uri_str.clone());
 
-    let caller_uri: rsip::Uri = match caller_uri_str.try_into() {
+    let caller_uri: rsipstack::sip::Uri = match caller_uri_str.try_into() {
         Ok(uri) => uri,
         Err(err) => return bad_request(format!("invalid caller uri: {}", err)),
     };
-    let callee_uri: rsip::Uri = match callee_uri_str.try_into() {
+    let callee_uri: rsipstack::sip::Uri = match callee_uri_str.try_into() {
         Ok(uri) => uri,
         Err(err) => return bad_request(format!("invalid callee uri: {}", err)),
     };
-    let request_uri: rsip::Uri = match request_uri_str.try_into() {
+    let request_uri: rsipstack::sip::Uri = match request_uri_str.try_into() {
         Ok(uri) => uri,
         Err(err) => return bad_request(format!("invalid request uri: {}", err)),
     };
@@ -1683,11 +1683,11 @@ fn headers_to_vec(headers: &HashMap<String, String>) -> Vec<SipHeader> {
 }
 
 fn build_diagnostics_request(
-    caller: &rsip::Uri,
-    callee: &rsip::Uri,
-    request_uri: &rsip::Uri,
+    caller: &rsipstack::sip::Uri,
+    callee: &rsipstack::sip::Uri,
+    request_uri: &rsipstack::sip::Uri,
     mut headers: Vec<SipHeader>,
-) -> Result<rsip::Request, String> {
+) -> Result<rsipstack::sip::Request, String> {
     let branch = format!("z9hG4bK{}", random_hex(10));
     let from_tag = random_hex(8);
     let call_id = format!("diag-{}", random_hex(12));
@@ -1724,7 +1724,7 @@ fn build_diagnostics_request(
 
     base_headers.append(&mut headers);
 
-    Ok(rsip::Request {
+    Ok(rsipstack::sip::Request {
         method: Method::Invite,
         uri: request_uri.clone(),
         version: Version::V2,
@@ -1811,7 +1811,7 @@ async fn resolve_candidate_ips(input: &str) -> Result<Vec<IpAddr>, String> {
 
 fn extract_sip_host(candidate: &str) -> Option<(String, u16)> {
     // Accept inputs that may be formatted as SIP URIs and surface the host/port for DNS resolution.
-    if let Ok(uri) = rsip::Uri::try_from(candidate) {
+    if let Ok(uri) = rsipstack::sip::Uri::try_from(candidate) {
         let host = uri.host_with_port.host.to_string();
         if host.is_empty() {
             return None;
@@ -1847,7 +1847,7 @@ fn determine_transport(override_label: Option<&str>, uri: &Uri) -> Result<ProbeT
     }
 
     if let Some(param_transport) = uri.params.iter().find_map(|param| match param {
-        rsip::Param::Transport(t) => Some(ProbeTransport::from(*t)),
+        rsipstack::sip::Param::Transport(t) => Some(ProbeTransport::from(*t)),
         _ => None,
     }) {
         return Ok(param_transport);
@@ -2095,8 +2095,8 @@ fn collect_rewrite_diff(before: &InviteOption, after: &InviteOption) -> Vec<Rewr
 
 fn record_uri_diff(
     field: &str,
-    before: &rsip::Uri,
-    after: &rsip::Uri,
+    before: &rsipstack::sip::Uri,
+    after: &rsipstack::sip::Uri,
     diffs: &mut Vec<RewriteDiff>,
 ) {
     let before_str = before.to_string();

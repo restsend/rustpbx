@@ -39,7 +39,7 @@ pub enum ProxyAction {
 #[async_trait]
 pub trait ProxyModule: Send + Sync {
     fn name(&self) -> &str;
-    fn allow_methods(&self) -> Vec<rsip::Method> {
+    fn allow_methods(&self) -> Vec<rsipstack::sip::Method> {
         vec![]
     }
     async fn on_start(&mut self) -> Result<()>;

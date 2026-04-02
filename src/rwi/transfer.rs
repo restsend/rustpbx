@@ -834,8 +834,8 @@ impl TransferController {
         original_call_id: &str,
     ) -> Result<(), String> {
         // Parse destination URI
-        let destination_uri: rsip::Uri =
-            rsip::Uri::try_from(target).map_err(|e| format!("Invalid target URI: {:?}", e))?;
+        let destination_uri: rsipstack::sip::Uri =
+            rsipstack::sip::Uri::try_from(target).map_err(|e| format!("Invalid target URI: {:?}", e))?;
 
         // Build caller URI (use server realm)
         let realm = sip_server
@@ -845,13 +845,13 @@ impl TransferController {
             .and_then(|v| v.first().cloned())
             .unwrap_or_else(|| sip_server.proxy_config.addr.clone());
         let caller_uri_str = format!("sip:transfer@{}", realm);
-        let caller_uri: rsip::Uri = rsip::Uri::try_from(caller_uri_str.as_str())
+        let caller_uri: rsipstack::sip::Uri = rsipstack::sip::Uri::try_from(caller_uri_str.as_str())
             .map_err(|e| format!("Invalid caller URI: {:?}", e))?;
 
         // Build headers
         let headers = vec![
-            rsip::Header::Other("Max-Forwards".into(), "70".into()),
-            rsip::Header::Other("X-Transfer-Id".into(), transfer_id.into()),
+            rsipstack::sip::Header::Other("Max-Forwards".into(), "70".into()),
+            rsipstack::sip::Header::Other("X-Transfer-Id".into(), transfer_id.into()),
         ];
 
         // Get external IP for SDP
@@ -951,7 +951,7 @@ impl TransferController {
             match result {
                 Ok(Ok((_, Some(resp))))
                     if resp.status_code().kind()
-                        == rsip::status_code::StatusCodeKind::Successful =>
+                        == rsipstack::sip::status_code::StatusCodeKind::Successful =>
                 {
                     info!(%call_id_for_spawn, "3PCC originate answered, completing transfer");
 

@@ -1,4 +1,4 @@
-use rsip::SipMessage;
+use rsipstack::sip::SipMessage;
 use rsipstack::{transaction::endpoint::MessageInspector, transport::SipAddr};
 use std::net::IpAddr;
 use tracing::debug;
@@ -19,7 +19,7 @@ impl NatInspector {
         }
     }
 
-    fn fix_contact_header(&self, header_value: &mut String, from_addr: &rsip::HostWithPort) {
+    fn fix_contact_header(&self, header_value: &mut String, from_addr: &rsipstack::sip::HostWithPort) {
         // Simple regex-less replacement of host:port in Contact header if it contains a private IP
         // Contact header looks like: "Display Name" <sip:user@host:port;params> or <sip:host:port> or sip:host:port
 
@@ -132,13 +132,13 @@ impl MessageInspector for NatInspector {
             let kind = resp.status_code.kind();
             let is_target_forming = matches!(
                 kind,
-                rsip::StatusCodeKind::Provisional | rsip::StatusCodeKind::Successful
+                rsipstack::sip::StatusCodeKind::Provisional | rsipstack::sip::StatusCodeKind::Successful
             );
 
             if is_target_forming {
                 for header in resp.headers.iter_mut() {
                     match header {
-                        rsip::Header::Contact(contact) => {
+                        rsipstack::sip::Header::Contact(contact) => {
                             let mut val = contact.to_string();
                             let old_val = val.clone();
                             self.fix_contact_header(&mut val, &from.addr);

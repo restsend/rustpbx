@@ -46,7 +46,9 @@ use anyhow::Result;
 use async_trait::async_trait;
 use rustrtc::{
     PeerConnection, PeerConnectionEvent, RtpCodecParameters, TransportMode,
-    media::{MediaError, MediaKind, MediaSample, MediaStreamTrack, SampleStreamSource, SampleStreamTrack},
+    media::{
+        MediaError, MediaKind, MediaSample, MediaStreamTrack, SampleStreamSource, SampleStreamTrack,
+    },
 };
 use std::sync::Arc;
 use tokio::sync::Mutex as AsyncMutex;
@@ -302,113 +304,6 @@ impl BridgePeer {
             }
 
             info!(bridge_id = %bridge_id, "Bidirectional forwarder stopped");
-        })
-    }
-
-    /// Spawn task to forward media from WebRTC side to RTP side
-    fn spawn_webrtc_to_rtp_forwarder(&self) -> tokio::task::JoinHandle<()> {
-        let webrtc_pc = self.webrtc_pc.clone();
-        let rtp_send = Arc::downgrade(&self.rtp_send);
-        let cancel_token = self.cancel_token.clone();
-        let bridge_id = self.id.clone();
-
-        tokio::spawn(async move {
-            info!(bridge_id = %bridge_id, "WebRTC → RTP forwarder started");
-
-            // Wait for track event on WebRTC side (incoming from remote peer)
-            let mut pc_recv = Box::pin(webrtc_pc.recv());
-
-            loop {
-                tokio::select! {
-                    _ = cancel_token.cancelled() => {
-                        debug!(bridge_id = %bridge_id, "WebRTC → RTP forwarder cancelled");
-                        break;
-                    }
-                    event = &mut pc_recv => {
-                        match event {
-                            Some(PeerConnectionEvent::Track(transceiver)) => {
-                                if let Some(receiver) = transceiver.receiver() {
-                                    let track = receiver.track();
-                                    info!(bridge_id = %bridge_id, "WebRTC receiver track ready, starting forward to RTP");
-
-                                    // Forward from WebRTC track to RTP sender
-                                    Self::forward_track_to_sender(
-                                        bridge_id.clone(),
-                                        track,
-                                        rtp_send.clone(),
-                                        cancel_token.clone(),
-                                        "WebRTC→RTP"
-                                    ).await;
-                                }
-                                pc_recv = Box::pin(webrtc_pc.recv());
-                            }
-                            Some(_) => {
-                                // Other event, continue
-                                pc_recv = Box::pin(webrtc_pc.recv());
-                            }
-                            None => {
-                                debug!(bridge_id = %bridge_id, "WebRTC PeerConnection closed");
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-
-            info!(bridge_id = %bridge_id, "WebRTC → RTP forwarder stopped");
-        })
-    }
-
-    /// Spawn task to forward media from RTP side to WebRTC side
-    fn spawn_rtp_to_webrtc_forwarder(&self) -> tokio::task::JoinHandle<()> {
-        let rtp_pc = self.rtp_pc.clone();
-        let webrtc_send = Arc::downgrade(&self.webrtc_send);
-        let cancel_token = self.cancel_token.clone();
-        let bridge_id = self.id.clone();
-
-        tokio::spawn(async move {
-            info!(bridge_id = %bridge_id, "RTP → WebRTC forwarder started");
-
-            // Wait for track event on RTP side (incoming from remote peer)
-            let mut pc_recv = Box::pin(rtp_pc.recv());
-
-            loop {
-                tokio::select! {
-                    _ = cancel_token.cancelled() => {
-                        debug!(bridge_id = %bridge_id, "RTP → WebRTC forwarder cancelled");
-                        break;
-                    }
-                    event = &mut pc_recv => {
-                        match event {
-                            Some(PeerConnectionEvent::Track(transceiver)) => {
-                                if let Some(receiver) = transceiver.receiver() {
-                                    let track = receiver.track();
-                                    info!(bridge_id = %bridge_id, "RTP receiver track ready, starting forward to WebRTC");
-
-                                    // Forward from RTP track to WebRTC sender
-                                    Self::forward_track_to_sender(
-                                        bridge_id.clone(),
-                                        track,
-                                        webrtc_send.clone(),
-                                        cancel_token.clone(),
-                                        "RTP→WebRTC"
-                                    ).await;
-                                }
-                                pc_recv = Box::pin(rtp_pc.recv());
-                            }
-                            Some(_) => {
-                                pc_recv = Box::pin(rtp_pc.recv());
-                            }
-                            None => {
-                                debug!(bridge_id = %bridge_id, "RTP PeerConnection closed");
-                                break;
-                            }
-                        }
-                    }
-                }
-            }
-
-            info!(bridge_id = %bridge_id, "RTP → WebRTC forwarder stopped");
         })
     }
 

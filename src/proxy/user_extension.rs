@@ -86,7 +86,7 @@ impl UserBackend for ExtensionUserBackend {
         &self,
         username: &str,
         realm: Option<&str>,
-        _request: Option<&rsip::Request>,
+        _request: Option<&rsipstack::sip::Request>,
     ) -> Result<Option<SipUser>, AuthError> {
         if username.trim().is_empty() {
             return Ok(None);

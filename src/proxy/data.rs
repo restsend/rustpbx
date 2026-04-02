@@ -1296,7 +1296,7 @@ fn extract_string_array(value: Option<serde_json::value::Value>) -> Vec<String> 
 }
 
 fn extract_host_from_uri(uri: &str) -> Option<String> {
-    rsip::Uri::try_from(uri)
+    rsipstack::sip::Uri::try_from(uri)
         .ok()
         .map(|parsed| parsed.host_with_port.host.to_string())
 }

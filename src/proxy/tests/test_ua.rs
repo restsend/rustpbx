@@ -1,6 +1,5 @@
 use anyhow::{Result, anyhow};
-use rsip::prelude::HeadersExt;
-use rsip::typed::MediaType;
+use rsipstack::sip::prelude::HeadersExt;
 use rsipstack::dialog::DialogId;
 use rsipstack::dialog::authenticate::Credential;
 use rsipstack::dialog::dialog::{Dialog, DialogState, DialogStateReceiver, DialogStateSender};
@@ -46,11 +45,13 @@ pub struct TestUa {
     cancel_token: CancellationToken,
     dialog_layer: Option<Arc<DialogLayer>>,
     state_receiver: Option<Arc<tokio::sync::Mutex<DialogStateReceiver>>>,
-    contact_uri: Option<rsip::Uri>,
+    contact_uri: Option<rsipstack::sip::Uri>,
     /// Store answer SDP per dialog for re-INVITE responses
     answer_sdps: Arc<Mutex<HashMap<DialogId, String>>>,
     /// Store received offer SDP per dialog from incoming INVITE
     received_offer_sdps: Arc<Mutex<HashMap<DialogId, String>>>,
+    /// Store negotiated answer SDP received by caller side after INVITE 200 OK
+    negotiated_answer_sdps: Arc<Mutex<HashMap<DialogId, String>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -65,7 +66,7 @@ pub enum TestUaEvent {
     CallEstablished(DialogId),
     CallTerminated(DialogId),
     CallFailed(String),
-    CallUpdated(DialogId, rsip::Method, Option<String>),
+    CallUpdated(DialogId, rsipstack::sip::Method, Option<String>),
 }
 
 impl TestUa {
@@ -78,6 +79,7 @@ impl TestUa {
             contact_uri: None,
             answer_sdps: Arc::new(Mutex::new(HashMap::new())),
             received_offer_sdps: Arc::new(Mutex::new(HashMap::new())),
+            negotiated_answer_sdps: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -104,9 +106,9 @@ impl TestUa {
         self.state_receiver = Some(Arc::new(tokio::sync::Mutex::new(state_receiver)));
 
         // Create Contact URI
-        self.contact_uri = Some(rsip::Uri {
-            scheme: Some(rsip::Scheme::Sip),
-            auth: Some(rsip::Auth {
+        self.contact_uri = Some(rsipstack::sip::Uri {
+            scheme: Some(rsipstack::sip::Scheme::Sip),
+            auth: Some(rsipstack::sip::Auth {
                 user: self.config.username.clone(),
                 password: None,
             }),
@@ -162,8 +164,8 @@ impl TestUa {
             realm: Some(self.config.realm.clone()),
         };
 
-        let sip_server = rsip::Uri {
-            scheme: Some(rsip::Scheme::Sip),
+        let sip_server = rsipstack::sip::Uri {
+            scheme: Some(rsipstack::sip::Scheme::Sip),
             auth: None,
             host_with_port: self.config.proxy_addr.into(),
             params: vec![],
@@ -176,7 +178,7 @@ impl TestUa {
             .await
             .map_err(|e| e.into_anyhow())?;
 
-        if resp.status_code == rsip::StatusCode::OK {
+        if resp.status_code == rsipstack::sip::StatusCode::OK {
             debug!("Registration successful for {}", self.config.username);
             Ok(())
         } else {
@@ -220,18 +222,15 @@ impl TestUa {
         .try_into()
         .map_err(|e| anyhow!("Invalid callee URI: {:?}", e))?;
 
-        let route_header = rsip::Header::Route(
-            rsip::typed::Route(rsip::UriWithParamsList(vec![rsip::UriWithParams {
-                uri: format!(
-                    "sip:{}:{}",
-                    self.config.proxy_addr.ip(),
-                    self.config.proxy_addr.port()
-                )
-                .try_into()
-                .map_err(|e| anyhow!("Invalid proxy URI: {:?}", e))?,
-                params: vec![rsip::Param::Other("lr".into(), None)].into(),
-            }]))
-            .into(),
+        let proxy_uri: rsipstack::sip::Uri = format!(
+            "sip:{}:{};lr",
+            self.config.proxy_addr.ip(),
+            self.config.proxy_addr.port()
+        )
+        .try_into()
+        .map_err(|e| anyhow!("Invalid proxy URI: {:?}", e))?;
+        let route_header = rsipstack::sip::Header::from(
+            rsipstack::sip::typed::Route::from(proxy_uri),
         );
 
         let (content_type, offer) = if let Some(sdp) = sdp_offer {
@@ -259,11 +258,22 @@ impl TestUa {
             .map_err(|e| e.into_anyhow())?;
         let resp = resp.ok_or_else(|| anyhow!("No response"))?;
 
-        if resp.status_code == rsip::StatusCode::OK {
+        if resp.status_code == rsipstack::sip::StatusCode::OK {
+            if !resp.body().is_empty() {
+                let answer_sdp = String::from_utf8_lossy(resp.body()).to_string();
+                let mut sdps = self.negotiated_answer_sdps.lock().await;
+                sdps.insert(dialog.id(), answer_sdp);
+            }
             Ok(dialog.id())
         } else {
             Err(anyhow!("Call failed: {}", resp.status_code))
         }
+    }
+
+    /// Get negotiated answer SDP for a successfully established outgoing INVITE.
+    pub async fn get_negotiated_answer_sdp(&self, dialog_id: &DialogId) -> Option<String> {
+        let sdps = self.negotiated_answer_sdps.lock().await;
+        sdps.get(dialog_id).cloned()
     }
 
     /// Answer an incoming call with optional SDP
@@ -288,7 +298,7 @@ impl TestUa {
 
                     let body = sdp_answer.map(|sdp| sdp.into_bytes());
                     let headers = if body.is_some() {
-                        vec![rsip::typed::ContentType(MediaType::Sdp(vec![])).into()]
+                        vec![rsipstack::sip::Header::ContentType("application/sdp".into())]
                     } else {
                         vec![]
                     };
@@ -313,7 +323,7 @@ impl TestUa {
         status_code: Option<u16>,
         reason: Option<String>,
     ) -> Result<()> {
-        use rsip::StatusCode;
+        use rsipstack::sip::StatusCode;
 
         let dialog_layer = self
             .dialog_layer
@@ -348,7 +358,7 @@ impl TestUa {
         if let Some(dialog) = dialog_layer.get_dialog(dialog_id) {
             match dialog {
                 Dialog::ServerInvite(d) => {
-                    let contact = rsip::typed::Contact {
+                    let contact = rsipstack::sip::typed::Contact {
                         display_name: None,
                         uri: self.contact_uri.clone().unwrap(),
                         params: vec![].into(),
@@ -356,7 +366,7 @@ impl TestUa {
 
                     let mut headers = vec![contact.into()];
                     let body = if let Some(sdp) = early_media_sdp {
-                        headers.push(rsip::typed::ContentType(MediaType::Sdp(vec![])).into());
+                        headers.push(rsipstack::sip::Header::ContentType("application/sdp".into()));
                         Some(sdp.into_bytes())
                     } else {
                         None
@@ -399,7 +409,7 @@ impl TestUa {
         dialog_id: &DialogId,
         sdp: Option<String>,
     ) -> Result<Option<String>> {
-        self.send_mid_dialog_request(dialog_id, rsip::Method::Update, sdp)
+        self.send_mid_dialog_request(dialog_id, rsipstack::sip::Method::Update, sdp)
             .await
     }
 
@@ -409,14 +419,14 @@ impl TestUa {
         dialog_id: &DialogId,
         sdp: Option<String>,
     ) -> Result<Option<String>> {
-        self.send_mid_dialog_request(dialog_id, rsip::Method::Invite, sdp)
+        self.send_mid_dialog_request(dialog_id, rsipstack::sip::Method::Invite, sdp)
             .await
     }
 
     async fn send_mid_dialog_request(
         &self,
         dialog_id: &DialogId,
-        method: rsip::Method,
+        method: rsipstack::sip::Method,
         sdp: Option<String>,
     ) -> Result<Option<String>> {
         let dialog_layer = self
@@ -427,25 +437,25 @@ impl TestUa {
         if let Some(mut dialog) = dialog_layer.get_dialog(dialog_id) {
             let body = sdp.map(|s| s.into_bytes());
             let headers = if body.is_some() {
-                vec![rsip::typed::ContentType(MediaType::Sdp(vec![])).into()]
+                vec![rsipstack::sip::Header::ContentType("application/sdp".into())]
             } else {
                 vec![]
             };
 
             let resp = match (method, &mut dialog) {
-                (rsip::Method::Update, Dialog::ClientInvite(d)) => d
+                (rsipstack::sip::Method::Update, Dialog::ClientInvite(d)) => d
                     .update(Some(headers), body)
                     .await
                     .map_err(|e| e.into_anyhow())?,
-                (rsip::Method::Update, Dialog::ServerInvite(d)) => d
+                (rsipstack::sip::Method::Update, Dialog::ServerInvite(d)) => d
                     .update(Some(headers), body)
                     .await
                     .map_err(|e| e.into_anyhow())?,
-                (rsip::Method::Invite, Dialog::ClientInvite(d)) => d
+                (rsipstack::sip::Method::Invite, Dialog::ClientInvite(d)) => d
                     .reinvite(Some(headers), body)
                     .await
                     .map_err(|e| e.into_anyhow())?,
-                (rsip::Method::Invite, Dialog::ServerInvite(d)) => d
+                (rsipstack::sip::Method::Invite, Dialog::ServerInvite(d)) => d
                     .reinvite(Some(headers), body)
                     .await
                     .map_err(|e| e.into_anyhow())?,
@@ -499,7 +509,7 @@ impl TestUa {
                             resp.status_code, id
                         );
                         match resp.status_code {
-                            rsip::StatusCode::Ringing => {
+                            rsipstack::sip::StatusCode::Ringing => {
                                 events.push(TestUaEvent::CallRinging(id.clone()));
                                 if !resp.body().is_empty() {
                                     events.push(TestUaEvent::EarlyMedia(id));
@@ -544,13 +554,13 @@ impl TestUa {
                         if let Some(answer_sdp) = sdps.get(&id) {
                             let body = answer_sdp.clone().into_bytes();
                             let headers =
-                                vec![rsip::typed::ContentType(MediaType::Sdp(vec![])).into()];
+                                vec![rsipstack::sip::Header::ContentType("application/sdp".into())];
                             tx_handle
-                                .respond(rsip::StatusCode::OK, Some(headers), Some(body))
+                                .respond(rsipstack::sip::StatusCode::OK, Some(headers), Some(body))
                                 .await
                                 .ok();
                         } else {
-                            tx_handle.reply(rsip::StatusCode::OK).await.ok();
+                            tx_handle.reply(rsipstack::sip::StatusCode::OK).await.ok();
                         }
                     }
                     _ => {}
@@ -569,7 +579,7 @@ impl TestUa {
         dialog_layer: Arc<DialogLayer>,
         mut incoming: TransactionReceiver,
         state_sender: DialogStateSender,
-        contact: rsip::Uri,
+        contact: rsipstack::sip::Uri,
         cancel_token: CancellationToken,
         received_sdps: Arc<Mutex<HashMap<DialogId, String>>>,
     ) -> Result<()> {
@@ -592,7 +602,7 @@ impl TestUa {
 
                         // Handle new dialog
                         match tx.original.method {
-                            rsip::Method::Invite => {
+                            rsipstack::sip::Method::Invite => {
                                 // Extract SDP from INVITE body before creating dialog
                                 let sdp = if !tx.original.body.is_empty() {
                                     Some(String::from_utf8_lossy(&tx.original.body).to_string())
@@ -614,7 +624,7 @@ impl TestUa {
                                     });
                                 }
                             }
-                            rsip::Method::Ack => {
+                            rsipstack::sip::Method::Ack => {
                                 if let Ok(mut dialog) = dialog_layer.get_or_create_server_invite(
                                     &tx, state_sender.clone(), None, Some(contact.clone())
                                 ) {
@@ -624,7 +634,7 @@ impl TestUa {
                                 }
                             }
                             _ => {
-                                tx.reply(rsip::StatusCode::OK).await.ok();
+                                tx.reply(rsipstack::sip::StatusCode::OK).await.ok();
                             }
                         }
                     } else {

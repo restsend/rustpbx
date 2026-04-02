@@ -1,6 +1,5 @@
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
-use rand::RngExt;
 use regex::Regex;
 use rsipstack::{
     dialog::{authenticate::Credential, invitation::InviteOption},
@@ -57,7 +56,7 @@ pub async fn match_invite(
     routes: Option<&Vec<RouteRule>>,
     resource_lookup: Option<&dyn RouteResourceLookup>,
     option: InviteOption,
-    origin: &rsip::Request,
+    origin: &rsipstack::sip::Request,
     source_trunk: Option<&SourceTrunk>,
     routing_state: Arc<RoutingState>,
     direction: &DialDirection,
@@ -82,7 +81,7 @@ pub async fn match_invite_with_trace(
     routes: Option<&Vec<RouteRule>>,
     resource_lookup: Option<&dyn RouteResourceLookup>,
     option: InviteOption,
-    origin: &rsip::Request,
+    origin: &rsipstack::sip::Request,
     source_trunk: Option<&SourceTrunk>,
     routing_state: Arc<RoutingState>,
     direction: &DialDirection,
@@ -108,7 +107,7 @@ pub async fn inspect_invite(
     routes: Option<&Vec<RouteRule>>,
     resource_lookup: Option<&dyn RouteResourceLookup>,
     option: InviteOption,
-    origin: &rsip::Request,
+    origin: &rsipstack::sip::Request,
     source_trunk: Option<&SourceTrunk>,
     routing_state: Arc<RoutingState>,
     direction: &DialDirection,
@@ -133,7 +132,7 @@ async fn match_invite_impl(
     routes: Option<&Vec<RouteRule>>,
     resource_lookup: Option<&dyn RouteResourceLookup>,
     option: InviteOption,
-    origin: &rsip::Request,
+    origin: &rsipstack::sip::Request,
     source_trunk: Option<&SourceTrunk>,
     routing_state: Arc<RoutingState>,
     direction: &DialDirection,
@@ -259,12 +258,12 @@ async fn match_invite_impl(
                     );
                     if let Some(trace) = &mut trace {
                         trace.abort = Some(RouteAbortTrace {
-                            code: rsip::StatusCode::Forbidden.into(),
+                            code: rsipstack::sip::StatusCode::Forbidden.into(),
                             reason: Some(reason.clone()),
                         });
                     }
                     return Ok(RouteResult::Abort(
-                        rsip::StatusCode::Forbidden,
+                        rsipstack::sip::StatusCode::Forbidden,
                         Some(reason),
                     ));
                 }
@@ -298,21 +297,21 @@ async fn match_invite_impl(
                 } else {
                     if let Some(trace) = &mut trace {
                         trace.abort = Some(RouteAbortTrace {
-                            code: rsip::StatusCode::Forbidden.into(),
+                            code: rsipstack::sip::StatusCode::Forbidden.into(),
                             reason: None,
                         });
                     }
-                    return Ok(RouteResult::Abort(rsip::StatusCode::Forbidden, None));
+                    return Ok(RouteResult::Abort(rsipstack::sip::StatusCode::Forbidden, None));
                 }
             }
             ActionType::Busy => {
                 if let Some(trace) = &mut trace {
                     trace.abort = Some(RouteAbortTrace {
-                        code: rsip::StatusCode::BusyHere.into(),
+                        code: rsipstack::sip::StatusCode::BusyHere.into(),
                         reason: None,
                     });
                 }
-                return Ok(RouteResult::Abort(rsip::StatusCode::BusyHere, None));
+                return Ok(RouteResult::Abort(rsipstack::sip::StatusCode::BusyHere, None));
             }
             ActionType::Forward => {
                 if let Some(dest_config) = &rule.action.dest {
@@ -357,12 +356,12 @@ async fn match_invite_impl(
                                         );
                                         if let Some(trace) = &mut trace {
                                             trace.abort = Some(RouteAbortTrace {
-                                                code: rsip::StatusCode::Forbidden.into(),
+                                                code: rsipstack::sip::StatusCode::Forbidden.into(),
                                                 reason: Some(reason.clone()),
                                             });
                                         }
                                         return Ok(RouteResult::Abort(
-                                            rsip::StatusCode::Forbidden,
+                                            rsipstack::sip::StatusCode::Forbidden,
                                             Some(reason),
                                         ));
                                     }
@@ -465,12 +464,12 @@ async fn match_invite_impl(
                                         );
                                         if let Some(trace) = &mut trace {
                                             trace.abort = Some(RouteAbortTrace {
-                                                code: rsip::StatusCode::Forbidden.into(),
+                                                code: rsipstack::sip::StatusCode::Forbidden.into(),
                                                 reason: Some(reason.clone()),
                                             });
                                         }
                                         return Ok(RouteResult::Abort(
-                                            rsip::StatusCode::Forbidden,
+                                            rsipstack::sip::StatusCode::Forbidden,
                                             Some(reason),
                                         ));
                                     }
@@ -509,13 +508,13 @@ async fn match_invite_impl(
 
 /// Context for rule matching to reduce function arguments
 struct MatchContext<'a> {
-    origin: &'a rsip::Request,
+    origin: &'a rsipstack::sip::Request,
     caller_user: &'a str,
-    caller_host: &'a rsip::Host,
+    caller_host: &'a rsipstack::sip::Host,
     callee_user: &'a str,
-    callee_host: &'a rsip::Host,
+    callee_host: &'a rsipstack::sip::Host,
     request_user: &'a str,
-    request_host: &'a rsip::Host,
+    request_host: &'a rsipstack::sip::Host,
 }
 
 /// Check if routing rule matches
@@ -740,18 +739,18 @@ fn matches_pattern(pattern: &str, value: &str) -> Result<bool> {
 }
 
 /// Get header value
-fn get_header_value(request: &rsip::Request, header_name: &str) -> Option<String> {
+fn get_header_value(request: &rsipstack::sip::Request, header_name: &str) -> Option<String> {
     for header in request.headers.iter() {
         match header {
-            rsip::Header::Other(name, value)
+            rsipstack::sip::Header::Other(name, value)
                 if name.to_lowercase() == header_name.to_lowercase() =>
             {
                 return Some(value.clone());
             }
-            rsip::Header::UserAgent(value) if header_name.to_lowercase() == "user-agent" => {
+            rsipstack::sip::Header::UserAgent(value) if header_name.to_lowercase() == "user-agent" => {
                 return Some(value.to_string());
             }
-            rsip::Header::Contact(contact) if header_name.to_lowercase() == "contact" => {
+            rsipstack::sip::Header::Contact(contact) if header_name.to_lowercase() == "contact" => {
                 return Some(contact.to_string());
             }
             // Add other standard header handling
@@ -765,7 +764,7 @@ fn get_header_value(request: &rsip::Request, header_name: &str) -> Option<String
 fn apply_rewrite_rules(
     option: &mut InviteOption,
     rewrite: &crate::proxy::routing::RewriteRules,
-    origin: &rsip::Request,
+    origin: &rsipstack::sip::Request,
     captures: &HashMap<String, Vec<String>>,
 ) -> Result<HashMap<String, String>> {
     let mut rewrites = HashMap::new();
@@ -813,7 +812,7 @@ fn apply_rewrite_rules(
         if let Some(header_name) = header_key.strip_prefix("header.") {
             let new_value = apply_rewrite_pattern(pattern, "", origin)?;
 
-            let new_header = rsip::Header::Other(header_name.to_string(), new_value);
+            let new_header = rsipstack::sip::Header::Other(header_name.to_string(), new_value);
 
             if option.headers.is_none() {
                 option.headers = Some(Vec::new());
@@ -963,7 +962,7 @@ fn extract_capture_group(original: &str, group_num: usize) -> Option<String> {
 }
 
 /// Apply rewrite pattern
-fn apply_rewrite_pattern(pattern: &str, original: &str, _origin: &rsip::Request) -> Result<String> {
+fn apply_rewrite_pattern(pattern: &str, original: &str, _origin: &rsipstack::sip::Request) -> Result<String> {
     // Support simple replacement patterns like "96123{1}" where {1} is capture group
     if pattern.contains('{') && pattern.contains('}') {
         // This is a pattern with capture groups, need to extract from original value
@@ -983,9 +982,9 @@ fn apply_rewrite_pattern(pattern: &str, original: &str, _origin: &rsip::Request)
 }
 
 /// Update URI user part
-fn update_uri_user(uri: &rsip::Uri, new_user: &str) -> Result<rsip::Uri> {
+fn update_uri_user(uri: &rsipstack::sip::Uri, new_user: &str) -> Result<rsipstack::sip::Uri> {
     let mut new_uri = uri.clone();
-    new_uri.auth = Some(rsip::Auth {
+    new_uri.auth = Some(rsipstack::sip::Auth {
         user: new_user.to_string(),
         password: uri.auth.as_ref().and_then(|a| a.password.clone()),
     });
@@ -993,7 +992,7 @@ fn update_uri_user(uri: &rsip::Uri, new_user: &str) -> Result<rsip::Uri> {
 }
 
 /// Update URI host part
-fn update_uri_host(uri: &rsip::Uri, new_host: &str) -> Result<rsip::Uri> {
+fn update_uri_host(uri: &rsipstack::sip::Uri, new_host: &str) -> Result<rsipstack::sip::Uri> {
     let mut new_uri = uri.clone();
     new_uri.host_with_port = new_host
         .try_into()
@@ -1121,7 +1120,7 @@ fn select_trunk_weighted(
 /// Apply trunk configuration
 pub(crate) fn apply_trunk_config(option: &mut InviteOption, trunk: &TrunkConfig) -> Result<()> {
     // Set destination
-    let dest_uri: rsip::Uri = trunk
+    let dest_uri: rsipstack::sip::Uri = trunk
         .dest
         .as_str()
         .try_into()
@@ -1129,11 +1128,11 @@ pub(crate) fn apply_trunk_config(option: &mut InviteOption, trunk: &TrunkConfig)
 
     let transport = if let Some(transport_str) = &trunk.transport {
         match transport_str.to_lowercase().as_str() {
-            "udp" => Some(rsip::transport::Transport::Udp),
-            "tcp" => Some(rsip::transport::Transport::Tcp),
-            "tls" => Some(rsip::transport::Transport::Tls),
-            "ws" => Some(rsip::transport::Transport::Ws),
-            "wss" => Some(rsip::transport::Transport::Wss),
+            "udp" => Some(rsipstack::sip::transport::Transport::Udp),
+            "tcp" => Some(rsipstack::sip::transport::Transport::Tcp),
+            "tls" => Some(rsipstack::sip::transport::Transport::Tls),
+            "ws" => Some(rsipstack::sip::transport::Transport::Ws),
+            "wss" => Some(rsipstack::sip::transport::Transport::Wss),
             _ => None,
         }
     } else {
@@ -1171,7 +1170,7 @@ pub(crate) fn apply_trunk_config(option: &mut InviteOption, trunk: &TrunkConfig)
 
     // Add P-Asserted-Identity header (using original caller, not rewritten)
     if trunk.username.is_some() {
-        let pai_header = rsip::Header::Other(
+        let pai_header = rsipstack::sip::Header::Other(
             "P-Asserted-Identity".to_string(),
             format!("<{}>", original_caller),
         );

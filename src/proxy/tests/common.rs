@@ -7,9 +7,9 @@ use crate::proxy::{
     data::ProxyDataContext,
     locator::{Locator, MemoryLocator},
 };
-use rsip::Header;
-use rsip::services::DigestGenerator;
-use rsip::{HostWithPort, prelude::*};
+use rsipstack::sip::Header;
+use rsipstack::sip::services::DigestGenerator;
+use rsipstack::sip::{HostWithPort, prelude::*};
 use rsipstack::dialog::dialog_layer::DialogLayer;
 use rsipstack::transaction::endpoint::EndpointInner;
 use rsipstack::transaction::key::{TransactionKey, TransactionRole};
@@ -50,8 +50,8 @@ pub async fn create_test_server_with_config(
     // Add a mock transport to the endpoint so it can send out-of-dialog requests in tests
     let (tx_chan, _rx_chan) = tokio::sync::mpsc::unbounded_channel();
     let mock_addr = SipAddr {
-        r#type: Some(rsip::Transport::Udp),
-        addr: rsip::HostWithPort {
+        r#type: Some(rsipstack::sip::Transport::Udp),
+        addr: rsipstack::sip::HostWithPort {
             host: "127.0.0.1".parse().unwrap(),
             port: Some(5060.into()),
         },
@@ -139,9 +139,9 @@ pub async fn create_test_server_with_config(
 }
 
 /// Creates a basic SIP transaction for testing
-pub async fn create_transaction(request: rsip::Request) -> (Transaction, Arc<EndpointInner>) {
+pub async fn create_transaction(request: rsipstack::sip::Request) -> (Transaction, Arc<EndpointInner>) {
     let mock_addr = SipAddr {
-        r#type: Some(rsip::Transport::Udp),
+        r#type: Some(rsipstack::sip::Transport::Udp),
         addr: HostWithPort {
             host: "127.0.0.1".parse().unwrap(),
             port: Some(5060.into()),
@@ -160,7 +160,7 @@ pub async fn create_transaction(request: rsip::Request) -> (Transaction, Arc<End
         transport_layer,
         CancellationToken::new(),
         Some(Duration::from_millis(20)),
-        vec![rsip::Method::Invite, rsip::Method::Register],
+        vec![rsipstack::sip::Method::Invite, rsipstack::sip::Method::Register],
         None,
         None,
         None,
@@ -174,20 +174,20 @@ pub async fn create_transaction(request: rsip::Request) -> (Transaction, Arc<End
 }
 
 pub fn create_test_request(
-    method: rsip::Method,
+    method: rsipstack::sip::Method,
     username: &str,
     password: Option<&str>,
     realm: &str,
     expires: Option<u32>,
-) -> rsip::Request {
-    let host_with_port = rsip::HostWithPort {
+) -> rsipstack::sip::Request {
+    let host_with_port = rsipstack::sip::HostWithPort {
         host: realm.parse().unwrap(),
         port: Some(5060.into()),
     };
 
-    let uri = rsip::Uri {
-        scheme: Some(rsip::Scheme::Sip),
-        auth: Some(rsip::Auth {
+    let uri = rsipstack::sip::Uri {
+        scheme: Some(rsipstack::sip::Scheme::Sip),
+        auth: Some(rsipstack::sip::Auth {
             user: username.to_string(),
             password: None,
         }),
@@ -196,34 +196,34 @@ pub fn create_test_request(
         headers: vec![],
     };
 
-    let from = rsip::typed::From {
+    let from = rsipstack::sip::typed::From {
         display_name: None,
         uri: uri.clone(),
-        params: vec![rsip::Param::Tag(rsip::param::Tag::new(random_text(8)))],
+        params: vec![rsipstack::sip::Param::Tag(rsipstack::sip::param::Tag::new(random_text(8)))],
     };
 
-    let to = rsip::typed::To {
+    let to = rsipstack::sip::typed::To {
         display_name: None,
         uri: uri.clone(),
         params: vec![],
     };
 
-    let via = rsip::headers::Via::new(format!(
+    let via = rsipstack::sip::headers::Via::new(format!(
         "SIP/2.0/UDP {}:5060;branch=z9hG4bK{}",
         realm,
         random_text(8)
     ));
 
-    let call_id = rsip::headers::CallId::new(random_text(16));
-    let cseq = rsip::headers::typed::CSeq {
+    let call_id = rsipstack::sip::headers::CallId::new(random_text(16));
+    let cseq = rsipstack::sip::headers::typed::CSeq {
         seq: 1u32.into(),
         method,
     };
 
     // Create contact with the same user and host
-    let contact_uri = rsip::Uri {
-        scheme: Some(rsip::Scheme::Sip),
-        auth: Some(rsip::Auth {
+    let contact_uri = rsipstack::sip::Uri {
+        scheme: Some(rsipstack::sip::Scheme::Sip),
+        auth: Some(rsipstack::sip::Auth {
             user: username.to_string(),
             password: password.map(|p| p.to_string()),
         }),
@@ -232,7 +232,7 @@ pub fn create_test_request(
         headers: vec![],
     };
 
-    let contact = rsip::typed::Contact {
+    let contact = rsipstack::sip::typed::Contact {
         display_name: None,
         uri: contact_uri,
         params: vec![],
@@ -256,7 +256,7 @@ pub fn create_test_request(
         let digest = DigestGenerator {
             username,
             password,
-            algorithm: rsip::headers::auth::Algorithm::Md5,
+            algorithm: rsipstack::sip::headers::auth::Algorithm::Md5,
             nonce: demo_nonce,
             method: &method,
             uri: &uri,
@@ -264,7 +264,7 @@ pub fn create_test_request(
             qop: None,
         };
 
-        let auth_header = rsip::headers::Authorization::new(format!(
+        let auth_header = rsipstack::sip::headers::Authorization::new(format!(
             "Digest username=\"{}\", realm=\"{}\", nonce=\"{}\", uri=\"{}\", response=\"{}\", algorithm=MD5",
             username,
             realm,
@@ -275,50 +275,50 @@ pub fn create_test_request(
         headers.push(auth_header.into());
     }
 
-    rsip::Request {
+    rsipstack::sip::Request {
         method,
         uri: uri.clone(),
-        version: rsip::Version::V2,
+        version: rsipstack::sip::Version::V2,
         headers: headers.into(),
         body: vec![],
     }
 }
 /// Creates a test REGISTER request
-pub fn create_register_request(username: &str, realm: &str, expires: Option<u32>) -> rsip::Request {
-    create_test_request(rsip::Method::Register, username, None, realm, expires)
+pub fn create_register_request(username: &str, realm: &str, expires: Option<u32>) -> rsipstack::sip::Request {
+    create_test_request(rsipstack::sip::Method::Register, username, None, realm, expires)
 }
 
 /// Creates a test request with proper authentication
 pub fn create_auth_request(
-    method: rsip::Method,
+    method: rsipstack::sip::Method,
     username: &str,
     realm: &str,
     password: &str,
-) -> rsip::Request {
+) -> rsipstack::sip::Request {
     create_test_request(method, username, Some(password), realm, None)
 }
 
 /// Creates a test request with specific source IP (for acl module tests)
-pub fn create_acl_request(method: rsip::Method, username: &str, realm: &str) -> rsip::Request {
+pub fn create_acl_request(method: rsipstack::sip::Method, username: &str, realm: &str) -> rsipstack::sip::Request {
     create_test_request(method, username, None, realm, None)
 }
 
 /// Creates a test request with proper proxy authentication
 pub fn create_proxy_auth_request_with_nonce(
-    method: rsip::Method,
+    method: rsipstack::sip::Method,
     username: &str,
     realm: &str,
     password: Option<&str>,
     nonce: &str,
-) -> rsip::Request {
-    let host_with_port = rsip::HostWithPort {
+) -> rsipstack::sip::Request {
+    let host_with_port = rsipstack::sip::HostWithPort {
         host: realm.parse().unwrap(),
         port: Some(5060.into()),
     };
 
-    let uri = rsip::Uri {
-        scheme: Some(rsip::Scheme::Sip),
-        auth: Some(rsip::Auth {
+    let uri = rsipstack::sip::Uri {
+        scheme: Some(rsipstack::sip::Scheme::Sip),
+        auth: Some(rsipstack::sip::Auth {
             user: username.to_string(),
             password: None,
         }),
@@ -327,34 +327,34 @@ pub fn create_proxy_auth_request_with_nonce(
         headers: vec![],
     };
 
-    let from = rsip::typed::From {
+    let from = rsipstack::sip::typed::From {
         display_name: None,
         uri: uri.clone(),
-        params: vec![rsip::Param::Tag(rsip::param::Tag::new(random_text(8)))],
+        params: vec![rsipstack::sip::Param::Tag(rsipstack::sip::param::Tag::new(random_text(8)))],
     };
 
-    let to = rsip::typed::To {
+    let to = rsipstack::sip::typed::To {
         display_name: None,
         uri: uri.clone(),
         params: vec![],
     };
 
-    let via = rsip::headers::Via::new(format!(
+    let via = rsipstack::sip::headers::Via::new(format!(
         "SIP/2.0/UDP {}:5060;branch=z9hG4bK{}",
         realm,
         random_text(8)
     ));
 
-    let call_id = rsip::headers::CallId::new(random_text(16));
-    let cseq = rsip::headers::typed::CSeq {
+    let call_id = rsipstack::sip::headers::CallId::new(random_text(16));
+    let cseq = rsipstack::sip::headers::typed::CSeq {
         seq: 1u32.into(),
         method,
     };
 
     // Create contact with the same user and host
-    let contact_uri = rsip::Uri {
-        scheme: Some(rsip::Scheme::Sip),
-        auth: Some(rsip::Auth {
+    let contact_uri = rsipstack::sip::Uri {
+        scheme: Some(rsipstack::sip::Scheme::Sip),
+        auth: Some(rsipstack::sip::Auth {
             user: username.to_string(),
             password: password.map(|p| p.to_string()),
         }),
@@ -363,7 +363,7 @@ pub fn create_proxy_auth_request_with_nonce(
         headers: vec![],
     };
 
-    let contact = rsip::typed::Contact {
+    let contact = rsipstack::sip::typed::Contact {
         display_name: None,
         uri: contact_uri,
         params: vec![],
@@ -383,7 +383,7 @@ pub fn create_proxy_auth_request_with_nonce(
         let digest = DigestGenerator {
             username,
             password,
-            algorithm: rsip::headers::auth::Algorithm::Md5,
+            algorithm: rsipstack::sip::headers::auth::Algorithm::Md5,
             nonce,
             method: &method,
             uri: &uri,
@@ -391,7 +391,7 @@ pub fn create_proxy_auth_request_with_nonce(
             qop: None,
         };
 
-        let proxy_auth_header = rsip::headers::ProxyAuthorization::new(format!(
+        let proxy_auth_header = rsipstack::sip::headers::ProxyAuthorization::new(format!(
             "Digest username=\"{}\", realm=\"{}\", nonce=\"{}\", uri=\"{}\", response=\"{}\", algorithm=MD5",
             username,
             realm,
@@ -402,17 +402,17 @@ pub fn create_proxy_auth_request_with_nonce(
         headers.push(proxy_auth_header.into());
     }
 
-    rsip::Request {
+    rsipstack::sip::Request {
         method,
         uri: uri.clone(),
-        version: rsip::Version::V2,
+        version: rsipstack::sip::Version::V2,
         headers: headers.into(),
         body: vec![],
     }
 }
 
 /// Extracts nonce from Proxy-Authenticate header
-pub fn extract_nonce_from_proxy_authenticate(response: &rsip::Response) -> Option<String> {
+pub fn extract_nonce_from_proxy_authenticate(response: &rsipstack::sip::Response) -> Option<String> {
     for header in response.headers().iter() {
         if let Header::ProxyAuthenticate(proxy_auth) = header {
             let auth_str = proxy_auth.value();

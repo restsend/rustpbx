@@ -528,7 +528,7 @@ async fn test_locator_lookup() {
     sleep(Duration::from_millis(200)).await;
 
     // Check if locator.lookup returns the registered location
-    let lookup_uri: rsip::Uri = format!("sip:testuser@127.0.0.1:{}", proxy.port)
+    let lookup_uri: rsipstack::sip::Uri = format!("sip:testuser@127.0.0.1:{}", proxy.port)
         .try_into()
         .unwrap();
     

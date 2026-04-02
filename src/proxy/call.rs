@@ -17,8 +17,7 @@ use async_trait::async_trait;
 use audio_codec::CodecType;
 use chrono::Utc;
 use glob::Pattern;
-use rsip::headers::UntypedHeader;
-use rsip::prelude::HeadersExt;
+use rsipstack::sip::prelude::HeadersExt;
 use rsipstack::dialog::DialogId;
 use rsipstack::dialog::dialog::Dialog;
 use rsipstack::dialog::dialog_layer::DialogLayer;
@@ -34,14 +33,14 @@ use tracing::{debug, info, warn};
 pub trait CallRouter: Send + Sync {
     async fn resolve(
         &self,
-        original: &rsip::Request,
+        original: &rsipstack::sip::Request,
         route_invite: Box<dyn RouteInvite>,
         caller: &SipUser,
         cookie: &TransactionCookie,
-    ) -> Result<Dialplan, (anyhow::Error, Option<rsip::StatusCode>)>;
+    ) -> Result<Dialplan, (anyhow::Error, Option<rsipstack::sip::StatusCode>)>;
 }
 
-fn q850_cause_from_status(code: &rsip::StatusCode) -> u16 {
+fn q850_cause_from_status(code: &rsipstack::sip::StatusCode) -> u16 {
     match u16::from(code.clone()) {
         400 | 401 | 402 | 403 | 405 | 406 | 407 | 421 | 603 => 21, // call rejected / not allowed
         404 | 484 | 604 => 1,                                      // unallocated number
@@ -69,23 +68,23 @@ fn resolve_unhandled_targets(
     callee_is_same_realm: bool,
     internal_lookup_empty: bool,
     locs: Vec<Location>,
-) -> Result<DialStrategy, (anyhow::Error, Option<rsip::StatusCode>)> {
+) -> Result<DialStrategy, (anyhow::Error, Option<rsipstack::sip::StatusCode>)> {
     if callee_is_same_realm && internal_lookup_empty {
         return Err((
             anyhow!("target user is offline"),
-            Some(rsip::StatusCode::TemporarilyUnavailable),
+            Some(rsipstack::sip::StatusCode::TemporarilyUnavailable),
         ));
     }
     if !callee_is_same_realm {
         return Err((
             anyhow!("no route found for external destination"),
-            Some(rsip::StatusCode::NotFound),
+            Some(rsipstack::sip::StatusCode::NotFound),
         ));
     }
     Ok(DialStrategy::Sequential(locs))
 }
 
-pub fn q850_reason_value(code: &rsip::StatusCode, detail: Option<&str>) -> String {
+pub fn q850_reason_value(code: &rsipstack::sip::StatusCode, detail: Option<&str>) -> String {
     let fallback = format!("SIP {}", u16::from(code.clone()));
     let text = detail
         .map(|s| s.trim())
@@ -105,8 +104,8 @@ pub trait DialplanInspector: Send + Sync {
         &self,
         dialplan: Dialplan,
         cookie: &TransactionCookie,
-        original: &rsip::Request,
-    ) -> Result<Dialplan, (anyhow::Error, Option<rsip::StatusCode>)>;
+        original: &rsipstack::sip::Request,
+    ) -> Result<Dialplan, (anyhow::Error, Option<rsipstack::sip::StatusCode>)>;
 }
 
 pub struct DefaultRouteInvite {
@@ -120,7 +119,7 @@ impl RouteInvite for DefaultRouteInvite {
     async fn route_invite(
         &self,
         option: InviteOption,
-        origin: &rsip::Request,
+        origin: &rsipstack::sip::Request,
         direction: &DialDirection,
         _cookie: &TransactionCookie,
     ) -> Result<RouteResult> {
@@ -142,7 +141,7 @@ impl RouteInvite for DefaultRouteInvite {
                                 to_user.as_deref().unwrap_or("")
                             );
                             let reason =
-                                q850_reason_value(&rsip::StatusCode::Forbidden, Some(&detail));
+                                q850_reason_value(&rsipstack::sip::StatusCode::Forbidden, Some(&detail));
                             warn!(
                                 trunk = %source.name,
                                 from = from_user.as_deref().unwrap_or(""),
@@ -151,13 +150,13 @@ impl RouteInvite for DefaultRouteInvite {
                                 "dropping inbound INVITE due to SIP trunk user prefix mismatch",
                             );
                             return Ok(RouteResult::Abort(
-                                rsip::StatusCode::Forbidden,
+                                rsipstack::sip::StatusCode::Forbidden,
                                 Some(reason),
                             ));
                         }
                         Err(mismatch) => {
                             let reason = q850_reason_value(
-                                &rsip::StatusCode::Forbidden,
+                                &rsipstack::sip::StatusCode::Forbidden,
                                 Some(&mismatch.to_string()),
                             );
                             warn!(
@@ -168,7 +167,7 @@ impl RouteInvite for DefaultRouteInvite {
                                 "dropping inbound INVITE due to SIP trunk user prefix mismatch",
                             );
                             return Ok(RouteResult::Abort(
-                                rsip::StatusCode::Forbidden,
+                                rsipstack::sip::StatusCode::Forbidden,
                                 Some(reason),
                             ));
                         }
@@ -201,7 +200,7 @@ impl RouteInvite for DefaultRouteInvite {
     async fn preview_route(
         &self,
         option: InviteOption,
-        origin: &rsip::Request,
+        origin: &rsipstack::sip::Request,
         direction: &DialDirection,
         _cookie: &TransactionCookie,
     ) -> Result<RouteResult> {
@@ -234,7 +233,7 @@ impl RouteInvite for DefaultRouteInvite {
 impl DefaultRouteInvite {
     async fn build_context(
         &self,
-        origin: &rsip::Request,
+        origin: &rsipstack::sip::Request,
         direction: &DialDirection,
     ) -> (
         std::collections::HashMap<String, TrunkConfig>,
@@ -252,7 +251,7 @@ impl DefaultRouteInvite {
     async fn resolve_source_trunk(
         &self,
         trunks: &HashMap<String, TrunkConfig>,
-        origin: &rsip::Request,
+        origin: &rsipstack::sip::Request,
         direction: &DialDirection,
     ) -> Option<SourceTrunk> {
         if !matches!(direction, DialDirection::Inbound) {
@@ -274,7 +273,7 @@ impl DefaultRouteInvite {
     }
 }
 
-fn extract_from_user(origin: &rsip::Request) -> Option<String> {
+fn extract_from_user(origin: &rsipstack::sip::Request) -> Option<String> {
     origin
         .from_header()
         .ok()
@@ -282,7 +281,7 @@ fn extract_from_user(origin: &rsip::Request) -> Option<String> {
         .and_then(|uri| uri.user().map(|u| u.to_string()))
 }
 
-fn extract_to_user(origin: &rsip::Request) -> Option<String> {
+fn extract_to_user(origin: &rsipstack::sip::Request) -> Option<String> {
     origin
         .to_header()
         .ok()
@@ -364,11 +363,11 @@ impl CallModule {
 
     async fn default_resolve(
         &self,
-        original: &rsip::Request,
+        original: &rsipstack::sip::Request,
         route_invite: Box<dyn RouteInvite>,
         caller: &SipUser,
         cookie: &TransactionCookie,
-    ) -> Result<Dialplan, (Error, Option<rsip::StatusCode>)> {
+    ) -> Result<Dialplan, (Error, Option<rsipstack::sip::StatusCode>)> {
         let callee_uri = original
             .to_header()
             .map_err(|e| (anyhow::anyhow!(e), None))?
@@ -435,7 +434,7 @@ impl CallModule {
                     warn!(dialog_id, caller_realm = ?caller.realm, callee_realm, "Both caller and callee are external realm, reject");
                     return Err((
                         anyhow::anyhow!("Both caller and callee are external realm"),
-                        Some(rsip::StatusCode::Forbidden),
+                        Some(rsipstack::sip::StatusCode::Forbidden),
                     ));
                 }
             }
@@ -477,7 +476,7 @@ impl CallModule {
             .map_err(|e| {
                 (
                     anyhow::anyhow!(e),
-                    Some(rsip::StatusCode::ServerInternalError),
+                    Some(rsipstack::sip::StatusCode::ServerInternalError),
                 )
             })?;
 
@@ -591,7 +590,7 @@ impl CallModule {
         }
 
         if let Some(contact_uri) = self.inner.server.default_contact_uri() {
-            let contact = rsip::typed::Contact {
+            let contact = rsipstack::sip::typed::Contact {
                 display_name: None,
                 uri: contact_uri,
                 params: vec![],
@@ -685,7 +684,7 @@ impl CallModule {
     /// Returns `None` when the callee realm doesn't belong to this server or
     /// the user is not found.  The result is LRU-cached by the backend so
     /// repeated lookups within the same call leg are cheap.
-    async fn resolve_callee_user(&self, request: &rsip::Request) -> Result<Option<SipUser>> {
+    async fn resolve_callee_user(&self, request: &rsipstack::sip::Request) -> Result<Option<SipUser>> {
         let callee_uri = request.to_header()?.uri()?;
         let callee_realm = callee_uri.host().to_string();
         if !self.inner.server.is_same_realm(&callee_realm).await {
@@ -738,7 +737,7 @@ impl CallModule {
             .map(Self::identity_from_uri)
     }
 
-    fn identity_from_uri(uri: rsip::Uri) -> String {
+    fn identity_from_uri(uri: rsipstack::sip::Uri) -> String {
         let user = uri.user().unwrap_or_default().to_string();
         let host = uri.host().to_string();
         if user.is_empty() {
@@ -834,7 +833,7 @@ impl CallModule {
         tx: &mut Transaction,
         cookie: TransactionCookie,
         caller: &SipUser,
-    ) -> Result<Dialplan, (Error, Option<rsip::StatusCode>)> {
+    ) -> Result<Dialplan, (Error, Option<rsipstack::sip::StatusCode>)> {
         let trunk_context = cookie.get_extension::<TrunkContext>();
         let source_trunk_hint = trunk_context.as_ref().map(|c| c.name.clone());
 
@@ -905,7 +904,7 @@ impl CallModule {
         &self,
         tx: &mut Transaction,
         cookie: &TransactionCookie,
-        code: rsip::StatusCode,
+        code: rsipstack::sip::StatusCode,
         reason: Option<String>,
     ) {
         let direction = if cookie.get_extension::<TrunkContext>().is_some() {
@@ -940,7 +939,7 @@ impl CallModule {
                 if cookie.is_spam() {
                     return Ok(());
                 }
-                let code = code.unwrap_or(rsip::StatusCode::ServerInternalError);
+                let code = code.unwrap_or(rsipstack::sip::StatusCode::ServerInternalError);
                 let reason_text = e.to_string();
                 // If error already contains ;cause= (e.g. "invite;cause=1234;text=\"xxx\""),
                 // treat it as pre-formatted Q850 and use directly.
@@ -953,7 +952,7 @@ impl CallModule {
                 self.report_failure(tx, &cookie, code.clone(), Some(reason_text));
                 tx.reply_with(
                     code.clone(),
-                    vec![rsip::Header::Other("Reason".into(), reason_value)],
+                    vec![rsipstack::sip::Header::Other("Reason".into(), reason_value)],
                     None,
                 )
                 .await
@@ -971,8 +970,8 @@ impl CallModule {
 
         if max_forwards == 0 {
             info!(key = %tx.key, "Max-Forwards exceeded");
-            self.report_failure(tx, &cookie, rsip::StatusCode::TooManyHops, None);
-            tx.reply(rsip::StatusCode::TooManyHops).await?;
+            self.report_failure(tx, &cookie, rsipstack::sip::StatusCode::TooManyHops, None);
+            tx.reply(rsipstack::sip::StatusCode::TooManyHops).await?;
             return Ok(());
         }
 
@@ -996,8 +995,8 @@ impl CallModule {
 
         // For re-INVITE and UPDATE with SDP, we want to ensure they get an SDP answer.
         // We can retrieve the current answer from the session's shared state.
-        let is_reinvite = tx.original.method == rsip::Method::Invite;
-        let is_update = tx.original.method == rsip::Method::Update;
+        let is_reinvite = tx.original.method == rsipstack::sip::Method::Invite;
+        let is_update = tx.original.method == rsipstack::sip::Method::Update;
         let has_sdp = !tx.original.body.is_empty();
 
         if (is_reinvite || is_update) && has_sdp {
@@ -1019,7 +1018,7 @@ impl CallModule {
                         if let Some(mut callee_dialog) = self.inner.dialog_layer.get_dialog(callee_dialog_id) {
                             debug!(%dialog_id, %callee_dialog_id, "Found callee dialog");
                             let body = offer_sdp.clone().into_bytes();
-                            let headers = vec![rsip::Header::ContentType("application/sdp".into())];
+                            let headers = vec![rsipstack::sip::Header::ContentType("application/sdp".into())];
 
                             let resp = match &mut callee_dialog {
                                 Dialog::ClientInvite(d) => {
@@ -1046,8 +1045,8 @@ impl CallModule {
                                     if !response.body().is_empty() {
                                         let answer_sdp = String::from_utf8_lossy(response.body()).to_string();
                                         debug!(%dialog_id, ?tx.original.method, "Forwarding re-INVITE to callee, received SDP answer");
-                                        let headers = vec![rsip::Header::ContentType("application/sdp".into())];
-                                        tx.reply_with(rsip::StatusCode::OK, headers, Some(answer_sdp.into_bytes()))
+                                        let headers = vec![rsipstack::sip::Header::ContentType("application/sdp".into())];
+                                        tx.reply_with(rsipstack::sip::StatusCode::OK, headers, Some(answer_sdp.into_bytes()))
                                             .await
                                             .map_err(|e| anyhow!(e))?;
                                         forwarded = true;
@@ -1064,8 +1063,8 @@ impl CallModule {
 
                     if let Some(sdp) = snapshot.answer_sdp {
                         debug!(%dialog_id, ?tx.original.method, "Replying to mid-dialog request with cached SDP");
-                        let headers = vec![rsip::Header::ContentType("application/sdp".into())];
-                        tx.reply_with(rsip::StatusCode::OK, headers, Some(sdp.into_bytes()))
+                        let headers = vec![rsipstack::sip::Header::ContentType("application/sdp".into())];
+                        tx.reply_with(rsipstack::sip::StatusCode::OK, headers, Some(sdp.into_bytes()))
                             .await
                             .map_err(|e| anyhow!(e))?;
                         return dialog.handle(tx).await.map_err(|e| anyhow!(e));
@@ -1097,7 +1096,7 @@ impl CallModule {
         // Extract Refer-To header
         let refer_to = tx.original.headers.iter()
             .find_map(|h| match h {
-                rsip::Header::Other(name, value) if name.eq_ignore_ascii_case("Refer-To") => {
+                rsipstack::sip::Header::Other(name, value) if name.eq_ignore_ascii_case("Refer-To") => {
                     Some(value.to_string())
                 }
                 _ => None,
@@ -1113,7 +1112,7 @@ impl CallModule {
             }
             None => {
                 warn!("Missing Refer-To header in REFER request");
-                tx.reply_with(rsip::StatusCode::BadRequest, vec![], None)
+                tx.reply_with(rsipstack::sip::StatusCode::BadRequest, vec![], None)
                     .await
                     .map_err(|e| anyhow!(e))?;
                 return Err(anyhow!("Missing Refer-To header"));
@@ -1125,7 +1124,7 @@ impl CallModule {
         // Check Referred-By header (optional)
         let referred_by = tx.original.headers.iter()
             .find_map(|h| match h {
-                rsip::Header::Other(name, value) if name.eq_ignore_ascii_case("Referred-By") => {
+                rsipstack::sip::Header::Other(name, value) if name.eq_ignore_ascii_case("Referred-By") => {
                     Some(value.to_string())
                 }
                 _ => None,
@@ -1140,7 +1139,7 @@ impl CallModule {
             .map_err(|e| anyhow!("Failed to get dialog ID: {}", e))?;
 
         // Send 202 Accepted response
-        tx.reply_with(rsip::StatusCode::Accepted, vec![], None)
+        tx.reply_with(rsipstack::sip::StatusCode::Accepted, vec![], None)
             .await
             .map_err(|e| anyhow!(e))?;
 
@@ -1221,21 +1220,21 @@ impl CallModule {
         let body = format!("SIP/2.0 {} {}\r\n", status_code, reason_phrase);
         
         // Build headers for NOTIFY
-        let mut headers: Vec<rsip::Header> = vec![
-            rsip::Header::ContentType("message/sipfrag;version=2.0".into()),
-            rsip::Header::ContentLength((body.len() as u32).into()),
+        let mut headers: Vec<rsipstack::sip::Header> = vec![
+            rsipstack::sip::Header::ContentType("message/sipfrag;version=2.0".into()),
+            rsipstack::sip::Header::ContentLength((body.len() as u32).into()),
         ];
         
         // Add Subscription-State header
         if status_code >= 200 {
             // Terminal state - subscription is terminated
-            headers.push(rsip::Header::Other(
+            headers.push(rsipstack::sip::Header::Other(
                 "Subscription-State".into(),
                 "terminated;reason=noresource".into(),
             ));
         } else {
             // Active subscription
-            headers.push(rsip::Header::Other(
+            headers.push(rsipstack::sip::Header::Other(
                 "Subscription-State".into(),
                 "active".into(),
             ));
@@ -1288,16 +1287,16 @@ impl ProxyModule for CallModule {
         "call"
     }
 
-    fn allow_methods(&self) -> Vec<rsip::Method> {
+    fn allow_methods(&self) -> Vec<rsipstack::sip::Method> {
         vec![
-            rsip::Method::Invite,
-            rsip::Method::Bye,
-            rsip::Method::Info,
-            rsip::Method::Ack,
-            rsip::Method::Cancel,
-            rsip::Method::Options,
-            rsip::Method::Refer,
-            rsip::Method::Notify,
+            rsipstack::sip::Method::Invite,
+            rsipstack::sip::Method::Bye,
+            rsipstack::sip::Method::Info,
+            rsipstack::sip::Method::Ack,
+            rsipstack::sip::Method::Cancel,
+            rsipstack::sip::Method::Options,
+            rsipstack::sip::Method::Refer,
+            rsipstack::sip::Method::Notify,
         ]
     }
 
@@ -1330,7 +1329,7 @@ impl ProxyModule for CallModule {
             "call transaction begin",
         );
         match tx.original.method {
-            rsip::Method::Invite => {
+            rsipstack::sip::Method::Invite => {
                 // Check for Re-invite (INVITE within an existing dialog)
                 // For server-side dialog, local_tag corresponds to To header tag
                 // A Re-INVITE has both From and To tags present
@@ -1344,11 +1343,11 @@ impl ProxyModule for CallModule {
 
                 if let Err(e) = self.handle_invite(token, tx, cookie).await {
                     if tx.last_response.is_none() {
-                        let code = rsip::StatusCode::ServerInternalError;
+                        let code = rsipstack::sip::StatusCode::ServerInternalError;
                         let reason_text = e.to_string();
                         tx.reply_with(
                             code.clone(),
-                            vec![rsip::Header::Other(
+                            vec![rsipstack::sip::Header::Other(
                                 "Reason".into(),
                                 q850_reason_value(&code, Some(reason_text.as_str())),
                             )],
@@ -1360,28 +1359,28 @@ impl ProxyModule for CallModule {
                 }
                 Ok(ProxyAction::Abort)
             }
-            rsip::Method::Options
-            | rsip::Method::Info
-            | rsip::Method::Ack
-            | rsip::Method::Update
-            | rsip::Method::Cancel
-            | rsip::Method::Bye => {
+            rsipstack::sip::Method::Options
+            | rsipstack::sip::Method::Info
+            | rsipstack::sip::Method::Ack
+            | rsipstack::sip::Method::Update
+            | rsipstack::sip::Method::Cancel
+            | rsipstack::sip::Method::Bye => {
                 if let Err(e) = self.process_message(tx).await {
                     warn!(%dialog_id, method=%tx.original.method, "error process {}\n{}", e, tx.original.to_string());
                 }
                 Ok(ProxyAction::Abort)
             }
-            rsip::Method::Refer => {
+            rsipstack::sip::Method::Refer => {
                 // Handle inbound REFER request (transfer target scenario)
                 if let Err(e) = self.handle_inbound_refer(tx, &cookie).await {
                     warn!(%dialog_id, "Failed to handle inbound REFER: {}", e);
                     // Send appropriate error response
-                    let code = rsip::StatusCode::ServerInternalError;
+                    let code = rsipstack::sip::StatusCode::ServerInternalError;
                     let _ = tx.reply_with(code, vec![], None).await;
                 }
                 Ok(ProxyAction::Abort)
             }
-            rsip::Method::Notify => {
+            rsipstack::sip::Method::Notify => {
                 // Handle NOTIFY request (typically from REFER subscription)
                 if let Err(e) = self.process_message(tx).await {
                     warn!(%dialog_id, "Failed to process NOTIFY: {}", e);
@@ -1404,14 +1403,14 @@ mod tests {
 
     fn make_loc() -> Vec<Location> {
         vec![Location {
-            aor: rsip::Uri {
-                scheme: Some(rsip::Scheme::Sip),
-                auth: Some(rsip::Auth {
+            aor: rsipstack::sip::Uri {
+                scheme: Some(rsipstack::sip::Scheme::Sip),
+                auth: Some(rsipstack::sip::Auth {
                     user: "test".to_string(),
                     password: None,
                 }),
-                host_with_port: rsip::HostWithPort {
-                    host: rsip::Host::Domain("example.com".to_string().into()),
+                host_with_port: rsipstack::sip::HostWithPort {
+                    host: rsipstack::sip::Host::Domain("example.com".to_string().into()),
                     port: None,
                 },
                 params: vec![],

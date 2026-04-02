@@ -1,13 +1,11 @@
 //! RTP End-to-End Tests
-//! 
+//!
 //! These tests verify that RTP packets are correctly forwarded through the PBX
 //! with accurate data integrity. This is critical for ensuring media quality.
 
 // use super::cdr_capture::{CdrCapture, CdrExpectation};
 use super::e2e_test_server::E2eTestServer;
-use super::rtp_utils::{
-    RtpPacket, RtpReceiver, RtpSender, RtpStats,
-};
+use super::rtp_utils::{RtpPacket, RtpReceiver, RtpSender, RtpStats, extract_media_endpoint};
 use super::test_ua::{TestUa, TestUaEvent};
 
 use crate::config::MediaProxyMode;
@@ -36,7 +34,7 @@ impl Default for RtpFlowTestConfig {
             payload_size: 160, // 20ms of PCMU @ 8kHz
             payload_type: 0,   // PCMU
             ssrc: 0x12345678,
-            interval_ms: 20,   // 20ms intervals
+            interval_ms: 20,          // 20ms intervals
             expected_loss_rate: 0.05, // 5% acceptable loss
         }
     }
@@ -88,7 +86,7 @@ impl RtpE2eTest {
     /// Create new RTP E2E test with server
     pub async fn new_with_mode(mode: MediaProxyMode) -> Result<Self> {
         let server = Arc::new(E2eTestServer::start_with_mode(mode).await?);
-        
+
         Ok(Self {
             server,
             caller: None,
@@ -103,47 +101,51 @@ impl RtpE2eTest {
     /// Setup caller UA with RTP
     pub async fn setup_caller(&mut self, username: &str) -> Result<()> {
         let ua = self.server.create_ua(username).await?;
-        
+
         // Setup RTP sender and receiver for caller
         let sender = RtpSender::bind().await?;
         let receiver = RtpReceiver::bind(0).await?;
-        
+
         self.caller = Some(ua);
         self.caller_rtp_sender = Some(sender);
         self.caller_rtp_receiver = Some(receiver);
-        
+
         Ok(())
     }
 
     /// Setup callee UA with RTP
     pub async fn setup_callee(&mut self, username: &str) -> Result<()> {
         let ua = self.server.create_ua(username).await?;
-        
+
         // Setup RTP sender and receiver for callee
         let sender = RtpSender::bind().await?;
         let receiver = RtpReceiver::bind(0).await?;
-        
+
         self.callee = Some(ua);
         self.callee_rtp_sender = Some(sender);
         self.callee_rtp_receiver = Some(receiver);
-        
+
         Ok(())
     }
 
     /// Get caller's RTP port for SDP
     pub fn get_caller_rtp_port(&self) -> Option<u16> {
-        self.caller_rtp_receiver.as_ref().and_then(|r| r.port().ok())
+        self.caller_rtp_receiver
+            .as_ref()
+            .and_then(|r| r.port().ok())
     }
 
     /// Get callee's RTP port for SDP
     pub fn get_callee_rtp_port(&self) -> Option<u16> {
-        self.callee_rtp_receiver.as_ref().and_then(|r| r.port().ok())
+        self.callee_rtp_receiver
+            .as_ref()
+            .and_then(|r| r.port().ok())
     }
 
     /// Generate SDP with correct RTP port
     pub fn generate_sdp(ip: &str, port: u16, payload_type: u8, codec_name: &str) -> String {
         let clock_rate = if codec_name == "opus" { 48000 } else { 8000 };
-        
+
         format!(
             "v=0\r\n\
             o=- {} {} IN IP4 {}\r\n\
@@ -156,8 +158,13 @@ impl RtpE2eTest {
             a=sendrecv\r\n",
             chrono::Utc::now().timestamp(),
             chrono::Utc::now().timestamp() + 1,
-            ip, ip, port, payload_type,
-            payload_type, codec_name, clock_rate
+            ip,
+            ip,
+            port,
+            payload_type,
+            payload_type,
+            codec_name,
+            clock_rate
         )
     }
 
@@ -175,9 +182,11 @@ impl RtpE2eTest {
         }
 
         // Get callee's RTP port for sending
-        let callee_rtp_port = self.get_callee_rtp_port()
+        let callee_rtp_port = self
+            .get_callee_rtp_port()
             .ok_or_else(|| anyhow!("Callee RTP port not available"))?;
-        let caller_rtp_port = self.get_caller_rtp_port()
+        let caller_rtp_port = self
+            .get_caller_rtp_port()
             .ok_or_else(|| anyhow!("Caller RTP port not available"))?;
 
         // Create test packets
@@ -219,7 +228,8 @@ impl RtpE2eTest {
         }
 
         // Wait for transmission
-        let test_duration = Duration::from_millis(config.packet_count as u64 * config.interval_ms + 500);
+        let test_duration =
+            Duration::from_millis(config.packet_count as u64 * config.interval_ms + 500);
         sleep(test_duration).await;
 
         // Stop sending
@@ -280,32 +290,32 @@ impl RtpE2eTest {
 #[tokio::test]
 async fn test_rtp_direct_flow_no_proxy() -> Result<()> {
     let _ = tracing_subscriber::fmt::try_init();
-    
+
     let mut test = RtpE2eTest::new_with_mode(MediaProxyMode::None).await?;
-    
+
     // Setup UAs
     test.setup_caller("alice").await?;
     test.setup_callee("bob").await?;
-    
+
     sleep(Duration::from_millis(100)).await;
-    
+
     // Get RTP ports and generate SDPs
     let caller_port = test.get_caller_rtp_port().unwrap();
     let callee_port = test.get_callee_rtp_port().unwrap();
-    
+
     let caller_sdp = RtpE2eTest::generate_sdp("127.0.0.1", caller_port, 0, "PCMU");
     let callee_sdp = RtpE2eTest::generate_sdp("127.0.0.1", callee_port, 0, "PCMU");
-    
+
     // Establish call
     let caller = Arc::new(test.caller.take().unwrap());
     let callee = test.callee.take().unwrap();
-    
+
     let caller_handle = tokio::spawn({
         let c = caller.clone();
         let sdp = caller_sdp.clone();
         async move { c.make_call("bob", Some(sdp)).await }
     });
-    
+
     // Answer call
     for _ in 0..50 {
         let events = callee.process_dialog_events().await?;
@@ -318,26 +328,26 @@ async fn test_rtp_direct_flow_no_proxy() -> Result<()> {
         }
         sleep(Duration::from_millis(100)).await;
     }
-    
+
     let _ = tokio::time::timeout(Duration::from_secs(5), caller_handle).await;
-    
+
     // Execute RTP test
     let config = RtpFlowTestConfig::default();
     let (caller_result, callee_result) = test.execute_bidirectional_rtp_test(config).await?;
-    
+
     info!(
         caller_received = caller_result.packets_received,
         callee_received = callee_result.packets_received,
         "RTP direct flow results"
     );
-    
+
     // In None mode, RTP should flow directly
     // We expect some packets to be received (actual routing depends on SDP handling)
     assert!(
         caller_result.packets_received > 0 || callee_result.packets_received > 0,
         "At least some RTP packets should be received"
     );
-    
+
     test.server.stop();
     Ok(())
 }
@@ -347,48 +357,143 @@ async fn test_rtp_direct_flow_no_proxy() -> Result<()> {
 #[tokio::test]
 async fn test_rtp_through_proxy() -> Result<()> {
     let _ = tracing_subscriber::fmt::try_init();
-    
+
     let mut test = RtpE2eTest::new_with_mode(MediaProxyMode::All).await?;
-    
+
     test.setup_caller("alice").await?;
     test.setup_callee("bob").await?;
-    
+
+    // Start receivers so we can verify forwarded RTP arrives at both UAs.
+    if let Some(ref receiver) = test.callee_rtp_receiver {
+        receiver.start_receiving();
+    }
+    if let Some(ref receiver) = test.caller_rtp_receiver {
+        receiver.start_receiving();
+    }
+
+    let caller_port = test
+        .get_caller_rtp_port()
+        .ok_or_else(|| anyhow!("Caller RTP port not available"))?;
+    let callee_port = test
+        .get_callee_rtp_port()
+        .ok_or_else(|| anyhow!("Callee RTP port not available"))?;
+
     sleep(Duration::from_millis(100)).await;
-    
-    // In All mode, the SDP will be rewritten to use proxy addresses
-    // We'll use placeholder ports and let the proxy handle the media
-    let caller_sdp = RtpE2eTest::generate_sdp("127.0.0.1", 12345, 0, "PCMU");
-    let callee_sdp = RtpE2eTest::generate_sdp("127.0.0.1", 54321, 0, "PCMU");
-    
+
+    // In All mode, PBX rewrites SDP to proxy media addresses.
+    // We still advertise real local RTP ports so proxy can forward media back.
+    let caller_sdp = RtpE2eTest::generate_sdp("127.0.0.1", caller_port, 0, "PCMU");
+    let callee_sdp = RtpE2eTest::generate_sdp("127.0.0.1", callee_port, 0, "PCMU");
+
     let caller = Arc::new(test.caller.take().unwrap());
     let callee = test.callee.take().unwrap();
-    
+
     let caller_handle = tokio::spawn({
         let c = caller.clone();
         let sdp = caller_sdp.clone();
         async move { c.make_call("bob", Some(sdp)).await }
     });
-    
+
+    let mut call_established = false;
+    let mut callee_received_offer_sdp: Option<String> = None;
+    let mut incoming_dialog_id = None;
+
     for _ in 0..50 {
         let events = callee.process_dialog_events().await?;
         for event in events {
-            if let TestUaEvent::IncomingCall(id, _) = event {
+            if let TestUaEvent::IncomingCall(id, offer_sdp) = event {
+                callee_received_offer_sdp = offer_sdp;
+                incoming_dialog_id = Some(id.clone());
                 callee.answer_call(&id, Some(callee_sdp.clone())).await?;
+                call_established = true;
                 break;
             }
         }
+        if call_established {
+            break;
+        }
         sleep(Duration::from_millis(100)).await;
     }
-    
-    let _ = tokio::time::timeout(Duration::from_secs(5), caller_handle).await;
-    
-    // TODO: In full implementation, we would:
-    // 1. Extract the proxy media ports from the SDP
-    // 2. Send RTP to those ports
-    // 3. Verify RTP is forwarded correctly
-    
-    info!("RTP through proxy test completed");
-    
+
+    assert!(call_established, "Call should be established in proxy mode");
+
+    let caller_dialog_id = tokio::time::timeout(Duration::from_secs(5), caller_handle)
+        .await
+        .map_err(|_| anyhow!("Caller task timed out"))?
+        .map_err(|e| anyhow!("Caller task join error: {}", e))??;
+
+    let caller_answer_sdp = caller
+        .get_negotiated_answer_sdp(&caller_dialog_id)
+        .await
+        .ok_or_else(|| anyhow!("Missing negotiated answer SDP on caller side"))?;
+
+    let callee_offer_sdp = callee_received_offer_sdp
+        .ok_or_else(|| anyhow!("Missing incoming offer SDP on callee side"))?;
+
+    let callee_to_proxy = extract_media_endpoint(&callee_offer_sdp)
+        .ok_or_else(|| anyhow!("Failed to parse callee-side proxy media endpoint"))?;
+    let caller_to_proxy = extract_media_endpoint(&caller_answer_sdp)
+        .ok_or_else(|| anyhow!("Failed to parse caller-side proxy media endpoint"))?;
+
+    info!(
+        caller_to_proxy = %caller_to_proxy,
+        callee_to_proxy = %callee_to_proxy,
+        ?incoming_dialog_id,
+        "Extracted proxy media endpoints"
+    );
+
+    let caller_packets = RtpPacket::create_sequence(60, 3000, 70000, 0xA1A1A1A1, 0, 160, 160);
+    let callee_packets = RtpPacket::create_sequence(60, 4000, 80000, 0xB2B2B2B2, 0, 160, 160);
+
+    if let Some(ref sender) = test.caller_rtp_sender {
+        sender.start_sending(caller_to_proxy, caller_packets, 20);
+    }
+    if let Some(ref sender) = test.callee_rtp_sender {
+        sender.start_sending(callee_to_proxy, callee_packets, 20);
+    }
+
+    sleep(Duration::from_secs(2)).await;
+
+    if let Some(ref sender) = test.caller_rtp_sender {
+        sender.stop();
+    }
+    if let Some(ref sender) = test.callee_rtp_sender {
+        sender.stop();
+    }
+
+    sleep(Duration::from_millis(200)).await;
+
+    let caller_stats = if let Some(ref receiver) = test.caller_rtp_receiver {
+        receiver.get_stats().await
+    } else {
+        RtpStats::default()
+    };
+
+    let callee_stats = if let Some(ref receiver) = test.callee_rtp_receiver {
+        receiver.get_stats().await
+    } else {
+        RtpStats::default()
+    };
+
+    info!(
+        caller_received = caller_stats.packets_received,
+        callee_received = callee_stats.packets_received,
+        caller_ssrcs = ?caller_stats.ssrcs,
+        callee_ssrcs = ?callee_stats.ssrcs,
+        "RTP through proxy stats"
+    );
+
+    assert!(
+        caller_stats.packets_received > 0,
+        "Caller should receive forwarded RTP through proxy"
+    );
+    assert!(
+        callee_stats.packets_received > 0,
+        "Callee should receive forwarded RTP through proxy"
+    );
+
+    info!("RTP through proxy test completed with real media verification");
+
     test.server.stop();
     Ok(())
 }
@@ -398,7 +503,7 @@ async fn test_rtp_through_proxy() -> Result<()> {
 #[tokio::test]
 async fn test_rtp_packet_integrity() -> Result<()> {
     let _ = tracing_subscriber::fmt::try_init();
-    
+
     // Create test packets with known payload patterns
     let test_ssrc = 0xDEADBEEFu32;
     let test_seq_start = 1000u16;
@@ -411,22 +516,30 @@ async fn test_rtp_packet_integrity() -> Result<()> {
         160,
         160,
     );
-    
+
     // Verify each packet
     for (i, packet) in packets.iter().enumerate() {
         // Encode and decode
         let encoded = packet.encode();
         let decoded = RtpPacket::decode(&encoded)?;
-        
+
         // Verify all fields are preserved
         assert_eq!(decoded.version, 2, "RTP version should be 2");
         assert_eq!(decoded.payload_type, 0, "Payload type should be 0 (PCMU)");
-        assert_eq!(decoded.sequence_number, test_seq_start + i as u16, "Sequence number mismatch");
+        assert_eq!(
+            decoded.sequence_number,
+            test_seq_start + i as u16,
+            "Sequence number mismatch"
+        );
         assert_eq!(decoded.ssrc, test_ssrc, "SSRC mismatch");
-        assert_eq!(decoded.timestamp, 50000 + (i as u32) * 160, "Timestamp mismatch");
+        assert_eq!(
+            decoded.timestamp,
+            50000 + (i as u32) * 160,
+            "Timestamp mismatch"
+        );
         assert_eq!(decoded.payload, packet.payload, "Payload mismatch");
     }
-    
+
     info!("RTP packet integrity test passed");
     Ok(())
 }
@@ -436,20 +549,14 @@ async fn test_rtp_packet_integrity() -> Result<()> {
 #[tokio::test]
 async fn test_rtp_sequence_validation() -> Result<()> {
     let _ = tracing_subscriber::fmt::try_init();
-    
+
     let packets = RtpPacket::create_sequence(
-        100,
-        5000,
-        100000,
-        0x12345678,
-        0,
-        160,
-        160, // 20ms @ 8kHz
+        100, 5000, 100000, 0x12345678, 0, 160, 160, // 20ms @ 8kHz
     );
-    
+
     let mut last_seq: Option<u16> = None;
     let mut last_ts: Option<u32> = None;
-    
+
     for packet in &packets {
         // Check sequence number progression
         if let Some(last) = last_seq {
@@ -461,7 +568,7 @@ async fn test_rtp_sequence_validation() -> Result<()> {
             );
         }
         last_seq = Some(packet.sequence_number);
-        
+
         // Check timestamp progression
         if let Some(last) = last_ts {
             let expected = last + 160;
@@ -472,11 +579,11 @@ async fn test_rtp_sequence_validation() -> Result<()> {
             );
         }
         last_ts = Some(packet.timestamp);
-        
+
         // SSRC should be constant
         assert_eq!(packet.ssrc, 0x12345678, "SSRC should be constant");
     }
-    
+
     info!("RTP sequence validation test passed");
     Ok(())
 }
@@ -486,22 +593,22 @@ async fn test_rtp_sequence_validation() -> Result<()> {
 #[tokio::test]
 async fn test_rtp_high_packet_rate() -> Result<()> {
     let _ = tracing_subscriber::fmt::try_init();
-    
+
     // Test with 10ms intervals (100 packets per second)
     let _config = RtpFlowTestConfig {
         packet_count: 200,
         interval_ms: 10,
         ..Default::default()
     };
-    
+
     let mut test = RtpE2eTest::new_with_mode(MediaProxyMode::Auto).await?;
     test.setup_caller("alice").await?;
     test.setup_callee("bob").await?;
-    
+
     // Setup call...
     // Execute test with high rate
     // Verify no excessive loss
-    
+
     info!("High packet rate RTP test completed");
     Ok(())
 }
@@ -511,7 +618,7 @@ async fn test_rtp_high_packet_rate() -> Result<()> {
 #[tokio::test]
 async fn test_rtp_various_payload_sizes() -> Result<()> {
     let _ = tracing_subscriber::fmt::try_init();
-    
+
     for payload_size in [80, 160, 240, 320] {
         let packets = RtpPacket::create_sequence(
             10,
@@ -522,21 +629,21 @@ async fn test_rtp_various_payload_sizes() -> Result<()> {
             payload_size,
             payload_size as u32,
         );
-        
+
         assert_eq!(packets.len(), 10);
-        
+
         for packet in &packets {
             assert_eq!(packet.payload.len(), payload_size);
-            
+
             // Encode/decode roundtrip
             let encoded = packet.encode();
             let decoded = RtpPacket::decode(&encoded)?;
             assert_eq!(decoded.payload.len(), payload_size);
         }
-        
+
         info!(payload_size, "Payload size test passed");
     }
-    
+
     Ok(())
 }
 
@@ -545,13 +652,9 @@ async fn test_rtp_various_payload_sizes() -> Result<()> {
 #[tokio::test]
 async fn test_rtp_different_codecs() -> Result<()> {
     let _ = tracing_subscriber::fmt::try_init();
-    
-    let codecs = vec![
-        (0, "PCMU", 160),
-        (8, "PCMA", 160),
-        (18, "G729", 20),
-    ];
-    
+
+    let codecs = vec![(0, "PCMU", 160), (8, "PCMA", 160), (18, "G729", 20)];
+
     for (pt, name, frame_size) in codecs {
         let packets = RtpPacket::create_sequence(
             10,
@@ -562,18 +665,26 @@ async fn test_rtp_different_codecs() -> Result<()> {
             frame_size,
             frame_size as u32,
         );
-        
+
         for packet in &packets {
-            assert_eq!(packet.payload_type, pt, "Payload type mismatch for {}", name);
-            
+            assert_eq!(
+                packet.payload_type, pt,
+                "Payload type mismatch for {}",
+                name
+            );
+
             let encoded = packet.encode();
             let decoded = RtpPacket::decode(&encoded)?;
-            assert_eq!(decoded.payload_type, pt, "Payload type not preserved for {}", name);
+            assert_eq!(
+                decoded.payload_type, pt,
+                "Payload type not preserved for {}",
+                name
+            );
         }
-        
+
         info!(codec = name, payload_type = pt, "Codec test passed");
     }
-    
+
     Ok(())
 }
 
@@ -582,22 +693,22 @@ async fn test_rtp_different_codecs() -> Result<()> {
 #[tokio::test]
 async fn test_full_call_with_rtp_verification() -> Result<()> {
     let _ = tracing_subscriber::fmt::try_init();
-    
+
     let mut test = RtpE2eTest::new_with_mode(MediaProxyMode::Auto).await?;
-    
+
     // Setup
     test.setup_caller("alice").await?;
     test.setup_callee("bob").await?;
-    
+
     let caller_port = test.get_caller_rtp_port().unwrap();
     let callee_port = test.get_callee_rtp_port().unwrap();
-    
+
     info!(caller_port, callee_port, "RTP ports allocated");
-    
+
     // Generate SDPs with actual RTP ports
     let caller_sdp = RtpE2eTest::generate_sdp("127.0.0.1", caller_port, 0, "PCMU");
     let callee_sdp = RtpE2eTest::generate_sdp("127.0.0.1", callee_port, 0, "PCMU");
-    
+
     // Start RTP receivers
     if let Some(ref receiver) = test.callee_rtp_receiver {
         receiver.start_receiving();
@@ -605,16 +716,15 @@ async fn test_full_call_with_rtp_verification() -> Result<()> {
     if let Some(ref receiver) = test.caller_rtp_receiver {
         receiver.start_receiving();
     }
-    
+
     // Make call
     let caller = Arc::new(test.caller.take().unwrap());
     let callee = test.callee.take().unwrap();
-    
+
     let caller_clone = caller.clone();
-    let caller_handle = tokio::spawn(async move {
-        caller_clone.make_call("bob", Some(caller_sdp)).await
-    });
-    
+    let caller_handle =
+        tokio::spawn(async move { caller_clone.make_call("bob", Some(caller_sdp)).await });
+
     // Answer
     let mut call_established = false;
     for _ in 0..50 {
@@ -632,29 +742,29 @@ async fn test_full_call_with_rtp_verification() -> Result<()> {
         }
         sleep(Duration::from_millis(100)).await;
     }
-    
+
     assert!(call_established, "Call should be established");
-    
+
     // Wait for dialog to be fully established
     let _ = tokio::time::timeout(Duration::from_secs(5), caller_handle).await;
-    
+
     // Send RTP packets
     let callee_addr: SocketAddr = format!("127.0.0.1:{}", callee_port).parse()?;
     let caller_addr: SocketAddr = format!("127.0.0.1:{}", caller_port).parse()?;
-    
+
     let caller_packets = RtpPacket::create_sequence(50, 1000, 50000, 0x11111111, 0, 160, 160);
     let callee_packets = RtpPacket::create_sequence(50, 2000, 60000, 0x22222222, 0, 160, 160);
-    
+
     if let Some(ref sender) = test.caller_rtp_sender {
         sender.start_sending(callee_addr, caller_packets, 20);
     }
     if let Some(ref sender) = test.callee_rtp_sender {
         sender.start_sending(caller_addr, callee_packets, 20);
     }
-    
+
     // Let RTP flow for ~2 seconds
     sleep(Duration::from_secs(2)).await;
-    
+
     // Stop senders
     if let Some(ref sender) = test.caller_rtp_sender {
         sender.stop();
@@ -662,22 +772,22 @@ async fn test_full_call_with_rtp_verification() -> Result<()> {
     if let Some(ref sender) = test.callee_rtp_sender {
         sender.stop();
     }
-    
+
     sleep(Duration::from_millis(200)).await;
-    
+
     // Get stats
     let caller_stats = if let Some(ref receiver) = test.caller_rtp_receiver {
         receiver.get_stats().await
     } else {
         RtpStats::default()
     };
-    
+
     let callee_stats = if let Some(ref receiver) = test.callee_rtp_receiver {
         receiver.get_stats().await
     } else {
         RtpStats::default()
     };
-    
+
     info!(
         caller_received = caller_stats.packets_received,
         caller_ssrcs = ?caller_stats.ssrcs,
@@ -685,7 +795,7 @@ async fn test_full_call_with_rtp_verification() -> Result<()> {
         callee_ssrcs = ?callee_stats.ssrcs,
         "RTP test results"
     );
-    
+
     // Verify some packets were received
     // Note: In a full implementation with proper SDP rewriting,
     // we would expect nearly all packets to be received
@@ -693,12 +803,12 @@ async fn test_full_call_with_rtp_verification() -> Result<()> {
         caller_stats.packets_received > 0 || callee_stats.packets_received > 0,
         "At least some RTP should be received"
     );
-    
+
     // Note: This test doesn't hang up the call, so no CDR will be generated
     // In a complete implementation, we would track dialog_id and hang up properly
-    
+
     info!("Full call with RTP verification test completed successfully");
-    
+
     test.server.stop();
     Ok(())
 }

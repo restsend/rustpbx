@@ -21,7 +21,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use chrono::{DateTime, NaiveDateTime, Utc};
-use rsip::Uri;
+use rsipstack::sip::Uri;
 use sea_orm::ActiveValue::Set;
 use sea_orm::sea_query::{Expr, Order, Query as SeaQuery};
 use sea_orm::{

@@ -1,9 +1,9 @@
 use crate::handler::middleware::clientaddr::ClientAddr;
 use axum::extract::ws::{Message, WebSocket};
 use futures::{SinkExt, StreamExt};
-use rsip::{
+use rsipstack::sip::{
     SipMessage,
-    prelude::{HeadersExt, UntypedHeader},
+    prelude::HeadersExt,
 };
 use rsipstack::{
     transaction::endpoint::EndpointInnerRef,
@@ -24,9 +24,9 @@ pub async fn sip_ws_handler(
     let (to_ws_tx, mut to_ws_rx) = mpsc::unbounded_channel();
 
     let transport_type = if client_addr.is_secure {
-        rsip::transport::Transport::Wss
+        rsipstack::sip::transport::Transport::Wss
     } else {
-        rsip::transport::Transport::Ws
+        rsipstack::sip::transport::Transport::Ws
     };
     let local_addr = SipAddr {
         r#type: Some(transport_type),

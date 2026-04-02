@@ -9,7 +9,7 @@ use crate::proxy::tests::common::{
     create_auth_request, create_register_request, create_test_request, create_transaction,
 };
 use crate::proxy::user::MemoryUserBackend;
-use rsip::{
+use rsipstack::sip::{
     headers::{ContentType, typed::To},
     prelude::*,
 };
@@ -157,7 +157,7 @@ async fn test_ban_module(username: &str, realm: &str, tx: mpsc::Sender<String>) 
 
     // Try registration with wrong password multiple times to trigger ban
     for i in 0..3 {
-        let request = create_auth_request(rsip::Method::Register, username, realm, "wrongpassword");
+        let request = create_auth_request(rsipstack::sip::Method::Register, username, realm, "wrongpassword");
         let (mut tx1, _endpoint_inner) = create_transaction(request).await;
 
         // Process the transaction (this won't actually send over network, just record the response locally)
@@ -168,7 +168,7 @@ async fn test_ban_module(username: &str, realm: &str, tx: mpsc::Sender<String>) 
     }
 
     // Try one more time - in a real server this would be banned
-    let request = create_auth_request(rsip::Method::Register, username, realm, "wrongpassword");
+    let request = create_auth_request(rsipstack::sip::Method::Register, username, realm, "wrongpassword");
     let (mut tx1, _endpoint_inner) = create_transaction(request).await;
     let _ = process_transaction_locally(&mut tx1).await;
 
@@ -194,7 +194,7 @@ async fn test_registration_module(
     let _ = process_transaction_locally(&mut tx1).await;
 
     // Create an authenticated request
-    let auth_request = create_auth_request(rsip::Method::Register, username, realm, password);
+    let auth_request = create_auth_request(rsipstack::sip::Method::Register, username, realm, password);
     let (mut tx2, _endpoint_inner) = create_transaction(auth_request).await;
     let _ = process_transaction_locally(&mut tx2).await;
 
@@ -231,37 +231,37 @@ async fn process_transaction_locally(tx: &mut Transaction) -> Result<(), String>
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     // Simulate a response
-    if tx.original.method == rsip::Method::Register {
+    if tx.original.method == rsipstack::sip::Method::Register {
         // For REGISTER, simulate a 401 challenge or 200 OK
         let is_auth = tx
             .original
             .headers()
             .iter()
-            .any(|h| matches!(h, rsip::Header::Authorization(_)));
+            .any(|h| matches!(h, rsipstack::sip::Header::Authorization(_)));
         if is_auth {
             // Simulate 200 OK for authenticated request
-            let resp = rsip::Response {
-                version: rsip::Version::V2,
-                status_code: rsip::StatusCode::OK,
+            let resp = rsipstack::sip::Response {
+                version: rsipstack::sip::Version::V2,
+                status_code: rsipstack::sip::StatusCode::OK,
                 headers: tx.original.headers().to_owned(),
                 body: vec![],
             };
             tx.last_response = Some(resp);
         } else {
             // Simulate 401 Unauthorized
-            let resp = rsip::Response {
-                version: rsip::Version::V2,
-                status_code: rsip::StatusCode::Unauthorized,
+            let resp = rsipstack::sip::Response {
+                version: rsipstack::sip::Version::V2,
+                status_code: rsipstack::sip::StatusCode::Unauthorized,
                 headers: tx.original.headers().to_owned(),
                 body: vec![],
             };
             tx.last_response = Some(resp);
         }
-    } else if tx.original.method == rsip::Method::Invite {
+    } else if tx.original.method == rsipstack::sip::Method::Invite {
         // For INVITE, simulate a 407 Proxy Authentication Required
-        let resp = rsip::Response {
-            version: rsip::Version::V2,
-            status_code: rsip::StatusCode::ProxyAuthenticationRequired,
+        let resp = rsipstack::sip::Response {
+            version: rsipstack::sip::Version::V2,
+            status_code: rsipstack::sip::StatusCode::ProxyAuthenticationRequired,
             headers: tx.original.headers().to_owned(),
             body: vec![],
         };
@@ -272,17 +272,17 @@ async fn process_transaction_locally(tx: &mut Transaction) -> Result<(), String>
 }
 
 // Helper function to create an INVITE request with SDP body
-fn create_invite_request(from_user: &str, to_user: &str, realm: &str) -> rsip::Request {
-    let mut request = create_test_request(rsip::Method::Invite, from_user, None, realm, None);
+fn create_invite_request(from_user: &str, to_user: &str, realm: &str) -> rsipstack::sip::Request {
+    let mut request = create_test_request(rsipstack::sip::Method::Invite, from_user, None, realm, None);
 
     // Update the request URI to target the callee
-    let to_uri = rsip::Uri {
-        scheme: Some(rsip::Scheme::Sip),
-        auth: Some(rsip::Auth {
+    let to_uri = rsipstack::sip::Uri {
+        scheme: Some(rsipstack::sip::Scheme::Sip),
+        auth: Some(rsipstack::sip::Auth {
             user: to_user.to_string(),
             password: None,
         }),
-        host_with_port: rsip::HostWithPort {
+        host_with_port: rsipstack::sip::HostWithPort {
             host: realm.parse().unwrap(),
             port: Some(5060.into()),
         },
@@ -297,11 +297,11 @@ fn create_invite_request(from_user: &str, to_user: &str, realm: &str) -> rsip::R
         uri: to_uri,
         params: vec![],
     };
-    let to_header: rsip::Header = to.into();
+    let to_header: rsipstack::sip::Header = to.into();
 
     // Replace the To header
     let mut headers = request.headers.clone();
-    headers.retain(|h| !matches!(h, rsip::Header::To(_)));
+    headers.retain(|h| !matches!(h, rsipstack::sip::Header::To(_)));
     headers.push(to_header);
     request.headers = headers;
 

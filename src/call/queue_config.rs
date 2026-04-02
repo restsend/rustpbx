@@ -2,7 +2,7 @@ use crate::call::{
     DialStrategy, FailureAction, Location, QueueFallbackAction, QueueHoldConfig, QueuePlan,
 };
 use anyhow::{Result, anyhow};
-use rsip::{StatusCode, Uri};
+use rsipstack::sip::{StatusCode, Uri};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 

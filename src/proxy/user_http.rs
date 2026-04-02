@@ -72,7 +72,7 @@ impl UserBackend for HttpUserBackend {
         &self,
         username: &str,
         realm: Option<&str>,
-        request: Option<&rsip::Request>,
+        request: Option<&rsipstack::sip::Request>,
     ) -> Result<Option<SipUser>, AuthError> {
         let start_time = Instant::now();
         let sip_params = if let Some(req) = request {

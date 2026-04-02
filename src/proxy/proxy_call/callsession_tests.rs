@@ -536,7 +536,7 @@ mod callsession_b2bua_tests {
     #[test]
     fn test_queue_plan_creation() {
         use crate::call::{DialStrategy, Location, QueuePlan};
-        use rsip::Uri;
+        use rsipstack::sip::Uri;
 
         let target1 = Location {
             aor: Uri::try_from("sip:agent1@example.com").unwrap(),
@@ -573,7 +573,7 @@ mod callsession_b2bua_tests {
     #[test]
     fn test_queue_plan_fallback_actions() {
         use crate::call::{FailureAction, QueueFallbackAction, QueuePlan};
-        use rsip::StatusCode;
+        use rsipstack::sip::StatusCode;
 
         let mut plan = QueuePlan::default();
 
@@ -593,7 +593,7 @@ mod callsession_b2bua_tests {
     #[test]
     fn test_dialplan_flow_queue_construction() {
         use crate::call::{DialStrategy, DialplanFlow, Location, QueuePlan};
-        use rsip::Uri;
+        use rsipstack::sip::Uri;
 
         let target = Location {
             aor: Uri::try_from("sip:agent1@example.com").unwrap(),
@@ -626,7 +626,7 @@ mod callsession_b2bua_tests {
     #[test]
     fn test_dialplan_flow_queue_with_multiple_fallback_levels() {
         use crate::call::{DialStrategy, DialplanFlow, Location, QueuePlan};
-        use rsip::Uri;
+        use rsipstack::sip::Uri;
 
         let target1 = Location {
             aor: Uri::try_from("sip:agent1@example.com").unwrap(),

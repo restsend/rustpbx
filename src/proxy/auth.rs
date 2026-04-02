@@ -5,12 +5,10 @@ use crate::call::{CalleeDisplayName, TransactionCookie, TrunkContext};
 use crate::config::ProxyConfig;
 use anyhow::{Error, Result};
 use async_trait::async_trait;
-use rsip::Header;
-use rsip::headers::UntypedHeader;
-use rsip::headers::{ProxyAuthenticate, WwwAuthenticate};
-use rsip::prelude::HeadersExt;
-use rsip::prelude::ToTypedHeader;
-use rsip::typed::Authorization;
+use rsipstack::sip::Header;
+use rsipstack::sip::headers::{ProxyAuthenticate, WwwAuthenticate};
+use rsipstack::sip::prelude::HeadersExt;
+use rsipstack::sip::typed::Authorization;
 use rsipstack::dialog::authenticate::verify_digest;
 use rsipstack::transaction::transaction::Transaction;
 use std::sync::Arc;
@@ -59,7 +57,7 @@ impl From<Error> for AuthError {
 pub trait AuthBackend: Send + Sync {
     async fn authenticate(
         &self,
-        original: &rsip::Request,
+        original: &rsipstack::sip::Request,
         cookie: &TransactionCookie,
     ) -> Result<Option<SipUser>, AuthError>;
 }
@@ -87,11 +85,11 @@ impl AuthModule {
         for header in tx.original.headers.iter() {
             match header {
                 Header::Authorization(h) => {
-                    auth_inner = h.typed().ok().map(|auth| (auth, h.value()));
+                    auth_inner = Authorization::parse(h.value()).ok().map(|auth| (auth, h.value()));
                     break;
                 }
                 Header::ProxyAuthorization(h) => {
-                    auth_inner = h.typed().ok().map(|auth| (auth.0, h.value()));
+                    auth_inner = Authorization::parse(h.value()).ok().map(|auth| (auth, h.value()));
                     break;
                 }
                 _ => {}
@@ -143,7 +141,7 @@ impl AuthModule {
     fn verify_credentials(
         &self,
         user: &SipUser,
-        method: &rsip::Method,
+        method: &rsipstack::sip::Method,
         auth: &Authorization,
         raw_auth_header: &str,
     ) -> bool {
@@ -178,12 +176,12 @@ impl ProxyModule for AuthModule {
         "auth"
     }
 
-    fn allow_methods(&self) -> Vec<rsip::Method> {
+    fn allow_methods(&self) -> Vec<rsipstack::sip::Method> {
         vec![
-            rsip::Method::Invite,
-            rsip::Method::Register,
-            rsip::Method::Bye,
-            rsip::Method::Options,
+            rsipstack::sip::Method::Invite,
+            rsipstack::sip::Method::Register,
+            rsipstack::sip::Method::Bye,
+            rsipstack::sip::Method::Options,
         ]
     }
 
@@ -204,8 +202,8 @@ impl ProxyModule for AuthModule {
         cookie: TransactionCookie,
     ) -> Result<ProxyAction> {
         // Only authenticate INVITE and REGISTER requests
-        if tx.original.method != rsip::Method::Invite
-            && tx.original.method != rsip::Method::Register
+        if tx.original.method != rsipstack::sip::Method::Invite
+            && tx.original.method != rsipstack::sip::Method::Register
         {
             return Ok(ProxyAction::Continue);
         }
@@ -254,7 +252,7 @@ impl ProxyModule for AuthModule {
                 let callee_user = to_header.user().unwrap_or_else(|| "");
                 let callee_realm = to_header.host().to_string();
 
-                if tx.original.method == rsip::Method::Invite {
+                if tx.original.method == rsipstack::sip::Method::Invite {
                     match self
                         .server
                         .user_backend
@@ -314,17 +312,17 @@ impl ProxyModule for AuthModule {
                     };
                 }
 
-                let (status_code, headers) = if tx.original.method == rsip::Method::Register {
+                let (status_code, headers) = if tx.original.method == rsipstack::sip::Method::Register {
                     let www_auth = self.create_www_auth_challenge(&realm)?;
                     (
-                        rsip::StatusCode::Unauthorized,
+                        rsipstack::sip::StatusCode::Unauthorized,
                         vec![Header::WwwAuthenticate(www_auth)],
                     )
                 } else {
                     let www_auth = self.create_www_auth_challenge(&realm)?;
                     let proxy_auth = self.create_proxy_auth_challenge(&realm)?;
                     (
-                        rsip::StatusCode::ProxyAuthenticationRequired,
+                        rsipstack::sip::StatusCode::ProxyAuthenticationRequired,
                         vec![
                             Header::WwwAuthenticate(www_auth),
                             Header::ProxyAuthenticate(proxy_auth),

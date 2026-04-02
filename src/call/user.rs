@@ -1,5 +1,5 @@
 use anyhow::Result;
-use rsip::{
+use rsipstack::sip::{
     Header, Transport,
     headers::auth::Algorithm,
     prelude::{HeadersExt, ToTypedHeader},
@@ -41,12 +41,12 @@ pub struct SipUser {
     pub call_forwarding_timeout: Option<i32>,
     /// From the original INVITE
     #[serde(skip)]
-    pub origin_contact: Option<rsip::typed::Contact>,
+    pub origin_contact: Option<rsipstack::sip::typed::Contact>,
     /// Current contact (may be updated by REGISTER)
     #[serde(skip)]
-    pub contact: Option<rsip::typed::Contact>,
+    pub contact: Option<rsipstack::sip::typed::Contact>,
     #[serde(skip)]
-    pub from: Option<rsip::Uri>,
+    pub from: Option<rsipstack::sip::Uri>,
     #[serde(skip)]
     pub destination: Option<SipAddr>,
     #[serde(default = "default_is_support_webrtc")]
@@ -192,16 +192,16 @@ impl SipUser {
 
         let mut contact_params = vec![];
         match addr.r#type {
-            Some(rsip::Transport::Udp) | None => {}
+            Some(rsipstack::sip::Transport::Udp) | None => {}
             Some(t) => {
-                contact_params.push(rsip::Param::Transport(t));
+                contact_params.push(rsipstack::sip::Param::Transport(t));
             }
         }
-        let contact = rsip::typed::Contact {
+        let contact = rsipstack::sip::typed::Contact {
             display_name: None,
-            uri: rsip::Uri {
+            uri: rsipstack::sip::Uri {
                 scheme: addr.r#type.map(|t| t.sip_scheme()),
-                auth: Some(rsip::Auth {
+                auth: Some(rsipstack::sip::Auth {
                     user: self.get_contact_username(),
                     password: None,
                 }),
@@ -222,21 +222,24 @@ impl SipUser {
             self.realm.as_ref().unwrap_or(&"".to_string()),
             self.password.as_ref().unwrap_or(&"".to_string()),
         );
+        fn to_hex(bytes: impl AsRef<[u8]>) -> String {
+            bytes.as_ref().iter().map(|b| format!("{:02x}", b)).collect()
+        }
         match algorithm {
             Algorithm::Md5 | Algorithm::Md5Sess => {
                 let mut hasher = Md5::new();
                 hasher.update(value);
-                format!("{:x}", hasher.finalize())
+                to_hex(hasher.finalize())
             }
             Algorithm::Sha256 | Algorithm::Sha256Sess => {
                 let mut hasher = Sha256::new();
                 hasher.update(value);
-                format!("{:x}", hasher.finalize())
+                to_hex(hasher.finalize())
             }
             Algorithm::Sha512 | Algorithm::Sha512Sess => {
                 let mut hasher = Sha512::new();
                 hasher.update(value);
-                format!("{:x}", hasher.finalize())
+                to_hex(hasher.finalize())
             }
         }
     }
@@ -259,7 +262,7 @@ impl TryFrom<&Transaction> for SipUser {
             _ => {
                 let username = from_uri.user().unwrap_or_default().to_string();
                 let realm = from_uri.host().to_string();
-                let realm = if let Some(port) = from_uri.port() {
+                let realm = if let Some(port) = from_uri.host_with_port.port {
                     Some(format!("{}:{}", realm, port))
                 } else {
                     Some(realm)
@@ -380,11 +383,11 @@ mod tests {
 }
 
 pub fn check_authorization_headers(
-    req: &rsip::Request,
+    req: &rsipstack::sip::Request,
 ) -> Result<Option<(SipUser, Authorization)>> {
     // First try Authorization header (for backward compatibility with existing tests)
-    if let Some(auth_header) = rsip::header_opt!(req.headers.iter(), Header::Authorization) {
-        let challenge = auth_header.typed()?;
+    if let Some(auth_header) = rsipstack::sip_header_opt!(req.headers.iter(), Header::Authorization) {
+        let challenge = Authorization::parse(auth_header.value())?;
         let user = SipUser {
             username: challenge.username.to_string(),
             realm: Some(challenge.realm.to_string()),
@@ -394,9 +397,9 @@ pub fn check_authorization_headers(
     }
     // Then try Proxy-Authorization header
     if let Some(proxy_auth_header) =
-        rsip::header_opt!(req.headers.iter(), Header::ProxyAuthorization)
+        rsipstack::sip_header_opt!(req.headers.iter(), Header::ProxyAuthorization)
     {
-        let challenge = proxy_auth_header.typed()?.0;
+        let challenge = Authorization::parse(proxy_auth_header.value())?;
         let user = SipUser {
             username: challenge.username.to_string(),
             realm: Some(challenge.realm.to_string()),

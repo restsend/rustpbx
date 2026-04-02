@@ -23,8 +23,8 @@ use crate::{
     sipflow::backend::create_backend,
 };
 use anyhow::{Result, anyhow};
-use rsip::prelude::{HeadersExt, UntypedHeader};
-use rsip::{Auth, Param, Transport};
+use rsipstack::sip::prelude::HeadersExt;
+use rsipstack::sip::{Auth, Param, Transport};
 use rsipstack::{
     EndpointBuilder,
     dialog::dialog_layer::DialogLayer,
@@ -667,7 +667,6 @@ impl SipServerBuilder {
             .inner
             .allows
             .lock()
-            .unwrap()
             .replace(allow_methods);
         Ok(SipServer {
             inner,
@@ -776,7 +775,7 @@ impl SipServer {
                         runnings = runnings_tx.load(Ordering::Relaxed),
                         "max concurrency reached, not process this transaction"
                     );
-                    tx.reply(rsip::StatusCode::ServiceUnavailable).await.ok();
+                    tx.reply(rsipstack::sip::StatusCode::ServiceUnavailable).await.ok();
                     continue;
                 }
             }
@@ -784,10 +783,10 @@ impl SipServer {
             // If the OPTIONS request is out-of-dialog and the tag is not present, ignore it
             if matches!(
                 tx.original.method,
-                rsip::Method::Options
-                    | rsip::method::Method::Info
-                    | rsip::method::Method::Refer
-                    | rsip::method::Method::Update
+                rsipstack::sip::Method::Options
+                    | rsipstack::sip::method::Method::Info
+                    | rsipstack::sip::method::Method::Refer
+                    | rsipstack::sip::method::Method::Update
             ) && self.inner.ignore_out_of_dialog_request
             {
                 let to_tag = tx
@@ -833,12 +832,12 @@ impl SipServer {
 
                 if !matches!(
                     tx.original.method,
-                    rsip::Method::Bye | rsip::Method::Cancel | rsip::Method::Ack
+                    rsipstack::sip::Method::Bye | rsipstack::sip::Method::Cancel | rsipstack::sip::Method::Ack
                 ) && !is_mid_dialog
                     && tx.last_response.is_none()
                     && !cookie.is_spam()
                 {
-                    tx.reply(rsip::StatusCode::NotImplemented).await.ok();
+                    tx.reply(rsipstack::sip::StatusCode::NotImplemented).await.ok();
                 }
                 let _ = guard;
                 Ok::<(), anyhow::Error>(())
@@ -870,7 +869,7 @@ impl SipServer {
                         e
                     );
                     if tx.last_response.is_none() {
-                        tx.reply(rsip::StatusCode::ServerInternalError).await.ok();
+                        tx.reply(rsipstack::sip::StatusCode::ServerInternalError).await.ok();
                     }
                     return Ok(());
                 }
@@ -897,7 +896,7 @@ impl Drop for SipServerInner {
 }
 
 impl SipServerInner {
-    pub fn default_contact_uri(&self) -> Option<rsip::Uri> {
+    pub fn default_contact_uri(&self) -> Option<rsipstack::sip::Uri> {
         let addr = self.endpoint.get_addrs().first()?.clone();
         let mut params = Vec::new();
         if let Some(transport) = addr.r#type {
@@ -905,7 +904,7 @@ impl SipServerInner {
                 params.push(Param::Transport(transport));
             }
         }
-        Some(rsip::Uri {
+        Some(rsipstack::sip::Uri {
             scheme: addr.r#type.map(|t| t.sip_scheme()),
             auth: Some(Auth {
                 user: "rustpbx".to_string(),
@@ -979,9 +978,9 @@ struct CompositeMessageInspector {
 impl MessageInspector for CompositeMessageInspector {
     fn before_send(
         &self,
-        mut msg: rsip::SipMessage,
+        mut msg: rsipstack::sip::SipMessage,
         dest: Option<&rsipstack::transport::SipAddr>,
-    ) -> rsip::SipMessage {
+    ) -> rsipstack::sip::SipMessage {
         for inspector in &self.inspectors {
             msg = inspector.before_send(msg, dest);
         }
@@ -990,9 +989,9 @@ impl MessageInspector for CompositeMessageInspector {
 
     fn after_received(
         &self,
-        mut msg: rsip::SipMessage,
+        mut msg: rsipstack::sip::SipMessage,
         from: &rsipstack::transport::SipAddr,
-    ) -> rsip::SipMessage {
+    ) -> rsipstack::sip::SipMessage {
         for inspector in &self.inspectors {
             msg = inspector.after_received(msg, from);
         }
