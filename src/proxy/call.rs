@@ -63,6 +63,28 @@ fn escape_reason_text(text: &str) -> String {
     text.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
+/// Decide what to do when routing returned NotHandled (no explicit forward/queue).
+/// Returns `Ok(targets)` to proceed with the given locations, or `Err` to reject.
+fn resolve_unhandled_targets(
+    callee_is_same_realm: bool,
+    internal_lookup_empty: bool,
+    locs: Vec<Location>,
+) -> Result<DialStrategy, (anyhow::Error, Option<rsip::StatusCode>)> {
+    if callee_is_same_realm && internal_lookup_empty {
+        return Err((
+            anyhow!("target user is offline"),
+            Some(rsip::StatusCode::TemporarilyUnavailable),
+        ));
+    }
+    if !callee_is_same_realm {
+        return Err((
+            anyhow!("no route found for external destination"),
+            Some(rsip::StatusCode::NotFound),
+        ));
+    }
+    Ok(DialStrategy::Sequential(locs))
+}
+
 pub fn q850_reason_value(code: &rsip::StatusCode, detail: Option<&str>) -> String {
     let fallback = format!("SIP {}", u16::from(code.clone()));
     let text = detail
@@ -494,13 +516,7 @@ impl CallModule {
             };
             DialStrategy::Sequential(vec![target])
         } else {
-            if callee_is_same_realm && internal_lookup_empty {
-                return Err((
-                    anyhow!("target user is offline"),
-                    Some(rsip::StatusCode::TemporarilyUnavailable),
-                ));
-            }
-            DialStrategy::Sequential(locs)
+            resolve_unhandled_targets(callee_is_same_realm, internal_lookup_empty, locs)?
         };
         let recording = self
             .inner
@@ -1378,5 +1394,63 @@ impl ProxyModule for CallModule {
 
     async fn on_transaction_end(&self, _tx: &mut Transaction) -> Result<()> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::call::Location;
+
+    fn make_loc() -> Vec<Location> {
+        vec![Location {
+            aor: rsip::Uri {
+                scheme: Some(rsip::Scheme::Sip),
+                auth: Some(rsip::Auth {
+                    user: "test".to_string(),
+                    password: None,
+                }),
+                host_with_port: rsip::HostWithPort {
+                    host: rsip::Host::Domain("example.com".to_string().into()),
+                    port: None,
+                },
+                params: vec![],
+                headers: vec![],
+            },
+            ..Default::default()
+        }]
+    }
+
+    #[test]
+    fn loop_guard_same_realm_online_user_passes() {
+        let result = resolve_unhandled_targets(true, false, make_loc());
+        assert!(result.is_ok(), "same-realm online user should not be rejected");
+    }
+
+    #[test]
+    fn loop_guard_same_realm_offline_user_returns_480() {
+        let result = resolve_unhandled_targets(true, true, make_loc());
+        let err = result.expect_err("offline same-realm user should be rejected");
+        let code = err.1.unwrap();
+        assert_eq!(u16::from(code), 480);
+        assert!(err.0.to_string().contains("offline"));
+    }
+
+    #[test]
+    fn loop_guard_external_callee_returns_404() {
+        let result = resolve_unhandled_targets(false, false, make_loc());
+        let err = result.expect_err("external callee with NotHandled should be rejected");
+        let code = err.1.unwrap();
+        assert_eq!(u16::from(code), 404);
+        assert!(err.0.to_string().contains("no route"));
+    }
+
+    #[test]
+    fn loop_guard_external_callee_offline_also_404() {
+        // external callee — internal_lookup_empty is irrelevant but test the combination
+        let result = resolve_unhandled_targets(false, true, make_loc());
+        let err = result.expect_err("external callee should be rejected");
+        let code = err.1.unwrap();
+        assert_eq!(u16::from(code), 404);
     }
 }

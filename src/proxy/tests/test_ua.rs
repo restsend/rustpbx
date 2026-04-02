@@ -285,7 +285,7 @@ impl TestUa {
                         let mut sdps = self.answer_sdps.lock().await;
                         sdps.insert(dialog_id.clone(), sdp.clone());
                     }
-                    
+
                     let body = sdp_answer.map(|sdp| sdp.into_bytes());
                     let headers = if body.is_some() {
                         vec![rsip::typed::ContentType(MediaType::Sdp(vec![])).into()]
@@ -534,13 +534,21 @@ impl TestUa {
                         } else {
                             None
                         };
-                        events.push(TestUaEvent::CallUpdated(id.clone(), request.method.clone(), sdp));
+                        events.push(TestUaEvent::CallUpdated(
+                            id.clone(),
+                            request.method.clone(),
+                            sdp,
+                        ));
                         // Reply with saved answer SDP if available (for re-INVITE responses)
                         let sdps = self.answer_sdps.lock().await;
                         if let Some(answer_sdp) = sdps.get(&id) {
                             let body = answer_sdp.clone().into_bytes();
-                            let headers = vec![rsip::typed::ContentType(MediaType::Sdp(vec![])).into()];
-                            tx_handle.respond(rsip::StatusCode::OK, Some(headers), Some(body)).await.ok();
+                            let headers =
+                                vec![rsip::typed::ContentType(MediaType::Sdp(vec![])).into()];
+                            tx_handle
+                                .respond(rsip::StatusCode::OK, Some(headers), Some(body))
+                                .await
+                                .ok();
                         } else {
                             tx_handle.reply(rsip::StatusCode::OK).await.ok();
                         }
@@ -591,7 +599,7 @@ impl TestUa {
                                 } else {
                                     None
                                 };
-                                
+
                                 if let Ok(mut dialog) = dialog_layer.get_or_create_server_invite(
                                     &tx, state_sender.clone(), None, Some(contact.clone())
                                 ) {
@@ -1179,9 +1187,7 @@ mod tests {
     #[tokio::test]
     async fn test_sdp_processing_modes() {
         // Test different types of SDP
-        let test_cases = vec![
-            ("Standard SDP", create_test_sdp("192.168.1.100", 5004, true)),
-        ];
+        let test_cases = vec![("Standard SDP", create_test_sdp("192.168.1.100", 5004, true))];
 
         for (test_name, sdp) in test_cases {
             println!("Testing {}", test_name);
@@ -1232,8 +1238,9 @@ mod tests {
 
             // Wait for both with timeout
             let _ = tokio::time::timeout(Duration::from_secs(10), callee_fut).await;
-            
-            if let Ok(join_res) = tokio::time::timeout(Duration::from_secs(5), caller_handle).await {
+
+            if let Ok(join_res) = tokio::time::timeout(Duration::from_secs(5), caller_handle).await
+            {
                 if let Ok(Ok(dialog_id)) = join_res {
                     alice.hangup(&dialog_id).await.ok();
                 }
@@ -1314,10 +1321,10 @@ mod tests {
                     sleep(Duration::from_millis(100)).await;
                 }
             };
-            
+
             // Run callee processing first
             callee_fut.await;
-            
+
             // Then wait for caller with timeout (don't block on it)
             match tokio::time::timeout(Duration::from_secs(5), caller_handle).await {
                 Ok(Ok(Ok(dialog_id))) => {
@@ -1382,7 +1389,7 @@ mod tests {
                 }
             };
             callee_fut.await;
-            
+
             // Wait for caller with timeout
             match tokio::time::timeout(Duration::from_secs(5), caller_handle).await {
                 Ok(Ok(Ok(id))) => {
@@ -1485,9 +1492,13 @@ mod tests {
                 tokio::spawn(async move { a.make_call("bob", None).await })
             };
 
-            if wait_for_event(&mut bob, |e| matches!(e, TestUaEvent::IncomingCall(_, _)), 800)
-                .await
-                .unwrap()
+            if wait_for_event(
+                &mut bob,
+                |e| matches!(e, TestUaEvent::IncomingCall(_, _)),
+                800,
+            )
+            .await
+            .unwrap()
             {
                 let events = bob.process_dialog_events().await.unwrap();
                 for e in &events {
@@ -1716,9 +1727,13 @@ mod tests {
                     let s = offer_sdp.to_string();
                     async move { a.make_call("bob", Some(s)).await }
                 });
-                if wait_for_event(&mut bob, |e| matches!(e, TestUaEvent::IncomingCall(_, _)), 500)
-                    .await
-                    .unwrap()
+                if wait_for_event(
+                    &mut bob,
+                    |e| matches!(e, TestUaEvent::IncomingCall(_, _)),
+                    500,
+                )
+                .await
+                .unwrap()
                 {
                     let bob_events = bob.process_dialog_events().await.unwrap();
                     for event in &bob_events {
@@ -1923,9 +1938,13 @@ a=rtpmap:0 PCMU/8000"#;
             let s = ipv6_sdp.to_string();
             async move { a.make_call("bob", Some(s)).await }
         });
-        if wait_for_event(&mut bob, |e| matches!(e, TestUaEvent::IncomingCall(_, _)), 500)
-            .await
-            .unwrap()
+        if wait_for_event(
+            &mut bob,
+            |e| matches!(e, TestUaEvent::IncomingCall(_, _)),
+            500,
+        )
+        .await
+        .unwrap()
         {
             let bob_events = bob.process_dialog_events().await.unwrap();
             for event in &bob_events {
@@ -2020,9 +2039,13 @@ a=candidate:2 1 udp 2130706430 2001:db8::1 54401 typ host"#;
                 let a = alice.clone();
                 tokio::spawn(async move { a.make_call("bob", None).await })
             };
-            if wait_for_event(&mut bob, |e| matches!(e, TestUaEvent::IncomingCall(_, _)), 800)
-                .await
-                .unwrap()
+            if wait_for_event(
+                &mut bob,
+                |e| matches!(e, TestUaEvent::IncomingCall(_, _)),
+                800,
+            )
+            .await
+            .unwrap()
             {
                 let events = bob.process_dialog_events().await.unwrap();
                 for e in &events {

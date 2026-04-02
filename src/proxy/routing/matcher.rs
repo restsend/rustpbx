@@ -323,6 +323,7 @@ async fn match_invite_impl(
                             &rule.action.hash_key,
                             &option,
                             routing_state.clone(),
+                            trunks,
                         )?;
 
                         if let Some(trace) = &mut trace {
@@ -430,6 +431,7 @@ async fn match_invite_impl(
                             &rule.action.hash_key,
                             &option,
                             routing_state.clone(),
+                            trunks,
                         )?;
 
                         if let Some(trace) = &mut trace {
@@ -1006,6 +1008,7 @@ fn select_trunk(
     hash_key: &Option<String>,
     option: &InviteOption,
     routing_state: Arc<RoutingState>,
+    trunks_config: Option<&std::collections::HashMap<String, crate::proxy::routing::TrunkConfig>>,
 ) -> Result<String> {
     let trunks = match dest_config {
         crate::proxy::routing::DestConfig::Single(trunk) => vec![trunk.clone()],
@@ -1022,6 +1025,7 @@ fn select_trunk(
 
     match select_method {
         "random" => {
+            use rand::RngExt;
             let index = rand::rng().random_range(0..trunks.len());
             Ok(trunks[index].clone())
         }
@@ -1048,6 +1052,10 @@ fn select_trunk(
             let index = routing_state.next_round_robin_index(&destination_key, trunks.len());
             Ok(trunks[index].clone())
         }
+        "weighted" => {
+            // Weighted random selection based on trunk weights
+            select_trunk_weighted(&trunks, trunks_config)
+        }
         _ => {
             // Default to round-robin for unknown selection methods
             let destination_key = format!("{:?}", dest_config);
@@ -1055,6 +1063,59 @@ fn select_trunk(
             Ok(trunks[index].clone())
         }
     }
+}
+
+/// Weighted random trunk selection
+/// Uses trunk weight configuration (default: 100 if not specified)
+fn select_trunk_weighted(
+    trunks: &[String],
+    trunks_config: Option<&std::collections::HashMap<String, crate::proxy::routing::TrunkConfig>>,
+) -> Result<String> {
+    use rand::RngExt;
+    
+    if trunks.is_empty() {
+        return Err(anyhow!("No trunks for weighted selection"));
+    }
+    
+    if trunks.len() == 1 {
+        return Ok(trunks[0].clone());
+    }
+    
+    // Collect weights for each trunk
+    let mut weights: Vec<u32> = Vec::with_capacity(trunks.len());
+    let mut total_weight: u32 = 0;
+    
+    for trunk_name in trunks {
+        let weight = trunks_config
+            .and_then(|configs| configs.get(trunk_name))
+            .and_then(|config| config.weight)
+            .unwrap_or(100); // Default weight: 100
+        
+        weights.push(weight);
+        total_weight = total_weight.saturating_add(weight);
+    }
+    
+    if total_weight == 0 {
+        // Fall back to uniform random if all weights are 0
+        let index = rand::rng().random_range(0..trunks.len());
+        return Ok(trunks[index].clone());
+    }
+    
+    // Generate random value between 0 and total_weight
+    let mut rng = rand::rng();
+    let random_val = rng.random_range(0..total_weight);
+    
+    // Find the trunk corresponding to the random value
+    let mut cumulative_weight: u32 = 0;
+    for (idx, weight) in weights.iter().enumerate() {
+        cumulative_weight = cumulative_weight.saturating_add(*weight);
+        if random_val < cumulative_weight {
+            return Ok(trunks[idx].clone());
+        }
+    }
+    
+    // Fallback to last trunk (shouldn't reach here)
+    Ok(trunks[trunks.len() - 1].clone())
 }
 
 /// Apply trunk configuration

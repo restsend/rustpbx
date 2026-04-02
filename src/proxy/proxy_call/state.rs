@@ -62,6 +62,7 @@ pub struct CallContext {
     pub start_time: Instant,
     pub original_caller: String,
     pub original_callee: String,
+    pub max_forwards: u32,
     pub dtmf_digits: Vec<char>,
 }
 
