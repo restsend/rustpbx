@@ -290,16 +290,6 @@ See [Benchmark Details](tests/bench/bench.md) for methodology and full results.
 
 ---
 
-## Tech Stack
-
-![Rust](https://img.shields.io/badge/Rust-1.75+-orange)
-![Tokio](https://img.shields.io/badge/Tokio-Async-runtime-green)
-![Axum](https://img.shields.io/badge/Axum-Web-framework-blue)
-
-Built with: Rust · Tokio · Axum · SeaORM · SQLite/PostgreSQL/MySQL · Prometheus · OpenTelemetry · WebRTC · SIP (RFC 3261)
-
----
-
 ## License
 
 Community edition: MIT
