@@ -1,0 +1,123 @@
+# A example config file
+# mv config.toml.example config.toml
+# cargo run . --bin rustpbx --conf config.toml
+
+http_addr = "0.0.0.0:8083"
+# http_gzip = true
+log_level = "debug"
+#log_file = "./dev.log"
+# Paths can include a trailing * to skip whole subtrees
+# http_access_skip_paths = ["/health", "/metrics*"]
+media_cache_path = "./config/mediacache"
+# SQLite database (default)
+database_url = "sqlite://rustpbx.sqlite3"
+# MySQL database example:
+#database_url = "mysql://root:123456@localhost:13306/rustpbx"
+
+# external IP address for SIP signaling and media
+# if server is behind NAT, set your public IP here (without port)
+# external_ip = "192.168.3.152"
+
+rtp_start_port = 20000
+rtp_end_port = 30000
+
+# setup your STUN/TURN servers here, for webrtc web clients
+# [[ice_servers]]
+# urls = ["stun:stun.l.google.com:19302"]
+
+# [[ice_servers]]
+# urls = ["turn:restsend.com:3478"]
+# username = "user"
+# credential = "pass"
+
+[console]
+session_secret = "please_change_me_to_a_random_secret"
+base_path = "/console"
+# allow self-service administrator signup after the first account
+allow_registration = false
+# set to true to force Secure cookie attribute, otherwise it is auto-detected based on request
+secure_cookie = false
+
+[proxy]
+modules = ["acl", "auth", "presence", "registrar", "call"]
+addr = "0.0.0.0"
+udp_port = 15061
+registrar_expires = 60
+ws_handler= "/ws"
+media_proxy = "all"
+# Base directory for generated routing/trunk/ACL files
+generated_dir = "./config"
+routes_files = ["config/routes/*.toml"]
+trunks_files = ["config/trunks/*.toml"]
+addons = [ "wholesale", "acme", "transcript", "archive", "queue", "endpoint_manager", "enterprise_auth", "voicemail", "ivr_editor"]
+realms= ["192.168.3.152"]
+session_timer=true
+session_expires=90
+
+[ami]
+allows = ["127.0.0.1", "::1"]
+
+# ACL rules
+acl_rules = [
+    # "allow 10.0.0.0/8",
+    # "deny 0.123.4.0/16",
+    "allow all",
+    "deny all"
+]
+acl_files = ["config/acl/*.toml"]
+models_path = "./config/models"
+hf_endpoint = "https://hf-mirror.com"
+
+[[proxy.user_backends]]
+type = "memory"
+users = [
+    { username = "bob", password = "123456" },
+    { username = "alice", password = "123456" },
+]
+
+[[proxy.user_backends]]
+type = "extension"
+
+[recording]
+enabled = false
+path = "./config/recorders"
+
+[callrecord]
+type="local"
+root="./config/cdr"
+
+# [sipflow]
+# type = "local"
+# root = "./config/sipflow"
+# subdirs = "daily"
+# flush_count = 1000
+# flush_interval_secs = 5
+
+#[callrecord]
+#type="s3"
+#vendor="tencent"
+#bucket="."
+#region="ap-guangzhou"
+#endpoint="https://pbxtest-1321574295.cos.ap-guangzhou.myqcloud.com"
+#access_key="your_access_key"
+#secret_key="your_secret_key"
+#root="cdr"
+#with_media=true
+
+
+# [proxy.trunks.wuhoo]
+# dest = "sip:123.456.789.00:1234"
+
+# [[proxy.routes]]
+# name = "default"
+# priority = 1
+# dest = "wuhoo"
+
+# [proxy.routes.match]
+# "to.user" = "^\\+.*"
+
+# [proxy.routes.rewrite]
+# "to.user" = "+{1}"
+# "to.host" = "123.456.789.00:1234"
+# "from.user" = "12345"
+# "from.host" = "123.456.789.00:1234"
