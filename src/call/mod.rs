@@ -673,7 +673,8 @@ pub struct Dialplan {
     pub caller_display_name: Option<String>,
     pub caller: Option<rsipstack::sip::Uri>,
     pub flow: DialplanFlow,
-    pub max_ring_time: u32,
+    /// Max ring time for call setup/ringback phase
+    pub max_ring_time: Duration,
     pub original: Arc<rsipstack::sip::Request>,
     // Enhanced call control options
     /// Recording configuration
@@ -684,8 +685,6 @@ pub struct Dialplan {
     pub media: MediaConfig,
     /// Maximum call duration
     pub max_call_duration: Option<Duration>,
-    /// Call timeout for individual legs
-    pub call_timeout: Duration,
     /// What to do when a call fails
     pub failure_action: FailureAction,
     /// Enable SIP flow recording (SIP message logging)
@@ -714,7 +713,7 @@ impl std::fmt::Debug for Dialplan {
             .field("max_ring_time", &self.max_ring_time)
             .field("recording", &self.recording)
             .field("media", &self.media)
-            .field("call_timeout", &self.call_timeout)
+            .field("max_call_duration", &self.max_call_duration)
             .field("enable_sipflow", &self.enable_sipflow)
             .finish()
     }
@@ -739,12 +738,11 @@ impl Dialplan {
             caller: None,
             caller_contact: None,
             flow: DialplanFlow::Targets(DialStrategy::Sequential(vec![])),
-            max_ring_time: 60,
+            max_ring_time: Duration::from_secs(60), // 60 seconds for ringback
             recording: CallRecordingConfig::default(),
             ringback: RingbackConfig::default(),
             media: MediaConfig::default(),
             max_call_duration: Some(Duration::from_secs(3600)), // 1 hour
-            call_timeout: Duration::from_secs(60),              // 60 seconds
             failure_action: FailureAction::default(),
             enable_sipflow: true, // Enable SIP flow recording by default
             call_forwarding: None,
@@ -809,9 +807,15 @@ impl Dialplan {
         self
     }
 
-    /// Set call timeout
-    pub fn with_timeout(mut self, timeout: Duration) -> Self {
-        self.call_timeout = timeout;
+    /// Set max call duration
+    pub fn with_max_call_duration(mut self, duration: Duration) -> Self {
+        self.max_call_duration = Some(duration);
+        self
+    }
+
+    /// Set max ring time
+    pub fn with_max_ring_time(mut self, duration: Duration) -> Self {
+        self.max_ring_time = duration;
         self
     }
     pub fn with_route_invite(mut self, route: Box<dyn RouteInvite>) -> Self {

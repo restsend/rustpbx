@@ -105,7 +105,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(dialplan.recording.enabled, true);
-        assert_eq!(dialplan.call_timeout.as_secs(), 30);
+        assert_eq!(dialplan.max_call_duration.unwrap().as_secs(), 30);
 
         let payload = rx.recv().await.unwrap();
         assert_eq!(payload["call_id"], "test-call-id");

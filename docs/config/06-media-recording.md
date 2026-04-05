@@ -17,9 +17,10 @@ codecs = ["opus", "pcmu", "pcma", "g729"]
 ```
 
 ## Recording Policy
-Control when calls are recorded.
+Control when calls are recorded. Can be set at top-level `[recording]` or per-proxy `[proxy.recording]` (proxy-level overrides top-level).
 
 ```toml
+# Top-level recording config (applies to all proxies unless overridden)
 [recording]
 enabled = false
 # Record these directions
@@ -34,6 +35,12 @@ path = "./recordings"
 # Fine-grained filters
 caller_allow = ["1001", "1002"]
 callee_deny = ["911"]
+
+# Or configure per-proxy
+[proxy.recording]
+enabled = true
+directions = ["inbound"]
+auto_start = true
 ```
 
 ## CDR & Record Storage (`[callrecord]`)

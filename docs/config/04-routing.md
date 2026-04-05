@@ -99,7 +99,8 @@ headers = { "X-Api-Key" = "secret" }
 | `status` | int | SIP Status Code (for `reject`, `abort`, default `403`) |
 | `reason` | string | Reason phrase (for `reject`, `abort`, `spam`) |
 | `record` | bool | Whether to record this call |
-| `timeout`| int | Call timeout in seconds |
+| `timeout`| int | Maximum call duration in seconds (default: 3600) |
+| `max_ring_time`| int | Max ring time in seconds for call setup/ringback phase (default: 60, clamped: 30-120) |
 | `media_proxy` | string | Media proxy mode: `auto`, `all`, `none`, `nat` |
 | `headers` | object | Custom SIP headers to add to the outgoing INVITE (key-value) |
 | `with_original_headers` | bool | Whether to forward original headers (except core SIP headers) |

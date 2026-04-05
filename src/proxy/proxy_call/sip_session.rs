@@ -332,8 +332,10 @@ impl SipSession {
                 .await
         });
 
-        let ring_time_secs = context.dialplan.max_ring_time.clamp(30, 120);
-        let max_setup_duration = Duration::from_secs(ring_time_secs as u64);
+        let max_setup_duration = context
+            .dialplan
+            .max_ring_time
+            .clamp(Duration::from_secs(30), Duration::from_secs(120));
         let teardown_duration = Duration::from_secs(2);
         let mut timeout = tokio::time::sleep(max_setup_duration).boxed();
         let mut cancelled = false;
