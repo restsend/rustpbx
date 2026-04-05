@@ -72,7 +72,10 @@ struct HttpResponsePayload {
     pub status: Option<u16>,
     pub reason: Option<String>,
     pub record: Option<bool>,
+    /// Maximum call duration (in seconds)
     pub timeout: Option<u32>,
+    /// Max ring time for call setup/ringback phase (in seconds)
+    pub max_ring_time: Option<u32>,
     pub media_proxy: Option<MediaProxyMode>,
     pub headers: Option<HashMap<String, String>>,
     pub with_original_headers: Option<bool>,
@@ -277,7 +280,11 @@ impl CallRouter for HttpCallRouter {
                 }
 
                 if let Some(timeout) = result.timeout {
-                    dialplan.call_timeout = Duration::from_secs(timeout as u64);
+                    dialplan.max_call_duration = Some(Duration::from_secs(timeout as u64));
+                }
+
+                if let Some(max_ring_time) = result.max_ring_time {
+                    dialplan.max_ring_time = Duration::from_secs(max_ring_time as u64);
                 }
 
                 Ok(dialplan)

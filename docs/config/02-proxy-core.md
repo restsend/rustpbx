@@ -15,9 +15,7 @@ tcp_port = 5060
 
 # Encrypted SIP (SIPS)
 tls_port = 5061
-# Certificates shared with HTTPS config or specified here overrides? 
-# Usually uses top-level ssl_* unless specified in proxy? 
-# (Check code: code uses top-level ssl certs if proxy ones aren't specific, usually shared)
+# Uses proxy-level ssl_* configs (if not set, falls back to top-level ssl_*)
 ssl_certificate = "./certs/fullchain.pem"
 ssl_private_key = "./certs/privkey.pem"
 
@@ -61,9 +59,16 @@ ua_white_list = []
 # If true, silently ignore requests to unknown users (anti-scanning)
 ensure_user = true
 
+# Frequency limiter (optional format: "100/60s" for 100 requests per 60 seconds)
+frequency_limiter = "100/60s"
+
 # SIP Session Timers (RFC 4028)
 session_timer = true
 session_expires = 1800  # 30 minutes
+
+# SIP Transaction Timers (RFC 3261) - optional overrides
+t1_timer = 500      # T1 timer in milliseconds (default: 500)
+t1x64_timer = 32000 # T1x64 timer in milliseconds (default: 32000)
 ```
 
 ## Modules
@@ -76,4 +81,53 @@ modules = ["acl", "auth", "registrar", "call"]
 
 # Enable additional Addons
 addons = ["wholesale", "monitor"]
+```
+
+## Media & Codecs
+
+```toml
+[proxy]
+# Media proxy mode: auto, all, none, nat
+media_proxy = "auto"
+
+# Preferred codec order for SDP negotiation
+codecs = ["opus", "pcmu", "pcma", "g729"]
+
+# Enable NAT media latching (helps with RTP behind NAT)
+enable_latching = true
+
+# Enable NAT fix for SIP signaling
+nat_fix = true
+```
+
+## File Loading & Paths
+
+```toml
+[proxy]
+# Directory for auto-generated configs (managed by UI/API)
+generated_dir = "./config"
+
+# Load additional config files matching these patterns
+routes_files = ["config/routes/*.toml"]
+trunks_files = ["config/trunks/*.toml"]
+acl_files = ["config/acl/*.toml"]
+
+# Directory for queue-specific data files
+queue_dir = "./queues"
+```
+
+## Call Handling
+
+```toml
+[proxy]
+# Registrar expires time (in seconds)
+registrar_expires = 3600
+
+# Passthrough failure status codes to caller
+# When true, caller receives the same SIP error code (e.g., 486, 603) from callee
+# When false, a generic error code is sent
+passthrough_failure = true
+
+# Maximum items for SIP flow storage (per dialog)
+sip_flow_max_items = 1000
 ```
