@@ -29,7 +29,7 @@ pub struct CallSessionRecordSnapshot {
     pub routed_contact: Option<String>,
     pub routed_destination: Option<String>,
     pub last_queue_name: Option<String>,
-    pub callee_dialogs: Vec<DialogId>,
+    pub callee_call_ids: Vec<String>,
     pub server_dialog_id: DialogId,
     pub extensions: http::Extensions,
 }
