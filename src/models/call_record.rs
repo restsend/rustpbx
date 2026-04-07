@@ -111,6 +111,10 @@ pub async fn persist_call_record(
         transcript_language: Set(transcript_language.clone()),
         tags: Set(tags.clone()),
         leg_timeline: Set(leg_timeline_json),
+        metadata: Set(details
+            .metadata
+            .as_ref()
+            .and_then(|m| serde_json::to_value(m).ok())),
         created_at: Set(record.start_time),
         updated_at: Set(record.end_time),
         archived_at: Set(None),
@@ -148,6 +152,7 @@ pub async fn persist_call_record(
                     Column::TranscriptLanguage,
                     Column::Tags,
                     Column::LegTimeline,
+                    Column::Metadata,
                     Column::UpdatedAt,
                 ])
                 .to_owned(),
@@ -244,6 +249,7 @@ pub struct Model {
     pub transcript_language: Option<String>,
     pub tags: Option<Json>,
     pub leg_timeline: Option<Json>,
+    pub metadata: Option<Json>,
     pub created_at: DateTimeUtc,
     pub updated_at: DateTimeUtc,
     pub archived_at: Option<DateTimeUtc>,
@@ -336,6 +342,7 @@ impl MigrationTrait for Migration {
                     .col(string_null(Column::TranscriptLanguage).char_len(16))
                     .col(json_null(Column::Tags))
                     .col(json_null(Column::LegTimeline))
+                    .col(json_null(Column::Metadata))
                     .col(timestamp(Column::CreatedAt).default(Expr::current_timestamp()))
                     .col(timestamp(Column::UpdatedAt).default(Expr::current_timestamp()))
                     .col(timestamp_null(Column::ArchivedAt))
@@ -449,6 +456,7 @@ impl Into<CallRecord> for Model {
             transcript_status: Some(self.transcript_status),
             transcript_language: self.transcript_language,
             tags: self.tags,
+            metadata: self.metadata.and_then(|v| serde_json::from_value(v).ok()),
             rewrite: crate::callrecord::CallRecordRewrite {
                 caller_original: self.rewrite_original_from.unwrap_or_default(),
                 caller_final: String::new(),
@@ -460,7 +468,8 @@ impl Into<CallRecord> for Model {
             last_error: None,
         };
 
-        let leg_timeline = self.leg_timeline
+        let leg_timeline = self
+            .leg_timeline
             .and_then(|json| serde_json::from_value(json).ok())
             .unwrap_or_default();
 

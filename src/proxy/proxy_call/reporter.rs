@@ -12,10 +12,7 @@ use crate::{
 };
 use chrono::{Duration, Utc};
 use rsipstack::sip::prelude::HeadersExt;
-use std::{
-    collections::HashMap,
-    fs,
-};
+use std::{collections::HashMap, fs};
 
 pub struct CallReporter {
     pub server: SipServerRef,
@@ -197,6 +194,10 @@ impl CallReporter {
         details.recording_url = recording_path_for_db;
         details.rewrite = rewrite;
         details.last_error = last_error;
+        details.metadata = snapshot
+            .extensions
+            .get::<HashMap<String, String>>()
+            .cloned();
 
         let record = CallRecord {
             call_id: self.context.session_id.clone(),

@@ -16,6 +16,7 @@ pub mod department;
 pub mod extension;
 pub mod extension_department;
 pub mod frequency_limit;
+pub mod add_metadata_column;
 pub mod migration;
 pub mod policy;
 pub mod presence;

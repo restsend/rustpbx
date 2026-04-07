@@ -1,9 +1,7 @@
 //! CDR (Call Detail Record) capture utilities for E2E testing
 
-use crate::callrecord::{
-    CallRecord, CallRecordHangupReason,
-};
 use crate::callrecord::CallRecordSender;
+use crate::callrecord::{CallRecord, CallRecordHangupReason};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
@@ -46,23 +44,19 @@ impl CdrCapture {
     }
 
     /// Wait for a CDR record with specific call_id
-    pub async fn wait_for_record(
-        &self,
-        call_id: &str,
-        timeout: Duration,
-    ) -> Option<CallRecord> {
+    pub async fn wait_for_record(&self, call_id: &str, timeout: Duration) -> Option<CallRecord> {
         let start = tokio::time::Instant::now();
-        
+
         while start.elapsed() < timeout {
             let records = self.records.read().await;
             if let Some(record) = records.iter().find(|r| r.call_id == call_id) {
                 return Some(record.clone());
             }
             drop(records);
-            
+
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
-        
+
         warn!(call_id, "Timeout waiting for CDR record");
         None
     }
@@ -74,7 +68,10 @@ impl CdrCapture {
 
     /// Find record by call_id
     pub async fn find_by_call_id(&self, call_id: &str) -> Option<CallRecord> {
-        self.records.read().await.iter()
+        self.records
+            .read()
+            .await
+            .iter()
             .find(|r| r.call_id == call_id)
             .cloned()
     }
@@ -218,8 +215,7 @@ pub fn validate_cdr(record: &CallRecord, expected: &CdrExpectation) -> CdrValida
 
     // Validate recording
     if let Some(expect_recording) = expected.expect_recording {
-        let has_recording = !record.recorder.is_empty() 
-            || record.details.recording_url.is_some();
+        let has_recording = !record.recorder.is_empty() || record.details.recording_url.is_some();
         if has_recording != expect_recording {
             result.add_error(format!(
                 "Recording mismatch: expected recording={}, got recording={}",
@@ -327,10 +323,9 @@ pub mod assertions {
             "Expected status code {}, got {}",
             expected_status_code, record.status_code
         );
-        
+
         match record.hangup_reason {
-            Some(CallRecordHangupReason::Rejected) |
-            Some(CallRecordHangupReason::Canceled) => {}
+            Some(CallRecordHangupReason::Rejected) | Some(CallRecordHangupReason::Canceled) => {}
             ref other => {
                 panic!("Expected rejected/canceled reason, got {:?}", other);
             }
@@ -379,6 +374,7 @@ mod tests {
                 tags: None,
                 rewrite: Default::default(),
                 last_error: None,
+                metadata: None,
             },
             extensions: http::Extensions::new(),
         }
@@ -387,13 +383,15 @@ mod tests {
     #[tokio::test]
     async fn test_cdr_capture() {
         let (capture, sender) = CdrCapture::new();
-        
+
         let mut record = create_test_record();
         record.call_id = "test-456".to_string();
-        
+
         sender.send(record.clone()).unwrap();
-        
-        let found = capture.wait_for_record("test-456", Duration::from_secs(1)).await;
+
+        let found = capture
+            .wait_for_record("test-456", Duration::from_secs(1))
+            .await;
         assert!(found.is_some());
         assert_eq!(found.unwrap().call_id, "test-456");
     }
@@ -418,7 +416,7 @@ mod tests {
         let record = create_test_record();
         let expected = CdrExpectation::default()
             .with_direction("inbound") // Wrong direction
-            .with_status("failed");    // Wrong status
+            .with_status("failed"); // Wrong status
 
         let result = validate_cdr(&record, &expected);
         assert!(!result.is_valid);
