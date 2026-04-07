@@ -84,6 +84,8 @@ pub struct CallDetails {
     #[serde(default)]
     pub rewrite: CallRecordRewrite,
     pub last_error: Option<CallRecordLastError>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<HashMap<String, String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -231,7 +233,13 @@ impl LegTimeline {
         Self { events: Vec::new() }
     }
 
-    pub fn add_event(&mut self, leg_id: String, event_type: LegTimelineEventType, peer_leg_id: Option<String>, details: Option<Value>) {
+    pub fn add_event(
+        &mut self,
+        leg_id: String,
+        event_type: LegTimelineEventType,
+        peer_leg_id: Option<String>,
+        details: Option<Value>,
+    ) {
         self.events.push(LegTimelineEvent {
             timestamp: chrono::Utc::now(),
             leg_id,

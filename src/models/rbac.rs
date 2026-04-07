@@ -126,8 +126,20 @@ pub const SYSTEM_ROLES: &[(&str, &str)] = &[
     ("supervisor", "Call center supervisor monitoring agents"),
     ("operator", "Operator with view and call control access"),
     ("viewer", "Read-only auditor for compliance"),
+    #[cfg(feature = "addon-ivr-editor")]
     ("ivr_editor", "IVR flow editor"),
+    #[cfg(feature = "addon-wholesale")]
     ("wholesale_admin", "Wholesale tenant and billing manager"),
+    #[cfg(feature = "addon-wholesale")]
+    (
+        "wholesale_finance",
+        "Wholesale finance role - read all data including costs, no writes",
+    ),
+    #[cfg(feature = "addon-wholesale")]
+    (
+        "wholesale_sales",
+        "Wholesale sales role - read assigned tenants only",
+    ),
 ];
 
 const ROLE_PERMISSIONS: &[(&str, &[(&str, &str)])] = &[
@@ -251,7 +263,9 @@ const ROLE_PERMISSIONS: &[(&str, &[(&str, &str)])] = &[
             ("wholesale", "read"),
         ],
     ),
+    #[cfg(feature = "addon-ivr-editor")]
     ("ivr_editor", &[("ivr", "read"), ("ivr", "write")]),
+    #[cfg(feature = "addon-wholesale")]
     (
         "wholesale_admin",
         &[
@@ -261,6 +275,13 @@ const ROLE_PERMISSIONS: &[(&str, &[(&str, &str)])] = &[
             ("wholesale", "settings"),
         ],
     ),
+    #[cfg(feature = "addon-wholesale")]
+    (
+        "wholesale_finance",
+        &[("wholesale", "read"), ("wholesale", "billing")],
+    ),
+    #[cfg(feature = "addon-wholesale")]
+    ("wholesale_sales", &[("wholesale", "read")]),
 ];
 
 #[derive(DeriveMigrationName)]

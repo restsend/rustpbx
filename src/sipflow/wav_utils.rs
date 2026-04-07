@@ -429,8 +429,6 @@ pub(crate) fn generate_wav_from_packets_with_leg_map_ex(
     let mut resamplers: HashMap<(i32, u8), Resampler> = HashMap::new();
     let mut base_timestamps: HashMap<i32, u64> = HashMap::new();
 
-    // Re-buffer logic
-    let mut logged_packets = 0;
     for (leg, ts, p) in packets {
         if p.len() < 12 {
             continue;
@@ -512,34 +510,6 @@ pub(crate) fn generate_wav_from_packets_with_leg_map_ex(
             processed_data = audio_codec::samples_to_bytes(&final_samples);
         } else {
             processed_data = payload.to_vec();
-        }
-
-        if logged_packets < 20 {
-            let header_hex = if p.len() >= 12 {
-                hex::encode(&p[0..12])
-            } else {
-                "truncated".to_string()
-            };
-
-            let samples_have = if pt == 0 || pt == 8 {
-                processed_data.len() // 1 byte per sample
-            } else if pt == 9 {
-                processed_data.len() / 2 // Decoded G722 is L16 (2 bytes)
-            } else {
-                processed_data.len() / 2
-            };
-            tracing::info!(
-                "Packet: leg={} ts={} diff_us={} target_step={} p_len={} pt={} header={} samples_got={}",
-                leg,
-                ts,
-                rtp_diff,
-                target_timestamp,
-                p.len(),
-                pt,
-                header_hex,
-                samples_have
-            );
-            logged_packets += 1;
         }
 
         if *leg == 1 {
