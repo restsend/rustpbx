@@ -516,6 +516,7 @@ impl RtpTrackBuilder {
             rtp_end_port: self.rtp_end_port,
             external_ip: self.external_ip,
             enable_latching: self.enable_latching,
+            ssrc_start: rand::random::<u32>(),
             ..Default::default()
         };
 
@@ -644,6 +645,7 @@ impl FileTrack {
             rtp_start_port: self.rtp_start_port,
             rtp_end_port: self.rtp_end_port,
             external_ip: self.external_ip.clone(),
+            ssrc_start: rand::random::<u32>(),
             ..Default::default()
         };
 
