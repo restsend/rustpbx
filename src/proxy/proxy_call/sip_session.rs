@@ -382,7 +382,7 @@ impl SipSession {
         mut cmd_rx: mpsc::UnboundedReceiver<CallCommand>,
         _dialog_guard: ServerDialogGuard,
     ) -> Result<()> {
-        let cancel_guard = self.cancel_token.clone().drop_guard();
+        let _cancel_guard = self.cancel_token.clone().drop_guard();
 
         if !self.context.dialplan.is_empty() {
             info!(session_id = %self.context.session_id, "Executing dialplan");
@@ -390,7 +390,12 @@ impl SipSession {
                 warn!(?status_code, ?reason, "Dialplan execution failed");
 
                 let code = status_code.clone();
-                let _ = self.server_dialog.reject(Some(code), reason);
+                let _ = self.server_dialog.reject(Some(code), reason.clone());
+                // Store error so cleanup/CDR can report the failure reason
+                self.last_error = Some((status_code.clone(), reason));
+                self.hangup_reason = Some(CallRecordHangupReason::Failed);
+                // Ensure cleanup runs (generates CDR) even on early failure
+                self.cleanup().await;
                 return Err(anyhow!("Dialplan failed: {:?}", status_code));
             }
         }
@@ -476,7 +481,7 @@ impl SipSession {
 
         self.cleanup().await;
 
-        let _ = cancel_guard;
+        let _ = _cancel_guard;
 
         Ok(())
     }

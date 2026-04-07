@@ -590,6 +590,7 @@ impl BridgePeerBuilder {
                 transport_mode: TransportMode::WebRtc,
                 external_ip: self.external_ip.clone(),
                 media_capabilities: webrtc_media_caps,
+                ssrc_start: rand::random::<u32>(),
                 ..Default::default()
             });
 
@@ -610,6 +611,7 @@ impl BridgePeerBuilder {
                 enable_latching: self.enable_latching,
                 external_ip: self.external_ip,
                 media_capabilities: rtp_media_caps,
+                ssrc_start: rand::random::<u32>(),
                 ..Default::default()
             });
 

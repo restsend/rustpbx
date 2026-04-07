@@ -122,6 +122,92 @@ impl E2eTestServer {
         })
     }
 
+    /// Start with a custom ProxyConfig, allowing injection of trunks, routes, etc.
+    pub async fn start_with_config(mut proxy_config: ProxyConfig) -> Result<Self> {
+        let port = portpicker::pick_unused_port().unwrap_or(15060);
+        let proxy_addr = format!("127.0.0.1:{}", port).parse()?;
+
+        proxy_config.addr = "127.0.0.1".to_string();
+        proxy_config.udp_port = Some(port);
+        proxy_config.tcp_port = None;
+        proxy_config.tls_port = None;
+        proxy_config.ws_port = None;
+        proxy_config.useragent = Some("RustPBX-E2E-Test/0.1.0".to_string());
+        proxy_config.modules = Some(vec![
+            "auth".to_string(),
+            "registrar".to_string(),
+            "call".to_string(),
+        ]);
+        proxy_config.ensure_user = Some(false);
+
+        let config = Arc::new(proxy_config);
+        let mode = config.media_proxy;
+
+        // Create CDR capture
+        let (cdr_capture, cdr_sender) = CdrCapture::new();
+
+        // Create user backend with test users
+        let user_backend = MemoryUserBackend::new(None);
+        for user in Self::create_test_users() {
+            user_backend.create_user(user).await?;
+        }
+
+        let locator = MemoryLocator::new();
+        let cancel_token = CancellationToken::new();
+
+        let mut builder = SipServerBuilder::new(config)
+            .with_user_backend(Box::new(user_backend))
+            .with_locator(Box::new(locator))
+            .with_cancel_token(cancel_token.clone())
+            .with_callrecord_sender(Some(cdr_sender));
+
+        builder = builder
+            .register_module("registrar", |inner, config| {
+                Ok(Box::new(RegistrarModule::new(inner, config)))
+            })
+            .register_module("auth", |inner, _config| {
+                Ok(Box::new(AuthModule::new(inner)))
+            })
+            .register_module("call", |inner, config| {
+                Ok(Box::new(CallModule::new(config, inner)))
+            });
+
+        let server = Arc::new(builder.build().await?);
+        let server_ref = server.get_inner();
+        let registry = server_ref.active_call_registry.clone();
+
+        // Start server in background
+        let cancel_token_clone = cancel_token.clone();
+        let _server_handle = Some(tokio::spawn(async move {
+            tokio::select! {
+                _ = cancel_token_clone.cancelled() => {
+                    info!("E2E test server cancelled");
+                }
+                result = server.serve() => {
+                    if let Err(e) = result {
+                        warn!("E2E test server error: {:?}", e);
+                    }
+                }
+            }
+        }));
+
+        // Wait for server to be ready
+        sleep(Duration::from_millis(200)).await;
+
+        info!(port, ?mode, "E2E test server started with custom config");
+
+        Ok(Self {
+            port,
+            proxy_addr,
+            server_ref,
+            cdr_capture,
+            registry,
+            media_proxy_mode: mode,
+            cancel_token,
+            _server_handle,
+        })
+    }
+
     /// Start with default settings (Auto mode)
     pub async fn start() -> Result<Self> {
         Self::start_with_mode(MediaProxyMode::Auto).await

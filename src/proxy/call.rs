@@ -17,11 +17,11 @@ use async_trait::async_trait;
 use audio_codec::CodecType;
 use chrono::Utc;
 use glob::Pattern;
-use rsipstack::sip::prelude::HeadersExt;
 use rsipstack::dialog::DialogId;
 use rsipstack::dialog::dialog::Dialog;
 use rsipstack::dialog::dialog_layer::DialogLayer;
 use rsipstack::dialog::invitation::InviteOption;
+use rsipstack::sip::prelude::HeadersExt;
 use rsipstack::transaction::key::TransactionRole;
 use rsipstack::transaction::transaction::Transaction;
 use rsipstack::transport::SipConnection;
@@ -140,8 +140,10 @@ impl RouteInvite for DefaultRouteInvite {
                                 from_user.as_deref().unwrap_or(""),
                                 to_user.as_deref().unwrap_or("")
                             );
-                            let reason =
-                                q850_reason_value(&rsipstack::sip::StatusCode::Forbidden, Some(&detail));
+                            let reason = q850_reason_value(
+                                &rsipstack::sip::StatusCode::Forbidden,
+                                Some(&detail),
+                            );
                             warn!(
                                 trunk = %source.name,
                                 from = from_user.as_deref().unwrap_or(""),
@@ -684,7 +686,10 @@ impl CallModule {
     /// Returns `None` when the callee realm doesn't belong to this server or
     /// the user is not found.  The result is LRU-cached by the backend so
     /// repeated lookups within the same call leg are cheap.
-    async fn resolve_callee_user(&self, request: &rsipstack::sip::Request) -> Result<Option<SipUser>> {
+    async fn resolve_callee_user(
+        &self,
+        request: &rsipstack::sip::Request,
+    ) -> Result<Option<SipUser>> {
         let callee_uri = request.to_header()?.uri()?;
         let callee_realm = callee_uri.host().to_string();
         if !self.inner.server.is_same_realm(&callee_realm).await {
@@ -1015,10 +1020,14 @@ impl CallModule {
 
                     for callee_dialog_id in &snapshot.callee_dialogs {
                         debug!(%dialog_id, %callee_dialog_id, "Trying to forward to callee dialog");
-                        if let Some(mut callee_dialog) = self.inner.dialog_layer.get_dialog(callee_dialog_id) {
+                        if let Some(mut callee_dialog) =
+                            self.inner.dialog_layer.get_dialog(callee_dialog_id)
+                        {
                             debug!(%dialog_id, %callee_dialog_id, "Found callee dialog");
                             let body = offer_sdp.clone().into_bytes();
-                            let headers = vec![rsipstack::sip::Header::ContentType("application/sdp".into())];
+                            let headers = vec![rsipstack::sip::Header::ContentType(
+                                "application/sdp".into(),
+                            )];
 
                             let resp = match &mut callee_dialog {
                                 Dialog::ClientInvite(d) => {
@@ -1043,12 +1052,19 @@ impl CallModule {
                             if let Some(response_opt) = resp {
                                 if let Some(response) = response_opt {
                                     if !response.body().is_empty() {
-                                        let answer_sdp = String::from_utf8_lossy(response.body()).to_string();
+                                        let answer_sdp =
+                                            String::from_utf8_lossy(response.body()).to_string();
                                         debug!(%dialog_id, ?tx.original.method, "Forwarding re-INVITE to callee, received SDP answer");
-                                        let headers = vec![rsipstack::sip::Header::ContentType("application/sdp".into())];
-                                        tx.reply_with(rsipstack::sip::StatusCode::OK, headers, Some(answer_sdp.into_bytes()))
-                                            .await
-                                            .map_err(|e| anyhow!(e))?;
+                                        let headers = vec![rsipstack::sip::Header::ContentType(
+                                            "application/sdp".into(),
+                                        )];
+                                        tx.reply_with(
+                                            rsipstack::sip::StatusCode::OK,
+                                            headers,
+                                            Some(answer_sdp.into_bytes()),
+                                        )
+                                        .await
+                                        .map_err(|e| anyhow!(e))?;
                                         forwarded = true;
                                         break;
                                     }
@@ -1063,10 +1079,16 @@ impl CallModule {
 
                     if let Some(sdp) = snapshot.answer_sdp {
                         debug!(%dialog_id, ?tx.original.method, "Replying to mid-dialog request with cached SDP");
-                        let headers = vec![rsipstack::sip::Header::ContentType("application/sdp".into())];
-                        tx.reply_with(rsipstack::sip::StatusCode::OK, headers, Some(sdp.into_bytes()))
-                            .await
-                            .map_err(|e| anyhow!(e))?;
+                        let headers = vec![rsipstack::sip::Header::ContentType(
+                            "application/sdp".into(),
+                        )];
+                        tx.reply_with(
+                            rsipstack::sip::StatusCode::OK,
+                            headers,
+                            Some(sdp.into_bytes()),
+                        )
+                        .await
+                        .map_err(|e| anyhow!(e))?;
                         return dialog.handle(tx).await.map_err(|e| anyhow!(e));
                     }
                 }
@@ -1077,7 +1099,7 @@ impl CallModule {
     }
 
     /// Handle inbound REFER request (transfer target scenario)
-    /// 
+    ///
     /// When PBX receives a REFER request, it means someone wants to transfer
     /// a call to us. We need to:
     /// 1. Parse the Refer-To header to get the transfer target
@@ -1094,13 +1116,12 @@ impl CallModule {
         info!("Handling inbound REFER request");
 
         // Extract Refer-To header
-        let refer_to = tx.original.headers.iter()
-            .find_map(|h| match h {
-                rsipstack::sip::Header::Other(name, value) if name.eq_ignore_ascii_case("Refer-To") => {
-                    Some(value.to_string())
-                }
-                _ => None,
-            });
+        let refer_to = tx.original.headers.iter().find_map(|h| match h {
+            rsipstack::sip::Header::Other(name, value) if name.eq_ignore_ascii_case("Refer-To") => {
+                Some(value.to_string())
+            }
+            _ => None,
+        });
 
         let refer_to = match refer_to {
             Some(uri) => {
@@ -1122,13 +1143,14 @@ impl CallModule {
         info!(refer_to = %refer_to, "Inbound REFER received");
 
         // Check Referred-By header (optional)
-        let referred_by = tx.original.headers.iter()
-            .find_map(|h| match h {
-                rsipstack::sip::Header::Other(name, value) if name.eq_ignore_ascii_case("Referred-By") => {
-                    Some(value.to_string())
-                }
-                _ => None,
-            });
+        let referred_by = tx.original.headers.iter().find_map(|h| match h {
+            rsipstack::sip::Header::Other(name, value)
+                if name.eq_ignore_ascii_case("Referred-By") =>
+            {
+                Some(value.to_string())
+            }
+            _ => None,
+        });
 
         if let Some(by) = &referred_by {
             info!(referred_by = %by, "Transfer initiated by");
@@ -1150,41 +1172,34 @@ impl CallModule {
         let refer_to_clone = refer_to.clone();
         let _referred_by_clone = referred_by.clone();
         let user = cookie.get_user().clone();
-        
+
         tokio::spawn(async move {
             // Small delay to ensure 202 response is sent
             tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-            
+
             // Send NOTIFY with 100 Trying
-            if let Err(e) = Self::send_refer_notify(
-                &dialog_layer,
-                &dialog_id,
-                100,
-                "Trying",
-                &refer_to_clone,
-            ).await {
+            if let Err(e) =
+                Self::send_refer_notify(&dialog_layer, &dialog_id, 100, "Trying", &refer_to_clone)
+                    .await
+            {
                 warn!(error = %e, "Failed to send NOTIFY 100 Trying");
                 return;
             }
-            
+
             info!("Sent NOTIFY 100 Trying for REFER");
-            
+
             // TODO: Initiate new call to transfer target
             // This would integrate with the originate functionality
             // For now, we simulate the transfer attempt
-            
+
             tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-            
+
             // Send final NOTIFY with result
             // In a full implementation, this would be sent after the transfer completes
             // For now, we send 200 OK to indicate success
-            if let Err(e) = Self::send_refer_notify(
-                &dialog_layer,
-                &dialog_id,
-                200,
-                "OK",
-                &refer_to_clone,
-            ).await {
+            if let Err(e) =
+                Self::send_refer_notify(&dialog_layer, &dialog_id, 200, "OK", &refer_to_clone).await
+            {
                 warn!(error = %e, "Failed to send NOTIFY 200 OK");
             } else {
                 info!("Sent NOTIFY 200 OK for REFER - transfer completed");
@@ -1202,9 +1217,9 @@ impl CallModule {
 
         Ok(())
     }
-    
+
     /// Send NOTIFY for REFER subscription
-    /// 
+    ///
     /// Builds and sends a SIP NOTIFY request with the transfer status.
     /// According to RFC 3515, the NOTIFY body contains a SIP message
     /// indicating the result of the REFER request.
@@ -1218,13 +1233,13 @@ impl CallModule {
         // Build NOTIFY body with SIP message fragment
         // Format: "SIP/2.0 <status> <reason>"
         let body = format!("SIP/2.0 {} {}\r\n", status_code, reason_phrase);
-        
+
         // Build headers for NOTIFY
         let mut headers: Vec<rsipstack::sip::Header> = vec![
             rsipstack::sip::Header::ContentType("message/sipfrag;version=2.0".into()),
             rsipstack::sip::Header::ContentLength((body.len() as u32).into()),
         ];
-        
+
         // Add Subscription-State header
         if status_code >= 200 {
             // Terminal state - subscription is terminated
@@ -1239,7 +1254,7 @@ impl CallModule {
                 "active".into(),
             ));
         }
-        
+
         // Get the dialog and send NOTIFY
         if let Some(dialog) = dialog_layer.get_dialog(dialog_id) {
             // Try to get the dialog as a subscription dialog
@@ -1258,9 +1273,7 @@ impl CallModule {
                                 warn!("No response received for NOTIFY");
                                 Ok(())
                             }
-                            Err(e) => {
-                                Err(anyhow!("Failed to send NOTIFY: {}", e))
-                            }
+                            Err(e) => Err(anyhow!("Failed to send NOTIFY: {}", e)),
                         }
                     }
                     _ => {
@@ -1423,7 +1436,10 @@ mod tests {
     #[test]
     fn loop_guard_same_realm_online_user_passes() {
         let result = resolve_unhandled_targets(true, false, make_loc());
-        assert!(result.is_ok(), "same-realm online user should not be rejected");
+        assert!(
+            result.is_ok(),
+            "same-realm online user should not be rejected"
+        );
     }
 
     #[test]
