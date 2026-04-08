@@ -91,6 +91,7 @@ pub struct SipSession {
     pub cancel_token: CancellationToken,
     pub pending_hangup: HashSet<DialogId>,
     pub connected_callee: Option<String>,
+    pub callee_call_ids: HashSet<String>,
     pub ring_time: Option<Instant>,
     pub answer_time: Option<Instant>,
     pub caller_offer: Option<String>,
@@ -220,6 +221,7 @@ impl SipSession {
             call_record_sender,
             cancel_token,
             connected_callee: None,
+            callee_call_ids: HashSet::new(),
             ring_time: None,
             answer_time: None,
             caller_offer,
@@ -935,6 +937,13 @@ impl SipSession {
             .map(|c| c.uri.clone())
             .unwrap_or_else(|| caller.clone());
 
+        let callee_call_id = self.context.dialplan.call_id.clone().unwrap_or_else(|| {
+            rsipstack::transaction::make_call_id(self.server.endpoint.inner.option.callid_suffix.as_deref())
+                .value()
+                .to_string()
+        });
+        self.callee_call_ids.insert(callee_call_id.clone());
+
         let invite_option = InviteOption {
             caller_display_name: self.context.dialplan.caller_display_name.clone(),
             callee: callee_uri.clone(),
@@ -945,7 +954,7 @@ impl SipSession {
             contact: contact_uri,
             credential: target.credential.clone(),
             headers: Some(headers),
-            call_id: self.context.dialplan.call_id.clone(),
+            call_id: Some(callee_call_id),
             ..Default::default()
         };
 
@@ -2109,11 +2118,7 @@ impl SipSession {
             routed_contact: self.routed_contact.clone(),
             routed_destination: self.routed_destination.clone(),
             last_queue_name: None,
-            callee_dialogs: self
-                .callee_dialogs
-                .iter()
-                .map(|entry| entry.key().clone())
-                .collect(),
+            callee_call_ids: self.callee_call_ids.iter().cloned().collect(),
             server_dialog_id: self.server_dialog.id(),
             extensions: self.context.dialplan.extensions.clone(),
         }
