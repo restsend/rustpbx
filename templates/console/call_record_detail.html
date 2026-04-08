@@ -445,7 +445,7 @@
 
                                                 <!-- Caller Column -->
                                                 <div class="relative">
-                                                    <template x-if="getRole(entry.src_addr) === 'leg-a'">
+                                                    <template x-if="entry._renderSrcRole === 'leg-a'">
                                                         <div>
                                                             <div class="rounded-lg border px-2 py-1 text-xs shadow-sm transition hover:shadow-md"
                                                                 :class="getMessageColorClass(entry.raw_message)">
@@ -471,7 +471,7 @@
                                                 <div class="relative">
                                                     <!-- PBX to Caller (PBX sends response back) -->
                                                     <template
-                                                        x-if="getRole(entry.src_addr) === 'pbx' && (getRole(entry.dst_addr) === 'leg-a' || entry._correctedDstRole === 'leg-a')">
+                                                        x-if="entry._renderSrcRole === 'pbx' && entry._renderDstRole === 'leg-a'">
                                                         <div>
                                                             <!-- Arrow Left -->
                                                             <div
@@ -493,7 +493,7 @@
 
                                                     <!-- PBX to Callee (PBX forwards request) -->
                                                     <template
-                                                        x-if="getRole(entry.src_addr) === 'pbx' && (getRole(entry.dst_addr) === 'leg-b' || entry._correctedDstRole === 'leg-b')">
+                                                        x-if="entry._renderSrcRole === 'pbx' && entry._renderDstRole === 'leg-b'">
                                                         <div>
                                                             <div class="rounded-lg border px-2 py-1 text-xs shadow-sm transition hover:shadow-md"
                                                                 :class="getMessageColorClass(entry.raw_message)">
@@ -516,7 +516,7 @@
 
                                                     <!-- PBX internal messages (same src and dst, no correction) -->
                                                     <template
-                                                        x-if="getRole(entry.src_addr) === 'pbx' && getRole(entry.dst_addr) === 'pbx' && !entry._correctedDstRole">
+                                                        x-if="entry._renderSrcRole === 'pbx' && entry._renderDstRole === 'pbx' && !entry._correctedDstRole">
                                                         <div class="rounded-lg border px-2 py-1 text-xs shadow-sm transition hover:shadow-md border-dashed"
                                                             :class="getMessageColorClass(entry.raw_message)">
                                                             <div class="font-semibold whitespace-nowrap"
@@ -528,7 +528,7 @@
                                                 <!-- Callee Column -->
                                                 <div class="relative">
                                                     <!-- Only show messages FROM leg-b (callee sends) -->
-                                                    <template x-if="getRole(entry.src_addr) === 'leg-b'">
+                                                    <template x-if="entry._renderSrcRole === 'leg-b'">
                                                         <div>
                                                             <!-- Arrow Left -->
                                                             <div
@@ -2186,6 +2186,7 @@
                         );
                         this.identifyRoles();
                         this.fixResponseDestinations();
+                        this.applyEntryRoles();
                     }
                 } catch (err) {
                     console.error('Failed to fetch sip flow', err);
@@ -2222,12 +2223,16 @@
                     // Leg A is the source of first INVITE
                     const legAAddr = this.normalizeAddr(firstInvite.src_addr);
                     const legAPort = this.extractPort(firstInvite.src_addr);
-                    this.roleMap.set(legAAddr, 'leg-a');
+                    if (legAAddr) {
+                        this.roleMap.set(legAAddr, 'leg-a');
+                    }
 
                     // PBX is the destination of first INVITE
                     const pbxAddr = this.normalizeAddr(firstInvite.dst_addr);
                     const pbxPort = this.extractPort(firstInvite.dst_addr);
-                    this.roleMap.set(pbxAddr, 'pbx');
+                    if (pbxAddr) {
+                        this.roleMap.set(pbxAddr, 'pbx');
+                    }
 
                     // Find PBX's INVITE to Leg B
                     const pbxInvite = sipMessages.find(e =>
@@ -2239,7 +2244,9 @@
                     if (pbxInvite) {
                         const legBAddr = this.normalizeAddr(pbxInvite.dst_addr);
                         const legBPort = this.extractPort(pbxInvite.dst_addr);
-                        this.roleMap.set(legBAddr, 'leg-b');
+                        if (legBAddr) {
+                            this.roleMap.set(legBAddr, 'leg-b');
+                        }
 
                         // Store ports for fallback matching
                         this.rolePortMap = {
@@ -2256,6 +2263,56 @@
                 } else {
                     console.warn('No INVITE message found');
                 }
+            },
+
+            applyEntryRoles() {
+                if (!this.sipFlowEntries || this.sipFlowEntries.length === 0) return;
+
+                this.sipFlowEntries.forEach((entry) => {
+                    const resolved = this.resolveEntryRoles(entry);
+                    entry._renderSrcRole = resolved.srcRole;
+                    entry._renderDstRole = resolved.dstRole;
+                });
+            },
+
+            resolveEntryRoles(entry) {
+                const role = entry?.role;
+                const hasSrc = Boolean(entry?.src_addr && entry.src_addr.trim());
+                const hasDst = Boolean(entry?.dst_addr && entry.dst_addr.trim());
+                const calleeHost = this.getParticipantHost('callee');
+                const srcHost = this.extractHost(entry?.src_addr);
+                const dstHost = this.extractHost(entry?.dst_addr);
+
+                if (role === 'caller') {
+                    if (hasSrc && !hasDst) {
+                        return { srcRole: 'leg-a', dstRole: 'pbx' };
+                    }
+                    if (hasDst && !hasSrc) {
+                        return { srcRole: 'pbx', dstRole: 'leg-a' };
+                    }
+                }
+
+                if (role === 'callee') {
+                    if (calleeHost) {
+                        if (srcHost === calleeHost && dstHost !== calleeHost) {
+                            return { srcRole: 'leg-b', dstRole: 'pbx' };
+                        }
+                        if (dstHost === calleeHost && srcHost !== calleeHost) {
+                            return { srcRole: 'pbx', dstRole: 'leg-b' };
+                        }
+                    }
+                    if (hasSrc && !hasDst) {
+                        return { srcRole: 'leg-b', dstRole: 'pbx' };
+                    }
+                    if (hasDst && !hasSrc) {
+                        return { srcRole: 'pbx', dstRole: 'leg-b' };
+                    }
+                }
+
+                return {
+                    srcRole: this.getRole(entry?.src_addr),
+                    dstRole: entry?._correctedDstRole || this.getRole(entry?.dst_addr),
+                };
             },
 
             // Fix response destinations that are incorrectly marked as pbx->pbx
@@ -2305,6 +2362,22 @@
                 if (!addr) return '';
                 // Extract IP:port (handle formats like "A_192.168.1.1:5060" or "192.168.1.1:5060")
                 return addr.split('_').pop();
+            },
+
+            extractHost(addr) {
+                const normalized = this.normalizeAddr(addr);
+                if (!normalized) return '';
+                const value = normalized.replace(/^\[|\]$/g, '');
+                const colonIndex = value.lastIndexOf(':');
+                if (colonIndex === -1) return value;
+                return value.slice(0, colonIndex);
+            },
+
+            getParticipantHost(role) {
+                const participant = this.participants.find(p => p.role === role);
+                const uri = participant?.uri || '';
+                const match = uri.match(/@\[?([^\];>]+)\]?/);
+                return match ? match[1] : '';
             },
 
             // Get role for an address

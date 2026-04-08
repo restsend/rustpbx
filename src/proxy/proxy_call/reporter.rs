@@ -116,13 +116,7 @@ impl CallReporter {
             destination: snapshot.routed_destination.clone(),
         };
 
-        let server_dialog_id = snapshot.server_dialog_id.clone();
-
-        let mut sip_leg_roles = HashMap::new();
-        sip_leg_roles.insert(server_dialog_id.call_id.clone(), "caller".to_string());
-        for dialog_id in &snapshot.callee_dialogs {
-            sip_leg_roles.insert(dialog_id.call_id.clone(), "callee".to_string());
-        }
+        let sip_leg_roles = build_sip_leg_roles(&snapshot);
 
         let has_sipflow_backend = self.server.sip_flow.as_ref().is_some();
         let direction = self.context.dialplan.direction.to_string();
@@ -221,6 +215,18 @@ impl CallReporter {
             let _ = sender.send(record);
         }
     }
+}
+
+fn build_sip_leg_roles(snapshot: &CallSessionRecordSnapshot) -> HashMap<String, String> {
+    let mut sip_leg_roles = HashMap::new();
+    let caller_call_id = snapshot.server_dialog_id.call_id.clone();
+    sip_leg_roles.insert(caller_call_id.clone(), "caller".to_string());
+    for call_id in &snapshot.callee_call_ids {
+        if call_id != &caller_call_id {
+            sip_leg_roles.insert(call_id.clone(), "callee".to_string());
+        }
+    }
+    sip_leg_roles
 }
 
 fn resolve_user_info(
@@ -382,4 +388,36 @@ mod tests {
         // Should extract username from caller URI
         assert!(from.is_some() || from.is_none()); // Behavior depends on implementation
     }
+
+    #[test]
+    fn test_build_sip_leg_roles_uses_callee_call_ids() {
+        let snapshot = CallSessionRecordSnapshot {
+            ring_time: None,
+            answer_time: None,
+            last_error: None,
+            hangup_reason: None,
+            hangup_messages: vec![],
+            original_caller: None,
+            original_callee: None,
+            routed_caller: None,
+            routed_callee: None,
+            connected_callee: None,
+            routed_contact: None,
+            routed_destination: None,
+            last_queue_name: None,
+            callee_call_ids: vec!["callee-call-id".to_string()],
+            server_dialog_id: rsipstack::dialog::DialogId {
+                call_id: "caller-call-id".to_string(),
+                local_tag: "local".to_string(),
+                remote_tag: "remote".to_string(),
+            },
+            extensions: http::Extensions::new(),
+        };
+
+        let roles = build_sip_leg_roles(&snapshot);
+
+        assert_eq!(roles.get("caller-call-id").map(String::as_str), Some("caller"));
+        assert_eq!(roles.get("callee-call-id").map(String::as_str), Some("callee"));
+    }
+
 }
