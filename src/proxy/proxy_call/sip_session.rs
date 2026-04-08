@@ -23,7 +23,7 @@ pub struct SessionSnapshot {
     pub callee_dialogs: Vec<DialogId>,
 }
 use crate::call::domain::SessionPolicy;
-use crate::call::sip::{DialogStateReceiverGuard, ServerDialogGuard};
+use crate::call::sip::{ClientDialogGuard, ServerDialogGuard};
 use crate::callrecord::{CallRecordHangupMessage, CallRecordHangupReason, CallRecordSender};
 use crate::config::MediaProxyMode;
 use crate::media::bridge::BridgePeerBuilder;
@@ -110,7 +110,7 @@ pub struct SipSession {
     pub server_timer: Arc<RwLock<SessionTimerState>>,
 
     pub callee_event_tx: Option<mpsc::UnboundedSender<DialogState>>,
-    pub callee_guards: Vec<DialogStateReceiverGuard>,
+    pub callee_guards: Vec<ClientDialogGuard>,
 
     pub reporter: Option<CallReporter>,
     pub recorder: Arc<RwLock<Option<Recorder>>>,
@@ -546,6 +546,9 @@ impl SipSession {
             DialogState::Terminated(terminated_dialog_id, reason) => {
                 self.update_leg_state(&LegId::from("callee"), LegState::Ended);
                 self.pending_hangup.remove(&terminated_dialog_id);
+                self.callee_dialogs.remove(&terminated_dialog_id);
+                self.callee_guards
+                    .retain(|guard| guard.id() != &terminated_dialog_id);
                 self.pending_hangup.insert(self.server_dialog.id());
 
                 match &reason {
@@ -1228,7 +1231,11 @@ impl SipSession {
         .await
         .map_err(|e| (StatusCode::ServerInternalError, Some(e.to_string())))?;
 
-        self.callee_dialogs.insert(dialog_id, ());
+        self.callee_dialogs.insert(dialog_id.clone(), ());
+        self.callee_guards.push(ClientDialogGuard::new(
+            self.server.dialog_layer.clone(),
+            dialog_id,
+        ));
 
         self.update_snapshot_cache();
 
@@ -1878,8 +1885,7 @@ impl SipSession {
 
         self.callee_event_tx = None;
 
-        let mut dialogs_to_hangup = self.pending_hangup.clone();
-        dialogs_to_hangup.extend(self.callee_dialogs.iter().map(|entry| entry.key().clone()));
+        let dialogs_to_hangup = self.pending_hangup.clone();
 
         if !dialogs_to_hangup.is_empty() {
             let hangup_dialogs = dialogs_to_hangup
