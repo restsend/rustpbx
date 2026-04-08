@@ -53,8 +53,6 @@ impl FromStr for SessionRefresher {
 
 impl SessionRefresher {
     /// Check if we are the refresher based on our role
-    #[cfg(test)]
-    #[allow(dead_code)]
     pub fn is_our_role(&self, we_are_uac: bool) -> bool {
         matches!(
             (self, we_are_uac),
@@ -182,6 +180,24 @@ impl SessionTimerState {
                 Duration::ZERO
             }
         })
+    }
+
+    /// Check if we are responsible for refreshing this dialog
+    pub fn should_we_refresh(&self, we_are_uac: bool) -> bool {
+        self.refresher.is_our_role(we_are_uac)
+    }
+
+    /// Get the next wakeup timeout for our role on this dialog
+    pub fn next_timeout_for_role(&self, we_are_uac: bool) -> Option<Duration> {
+        if !self.active || !self.enabled {
+            return None;
+        }
+
+        if !self.refreshing && self.should_we_refresh(we_are_uac) {
+            self.time_until_refresh()
+        } else {
+            self.time_until_expiration()
+        }
     }
 
     /// Start a refresh operation
@@ -342,10 +358,53 @@ pub fn has_timer_support(headers: &rsipstack::sip::Headers) -> bool {
 }
 
 /// Parse Min-SE header value
-#[cfg(test)]
 pub fn parse_min_se(value: &str) -> Option<Duration> {
     let seconds = value.trim().parse::<u64>().ok()?;
     Some(Duration::from_secs(seconds))
+}
+
+fn build_timer_headers(
+    session_expires: String,
+    min_se: String,
+    include_content_type: bool,
+) -> Vec<rsipstack::sip::Header> {
+    let mut headers = Vec::with_capacity(if include_content_type { 4 } else { 3 });
+    if include_content_type {
+        headers.push(rsipstack::sip::Header::ContentType(
+            "application/sdp".into(),
+        ));
+    }
+    headers.push(rsipstack::sip::Header::Other(
+        HEADER_SESSION_EXPIRES.to_string(),
+        session_expires,
+    ));
+    headers.push(rsipstack::sip::Header::Other(
+        HEADER_MIN_SE.to_string(),
+        min_se,
+    ));
+    headers.push(rsipstack::sip::Header::Supported(
+        rsipstack::sip::headers::Supported::from(TIMER_TAG),
+    ));
+    headers
+}
+
+pub fn build_default_session_timer_headers(session_expires: u64, min_se: u64) -> Vec<rsipstack::sip::Header> {
+    build_timer_headers(
+        session_expires.to_string(),
+        min_se.to_string(),
+        false,
+    )
+}
+
+pub fn build_session_timer_headers(
+    timer: &SessionTimerState,
+    include_content_type: bool,
+) -> Vec<rsipstack::sip::Header> {
+    build_timer_headers(
+        timer.get_session_expires_value(),
+        timer.get_min_se_value(),
+        include_content_type,
+    )
 }
 
 /// Check if timer is required (Require: timer header)
