@@ -48,10 +48,16 @@ impl RemoteBackend {
                     Some(cmd) = rx.recv() => {
                         match cmd {
                             Command::RecordItem { item } => {
+                                let default_port = if matches!(&item.msg_type, SipFlowMsgType::Sip)
+                                {
+                                    5060
+                                } else {
+                                    0
+                                };
                                 let parse_addr = |s: &str| -> (IpAddr, u16) {
                                     let parts: Vec<&str> = s.split(':').collect();
                                     let ip = parts[0].parse().unwrap_or(IpAddr::from([127, 0, 0, 1]));
-                                    let port = parts.get(1).and_then(|p| p.parse().ok()).unwrap_or(0);
+                                    let port = parts.get(1).and_then(|p| p.parse().ok()).unwrap_or(default_port);
                                     (ip, port)
                                 };
 
