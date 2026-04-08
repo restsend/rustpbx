@@ -115,3 +115,41 @@ impl Drop for ServerDialogGuard {
         });
     }
 }
+
+pub struct ClientDialogGuard {
+    pub dialog_layer: Arc<DialogLayer>,
+    pub id: DialogId,
+}
+
+impl ClientDialogGuard {
+    pub fn new(dialog_layer: Arc<DialogLayer>, id: DialogId) -> Self {
+        Self { dialog_layer, id }
+    }
+
+    pub fn id(&self) -> &DialogId {
+        &self.id
+    }
+}
+
+impl Drop for ClientDialogGuard {
+    fn drop(&mut self) {
+        let dlg = match self.dialog_layer.get_dialog(&self.id) {
+            Some(dlg) => {
+                debug!(%self.id, state = %dlg.state(), "client dialog removed on drop");
+                self.dialog_layer.remove_dialog(&self.id);
+                dlg
+            }
+            None => return,
+        };
+
+        if dlg.state().is_terminated() {
+            return;
+        }
+
+        crate::utils::spawn(async move {
+            if let Err(e) = dlg.hangup().await {
+                warn!(id=%dlg.id(), "error hanging up client dialog on drop: {}", e);
+            }
+        });
+    }
+}
