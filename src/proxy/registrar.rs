@@ -601,11 +601,29 @@ impl ProxyModule for RegistrarModule {
                 Some(dest) => dest,
                 None => {
                     info!("unable to determine network destination for REGISTER");
-                    tx.reply(rsipstack::sip::StatusCode::ServiceUnavailable).await.ok();
+                    tx.reply(rsipstack::sip::StatusCode::ServiceUnavailable)
+                        .await
+                        .ok();
                     return Ok(ProxyAction::Abort);
                 }
             };
 
+            let headers = tx
+                .original
+                .headers
+                .clone()
+                .into_iter()
+                .filter(|h| {
+                    !matches!(
+                        h,
+                        Header::From(_)
+                            | Header::To(_)
+                            | Header::CallId(_)
+                            | Header::CSeq(_)
+                            | Header::Via(_)
+                    )
+                })
+                .collect::<Vec<Header>>();
             let rendered_contact = entry.contact_value(expires);
             let mut location = Location {
                 aor: entry.uri().clone(),
@@ -621,7 +639,7 @@ impl ProxyModule for RegistrarModule {
                     (is_ws && is_invalid) || user.is_support_webrtc
                 },
                 credential: None,
-                headers: None,
+                headers: Some(headers),
                 registered_aor: Some(registered_aor.clone()),
                 contact_raw: Some(rendered_contact.clone()),
                 contact_params: Some(entry.param_map()),
@@ -662,7 +680,9 @@ impl ProxyModule for RegistrarModule {
                 Err(e) => {
                     info!("failed to register user: {:?}", e);
                     metrics::sip::registration_failed(&realm, "storage_error");
-                    tx.reply(rsipstack::sip::StatusCode::ServiceUnavailable).await.ok();
+                    tx.reply(rsipstack::sip::StatusCode::ServiceUnavailable)
+                        .await
+                        .ok();
                     return Ok(ProxyAction::Abort);
                 }
             }
