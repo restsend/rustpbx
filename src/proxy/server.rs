@@ -531,6 +531,7 @@ impl SipServerBuilder {
             if let Some(http_router_config) = &self.config.http_router {
                 call_router = Some(Box::new(crate::proxy::routing::http::HttpCallRouter::new(
                     http_router_config.clone(),
+                    rtp_config.clone(),
                 )));
             }
         }
