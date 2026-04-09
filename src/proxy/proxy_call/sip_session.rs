@@ -286,7 +286,8 @@ impl SipSession {
             .get_or_create_server_invite(tx, state_tx, None, local_contact.clone())
             .map_err(|e| anyhow!("Failed to create server dialog: {}", e))?;
 
-        let use_media_proxy = Self::check_media_proxy(&context, &server.proxy_config.media_proxy);
+        let use_media_proxy =
+            Self::check_media_proxy(&context, &context.dialplan.media.proxy_mode);
 
         let caller_media_builder = crate::media::MediaStreamBuilder::new()
             .with_id(format!("{}-caller", session_id))
@@ -536,7 +537,11 @@ impl SipSession {
     }
 
     async fn handle_dialog_state(&mut self, state: DialogState) -> Result<()> {
-        debug!("Handling caller dialog state");
+        debug!(
+            session_id = %self.context.session_id,
+            state = %state,
+            "Caller dialog state"
+        );
         match state {
             DialogState::Confirmed(_, _) => {
                 self.update_leg_state(&LegId::from("caller"), LegState::Connected);
@@ -587,7 +592,11 @@ impl SipSession {
     }
 
     async fn handle_callee_state(&mut self, state: DialogState) -> Result<()> {
-        debug!("Handling callee state");
+        debug!(
+            session_id = %self.context.session_id,
+            state = %state,
+            "Callee dialog state"
+        );
         match state {
             DialogState::Confirmed(_, _) => {
                 self.update_leg_state(&LegId::from("callee"), LegState::Connected);
@@ -1726,9 +1735,24 @@ impl SipSession {
                 "Media proxy enabled for same-type transport (anchored media)"
             );
 
+            let media_config = &self.context.dialplan.media;
             let mut track_builder = RtpTrackBuilder::new(track_id.clone())
                 .with_cancel_token(self.callee_peer.cancel_token())
-                .with_enable_latching(self.server.proxy_config.enable_latching);
+                .with_enable_latching(media_config.enable_latching);
+
+            if let Some(ref external_ip) = media_config.external_ip {
+                track_builder = track_builder.with_external_ip(external_ip.clone());
+            }
+
+            let (start_port, end_port) = if callee_is_webrtc {
+                (media_config.webrtc_port_start, media_config.webrtc_port_end)
+            } else {
+                (media_config.rtp_start_port, media_config.rtp_end_port)
+            };
+
+            if let (Some(start), Some(end)) = (start_port, end_port) {
+                track_builder = track_builder.with_rtp_range(start, end);
+            }
 
             if let Some(ref caller_offer) = self.caller_offer {
                 let codecs =
@@ -1740,6 +1764,9 @@ impl SipSession {
 
             if callee_is_webrtc {
                 track_builder = track_builder.with_mode(rustrtc::TransportMode::WebRtc);
+                if let Some(ref ice_servers) = media_config.ice_servers {
+                    track_builder = track_builder.with_ice_servers(ice_servers.clone());
+                }
             }
 
             let track = track_builder.build();

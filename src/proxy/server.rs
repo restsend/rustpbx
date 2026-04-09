@@ -532,6 +532,7 @@ impl SipServerBuilder {
                 call_router = Some(Box::new(crate::proxy::routing::http::HttpCallRouter::new(
                     http_router_config.clone(),
                     rtp_config.clone(),
+                    self.config.media_proxy
                 )));
             }
         }
@@ -702,7 +703,7 @@ impl SipServer {
         crate::utils::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            
+
             loop {
                 tokio::select! {
                     _ = cleanup_cancel.cancelled() => break,

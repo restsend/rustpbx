@@ -17,11 +17,12 @@ use tracing::{info, warn};
 pub struct HttpCallRouter {
     pub config: HttpRouterConfig,
     pub rtp_config: RtpConfig,
+    pub default_media_proxy_mode: MediaProxyMode,
     pub client: reqwest::Client,
 }
 
 impl HttpCallRouter {
-    pub fn new(config: HttpRouterConfig, rtp_config: RtpConfig) -> Self {
+    pub fn new(config: HttpRouterConfig, rtp_config: RtpConfig, default_media_proxy_mode: MediaProxyMode) -> Self {
         let mut builder = reqwest::Client::builder();
         if let Some(timeout) = config.timeout_ms {
             builder = builder.timeout(Duration::from_millis(timeout));
@@ -31,6 +32,7 @@ impl HttpCallRouter {
         Self {
             config,
             rtp_config,
+            default_media_proxy_mode,
             client: builder.build().unwrap_or_default(),
         }
     }
@@ -272,7 +274,8 @@ impl CallRouter for HttpCallRouter {
 
                 let mut dialplan = Dialplan::new(call_id, original.clone(), direction);
 
-                // Apply server RTP config so SDP uses the correct public IP, port range, etc.
+                // Start from server defaults, then let HTTP router override individual fields.
+                dialplan.media.proxy_mode = self.default_media_proxy_mode;
                 dialplan.media.external_ip = self.rtp_config.external_ip.clone();
                 dialplan.media.rtp_start_port = self.rtp_config.start_port;
                 dialplan.media.rtp_end_port = self.rtp_config.end_port;
