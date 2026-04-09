@@ -8,6 +8,7 @@ use crate::proxy::call::{CallRouter, RouteError};
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use rsipstack::sip::prelude::*;
+use rsipstack::sip::typed::Contact;
 use rsipstack::transport::SipConnection;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -17,6 +18,7 @@ use tracing::{info, warn};
 pub struct HttpCallRouter {
     pub config: HttpRouterConfig,
     pub rtp_config: RtpConfig,
+    pub default_contact: Option<Contact>,
     pub client: reqwest::Client,
 }
 
@@ -31,8 +33,14 @@ impl HttpCallRouter {
         Self {
             config,
             rtp_config,
+            default_contact: None,
             client: builder.build().unwrap_or_default(),
         }
+    }
+
+    pub fn with_default_contact(mut self, contact: Contact) -> Self {
+        self.default_contact = Some(contact);
+        self
     }
 }
 
@@ -280,6 +288,10 @@ impl CallRouter for HttpCallRouter {
 
                 if let Some(from) = caller.from.as_ref() {
                     dialplan = dialplan.with_caller(from.clone());
+                }
+
+                if let Some(contact) = self.default_contact.clone() {
+                    dialplan = dialplan.with_caller_contact(contact);
                 }
 
                 dialplan = dialplan.with_targets(strategy);

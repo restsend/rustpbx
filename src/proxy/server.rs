@@ -17,13 +17,12 @@ use crate::{
         auth::AuthBackend,
         call::{CallRouter, DialplanInspector},
         locator::{DialogTargetLocator, LocatorEventSender, TransportInspectorLocator},
-        presence::PresenceManager,
+        presence::PresenceManager, routing::http::HttpCallRouter,
     },
-    sipflow::SipFlowBackend,
-    sipflow::backend::create_backend,
+    sipflow::{SipFlowBackend, backend::create_backend},
 };
 use anyhow::{Result, anyhow};
-use rsipstack::sip::prelude::HeadersExt;
+use rsipstack::sip::{prelude::HeadersExt, typed::Contact};
 use rsipstack::sip::{Auth, Param, Transport};
 use rsipstack::{
     EndpointBuilder,
@@ -529,10 +528,36 @@ impl SipServerBuilder {
         let mut call_router = self.call_router;
         if call_router.is_none() {
             if let Some(http_router_config) = &self.config.http_router {
-                call_router = Some(Box::new(crate::proxy::routing::http::HttpCallRouter::new(
+                let mut http_router = HttpCallRouter::new(
                     http_router_config.clone(),
                     rtp_config.clone(),
-                )));
+                );
+                if let Some(addr) = endpoint.get_addrs().first() {
+                    let addr = addr.clone();
+                    let mut params = Vec::new();
+                    if let Some(transport) = addr.r#type {
+                        if !matches!(transport, Transport::Udp) {
+                            params.push(Param::Transport(transport));
+                        }
+                    }
+
+                    let default_contact = Contact {
+                        display_name: None,
+                        uri: rsipstack::sip::Uri {
+                            scheme: addr.r#type.map(|t| t.sip_scheme()),
+                            auth: Some(Auth {
+                                user: "rustpbx".to_string(),
+                                password: None,
+                            }),
+                            host_with_port: addr.addr,
+                            params,
+                            ..Default::default()
+                        },
+                        params: vec![],
+                    };
+                    http_router = http_router.with_default_contact(default_contact);
+                }
+                call_router = Some(Box::new(http_router));
             }
         }
         let dialog_layer = Arc::new(DialogLayer::new(endpoint.inner.clone()));
@@ -702,7 +727,7 @@ impl SipServer {
         crate::utils::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-            
+
             loop {
                 tokio::select! {
                     _ = cleanup_cancel.cancelled() => break,
