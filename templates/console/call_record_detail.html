@@ -2279,9 +2279,6 @@
                 const role = entry?.role;
                 const hasSrc = Boolean(entry?.src_addr && entry.src_addr.trim());
                 const hasDst = Boolean(entry?.dst_addr && entry.dst_addr.trim());
-                const calleeHost = this.getParticipantHost('callee');
-                const srcHost = this.extractHost(entry?.src_addr);
-                const dstHost = this.extractHost(entry?.dst_addr);
 
                 if (role === 'caller') {
                     if (hasSrc && !hasDst) {
@@ -2293,14 +2290,6 @@
                 }
 
                 if (role === 'callee') {
-                    if (calleeHost) {
-                        if (srcHost === calleeHost && dstHost !== calleeHost) {
-                            return { srcRole: 'leg-b', dstRole: 'pbx' };
-                        }
-                        if (dstHost === calleeHost && srcHost !== calleeHost) {
-                            return { srcRole: 'pbx', dstRole: 'leg-b' };
-                        }
-                    }
                     if (hasSrc && !hasDst) {
                         return { srcRole: 'leg-b', dstRole: 'pbx' };
                     }
@@ -2371,13 +2360,6 @@
                 const colonIndex = value.lastIndexOf(':');
                 if (colonIndex === -1) return value;
                 return value.slice(0, colonIndex);
-            },
-
-            getParticipantHost(role) {
-                const participant = this.participants.find(p => p.role === role);
-                const uri = participant?.uri || '';
-                const match = uri.match(/@\[?([^\];>]+)\]?/);
-                return match ? match[1] : '';
             },
 
             // Get role for an address
