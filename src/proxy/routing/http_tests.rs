@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod tests {
     use crate::call::{SipUser, TransactionCookie};
-    use crate::config::{HttpRouterConfig, RtpConfig};
+    use crate::config::{HttpRouterConfig, MediaProxyMode, RtpConfig};
     use crate::proxy::call::CallRouter;
     use crate::proxy::routing::http::HttpCallRouter;
     use axum::{Json, Router, routing::post};
@@ -43,7 +43,7 @@ mod tests {
             timeout_ms: Some(1000),
         };
 
-        let router = HttpCallRouter::new(config, RtpConfig::default());
+        let router = HttpCallRouter::new(config, RtpConfig::default(), MediaProxyMode::None);
 
         let request = rsipstack::sip::Request {
             method: rsipstack::sip::Method::Invite,
@@ -140,7 +140,7 @@ mod tests {
             timeout_ms: Some(1000),
         };
 
-        let router = HttpCallRouter::new(config, RtpConfig::default());
+        let router = HttpCallRouter::new(config, RtpConfig::default(), MediaProxyMode::None);
 
         let request = rsipstack::sip::Request {
             method: rsipstack::sip::Method::Invite,
@@ -240,7 +240,7 @@ mod tests {
             timeout_ms: Some(1000),
         };
 
-        let router = HttpCallRouter::new(config, RtpConfig::default());
+        let router = HttpCallRouter::new(config, RtpConfig::default(), MediaProxyMode::None);
 
         let request = rsipstack::sip::Request {
             method: rsipstack::sip::Method::Invite,
@@ -339,7 +339,7 @@ mod tests {
             timeout_ms: Some(1000),
         };
 
-        let router = HttpCallRouter::new(config, RtpConfig::default());
+        let router = HttpCallRouter::new(config, RtpConfig::default(), MediaProxyMode::None);
 
         let request = rsipstack::sip::Request {
             method: rsipstack::sip::Method::Invite,
@@ -425,7 +425,7 @@ mod tests {
             timeout_ms: Some(1000),
         };
 
-        let router = HttpCallRouter::new(config, RtpConfig::default());
+        let router = HttpCallRouter::new(config, RtpConfig::default(), MediaProxyMode::None);
 
         let request = rsipstack::sip::Request {
             method: rsipstack::sip::Method::Invite,
@@ -516,7 +516,7 @@ mod tests {
             timeout_ms: Some(1000),
         };
 
-        let router = HttpCallRouter::new(config, RtpConfig::default());
+        let router = HttpCallRouter::new(config, RtpConfig::default(), MediaProxyMode::None);
 
         let request = rsipstack::sip::Request {
             method: rsipstack::sip::Method::Invite,
@@ -609,7 +609,7 @@ mod tests {
             ..Default::default()
         };
 
-        let router = HttpCallRouter::new(config, rtp_config);
+        let router = HttpCallRouter::new(config, rtp_config, MediaProxyMode::None);
 
         let request = rsipstack::sip::Request {
             method: rsipstack::sip::Method::Invite,
