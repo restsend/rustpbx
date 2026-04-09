@@ -3,8 +3,8 @@ use crate::call::{
     DialDirection, DialStrategy, Dialplan, Location, RouteInvite, SipUser, TransactionCookie,
     TrunkContext,
 };
-use crate::config::{HttpRouterConfig, MediaProxyMode};
-use crate::proxy::call::CallRouter;
+use crate::config::{HttpRouterConfig, MediaProxyMode, RtpConfig};
+use crate::proxy::call::{CallRouter, RouteError};
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use rsipstack::sip::prelude::*;
@@ -16,11 +16,12 @@ use tracing::{info, warn};
 
 pub struct HttpCallRouter {
     pub config: HttpRouterConfig,
+    pub rtp_config: RtpConfig,
     pub client: reqwest::Client,
 }
 
 impl HttpCallRouter {
-    pub fn new(config: HttpRouterConfig) -> Self {
+    pub fn new(config: HttpRouterConfig, rtp_config: RtpConfig) -> Self {
         let mut builder = reqwest::Client::builder();
         if let Some(timeout) = config.timeout_ms {
             builder = builder.timeout(Duration::from_millis(timeout));
@@ -29,6 +30,7 @@ impl HttpCallRouter {
         }
         Self {
             config,
+            rtp_config,
             client: builder.build().unwrap_or_default(),
         }
     }
@@ -90,7 +92,7 @@ impl CallRouter for HttpCallRouter {
         _route_invite: Box<dyn RouteInvite>,
         caller: &SipUser,
         cookie: &TransactionCookie,
-    ) -> Result<Dialplan, (anyhow::Error, Option<rsipstack::sip::StatusCode>)> {
+    ) -> Result<Dialplan, RouteError> {
         let direction = if cookie.get_extension::<TrunkContext>().is_some() {
             DialDirection::Inbound
         } else {
@@ -160,10 +162,11 @@ impl CallRouter for HttpCallRouter {
                 "HTTP router request failed: {}",
                 e
             );
-            (
-                anyhow!("HTTP router request failed: {}", e),
-                Some(rsipstack::sip::StatusCode::ServiceUnavailable),
-            )
+            RouteError {
+                error: anyhow!("HTTP router request failed: {}", e),
+                status: Some(rsipstack::sip::StatusCode::ServiceUnavailable),
+                extensions: None,
+            }
         })?;
 
         let elapsed = start.elapsed();
@@ -177,19 +180,25 @@ impl CallRouter for HttpCallRouter {
                     status = %response.status(),
                     "HTTP router returned error, falling back to static"
                 );
-                return Err((anyhow!("HTTP router returned error"), None));
+                return Err(RouteError {
+                    error: anyhow!("HTTP router returned error"),
+                    status: None,
+                    extensions: None,
+                });
             }
-            return Err((
-                anyhow!("HTTP router returned error: {}", response.status()),
-                Some(rsipstack::sip::StatusCode::ServiceUnavailable),
-            ));
+            return Err(RouteError {
+                error: anyhow!("HTTP router returned error: {}", response.status()),
+                status: Some(rsipstack::sip::StatusCode::ServiceUnavailable),
+                extensions: None,
+            });
         }
 
         let result: HttpResponsePayload = response.json().await.map_err(|e| {
-            (
-                anyhow!("Failed to parse HTTP router response: {}", e),
-                Some(rsipstack::sip::StatusCode::ServerInternalError),
-            )
+            RouteError {
+                error: anyhow!("Failed to parse HTTP router response: {}", e),
+                status: Some(rsipstack::sip::StatusCode::ServerInternalError),
+                extensions: None,
+            }
         })?;
 
         info!(
@@ -204,31 +213,37 @@ impl CallRouter for HttpCallRouter {
         match result.action {
             HttpRouteAction::Spam => {
                 cookie.mark_as_spam(SpamResult::Spam);
-                return Err((
-                    anyhow!(
+                return Err(RouteError {
+                    error: anyhow!(
                         result
                             .reason
                             .unwrap_or_else(|| "marked as spam by HTTP router".to_string())
                     ),
-                    Some(rsipstack::sip::StatusCode::Forbidden),
-                ));
+                    status: Some(rsipstack::sip::StatusCode::Forbidden),
+                    extensions: result.extensions,
+                });
             }
             HttpRouteAction::Reject | HttpRouteAction::Abort => {
                 let status = result
                     .status
                     .and_then(|s| rsipstack::sip::StatusCode::try_from(s).ok())
                     .unwrap_or(rsipstack::sip::StatusCode::Forbidden);
-                return Err((
-                    anyhow!(
+                return Err(RouteError {
+                    error: anyhow!(
                         result
                             .reason
                             .unwrap_or_else(|| "rejected by HTTP router".to_string())
                     ),
-                    Some(status),
-                ));
+                    status: Some(status),
+                    extensions: result.extensions,
+                });
             }
             HttpRouteAction::NotHandled => {
-                return Err((anyhow!("not handled by HTTP router"), None));
+                return Err(RouteError {
+                    error: anyhow!("not handled by HTTP router"),
+                    status: None,
+                    extensions: result.extensions,
+                });
             }
             HttpRouteAction::Forward => {
                 let mut locs = Vec::new();
@@ -256,6 +271,12 @@ impl CallRouter for HttpCallRouter {
                 };
 
                 let mut dialplan = Dialplan::new(call_id, original.clone(), direction);
+
+                // Apply server RTP config so SDP uses the correct public IP, port range, etc.
+                dialplan.media.external_ip = self.rtp_config.external_ip.clone();
+                dialplan.media.rtp_start_port = self.rtp_config.start_port;
+                dialplan.media.rtp_end_port = self.rtp_config.end_port;
+                dialplan.media.ice_servers = self.rtp_config.ice_servers.clone();
 
                 if let Some(from) = caller.from.as_ref() {
                     dialplan = dialplan.with_caller(from.clone());

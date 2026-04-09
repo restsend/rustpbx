@@ -11,7 +11,6 @@ use crate::proxy::routing::{
     RouteRule, SourceTrunk, TrunkConfig, build_source_trunk,
     matcher::{RouteResourceLookup, match_invite},
 };
-use anyhow::Error;
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use audio_codec::CodecType;
@@ -29,6 +28,25 @@ use std::{collections::HashMap, net::IpAddr, path::PathBuf, sync::Arc};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
+/// Error type returned by [`CallRouter::resolve`] on failure.
+#[derive(Debug)]
+pub struct RouteError {
+    pub error: anyhow::Error,
+    pub status: Option<rsipstack::sip::StatusCode>,
+    /// Optional metadata extensions carried from the router response (e.g. HTTP router abort/reject).
+    pub extensions: Option<HashMap<String, String>>,
+}
+
+impl<E: Into<anyhow::Error>> From<(E, Option<rsipstack::sip::StatusCode>)> for RouteError {
+    fn from((error, status): (E, Option<rsipstack::sip::StatusCode>)) -> Self {
+        Self {
+            error: error.into(),
+            status,
+            extensions: None,
+        }
+    }
+}
+
 #[async_trait]
 pub trait CallRouter: Send + Sync {
     async fn resolve(
@@ -37,7 +55,7 @@ pub trait CallRouter: Send + Sync {
         route_invite: Box<dyn RouteInvite>,
         caller: &SipUser,
         cookie: &TransactionCookie,
-    ) -> Result<Dialplan, (anyhow::Error, Option<rsipstack::sip::StatusCode>)>;
+    ) -> Result<Dialplan, RouteError>;
 }
 
 fn q850_cause_from_status(code: &rsipstack::sip::StatusCode) -> u16 {
@@ -68,18 +86,18 @@ fn resolve_unhandled_targets(
     callee_is_same_realm: bool,
     internal_lookup_empty: bool,
     locs: Vec<Location>,
-) -> Result<DialStrategy, (anyhow::Error, Option<rsipstack::sip::StatusCode>)> {
+) -> Result<DialStrategy, RouteError> {
     if callee_is_same_realm && internal_lookup_empty {
-        return Err((
+        return Err(RouteError::from((
             anyhow!("target user is offline"),
             Some(rsipstack::sip::StatusCode::TemporarilyUnavailable),
-        ));
+        )));
     }
     if !callee_is_same_realm {
-        return Err((
+        return Err(RouteError::from((
             anyhow!("no route found for external destination"),
             Some(rsipstack::sip::StatusCode::NotFound),
-        ));
+        )));
     }
     Ok(DialStrategy::Sequential(locs))
 }
@@ -105,7 +123,7 @@ pub trait DialplanInspector: Send + Sync {
         dialplan: Dialplan,
         cookie: &TransactionCookie,
         original: &rsipstack::sip::Request,
-    ) -> Result<Dialplan, (anyhow::Error, Option<rsipstack::sip::StatusCode>)>;
+    ) -> Result<Dialplan, RouteError>;
 }
 
 pub struct DefaultRouteInvite {
@@ -369,17 +387,17 @@ impl CallModule {
         route_invite: Box<dyn RouteInvite>,
         caller: &SipUser,
         cookie: &TransactionCookie,
-    ) -> Result<Dialplan, (Error, Option<rsipstack::sip::StatusCode>)> {
+    ) -> Result<Dialplan, RouteError> {
         let callee_uri = original
             .to_header()
-            .map_err(|e| (anyhow::anyhow!(e), None))?
+            .map_err(|e| RouteError::from((anyhow::anyhow!(e), None)))?
             .uri()
-            .map_err(|e| (anyhow::anyhow!(e), None))?;
+            .map_err(|e| RouteError::from((anyhow::anyhow!(e), None)))?;
         let callee_realm = callee_uri.host().to_string();
 
         let dialog_id = original
             .call_id_header()
-            .map_err(|e| (anyhow::anyhow!(e), None))?
+            .map_err(|e| RouteError::from((anyhow::anyhow!(e), None)))?
             .value();
         let session_id = dialog_id.to_string();
 
@@ -434,10 +452,10 @@ impl CallModule {
                     DialDirection::Inbound
                 } else {
                     warn!(dialog_id, caller_realm = ?caller.realm, callee_realm, "Both caller and callee are external realm, reject");
-                    return Err((
+                    return Err(RouteError::from((
                         anyhow::anyhow!("Both caller and callee are external realm"),
                         Some(rsipstack::sip::StatusCode::Forbidden),
-                    ));
+                    )));
                 }
             }
         };
@@ -460,9 +478,9 @@ impl CallModule {
             Some(uri) => uri.clone(),
             None => original
                 .from_header()
-                .map_err(|e| (anyhow::anyhow!(e), None))?
+                .map_err(|e| RouteError::from((anyhow::anyhow!(e), None)))?
                 .uri()
-                .map_err(|e| (anyhow::anyhow!(e), None))?,
+                .map_err(|e| RouteError::from((anyhow::anyhow!(e), None)))?,
         };
 
         let preview_option = InviteOption {
@@ -476,10 +494,10 @@ impl CallModule {
             .preview_route(preview_option, original, &direction, cookie)
             .await
             .map_err(|e| {
-                (
+                RouteError::from((
                     anyhow::anyhow!(e),
                     Some(rsipstack::sip::StatusCode::ServerInternalError),
-                )
+                ))
             })?;
 
         let (preview_forward, pending_queue, pending_app, dialplan_hints) = match preview_outcome {
@@ -490,7 +508,7 @@ impl CallModule {
                 let err = anyhow::anyhow!(
                     reason.unwrap_or_else(|| "route aborted during preview".to_string())
                 );
-                return Err((err, Some(code)));
+                return Err(RouteError::from((err, Some(code))));
             }
             RouteResult::Application {
                 option: _,
@@ -838,7 +856,7 @@ impl CallModule {
         tx: &mut Transaction,
         cookie: TransactionCookie,
         caller: &SipUser,
-    ) -> Result<Dialplan, (Error, Option<rsipstack::sip::StatusCode>)> {
+    ) -> Result<Dialplan, RouteError> {
         let trunk_context = cookie.get_extension::<TrunkContext>();
         let source_trunk_hint = trunk_context.as_ref().map(|c| c.name.clone());
 
@@ -849,7 +867,11 @@ impl CallModule {
                     self.inner.config.clone(),
                     self.inner.routing_state.clone(),
                 )
-                .map_err(|e| (e, None))?
+                .map_err(|e| RouteError {
+                    error: e,
+                    status: None,
+                    extensions: None,
+                })?
             } else {
                 Box::new(DefaultRouteInvite {
                     routing_state: self.inner.routing_state.clone(),
@@ -911,6 +933,7 @@ impl CallModule {
         cookie: &TransactionCookie,
         code: rsipstack::sip::StatusCode,
         reason: Option<String>,
+        extensions: Option<HashMap<String, String>>,
     ) {
         let direction = if cookie.get_extension::<TrunkContext>().is_some() {
             DialDirection::Inbound
@@ -921,7 +944,10 @@ impl CallModule {
             |_| uuid::Uuid::new_v4().to_string(),
             |h| h.value().to_string(),
         );
-        let dialplan = Dialplan::new(session_id, tx.original.clone(), direction);
+        let mut dialplan = Dialplan::new(session_id, tx.original.clone(), direction);
+        if let Some(exts) = extensions {
+            dialplan = dialplan.with_extension(exts);
+        }
         let proxy_call = CallSessionBuilder::new(cookie.clone(), dialplan, 70)
             .with_call_record_sender(self.inner.server.callrecord_sender.clone())
             .with_addon_registry(self.inner.server.addon_registry.clone());
@@ -940,12 +966,12 @@ impl CallModule {
 
         let dialplan = match self.build_dialplan(tx, cookie.clone(), &caller).await {
             Ok(d) => d,
-            Err((e, code)) => {
+            Err(route_err) => {
                 if cookie.is_spam() {
                     return Ok(());
                 }
-                let code = code.unwrap_or(rsipstack::sip::StatusCode::ServerInternalError);
-                let reason_text = e.to_string();
+                let code = route_err.status.unwrap_or(rsipstack::sip::StatusCode::ServerInternalError);
+                let reason_text = route_err.error.to_string();
                 // If error already contains ;cause= (e.g. "invite;cause=1234;text=\"xxx\""),
                 // treat it as pre-formatted Q850 and use directly.
                 let reason_value = if reason_text.contains(";cause=") {
@@ -954,7 +980,7 @@ impl CallModule {
                     q850_reason_value(&code, Some(reason_text.as_str()))
                 };
                 warn!(%code, key = %tx.key, reason = %reason_value, "failed to build dialplan");
-                self.report_failure(tx, &cookie, code.clone(), Some(reason_text));
+                self.report_failure(tx, &cookie, code.clone(), Some(reason_text), route_err.extensions);
                 tx.reply_with(
                     code.clone(),
                     vec![rsipstack::sip::Header::Other("Reason".into(), reason_value)],
@@ -962,7 +988,7 @@ impl CallModule {
                 )
                 .await
                 .map_err(|e| anyhow!("Failed to send reply: {}", e))?;
-                return Err(e);
+                return Err(route_err.error);
             }
         };
 
@@ -975,7 +1001,7 @@ impl CallModule {
 
         if max_forwards == 0 {
             info!(key = %tx.key, "Max-Forwards exceeded");
-            self.report_failure(tx, &cookie, rsipstack::sip::StatusCode::TooManyHops, None);
+            self.report_failure(tx, &cookie, rsipstack::sip::StatusCode::TooManyHops, None, None);
             tx.reply(rsipstack::sip::StatusCode::TooManyHops).await?;
             return Ok(());
         }
@@ -1446,18 +1472,18 @@ mod tests {
     fn loop_guard_same_realm_offline_user_returns_480() {
         let result = resolve_unhandled_targets(true, true, make_loc());
         let err = result.expect_err("offline same-realm user should be rejected");
-        let code = err.1.unwrap();
+        let code = err.status.unwrap();
         assert_eq!(u16::from(code), 480);
-        assert!(err.0.to_string().contains("offline"));
+        assert!(err.error.to_string().contains("offline"));
     }
 
     #[test]
     fn loop_guard_external_callee_returns_404() {
         let result = resolve_unhandled_targets(false, false, make_loc());
         let err = result.expect_err("external callee with NotHandled should be rejected");
-        let code = err.1.unwrap();
+        let code = err.status.unwrap();
         assert_eq!(u16::from(code), 404);
-        assert!(err.0.to_string().contains("no route"));
+        assert!(err.error.to_string().contains("no route"));
     }
 
     #[test]
@@ -1465,7 +1491,7 @@ mod tests {
         // external callee — internal_lookup_empty is irrelevant but test the combination
         let result = resolve_unhandled_targets(false, true, make_loc());
         let err = result.expect_err("external callee should be rejected");
-        let code = err.1.unwrap();
+        let code = err.status.unwrap();
         assert_eq!(u16::from(code), 404);
     }
 }
