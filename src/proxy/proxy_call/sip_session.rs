@@ -23,7 +23,7 @@ pub struct SessionSnapshot {
     pub callee_dialogs: Vec<DialogId>,
 }
 use crate::call::domain::SessionPolicy;
-use crate::call::sip::{DialogStateReceiverGuard, ServerDialogGuard};
+use crate::call::sip::{ClientDialogGuard, ServerDialogGuard};
 use crate::callrecord::{CallRecordHangupMessage, CallRecordHangupReason, CallRecordSender};
 use crate::config::MediaProxyMode;
 use crate::media::bridge::BridgePeerBuilder;
@@ -35,8 +35,10 @@ use crate::proxy::proxy_call::{
     media_peer::{MediaPeer, VoiceEnginePeer},
     reporter::CallReporter,
     session_timer::{
-        HEADER_MIN_SE, HEADER_SESSION_EXPIRES, SessionRefresher, SessionTimerState, TIMER_TAG,
-        get_header_value, has_timer_support, parse_session_expires,
+        DEFAULT_SESSION_EXPIRES, HEADER_MIN_SE, HEADER_SESSION_EXPIRES, HEADER_SUPPORTED,
+        MIN_MIN_SE, SessionRefresher, SessionTimerState, build_default_session_timer_headers,
+        build_session_timer_headers, get_header_value, has_timer_support, parse_min_se,
+        parse_session_expires,
     },
     state::{CallContext, CallSessionRecordSnapshot, SessionHangupMessage},
 };
@@ -51,20 +53,21 @@ use rsipstack::dialog::{
     server_dialog::ServerInviteDialog,
 };
 use rsipstack::sip::StatusCode;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
-use tokio_util::sync::CancellationToken;
+use tokio_util::{
+    sync::CancellationToken,
+    time::{DelayQueue, delay_queue},
+};
 use tracing::{debug, error, info, warn};
 
 #[derive(Debug)]
 enum TimerAction {
     Refresh,
     Expired,
-    #[allow(unused)]
-    Reschedule(Duration),
 }
 
 pub struct SipSession {
@@ -107,10 +110,12 @@ pub struct SipSession {
     pub routed_contact: Option<String>,
     pub routed_destination: Option<String>,
 
-    pub server_timer: Arc<RwLock<SessionTimerState>>,
+    timers: HashMap<DialogId, SessionTimerState>,
+    timer_queue: DelayQueue<DialogId>,
+    timer_keys: HashMap<DialogId, delay_queue::Key>,
 
     pub callee_event_tx: Option<mpsc::UnboundedSender<DialogState>>,
-    pub callee_guards: Vec<DialogStateReceiverGuard>,
+    pub callee_guards: Vec<ClientDialogGuard>,
 
     pub reporter: Option<CallReporter>,
     pub recorder: Arc<RwLock<Option<Recorder>>>,
@@ -235,7 +240,9 @@ impl SipSession {
             routed_callee: None,
             routed_contact: None,
             routed_destination: None,
-            server_timer: Arc::new(RwLock::new(SessionTimerState::default())),
+            timers: HashMap::new(),
+            timer_queue: DelayQueue::new(),
+            timer_keys: HashMap::new(),
             callee_event_tx: None,
             callee_guards: Vec::new(),
             reporter: None,
@@ -405,8 +412,6 @@ impl SipSession {
         let hangup_futures = FuturesUnordered::new();
         tokio::pin!(hangup_futures);
 
-        let mut next_timer_check = self.calculate_next_timer_check();
-
         loop {
             for dialog_id in self.pending_hangup.drain() {
                 if let Some(dialog) = self.server.dialog_layer.get_dialog(&dialog_id) {
@@ -417,12 +422,6 @@ impl SipSession {
                     });
                 }
             }
-
-            let timer_sleep = if let Some(instant) = next_timer_check {
-                tokio::time::sleep_until(instant).boxed()
-            } else {
-                tokio::time::sleep(Duration::from_secs(60)).boxed()
-            };
 
             tokio::select! {
                 res = hangup_futures.next(), if !hangup_futures.is_empty() => {
@@ -458,25 +457,37 @@ impl SipSession {
                 }
 
 
-                _ = timer_sleep => {
-                    match self.check_session_timer().await {
-                        TimerAction::Refresh => {
-                            if let Err(e) = self.send_session_refresh().await {
-                                warn!(error = %e, "Failed to send session refresh");
-                                self.server_timer.write().fail_refresh();
+                Some(expired) = self.timer_queue.next(), if !self.timer_queue.is_empty() => {
+                    let scheduled = expired.into_inner();
+
+                    match self.next_timer_action(&scheduled) {
+                        Some(TimerAction::Refresh) => {
+                            let refresh_ok = match if scheduled == self.caller_dialog_id() {
+                                self.send_server_session_refresh().await
+                            } else {
+                                self.send_callee_session_refresh(&scheduled).await
+                            } {
+                                Ok(()) => true,
+                                Err(e) => {
+                                    warn!(dialog_id = %scheduled, error = %e, "Failed to send session refresh");
+                                    false
+                                }
+                            };
+
+                            if refresh_ok {
+                                self.schedule_timer(scheduled);
+                            } else {
+                                self.schedule_expiration_timer(scheduled);
                             }
                         }
-                        TimerAction::Expired => {
-                            warn!("Session timer expired, terminating session");
+                        Some(TimerAction::Expired) => {
+                            warn!(dialog_id = %scheduled, "Session timer expired, terminating session");
                             self.hangup_reason = Some(CallRecordHangupReason::Autohangup);
                             self.cancel_token.cancel();
                             break;
                         }
-                        TimerAction::Reschedule(_) => {}
+                        None => {}
                     }
-
-
-                    next_timer_check = self.calculate_next_timer_check();
                 }
             }
         }
@@ -486,6 +497,22 @@ impl SipSession {
         let _ = _cancel_guard;
 
         Ok(())
+    }
+
+    fn next_timer_action(&mut self, scheduled: &DialogId) -> Option<TimerAction> {
+        let we_are_uac = self.is_uac_dialog(scheduled);
+        self.timer_keys.remove(scheduled);
+        let timer = self.timers.get_mut(scheduled)?;
+
+        if timer.is_expired() {
+            return Some(TimerAction::Expired);
+        }
+
+        if timer.should_we_refresh(we_are_uac) && timer.should_refresh() && timer.start_refresh() {
+            return Some(TimerAction::Refresh);
+        }
+
+        None
     }
 
     fn update_snapshot_cache(&self) {
@@ -513,6 +540,28 @@ impl SipSession {
         match state {
             DialogState::Confirmed(_, _) => {
                 self.update_leg_state(&LegId::from("caller"), LegState::Connected);
+            }
+            DialogState::Updated(dialog_id, request, tx_handle) => {
+                debug!(%dialog_id, method = ?request.method, "Received UPDATE/INVITE on caller dialog");
+
+                let update_result =
+                    self.update_dialog_timer_from_headers(&dialog_id, &request.headers);
+
+                if let Err(e) = &update_result {
+                    warn!(error = %e, "Failed to refresh caller session timer");
+                }
+
+                if !request.body.is_empty() {
+                    return Ok(());
+                }
+
+                let status = if update_result.is_ok() {
+                    rsipstack::sip::StatusCode::OK
+                } else {
+                    rsipstack::sip::StatusCode::SessionIntervalTooSmall
+                };
+
+                let _ = tx_handle.reply(status).await;
             }
             DialogState::Terminated(_, reason) => {
                 self.update_leg_state(&LegId::from("caller"), LegState::Ended);
@@ -543,9 +592,26 @@ impl SipSession {
             DialogState::Confirmed(_, _) => {
                 self.update_leg_state(&LegId::from("callee"), LegState::Connected);
             }
+            DialogState::Updated(dialog_id, request, tx_handle) => {
+                debug!(%dialog_id, method = ?request.method, "Received UPDATE/INVITE on callee dialog");
+
+                if let Err(e) = self.update_dialog_timer_from_headers(&dialog_id, &request.headers) {
+                    warn!(%dialog_id, error = %e, "Failed to refresh callee session timer");
+                    let _ = tx_handle
+                        .reply(rsipstack::sip::StatusCode::SessionIntervalTooSmall)
+                        .await;
+                    return Ok(());
+                }
+                let _ = tx_handle.reply(rsipstack::sip::StatusCode::OK).await;
+            }
             DialogState::Terminated(terminated_dialog_id, reason) => {
                 self.update_leg_state(&LegId::from("callee"), LegState::Ended);
                 self.pending_hangup.remove(&terminated_dialog_id);
+                self.callee_dialogs.remove(&terminated_dialog_id);
+                self.unschedule_timer(&terminated_dialog_id);
+                self.timers.remove(&terminated_dialog_id);
+                self.callee_guards
+                    .retain(|guard| guard.id() != &terminated_dialog_id);
                 self.pending_hangup.insert(self.server_dialog.id());
 
                 match &reason {
@@ -908,8 +974,16 @@ impl SipSession {
 
         info!(session_id = %self.context.session_id, %caller, %callee_uri, "Sending INVITE to callee");
 
-        let headers: Vec<rsipstack::sip::Header> =
+        let mut headers: Vec<rsipstack::sip::Header> =
             vec![rsipstack::sip::headers::MaxForwards::from(self.context.max_forwards).into()];
+        let default_expires = self
+            .server
+            .proxy_config
+            .session_expires
+            .unwrap_or(DEFAULT_SESSION_EXPIRES);
+        if self.server.proxy_config.session_timer {
+            headers.extend(build_default_session_timer_headers(default_expires, MIN_MIN_SE));
+        }
 
         let caller_is_webrtc = self.is_caller_webrtc();
         let callee_is_webrtc = target.supports_webrtc;
@@ -944,7 +1018,7 @@ impl SipSession {
         });
         self.callee_call_ids.insert(callee_call_id.clone());
 
-        let invite_option = InviteOption {
+        let mut invite_option = InviteOption {
             caller_display_name: self.context.dialplan.caller_display_name.clone(),
             callee: callee_uri.clone(),
             caller: caller.clone(),
@@ -966,7 +1040,10 @@ impl SipSession {
         })?;
 
         let dialog_layer = self.server.dialog_layer.clone();
-        let mut invitation = dialog_layer.do_invite(invite_option, state_tx).boxed();
+        let mut retry_count = 0;
+        let mut invitation = dialog_layer
+            .do_invite(invite_option.clone(), state_tx.clone())
+            .boxed();
 
         let result = loop {
             tokio::select! {
@@ -979,8 +1056,73 @@ impl SipSession {
                 res = &mut invitation => {
                     break match res {
                         Ok((dialog, response)) => {
-
                             if let Some(ref resp) = response {
+                                if self.server.proxy_config.session_timer
+                                    && resp.status_code == StatusCode::SessionIntervalTooSmall
+                                    && retry_count < 1
+                                {
+                                    if let Some(min_se_value) =
+                                        get_header_value(&resp.headers, HEADER_MIN_SE)
+                                    {
+                                        if let Some(min_se) = parse_min_se(&min_se_value) {
+                                            if let Some(headers) = &mut invite_option.headers {
+                                                headers.retain(|header| match header {
+                                                    rsipstack::sip::Header::Other(name, _)
+                                                        if name.eq_ignore_ascii_case(
+                                                            HEADER_SESSION_EXPIRES,
+                                                        )
+                                                            || name.eq_ignore_ascii_case(HEADER_MIN_SE) =>
+                                                    {
+                                                        false
+                                                    }
+                                                    _ => true,
+                                                });
+
+                                                for header in headers.iter_mut() {
+                                                    if let rsipstack::sip::Header::Supported(value) = header {
+                                                        let filtered: Vec<String> = value
+                                                            .to_string()
+                                                            .split(',')
+                                                            .map(str::trim)
+                                                            .filter(|entry| !entry.is_empty() && *entry != "timer")
+                                                            .map(ToString::to_string)
+                                                            .collect();
+                                                        *header = rsipstack::sip::Header::Other(
+                                                            HEADER_SUPPORTED.to_string(),
+                                                            filtered.join(", "),
+                                                        );
+                                                    }
+                                                }
+
+                                                headers.retain(|header| match header {
+                                                    rsipstack::sip::Header::Other(name, value)
+                                                        if name.eq_ignore_ascii_case(HEADER_SUPPORTED) =>
+                                                    {
+                                                        !value.trim().is_empty()
+                                                    }
+                                                    rsipstack::sip::Header::Other(name, _) => {
+                                                        !name.eq_ignore_ascii_case(
+                                                            HEADER_SESSION_EXPIRES,
+                                                        ) && !name.eq_ignore_ascii_case(
+                                                            HEADER_MIN_SE,
+                                                        )
+                                                    }
+                                                    _ => true,
+                                                });
+                                                headers.extend(build_default_session_timer_headers(
+                                                    min_se.as_secs(),
+                                                    min_se.as_secs(),
+                                                ));
+                                            }
+                                            retry_count += 1;
+                                            invitation = dialog_layer
+                                                .do_invite(invite_option.clone(), state_tx.clone())
+                                                .boxed();
+                                            continue;
+                                        }
+                                    }
+                                }
+
                                 if resp.status_code.kind() == rsipstack::sip::StatusCodeKind::Successful {
                                     Ok((dialog.id(), response))
                                 } else {
@@ -1228,7 +1370,16 @@ impl SipSession {
         .await
         .map_err(|e| (StatusCode::ServerInternalError, Some(e.to_string())))?;
 
-        self.callee_dialogs.insert(dialog_id, ());
+        self.callee_dialogs.insert(dialog_id.clone(), ());
+        if self.server.proxy_config.session_timer {
+            if let Some(ref response) = response {
+                self.init_callee_timer(dialog_id.clone(), response, default_expires);
+            }
+        }
+        self.callee_guards.push(ClientDialogGuard::new(
+            self.server.dialog_layer.clone(),
+            dialog_id,
+        ));
 
         self.update_snapshot_cache();
 
@@ -1631,28 +1782,23 @@ impl SipSession {
 
         let mut timer_headers = vec![];
         if self.server.proxy_config.session_timer {
-            let default_expires = self.server.proxy_config.session_expires.unwrap_or(1800);
+            let default_expires = self
+                .server
+                .proxy_config
+                .session_expires
+                .unwrap_or(DEFAULT_SESSION_EXPIRES);
             match self.init_server_timer(default_expires) {
                 Ok(()) => {
-                    let timer = self.server_timer.read();
-                    if timer.enabled {
-                        timer_headers.push(rsipstack::sip::Header::Other(
-                            HEADER_SESSION_EXPIRES.to_string(),
-                            timer.get_session_expires_value(),
-                        ));
-                        timer_headers.push(rsipstack::sip::Header::Other(
-                            HEADER_MIN_SE.to_string(),
-                            timer.get_min_se_value(),
-                        ));
-                        timer_headers.push(rsipstack::sip::Header::Supported(
-                            rsipstack::sip::headers::Supported::from(TIMER_TAG),
-                        ));
-                        info!(
-                            session_expires = %timer.get_session_expires_value(),
-                            "Session timer negotiated in 200 OK"
-                        );
+                    let caller_dialog_id = self.caller_dialog_id();
+                    if let Some(timer) = self.timers.get(&caller_dialog_id) {
+                        if timer.enabled {
+                            timer_headers.extend(build_session_timer_headers(timer, false));
+                            info!(
+                                session_expires = %timer.get_session_expires_value(),
+                                "Session timer negotiated in 200 OK"
+                            );
+                        }
                     }
-                    drop(timer);
                 }
                 Err((code, reason)) => {
                     warn!(?code, ?reason, "Failed to initialize session timer");
@@ -1688,11 +1834,6 @@ impl SipSession {
 
         if method != rsipstack::sip::Method::Invite {
             return Err(anyhow!("Expected INVITE method, got {:?}", method));
-        }
-
-        let headers = self.server_dialog.initial_request().headers.clone();
-        if let Err(e) = self.handle_session_refresh(&headers, sdp.clone()).await {
-            warn!(error = %e, "Failed to handle session refresh in re-INVITE");
         }
 
         let offer_sdp = match sdp {
@@ -1878,8 +2019,7 @@ impl SipSession {
 
         self.callee_event_tx = None;
 
-        let mut dialogs_to_hangup = self.pending_hangup.clone();
-        dialogs_to_hangup.extend(self.callee_dialogs.iter().map(|entry| entry.key().clone()));
+        let dialogs_to_hangup = self.pending_hangup.clone();
 
         if !dialogs_to_hangup.is_empty() {
             let hangup_dialogs = dialogs_to_hangup
@@ -1903,6 +2043,9 @@ impl SipSession {
         }
 
         self.callee_dialogs.clear();
+        self.timers.clear();
+        self.timer_queue.clear();
+        self.timer_keys.clear();
 
         self.server
             .active_call_registry
@@ -1922,13 +2065,13 @@ impl SipSession {
     ) -> Result<(), (StatusCode, Option<String>)> {
         let request = self.server_dialog.initial_request();
         let headers = &request.headers;
+        let dialog_id = self.caller_dialog_id();
 
         let supported = has_timer_support(headers);
         let session_expires_value = get_header_value(headers, HEADER_SESSION_EXPIRES);
+        let mut timer = SessionTimerState::default();
 
-        let local_min_se = Duration::from_secs(90);
-        let mut server_timer = self.server_timer.write();
-
+        let local_min_se = Duration::from_secs(MIN_MIN_SE);
         if let Some(value) = session_expires_value {
             if let Some((interval, refresher)) = parse_session_expires(&value) {
                 if interval < local_min_se {
@@ -1938,135 +2081,214 @@ impl SipSession {
                     ));
                 }
 
-                server_timer.enabled = true;
-                server_timer.session_interval = interval;
-                server_timer.active = true;
-                server_timer.refresher = refresher.unwrap_or(SessionRefresher::Uac);
+                timer.enabled = true;
+                timer.session_interval = interval;
+                timer.active = true;
+                timer.refresher = refresher.unwrap_or(SessionRefresher::Uac);
             }
         } else {
-            server_timer.enabled = true;
-            server_timer.session_interval = Duration::from_secs(default_expires);
-            server_timer.active = true;
-            server_timer.refresher = if supported {
+            timer.enabled = true;
+            timer.session_interval = Duration::from_secs(default_expires);
+            timer.active = true;
+            timer.refresher = if supported {
                 SessionRefresher::Uac
             } else {
                 SessionRefresher::Uas
             };
         }
 
+        self.timers.insert(dialog_id.clone(), timer);
+        self.schedule_timer(dialog_id);
+
         Ok(())
     }
 
-    fn calculate_next_timer_check(&self) -> Option<tokio::time::Instant> {
-        let timer = self.server_timer.read();
-        if !timer.active || !timer.enabled {
-            return None;
-        }
+    fn init_callee_timer(
+        &mut self,
+        dialog_id: DialogId,
+        response: &rsipstack::sip::Response,
+        default_expires: u64,
+    ) {
+        let headers = &response.headers;
+        let session_expires_value = get_header_value(headers, HEADER_SESSION_EXPIRES);
 
-        let now = tokio::time::Instant::now();
-        let time_until_refresh = timer.time_until_refresh();
-        let time_until_expiry = timer.time_until_expiration();
+        let mut timer = SessionTimerState::default();
+        timer.enabled = true;
+        timer.active = true;
+        timer.last_refresh = Instant::now();
 
-        let next_check = match (time_until_refresh, time_until_expiry) {
-            (Some(refresh), Some(expiry)) => refresh.min(expiry),
-            (Some(refresh), None) => refresh,
-            (None, Some(expiry)) => expiry,
-            (None, None) => return None,
-        };
+        let (session_interval, refresher) = session_expires_value
+            .as_deref()
+            .and_then(parse_session_expires)
+            .map(|(interval, refresher)| (interval, refresher.unwrap_or(SessionRefresher::Uac)))
+            .unwrap_or((Duration::from_secs(default_expires), SessionRefresher::Uac));
+        timer.session_interval = session_interval;
+        timer.refresher = refresher;
 
-        Some(now + next_check)
+        self.timers.insert(dialog_id.clone(), timer);
+        self.schedule_timer(dialog_id);
     }
 
-    fn calculate_timer_check_interval(&self) -> Duration {
-        let timer = self.server_timer.read();
-        if !timer.active || !timer.enabled {
-            return Duration::from_secs(60);
-        }
-
-        let time_until_refresh = timer.time_until_refresh();
-        let time_until_expiry = timer.time_until_expiration();
-
-        let min_time = match (time_until_refresh, time_until_expiry) {
-            (Some(refresh), Some(expiry)) => refresh.min(expiry),
-            (Some(refresh), None) => refresh,
-            (None, Some(expiry)) => expiry,
-            (None, None) => Duration::from_secs(60),
-        };
-
-        min_time.clamp(Duration::from_secs(1), Duration::from_secs(30))
+    fn caller_dialog_id(&self) -> DialogId {
+        self.server_dialog.id()
     }
 
-    async fn check_session_timer(&self) -> TimerAction {
-        let (active, enabled, expired, should_refresh, we_are_refresher) = {
-            let timer = self.server_timer.read();
-            (
-                timer.active,
-                timer.enabled,
-                timer.is_expired(),
-                timer.should_refresh(),
-                timer.refresher == SessionRefresher::Uas,
-            )
-        };
+    fn is_uac_dialog(&self, dialog_id: &DialogId) -> bool {
+        *dialog_id != self.caller_dialog_id()
+    }
 
-        if !active || !enabled {
-            return TimerAction::Reschedule(Duration::from_secs(60));
-        }
+    fn schedule_timer(&mut self, dialog_id: DialogId) {
+        let timeout = self
+            .timers
+            .get(&dialog_id)
+            .and_then(|timer| timer.next_timeout_for_role(self.is_uac_dialog(&dialog_id)));
 
-        if expired {
-            return TimerAction::Expired;
-        }
+        self.schedule_timer_with_timeout(dialog_id, timeout);
+    }
 
-        if we_are_refresher && should_refresh {
-            if self.server_timer.write().start_refresh() {
-                return TimerAction::Refresh;
+    fn schedule_expiration_timer(&mut self, dialog_id: DialogId) {
+        let timeout = self
+            .timers
+            .get(&dialog_id)
+            .and_then(SessionTimerState::time_until_expiration);
+
+        self.schedule_timer_with_timeout(dialog_id, timeout);
+    }
+
+    fn schedule_timer_with_timeout(&mut self, dialog_id: DialogId, timeout: Option<Duration>) {
+        match timeout {
+            Some(timeout) => {
+                let current_key = self.timer_keys.get(&dialog_id).copied();
+                let queue_key = if let Some(key) = current_key {
+                    self.timer_queue.reset(&key, timeout);
+                    key
+                } else {
+                    self.timer_queue.insert(dialog_id.clone(), timeout)
+                };
+                self.timer_keys.insert(dialog_id, queue_key);
             }
+            None => self.unschedule_timer(&dialog_id),
         }
-
-        TimerAction::Reschedule(self.calculate_timer_check_interval())
     }
 
-    async fn send_session_refresh(&self) -> Result<()> {
+    fn unschedule_timer(&mut self, dialog_id: &DialogId) {
+        if let Some(key) = self.timer_keys.remove(dialog_id) {
+            self.timer_queue.remove(&key);
+        }
+    }
+
+    async fn send_server_session_refresh(&mut self) -> Result<()> {
         info!("Sending session refresh (re-INVITE)");
+        let dialog_id = self.caller_dialog_id();
 
-        let (session_expires, min_se) = {
-            let timer = self.server_timer.read();
-            (timer.get_session_expires_value(), timer.get_min_se_value())
+        let headers = {
+            let timer = self
+                .timers
+                .get(&dialog_id)
+                .ok_or_else(|| anyhow!("No caller timer for dialog {}", dialog_id))?;
+            build_session_timer_headers(timer, true)
         };
-
-        let headers = vec![
-            rsipstack::sip::Header::ContentType("application/sdp".into()),
-            rsipstack::sip::Header::Other(HEADER_SESSION_EXPIRES.to_string(), session_expires),
-            rsipstack::sip::Header::Other(HEADER_MIN_SE.to_string(), min_se),
-            rsipstack::sip::Header::Supported(rsipstack::sip::headers::Supported::from(TIMER_TAG)),
-        ];
 
         let body = self.answer.clone().map(|sdp| sdp.into_bytes());
 
         match self.server_dialog.reinvite(Some(headers), body).await {
-            Ok(_response) => {
+            Ok(response) => {
                 info!("Session refresh (re-INVITE) successful");
-                self.server_timer.write().complete_refresh();
+                if let Some(timer) = self.timers.get_mut(&dialog_id) {
+                    if let Some(resp) = response.as_ref() {
+                        if let Err(e) = Self::apply_timer_headers(timer, &resp.headers) {
+                            timer.fail_refresh();
+                            return Err(e);
+                        }
+                    }
+                    timer.complete_refresh();
+                }
                 Ok(())
             }
             Err(e) => {
                 warn!(error = %e, "Session refresh (re-INVITE) failed");
-                self.server_timer.write().fail_refresh();
+                if let Some(timer) = self.timers.get_mut(&dialog_id) {
+                    timer.fail_refresh();
+                }
                 Err(anyhow!("re-INVITE failed: {}", e))
             }
         }
     }
 
-    pub async fn handle_session_refresh(
-        &mut self,
-        headers: &rsipstack::sip::Headers,
-        body: Option<String>,
-    ) -> Result<()> {
-        debug!("Handling incoming session refresh");
+    async fn send_callee_session_refresh(&mut self, dialog_id: &DialogId) -> Result<()> {
+        let headers = self
+            .timers
+            .get(dialog_id)
+            .map(|timer| build_session_timer_headers(timer, false))
+            .ok_or_else(|| anyhow!("No callee timer for dialog {}", dialog_id))?;
 
+        let Some(mut dialog) = self.server.dialog_layer.get_dialog(dialog_id) else {
+            if let Some(timer) = self.timers.get_mut(dialog_id) {
+                timer.fail_refresh();
+            }
+            return Err(anyhow!("No callee dialog found for {}", dialog_id));
+        };
+
+        let response = match &mut dialog {
+            Dialog::ClientInvite(invite_dialog) => invite_dialog
+                .update(Some(headers), None)
+                .await
+                .map_err(|e| anyhow!("UPDATE failed: {}", e)),
+            _ => Err(anyhow!("Dialog {} is not a client INVITE dialog", dialog_id)),
+        };
+
+        let result = match response {
+            Ok(Some(resp))
+                if resp.status_code.kind()
+                    == rsipstack::sip::status_code::StatusCodeKind::Successful =>
+            {
+                Ok(resp)
+            }
+            Ok(Some(resp)) => Err(anyhow!("UPDATE rejected with status {}", resp.status_code)),
+            Ok(None) => Err(anyhow!("UPDATE timed out")),
+            Err(e) => Err(e),
+        };
+
+        if let Some(timer) = self.timers.get_mut(dialog_id) {
+            match &result {
+                Ok(resp) => {
+                    if let Err(e) = Self::apply_timer_headers(timer, &resp.headers) {
+                        timer.fail_refresh();
+                        return Err(e);
+                    }
+                    timer.complete_refresh();
+                }
+                Err(_) => {
+                    timer.fail_refresh();
+                }
+            }
+        }
+
+        result.map(|_| ())
+    }
+
+    fn update_dialog_timer_from_headers(
+        &mut self,
+        dialog_id: &DialogId,
+        headers: &rsipstack::sip::Headers,
+    ) -> Result<()> {
+        if let Some(timer) = self.timers.get_mut(dialog_id) {
+            Self::apply_timer_headers(timer, headers)?;
+            if timer.active {
+                timer.update_refresh();
+            }
+
+            self.schedule_timer(dialog_id.clone());
+        }
+        Ok(())
+    }
+
+    fn apply_timer_headers(
+        timer: &mut SessionTimerState,
+        headers: &rsipstack::sip::Headers,
+    ) -> Result<()> {
         if let Some(se_value) = get_header_value(headers, HEADER_SESSION_EXPIRES) {
             if let Some((interval, refresher)) = parse_session_expires(&se_value) {
-                let mut timer = self.server_timer.write();
-
                 if interval < timer.min_se {
                     return Err(anyhow!(
                         "Session-Expires too small: {} < {}",
@@ -2079,26 +2301,8 @@ impl SipSession {
                 if let Some(new_refresher) = refresher {
                     timer.refresher = new_refresher;
                 }
-                timer.update_refresh();
-
-                info!(
-                    interval = interval.as_secs(),
-                    refresher = %timer.refresher,
-                    "Session timer updated from remote refresh"
-                );
             }
-        } else {
-            self.server_timer.write().update_refresh();
         }
-
-        let response_headers = vec![rsipstack::sip::Header::ContentType(
-            "application/sdp".into(),
-        )];
-        let response_body = body.map(|sdp| sdp.into_bytes());
-
-        self.server_dialog
-            .accept(Some(response_headers), response_body)
-            .map_err(|e| anyhow!("Failed to send 200 OK for refresh: {}", e))?;
 
         Ok(())
     }
@@ -3605,6 +3809,9 @@ impl Drop for SipSession {
         self.callee_event_tx = None;
 
         self.callee_dialogs.clear();
+        self.timers.clear();
+        self.timer_queue.clear();
+        self.timer_keys.clear();
 
         let _ = self.supervisor_mixer.take();
 
