@@ -229,6 +229,8 @@ pub struct Config {
     pub ssl_private_key: Option<String>,
     pub log_level: Option<String>,
     pub log_file: Option<String>,
+    #[serde(default)]
+    pub log_rotation: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub http_access_skip_paths: Vec<String>,
     pub proxy: ProxyConfig,
@@ -1026,6 +1028,7 @@ impl Default for Config {
             ssl_private_key: None,
             log_level: None,
             log_file: None,
+            log_rotation: String::new(),
             http_access_skip_paths: Vec::new(),
             proxy: ProxyConfig::default(),
             callrecord: None,

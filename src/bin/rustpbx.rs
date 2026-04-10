@@ -235,12 +235,20 @@ async fn main() -> Result<()> {
     let mut guard_holder = None;
     let mut fmt_layer = None;
     if let Some(ref log_file) = config.log_file {
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(log_file)
-            .expect("Failed to open log file");
-        let (non_blocking, guard) = tracing_appender::non_blocking(file);
+        let log_path = std::path::Path::new(log_file);
+        let dir = log_path
+            .parent()
+            .unwrap_or_else(|| std::path::Path::new("."));
+        let prefix = log_path
+            .file_name()
+            .expect("log_file must have a file name")
+            .to_string_lossy();
+        let appender = match config.log_rotation.to_lowercase().as_str() {
+            "hourly" => tracing_appender::rolling::hourly(dir, prefix.as_ref()),
+            "daily" => tracing_appender::rolling::daily(dir, prefix.as_ref()),
+            _ => tracing_appender::rolling::never(dir, prefix.as_ref()),
+        };
+        let (non_blocking, guard) = tracing_appender::non_blocking(appender);
         guard_holder = Some(guard);
         file_layer = Some(
             tracing_subscriber::fmt::layer()
