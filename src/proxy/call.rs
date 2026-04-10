@@ -609,15 +609,6 @@ impl CallModule {
             }
         }
 
-        if let Some(contact_uri) = self.inner.server.default_contact_uri() {
-            let contact = rsipstack::sip::typed::Contact {
-                display_name: None,
-                uri: contact_uri,
-                params: vec![],
-            };
-            dialplan = dialplan.with_caller_contact(contact);
-        }
-
         Ok(dialplan)
     }
 
@@ -890,6 +881,16 @@ impl CallModule {
         }?;
 
         let mut dialplan = dialplan;
+        if dialplan.caller_contact.is_none() {
+            if let Some(contact_uri) = self.inner.server.default_contact_uri() {
+                let contact = rsipstack::sip::typed::Contact {
+                    display_name: None,
+                    uri: contact_uri,
+                    params: vec![],
+                };
+                dialplan = dialplan.with_caller_contact(contact);
+            }
+        }
         for inspector in &self.inner.server.dialplan_inspectors {
             dialplan = inspector
                 .inspect_dialplan(dialplan, &cookie, &tx.original)
