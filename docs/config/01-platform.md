@@ -24,9 +24,24 @@ Global logging configuration.
 ```toml
 # Levels: debug, info, warn, error
 log_level = "info"
+
 # If unset, logs to stderr
-log_file = "/var/log/rustpbx.log"
+log_file = "/var/log/rustpbx/app.log"
+
+# Log rotation policy (only effective when log_file is set).
+# Allowed values:
+#   "never"  – single file, no rotation (default)
+#   "daily"  – rotate once per day; filename suffix: YYYY-MM-DD
+#   "hourly" – rotate once per hour; filename suffix: YYYY-MM-DD-HH
+log_rotation = "daily"
 ```
+
+> **Note on `log_file` + rotation**: `log_file` is treated as a *prefix*.
+> For example, with `log_file = "/var/log/rustpbx/app.log"` and `log_rotation = "daily"`,
+> the actual file written will be `/var/log/rustpbx/app.log.2026-04-10`.
+> The directory must exist and be writable before the process starts.
+> Old rotated files are **not** deleted automatically — use `logrotate` or similar tools
+> for retention policies.
 
 ## Database
 Primary database connection. Currently supports SQLite (and MySQL in some builds).
