@@ -100,6 +100,8 @@ pub struct SipSession {
     pub caller_offer: Option<String>,
     pub callee_offer: Option<String>,
     pub answer: Option<String>,
+    pub early_media_sent: bool,
+    pub callee_answer_sdp: Option<String>,
     pub hangup_reason: Option<CallRecordHangupReason>,
     pub hangup_messages: Vec<SessionHangupMessage>,
     pub last_error: Option<(StatusCode, Option<String>)>,
@@ -232,6 +234,8 @@ impl SipSession {
             caller_offer,
             callee_offer: None,
             answer: None,
+            early_media_sent: false,
+            callee_answer_sdp: None,
             hangup_reason: None,
             hangup_messages: Vec::new(),
             last_error: None,
@@ -994,7 +998,6 @@ impl SipSession {
             headers.extend(build_default_session_timer_headers(default_expires, MIN_MIN_SE));
         }
 
-        let caller_is_webrtc = self.is_caller_webrtc();
         let callee_is_webrtc = target.supports_webrtc;
 
         let callee_sdp = self.create_callee_track(callee_is_webrtc).await.ok();
@@ -1150,14 +1153,65 @@ impl SipSession {
 
                 state = callee_state_rx.recv() => {
                     if let Some(DialogState::Early(_, ref response)) = state {
-
-                        let sdp = String::from_utf8_lossy(response.body()).to_string();
-                        if !sdp.is_empty() && sdp.contains("v=0") {
-
-                            let _ = self.server_dialog.ringing(None, Some(sdp.into_bytes()));
-                        } else {
-                            let _ = self.server_dialog.ringing(None, None);
+                        if self.ring_time.is_none() {
+                            self.ring_time = Some(Instant::now());
                         }
+
+                        let callee_sdp = String::from_utf8_lossy(response.body()).to_string();
+                        if !callee_sdp.is_empty() && callee_sdp.contains("v=0") {
+                            self.early_media_sent = true;
+                            self.update_leg_state(&LegId::from("callee"), LegState::EarlyMedia);
+
+                            if self.media_profile.path == MediaPathMode::Anchored {
+                                let caller_sdp = self
+                                    .prepare_caller_answer_from_callee_sdp(
+                                        Some(callee_sdp),
+                                        false,
+                                    )
+                                    .await;
+
+                                if let Err(e) = self.server_dialog.ringing(
+                                    Some(vec![rsipstack::sip::Header::ContentType(
+                                        "application/sdp".into(),
+                                    )]),
+                                    caller_sdp.map(|sdp| sdp.into_bytes()),
+                                ) {
+                                    warn!(
+                                        session_id = %self.context.session_id,
+                                        error = %e,
+                                        "Failed to send 183 Session Progress"
+                                    );
+                                }
+                            } else {
+                                if let Err(e) = self
+                                    .server_dialog
+                                    .ringing(
+                                        Some(vec![rsipstack::sip::Header::ContentType(
+                                            "application/sdp".into(),
+                                        )]),
+                                        Some(callee_sdp.into_bytes()),
+                                    )
+                                {
+                                    warn!(
+                                        session_id = %self.context.session_id,
+                                        error = %e,
+                                        "Failed to relay provisional SDP"
+                                    );
+                                }
+                            }
+                        } else {
+                            if !self.early_media_sent {
+                                self.update_leg_state(&LegId::from("callee"), LegState::Ringing);
+                            }
+                            if let Err(e) = self.server_dialog.ringing(None, None) {
+                                warn!(
+                                    session_id = %self.context.session_id,
+                                    error = %e,
+                                    "Failed to send 180 Ringing"
+                                );
+                            }
+                        }
+                        self.update_snapshot_cache();
                     }
                 }
             }
@@ -1173,8 +1227,67 @@ impl SipSession {
                 Some(String::from_utf8_lossy(body).to_string())
             }
         });
+        let caller_answer = self
+            .prepare_caller_answer_from_callee_sdp(callee_sdp, false)
+            .await;
 
-        let bridged_sdp = if caller_is_webrtc && !callee_is_webrtc {
+        self.accept_call(
+            Some(callee_uri.to_string()),
+            caller_answer,
+            Some(dialog_id.to_string()),
+        )
+        .await
+        .map_err(|e| (StatusCode::ServerInternalError, Some(e.to_string())))?;
+
+        self.callee_dialogs.insert(dialog_id.clone(), ());
+        if self.server.proxy_config.session_timer {
+            if let Some(ref response) = response {
+                self.init_callee_timer(dialog_id.clone(), response, default_expires);
+            }
+        }
+        self.callee_guards.push(ClientDialogGuard::new(
+            self.server.dialog_layer.clone(),
+            dialog_id,
+        ));
+
+        self.update_snapshot_cache();
+
+        Ok(())
+    }
+
+
+    async fn prepare_caller_answer_from_callee_sdp(
+        &mut self,
+        callee_sdp: Option<String>,
+        force_regenerate: bool,
+    ) -> Option<String> {
+        let Some(callee_sdp_value) = callee_sdp else {
+            return if self.early_media_sent {
+                self.answer.clone()
+            } else {
+                None
+            };
+        };
+
+        let sdp_changed =
+            self.callee_answer_sdp.as_deref() != Some(callee_sdp_value.as_str());
+
+        if self.answer.is_some() && !sdp_changed && !force_regenerate {
+            return self.answer.clone();
+        }
+
+        if self.callee_answer_sdp.is_some() && sdp_changed {
+            warn!(
+                session_id = %self.context.session_id,
+                "Callee answer SDP changed after early media; regenerating caller-facing SDP"
+            );
+        }
+
+        let callee_sdp = Some(callee_sdp_value.clone());
+        let caller_is_webrtc = self.is_caller_webrtc();
+        let callee_is_webrtc = self.callee_is_webrtc;
+
+        let caller_answer = if caller_is_webrtc && !callee_is_webrtc {
             // WebRTC caller, RTP callee — bridge must convert media
             if let Some(ref sdp) = callee_sdp {
                 if let Some(ref bridge) = self.media_bridge {
@@ -1367,39 +1480,21 @@ impl SipSession {
             callee_sdp.clone()
         };
 
-        self.answer = callee_sdp.clone();
-
-        let caller_answer = bridged_sdp.clone();
-
-        self.accept_call(
-            Some(callee_uri.to_string()),
-            bridged_sdp,
-            Some(dialog_id.to_string()),
-        )
-        .await
-        .map_err(|e| (StatusCode::ServerInternalError, Some(e.to_string())))?;
-
-        self.callee_dialogs.insert(dialog_id.clone(), ());
-        if self.server.proxy_config.session_timer {
-            if let Some(ref response) = response {
-                self.init_callee_timer(dialog_id.clone(), response, default_expires);
-            }
-        }
-        self.callee_guards.push(ClientDialogGuard::new(
-            self.server.dialog_layer.clone(),
-            dialog_id,
-        ));
-
-        self.update_snapshot_cache();
+        self.callee_answer_sdp = callee_sdp.clone();
+        self.answer = caller_answer.clone();
 
         if self.media_profile.path == MediaPathMode::Anchored && self.media_bridge.is_none() {
-            self.start_anchored_media_forwarding(caller_answer.as_deref(), callee_sdp.as_deref())
+            let caller_answer_for_forwarding = self.answer.clone();
+            let callee_answer_for_forwarding = callee_sdp.clone();
+            self.start_anchored_media_forwarding(
+                caller_answer_for_forwarding.as_deref(),
+                callee_answer_for_forwarding.as_deref(),
+            )
                 .await;
         }
 
-        Ok(())
+        caller_answer
     }
-
     fn build_forwarding_config(
         source: &crate::media::negotiate::NegotiatedLegProfile,
         target: &crate::media::negotiate::NegotiatedLegProfile,
@@ -1869,6 +1964,7 @@ impl SipSession {
                 return Ok(self.answer.clone());
             }
         };
+        self.caller_offer = Some(offer_sdp.clone());
 
         let callee_dialogs: Vec<DialogId> = self
             .callee_dialogs
@@ -1901,8 +1997,20 @@ impl SipSession {
                 if let Some(response) = resp {
                     if !response.body().is_empty() {
                         let answer_sdp = String::from_utf8_lossy(response.body()).to_string();
-                        final_answer = Some(answer_sdp.clone());
-                        self.answer = Some(answer_sdp.clone());
+                        if self.media_profile.path == MediaPathMode::Anchored
+                            || self.media_bridge.is_some()
+                        {
+                            final_answer = self
+                                .prepare_caller_answer_from_callee_sdp(
+                                    Some(answer_sdp),
+                                    true,
+                                )
+                                .await;
+                        } else {
+                            final_answer = Some(answer_sdp.clone());
+                            self.answer = Some(answer_sdp.clone());
+                            self.callee_answer_sdp = Some(answer_sdp);
+                        }
                     }
                 }
             }
