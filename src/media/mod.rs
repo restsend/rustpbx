@@ -18,9 +18,9 @@ use crate::media::recorder::RecorderOption;
 
 pub mod audio_source;
 pub mod bridge;
-pub mod forwarding_track;
 #[cfg(test)]
 mod file_track_tests;
+pub mod forwarding_track;
 pub mod mixer;
 #[cfg(test)]
 mod mixer_e2e_tests;
@@ -216,7 +216,7 @@ impl MediaStream {
             let tracks = self.tracks.lock().unwrap();
             tracks.get(track_id).cloned()
         };
-        
+
         if let Some(track) = track_handle {
             let guard = track.lock().await;
             guard.set_muted(true).await
@@ -233,7 +233,7 @@ impl MediaStream {
             let tracks = self.tracks.lock().unwrap();
             tracks.get(track_id).cloned()
         };
-        
+
         if let Some(track) = track_handle {
             let guard = track.lock().await;
             guard.set_muted(false).await
@@ -269,6 +269,45 @@ impl RtcTrack {
             params.channels = info.channels as u8;
         }
         let _ = pc.add_track(track, params);
+
+        Self {
+            track_id,
+            pc,
+            recorder_option: None,
+            rtp_map,
+            muted: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    pub fn new_with_video(
+        track_id: String,
+        config: RtcConfiguration,
+        rtp_map: Vec<negotiate::CodecInfo>,
+        video_capabilities: Vec<rustrtc::config::VideoCapability>,
+    ) -> Self {
+        let pc = PeerConnection::new(config);
+
+        // Add audio track
+        let (_, audio_track, _) =
+            rustrtc::media::track::sample_track(rustrtc::media::MediaKind::Audio, 100);
+        let mut audio_params = RtpCodecParameters::default();
+        if let Some(info) = rtp_map.first() {
+            audio_params.payload_type = info.payload_type;
+            audio_params.clock_rate = info.clock_rate;
+            audio_params.channels = info.channels as u8;
+        }
+        let _ = pc.add_track(audio_track, audio_params);
+
+        // Add video track for each video capability
+        for (_idx, video_cap) in video_capabilities.iter().enumerate() {
+            let (_, video_track, _) =
+                rustrtc::media::track::sample_track(rustrtc::media::MediaKind::Video, 100);
+            let mut video_params = RtpCodecParameters::default();
+            video_params.payload_type = video_cap.payload_type;
+            video_params.clock_rate = video_cap.clock_rate;
+            video_params.channels = 0;
+            let _ = pc.add_track(video_track, video_params);
+        }
 
         Self {
             track_id,
@@ -394,7 +433,8 @@ impl Track for RtcTrack {
     }
 
     async fn set_muted(&self, muted: bool) -> bool {
-        self.muted.store(muted, std::sync::atomic::Ordering::Relaxed);
+        self.muted
+            .store(muted, std::sync::atomic::Ordering::Relaxed);
         // Note: Actual RTP mute is handled at the media stream level
         // by dropping or zeroing audio packets
         true
@@ -425,6 +465,7 @@ pub struct RtpTrackBuilder {
     rtp_end_port: Option<u16>,
     mode: TransportMode,
     rtp_map: Vec<negotiate::CodecInfo>,
+    video_capabilities: Vec<rustrtc::config::VideoCapability>,
     enable_latching: bool,
     ice_servers: Vec<IceServer>,
 }
@@ -457,6 +498,7 @@ impl RtpTrackBuilder {
                 codec: c,
             })
             .collect(),
+            video_capabilities: Vec::new(),
         }
     }
 
@@ -508,7 +550,24 @@ impl RtpTrackBuilder {
         self
     }
 
+    /// Set video capabilities for the PeerConnection.
+    /// Controls which video codecs appear in SDP offers/answers.
+    pub fn with_video_capabilities(mut self, caps: Vec<rustrtc::config::VideoCapability>) -> Self {
+        self.video_capabilities = caps;
+        self
+    }
+
     pub fn build(self) -> RtcTrack {
+        // Choose SDP compatibility mode based on transport mode:
+        // - WebRTC mode: use Standard (includes rtcp-mux, a=mid)
+        // - RTP/SRTP mode: use LegacySip (omits rtcp-mux for Linphone compatibility)
+        let sdp_compatibility = match self.mode {
+            TransportMode::WebRtc => rustrtc::config::SdpCompatibilityMode::Standard,
+            TransportMode::Rtp | TransportMode::Srtp => {
+                rustrtc::config::SdpCompatibilityMode::LegacySip
+            }
+        };
+
         let config = RtcConfiguration {
             ice_servers: self.ice_servers,
             transport_mode: self.mode,
@@ -517,10 +576,15 @@ impl RtpTrackBuilder {
             external_ip: self.external_ip,
             enable_latching: self.enable_latching,
             ssrc_start: rand::random::<u32>(),
+            sdp_compatibility,
             ..Default::default()
         };
 
-        RtcTrack::new(self.track_id, config, self.rtp_map)
+        if self.video_capabilities.is_empty() {
+            RtcTrack::new(self.track_id, config, self.rtp_map)
+        } else {
+            RtcTrack::new_with_video(self.track_id, config, self.rtp_map, self.video_capabilities)
+        }
     }
 }
 
@@ -561,7 +625,7 @@ impl Clone for FileTrack {
             external_ip: self.external_ip.clone(),
             audio_source_manager: self.audio_source_manager.clone(),
             muted: std::sync::atomic::AtomicBool::new(
-                self.muted.load(std::sync::atomic::Ordering::Relaxed)
+                self.muted.load(std::sync::atomic::Ordering::Relaxed),
             ),
         }
     }
@@ -834,6 +898,7 @@ impl FileTrack {
                             sequence_number: Some(sequence_number),
                             payload_type: Some(payload_type),
                             marker: false,
+                            header_extension: None,
                             raw_packet: None,
                             source_addr: None,
                         };
@@ -955,7 +1020,8 @@ impl Track for FileTrack {
     }
 
     async fn set_muted(&self, muted: bool) -> bool {
-        self.muted.store(muted, std::sync::atomic::Ordering::Relaxed);
+        self.muted
+            .store(muted, std::sync::atomic::Ordering::Relaxed);
         true
     }
 

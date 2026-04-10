@@ -169,6 +169,7 @@ mod recorder_advanced_tests {
             marker: false,
             raw_packet: None,
             source_addr: None,
+            header_extension: None,
         };
 
         let frame_b = AudioFrame {
@@ -180,6 +181,7 @@ mod recorder_advanced_tests {
             marker: false,
             raw_packet: None,
             source_addr: None,
+            header_extension: None,
         };
 
         // Write samples from both legs
@@ -221,6 +223,7 @@ mod recorder_advanced_tests {
             marker: false,
             raw_packet: None,
             source_addr: None,
+            header_extension: None,
         };
 
         recorder
@@ -313,6 +316,7 @@ mod recorder_advanced_tests {
             marker: false,
             raw_packet: None,
             source_addr: None,
+            header_extension: None,
         };
 
         recorder_a
@@ -466,6 +470,7 @@ mod recorder_advanced_tests {
             marker: false,
             raw_packet: None,
             source_addr: None,
+            header_extension: None,
         };
 
         recorder
@@ -497,6 +502,7 @@ mod recorder_advanced_tests {
             marker: false,
             raw_packet: None,
             source_addr: None,
+            header_extension: None,
         };
 
         // Leg B starts at 40ms (320 samples later)
@@ -509,6 +515,7 @@ mod recorder_advanced_tests {
             marker: false,
             raw_packet: None,
             source_addr: None,
+            header_extension: None,
         };
 
         recorder
@@ -544,6 +551,7 @@ mod recorder_advanced_tests {
                 marker: false,
                 raw_packet: None,
                 source_addr: None,
+                header_extension: None,
             };
 
             recorder
@@ -580,6 +588,7 @@ mod recorder_advanced_tests {
                 marker: false,
                 raw_packet: None,
                 source_addr: None,
+                header_extension: None,
             };
 
             recorder
@@ -622,6 +631,7 @@ mod recorder_advanced_tests {
                 marker: false,
                 raw_packet: None,
                 source_addr: None,
+                header_extension: None,
             };
 
             recorder
@@ -679,6 +689,7 @@ mod recorder_advanced_tests {
                 marker: false,
                 raw_packet: Some(raw_packet),
                 source_addr: None,
+                header_extension: None,
             };
 
             recorder
@@ -719,6 +730,7 @@ mod recorder_advanced_tests {
                 marker: false,
                 raw_packet: Some(raw_packet),
                 source_addr: None,
+                header_extension: None,
             };
 
             recorder
@@ -741,6 +753,7 @@ mod recorder_advanced_tests {
                 marker: false,
                 raw_packet: Some(raw_packet),
                 source_addr: None,
+                header_extension: None,
             };
 
             recorder
@@ -783,6 +796,7 @@ mod recorder_advanced_tests {
                 marker: false,
                 raw_packet: Some(raw_packet),
                 source_addr: None,
+                header_extension: None,
             };
 
             recorder
@@ -807,6 +821,7 @@ mod recorder_advanced_tests {
                 marker: false,
                 raw_packet: Some(raw_packet),
                 source_addr: None,
+                header_extension: None,
             };
 
             recorder
@@ -842,6 +857,7 @@ mod recorder_advanced_tests {
             marker: false,
             raw_packet: None,
             source_addr: None,
+            header_extension: None,
         };
 
         let frame_b = AudioFrame {
@@ -853,6 +869,7 @@ mod recorder_advanced_tests {
             marker: false,
             raw_packet: None,
             source_addr: None,
+            header_extension: None,
         };
 
         recorder
@@ -908,6 +925,7 @@ mod recorder_advanced_tests {
             marker: false,
             raw_packet: None,
             source_addr: None,
+            header_extension: None,
         });
 
         recorder
@@ -964,6 +982,7 @@ mod recorder_advanced_tests {
                 marker: false,
                 raw_packet: None,
                 source_addr: None,
+                header_extension: None,
             });
             recorder.write_sample(Leg::A, &frame, None, None, None).ok();
         }
@@ -980,6 +999,7 @@ mod recorder_advanced_tests {
                 marker: false,
                 raw_packet: None,
                 source_addr: None,
+                header_extension: None,
             });
             recorder.write_sample(Leg::B, &frame, None, None, None).ok();
         }
@@ -1022,6 +1042,7 @@ mod recorder_advanced_tests {
             marker: false,
             raw_packet: None,
             source_addr: None,
+            header_extension: None,
         });
 
         recorder

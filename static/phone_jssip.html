@@ -163,6 +163,38 @@
             margin: 10px 0;
         }
 
+        .video-container {
+            display: none;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+
+        .video-container.active {
+            display: flex;
+        }
+
+        .video-box {
+            flex: 1 1 200px;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+
+        .video-box label {
+            font-size: 12px;
+            color: #666;
+            margin-bottom: 4px;
+        }
+
+        .video-box video {
+            width: 100%;
+            max-width: 320px;
+            background: #000;
+            border-radius: 4px;
+            border: 1px solid #ddd;
+            aspect-ratio: 16/9;
+        }
+
         @media (max-width: 768px) {
             body {
                 max-width: 100%;
@@ -226,6 +258,37 @@
                         <label for="callTarget">Call To:</label>
                         <input type="text" id="callTarget" value="alice" placeholder="alice">
                     </div>
+                    <div class="form-group">
+                        <label class="checkbox-inline"><input type="checkbox" id="enableVideo"> Enable Video</label>
+                    </div>
+                    <div class="form-group" id="videoSourceGroup" style="display:none;">
+                        <label>Video Source:</label>
+                        <div style="margin-bottom:6px;">
+                            <label class="checkbox-inline" style="margin-right:16px;">
+                                <input type="radio" name="videoSource" id="videoSourceCamera" value="camera" checked>
+                                Camera
+                            </label>
+                            <label class="checkbox-inline">
+                                <input type="radio" name="videoSource" id="videoSourceClock" value="clock">
+                                Clock (Virtual)
+                            </label>
+                        </div>
+                        <div id="cameraSelectorDiv">
+                            <div style="display:flex;gap:6px;align-items:center;">
+                                <select id="cameraSelect"
+                                    style="flex:1;padding:8px;border:1px solid #ddd;border-radius:4px;font-size:13px;">
+                                    <option value="">Default Camera</option>
+                                </select>
+                                <button type="button" id="refreshCamerasBtn"
+                                    style="width:auto;flex-shrink:0;margin:0;padding:8px 10px;"
+                                    title="Refresh camera list">&#x21BB;</button>
+                            </div>
+                        </div>
+                        <div id="videoPreviewDiv" style="display:none;margin-top:8px;">
+                            <canvas id="clockCanvas" width="320" height="240"
+                                style="width:100%;border-radius:4px;display:block;background:#111;"></canvas>
+                        </div>
+                    </div>
                     <button id="callBtn" disabled>Call</button>
 
                     <div class="call-controls" id="callControls">
@@ -247,6 +310,16 @@
                     <h3>ICE Stats</h3>
                     <div class="logs" id="iceStats" style="height:220px;">
                         <em>No ICE data yet.</em>
+                    </div>
+                    <div class="video-container" id="videoContainer">
+                        <div class="video-box">
+                            <label>Remote Video</label>
+                            <video id="remoteVideo" autoplay playsinline></video>
+                        </div>
+                        <div class="video-box">
+                            <label>Local Video</label>
+                            <video id="localVideo" autoplay playsinline muted></video>
+                        </div>
                     </div>
                     <audio id="remoteAudio" autoplay style="display:none;"></audio>
                     <audio id="localAudio" muted autoplay style="display:none;"></audio>
@@ -285,6 +358,19 @@
         const rejectBtn = document.getElementById('rejectBtn');
         const remoteAudio = document.getElementById('remoteAudio');
         const localAudio = document.getElementById('localAudio');
+        const remoteVideo = document.getElementById('remoteVideo');
+        const localVideo = document.getElementById('localVideo');
+        const videoContainer = document.getElementById('videoContainer');
+        const enableVideoCheckbox = document.getElementById('enableVideo');
+        const videoSourceGroup = document.getElementById('videoSourceGroup');
+        const cameraSelectorDiv = document.getElementById('cameraSelectorDiv');
+        const cameraSelect = document.getElementById('cameraSelect');
+        const refreshCamerasBtn = document.getElementById('refreshCamerasBtn');
+        const clockCanvas = document.getElementById('clockCanvas');
+        const videoPreviewDiv = document.getElementById('videoPreviewDiv');
+
+        let localMediaStream = null;
+        let videoCanvasInterval = null;
         const logs = document.getElementById('logs');
         const iceStatsPanel = document.getElementById('iceStats');
         const iceEnable = document.getElementById('iceEnable');
@@ -545,6 +631,37 @@
         answerBtn.addEventListener('click', answerCall);
         rejectBtn.addEventListener('click', rejectCall);
 
+        if (enableVideoCheckbox) {
+            enableVideoCheckbox.addEventListener('change', () => {
+                if (videoSourceGroup) {
+                    videoSourceGroup.style.display = enableVideoCheckbox.checked ? '' : 'none';
+                }
+                if (enableVideoCheckbox.checked) {
+                    enumerateCameras();
+                    const isClock = document.getElementById('videoSourceClock') && document.getElementById('videoSourceClock').checked;
+                    if (isClock) startClockPreview();
+                } else {
+                    stopClockPreview();
+                }
+            });
+        }
+
+        document.querySelectorAll('input[name="videoSource"]').forEach((radio) => {
+            radio.addEventListener('change', () => {
+                const isCam = document.getElementById('videoSourceCamera').checked;
+                if (cameraSelectorDiv) cameraSelectorDiv.style.display = isCam ? '' : 'none';
+                if (isCam) {
+                    stopClockPreview();
+                } else {
+                    startClockPreview();
+                }
+            });
+        });
+
+        if (refreshCamerasBtn) {
+            refreshCamerasBtn.addEventListener('click', enumerateCameras);
+        }
+
         function log(message) {
             const timestamp = new Date().toLocaleTimeString();
             logs.innerHTML += `[${timestamp}] ${message}<br>`;
@@ -765,7 +882,7 @@
             showStatus('Unregistered', 'info');
         }
 
-        function makeCall() {
+        async function makeCall() {
             if (!ua || !isRegistered) {
                 log('UA is not registered');
                 return;
@@ -788,28 +905,72 @@
             const destination = target.startsWith('sip:') ? target : `sip:${target}@${domain}`;
             log(`Calling ${destination}`);
 
-            const options = {
-                mediaConstraints: { audio: true, video: false },
-                rtcOfferConstraints: { offerToReceiveAudio: true, offerToReceiveVideo: false }
-            };
-            // record approximate time when we initiate the outgoing call request
+            const videoEnabled = enableVideoCheckbox && enableVideoCheckbox.checked;
+            let callOptions;
+            if (videoEnabled) {
+                try {
+                    localMediaStream = await getVideoSourceStream();
+                    if (localVideo) { localVideo.srcObject = localMediaStream; videoContainer.classList.add('active'); }
+                    callOptions = {
+                        mediaStream: localMediaStream,
+                        rtcOfferConstraints: { offerToReceiveAudio: true, offerToReceiveVideo: true }
+                    };
+                    log('Video source stream acquired');
+                } catch (e) {
+                    log(`Failed to get video stream: ${e.message} — falling back to audio-only`);
+                    callOptions = {
+                        mediaConstraints: { audio: true, video: false },
+                        rtcOfferConstraints: { offerToReceiveAudio: true, offerToReceiveVideo: false }
+                    };
+                }
+            } else {
+                callOptions = {
+                    mediaConstraints: { audio: true, video: false },
+                    rtcOfferConstraints: { offerToReceiveAudio: true, offerToReceiveVideo: false }
+                };
+            }
+
             lastOutgoingCallTime = Date.now();
             lastOutgoingCallLabel = target;
-            ua.call(destination, options);
-            log('Invite sent successfully');
+            ua.call(destination, callOptions);
+            log(`Invite sent successfully (video: ${videoEnabled})`);
             callBtn.disabled = true;
         }
 
-        function answerCall() {
+        async function answerCall() {
             if (!currentSession) {
                 return;
             }
 
             log('Answering incoming call');
-            const options = {
-                mediaConstraints: { audio: true, video: false },
-                rtcAnswerConstraints: { mandatory: { OfferToReceiveAudio: true, OfferToReceiveVideo: false } }
-            };
+            // For incoming calls, enable video if the remote offer includes video
+            const offerHasVideo = currentSession && currentSession.request &&
+                currentSession.request.body && currentSession.request.body.includes('m=video');
+            const videoEnabled = offerHasVideo || (enableVideoCheckbox && enableVideoCheckbox.checked);
+
+            let options;
+            if (videoEnabled) {
+                try {
+                    localMediaStream = await getVideoSourceStream();
+                    if (localVideo) { localVideo.srcObject = localMediaStream; videoContainer.classList.add('active'); }
+                    options = {
+                        mediaStream: localMediaStream,
+                        rtcAnswerConstraints: { offerToReceiveAudio: true, offerToReceiveVideo: true }
+                    };
+                    log('Video source stream acquired');
+                } catch (e) {
+                    log(`Failed to get video stream: ${e.message} — answering audio-only`);
+                    options = {
+                        mediaConstraints: { audio: true, video: false },
+                        rtcAnswerConstraints: { offerToReceiveAudio: true, offerToReceiveVideo: false }
+                    };
+                }
+            } else {
+                options = {
+                    mediaConstraints: { audio: true, video: false },
+                    rtcAnswerConstraints: { offerToReceiveAudio: true, offerToReceiveVideo: false }
+                };
+            }
 
             try {
                 // record answer time to compute handshake
@@ -1001,33 +1162,124 @@
         }
 
         function attachMedia(peerconnection) {
-            const remoteStream = new MediaStream();
+            const remoteAudioStream = new MediaStream();
+            const remoteVideoStream = new MediaStream();
+
             peerconnection.addEventListener('track', (event) => {
-                if (event.track.kind !== 'audio') {
+                const { track } = event;
+                if (track.kind === 'audio') {
+                    remoteAudioStream.addTrack(track);
+                    remoteAudio.srcObject = remoteAudioStream;
+                    log('Remote audio track attached');
+                } else if (track.kind === 'video') {
+                    remoteVideoStream.addTrack(track);
+                    remoteVideo.srcObject = remoteVideoStream;
+                    videoContainer.classList.add('active');
+                    log('Remote video track attached');
+                }
+            });
+            // Local video is set directly in makeCall/answerCall after stream is acquired
+        }
+
+        function startClockPreview() {
+            if (!clockCanvas) return;
+            if (videoCanvasInterval) { clearInterval(videoCanvasInterval); videoCanvasInterval = null; }
+            const ctx = clockCanvas.getContext('2d');
+            drawTestPattern(ctx, clockCanvas.width, clockCanvas.height);
+            videoCanvasInterval = setInterval(() => drawTestPattern(ctx, clockCanvas.width, clockCanvas.height), 100);
+            if (videoPreviewDiv) videoPreviewDiv.style.display = '';
+        }
+
+        function stopClockPreview() {
+            if (videoCanvasInterval) { clearInterval(videoCanvasInterval); videoCanvasInterval = null; }
+            if (videoPreviewDiv) videoPreviewDiv.style.display = 'none';
+        }
+
+        function stopLocalVideoSource() {
+            // Keep clock preview (videoCanvasInterval) running between calls
+            if (localMediaStream) {
+                localMediaStream.getTracks().forEach((t) => t.stop());
+                localMediaStream = null;
+            }
+            if (localVideo) localVideo.srcObject = null;
+        }
+
+        function drawTestPattern(ctx, width, height) {
+            // Background gradient
+            const grad = ctx.createLinearGradient(0, 0, 0, height);
+            grad.addColorStop(0, '#0d1b2a');
+            grad.addColorStop(1, '#1b2838');
+            ctx.fillStyle = grad;
+            ctx.fillRect(0, 0, width, height);
+
+            const now = new Date();
+
+            // Large HH:MM:SS clock
+            const timeStr = now.toLocaleTimeString('en-US', { hour12: false });
+            ctx.font = `bold ${Math.floor(height * 0.22)}px monospace`;
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillStyle = '#00e5ff';
+            ctx.shadowColor = '#00e5ff';
+            ctx.shadowBlur = 14;
+            ctx.fillText(timeStr, width / 2, height * 0.42);
+
+            // Date below
+            ctx.shadowBlur = 0;
+            ctx.font = `${Math.floor(height * 0.09)}px monospace`;
+            ctx.fillStyle = '#90a4ae';
+            ctx.fillText(now.toLocaleDateString(), width / 2, height * 0.65);
+
+            // Label
+            ctx.font = `${Math.floor(height * 0.07)}px sans-serif`;
+            ctx.fillStyle = '#546e7a';
+            ctx.fillText('rustpbx virtual camera', width / 2, height * 0.88);
+
+            ctx.textAlign = 'left';
+            ctx.textBaseline = 'alphabetic';
+            ctx.shadowBlur = 0;
+        }
+
+        async function getVideoSourceStream() {
+            const source = document.querySelector('input[name="videoSource"]:checked');
+            const sourceValue = source ? source.value : 'camera';
+
+            if (sourceValue === 'camera') {
+                const deviceId = cameraSelect && cameraSelect.value;
+                const videoConstraint = deviceId ? { deviceId: { exact: deviceId } } : true;
+                return navigator.mediaDevices.getUserMedia({ audio: true, video: videoConstraint });
+            }
+
+            // --- Clock virtual camera: use the DOM canvas (already visible as preview) ---
+            if (!clockCanvas) throw new Error('Clock canvas element not found');
+            if (!videoCanvasInterval) startClockPreview(); // ensure drawing is running
+            const canvasStream = clockCanvas.captureStream(15);
+            const audioStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            return new MediaStream([
+                ...audioStream.getAudioTracks(),
+                ...canvasStream.getVideoTracks()
+            ]);
+        }
+
+        async function enumerateCameras() {
+            if (!cameraSelect) return;
+            try {
+                const devices = await navigator.mediaDevices.enumerateDevices();
+                const cameras = devices.filter((d) => d.kind === 'videoinput');
+                cameraSelect.innerHTML = '';
+                if (cameras.length === 0) {
+                    cameraSelect.innerHTML = '<option value="">No cameras found</option>';
                     return;
                 }
-                if (event.streams && event.streams.length > 0) {
-                    remoteAudio.srcObject = event.streams[0];
-                } else {
-                    remoteStream.addTrack(event.track);
-                    remoteAudio.srcObject = remoteStream;
-                }
-                log('Remote audio stream attached');
-            });
-
-            const senders = peerconnection.getSenders();
-            if (senders && senders.length > 0) {
-                const localStream = new MediaStream();
-                senders.forEach((sender) => {
-                    if (sender.track && sender.track.kind === 'audio') {
-                        localStream.addTrack(sender.track);
-                    }
+                cameras.forEach((cam, i) => {
+                    const opt = document.createElement('option');
+                    opt.value = cam.deviceId;
+                    opt.textContent = cam.label || `Camera ${i + 1}`;
+                    cameraSelect.appendChild(opt);
                 });
-
-                if (localStream.getTracks().length > 0) {
-                    localAudio.srcObject = localStream;
-                    log('Local audio stream attached');
-                }
+                log(`Found ${cameras.length} camera(s)`);
+            } catch (e) {
+                log(`Failed to enumerate cameras: ${e.message}`);
             }
         }
 
@@ -1035,6 +1287,9 @@
             callControls.classList.remove('active');
             incomingCallDiv.classList.remove('active');
             callInfo.textContent = '';
+            videoContainer.classList.remove('active');
+
+            stopLocalVideoSource();
 
             if (remoteAudio.srcObject) {
                 remoteAudio.srcObject.getTracks().forEach((track) => track.stop());
@@ -1044,6 +1299,16 @@
             if (localAudio.srcObject) {
                 localAudio.srcObject.getTracks().forEach((track) => track.stop());
                 localAudio.srcObject = null;
+            }
+
+            if (remoteVideo.srcObject) {
+                remoteVideo.srcObject.getTracks().forEach((track) => track.stop());
+                remoteVideo.srcObject = null;
+            }
+
+            if (localVideo.srcObject) {
+                localVideo.srcObject.getTracks().forEach((track) => track.stop());
+                localVideo.srcObject = null;
             }
 
             currentSession = null;
@@ -1071,6 +1336,8 @@
         });
 
         loadDefaultIceServers();
+        // Enumerate cameras once (may return limited info until permission granted)
+        enumerateCameras();
         log('SIP Phone initialized');
     </script>
 </body>

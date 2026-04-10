@@ -608,7 +608,8 @@ impl SipSession {
             DialogState::Updated(dialog_id, request, tx_handle) => {
                 debug!(%dialog_id, method = ?request.method, "Received UPDATE/INVITE on callee dialog");
 
-                if let Err(e) = self.update_dialog_timer_from_headers(&dialog_id, &request.headers) {
+                if let Err(e) = self.update_dialog_timer_from_headers(&dialog_id, &request.headers)
+                {
                     warn!(%dialog_id, error = %e, "Failed to refresh callee session timer");
                     let _ = tx_handle
                         .reply(rsipstack::sip::StatusCode::SessionIntervalTooSmall)
@@ -995,7 +996,10 @@ impl SipSession {
             .session_expires
             .unwrap_or(DEFAULT_SESSION_EXPIRES);
         if self.server.proxy_config.session_timer {
-            headers.extend(build_default_session_timer_headers(default_expires, MIN_MIN_SE));
+            headers.extend(build_default_session_timer_headers(
+                default_expires,
+                MIN_MIN_SE,
+            ));
         }
 
         let callee_is_webrtc = target.supports_webrtc;
@@ -1024,9 +1028,11 @@ impl SipSession {
             .unwrap_or_else(|| caller.clone());
 
         let callee_call_id = self.context.dialplan.call_id.clone().unwrap_or_else(|| {
-            rsipstack::transaction::make_call_id(self.server.endpoint.inner.option.callid_suffix.as_deref())
-                .value()
-                .to_string()
+            rsipstack::transaction::make_call_id(
+                self.server.endpoint.inner.option.callid_suffix.as_deref(),
+            )
+            .value()
+            .to_string()
         });
         self.callee_call_ids.insert(callee_call_id.clone());
 
@@ -1376,6 +1382,9 @@ impl SipSession {
                     // 2. Set caller's RTP offer on bridge's RTP side and create answer
                     if let Some(ref caller_offer) = self.caller_offer {
                         debug!(session_id = %self.context.session_id, "Bridge: Creating RTP answer from caller offer");
+                        // Pass the offer as-is: address latching (enabled above for BUNDLE
+                        // callers) will auto-correct remote_addr to the actual BUNDLE port
+                        // when the first packet arrives, handling both send and receive.
                         match SessionDescription::parse(SdpType::Offer, caller_offer) {
                             Ok(caller_desc) => {
                                 match bridge.rtp_pc().set_remote_description(caller_desc).await {
@@ -1387,12 +1396,12 @@ impl SipSession {
                                                 warn!(session_id = %self.context.session_id, error = %e, "Failed to set bridge RTP local description");
                                                 callee_sdp.clone()
                                             } else {
-                                                debug!(session_id = %self.context.session_id, "Bridge: RTP answer created successfully");
-                                                bridge
+                                                let rtp_sdp = bridge
                                                     .rtp_pc()
                                                     .local_description()
-                                                    .map(|d| d.to_sdp_string())
-                                                    .or_else(|| callee_sdp.clone())
+                                                    .map(|d| d.to_sdp_string());
+                                                debug!(session_id = %self.context.session_id, sdp = ?rtp_sdp, "Bridge: RTP answer SDP (sent to RTP caller)");
+                                                rtp_sdp.or_else(|| callee_sdp.clone())
                                             }
                                         }
                                         Err(e) => {
@@ -1727,6 +1736,26 @@ impl SipSession {
                 .with_rtp_port_range(20000, 30000)
                 .with_enable_latching(self.server.proxy_config.enable_latching);
 
+            // If the RTP caller offered BUNDLE (e.g. Linphone includes a=group:BUNDLE),
+            // use Standard SDP mode on the RTP side so the answer includes a=group:BUNDLE
+            // and a=mid:, allowing both audio and video to share the same port via BUNDLE.
+            // Without this, the answer would have two m= sections on the same port
+            // without BUNDLE signaling — which is an invalid SDP that confuses SIP clients.
+            //
+            // Also enable address latching: with BUNDLE the caller sends all media from its
+            // audio (BUNDLE master) port. rustrtc's setup_direct_rtp connects to the LAST
+            // m-line port (the video port) which Linphone doesn't actually use for sending.
+            // Latching lets the IceConn auto-correct to the real source (BUNDLE master port)
+            // on the first incoming packet, fixing both send and receive directions.
+            if let Some(ref caller_sdp) = self.caller_offer {
+                if !caller_is_webrtc && caller_sdp.contains("a=group:BUNDLE") {
+                    bridge_builder = bridge_builder
+                        .with_rtp_sdp_compatibility(rustrtc::config::SdpCompatibilityMode::Standard)
+                        .with_enable_latching(true);
+                    info!(session_id = %self.id, "RTP caller offered BUNDLE, using Standard SDP mode + latching for RTP side");
+                }
+            }
+
             if let Some(ref external_ip) = self.server.rtp_config.external_ip {
                 bridge_builder = bridge_builder.with_external_ip(external_ip.clone());
             }
@@ -1779,6 +1808,82 @@ impl SipSession {
                     bridge_builder = bridge_builder.with_sender_codecs(w, r);
                 }
 
+                // Extract video capabilities from caller SDP
+                match rustrtc::SessionDescription::parse(rustrtc::SdpType::Offer, caller_sdp) {
+                    Ok(caller_desc) => {
+                        let caller_video_caps = caller_desc.to_video_capabilities();
+                        if !caller_video_caps.is_empty() {
+                            info!(
+                                session_id = %self.id,
+                                codecs = ?caller_video_caps.iter().map(|c| format!("{}@{}", c.codec_name, c.payload_type)).collect::<Vec<_>>(),
+                                "Video capabilities configured from caller SDP"
+                            );
+                            // Ensure H264 WebRTC capabilities include packetization-mode=1 so that
+                            // Chrome's SDP answer also negotiates mode=1.  Without this, Chrome
+                            // answers with packetization-mode=0, meaning its decoder will reject
+                            // FU-A packets sent by the bridge, keeping framesReceived at 0.
+                            let webrtc_video_caps: Vec<rustrtc::config::VideoCapability> =
+                                caller_video_caps
+                                    .iter()
+                                    .map(|cap| {
+                                        if cap.codec_name.eq_ignore_ascii_case("H264") {
+                                            let mut c = cap.clone();
+                                            // Inject packetization-mode=1 if not already present
+                                            let fmtp = cap.fmtp.as_deref().unwrap_or("");
+                                            if !fmtp.contains("packetization-mode") {
+                                                let new_fmtp = if fmtp.is_empty() {
+                                                    "packetization-mode=1".to_string()
+                                                } else {
+                                                    format!("{};packetization-mode=1", fmtp)
+                                                };
+                                                c.fmtp = Some(new_fmtp);
+                                            }
+                                            c
+                                        } else {
+                                            cap.clone()
+                                        }
+                                    })
+                                    .collect();
+                            // Also inject packetization-mode=1 into the RTP caps so the SDP
+                            // answer to Linphone explicitly declares we will use FU-A (mode 1).
+                            // Per RFC 6184 §8.1 receivers MUST support all modes, but some
+                            // Linphone builds are stricter; being explicit avoids ambiguity.
+                            let rtp_video_caps: Vec<rustrtc::config::VideoCapability> =
+                                caller_video_caps
+                                    .iter()
+                                    .map(|cap| {
+                                        if cap.codec_name.eq_ignore_ascii_case("H264") {
+                                            let mut c = cap.clone();
+                                            let fmtp = cap.fmtp.as_deref().unwrap_or("");
+                                            if !fmtp.contains("packetization-mode") {
+                                                let new_fmtp = if fmtp.is_empty() {
+                                                    "packetization-mode=1".to_string()
+                                                } else {
+                                                    format!("{};packetization-mode=1", fmtp)
+                                                };
+                                                c.fmtp = Some(new_fmtp);
+                                            }
+                                            c
+                                        } else {
+                                            cap.clone()
+                                        }
+                                    })
+                                    .collect();
+                            bridge_builder = bridge_builder
+                                .with_webrtc_video_capabilities(webrtc_video_caps)
+                                .with_rtp_video_capabilities(rtp_video_caps);
+                        } else {
+                            warn!(
+                                session_id = %self.id,
+                                "No video capabilities found in caller SDP — video will not be bridged"
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        warn!(session_id = %self.id, "Failed to parse caller SDP for video: {}", e)
+                    }
+                }
+
                 info!(
                     session_id = %self.id,
                     webrtc_codecs = ?webrtc_side.iter().map(|c| format!("{:?}", c.codec)).collect::<Vec<_>>(),
@@ -1795,11 +1900,25 @@ impl SipSession {
             // The caller-facing PC will answer the caller's INVITE offer later.
             if callee_is_webrtc {
                 let offer = bridge.webrtc_pc().create_offer().await?;
+                let offer_sdp = offer.to_sdp_string();
+                info!(
+                    session_id = %self.id,
+                    has_video = offer_sdp.contains("m=video"),
+                    "Bridge WebRTC offer created for callee"
+                );
+                debug!(session_id = %self.id, sdp = %offer_sdp, "Bridge WebRTC offer SDP");
                 bridge.webrtc_pc().set_local_description(offer)?;
                 // Wait for ICE gathering so SDP contains real candidates
                 bridge.webrtc_pc().wait_for_gathering_complete().await;
             } else {
                 let offer = bridge.rtp_pc().create_offer().await?;
+                let offer_sdp = offer.to_sdp_string();
+                info!(
+                    session_id = %self.id,
+                    has_video = offer_sdp.contains("m=video"),
+                    "Bridge RTP offer created for callee"
+                );
+                debug!(session_id = %self.id, sdp = %offer_sdp, "Bridge RTP offer SDP");
                 bridge.rtp_pc().set_local_description(offer)?;
             }
 
@@ -1854,6 +1973,21 @@ impl SipSession {
                     MediaNegotiator::build_callee_codec_offer(caller_offer, callee_is_webrtc);
                 if !codecs.is_empty() {
                     track_builder = track_builder.with_codec_info(codecs);
+                }
+
+                // Extract video capabilities from caller SDP
+                if let Ok(caller_desc) =
+                    rustrtc::SessionDescription::parse(rustrtc::SdpType::Offer, caller_offer)
+                {
+                    let video_caps: Vec<rustrtc::config::VideoCapability> =
+                        caller_desc.to_video_capabilities();
+                    if !video_caps.is_empty() {
+                        track_builder = track_builder.with_video_capabilities(video_caps);
+                        info!(
+                            session_id = %self.id,
+                            "Video capabilities configured for anchored media"
+                        );
+                    }
                 }
             }
 
@@ -2369,7 +2503,10 @@ impl SipSession {
                 .update(Some(headers), None)
                 .await
                 .map_err(|e| anyhow!("UPDATE failed: {}", e)),
-            _ => Err(anyhow!("Dialog {} is not a client INVITE dialog", dialog_id)),
+            _ => Err(anyhow!(
+                "Dialog {} is not a client INVITE dialog",
+                dialog_id
+            )),
         };
 
         let result = match response {
@@ -3863,7 +4000,7 @@ impl SipSession {
             .or(self.caller_offer.as_ref())
             .ok_or_else(|| anyhow!("No SDP available for hold"))?;
 
-        let hold_sdp = modify_sdp_direction(base_sdp, "sendonly");
+        let hold_sdp = rustrtc::modify_sdp_direction(base_sdp, "sendonly");
         Ok(hold_sdp)
     }
 
@@ -3874,7 +4011,7 @@ impl SipSession {
             .or(self.caller_offer.as_ref())
             .ok_or_else(|| anyhow!("No SDP available for unhold"))?;
 
-        let unhold_sdp = modify_sdp_direction(base_sdp, "sendrecv");
+        let unhold_sdp = rustrtc::modify_sdp_direction(base_sdp, "sendrecv");
         Ok(unhold_sdp)
     }
 
@@ -3901,36 +4038,6 @@ impl SipSession {
             Err(e) => Err(anyhow!("re-INVITE failed: {}", e)),
         }
     }
-}
-
-fn modify_sdp_direction(sdp: &str, direction: &str) -> String {
-    let lines: Vec<&str> = sdp.lines().collect();
-    let mut result: Vec<String> = Vec::new();
-    let mut in_media_section = false;
-
-    for line in lines {
-        if line.starts_with("m=") {
-            in_media_section = true;
-            result.push(line.to_string());
-        } else if line.starts_with("c=")
-            || line.starts_with("a=rtpmap:")
-            || line.starts_with("a=fmtp:")
-        {
-            result.push(line.to_string());
-        } else if in_media_section && line.starts_with("a=sendrecv") {
-            result.push(format!("a={}", direction));
-        } else if in_media_section
-            && (line.starts_with("a=sendonly")
-                || line.starts_with("a=recvonly")
-                || line.starts_with("a=inactive"))
-        {
-            result.push(format!("a={}", direction));
-        } else {
-            result.push(line.to_string());
-        }
-    }
-
-    result.join("\r\n")
 }
 
 impl Drop for SipSession {

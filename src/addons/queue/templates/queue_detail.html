@@ -45,7 +45,7 @@
                 <dl class="mt-4 space-y-2 text-xs text-slate-500">
                     <div class="flex items-center justify-between gap-6">
                         <dt class="uppercase tracking-wide" x-text="tt('queue.detail_name_label')"></dt>
-                        <dd class="text-sm text-slate-700" x-text="form.name || '—'"></dd>
+                        <dd class="text-sm text-slate-700" x-text="form.name || '-'"></dd>
                     </div>
                     <div class="flex items-center justify-between gap-6">
                         <dt class="uppercase tracking-wide" x-text="tt('queue.detail_updated_label')"></dt>
@@ -329,7 +329,7 @@
 </div>
 
 <script>
-    window._queueTranslations = {{ t | json | safe }};
+    window._queueTranslations = JSON.parse('{{ t | json | safe }}');
     document.addEventListener('alpine:init', () => {
         Alpine.data('queueDetailPage', (options) => ({
             basePath: options.basePath || '/console',
@@ -406,8 +406,8 @@
                 this.holdEnabled = Boolean(spec.hold && (spec.hold.audio_file || spec.hold.loop_playback === false));
                 this.fallbackMode = this.detectFallbackMode(spec.fallback);
                 this.pageTitle = this.mode === 'edit'
-                    ? (model.name ? `${tt('queue.detail_subtitle_edit')} — ${model.name}` : tt('queue.detail_subtitle_edit'))
-                    : tt('queue.new_queue');
+                    ? (model.name ? `${this.tt('queue.detail_subtitle_edit')} - ${model.name}` : this.tt('queue.detail_subtitle_edit'))
+                    : this.tt('queue.new_queue');
             },
             normalizeSpec(raw) {
                 const spec = {
@@ -565,22 +565,22 @@
                     });
                     const data = await response.json().catch(() => ({}));
                     if (!response.ok) {
-                        throw new Error(data?.message || tt('queue.save_failed'));
+                        throw new Error(data?.message || this.tt('queue.save_failed'));
                     }
-                    this.success = isEdit ? tt('queue.queue_updated') : tt('queue.queue_created');
+                    this.success = isEdit ? this.tt('queue.queue_updated') : this.tt('queue.queue_created');
                     if (!isEdit && data?.id) {
                         window.location.href = `${this.basePath}/queues/${data.id}`;
                         return;
                     }
                 } catch (err) {
                     console.error(err);
-                    this.error = err?.message || tt('queue.save_failed');
+                    this.error = err?.message || this.tt('queue.save_failed');
                 } finally {
                     this.saving = false;
                 }
             },
             formatDate(value) {
-                if (!value) return '—';
+                if (!value) return '-';
                 const date = new Date(value);
                 if (Number.isNaN(date.getTime())) {
                     return value;
