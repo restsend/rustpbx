@@ -146,6 +146,7 @@ impl Transcoder {
             sequence_number: frame.sequence_number,
             payload_type: Some(self.target_pt),
             marker: frame.marker,
+            header_extension: None,
             raw_packet: None,
             source_addr: frame.source_addr,
         }

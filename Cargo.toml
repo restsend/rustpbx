@@ -65,7 +65,7 @@ serde = { version = "1", features = ["derive"] }
 glob = "0.3.3"
 serde_json = "1"
 thiserror = "2"
-tokio = { version = "1.49.0", features = ["full", "tracing"] }
+tokio = { version = "1.51.0", features = ["full", "tracing"] }
 tokio-stream = { version = "0.1.18", features = ["net", "sync"] }
 parking_lot = "0.12"
 dashmap = "6"
@@ -78,16 +78,16 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 tracing-appender = "0.2.4"
 url = "2.5.8"
 uuid = { version = "1.23.0", features = ["v4"] }
-clap = { version = "4.5.54", features = ["derive"] }
+clap = { version = "4.6.0", features = ["derive"] }
 toml = "1.1.2"
-toml_edit = { version = "0.25.10", features = ["serde"] }
+toml_edit = { version = "0.25.11", features = ["serde"] }
 rand = "0.10.0"
 chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = "0.10.4"
-rsipstack = "0.5.2"
+rsipstack = "0.5.3"
 #rsipstack = { path = "../rsipstack" }
 audio-codec = { version = "0.3.30", default-features = false }
-rustrtc = "0.3.46"
+rustrtc = "0.3.47"
 #rustrtc = { path = "../rustrtc" }
 reqwest = { version = "0.13", features = [
     "json",
@@ -167,7 +167,7 @@ zstd = "0.13"
 hound = "3.5"
 minimp3 = "0.6.1"
 aws-lc-rs = { version = "1", optional = true }
-totp-rs = { version = "5.7.0", features = ["qr", "gen_secret"] }
+totp-rs = { version = "5.7.1", features = ["qr", "gen_secret"] }
 ldap3 = { version = "0.12.1", optional = true }
 ring = { version = "0.17", optional = true }
 
