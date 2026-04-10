@@ -64,10 +64,10 @@ pub trait CallFailureHandler: Send + Sync {
     ) -> Option<Box<dyn app::CallApp>>;
 }
 
-/// Default hold audio that ships with config/sounds.
-pub const DEFAULT_QUEUE_HOLD_AUDIO: &str = "config/sounds/phone-calling.wav";
+/// Default hold audio that ships with config/sounds, relocated in Dockerfile to /app/sounds.
+pub const DEFAULT_QUEUE_HOLD_AUDIO: &str = "sounds/phone-calling.wav";
 /// Default prompt played when a queue cannot find an available agent.
-pub const DEFAULT_QUEUE_FAILURE_AUDIO: &str = "config/sounds/unavailable-phone.wav";
+pub const DEFAULT_QUEUE_FAILURE_AUDIO: &str = "sounds/unavailable-phone.wav";
 
 #[derive(Clone, Default)]
 pub struct Location {
@@ -728,7 +728,11 @@ impl Dialplan {
         self.flow.all_webrtc_target()
     }
     /// Create a new dialplan with basic configuration
-    pub fn new(session_id: String, original: rsipstack::sip::Request, direction: DialDirection) -> Self {
+    pub fn new(
+        session_id: String,
+        original: rsipstack::sip::Request,
+        direction: DialDirection,
+    ) -> Self {
         Self {
             direction,
             session_id: Some(session_id),
