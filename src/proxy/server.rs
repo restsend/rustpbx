@@ -532,7 +532,7 @@ impl SipServerBuilder {
                 call_router = Some(Box::new(crate::proxy::routing::http::HttpCallRouter::new(
                     http_router_config.clone(),
                     rtp_config.clone(),
-                    self.config.media_proxy
+                    self.config.media_proxy,
                 )));
             }
         }
@@ -550,10 +550,16 @@ impl SipServerBuilder {
             )
         };
 
-        // Wire up the SIP endpoint for trunk registration.
+        // Wire up the SIP endpoint for trunk registration, then reconcile so
+        // that trunks with register_enabled=true are registered on startup
+        // (previously reconcile ran before set_endpoint and was silently skipped).
         data_context
             .trunk_registrar()
             .set_endpoint(endpoint.inner.clone());
+        {
+            let trunks = data_context.trunks_snapshot();
+            data_context.trunk_registrar().reconcile(&trunks).await;
+        }
 
         let active_call_registry = Arc::new(ActiveProxyCallRegistry::new());
         let presence_manager = Arc::new(PresenceManager::new(database.clone()));
@@ -664,12 +670,7 @@ impl SipServerBuilder {
                     .join(",")
             );
         }
-        inner
-            .endpoint
-            .inner
-            .allows
-            .lock()
-            .replace(allow_methods);
+        inner.endpoint.inner.allows.lock().replace(allow_methods);
         Ok(SipServer {
             inner,
             modules: Arc::new(modules),
@@ -777,7 +778,9 @@ impl SipServer {
                         runnings = runnings_tx.load(Ordering::Relaxed),
                         "max concurrency reached, not process this transaction"
                     );
-                    tx.reply(rsipstack::sip::StatusCode::ServiceUnavailable).await.ok();
+                    tx.reply(rsipstack::sip::StatusCode::ServiceUnavailable)
+                        .await
+                        .ok();
                     continue;
                 }
             }
@@ -834,12 +837,16 @@ impl SipServer {
 
                 if !matches!(
                     tx.original.method,
-                    rsipstack::sip::Method::Bye | rsipstack::sip::Method::Cancel | rsipstack::sip::Method::Ack
+                    rsipstack::sip::Method::Bye
+                        | rsipstack::sip::Method::Cancel
+                        | rsipstack::sip::Method::Ack
                 ) && !is_mid_dialog
                     && tx.last_response.is_none()
                     && !cookie.is_spam()
                 {
-                    tx.reply(rsipstack::sip::StatusCode::NotImplemented).await.ok();
+                    tx.reply(rsipstack::sip::StatusCode::NotImplemented)
+                        .await
+                        .ok();
                 }
                 let _ = guard;
                 Ok::<(), anyhow::Error>(())
@@ -871,7 +878,9 @@ impl SipServer {
                         e
                     );
                     if tx.last_response.is_none() {
-                        tx.reply(rsipstack::sip::StatusCode::ServerInternalError).await.ok();
+                        tx.reply(rsipstack::sip::StatusCode::ServerInternalError)
+                            .await
+                            .ok();
                     }
                     return Ok(());
                 }

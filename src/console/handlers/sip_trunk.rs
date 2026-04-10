@@ -228,6 +228,8 @@ async fn create_sip_trunk(
                     model.id, err
                 );
             }
+            
+            state.mark_pending_reload();
             Json(json!({"status": "ok", "id": model.id})).into_response()
         }
         Err(err) => {
@@ -295,6 +297,8 @@ async fn update_sip_trunk(
                     model.id, err
                 );
             }
+            
+            state.mark_pending_reload();
             Json(json!({"status": "ok"})).into_response()
         }
         Err(err) => {
@@ -342,7 +346,10 @@ async fn delete_sip_trunk(
 
     let active: SipTrunkActiveModel = model.into();
     match active.delete(db).await {
-        Ok(_) => Json(json!({"status": "ok"})).into_response(),
+        Ok(_) => {
+            state.mark_pending_reload();
+            Json(json!({"status": "ok"})).into_response()
+        }
         Err(err) => {
             warn!("failed to delete sip trunk {}: {}", id, err);
             (

@@ -177,6 +177,9 @@ async fn reload_trunks_handler(State(state): State<AppState>, client_ip: ClientA
     {
         Ok(metrics) => {
             let total = metrics.total;
+            if let Some(ref console) = state.console {
+                console.clear_pending_reload();
+            }
             Json(serde_json::json!({
                 "status": "ok",
                 "trunks_reloaded": total,
@@ -228,6 +231,9 @@ async fn reload_routes_handler(State(state): State<AppState>, client_ip: ClientA
     {
         Ok(metrics) => {
             let total = metrics.total;
+            if let Some(ref console) = state.console {
+                console.clear_pending_reload();
+            }
             Json(serde_json::json!({
                 "status": "ok",
                 "routes_reloaded": total,

@@ -276,6 +276,7 @@ pub async fn create_queue(
     match active.insert(db).await {
         Ok(model) => {
             export_queue_async(state.as_ref(), model.id).await;
+            state.mark_pending_reload();
             Json(json!({"status": "ok", "id": model.id})).into_response()
         }
         Err(err) => {
@@ -368,6 +369,7 @@ pub async fn update_queue(
     match active.update(db).await {
         Ok(updated) => {
             export_queue_async(state.as_ref(), updated.id).await;
+            state.mark_pending_reload();
             Json(json!({"status": "ok", "id": updated.id})).into_response()
         }
         Err(err) => {
@@ -420,6 +422,7 @@ pub async fn delete_queue(
                 if let Some(entry) = export_entry {
                     remove_queue_export(state.as_ref(), entry).await;
                 }
+                state.mark_pending_reload();
                 Json(json!({"status": "ok", "rows_affected": result.rows_affected})).into_response()
             }
         }

@@ -11,6 +11,7 @@ use minijinja::Environment;
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock, Weak};
 use std::time::Instant;
 
@@ -30,6 +31,7 @@ pub struct ConsoleState {
     callrecord_formatter: Arc<dyn CallRecordFormatter>,
     i18n: Arc<I18n>,
     perm_cache: Arc<Mutex<HashMap<i64, (Instant, HashSet<String>)>>>,
+    pub pending_reload: Arc<AtomicBool>,
 }
 
 impl ConsoleState {
@@ -67,6 +69,7 @@ impl ConsoleState {
             callrecord_formatter,
             i18n,
             perm_cache: Arc::new(Mutex::new(HashMap::new())),
+            pending_reload: Arc::new(AtomicBool::new(false)),
         }))
     }
 
@@ -408,6 +411,14 @@ impl ConsoleState {
         &self.db
     }
 
+    pub fn mark_pending_reload(&self) {
+        self.pending_reload.store(true, Ordering::Relaxed);
+    }
+
+    pub fn clear_pending_reload(&self) {
+        self.pending_reload.store(false, Ordering::Relaxed);
+    }
+
     pub fn set_sip_server(&self, server: Option<SipServerRef>) {
         if let Ok(mut slot) = self.sip_server.write() {
             *slot = server;
@@ -607,6 +618,18 @@ mod tests {
         state.user_permissions(&user).await;
         let cache = state.perm_cache.lock().expect("lock cache");
         assert!(cache.contains_key(&300));
+    }
+
+    #[tokio::test]
+    async fn pending_reload_mark_and_clear() {
+        let state = setup_state().await;
+        use std::sync::atomic::Ordering;
+
+        assert!(!state.pending_reload.load(Ordering::Relaxed));
+        state.mark_pending_reload();
+        assert!(state.pending_reload.load(Ordering::Relaxed));
+        state.clear_pending_reload();
+        assert!(!state.pending_reload.load(Ordering::Relaxed));
     }
 }
 

@@ -12,7 +12,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{Arc, RwLock},
 };
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::{
     addons::queue::services::utils as queue_utils,
@@ -262,6 +262,20 @@ impl ProxyDataContext {
 
         let len = trunks.len();
         *self.trunks.write().unwrap() = trunks.clone();
+
+        let acl_enabled = config
+            .modules
+            .as_deref()
+            .unwrap_or(&[])
+            .iter()
+            .any(|m| m == "acl");
+        if !acl_enabled && trunks.values().any(|t| !t.inbound_hosts.is_empty()) {
+            warn!(
+                "inbound_hosts is configured on one or more trunks but the 'acl' module is \
+                 not listed in proxy.modules — inbound IP filtering will be silently skipped. \
+                 Add 'acl' to proxy.modules to enable it."
+            );
+        }
 
         // Reconcile trunk registrations after reload.
         self.trunk_registrar.reconcile(&trunks).await;
@@ -1104,6 +1118,54 @@ mod tests {
         assert_eq!(action.app.as_deref(), Some("ivr"));
         let params = action.app_params.unwrap();
         assert_eq!(params["file"], "config/ivr/main.toml");
+    }
+
+    #[test]
+    fn acl_module_presence_check() {
+        let acl_enabled = |modules: Option<Vec<String>>| -> bool {
+            modules.as_deref().unwrap_or(&[]).iter().any(|m| m == "acl")
+        };
+
+        assert!(!acl_enabled(None), "None modules → acl not enabled");
+        assert!(
+            !acl_enabled(Some(vec!["recording".to_string()])),
+            "modules without acl → not enabled"
+        );
+        assert!(
+            acl_enabled(Some(vec!["acl".to_string(), "recording".to_string()])),
+            "modules with acl → enabled"
+        );
+        assert!(
+            acl_enabled(Some(vec!["acl".to_string()])),
+            "only acl → enabled"
+        );
+    }
+
+    #[test]
+    fn trunk_with_inbound_hosts_detected() {
+        let mut trunks: HashMap<String, TrunkConfig> = HashMap::new();
+        let no_hosts = TrunkConfig {
+            dest: "sip:192.0.2.1".to_string(),
+            inbound_hosts: vec![],
+            ..Default::default()
+        };
+        let with_hosts = TrunkConfig {
+            dest: "sip:192.0.2.2".to_string(),
+            inbound_hosts: vec!["203.0.113.1".to_string()],
+            ..Default::default()
+        };
+
+        trunks.insert("no-hosts".to_string(), no_hosts);
+        assert!(
+            !trunks.values().any(|t| !t.inbound_hosts.is_empty()),
+            "no trunk has inbound_hosts"
+        );
+
+        trunks.insert("with-hosts".to_string(), with_hosts);
+        assert!(
+            trunks.values().any(|t| !t.inbound_hosts.is_empty()),
+            "one trunk has inbound_hosts — warning should fire"
+        );
     }
 }
 

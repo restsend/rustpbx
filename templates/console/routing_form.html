@@ -19,11 +19,10 @@
                 <nav class="text-xs font-medium text-slate-400">
                     <a href="{{ back_url }}" class="hover:text-slate-600">{{ "routing_form.routing" | t }}</a>
                     <span class="mx-1">/</span>
-                    <span class="text-slate-600" x-text="mode === 'edit' ? '{{ "routing_form.edit_rule" | t }}' : '{{ "routing_form.create_rule" | t }}'"></span>
+                    <span class="text-slate-600" x-text="mode === 'edit' ? translations.edit_rule : translations.create_rule"></span>
                 </nav>
-                <h1 class="text-2xl font-semibold text-slate-900"
-                    x-text="mode === 'edit' ? '{{ "routing_form.edit_routing_rule" | t }}' : '{{ "routing_form.create_routing_rule" | t }}'"></h1>
-                <p class="mt-2 text-sm text-slate-500">{{ "routing_form.define_match" | t }}</p>
+                <h1 class="text-2xl font-semibold text-slate-900" x-text="mode === 'edit' ? translations.edit_routing_rule : translations.create_routing_rule"></h1>
+                <p class=" mt-2 text-sm text-slate-500">{{ "routing_form.define_match" | t }}</p>
             </div>
             <div class="flex gap-3">
                 <a href="{{ back_url }}"
@@ -62,14 +61,15 @@
 
             <div class="rounded-xl bg-white p-3 shadow-sm ring-1 ring-black/5">
                 <nav class="inline-flex w-full flex-wrap gap-2 rounded-lg border border-slate-200 bg-slate-50 p-1 text-xs font-semibold text-slate-600"
-                    role="tablist" aria-label="{{ "routing_form.routing_config_tabs_label" | t }}">
+                    role="tablist" aria-label="{{ " routing_form.routing_config_tabs_label" | t }}">
                     <button type="button" class="flex-1 rounded-md px-4 py-2 text-left transition sm:flex-none"
                         :class="activeTab === 'overview' ? 'bg-white text-sky-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'"
                         :aria-selected="activeTab === 'overview'" aria-controls="routing-tab-overview"
                         @click="activeTab = 'overview'">
                         <div class="flex flex-col">
                             <span class="text-sm">{{ "routing_form.overview" | t }}</span>
-                            <span class="text-[11px] font-normal text-slate-400">{{ "routing_form.summary_status" | t }}</span>
+                            <span class="text-[11px] font-normal text-slate-400">{{ "routing_form.summary_status" | t
+                                }}</span>
                         </div>
                     </button>
                     <button type="button" class="flex-1 rounded-md px-4 py-2 text-left transition sm:flex-none"
@@ -78,7 +78,8 @@
                         @click="activeTab = 'matching'">
                         <div class="flex flex-col">
                             <span class="text-sm">{{ "routing_form.match" | t }}</span>
-                            <span class="text-[11px] font-normal text-slate-400">{{ "routing_form.patterns_before_routing" | t }}</span>
+                            <span class="text-[11px] font-normal text-slate-400">{{
+                                "routing_form.patterns_before_routing" | t }}</span>
                         </div>
                     </button>
                     <button type="button" class="flex-1 rounded-md px-4 py-2 text-left transition sm:flex-none"
@@ -87,7 +88,8 @@
                         @click="activeTab = 'rewrite'">
                         <div class="flex flex-col">
                             <span class="text-sm">{{ "routing_form.rewrite" | t }}</span>
-                            <span class="text-[11px] font-normal text-slate-400">{{ "routing_form.transforms_header" | t }}</span>
+                            <span class="text-[11px] font-normal text-slate-400">{{ "routing_form.transforms_header" | t
+                                }}</span>
                         </div>
                     </button>
                     <button type="button" class="flex-1 rounded-md px-4 py-2 text-left transition sm:flex-none"
@@ -96,7 +98,8 @@
                         @click="activeTab = 'delivery'">
                         <div class="flex flex-col">
                             <span class="text-sm">{{ "routing_form.trunks_delivery" | t }}</span>
-                            <span class="text-[11px] font-normal text-slate-400">{{ "routing_form.selection_strategy" | t }}</span>
+                            <span class="text-[11px] font-normal text-slate-400">{{ "routing_form.selection_strategy" |
+                                t }}</span>
                         </div>
                     </button>
                     <button type="button" class="flex-1 rounded-md px-4 py-2 text-left transition sm:flex-none"
@@ -105,7 +108,8 @@
                         @click="activeTab = 'policy'">
                         <div class="flex flex-col">
                             <span class="text-sm">{{ "routing_form.policy" | t }}</span>
-                            <span class="text-[11px] font-normal text-slate-400">{{ "routing_form.limits_restrictions" | t }}</span>
+                            <span class="text-[11px] font-normal text-slate-400">{{ "routing_form.limits_restrictions" |
+                                t }}</span>
                         </div>
                     </button>
                 </nav>
@@ -120,28 +124,29 @@
                             <p class="text-xs text-slate-500">{{ "routing_form.set_identity" | t }}</p>
                         </div>
                         <div class="flex items-center gap-2 text-xs font-medium text-slate-600">
-                            <span class="rounded-full border border-slate-200 px-2 py-1"
-                                x-text="route.id ? '{{ "routing_form.rule_id" | t }}: ' + route.id : '{{ "routing_form.new_rule" | t }}'"></span>
+                            <span class="rounded-full border border-slate-200 px-2 py-1" x-text="route.id ? translations.rule_id + ': ' + route.id : translations.new_rule"></span>
                             <span class="rounded-full border border-slate-200 px-2 py-1" x-text="routeSummary"></span>
                         </div>
                     </div>
 
                     <div class="mt-6 grid gap-4 md:grid-cols-2">
                         <div class="space-y-2">
-                            <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">{{ "routing_form.name" | t }}</label>
+                            <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">{{
+                                "routing_form.name" | t }}</label>
                             <input type="text" name="name" x-model="route.name"
                                 class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                                 placeholder='{{ "routing_form.name_placeholder" | t }}' required>
                         </div>
                         <div class="space-y-2">
-                            <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">{{ "routing_form.owner" | t }}</label>
+                            <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">{{
+                                "routing_form.owner" | t }}</label>
                             <input type="text" name="owner" x-model="route.owner"
                                 class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                                 placeholder='{{ "routing_form.owner_placeholder" | t }}'>
                         </div>
                         <div class="space-y-2">
-                            <label
-                                class="text-xs font-semibold uppercase tracking-wide text-slate-500">{{ "routing_form.direction" | t }}</label>
+                            <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">{{
+                                "routing_form.direction" | t }}</label>
                             <select name="direction" x-model="route.direction"
                                 class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
                                 <option value="" x-bind:selected="!route.direction" :disabled="!!route.direction"
@@ -153,12 +158,14 @@
                             </select>
                         </div>
                         <div class="space-y-2">
-                            <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">{{ "routing_form.priority" | t }}</label>
+                            <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">{{
+                                "routing_form.priority" | t }}</label>
                             <input type="number" min="0" name="priority" x-model.number="route.priority"
                                 class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
                         </div>
                         <div class="space-y-2">
-                            <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">{{ "routing_form.status" | t }}</label>
+                            <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">{{
+                                "routing_form.status" | t }}</label>
                             <div class="flex gap-2">
                                 <template x-for="option in statusOptions" :key="option.value">
                                     <button type="button"
@@ -171,12 +178,11 @@
                             </div>
                         </div>
                         <div class="space-y-2 md:col-span-2">
-                            <label
-                                class="text-xs font-semibold uppercase tracking-wide text-slate-500">{{ "routing_form.description" | t }}</label>
+                            <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">{{
+                                "routing_form.description" | t }}</label>
                             <textarea name="description" x-model="route.description"
                                 class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                rows="3"
-                                placeholder='{{ "routing_form.description_placeholder" | t }}'></textarea>
+                                rows="3" placeholder='{{ "routing_form.description_placeholder" | t }}'></textarea>
                         </div>
                     </div>
                 </section>
@@ -186,7 +192,8 @@
                 id="routing-tab-matching" role="tabpanel" tabindex="0">
                 <section class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
                     <div class="flex flex-col gap-2">
-                        <h2 class="text-base font-semibold text-slate-900">{{ "routing_form.match_expressions" | t }}</h2>
+                        <h2 class="text-base font-semibold text-slate-900">{{ "routing_form.match_expressions" | t }}
+                        </h2>
                         <p class="text-xs text-slate-500">{{ "routing_form.regex_applied_detail" | t }}</p>
                     </div>
 
@@ -211,8 +218,10 @@
                                         @click.outside="closeRegexPanel()"
                                         class="absolute z-50 right-0 mt-10 w-[28rem] rounded-lg border border-slate-200 bg-white p-3 shadow-lg">
                                         <div class="flex items-center justify-between gap-2">
-                                            <div class="text-sm font-semibold text-slate-700">{{ "routing_form.regex_helper" | t }}</div>
-                                            <div class="text-xs text-slate-400">{{ "routing_form.presets_tester" | t }}</div>
+                                            <div class="text-sm font-semibold text-slate-700">{{
+                                                "routing_form.regex_helper" | t }}</div>
+                                            <div class="text-xs text-slate-400">{{ "routing_form.presets_tester" | t }}
+                                            </div>
                                         </div>
                                         <div class="mt-2 space-y-2">
                                             <div class="rounded-md bg-slate-50 px-2 py-2 text-[11px] text-slate-500">
@@ -224,16 +233,20 @@
                                                     class="w-full rounded-lg border border-slate-200 px-2 py-1 text-sm text-slate-700 focus:border-sky-300 focus:outline-none">
                                                 <div class="flex flex-wrap gap-2">
                                                     <button type="button" @click="buildPreset('starts_with')"
-                                                        class="rounded-md border border-slate-200 px-2 py-1 text-xs text-slate-600 hover:bg-slate-50">{{ "routing_form.start_with" | t }}</button>
+                                                        class="rounded-md border border-slate-200 px-2 py-1 text-xs text-slate-600 hover:bg-slate-50">{{
+                                                        "routing_form.start_with" | t }}</button>
                                                     <button type="button" @click="buildPreset('ends_with')"
-                                                        class="rounded-md border border-slate-200 px-2 py-1 text-xs text-slate-600 hover:bg-slate-50">{{ "routing_form.end_with" | t }}</button>
+                                                        class="rounded-md border border-slate-200 px-2 py-1 text-xs text-slate-600 hover:bg-slate-50">{{
+                                                        "routing_form.end_with" | t }}</button>
                                                     <button type="button" @click="buildPreset('equals')"
-                                                        class="rounded-md border border-slate-200 px-2 py-1 text-xs text-slate-600 hover:bg-slate-50">{{ "routing_form.equals" | t }}</button>
+                                                        class="rounded-md border border-slate-200 px-2 py-1 text-xs text-slate-600 hover:bg-slate-50">{{
+                                                        "routing_form.equals" | t }}</button>
                                                 </div>
                                             </div>
 
                                             <div>
-                                                <div class="text-xs text-slate-500">{{ "routing_form.pattern" | t }}</div>
+                                                <div class="text-xs text-slate-500">{{ "routing_form.pattern" | t }}
+                                                </div>
                                                 <input type="text" x-model="regexPanel.pattern"
                                                     class="w-full rounded-lg border border-slate-200 px-2 py-1 text-sm text-slate-700 focus:border-sky-300 focus:outline-none">
                                             </div>
@@ -243,7 +256,8 @@
                                                     placeholder='{{ "routing_form.test_input" | t }}'
                                                     class="col-span-2 rounded-lg border border-slate-200 px-2 py-1 text-sm text-slate-700 focus:border-sky-300 focus:outline-none">
                                                 <button type="button" @click="testRegex()"
-                                                    class="rounded-md border border-slate-200 px-2 py-1 text-sm text-sky-600 hover:bg-slate-50">{{ "routing_form.test" | t }}</button>
+                                                    class="rounded-md border border-slate-200 px-2 py-1 text-sm text-sky-600 hover:bg-slate-50">{{
+                                                    "routing_form.test" | t }}</button>
                                             </div>
 
                                             <div class="mt-2 space-y-2 text-xs">
@@ -264,11 +278,14 @@
                                                         </div>
                                                         <div class="mt-1 text-sm"
                                                             :class="regexPanel.lastMatch ? 'text-emerald-600' : 'text-rose-600'"
-                                                            x-text="regexPanel.lastMatch ? '{{ "routing_form.matched" | t }}' : '{{ "routing_form.no_match" | t }}'">
+                                                            x-text="regexPanel.lastMatch ? '{{ " routing_form.matched" |
+                                                            t }}' : '{{ "routing_form.no_match" | t }}'">
                                                         </div>
-                                                        <template x-if="regexPanel.groups && regexPanel.groups.length">
+                                                        <template x-if=" regexPanel.groups &&
+                                                            regexPanel.groups.length">
                                                             <div class="mt-2">
-                                                                <div class="text-xs text-slate-500">{{ "routing_form.capture_groups_detected" | t }}</div>
+                                                                <div class="text-xs text-slate-500">{{
+                                                                    "routing_form.capture_groups_detected" | t }}</div>
                                                                 <ul class="mt-1 list-disc pl-5 text-xs text-slate-700">
                                                                     <template x-for="(g, i) in regexPanel.groups"
                                                                         :key="i">
@@ -281,825 +298,933 @@
                                                                     </template>
                                                                 </ul>
                                                             </div>
-                                                        </template>
-                                                        <template
-                                                            x-if="regexPanel.lastMatch && (!regexPanel.groups || !regexPanel.groups.length)">
-                                                            <div class="mt-2 text-xs text-slate-400">
-                                                                {{ "routing_form.no_capture_groups_hint" | t }}
-                                                            </div>
-                                                        </template>
+                                                </template>
+                                                <template
+                                                    x-if="regexPanel.lastMatch && (!regexPanel.groups || !regexPanel.groups.length)">
+                                                    <div class="mt-2 text-xs text-slate-400">
+                                                        {{ "routing_form.no_capture_groups_hint" | t }}
                                                     </div>
                                                 </template>
                                             </div>
-
-                                            <div class="mt-3 flex justify-end gap-2">
-                                                <button type="button" @click="closeRegexPanel()"
-                                                    class="rounded-md border border-slate-200 px-3 py-1 text-xs text-slate-600 hover:bg-slate-50">{{ "common.cancel" | t }}</button>
-                                                <button type="button" @click="applyRegexPanel()"
-                                                    class="rounded-md bg-sky-600 px-3 py-1 text-xs text-white hover:bg-sky-500">{{ "routing_form.apply" | t }}</button>
-                                            </div>
-                                        </div>
-                                    </div>
-                                </div>
-                            </div>
                         </template>
                     </div>
 
-                    <div class="mt-6 space-y-3">
-                        <div class="flex items-center justify-between">
-                            <h3 class="text-xs font-semibold uppercase tracking-wide text-slate-500">{{ "routing_form.header_matchers" | t }}
-                            </h3>
-                            <button type="button" @click="addMatchHeader()"
-                                class="inline-flex items-center gap-1 rounded-lg border border-slate-200 px-2 py-1 text-xs font-semibold text-slate-600 hover:bg-slate-50">
-                                {{ "routing_form.btn_add_header" | t }}
-                            </button>
-                        </div>
-                        <template x-if="!matchHeaders.length">
-                            <p class="text-xs text-slate-400">{{ "routing_form.no_header_matchers" | t }}</p>
-                        </template>
-                        <div class="space-y-2">
-                            <template x-for="(header, index) in matchHeaders" :key="index">
-                                <div
-                                    class="grid gap-2 rounded-lg border border-slate-200 p-3 md:grid-cols-[1fr_2fr_auto]">
-                                    <input type="text" :name="'match_headers[' + index + '][name]'"
-                                        x-model="header.name"
-                                        class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                        placeholder="X-Account-Code">
-                                    <div class="relative">
-                                        <input type="text" :name="'match_headers[' + index + '][value]'"
-                                            x-model="header.value"
-                                            class="w-full rounded-lg border border-slate-200 pl-3 pr-16 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                            placeholder="^sales-.*$">
-                                        <button type="button" @click.prevent="openRegexPanel('header', index)"
-                                            class="absolute right-1 top-1/2 -translate-y-1/2 rounded-md border border-slate-200 bg-white px-2 py-1 text-xs text-slate-600 hover:bg-slate-50">
-                                            {{ "routing_form.regex" | t }}
-                                        </button>
-                                        <div x-show="regexPanel.open && regexPanel.field === 'header' && regexPanel.headerIndex === index"
-                                            x-cloak @click.outside="closeRegexPanel()"
-                                            class="absolute z-50 right-0 mt-10 w-[28rem] rounded-lg border border-slate-200 bg-white p-3 shadow-lg">
-                                            <div class="flex items-center justify-between gap-2">
-                                                <div class="text-sm font-semibold text-slate-700">{{ "routing_form.regex_helper" | t }}</div>
-                                                <div class="text-xs text-slate-400">{{ "routing_form.presets_tester" | t }}</div>
-                                            </div>
-                                            <div class="mt-2 space-y-2">
-                                                <div
-                                                    class="rounded-md bg-slate-50 px-2 py-2 text-[11px] text-slate-500">
-                                                    {{ "routing_form.capture_groups_help" | t }}
-                                                </div>
-                                                <div class="flex flex-col gap-2">
-                                                    <input type="text" x-model="regexPanel.builder"
-                                                        placeholder='{{ "routing_form.literal_text" | t }}'
-                                                        class="w-full rounded-lg border border-slate-200 px-2 py-1 text-sm text-slate-700 focus:border-sky-300 focus:outline-none">
-                                                    <div class="flex flex-wrap gap-2">
-                                                        <button type="button" @click="buildPreset('starts_with')"
-                                                            class="rounded-md border border-slate-200 px-2 py-1 text-xs text-slate-600 hover:bg-slate-50">{{ "routing_form.start_with" | t }}</button>
-                                                        <button type="button" @click="buildPreset('ends_with')"
-                                                            class="rounded-md border border-slate-200 px-2 py-1 text-xs text-slate-600 hover:bg-slate-50">{{ "routing_form.end_with" | t }}</button>
-                                                        <button type="button" @click="buildPreset('equals')"
-                                                            class="rounded-md border border-slate-200 px-2 py-1 text-xs text-slate-600 hover:bg-slate-50">{{ "routing_form.equals" | t }}</button>
-                                                    </div>
-                                                </div>
-                                                <div>
-                                                    <div class="text-xs text-slate-500">{{ "routing_form.pattern" | t }}</div>
-                                                    <input type="text" x-model="regexPanel.pattern"
-                                                        class="w-full rounded-lg border border-slate-200 px-2 py-1 text-sm text-slate-700 focus:border-sky-300 focus:outline-none">
-                                                </div>
-                                                <div class="grid grid-cols-3 gap-2">
-                                                    <input type="text" x-model="regexPanel.testInput"
-                                                        placeholder='{{ "routing_form.test_input" | t }}'
-                                                        class="col-span-2 rounded-lg border border-slate-200 px-2 py-1 text-sm text-slate-700 focus:border-sky-300 focus:outline-none">
-                                                    <button type="button" @click="testRegex()"
-                                                        class="rounded-md border border-slate-200 px-2 py-1 text-sm text-sky-600 hover:bg-slate-50">{{ "routing_form.test" | t }}</button>
-                                                </div>
-                                                <div class="mt-2 space-y-2 text-xs">
-                                                    <template x-if="regexPanel.error">
-                                                        <div class="rounded-md bg-rose-50 px-2 py-1 text-rose-700"
-                                                            x-text="regexPanel.error"></div>
-                                                    </template>
-                                                    <template x-if="regexPanel.lastMatch === null && !regexPanel.error">
-                                                        <div class="rounded-md bg-slate-50 px-2 py-1 text-slate-500">
-                                                            {{ "routing_form.use_test_hint" | t }}
-                                                        </div>
-                                                    </template>
-                                                    <template x-if="regexPanel.lastMatch !== null">
-                                                        <div
-                                                            class="rounded-md border border-slate-200 px-2 py-2 text-sm">
-                                                            <div
-                                                                class="text-xs font-semibold uppercase tracking-wide text-slate-500">
-                                                                {{ "routing_form.test_result" | t }}
-                                                            </div>
-                                                            <div class="mt-1 text-sm"
-                                                                :class="regexPanel.lastMatch ? 'text-emerald-600' : 'text-rose-600'"
-                                                                x-text="regexPanel.lastMatch ? '{{ "routing_form.matched" | t }}' : '{{ "routing_form.no_match" | t }}'">
-                                                            </div>
-                                                            <template
-                                                                x-if="regexPanel.groups && regexPanel.groups.length">
-                                                                <div class="mt-2">
-                                                                    <div class="text-xs text-slate-500">{{ "routing_form.capture_groups_detected" | t }}
-                                                                    </div>
-                                                                    <ul
-                                                                        class="mt-1 list-disc pl-5 text-xs text-slate-700">
-                                                                        <template x-for="(g, i) in regexPanel.groups"
-                                                                            :key="i">
-                                                                            <li>
-                                                                                <span class="font-mono"
-                                                                                    x-text="'{' + (i + 1) + '}'"></span>
-                                                                                <span class="mx-1">→</span>
-                                                                                <span x-text="g"></span>
-                                                                            </li>
-                                                                        </template>
-                                                                    </ul>
-                                                                </div>
-                                                            </template>
-                                                            <template
-                                                                x-if="regexPanel.lastMatch && (!regexPanel.groups || !regexPanel.groups.length)">
-                                                                <div class="mt-2 text-xs text-slate-400">
-                                                                    {{ "routing_form.no_capture_groups_hint" | t }}
-                                                                </div>
-                                                            </template>
-                                                        </div>
-                                                    </template>
-                                                </div>
-                                                <div class="mt-3 flex justify-end gap-2">
-                                                    <button type="button" @click="closeRegexPanel()"
-                                                        class="rounded-md border border-slate-200 px-3 py-1 text-xs text-slate-600 hover:bg-slate-50">{{ "common.cancel" | t }}</button>
-                                                    <button type="button" @click="applyRegexPanel()"
-                                                        class="rounded-md bg-sky-600 px-3 py-1 text-xs text-white hover:bg-sky-500">{{ "routing_form.apply" | t }}</button>
-                                                </div>
-                                            </div>
-                                        </div>
-                                    </div>
-                                    <button type="button" @click="removeMatchHeader(index)"
-                                        class="rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-500 hover:bg-slate-50">
-                                        {{ "routing_form.btn_remove" | t }}
-                                    </button>
-                                </div>
-                            </template>
-                        </div>
+                    <div class="mt-3 flex justify-end gap-2">
+                        <button type="button" @click="closeRegexPanel()"
+                            class="rounded-md border border-slate-200 px-3 py-1 text-xs text-slate-600 hover:bg-slate-50">{{
+                            "common.cancel" | t }}</button>
+                        <button type="button" @click="applyRegexPanel()"
+                            class="rounded-md bg-sky-600 px-3 py-1 text-xs text-white hover:bg-sky-500">{{
+                            "routing_form.apply" | t }}</button>
                     </div>
-                </section>
-
             </div>
+    </div>
+</div>
+</div>
+</template>
+</div>
 
-            <div x-show="activeTab === 'rewrite'" x-transition.opacity x-cloak class="space-y-6"
-                id="routing-tab-rewrite" role="tabpanel" tabindex="0">
-                <section class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
-                    <div class="flex flex-col gap-2">
-                        <h2 class="text-base font-semibold text-slate-900">{{ "routing_form.rewrite_rules_title" | t }}</h2>
-                        <p class="text-xs text-slate-500">{{ "routing_form.rewrite_rules_desc" | t }}</p>
-                    </div>
-
-                    <div class="mt-6 grid gap-4 md:grid-cols-2">
-                        <template x-for="field in rewriteFields" :key="field.key">
-                            <div class="space-y-2">
-                                <label class="text-xs font-semibold uppercase tracking-wide text-slate-500"
-                                    x-text="field.label"></label>
-                                <div class="text-[11px] text-slate-400">
-                                    {{ "routing_form.matching_regex_label" | t }}
-                                    <code class="font-mono text-[11px]"
-                                        x-text="trimString(route.match[field.key] || '') || '—'"></code>
-                                </div>
-                                <input type="text" :name="'rewrite[' + field.key + ']'"
-                                    x-model="route.rewrite[field.key]"
-                                    class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                    :placeholder="field.placeholder">
+<div class="mt-6 space-y-3">
+    <div class="flex items-center justify-between">
+        <h3 class="text-xs font-semibold uppercase tracking-wide text-slate-500">{{ "routing_form.header_matchers" | t
+            }}
+        </h3>
+        <button type="button" @click="addMatchHeader()"
+            class="inline-flex items-center gap-1 rounded-lg border border-slate-200 px-2 py-1 text-xs font-semibold text-slate-600 hover:bg-slate-50">
+            {{ "routing_form.btn_add_header" | t }}
+        </button>
+    </div>
+    <template x-if="!matchHeaders.length">
+        <p class="text-xs text-slate-400">{{ "routing_form.no_header_matchers" | t }}</p>
+    </template>
+    <div class="space-y-2">
+        <template x-for="(header, index) in matchHeaders" :key="index">
+            <div class="grid gap-2 rounded-lg border border-slate-200 p-3 md:grid-cols-[1fr_2fr_auto]">
+                <input type="text" :name="'match_headers[' + index + '][name]'" x-model="header.name"
+                    class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                    placeholder="X-Account-Code">
+                <div class="relative">
+                    <input type="text" :name="'match_headers[' + index + '][value]'" x-model="header.value"
+                        class="w-full rounded-lg border border-slate-200 pl-3 pr-16 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                        placeholder="^sales-.*$">
+                    <button type="button" @click.prevent="openRegexPanel('header', index)"
+                        class="absolute right-1 top-1/2 -translate-y-1/2 rounded-md border border-slate-200 bg-white px-2 py-1 text-xs text-slate-600 hover:bg-slate-50">
+                        {{ "routing_form.regex" | t }}
+                    </button>
+                    <div x-show="regexPanel.open && regexPanel.field === 'header' && regexPanel.headerIndex === index"
+                        x-cloak @click.outside="closeRegexPanel()"
+                        class="absolute z-50 right-0 mt-10 w-[28rem] rounded-lg border border-slate-200 bg-white p-3 shadow-lg">
+                        <div class="flex items-center justify-between gap-2">
+                            <div class="text-sm font-semibold text-slate-700">{{ "routing_form.regex_helper" | t }}
                             </div>
-                        </template>
-                    </div>
-
-                    <div class="mt-6 space-y-3">
-                        <div class="flex items-center justify-between">
-                            <h3 class="text-xs font-semibold uppercase tracking-wide text-slate-500">{{ "routing_form.set_headers_title" | t }}</h3>
-                            <button type="button" @click="addRewriteHeader()"
-                                class="inline-flex items-center gap-1 rounded-lg border border-slate-200 px-2 py-1 text-xs font-semibold text-slate-600 hover:bg-slate-50">
-                                {{ "routing_form.btn_add_header" | t }}
-                            </button>
+                            <div class="text-xs text-slate-400">{{ "routing_form.presets_tester" | t }}</div>
                         </div>
-                        <template x-if="!rewriteHeaders.length">
-                            <p class="text-xs text-slate-400">{{ "routing_form.no_header_rewrites" | t }}</p>
-                        </template>
-                        <div class="space-y-2">
-                            <template x-for="(header, index) in rewriteHeaders" :key="index">
-                                <div
-                                    class="grid gap-2 rounded-lg border border-slate-200 p-3 md:grid-cols-[1fr_2fr_auto]">
-                                    <input type="text" :name="'rewrite_headers[' + index + '][name]'"
-                                        x-model="header.name"
-                                        class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                        placeholder="X-Account-Code">
-                                    <input type="text" :name="'rewrite_headers[' + index + '][value]'"
-                                        x-model="header.value"
-                                        class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                        placeholder="sales-apac">
-                                    <button type="button" @click="removeRewriteHeader(index)"
-                                        class="rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-500 hover:bg-slate-50">
-                                        {{ "routing_form.btn_remove" | t }}
-                                    </button>
-                                </div>
-                            </template>
-                        </div>
-                    </div>
-                </section>
-            </div>
-
-            <div x-show="activeTab === 'delivery'" x-transition.opacity x-cloak class="space-y-6"
-                id="routing-tab-delivery" role="tabpanel" tabindex="0">
-                <section class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
-                    <div class="flex flex-col gap-2">
-                        <h2 class="text-base font-semibold text-slate-900">{{ "routing_form.action_trunks_title" | t }}</h2>
-                        <p class="text-xs text-slate-500">{{ "routing_form.action_trunks_desc" | t }}</p>
-                    </div>
-
-                    <div class="mt-6 space-y-6">
-                        <div class="space-y-2">
-                            <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">{{ "routing_form.dest_type_label" | t }}</label>
-                            <div class="grid gap-2 md:grid-cols-3">
-                                <template x-for="option in destinationOptions" :key="option.value">
-                                    <button type="button"
-                                        class="rounded-lg border px-3 py-2 text-xs font-semibold transition"
-                                        :class="normalizeTargetType(route.action.target_type) === option.value ? 'border-sky-400 bg-sky-50 text-sky-700' : 'border-slate-200 text-slate-600 hover:bg-slate-50'"
-                                        @click="setTargetType(option.value)">
-                                        <span x-text="option.label"></span>
-                                    </button>
-                                </template>
+                        <div class="mt-2 space-y-2">
+                            <div class="rounded-md bg-slate-50 px-2 py-2 text-[11px] text-slate-500">
+                                {{ "routing_form.capture_groups_help" | t }}
                             </div>
-                        </div>
-
-                        <div class="space-y-6" x-show="isSipTrunkTarget" x-cloak>
-                            <div class="space-y-2">
-                                <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">{{ "routing_form.selection_algorithm_label" | t }}</label>
+                            <div class="flex flex-col gap-2">
+                                <input type="text" x-model="regexPanel.builder"
+                                    placeholder='{{ "routing_form.literal_text" | t }}'
+                                    class="w-full rounded-lg border border-slate-200 px-2 py-1 text-sm text-slate-700 focus:border-sky-300 focus:outline-none">
                                 <div class="flex flex-wrap gap-2">
-                                    <template x-for="option in algorithmOptions" :key="option.value">
-                                        <button type="button"
-                                            class="rounded-lg border px-3 py-2 text-xs font-semibold transition"
-                                            :class="route.action.select === option.value ? 'border-sky-300 bg-sky-50 text-sky-700' : 'border-slate-200 text-slate-600 hover:bg-slate-50'"
-                                            @click="setAlgorithm(option.value)">
-                                            <span x-text="option.label"></span>
-                                        </button>
-                                    </template>
-                                </div>
-                                <template x-if="route.action.select === 'hash'">
-                                    <div class="mt-3 space-y-2">
-                                        <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">{{ "routing_form.hash_key_label" | t }}</label>
-                                        <input type="text" name="hash_key" x-model="route.action.hash_key"
-                                            class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                            placeholder="caller">
-                                    </div>
-                                </template>
-                            </div>
-
-                            <div class="space-y-3">
-                                <div class="flex items-center justify-between">
-                                    <h3 class="text-xs font-semibold uppercase tracking-wide text-slate-500">{{ "routing_form.trunk_pool_label" | t }}</h3>
-                                    <button type="button" @click="addTrunkAssignment()"
-                                        class="inline-flex items-center gap-1 rounded-lg border border-slate-200 px-2 py-1 text-xs font-semibold text-slate-600 hover:bg-slate-50">
-                                        {{ "routing_form.btn_add_trunk" | t }}
-                                    </button>
-                                </div>
-                                <template x-if="!route.action.trunks.length">
-                                    <p class="text-xs text-slate-400">{{ "routing_form.no_trunks_hint" | t }}</p>
-                                </template>
-                                <div class="space-y-3">
-                                    <template x-for="(trunk, index) in route.action.trunks" :key="index">
-                                        <div
-                                            class="grid gap-2 rounded-lg border border-slate-200 p-3 md:grid-cols-[minmax(0,1fr)_120px_auto]">
-                                            <select x-model="trunk.name"
-                                                class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
-                                                <option value="">{{ "routing_form.select_trunk_placeholder" | t }}</option>
-                                                <template x-for="option in trunkOptions" :key="option.name">
-                                                    <option :value="option.name"
-                                                        x-text="option.display_name || option.name">
-                                                    </option>
-                                                </template>
-                                            </select>
-                                            <input type="number" min="0" step="1" x-model.number="trunk.weight"
-                                                class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                                placeholder='{{ "routing_form.weight_placeholder" | t }}'>
-                                            <button type="button" @click="removeTrunkAssignment(index)"
-                                                class="rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-500 hover:bg-slate-50">
-                                                {{ "routing_form.btn_remove" | t }}
-                                            </button>
-                                        </div>
-                                    </template>
-                                </div>
-                                <div class="rounded-lg bg-slate-50 p-3 text-xs text-slate-500">
-                                    <div class="flex flex-wrap items-center gap-3">
-                                        <span>{{ "routing_form.total_weight_label" | t }}</span>
-                                        <span class="rounded-full bg-white px-2 py-1 font-semibold text-slate-700"
-                                            x-text="totalWeight"></span>
-                                        <span>{{ "routing_form.distribution_preview" | t }}</span>
-                                        <div class="flex flex-wrap gap-2 text-[11px]">
-                                            <template x-for="item in normalizedWeights" :key="item.name">
-                                                <span
-                                                    class="inline-flex items-center gap-1 rounded-full bg-white px-2 py-1 font-semibold text-slate-600">
-                                                    <span x-text="item.label"></span>
-                                                    <span class="text-slate-400" x-text="item.percent + '%' "></span>
-                                                </span>
-                                            </template>
-                                        </div>
-                                    </div>
+                                    <button type="button" @click="buildPreset('starts_with')"
+                                        class="rounded-md border border-slate-200 px-2 py-1 text-xs text-slate-600 hover:bg-slate-50">{{
+                                        "routing_form.start_with" | t }}</button>
+                                    <button type="button" @click="buildPreset('ends_with')"
+                                        class="rounded-md border border-slate-200 px-2 py-1 text-xs text-slate-600 hover:bg-slate-50">{{
+                                        "routing_form.end_with" | t }}</button>
+                                    <button type="button" @click="buildPreset('equals')"
+                                        class="rounded-md border border-slate-200 px-2 py-1 text-xs text-slate-600 hover:bg-slate-50">{{
+                                        "routing_form.equals" | t }}</button>
                                 </div>
                             </div>
-                        </div>
-
-                        <div class="rounded-xl border border-slate-200 bg-slate-50 p-4" x-show="isQueueTarget" x-cloak>
-                            <div class="flex items-center justify-between">
-                                <div>
-                                    <h3 class="text-sm font-semibold text-slate-800">{{ "routing_form.queue_dest_title" | t }}</h3>
-                                    <p class="text-xs text-slate-500">{{ "routing_form.queue_dest_desc" | t }}</p>
-                                </div>
-                                <a :href="queuesUrl()"
-                                    class="text-xs font-semibold text-sky-600 underline-offset-2 hover:underline">
-                                    {{ "routing_form.manage_queues" | t }}
-                                </a>
-                            </div>
-                            <div class="mt-4 space-y-2">
-                                <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">{{ "routing_form.queue_file_path_label" | t }}</label>
-                                <input type="text" x-model="route.action.queue_file" maxlength="200"
-                                    class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                    placeholder='{{ "routing_form.queue_file_placeholder" | t }}'>
-                                <p class="text-[11px] text-slate-500">{{ "routing_form.queue_file_hint" | t }}</p>
-                            </div>
-                            <div class="mt-4 space-y-3">
-                                <div class="flex items-center justify-between">
-                                    <h4 class="text-xs font-semibold uppercase tracking-wide text-slate-500">{{ "routing_form.saved_queues_label" | t }}</h4>
-                                    <span class="text-[11px] text-slate-400"
-                                        x-text="'{{ "routing_form.n_available" | t }}'.replace('{n}', queueOptions.length)"></span>
-                                </div>
-                                <template x-if="queueOptions.length">
-                                    <ul class="space-y-2 text-xs text-slate-600">
-                                        <template x-for="option in queueOptions" :key="option.id">
-                                            <li class="rounded-lg border border-slate-200 bg-white p-3">
-                                                <div class="flex flex-wrap items-center justify-between gap-2">
-                                                    <div>
-                                                        <div class="text-sm font-semibold text-slate-800"
-                                                            x-text="option.name"></div>
-                                                        <div class="text-[11px] text-slate-500"
-                                                            x-text="option.description || '{{ "routing_form.no_description" | t }}'">
-                                                        </div>
-                                                    </div>
-                                                    <div class="inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-[11px] font-semibold"
-                                                        :class="option.is_active ? 'bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200' : 'bg-rose-50 text-rose-600 ring-1 ring-rose-200'">
-                                                        <span x-text="option.is_active ? '{{ "routing_form.queue_active" | t }}' : '{{ "routing_form.queue_disabled" | t }}'"></span>
-                                                    </div>
-                                                </div>
-                                                <div class="mt-2 flex flex-wrap items-center gap-2 text-[11px]">
-                                                    <span class="rounded bg-slate-100 px-2 py-1 font-mono"
-                                                        x-text="queueSuggestion(option)"></span>
-                                                    <button type="button" @click="applyQueueSuggestion(option)"
-                                                        class="rounded border border-slate-200 px-2 py-0.5 text-xs font-semibold text-slate-600 hover:bg-slate-50">
-                                                        {{ "routing_form.use_path" | t }}
-                                                    </button>
-                                                    <span class="text-slate-400"
-                                                        x-text="'{{ "routing_form.updated_at_label" | t }}'.replace('{time}', formatTimestamp(option.updated_at))"></span>
-                                                </div>
-                                            </li>
-                                        </template>
-                                    </ul>
-                                </template>
-                                <template x-if="!queueOptions.length">
-                                    <p class="text-xs text-rose-500">{{ "routing_form.no_queues_available" | t }}</p>
-                                </template>
-                            </div>
-                        </div>
-
-                        <div class="rounded-xl border border-slate-200 bg-slate-50 p-4" x-show="isVoicemailTarget"
-                            x-cloak>
                             <div>
-                                <h3 class="text-sm font-semibold text-slate-800">{{ "routing_form.voicemail_dest_title" | t }}</h3>
-                                <p class="text-xs text-slate-500">{{ "routing_form.voicemail_dest_desc" | t }}</p>
+                                <div class="text-xs text-slate-500">{{ "routing_form.pattern" | t }}</div>
+                                <input type="text" x-model="regexPanel.pattern"
+                                    class="w-full rounded-lg border border-slate-200 px-2 py-1 text-sm text-slate-700 focus:border-sky-300 focus:outline-none">
                             </div>
-                            <div class="mt-4 space-y-2">
-                                <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">{{ "routing_form.voicemail_target_ext_label" | t }}</label>
-                                <input type="text" x-model="route.action.voicemail_extension" maxlength="50"
-                                    class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                    placeholder='{{ "routing_form.voicemail_ext_placeholder" | t }}'>
-                                <p class="text-[11px] text-slate-500">{{ "routing_form.voicemail_ext_hint" | t }}</p>
+                            <div class="grid grid-cols-3 gap-2">
+                                <input type="text" x-model="regexPanel.testInput"
+                                    placeholder='{{ "routing_form.test_input" | t }}'
+                                    class="col-span-2 rounded-lg border border-slate-200 px-2 py-1 text-sm text-slate-700 focus:border-sky-300 focus:outline-none">
+                                <button type="button" @click="testRegex()"
+                                    class="rounded-md border border-slate-200 px-2 py-1 text-sm text-sky-600 hover:bg-slate-50">{{
+                                    "routing_form.test" | t }}</button>
                             </div>
-                        </div>
-
-                        <div class="rounded-xl border border-slate-200 bg-slate-50 p-4" x-show="isIvrTarget" x-cloak>
-                            <div class="flex items-center justify-between">
-                                <div>
-                                    <h3 class="text-sm font-semibold text-slate-800">{{ "routing_form.ivr_dest_title" | t }}</h3>
-                                    <p class="text-xs text-slate-500">{{ "routing_form.ivr_dest_desc" | t }}</p>
-                                </div>
-                                <!-- "Manage IVR flows" link only available with the IVR Editor addon -->
-                                <a :href="ivrEditorUrl()"
-                                    class="text-xs font-semibold text-sky-600 underline-offset-2 hover:underline"
-                                    x-show="window.ivrEditorAddonEnabled" x-cloak>
-                                    {{ "routing_form.manage_ivr_flows" | t }}
-                                </a>
-                            </div>
-                            <!-- File-path input — always available, no addon required -->
-                            <div class="mt-4 space-y-2">
-                                <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">{{ "routing_form.ivr_file_path_label" | t }}</label>
-                                <input type="text" x-model="route.action.ivr_file" maxlength="200"
-                                    class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                    placeholder='{{ "routing_form.ivr_file_placeholder" | t }}'>
-                                <p class="text-[11px] text-slate-500">{{ "routing_form.ivr_file_hint" | t }}</p>
-                            </div>
-                            <!-- Published project picker — only available with the IVR Editor addon -->
-                            <div class="mt-4 space-y-3" x-show="window.ivrEditorAddonEnabled" x-cloak>
-                                <div class="flex items-center justify-between">
-                                    <h4 class="text-xs font-semibold uppercase tracking-wide text-slate-500">{{ "routing_form.published_ivr_flows" | t }}</h4>
-                                    <span class="text-[11px] text-slate-400"
-                                        x-text="'{{ "routing_form.n_available" | t }}'.replace('{n}', ivrOptions.length)"></span>
-                                </div>
-                                <template x-if="ivrOptions.length">
-                                    <ul class="space-y-2 text-xs text-slate-600">
-                                        <template x-for="option in ivrOptions" :key="option.id">
-                                            <li class="rounded-lg border border-slate-200 bg-white p-3">
-                                                <div class="flex flex-wrap items-center justify-between gap-2">
-                                                    <div>
-                                                        <div class="text-sm font-semibold text-slate-800"
-                                                            x-text="option.name"></div>
-                                                        <div class="text-[11px] text-slate-500"
-                                                            x-text="option.description || '{{ "routing_form.no_description" | t }}'">
-                                                        </div>
-                                                    </div>
-                                                    <div class="inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-[11px] font-semibold"
-                                                        :class="option.status === 'active' ? 'bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200' : 'bg-rose-50 text-rose-600 ring-1 ring-rose-200'">
-                                                        <span
-                                                            x-text="option.status === 'active' ? '{{ "routing_form.queue_active" | t }}' : '{{ "routing_form.queue_disabled" | t }}'"></span>
-                                                    </div>
-                                                </div>
-                                                <div class="mt-2 flex flex-wrap items-center gap-2 text-[11px]">
-                                                    <span class="rounded bg-slate-100 px-2 py-1 font-mono"
-                                                        x-text="option.file"></span>
-                                                    <button type="button" @click="route.action.ivr_file = option.file"
-                                                        class="rounded border border-slate-200 px-2 py-0.5 text-xs font-semibold text-slate-600 hover:bg-slate-50">
-                                                        {{ "routing_form.use_path" | t }}
-                                                    </button>
-                                                    <template x-if="option.published_at">
-                                                        <span class="text-slate-400"
-                                                            x-text="'{{ "routing_form.published_at" | t }}'.replace('{time}', formatTimestamp(option.published_at))"></span>
-                                                    </template>
-                                                    <template x-if="!option.published_at">
-                                                        <span class="text-amber-500">{{ "routing_form.not_yet_published" | t }}</span>
-                                                    </template>
-                                                </div>
-                                            </li>
-                                        </template>
-                                    </ul>
+                            <div class="mt-2 space-y-2 text-xs">
+                                <template x-if="regexPanel.error">
+                                    <div class="rounded-md bg-rose-50 px-2 py-1 text-rose-700"
+                                        x-text="regexPanel.error"></div>
                                 </template>
-                                <template x-if="!ivrOptions.length">
-                                    <p class="text-xs text-rose-500">{{ "routing_form.no_ivr_available" | t }}</p>
+                                <template x-if="regexPanel.lastMatch === null && !regexPanel.error">
+                                    <div class="rounded-md bg-slate-50 px-2 py-1 text-slate-500">
+                                        {{ "routing_form.use_test_hint" | t }}
+                                    </div>
+                                </template>
+                                <template x-if="regexPanel.lastMatch !== null">
+                                    <div class="rounded-md border border-slate-200 px-2 py-2 text-sm">
+                                        <div class="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                                            {{ "routing_form.test_result" | t }}
+                                        </div>
+                                        <div class="mt-1 text-sm"
+                                            :class="regexPanel.lastMatch ? 'text-emerald-600' : 'text-rose-600'"
+                                            x-text="regexPanel.lastMatch ? '{{ " routing_form.matched" | t }}'
+                                            : '{{ "routing_form.no_match" | t }}'">
+                                                            </div>
+                                                            <template
+                                                                x-if=" regexPanel.groups && regexPanel.groups.length">
+                                            <div class="mt-2">
+                                                <div class="text-xs text-slate-500">{{
+                                                    "routing_form.capture_groups_detected" | t }}
+                                                </div>
+                                                <ul class="mt-1 list-disc pl-5 text-xs text-slate-700">
+                                                    <template x-for="(g, i) in regexPanel.groups" :key="i">
+                                                        <li>
+                                                            <span class="font-mono" x-text="'{' + (i + 1) + '}'"></span>
+                                                            <span class="mx-1">→</span>
+                                                            <span x-text="g"></span>
+                                                        </li>
+                                                    </template>
+                                                </ul>
+                                            </div>
+                                </template>
+                                <template
+                                    x-if="regexPanel.lastMatch && (!regexPanel.groups || !regexPanel.groups.length)">
+                                    <div class="mt-2 text-xs text-slate-400">
+                                        {{ "routing_form.no_capture_groups_hint" | t }}
+                                    </div>
                                 </template>
                             </div>
-                        </div>
+        </template>
+    </div>
+    <div class="mt-3 flex justify-end gap-2">
+        <button type="button" @click="closeRegexPanel()"
+            class="rounded-md border border-slate-200 px-3 py-1 text-xs text-slate-600 hover:bg-slate-50">{{
+            "common.cancel" | t }}</button>
+        <button type="button" @click="applyRegexPanel()"
+            class="rounded-md bg-sky-600 px-3 py-1 text-xs text-white hover:bg-sky-500">{{ "routing_form.apply" | t
+            }}</button>
+    </div>
+</div>
+</div>
+</div>
+<button type="button" @click="removeMatchHeader(index)"
+    class="rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-500 hover:bg-slate-50">
+    {{ "routing_form.btn_remove" | t }}
+</button>
+</div>
+</template>
+</div>
+</div>
+</section>
 
-                        <div class="grid gap-4 md:grid-cols-2">
-                            <div class="space-y-2">
-                                <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">{{ "routing_form.source_trunk_label" | t }}</label>
-                                <select name="source_trunk" x-model="route.source_trunk"
-                                    class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
-                                    <option value="">{{ "routing_form.select_source_trunk" | t }}</option>
-                                    <template x-for="option in trunkOptions" :key="'source-' + option.name">
+</div>
+
+<div x-show="activeTab === 'rewrite'" x-transition.opacity x-cloak class="space-y-6" id="routing-tab-rewrite"
+    role="tabpanel" tabindex="0">
+    <section class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+        <div class="flex flex-col gap-2">
+            <h2 class="text-base font-semibold text-slate-900">{{ "routing_form.rewrite_rules_title" | t }}</h2>
+            <p class="text-xs text-slate-500">{{ "routing_form.rewrite_rules_desc" | t }}</p>
+        </div>
+
+        <div class="mt-6 grid gap-4 md:grid-cols-2">
+            <template x-for="field in rewriteFields" :key="field.key">
+                <div class="space-y-2">
+                    <label class="text-xs font-semibold uppercase tracking-wide text-slate-500"
+                        x-text="field.label"></label>
+                    <div class="text-[11px] text-slate-400">
+                        {{ "routing_form.matching_regex_label" | t }}
+                        <code class="font-mono text-[11px]"
+                            x-text="trimString(route.match[field.key] || '') || '—'"></code>
+                    </div>
+                    <input type="text" :name="'rewrite[' + field.key + ']'" x-model="route.rewrite[field.key]"
+                        class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                        :placeholder="field.placeholder">
+                </div>
+            </template>
+        </div>
+
+        <div class="mt-6 space-y-3">
+            <div class="flex items-center justify-between">
+                <h3 class="text-xs font-semibold uppercase tracking-wide text-slate-500">{{
+                    "routing_form.set_headers_title" | t }}</h3>
+                <button type="button" @click="addRewriteHeader()"
+                    class="inline-flex items-center gap-1 rounded-lg border border-slate-200 px-2 py-1 text-xs font-semibold text-slate-600 hover:bg-slate-50">
+                    {{ "routing_form.btn_add_header" | t }}
+                </button>
+            </div>
+            <template x-if="!rewriteHeaders.length">
+                <p class="text-xs text-slate-400">{{ "routing_form.no_header_rewrites" | t }}</p>
+            </template>
+            <div class="space-y-2">
+                <template x-for="(header, index) in rewriteHeaders" :key="index">
+                    <div class="grid gap-2 rounded-lg border border-slate-200 p-3 md:grid-cols-[1fr_2fr_auto]">
+                        <input type="text" :name="'rewrite_headers[' + index + '][name]'" x-model="header.name"
+                            class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                            placeholder="X-Account-Code">
+                        <input type="text" :name="'rewrite_headers[' + index + '][value]'" x-model="header.value"
+                            class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                            placeholder="sales-apac">
+                        <button type="button" @click="removeRewriteHeader(index)"
+                            class="rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-500 hover:bg-slate-50">
+                            {{ "routing_form.btn_remove" | t }}
+                        </button>
+                    </div>
+                </template>
+            </div>
+        </div>
+    </section>
+</div>
+
+<div x-show="activeTab === 'delivery'" x-transition.opacity x-cloak class="space-y-6" id="routing-tab-delivery"
+    role="tabpanel" tabindex="0">
+    <section class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+        <div class="flex flex-col gap-2">
+            <h2 class="text-base font-semibold text-slate-900">{{ "routing_form.action_trunks_title" | t }}</h2>
+            <p class="text-xs text-slate-500">{{ "routing_form.action_trunks_desc" | t }}</p>
+        </div>
+
+        <div class="mt-6 space-y-6">
+            <div class="space-y-2">
+                <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">{{
+                    "routing_form.dest_type_label" | t }}</label>
+                <div class="grid gap-2 md:grid-cols-3">
+                    <template x-for="option in destinationOptions" :key="option.value">
+                        <button type="button" class="rounded-lg border px-3 py-2 text-xs font-semibold transition"
+                            :class="normalizeTargetType(route.action.target_type) === option.value ? 'border-sky-400 bg-sky-50 text-sky-700' : 'border-slate-200 text-slate-600 hover:bg-slate-50'"
+                            @click="setTargetType(option.value)">
+                            <span x-text="option.label"></span>
+                        </button>
+                    </template>
+                </div>
+            </div>
+
+            <div class="space-y-6" x-show="isSipTrunkTarget" x-cloak>
+                <div class="space-y-2">
+                    <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">{{
+                        "routing_form.selection_algorithm_label" | t }}</label>
+                    <div class="flex flex-wrap gap-2">
+                        <template x-for="option in algorithmOptions" :key="option.value">
+                            <button type="button" class="rounded-lg border px-3 py-2 text-xs font-semibold transition"
+                                :class="route.action.select === option.value ? 'border-sky-300 bg-sky-50 text-sky-700' : 'border-slate-200 text-slate-600 hover:bg-slate-50'"
+                                @click="setAlgorithm(option.value)">
+                                <span x-text="option.label"></span>
+                            </button>
+                        </template>
+                    </div>
+                    <template x-if="route.action.select === 'hash'">
+                        <div class="mt-3 space-y-2">
+                            <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">{{
+                                "routing_form.hash_key_label" | t }}</label>
+                            <input type="text" name="hash_key" x-model="route.action.hash_key"
+                                class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                placeholder="caller">
+                        </div>
+                    </template>
+                </div>
+
+                <div class="space-y-3">
+                    <div class="flex items-center justify-between">
+                        <h3 class="text-xs font-semibold uppercase tracking-wide text-slate-500">{{
+                            "routing_form.trunk_pool_label" | t }}</h3>
+                        <button type="button" @click="addTrunkAssignment()"
+                            class="inline-flex items-center gap-1 rounded-lg border border-slate-200 px-2 py-1 text-xs font-semibold text-slate-600 hover:bg-slate-50">
+                            {{ "routing_form.btn_add_trunk" | t }}
+                        </button>
+                    </div>
+                    <template x-if="!route.action.trunks.length">
+                        <p class="text-xs text-slate-400">{{ "routing_form.no_trunks_hint" | t }}</p>
+                    </template>
+                    <div class="space-y-3">
+                        <template x-for="(trunk, index) in route.action.trunks" :key="index">
+                            <div
+                                class="grid gap-2 rounded-lg border border-slate-200 p-3 md:grid-cols-[minmax(0,1fr)_120px_auto]">
+                                <select x-model="trunk.name"
+                                    class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                                    <option value="">{{ "routing_form.select_trunk_placeholder" | t }}</option>
+                                    <template x-for="option in trunkOptions" :key="option.name">
                                         <option :value="option.name" x-text="option.display_name || option.name">
                                         </option>
                                     </template>
                                 </select>
+                                <input type="number" min="0" step="1" x-model.number="trunk.weight"
+                                    class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                    placeholder='{{ "routing_form.weight_placeholder" | t }}'>
+                                <button type="button" @click="removeTrunkAssignment(index)"
+                                    class="rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-500 hover:bg-slate-50">
+                                    {{ "routing_form.btn_remove" | t }}
+                                </button>
+                            </div>
+                        </template>
+                    </div>
+                    <div class="rounded-lg bg-slate-50 p-3 text-xs text-slate-500">
+                        <div class="flex flex-wrap items-center gap-3">
+                            <span>{{ "routing_form.total_weight_label" | t }}</span>
+                            <span class="rounded-full bg-white px-2 py-1 font-semibold text-slate-700"
+                                x-text="totalWeight"></span>
+                            <span>{{ "routing_form.distribution_preview" | t }}</span>
+                            <div class="flex flex-wrap gap-2 text-[11px]">
+                                <template x-for="item in normalizedWeights" :key="item.name">
+                                    <span
+                                        class="inline-flex items-center gap-1 rounded-full bg-white px-2 py-1 font-semibold text-slate-600">
+                                        <span x-text="item.label"></span>
+                                        <span class="text-slate-400" x-text="item.percent + '%' "></span>
+                                    </span>
+                                </template>
                             </div>
                         </div>
                     </div>
-                </section>
+                </div>
             </div>
 
-            <div x-show="activeTab === 'policy'" x-transition.opacity x-cloak class="space-y-6" id="routing-tab-policy"
-                role="tabpanel" tabindex="0">
-                <section class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
-                    <div class="flex flex-col gap-2">
-                        <h2 class="text-base font-semibold text-slate-900">{{ "routing_form.call_policy_title" | t }}</h2>
-                        <p class="text-xs text-slate-500">{{ "routing_form.call_policy_desc" | t }}</p>
+            <div class="rounded-xl border border-slate-200 bg-slate-50 p-4" x-show="isQueueTarget" x-cloak>
+                <div class="flex items-center justify-between">
+                    <div>
+                        <h3 class="text-sm font-semibold text-slate-800">{{ "routing_form.queue_dest_title" | t }}</h3>
+                        <p class="text-xs text-slate-500">{{ "routing_form.queue_dest_desc" | t }}</p>
                     </div>
-
-                    <div class="mt-6 grid gap-6 md:grid-cols-2">
-                        <!-- Frequency Limit -->
-                        <div class="space-y-4 rounded-lg border border-slate-200 p-4">
-                            <h3 class="text-sm font-semibold text-slate-800">{{ "routing_form.freq_limit_title" | t }}</h3>
-                            <div class="grid gap-4">
-                                <div class="space-y-2">
-                                    <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">{{ "routing_form.max_calls_label" | t }}</label>
-                                    <input type="number" min="0" x-model.number="route.policy.frequency_limit.max_calls"
-                                        class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                        placeholder='{{ "routing_form.max_calls_placeholder" | t }}'>
-                                </div>
-                                <div class="space-y-2">
-                                    <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">{{ "routing_form.duration_seconds_label" | t }}</label>
-                                    <input type="number" min="0" x-model.number="route.policy.frequency_limit.duration"
-                                        class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                        placeholder='{{ "routing_form.duration_seconds_placeholder" | t }}'>
-                                </div>
-                            </div>
+                    <a :href="queuesUrl()"
+                        class="text-xs font-semibold text-sky-600 underline-offset-2 hover:underline">
+                        {{ "routing_form.manage_queues" | t }}
+                    </a>
+                </div>
+                <div class="mt-4 space-y-2">
+                    <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">{{
+                        "routing_form.queue_file_path_label" | t }}</label>
+                    <template x-if="queueOptions.length">
+                        <!-- Issue #176: use a dropdown instead of a free-text path input so
+                                         the user picks a queue by name and the stable db-<id> reference
+                                         is stored — compatible with GUI-generated queues.toml entries. -->
+                        <select x-model="route.action.queue_file"
+                            class="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                            <option value="">— {{ "routing_form.queue_file_placeholder" | t }} —</option>
+                            <template x-for="option in queueOptions" :key="option.id">
+                                <option :value="queueSuggestion(option)"
+                                    :selected="route.action.queue_file === queueSuggestion(option)"
+                                    x-text="option.name + ' (' + option.id + ')' + (option.is_active ? '' : ' (' + translations.status_paused + ')')">
+                                </option>
+                            </template>
+                        </select>
+                    </template>
+                    <template x-if="!queueOptions.length">
+                        <div class="space-y-1">
+                            <input type="text" x-model="route.action.queue_file"
+                                class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                placeholder='{{ "routing_form.queue_file_placeholder" | t }}'>
+                            <p class="text-xs text-amber-600">
+                                {{ "routing_form.no_queues_available" | t }}
+                                <a :href="queuesUrl()" class="underline">{{ "routing_form.no_queues_create_first" | t
+                                    }}</a>
+                            </p>
                         </div>
-
-                        <!-- Concurrency & Daily Limit -->
-                        <div class="space-y-4 rounded-lg border border-slate-200 p-4">
-                            <h3 class="text-sm font-semibold text-slate-800">{{ "routing_form.limits_title" | t }}</h3>
-                            <div class="grid gap-4">
-                                <div class="space-y-2">
-                                    <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">{{ "routing_form.max_concurrency_label" | t }}</label>
-                                    <input type="number" min="0" x-model.number="route.policy.concurrency"
-                                        class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                        placeholder='{{ "routing_form.max_concurrency_placeholder" | t }}'>
-                                </div>
-                                <div class="space-y-2">
-                                    <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">{{ "routing_form.daily_limit_label" | t }}</label>
-                                    <input type="number" min="0" x-model.number="route.policy.daily_limit"
-                                        class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                        placeholder='{{ "routing_form.daily_limit_placeholder" | t }}'>
-                                </div>
-                            </div>
-                        </div>
-
-                        <!-- Time Window -->
-                        <div class="md:col-span-2 space-y-4 rounded-lg border border-slate-200 p-4">
-                            <h3 class="text-sm font-semibold text-slate-800">{{ "routing_form.time_window_title" | t }}</h3>
-                            <div class="grid gap-4 md:grid-cols-2">
-                                <div class="space-y-2">
-                                    <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">{{ "routing_form.start_time_label" | t }}</label>
-                                    <input type="time" x-model="route.policy.time_window.start_time"
-                                        class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
-                                </div>
-                                <div class="space-y-2">
-                                    <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">{{ "routing_form.end_time_label" | t }}</label>
-                                    <input type="time" x-model="route.policy.time_window.end_time"
-                                        class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
-                                </div>
-                                <div class="md:col-span-2 space-y-2">
-                                    <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">{{ "routing_form.active_days_label" | t }}</label>
-                                    <div class="flex flex-wrap gap-3">
-                                        <template x-for="day in ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']"
-                                            :key="day">
-                                            <label class="inline-flex items-center gap-2">
-                                                <input type="checkbox" :value="day"
-                                                    x-model="route.policy.time_window.days"
-                                                    class="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-500">
-                                                <span class="text-sm text-slate-700" x-text="day"></span>
-                                            </label>
-                                        </template>
-                                    </div>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                </section>
+                    </template>
+                    <p class="text-[11px] text-slate-500">{{ "routing_form.queue_file_hint" | t }}</p>
+                </div>
             </div>
-        </form>
-    </div>
+
+            <div class="rounded-xl border border-slate-200 bg-slate-50 p-4" x-show="isVoicemailTarget" x-cloak>
+                <div>
+                    <h3 class="text-sm font-semibold text-slate-800">{{ "routing_form.voicemail_dest_title" | t }}</h3>
+                    <p class="text-xs text-slate-500">{{ "routing_form.voicemail_dest_desc" | t }}</p>
+                </div>
+                <div class="mt-4 space-y-2">
+                    <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">{{
+                        "routing_form.voicemail_target_ext_label" | t }}</label>
+                    <input type="text" x-model="route.action.voicemail_extension" maxlength="50"
+                        class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                        placeholder='{{ "routing_form.voicemail_ext_placeholder" | t }}'>
+                    <p class="text-[11px] text-slate-500">{{ "routing_form.voicemail_ext_hint" | t }}</p>
+                </div>
+            </div>
+
+            <div class="rounded-xl border border-slate-200 bg-slate-50 p-4" x-show="isIvrTarget" x-cloak>
+                <div class="flex items-center justify-between">
+                    <div>
+                        <h3 class="text-sm font-semibold text-slate-800">{{ "routing_form.ivr_dest_title" | t }}</h3>
+                        <p class="text-xs text-slate-500">{{ "routing_form.ivr_dest_desc" | t }}</p>
+                    </div>
+                    <!-- "Manage IVR flows" link only available with the IVR Editor addon -->
+                    <a :href="ivrEditorUrl()"
+                        class="text-xs font-semibold text-sky-600 underline-offset-2 hover:underline"
+                        x-show="window.ivrEditorAddonEnabled" x-cloak>
+                        {{ "routing_form.manage_ivr_flows" | t }}
+                    </a>
+                </div>
+                <!-- File-path input — always available, no addon required -->
+                <div class="mt-4 space-y-2">
+                    <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">{{
+                        "routing_form.ivr_file_path_label" | t }}</label>
+                    <input type="text" x-model="route.action.ivr_file" maxlength="200"
+                        class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                        placeholder='{{ "routing_form.ivr_file_placeholder" | t }}'>
+                    <p class="text-[11px] text-slate-500">{{ "routing_form.ivr_file_hint" | t }}</p>
+                </div>
+                <!-- Published project picker — only available with the IVR Editor addon -->
+                <div class="mt-4 space-y-3" x-show="window.ivrEditorAddonEnabled" x-cloak>
+                    <div class="flex items-center justify-between">
+                        <h4 class="text-xs font-semibold uppercase tracking-wide text-slate-500">{{
+                            "routing_form.published_ivr_flows" | t }}</h4>
+                        <span class="text-[11px] text-slate-400" x-text="'{{ " routing_form.n_available" | t
+                            }}'.replace('{n}', ivrOptions.length)"></span>
+                    </div>
+                    <template x-if="ivrOptions.length">
+                        <ul class="space-y-2 text-xs text-slate-600">
+                            <template x-for="option in ivrOptions" :key="option.id">
+                                <li class="rounded-lg border border-slate-200 bg-white p-3">
+                                    <div class="flex flex-wrap items-center justify-between gap-2">
+                                        <div>
+                                            <div class="text-sm font-semibold text-slate-800" x-text="option.name">
+                                            </div>
+                                            <div class="text-[11px] text-slate-500" x-text="option.description || '{{ "
+                                                routing_form.no_description" | t }}'">
+                                            </div>
+                                        </div>
+                                        <div class="inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-[11px] font-semibold"
+                                            :class="option.status === 'active' ? 'bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200' : 'bg-rose-50 text-rose-600 ring-1 ring-rose-200'">
+                                            <span x-text="option.status === 'active' ? '{{ " routing_form.queue_active"
+                                                | t }}' : '{{ "routing_form.queue_disabled" | t }}'"></span>
+                                                    </div>
+                                                </div>
+                                                <div class=" mt-2 flex flex-wrap items-center gap-2 text-[11px]">
+                                                <span class="rounded bg-slate-100 px-2 py-1 font-mono"
+                                                    x-text="option.file"></span>
+                                                <button type="button" @click="route.action.ivr_file = option.file"
+                                                    class="rounded border border-slate-200 px-2 py-0.5 text-xs font-semibold text-slate-600 hover:bg-slate-50">
+                                                    {{ "routing_form.use_path" | t }}
+                                                </button>
+                                                <template x-if="option.published_at">
+                                                    <span class="text-slate-400" x-text="'{{ "
+                                                        routing_form.published_at" | t }}'.replace('{time}',
+                                                        formatTimestamp(option.published_at))"></span>
+                                                </template>
+                                                <template x-if="!option.published_at">
+                                                    <span class="text-amber-500">{{ "routing_form.not_yet_published" | t
+                                                        }}</span>
+                                                </template>
+                                        </div>
+                                </li>
+                            </template>
+                        </ul>
+                    </template>
+                    <template x-if="!ivrOptions.length">
+                        <p class="text-xs text-rose-500">{{ "routing_form.no_ivr_available" | t }}</p>
+                    </template>
+                </div>
+            </div>
+
+            <div class="grid gap-4 md:grid-cols-2">
+                <div class="space-y-2">
+                    <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">{{
+                        "routing_form.source_trunk_label" | t }}</label>
+                    <select name="source_trunk" x-model="route.source_trunk"
+                        class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                        <option value="">{{ "routing_form.select_source_trunk" | t }}</option>
+                        <template x-for="option in trunkOptions" :key="'source-' + option.name">
+                            <option :value="option.name" x-text="option.display_name || option.name">
+                            </option>
+                        </template>
+                    </select>
+                </div>
+            </div>
+        </div>
+    </section>
+</div>
+
+<div x-show="activeTab === 'policy'" x-transition.opacity x-cloak class="space-y-6" id="routing-tab-policy"
+    role="tabpanel" tabindex="0">
+    <section class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+        <div class="flex flex-col gap-2">
+            <h2 class="text-base font-semibold text-slate-900">{{ "routing_form.call_policy_title" | t }}</h2>
+            <p class="text-xs text-slate-500">{{ "routing_form.call_policy_desc" | t }}</p>
+        </div>
+
+        <div class="mt-6 grid gap-6 md:grid-cols-2">
+            <!-- Frequency Limit -->
+            <div class="space-y-4 rounded-lg border border-slate-200 p-4">
+                <h3 class="text-sm font-semibold text-slate-800">{{ "routing_form.freq_limit_title" | t }}</h3>
+                <div class="grid gap-4">
+                    <div class="space-y-2">
+                        <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">{{
+                            "routing_form.max_calls_label" | t }}</label>
+                        <input type="number" min="0" x-model.number="route.policy.frequency_limit.max_calls"
+                            class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                            placeholder='{{ "routing_form.max_calls_placeholder" | t }}'>
+                    </div>
+                    <div class="space-y-2">
+                        <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">{{
+                            "routing_form.duration_seconds_label" | t }}</label>
+                        <input type="number" min="0" x-model.number="route.policy.frequency_limit.duration"
+                            class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                            placeholder='{{ "routing_form.duration_seconds_placeholder" | t }}'>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Concurrency & Daily Limit -->
+            <div class="space-y-4 rounded-lg border border-slate-200 p-4">
+                <h3 class="text-sm font-semibold text-slate-800">{{ "routing_form.limits_title" | t }}</h3>
+                <div class="grid gap-4">
+                    <div class="space-y-2">
+                        <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">{{
+                            "routing_form.max_concurrency_label" | t }}</label>
+                        <input type="number" min="0" x-model.number="route.policy.concurrency"
+                            class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                            placeholder='{{ "routing_form.max_concurrency_placeholder" | t }}'>
+                    </div>
+                    <div class="space-y-2">
+                        <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">{{
+                            "routing_form.daily_limit_label" | t }}</label>
+                        <input type="number" min="0" x-model.number="route.policy.daily_limit"
+                            class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                            placeholder='{{ "routing_form.daily_limit_placeholder" | t }}'>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Time Window -->
+            <div class="md:col-span-2 space-y-4 rounded-lg border border-slate-200 p-4">
+                <h3 class="text-sm font-semibold text-slate-800">{{ "routing_form.time_window_title" | t }}</h3>
+                <div class="grid gap-4 md:grid-cols-2">
+                    <div class="space-y-2">
+                        <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">{{
+                            "routing_form.start_time_label" | t }}</label>
+                        <input type="time" x-model="route.policy.time_window.start_time"
+                            class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                    </div>
+                    <div class="space-y-2">
+                        <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">{{
+                            "routing_form.end_time_label" | t }}</label>
+                        <input type="time" x-model="route.policy.time_window.end_time"
+                            class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                    </div>
+                    <div class="md:col-span-2 space-y-2">
+                        <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">{{
+                            "routing_form.active_days_label" | t }}</label>
+                        <div class="flex flex-wrap gap-3">
+                            <template x-for="day in ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']" :key="day">
+                                <label class="inline-flex items-center gap-2">
+                                    <input type="checkbox" :value="day" x-model="route.policy.time_window.days"
+                                        class="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-500">
+                                    <span class="text-sm text-slate-700" x-text="day"></span>
+                                </label>
+                            </template>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </section>
+</div>
+</form>
+</div>
 </div>
 <script>
-    (function() {
+    (function () {
         function registerRoutingForm() {
             Alpine.data('routingForm', (options = {}) => ({
-            mode: options.mode || 'create',
-            activeTab: 'overview',
-            listUrl: options.listUrl || '/console/routing',
-            formAction: options.formAction || options.listUrl || '/console/routing',
-            directionOptions: Array.isArray(options.directionOptions) ? options.directionOptions : [],
-            statusOptions: Array.isArray(options.statusOptions) ? options.statusOptions : [],
-            trunkOptions: [],
-            queueOptions: [],
-            ivrOptions: [],
-            algorithmOptions: [],
-            destinationOptions: [
-                { value: 'sip_trunk', label: '{{ "routing_form.dest_sip_trunks" | t }}' },
-                ...(window.queueAddonEnabled ? [{ value: 'queue', label: '{{ "routing_form.dest_queue" | t }}' }] : []),
-                ...(window.voicemailAddonEnabled ? [{ value: 'voicemail', label: '{{ "routing_form.dest_voicemail" | t }}' }] : []),
-                // IVR is always available via file path; the IVR Editor addon adds the project-picker.
-                { value: 'ivr', label: '{{ "routing_form.dest_ivr" | t }}' },
-            ],
-            selectionOptionAliases: {
-                rr: 'rr',
-                roundrobin: 'rr',
-                'round_robin': 'rr',
-                'round-robin': 'rr',
-                weighted: 'weight',
-                weight: 'weight',
-                hash: 'hash',
-            },
-            selectionCanonicalMap: {
-                rr: 'roundrobin',
-                weight: 'weighted',
-                hash: 'hash',
-            },
-            route: {
-                id: null,
-                name: '',
-                description: '',
-                owner: '',
-                direction: 'outbound',
-                priority: 10,
-                disabled: false,
-                match: {},
-                rewrite: {},
-                action: {
-                    select: 'rr',
-                    hash_key: null,
-                    trunks: [],
-                    target_type: 'sip_trunk',
-                    queue_file: '',
-                    voicemail_extension: '',
-                    ivr_file: '',
+                mode: options.mode || 'create',
+                activeTab: 'overview',
+                listUrl: options.listUrl || '/console/routing',
+                formAction: options.formAction || options.listUrl || '/console/routing',
+                directionOptions: Array.isArray(options.directionOptions) ? options.directionOptions : [],
+                statusOptions: Array.isArray(options.statusOptions) ? options.statusOptions : [],
+                trunkOptions: [],
+                queueOptions: [],
+                ivrOptions: [],
+                algorithmOptions: [],
+                destinationOptions: [
+                    { value: 'sip_trunk', label: '{{ "routing_form.dest_sip_trunks" | t }}' },
+                    ...(window.queueAddonEnabled ? [{ value: 'queue', label: '{{ "routing_form.dest_queue" | t }}' }] : []),
+                    ...(window.voicemailAddonEnabled ? [{ value: 'voicemail', label: '{{ "routing_form.dest_voicemail" | t }}' }] : []),
+                    // IVR is always available via file path; the IVR Editor addon adds the project-picker.
+                    { value: 'ivr', label: '{{ "routing_form.dest_ivr" | t }}' },
+                ],
+                selectionOptionAliases: {
+                    rr: 'rr',
+                    roundrobin: 'rr',
+                    'round_robin': 'rr',
+                    'round-robin': 'rr',
+                    weighted: 'weight',
+                    weight: 'weight',
+                    hash: 'hash',
                 },
-                policy: {
-                    frequency_limit: { max_calls: null, duration: null },
-                    daily_limit: null,
-                    concurrency: null,
-                    time_window: { start_time: '', end_time: '', days: [] },
+                selectionCanonicalMap: {
+                    rr: 'roundrobin',
+                    weight: 'weighted',
+                    hash: 'hash',
                 },
-                source_trunk: '',
-                target_trunks: [],
-            },
-            matchHeaders: [],
-            rewriteHeaders: [],
-            // Regex helper panel state
-            regexPanel: {
-                open: false,
-                field: null,
-                headerIndex: null,
-                builder: '',
-                pattern: '',
-                testInput: '',
-                groups: [],
-                lastMatch: null,
+                route: {
+                    id: null,
+                    name: '',
+                    description: '',
+                    owner: '',
+                    direction: 'outbound',
+                    priority: 10,
+                    disabled: false,
+                    match: {},
+                    rewrite: {},
+                    action: {
+                        select: 'rr',
+                        hash_key: null,
+                        trunks: [],
+                        target_type: 'sip_trunk',
+                        queue_file: '',
+                        voicemail_extension: '',
+                        ivr_file: '',
+                    },
+                    policy: {
+                        frequency_limit: { max_calls: null, duration: null },
+                        daily_limit: null,
+                        concurrency: null,
+                        time_window: { start_time: '', end_time: '', days: [] },
+                    },
+                    source_trunk: '',
+                    target_trunks: [],
+                },
+                matchHeaders: [],
+                rewriteHeaders: [],
+                // Regex helper panel state
+                regexPanel: {
+                    open: false,
+                    field: null,
+                    headerIndex: null,
+                    builder: '',
+                    pattern: '',
+                    testInput: '',
+                    groups: [],
+                    lastMatch: null,
+                    error: null,
+                },
+                saving: false,
                 error: null,
-            },
-            saving: false,
-            error: null,
-            success: null,
-            translations: {
-                err_name_required: '{{ "routing_form.err_name_required" | t }}',
-                err_direction_required: '{{ "routing_form.err_direction_required" | t }}',
-                err_source_trunk_unavailable: '{{ "routing_form.err_source_trunk_unavailable" | t }}',
-                err_queue_file_required: '{{ "routing_form.err_queue_file_required" | t }}',
-                err_voicemail_ext_required: '{{ "routing_form.err_voicemail_ext_required" | t }}',
-                err_ivr_file_required: '{{ "routing_form.err_ivr_file_required" | t }}',
-                err_failed_save: '{{ "routing_form.err_failed_save" | t }}',
-                err_validation_failed: '{{ "routing_form.err_validation_failed" | t }}',
-                saved_successfully: '{{ "routing_form.saved_successfully" | t }}',
-                direction_pending: '{{ "routing_form.direction_pending" | t }}',
-                route_summary: '{{ "routing_form.route_summary" | t }}',
-                match_from_user: '{{ "routing_form.match_from_user" | t }}',
-                match_from_host: '{{ "routing_form.match_from_host" | t }}',
-                match_to_user: '{{ "routing_form.match_to_user" | t }}',
-                match_to_host: '{{ "routing_form.match_to_host" | t }}',
-                match_request_uri_user: '{{ "routing_form.match_request_uri_user" | t }}',
-                match_request_uri_host: '{{ "routing_form.match_request_uri_host" | t }}',
-                match_request_uri_port: '{{ "routing_form.match_request_uri_port" | t }}',
-                rewrite_from_user: '{{ "routing_form.rewrite_from_user" | t }}',
-                rewrite_from_host: '{{ "routing_form.rewrite_from_host" | t }}',
-                rewrite_to_user: '{{ "routing_form.rewrite_to_user" | t }}',
-                rewrite_to_host: '{{ "routing_form.rewrite_to_host" | t }}',
-                rewrite_request_uri_host: '{{ "routing_form.rewrite_request_uri_host" | t }}',
-                sel_round_robin: '{{ "routing_form.sel_round_robin" | t }}',
-                sel_weighted: '{{ "routing_form.sel_weighted" | t }}',
-                sel_hash: '{{ "routing_form.sel_hash" | t }}',
-                status_active: '{{ "routing_form.queue_active" | t }}',
-                status_paused: '{{ "routing_form.queue_disabled" | t }}',
-                timestamp_recently: '{{ "routing_form.timestamp_recently" | t }}',
-            },
-            init() {
-                this.listUrl = (this.listUrl || '').replace(/\/$/, '') || '/console/routing';
-                this.formAction = (this.formAction || this.listUrl || '/console/routing').replace(/\/$/, '');
-                // Translate algorithm option labels
-                this.algorithmOptions = (Array.isArray(options.algorithms) ? options.algorithms : []).map(opt => ({
-                    value: opt.value,
-                    label: this.getAlgorithmLabel(opt.value, opt.label)
-                }));
-                this.directionOptions = (Array.isArray(options.directionOptions) ? options.directionOptions : [])
-                    .map((value) => this.trimString(value))
-                    .filter((value) => value.length);
-                this.statusOptions = Array.isArray(options.statusOptions) ? options.statusOptions : [];
-                // Translate status option labels
-                this.statusOptions = this.statusOptions.map(opt => ({
-                    value: opt.value,
-                    label: opt.value === false ? this.translations.status_active : this.translations.status_paused
-                }));
-                const trunksData = options.trunks;
-                this.trunkOptions = Array.isArray(trunksData) ? trunksData : (trunksData?.trunks || []);
-                const queuesData = options.queues;
-                this.queueOptions = Array.isArray(queuesData) ? queuesData : (queuesData?.queues || []);
-                const ivrData = options.ivrProjects;
-                this.ivrOptions = Array.isArray(ivrData) ? ivrData : [];
-                if (typeof window.__ivrProjectsLoader === 'function') {
-                    window.__ivrProjectsLoader()
-                        .then(data => { if (Array.isArray(data)) this.ivrOptions = data; })
-                        .catch(() => { });
-                }
-                const normalised = this.normaliseRoute(options.route || {});
-                this.route = normalised.route;
-                this.matchHeaders = normalised.matchHeaders;
-                this.rewriteHeaders = normalised.rewriteHeaders;
-                if (this.mode === 'create' && !this.route.id) {
-                    this.route.direction = '';
-                }
-            },
-            // Regex helper methods
-            openRegexPanel(field, headerIndex = null) {
-                this.regexPanel.open = true;
-                this.regexPanel.field = field;
-                this.regexPanel.headerIndex = headerIndex;
-                this.regexPanel.builder = '';
-                this.regexPanel.testInput = '';
-                this.regexPanel.groups = [];
-                this.regexPanel.lastMatch = null;
-                this.regexPanel.error = null;
+                success: null,
+                translations: {
+                    err_name_required: '{{ "routing_form.err_name_required" | t }}',
+                    err_direction_required: '{{ "routing_form.err_direction_required" | t }}',
+                    err_source_trunk_unavailable: '{{ "routing_form.err_source_trunk_unavailable" | t }}',
+                    err_queue_file_required: '{{ "routing_form.err_queue_file_required" | t }}',
+                    err_voicemail_ext_required: '{{ "routing_form.err_voicemail_ext_required" | t }}',
+                    err_ivr_file_required: '{{ "routing_form.err_ivr_file_required" | t }}',
+                    err_failed_save: '{{ "routing_form.err_failed_save" | t }}',
+                    err_validation_failed: '{{ "routing_form.err_validation_failed" | t }}',
+                    saved_successfully: '{{ "routing_form.saved_successfully" | t }}',
+                    direction_pending: '{{ "routing_form.direction_pending" | t }}',
+                    route_summary: '{{ "routing_form.route_summary" | t }}',
+                    match_from_user: '{{ "routing_form.match_from_user" | t }}',
+                    match_from_host: '{{ "routing_form.match_from_host" | t }}',
+                    match_to_user: '{{ "routing_form.match_to_user" | t }}',
+                    match_to_host: '{{ "routing_form.match_to_host" | t }}',
+                    match_request_uri_user: '{{ "routing_form.match_request_uri_user" | t }}',
+                    match_request_uri_host: '{{ "routing_form.match_request_uri_host" | t }}',
+                    match_request_uri_port: '{{ "routing_form.match_request_uri_port" | t }}',
+                    rewrite_from_user: '{{ "routing_form.rewrite_from_user" | t }}',
+                    rewrite_from_host: '{{ "routing_form.rewrite_from_host" | t }}',
+                    rewrite_to_user: '{{ "routing_form.rewrite_to_user" | t }}',
+                    rewrite_to_host: '{{ "routing_form.rewrite_to_host" | t }}',
+                    rewrite_request_uri_host: '{{ "routing_form.rewrite_request_uri_host" | t }}',
+                    sel_round_robin: '{{ "routing_form.sel_round_robin" | t }}',
+                    sel_weighted: '{{ "routing_form.sel_weighted" | t }}',
+                    sel_hash: '{{ "routing_form.sel_hash" | t }}',
+                    status_active: '{{ "routing_form.queue_active" | t }}',
+                    edit_rule: '{{ "routing_form.edit_rule" | t }}',
+                    create_rule: '{{ "routing_form.create_rule" | t }}',
+                    edit_routing_rule: '{{ "routing_form.edit_routing_rule" | t }}',
+                    create_routing_rule: '{{ "routing_form.create_routing_rule" | t }}',
+                    rule_id: '{{ "routing_form.rule_id" | t }}',
+                    new_rule: '{{ "routing_form.new_rule" | t }}',
+                    status_paused: '{{ "routing_form.queue_disabled" | t }}',
+                    timestamp_recently: '{{ "routing_form.timestamp_recently" | t }}',
+                },
+                init() {
+                    this.listUrl = (this.listUrl || '').replace(/\/$/, '') || '/console/routing';
+                    this.formAction = (this.formAction || this.listUrl || '/console/routing').replace(/\/$/, '');
+                    // Translate algorithm option labels
+                    this.algorithmOptions = (Array.isArray(options.algorithms) ? options.algorithms : []).map(opt => ({
+                        value: opt.value,
+                        label: this.getAlgorithmLabel(opt.value, opt.label)
+                    }));
+                    this.directionOptions = (Array.isArray(options.directionOptions) ? options.directionOptions : [])
+                        .map((value) => this.trimString(value))
+                        .filter((value) => value.length);
+                    this.statusOptions = Array.isArray(options.statusOptions) ? options.statusOptions : [];
+                    // Translate status option labels
+                    this.statusOptions = this.statusOptions.map(opt => ({
+                        value: opt.value,
+                        label: opt.value === false ? this.translations.status_active : this.translations.status_paused
+                    }));
+                    const trunksData = options.trunks;
+                    this.trunkOptions = Array.isArray(trunksData) ? trunksData : (trunksData?.trunks || []);
+                    const queuesData = options.queues;
+                    this.queueOptions = Array.isArray(queuesData) ? queuesData : (queuesData?.queues || []);
+                    const ivrData = options.ivrProjects;
+                    this.ivrOptions = Array.isArray(ivrData) ? ivrData : [];
+                    if (typeof window.__ivrProjectsLoader === 'function') {
+                        window.__ivrProjectsLoader()
+                            .then(data => { if (Array.isArray(data)) this.ivrOptions = data; })
+                            .catch(() => { });
+                    }
+                    const normalised = this.normaliseRoute(options.route || {});
+                    this.route = normalised.route;
+                    this.matchHeaders = normalised.matchHeaders;
+                    this.rewriteHeaders = normalised.rewriteHeaders;
+                    if (this.mode === 'create' && !this.route.id) {
+                        this.route.direction = '';
+                    }
+                },
+                // Regex helper methods
+                openRegexPanel(field, headerIndex = null) {
+                    this.regexPanel.open = true;
+                    this.regexPanel.field = field;
+                    this.regexPanel.headerIndex = headerIndex;
+                    this.regexPanel.builder = '';
+                    this.regexPanel.testInput = '';
+                    this.regexPanel.groups = [];
+                    this.regexPanel.lastMatch = null;
+                    this.regexPanel.error = null;
 
-                // Load stored value into the helper state
-                let stored = '';
-                if (headerIndex === null) {
-                    stored = this.trimString(this.route.match[field] || '');
-                } else {
-                    stored = this.trimString((this.matchHeaders[headerIndex] && this.matchHeaders[headerIndex].value) || '');
-                }
-                this.regexPanel.pattern = stored;
-            },
-            closeRegexPanel() {
-                this.regexPanel.open = false;
-                this.regexPanel.field = null;
-                this.regexPanel.headerIndex = null;
-                this.regexPanel.builder = '';
-                this.regexPanel.pattern = '';
-                this.regexPanel.testInput = '';
-                this.regexPanel.groups = [];
-                this.regexPanel.lastMatch = null;
-                this.regexPanel.error = null;
-            },
-            buildPreset(type) {
-                const raw = this.trimString(this.regexPanel.builder || '');
-                const escapeRegExp = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-                const lit = escapeRegExp(raw);
-                if (!raw.length) return;
-                switch (type) {
-                    case 'starts_with':
-                        this.regexPanel.pattern = `^${lit}(.*)$`;
-                        break;
-                    case 'ends_with':
-                        this.regexPanel.pattern = `^(.*)${lit}$`;
-                        break;
-                    case 'equals':
-                        this.regexPanel.pattern = `^(${lit})$`;
-                        break;
-                }
-            },
-            testRegex() {
-                this.regexPanel.error = null;
-                this.regexPanel.groups = [];
-                this.regexPanel.lastMatch = null;
-                const rawPattern = this.regexPanel.pattern || '';
-                if (!rawPattern.length) {
-                    this.regexPanel.error = '{{ "routing_form.regex_empty_pattern" | t }}';
-                    return;
-                }
-                const input = String(this.regexPanel.testInput ?? '');
-                if (!input.length) {
-                    this.regexPanel.error = '{{ "routing_form.regex_enter_test_input" | t }}';
-                    return;
-                }
-                try {
-                    const re = new RegExp(rawPattern);
-                    const m = re.exec(input);
-                    if (m) {
-                        this.regexPanel.groups = m.slice(1).map((g) => g == null ? '' : g);
-                        this.regexPanel.lastMatch = true;
+                    // Load stored value into the helper state
+                    let stored = '';
+                    if (headerIndex === null) {
+                        stored = this.trimString(this.route.match[field] || '');
                     } else {
-                        this.regexPanel.groups = [];
-                        this.regexPanel.lastMatch = false;
+                        stored = this.trimString((this.matchHeaders[headerIndex] && this.matchHeaders[headerIndex].value) || '');
                     }
-                } catch (err) {
-                    this.regexPanel.error = '{{ "routing_form.regex_invalid_prefix" | t }}' + (err && err.message ? err.message : err);
-                }
-            },
-            applyRegexPanel() {
-                const raw = this.regexPanel.pattern || '';
-                if (this.regexPanel.headerIndex === null) {
-                    this.route.match[this.regexPanel.field] = raw;
-                } else {
-                    const idx = this.regexPanel.headerIndex;
-                    if (this.matchHeaders[idx]) {
-                        this.matchHeaders[idx].value = raw;
+                    this.regexPanel.pattern = stored;
+                },
+                closeRegexPanel() {
+                    this.regexPanel.open = false;
+                    this.regexPanel.field = null;
+                    this.regexPanel.headerIndex = null;
+                    this.regexPanel.builder = '';
+                    this.regexPanel.pattern = '';
+                    this.regexPanel.testInput = '';
+                    this.regexPanel.groups = [];
+                    this.regexPanel.lastMatch = null;
+                    this.regexPanel.error = null;
+                },
+                buildPreset(type) {
+                    const raw = this.trimString(this.regexPanel.builder || '');
+                    const escapeRegExp = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+                    const lit = escapeRegExp(raw);
+                    if (!raw.length) return;
+                    switch (type) {
+                        case 'starts_with':
+                            this.regexPanel.pattern = `^${lit}(.*)$`;
+                            break;
+                        case 'ends_with':
+                            this.regexPanel.pattern = `^(.*)${lit}$`;
+                            break;
+                        case 'equals':
+                            this.regexPanel.pattern = `^(${lit})$`;
+                            break;
                     }
-                }
-                this.closeRegexPanel();
-            },
-            normaliseRoute(raw) {
-                const toBoolean = (value) => {
-                    if (typeof value === 'boolean') return value;
-                    if (typeof value === 'string') {
-                        const trimmed = value.trim().toLowerCase();
-                        if (['true', '1', 'yes', 'enabled'].includes(trimmed)) return true;
-                        if (['false', '0', 'no', 'disabled'].includes(trimmed)) return false;
+                },
+                testRegex() {
+                    this.regexPanel.error = null;
+                    this.regexPanel.groups = [];
+                    this.regexPanel.lastMatch = null;
+                    const rawPattern = this.regexPanel.pattern || '';
+                    if (!rawPattern.length) {
+                        this.regexPanel.error = '{{ "routing_form.regex_empty_pattern" | t }}';
+                        return;
                     }
-                    return Boolean(value);
-                };
-                const normalizeDirection = (value) => {
-                    if (typeof value === 'string' && value.trim().length) {
-                        return value.trim().toLowerCase();
+                    const input = String(this.regexPanel.testInput ?? '');
+                    if (!input.length) {
+                        this.regexPanel.error = '{{ "routing_form.regex_enter_test_input" | t }}';
+                        return;
                     }
-                    return 'outbound';
-                };
-                const normalizeTargetType = (value) => {
+                    try {
+                        const re = new RegExp(rawPattern);
+                        const m = re.exec(input);
+                        if (m) {
+                            this.regexPanel.groups = m.slice(1).map((g) => g == null ? '' : g);
+                            this.regexPanel.lastMatch = true;
+                        } else {
+                            this.regexPanel.groups = [];
+                            this.regexPanel.lastMatch = false;
+                        }
+                    } catch (err) {
+                        this.regexPanel.error = '{{ "routing_form.regex_invalid_prefix" | t }}' + (err && err.message ? err.message : err);
+                    }
+                },
+                applyRegexPanel() {
+                    const raw = this.regexPanel.pattern || '';
+                    if (this.regexPanel.headerIndex === null) {
+                        this.route.match[this.regexPanel.field] = raw;
+                    } else {
+                        const idx = this.regexPanel.headerIndex;
+                        if (this.matchHeaders[idx]) {
+                            this.matchHeaders[idx].value = raw;
+                        }
+                    }
+                    this.closeRegexPanel();
+                },
+                normaliseRoute(raw) {
+                    const toBoolean = (value) => {
+                        if (typeof value === 'boolean') return value;
+                        if (typeof value === 'string') {
+                            const trimmed = value.trim().toLowerCase();
+                            if (['true', '1', 'yes', 'enabled'].includes(trimmed)) return true;
+                            if (['false', '0', 'no', 'disabled'].includes(trimmed)) return false;
+                        }
+                        return Boolean(value);
+                    };
+                    const normalizeDirection = (value) => {
+                        if (typeof value === 'string' && value.trim().length) {
+                            return value.trim().toLowerCase();
+                        }
+                        return 'outbound';
+                    };
+                    const normalizeTargetType = (value) => {
+                        if (typeof value === 'string') {
+                            const trimmed = value.trim().toLowerCase();
+                            if (trimmed === 'queue' || trimmed === 'voicemail' || trimmed === 'ivr') {
+                                return trimmed;
+                            }
+                        }
+                        return 'sip_trunk';
+                    };
+                    const queueFile = this.trimString(raw?.action?.queue_file || '');
+                    const voicemailExtension = this.trimString(raw?.action?.voicemail_extension || '');
+                    const ivrFile = this.trimString(raw?.action?.ivr_file || '');
+                    const normalizeSelection = (value) => this.normalizeSelectionOption(value);
+                    const route = {
+                        id: raw?.id ?? null,
+                        name: raw?.name ?? '',
+                        description: raw?.description ?? '',
+                        owner: raw?.owner ?? '',
+                        direction: normalizeDirection(raw?.direction),
+                        priority: typeof raw?.priority === 'number' ? raw.priority : Number(raw?.priority) || 10,
+                        disabled: toBoolean(raw?.disabled),
+                        match: Object.assign({
+                            from_user: '',
+                            from_host: '',
+                            to_user: '',
+                            to_host: '',
+                            request_uri_user: '',
+                            request_uri_host: '',
+                            request_uri_port: '',
+                        }, raw?.match || {}),
+                        rewrite: Object.assign({
+                            from_user: '',
+                            from_host: '',
+                            to_user: '',
+                            to_host: '',
+                            request_uri_user: '',
+                            request_uri_host: '',
+                        }, raw?.rewrite || {}),
+                        action: {
+                            select: normalizeSelection(raw?.action?.select),
+                            hash_key: raw?.action?.hash_key || null,
+                            trunks: Array.isArray(raw?.action?.trunks)
+                                ? raw.action.trunks.map((item) => ({
+                                    name: item?.name || '',
+                                    weight: typeof item?.weight === 'number' ? item.weight : Number(item?.weight) || 0,
+                                }))
+                                : [],
+                            target_type: normalizeTargetType(raw?.action?.target_type),
+                            queue_file: queueFile,
+                            voicemail_extension: voicemailExtension,
+                            ivr_file: ivrFile,
+                        },
+                        policy: {
+                            frequency_limit: {
+                                max_calls: raw?.policy?.frequency_limit?.max_calls || null,
+                                duration: raw?.policy?.frequency_limit?.duration || null,
+                            },
+                            daily_limit: raw?.policy?.daily_limit || null,
+                            concurrency: raw?.policy?.concurrency || null,
+                            time_window: {
+                                start_time: raw?.policy?.time_window?.start_time || '',
+                                end_time: raw?.policy?.time_window?.end_time || '',
+                                days: Array.isArray(raw?.policy?.time_window?.days) ? raw.policy.time_window.days : [],
+                            },
+                        },
+                        source_trunk: raw?.source_trunk || '',
+                        target_trunks: Array.isArray(raw?.target_trunks) ? raw.target_trunks.slice() : [],
+                    };
+
+                    const matchHeaders = [];
+                    Object.keys(route.match).forEach((key) => {
+                        if (key.startsWith('header.')) {
+                            matchHeaders.push({
+                                name: key.replace(/^header\./, ''),
+                                value: route.match[key] || '',
+                            });
+                            delete route.match[key];
+                        }
+                    });
+
+                    const rewriteHeaders = [];
+                    Object.keys(route.rewrite).forEach((key) => {
+                        if (key.startsWith('header.')) {
+                            rewriteHeaders.push({
+                                name: key.replace(/^header\./, ''),
+                                value: route.rewrite[key] || '',
+                            });
+                            delete route.rewrite[key];
+                        }
+                    });
+
+                    return { route, matchHeaders, rewriteHeaders };
+                },
+                trimString(value) {
+                    if (value == null) return '';
+                    return typeof value === 'string' ? value.trim() : String(value).trim();
+                },
+                sanitizeKeyValue(object) {
+                    const result = {};
+                    Object.entries(object || {}).forEach(([key, value]) => {
+                        const trimmedValue = this.trimString(value);
+                        if (trimmedValue.length) {
+                            result[key] = trimmedValue;
+                        }
+                    });
+                    return result;
+                },
+                normalizeTargetType(value) {
                     if (typeof value === 'string') {
                         const trimmed = value.trim().toLowerCase();
                         if (trimmed === 'queue' || trimmed === 'voicemail' || trimmed === 'ivr') {
@@ -1107,483 +1232,382 @@
                         }
                     }
                     return 'sip_trunk';
-                };
-                const queueFile = this.trimString(raw?.action?.queue_file || '');
-                const voicemailExtension = this.trimString(raw?.action?.voicemail_extension || '');
-                const ivrFile = this.trimString(raw?.action?.ivr_file || '');
-                const normalizeSelection = (value) => this.normalizeSelectionOption(value);
-                const route = {
-                    id: raw?.id ?? null,
-                    name: raw?.name ?? '',
-                    description: raw?.description ?? '',
-                    owner: raw?.owner ?? '',
-                    direction: normalizeDirection(raw?.direction),
-                    priority: typeof raw?.priority === 'number' ? raw.priority : Number(raw?.priority) || 10,
-                    disabled: toBoolean(raw?.disabled),
-                    match: Object.assign({
-                        from_user: '',
-                        from_host: '',
-                        to_user: '',
-                        to_host: '',
-                        request_uri_user: '',
-                        request_uri_host: '',
-                        request_uri_port: '',
-                    }, raw?.match || {}),
-                    rewrite: Object.assign({
-                        from_user: '',
-                        from_host: '',
-                        to_user: '',
-                        to_host: '',
-                        request_uri_user: '',
-                        request_uri_host: '',
-                    }, raw?.rewrite || {}),
-                    action: {
-                        select: normalizeSelection(raw?.action?.select),
-                        hash_key: raw?.action?.hash_key || null,
-                        trunks: Array.isArray(raw?.action?.trunks)
-                            ? raw.action.trunks.map((item) => ({
-                                name: item?.name || '',
-                                weight: typeof item?.weight === 'number' ? item.weight : Number(item?.weight) || 0,
-                            }))
-                            : [],
-                        target_type: normalizeTargetType(raw?.action?.target_type),
-                        queue_file: queueFile,
-                        voicemail_extension: voicemailExtension,
-                        ivr_file: ivrFile,
-                    },
-                    policy: {
-                        frequency_limit: {
-                            max_calls: raw?.policy?.frequency_limit?.max_calls || null,
-                            duration: raw?.policy?.frequency_limit?.duration || null,
-                        },
-                        daily_limit: raw?.policy?.daily_limit || null,
-                        concurrency: raw?.policy?.concurrency || null,
-                        time_window: {
-                            start_time: raw?.policy?.time_window?.start_time || '',
-                            end_time: raw?.policy?.time_window?.end_time || '',
-                            days: Array.isArray(raw?.policy?.time_window?.days) ? raw.policy.time_window.days : [],
-                        },
-                    },
-                    source_trunk: raw?.source_trunk || '',
-                    target_trunks: Array.isArray(raw?.target_trunks) ? raw.target_trunks.slice() : [],
-                };
-
-                const matchHeaders = [];
-                Object.keys(route.match).forEach((key) => {
-                    if (key.startsWith('header.')) {
-                        matchHeaders.push({
-                            name: key.replace(/^header\./, ''),
-                            value: route.match[key] || '',
-                        });
-                        delete route.match[key];
-                    }
-                });
-
-                const rewriteHeaders = [];
-                Object.keys(route.rewrite).forEach((key) => {
-                    if (key.startsWith('header.')) {
-                        rewriteHeaders.push({
-                            name: key.replace(/^header\./, ''),
-                            value: route.rewrite[key] || '',
-                        });
-                        delete route.rewrite[key];
-                    }
-                });
-
-                return { route, matchHeaders, rewriteHeaders };
-            },
-            trimString(value) {
-                if (value == null) return '';
-                return typeof value === 'string' ? value.trim() : String(value).trim();
-            },
-            sanitizeKeyValue(object) {
-                const result = {};
-                Object.entries(object || {}).forEach(([key, value]) => {
-                    const trimmedValue = this.trimString(value);
-                    if (trimmedValue.length) {
-                        result[key] = trimmedValue;
-                    }
-                });
-                return result;
-            },
-            normalizeTargetType(value) {
-                if (typeof value === 'string') {
-                    const trimmed = value.trim().toLowerCase();
-                    if (trimmed === 'queue' || trimmed === 'voicemail' || trimmed === 'ivr') {
-                        return trimmed;
-                    }
-                }
-                return 'sip_trunk';
-            },
-            getAlgorithmLabel(value, fallback) {
-                const map = {
-                    'rr': this.translations.sel_round_robin,
-                    'roundrobin': this.translations.sel_round_robin,
-                    'weight': this.translations.sel_weighted,
-                    'weighted': this.translations.sel_weighted,
-                    'hash': this.translations.sel_hash,
-                };
-                const key = (value || '').toLowerCase();
-                return map[key] || fallback || value;
-            },
-            get matchFields() {
-                return [
-                    { key: 'from_user', label: this.translations.match_from_user, placeholder: '^20(0[1-9]|[1-9][0-9])$' },
-                    { key: 'from_host', label: this.translations.match_from_host, placeholder: '^sip\\.example\\.com$' },
-                    { key: 'to_user', label: this.translations.match_to_user, placeholder: '^(852|853)\\d{7,8}$' },
-                    { key: 'to_host', label: this.translations.match_to_host, placeholder: '^carrier\\.provider\\.net$' },
-                    { key: 'request_uri_user', label: this.translations.match_request_uri_user, placeholder: '^(400|800)\\d{6}$' },
-                    { key: 'request_uri_host', label: this.translations.match_request_uri_host, placeholder: '.*' },
-                    { key: 'request_uri_port', label: this.translations.match_request_uri_port, placeholder: '5061' },
-                ];
-            },
-            get rewriteFields() {
-                return [
-                    { key: 'from_user', label: this.translations.rewrite_from_user, placeholder: '{1}' },
-                    { key: 'from_host', label: this.translations.rewrite_from_host, placeholder: 'sip.internal' },
-                    { key: 'to_user', label: this.translations.rewrite_to_user, placeholder: '00{1}' },
-                    { key: 'to_host', label: this.translations.rewrite_to_host, placeholder: 'carrier.provider.net' },
-                    { key: 'request_uri_host', label: this.translations.rewrite_request_uri_host, placeholder: 'rtp.provider.net' },
-                ];
-            },
-            addMatchHeader() {
-                this.matchHeaders.push({ name: '', value: '' });
-            },
-            removeMatchHeader(index) {
-                this.matchHeaders.splice(index, 1);
-            },
-            addRewriteHeader() {
-                this.rewriteHeaders.push({ name: '', value: '' });
-            },
-            removeRewriteHeader(index) {
-                this.rewriteHeaders.splice(index, 1);
-            },
-            addTrunkAssignment() {
-                if (!this.isSipTrunkTarget) return;
-                this.route.action.trunks.push({ name: '', weight: 0 });
-            },
-            removeTrunkAssignment(index) {
-                if (!this.isSipTrunkTarget) return;
-                this.route.action.trunks.splice(index, 1);
-            },
-            setAlgorithm(value) {
-                if (!this.isSipTrunkTarget) {
-                    this.route.action.select = 'rr';
-                    this.route.action.hash_key = null;
-                    return;
-                }
-                this.route.action.select = this.normalizeSelectionOption(value);
-                if (this.route.action.select !== 'hash') {
-                    this.route.action.hash_key = null;
-                }
-            },
-            toggleTarget(name) {
-                if (!this.isSipTrunkTarget) return;
-                const candidate = this.trimString(name);
-                if (!candidate.length) return;
-                const current = new Set(
-                    (this.route.target_trunks || [])
-                        .map((value) => this.trimString(value))
-                        .filter((value) => value.length),
-                );
-                if (current.has(candidate)) {
-                    current.delete(candidate);
-                } else {
-                    current.add(candidate);
-                }
-                this.route.target_trunks = Array.from(current);
-            },
-            get totalWeight() {
-                if (!this.isSipTrunkTarget) {
-                    return 0;
-                }
-                return this.route.action.trunks.reduce((sum, trunk) => sum + (Number(trunk.weight) || 0), 0);
-            },
-            get normalizedWeights() {
-                if (!this.isSipTrunkTarget) {
-                    return [];
-                }
-                const total = this.totalWeight || 1;
-                return this.route.action.trunks
-                    .map((trunk) => ({
-                        name: this.trimString(trunk.name),
-                        label: this.trimString(trunk.name) || '—',
-                        percent: Math.round(((Number(trunk.weight) || 0) / total) * 100),
-                    }))
-                    .filter((item) => item.name.length);
-            },
-            queueSuggestion(option) {
-                const provided = this.trimString(option?.file_name || option?.reference || '');
-                if (provided.length) {
-                    return provided;
-                }
-                const id = Number(option?.id);
-                const prefix = Number.isFinite(id) ? String(id) : 'queue';
-                const slug = this.slugify(option?.name || '') || 'queue';
-                return `${prefix}-${slug}.generated.toml`;
-            },
-            applyQueueSuggestion(option) {
-                this.route.action.queue_file = this.queueSuggestion(option);
-            },
-            slugify(value) {
-                if (!value) return '';
-                const chars = String(value)
-                    .toLowerCase()
-                    .split('')
-                    .map((ch) => (/[a-z0-9]/.test(ch) ? ch : '-'))
-                    .join('');
-                return chars.replace(/-+/g, '-').replace(/^-|-$/g, '');
-            },
-            formatTimestamp(value) {
-                if (!value) return '{{ "routing_form.timestamp_recently" | t }}';
-                const date = new Date(value);
-                if (Number.isNaN(date.getTime())) {
-                    return '{{ "routing_form.timestamp_recently" | t }}';
-                }
-                return date.toLocaleString();
-            },
-            setTargetType(value) {
-                const targetType = this.normalizeTargetType(value);
-                this.route.action.target_type = targetType;
-                if (!this.isSipTrunkTarget) {
-                    this.route.action.select = 'rr';
-                    this.route.action.hash_key = null;
-                    this.route.action.trunks = [];
-                    this.route.target_trunks = [];
-                }
-                if (!this.isQueueTarget) {
-                    this.route.action.queue_file = '';
-                }
-                if (!this.isVoicemailTarget) {
-                    this.route.action.voicemail_extension = '';
-                }
-                if (!this.isIvrTarget) {
-                    this.route.action.ivr_file = '';
-                }
-            },
-            get isSipTrunkTarget() {
-                return this.normalizeTargetType(this.route.action?.target_type) === 'sip_trunk';
-            },
-            get isQueueTarget() {
-                return this.normalizeTargetType(this.route.action?.target_type) === 'queue';
-            },
-            get isVoicemailTarget() {
-                return this.normalizeTargetType(this.route.action?.target_type) === 'voicemail';
-            },
-            get isIvrTarget() {
-                return this.normalizeTargetType(this.route.action?.target_type) === 'ivr';
-            },
-            get routeSummary() {
-                const direction = this.trimString(this.route.direction) || this.translations.direction_pending;
-                return this.translations.route_summary
-                    .replace('{direction}', direction)
-                    .replace('{priority}', this.route.priority);
-            },
-            queuesUrl() {
-                const base = (this.listUrl || '/console/routing').replace(/\/routing$/, '');
-                return `${base}/queues`;
-            },
-            ivrEditorUrl() {
-                const base = (this.listUrl || '/console/routing').replace(/\/routing$/, '');
-                return `${base}/ivr_editor`;
-            },
-            submitUrl() {
-                return this.formAction || this.listUrl;
-            },
-            submitMethod() {
-                return this.mode === 'edit' ? 'PATCH' : 'PUT';
-            },
-            validate() {
-                const name = this.trimString(this.route.name);
-                if (!name.length) {
-                    throw new Error(this.translations.err_name_required);
-                }
-                const direction = this.trimString(this.route.direction);
-                if (!direction.length) {
-                    throw new Error(this.translations.err_direction_required);
-                }
-                const source = this.trimString(this.route.source_trunk);
-                if (source.length) {
-                    const exists = this.trunkOptions.some((option) => {
-                        const candidate = this.trimString(option?.name);
-                        return candidate.length && candidate.toLowerCase() === source.toLowerCase();
-                    });
-                    if (!exists) {
-                        throw new Error(this.translations.err_source_trunk_unavailable.replace('{name}', source));
-                    }
-                }
-                const targetType = this.normalizeTargetType(this.route.action?.target_type);
-                if (targetType === 'queue') {
-                    const queueFile = this.trimString(this.route.action.queue_file);
-                    if (!queueFile.length) {
-                        throw new Error(this.translations.err_queue_file_required);
-                    }
-                }
-                if (targetType === 'voicemail') {
-                    const ext = this.trimString(this.route.action.voicemail_extension);
-                    if (!ext.length) {
-                        throw new Error(this.translations.err_voicemail_ext_required);
-                    }
-                }
-                if (targetType === 'ivr') {
-                    const ivrFile = this.trimString(this.route.action.ivr_file);
-                    if (!ivrFile.length) {
-                        throw new Error(this.translations.err_ivr_file_required);
-                    }
-                }
-            },
-            buildPayload() {
-                const match = this.sanitizeKeyValue(this.route.match);
-                this.matchHeaders.forEach((header) => {
-                    const name = this.trimString(header.name);
-                    const value = this.trimString(header.value);
-                    if (name.length && value.length) {
-                        match[`header.${name}`] = value;
-                    }
-                });
-
-                const rewrite = this.sanitizeKeyValue(this.route.rewrite);
-                this.rewriteHeaders.forEach((header) => {
-                    const name = this.trimString(header.name);
-                    const value = this.trimString(header.value);
-                    if (name.length && value.length) {
-                        rewrite[`header.${name}`] = value;
-                    }
-                });
-
-                const targetType = this.normalizeTargetType(this.route.action?.target_type);
-                const isTrunk = targetType === 'sip_trunk';
-                const trunks = isTrunk
-                    ? this.route.action.trunks
-                        .map((trunk) => ({
-                            name: this.trimString(trunk.name),
-                            weight: Math.max(0, Math.round(Number(trunk.weight) || 0)),
-                        }))
-                        .filter((trunk) => trunk.name.length)
-                    : [];
-
-                const hashKey = isTrunk && this.route.action.select === 'hash'
-                    ? this.trimString(this.route.action.hash_key)
-                    : '';
-
-                const targetTrunks = isTrunk
-                    ? Array.from(
-                        new Set(
-                            (this.route.target_trunks || [])
-                                .map((name) => this.trimString(name))
-                                .filter((name) => name.length),
-                        ),
-                    )
-                    : [];
-
-                const actionPayload = {
-                    select: isTrunk ? (this.route.action.select || 'rr') : 'rr',
-                    hash_key: hashKey.length ? hashKey : null,
-                    trunks,
-                    target_type: targetType,
-                };
-
-                if (targetType === 'queue') {
-                    const queueFile = this.trimString(this.route.action.queue_file);
-                    actionPayload.queue_file = queueFile || null;
-                }
-                if (targetType === 'voicemail') {
-                    actionPayload.voicemail_extension = this.trimString(this.route.action.voicemail_extension) || null;
-                }
-                if (targetType === 'ivr') {
-                    actionPayload.ivr_file = this.trimString(this.route.action.ivr_file) || null;
-                }
-
-                const description = this.trimString(this.route.description);
-                const owner = this.trimString(this.route.owner);
-
-                const direction = this.trimString(this.route.direction);
-                const selectionValue = this.selectionPayloadValue(this.route.action.select);
-
-                const policy = {};
-                if (this.route.policy.frequency_limit.max_calls && this.route.policy.frequency_limit.duration) {
-                    policy.frequency_limit = {
-                        max_calls: Number(this.route.policy.frequency_limit.max_calls),
-                        duration: Number(this.route.policy.frequency_limit.duration),
+                },
+                getAlgorithmLabel(value, fallback) {
+                    const map = {
+                        'rr': this.translations.sel_round_robin,
+                        'roundrobin': this.translations.sel_round_robin,
+                        'weight': this.translations.sel_weighted,
+                        'weighted': this.translations.sel_weighted,
+                        'hash': this.translations.sel_hash,
                     };
-                }
-                if (this.route.policy.daily_limit) {
-                    policy.daily_limit = Number(this.route.policy.daily_limit);
-                }
-                if (this.route.policy.concurrency) {
-                    policy.concurrency = Number(this.route.policy.concurrency);
-                }
-                if (this.route.policy.time_window.start_time && this.route.policy.time_window.end_time && this.route.policy.time_window.days.length) {
-                    policy.time_window = {
-                        start_time: this.route.policy.time_window.start_time,
-                        end_time: this.route.policy.time_window.end_time,
-                        days: this.route.policy.time_window.days,
-                    };
-                }
-
-                return {
-                    id: this.route.id,
-                    name: this.trimString(this.route.name),
-                    description: description || null,
-                    owner: owner || null,
-                    direction: direction || null,
-                    priority: Math.max(0, Math.round(Number(this.route.priority) || 0)),
-                    disabled: Boolean(this.route.disabled),
-                    match,
-                    rewrite,
-                    action: Object.assign(actionPayload, { select: selectionValue }),
-                    policy: Object.keys(policy).length ? policy : null,
-                    source_trunk: this.trimString(this.route.source_trunk) || null,
-                    target_trunks: targetTrunks,
-                };
-            },
-            async submit() {
-                try {
-                    this.validate();
-                } catch (err) {
-                    this.error = err?.message || this.translations.err_validation_failed;
-                    this.success = null;
-                    return;
-                }
-                this.saving = true;
-                this.error = null;
-                this.success = null;
-                const payload = this.buildPayload();
-                try {
-                    const response = await fetch(this.submitUrl(), {
-                        method: this.submitMethod(),
-                        headers: {
-                            'Accept': 'application/json',
-                            'Content-Type': 'application/json',
-                        },
-                        body: JSON.stringify(payload),
-                    });
-                    const data = await response.json().catch(() => ({}));
-                    if (!response.ok) {
-                        throw new Error(data?.message || this.translations.err_failed_save);
-                    }
-                    if (this.mode === 'create' && data?.id) {
-                        window.location.href = `${this.listUrl}/${data.id}`;
+                    const key = (value || '').toLowerCase();
+                    return map[key] || fallback || value;
+                },
+                get matchFields() {
+                    return [
+                        { key: 'from_user', label: this.translations.match_from_user, placeholder: '^20(0[1-9]|[1-9][0-9])$' },
+                        { key: 'from_host', label: this.translations.match_from_host, placeholder: '^sip\\.example\\.com$' },
+                        { key: 'to_user', label: this.translations.match_to_user, placeholder: '^(852|853)\\d{7,8}$' },
+                        { key: 'to_host', label: this.translations.match_to_host, placeholder: '^carrier\\.provider\\.net$' },
+                        { key: 'request_uri_user', label: this.translations.match_request_uri_user, placeholder: '^(400|800)\\d{6}$' },
+                        { key: 'request_uri_host', label: this.translations.match_request_uri_host, placeholder: '.*' },
+                        { key: 'request_uri_port', label: this.translations.match_request_uri_port, placeholder: '5061' },
+                    ];
+                },
+                get rewriteFields() {
+                    return [
+                        { key: 'from_user', label: this.translations.rewrite_from_user, placeholder: '{1}' },
+                        { key: 'from_host', label: this.translations.rewrite_from_host, placeholder: 'sip.internal' },
+                        { key: 'to_user', label: this.translations.rewrite_to_user, placeholder: '00{1}' },
+                        { key: 'to_host', label: this.translations.rewrite_to_host, placeholder: 'carrier.provider.net' },
+                        { key: 'request_uri_host', label: this.translations.rewrite_request_uri_host, placeholder: 'rtp.provider.net' },
+                    ];
+                },
+                addMatchHeader() {
+                    this.matchHeaders.push({ name: '', value: '' });
+                },
+                removeMatchHeader(index) {
+                    this.matchHeaders.splice(index, 1);
+                },
+                addRewriteHeader() {
+                    this.rewriteHeaders.push({ name: '', value: '' });
+                },
+                removeRewriteHeader(index) {
+                    this.rewriteHeaders.splice(index, 1);
+                },
+                addTrunkAssignment() {
+                    if (!this.isSipTrunkTarget) return;
+                    this.route.action.trunks.push({ name: '', weight: 0 });
+                },
+                removeTrunkAssignment(index) {
+                    if (!this.isSipTrunkTarget) return;
+                    this.route.action.trunks.splice(index, 1);
+                },
+                setAlgorithm(value) {
+                    if (!this.isSipTrunkTarget) {
+                        this.route.action.select = 'rr';
+                        this.route.action.hash_key = null;
                         return;
                     }
-                    this.mode = 'edit';
-                    this.success = this.translations.saved_successfully;
-                } catch (err) {
-                    console.error(err);
-                    this.error = err?.message || this.translations.err_failed_save;
-                } finally {
-                    this.saving = false;
-                }
-            },
-            normalizeSelectionOption(value) {
-                const key = this.trimString(value).toLowerCase();
-                return this.selectionOptionAliases[key] || 'rr';
-            },
-            selectionPayloadValue(value) {
-                const option = this.normalizeSelectionOption(value);
-                return this.selectionCanonicalMap[option] || 'roundrobin';
-            },
-        }));
+                    this.route.action.select = this.normalizeSelectionOption(value);
+                    if (this.route.action.select !== 'hash') {
+                        this.route.action.hash_key = null;
+                    }
+                },
+                toggleTarget(name) {
+                    if (!this.isSipTrunkTarget) return;
+                    const candidate = this.trimString(name);
+                    if (!candidate.length) return;
+                    const current = new Set(
+                        (this.route.target_trunks || [])
+                            .map((value) => this.trimString(value))
+                            .filter((value) => value.length),
+                    );
+                    if (current.has(candidate)) {
+                        current.delete(candidate);
+                    } else {
+                        current.add(candidate);
+                    }
+                    this.route.target_trunks = Array.from(current);
+                },
+                get totalWeight() {
+                    if (!this.isSipTrunkTarget) {
+                        return 0;
+                    }
+                    return this.route.action.trunks.reduce((sum, trunk) => sum + (Number(trunk.weight) || 0), 0);
+                },
+                get normalizedWeights() {
+                    if (!this.isSipTrunkTarget) {
+                        return [];
+                    }
+                    const total = this.totalWeight || 1;
+                    return this.route.action.trunks
+                        .map((trunk) => ({
+                            name: this.trimString(trunk.name),
+                            label: this.trimString(trunk.name) || '—',
+                            percent: Math.round(((Number(trunk.weight) || 0) / total) * 100),
+                        }))
+                        .filter((item) => item.name.length);
+                },
+                queueSuggestion(option) {
+                    // Issue #176: prefer the stable db-<id> reference over a file
+                    // path so that the queue can be resolved regardless of file layout.
+                    const queueId = this.trimString(option?.queue_id || '');
+                    if (queueId.length) {
+                        return queueId;
+                    }
+                    const provided = this.trimString(option?.file_name || option?.reference || '');
+                    if (provided.length) {
+                        return provided;
+                    }
+                    const id = Number(option?.id);
+                    const prefix = Number.isFinite(id) ? String(id) : 'queue';
+                    const slug = this.slugify(option?.name || '') || 'queue';
+                    return `${prefix}-${slug}.generated.toml`;
+                },
+                applyQueueSuggestion(option) {
+                    this.route.action.queue_file = this.queueSuggestion(option);
+                },
+                slugify(value) {
+                    if (!value) return '';
+                    const chars = String(value)
+                        .toLowerCase()
+                        .split('')
+                        .map((ch) => (/[a-z0-9]/.test(ch) ? ch : '-'))
+                        .join('');
+                    return chars.replace(/-+/g, '-').replace(/^-|-$/g, '');
+                },
+                formatTimestamp(value) {
+                    if (!value) return '{{ "routing_form.timestamp_recently" | t }}';
+                    const date = new Date(value);
+                    if (Number.isNaN(date.getTime())) {
+                        return '{{ "routing_form.timestamp_recently" | t }}';
+                    }
+                    return date.toLocaleString();
+                },
+                setTargetType(value) {
+                    const targetType = this.normalizeTargetType(value);
+                    this.route.action.target_type = targetType;
+                    if (!this.isSipTrunkTarget) {
+                        this.route.action.select = 'rr';
+                        this.route.action.hash_key = null;
+                        this.route.action.trunks = [];
+                        this.route.target_trunks = [];
+                    }
+                    if (!this.isQueueTarget) {
+                        this.route.action.queue_file = '';
+                    }
+                    if (!this.isVoicemailTarget) {
+                        this.route.action.voicemail_extension = '';
+                    }
+                    if (!this.isIvrTarget) {
+                        this.route.action.ivr_file = '';
+                    }
+                },
+                get isSipTrunkTarget() {
+                    return this.normalizeTargetType(this.route.action?.target_type) === 'sip_trunk';
+                },
+                get isQueueTarget() {
+                    return this.normalizeTargetType(this.route.action?.target_type) === 'queue';
+                },
+                get isVoicemailTarget() {
+                    return this.normalizeTargetType(this.route.action?.target_type) === 'voicemail';
+                },
+                get isIvrTarget() {
+                    return this.normalizeTargetType(this.route.action?.target_type) === 'ivr';
+                },
+                get routeSummary() {
+                    const direction = this.trimString(this.route.direction) || this.translations.direction_pending;
+                    return this.translations.route_summary
+                        .replace('{direction}', direction)
+                        .replace('{priority}', this.route.priority);
+                },
+                queuesUrl() {
+                    const base = (this.listUrl || '/console/routing').replace(/\/routing$/, '');
+                    return `${base}/queues`;
+                },
+                ivrEditorUrl() {
+                    const base = (this.listUrl || '/console/routing').replace(/\/routing$/, '');
+                    return `${base}/ivr_editor`;
+                },
+                submitUrl() {
+                    return this.formAction || this.listUrl;
+                },
+                submitMethod() {
+                    return this.mode === 'edit' ? 'PATCH' : 'PUT';
+                },
+                validate() {
+                    const name = this.trimString(this.route.name);
+                    if (!name.length) {
+                        throw new Error(this.translations.err_name_required);
+                    }
+                    const direction = this.trimString(this.route.direction);
+                    if (!direction.length) {
+                        throw new Error(this.translations.err_direction_required);
+                    }
+                    const source = this.trimString(this.route.source_trunk);
+                    if (source.length) {
+                        const exists = this.trunkOptions.some((option) => {
+                            const candidate = this.trimString(option?.name);
+                            return candidate.length && candidate.toLowerCase() === source.toLowerCase();
+                        });
+                        if (!exists) {
+                            throw new Error(this.translations.err_source_trunk_unavailable.replace('{name}', source));
+                        }
+                    }
+                    const targetType = this.normalizeTargetType(this.route.action?.target_type);
+                    if (targetType === 'queue') {
+                        const queueFile = this.trimString(this.route.action.queue_file);
+                        if (!queueFile.length) {
+                            throw new Error(this.translations.err_queue_file_required);
+                        }
+                    }
+                    if (targetType === 'voicemail') {
+                        const ext = this.trimString(this.route.action.voicemail_extension);
+                        if (!ext.length) {
+                            throw new Error(this.translations.err_voicemail_ext_required);
+                        }
+                    }
+                    if (targetType === 'ivr') {
+                        const ivrFile = this.trimString(this.route.action.ivr_file);
+                        if (!ivrFile.length) {
+                            throw new Error(this.translations.err_ivr_file_required);
+                        }
+                    }
+                },
+                buildPayload() {
+                    const match = this.sanitizeKeyValue(this.route.match);
+                    this.matchHeaders.forEach((header) => {
+                        const name = this.trimString(header.name);
+                        const value = this.trimString(header.value);
+                        if (name.length && value.length) {
+                            match[`header.${name}`] = value;
+                        }
+                    });
+
+                    const rewrite = this.sanitizeKeyValue(this.route.rewrite);
+                    this.rewriteHeaders.forEach((header) => {
+                        const name = this.trimString(header.name);
+                        const value = this.trimString(header.value);
+                        if (name.length && value.length) {
+                            rewrite[`header.${name}`] = value;
+                        }
+                    });
+
+                    const targetType = this.normalizeTargetType(this.route.action?.target_type);
+                    const isTrunk = targetType === 'sip_trunk';
+                    const trunks = isTrunk
+                        ? this.route.action.trunks
+                            .map((trunk) => ({
+                                name: this.trimString(trunk.name),
+                                weight: Math.max(0, Math.round(Number(trunk.weight) || 0)),
+                            }))
+                            .filter((trunk) => trunk.name.length)
+                        : [];
+
+                    const hashKey = isTrunk && this.route.action.select === 'hash'
+                        ? this.trimString(this.route.action.hash_key)
+                        : '';
+
+                    const targetTrunks = isTrunk
+                        ? Array.from(
+                            new Set(
+                                (this.route.target_trunks || [])
+                                    .map((name) => this.trimString(name))
+                                    .filter((name) => name.length),
+                            ),
+                        )
+                        : [];
+
+                    const actionPayload = {
+                        select: isTrunk ? (this.route.action.select || 'rr') : 'rr',
+                        hash_key: hashKey.length ? hashKey : null,
+                        trunks,
+                        target_type: targetType,
+                    };
+
+                    if (targetType === 'queue') {
+                        const queueFile = this.trimString(this.route.action.queue_file);
+                        actionPayload.queue_file = queueFile || null;
+                    }
+                    if (targetType === 'voicemail') {
+                        actionPayload.voicemail_extension = this.trimString(this.route.action.voicemail_extension) || null;
+                    }
+                    if (targetType === 'ivr') {
+                        actionPayload.ivr_file = this.trimString(this.route.action.ivr_file) || null;
+                    }
+
+                    const description = this.trimString(this.route.description);
+                    const owner = this.trimString(this.route.owner);
+
+                    const direction = this.trimString(this.route.direction);
+                    const selectionValue = this.selectionPayloadValue(this.route.action.select);
+
+                    const policy = {};
+                    if (this.route.policy.frequency_limit.max_calls && this.route.policy.frequency_limit.duration) {
+                        policy.frequency_limit = {
+                            max_calls: Number(this.route.policy.frequency_limit.max_calls),
+                            duration: Number(this.route.policy.frequency_limit.duration),
+                        };
+                    }
+                    if (this.route.policy.daily_limit) {
+                        policy.daily_limit = Number(this.route.policy.daily_limit);
+                    }
+                    if (this.route.policy.concurrency) {
+                        policy.concurrency = Number(this.route.policy.concurrency);
+                    }
+                    if (this.route.policy.time_window.start_time && this.route.policy.time_window.end_time && this.route.policy.time_window.days.length) {
+                        policy.time_window = {
+                            start_time: this.route.policy.time_window.start_time,
+                            end_time: this.route.policy.time_window.end_time,
+                            days: this.route.policy.time_window.days,
+                        };
+                    }
+
+                    return {
+                        id: this.route.id,
+                        name: this.trimString(this.route.name),
+                        description: description || null,
+                        owner: owner || null,
+                        direction: direction || null,
+                        priority: Math.max(0, Math.round(Number(this.route.priority) || 0)),
+                        disabled: Boolean(this.route.disabled),
+                        match,
+                        rewrite,
+                        action: Object.assign(actionPayload, { select: selectionValue }),
+                        policy: Object.keys(policy).length ? policy : null,
+                        source_trunk: this.trimString(this.route.source_trunk) || null,
+                        target_trunks: targetTrunks,
+                    };
+                },
+                async submit() {
+                    try {
+                        this.validate();
+                    } catch (err) {
+                        this.error = err?.message || this.translations.err_validation_failed;
+                        this.success = null;
+                        return;
+                    }
+                    this.saving = true;
+                    this.error = null;
+                    this.success = null;
+                    const payload = this.buildPayload();
+                    try {
+                        const response = await fetch(this.submitUrl(), {
+                            method: this.submitMethod(),
+                            headers: {
+                                'Accept': 'application/json',
+                                'Content-Type': 'application/json',
+                            },
+                            body: JSON.stringify(payload),
+                        });
+                        const data = await response.json().catch(() => ({}));
+                        if (!response.ok) {
+                            throw new Error(data?.message || this.translations.err_failed_save);
+                        }
+                        if (this.mode === 'create' && data?.id) {
+                            window.location.href = `${this.listUrl}/${data.id}`;
+                            return;
+                        }
+                        this.mode = 'edit';
+                        this.success = this.translations.saved_successfully;
+                    } catch (err) {
+                        console.error(err);
+                        this.error = err?.message || this.translations.err_failed_save;
+                    } finally {
+                        this.saving = false;
+                    }
+                },
+                normalizeSelectionOption(value) {
+                    const key = this.trimString(value).toLowerCase();
+                    return this.selectionOptionAliases[key] || 'rr';
+                },
+                selectionPayloadValue(value) {
+                    const option = this.normalizeSelectionOption(value);
+                    return this.selectionCanonicalMap[option] || 'roundrobin';
+                },
+            }));
         }
         document.addEventListener('alpine:init', registerRoutingForm);
     })();
