@@ -2,7 +2,8 @@
 {% set has_model = model is defined and model is not none %}
 {% set page_mode = mode | default('create') %}
 {% set model_data = model if has_model else {} %}
-{% block title %}{{ model_data.name | default("queue.new_queue" | t) }} · {{ site_name | default('RustPBX') }}{% endblock %}
+{% block title %}{{ model_data.name | default("queue.new_queue" | t) }} · {{ site_name | default('RustPBX') }}{%
+endblock %}
 {% block content %}
 {% set base_url = base_path | default('/console') %}
 <div class="p-6" x-data='queueDetailPage({
@@ -102,7 +103,8 @@
                                 <path stroke-linecap="round" stroke-linejoin="round" d="M6 6l8 8M6 14l8-8"
                                     x-show="!form.is_active"></path>
                             </svg>
-                            <span x-text="form.is_active ? tt('queue.status_active') : tt('queue.status_paused')"></span>
+                            <span
+                                x-text="form.is_active ? tt('queue.status_active') : tt('queue.status_paused')"></span>
                         </button>
                         <span class="text-xs font-normal text-slate-400" x-text="tt('queue.field_status_hint')"></span>
                     </div>
@@ -128,7 +130,8 @@
                             <input type="checkbox"
                                 class="mt-1 h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-400"
                                 x-model="form.spec.passthrough_ringback">
-                            <span class="text-sm font-normal text-slate-600" x-text="tt('queue.field_passthrough_ringback_desc')"></span>
+                            <span class="text-sm font-normal text-slate-600"
+                                x-text="tt('queue.field_passthrough_ringback_desc')"></span>
                         </label>
                     </div>
                     <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
@@ -190,12 +193,14 @@
                             <input type="number" min="0" x-model.number="form.spec.strategy.wait_timeout_secs"
                                 class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                                 :placeholder="tt('queue.field_ring_timeout_placeholder')">
-                            <span class="text-xs font-normal text-slate-400" x-text="tt('queue.field_ring_timeout_hint')"></span>
+                            <span class="text-xs font-normal text-slate-400"
+                                x-text="tt('queue.field_ring_timeout_hint')"></span>
                         </label>
                     </div>
                     <div class="space-y-3">
                         <div class="flex items-center justify-between">
-                            <h3 class="text-sm font-semibold text-slate-800" x-text="tt('queue.dial_targets_title')"></h3>
+                            <h3 class="text-sm font-semibold text-slate-800" x-text="tt('queue.dial_targets_title')">
+                            </h3>
                             <button type="button" @click="addStrategyTarget()"
                                 class="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-600 hover:bg-slate-50"
                                 x-text="tt('queue.add_target')">
@@ -290,7 +295,8 @@
                             <input type="text" x-model.trim="form.spec.fallback.failure_prompt"
                                 class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                                 :placeholder="tt('queue.fallback_prompt_placeholder')">
-                            <span class="text-xs font-normal text-slate-400" x-text="tt('queue.fallback_prompt_hint')"></span>
+                            <span class="text-xs font-normal text-slate-400"
+                                x-text="tt('queue.fallback_prompt_hint')"></span>
                         </label>
                     </div>
                     <div class="grid gap-4 md:grid-cols-2" x-show="fallbackMode === 'queue'" x-cloak>
@@ -299,7 +305,8 @@
                             <input type="text" x-model.trim="form.spec.fallback.queue_ref"
                                 class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                                 :placeholder="tt('queue.fallback_queue_placeholder')">
-                            <span class="text-xs font-normal text-slate-400" x-text="tt('queue.fallback_queue_hint')"></span>
+                            <span class="text-xs font-normal text-slate-400"
+                                x-text="tt('queue.fallback_queue_hint')"></span>
                         </label>
                     </div>
                 </div>
@@ -329,7 +336,7 @@
 </div>
 
 <script>
-    window._queueTranslations = JSON.parse('{{ t | json | safe }}');
+    window._queueTranslations = {{ t | json | safe }};
     document.addEventListener('alpine:init', () => {
         Alpine.data('queueDetailPage', (options) => ({
             basePath: options.basePath || '/console',

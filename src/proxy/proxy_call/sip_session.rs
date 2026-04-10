@@ -290,8 +290,7 @@ impl SipSession {
             .get_or_create_server_invite(tx, state_tx, None, local_contact.clone())
             .map_err(|e| anyhow!("Failed to create server dialog: {}", e))?;
 
-        let use_media_proxy =
-            Self::check_media_proxy(&context, &context.dialplan.media.proxy_mode);
+        let use_media_proxy = Self::check_media_proxy(&context, &context.dialplan.media.proxy_mode);
 
         let caller_media_builder = crate::media::MediaStreamBuilder::new()
             .with_id(format!("{}-caller", session_id))
@@ -1261,7 +1260,6 @@ impl SipSession {
         Ok(())
     }
 
-
     async fn prepare_caller_answer_from_callee_sdp(
         &mut self,
         callee_sdp: Option<String>,
@@ -1275,8 +1273,7 @@ impl SipSession {
             };
         };
 
-        let sdp_changed =
-            self.callee_answer_sdp.as_deref() != Some(callee_sdp_value.as_str());
+        let sdp_changed = self.callee_answer_sdp.as_deref() != Some(callee_sdp_value.as_str());
 
         if self.answer.is_some() && !sdp_changed && !force_regenerate {
             return self.answer.clone();
@@ -1522,7 +1519,7 @@ impl SipSession {
                 caller_answer_for_forwarding.as_deref(),
                 callee_answer_for_forwarding.as_deref(),
             )
-                .await;
+            .await;
         }
 
         caller_answer
@@ -1700,12 +1697,41 @@ impl SipSession {
             .sender()
             .ok_or_else(|| anyhow!("{}: no sender on target audio transceiver", direction))?;
 
+        // Issue #171: spin up a dedicated recorder drain task so that
+        // write_sample (codec decode + disk I/O) never blocks the RTP recv loop.
+        // The task borrows the shared recorder lock and calls write_sample
+        // asynchronously; the ForwardingTrack just does a non-blocking
+        // try_send per sample — if the channel is full the sample is dropped
+        // rather than allowing unbounded memory growth under disk pressure.
+        let recorder_tx = {
+            use tokio::sync::mpsc;
+            // 256 slots ≈ 5 seconds of 20 ms packets at 8 kHz — enough to
+            // absorb transient disk stalls without unbounded heap growth.
+            const RECORDER_CHANNEL_CAPACITY: usize = 256;
+            let (tx, mut rx) = mpsc::channel::<(
+                crate::media::recorder::Leg,
+                rustrtc::media::frame::MediaSample,
+            )>(RECORDER_CHANNEL_CAPACITY);
+            let recorder_arc = recorder;
+            tokio::spawn(async move {
+                while let Some((sample_leg, sample)) = rx.recv().await {
+                    let mut guard = recorder_arc.write();
+                    if let Some(rec) = guard.as_mut() {
+                        if let Err(err) = rec.write_sample(sample_leg, &sample, None, None, None) {
+                            tracing::warn!("recorder write_sample failed: {err}");
+                        }
+                    }
+                }
+            });
+            tx
+        };
+
         let forwarding = Arc::new(ForwardingTrack::new(
             track_id.to_string(),
             receiver_track,
             transcoder,
             audio_mapping,
-            recorder,
+            Some(recorder_tx),
             leg,
             dtmf_mapping,
         ));
@@ -1723,7 +1749,7 @@ impl SipSession {
         debug!(
             session_id = %session_id,
             direction = %direction,
-            "Wired ForwardingTrack (zero-task forwarding)"
+            "Wired ForwardingTrack (async recorder task, zero-blocking forwarding)"
         );
 
         Ok(())
@@ -2163,10 +2189,7 @@ impl SipSession {
                             || self.media_bridge.is_some()
                         {
                             final_answer = self
-                                .prepare_caller_answer_from_callee_sdp(
-                                    Some(answer_sdp),
-                                    true,
-                                )
+                                .prepare_caller_answer_from_callee_sdp(Some(answer_sdp), true)
                                 .await;
                         } else {
                             final_answer = Some(answer_sdp.clone());

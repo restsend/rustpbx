@@ -597,6 +597,7 @@ fn build_queue_options(queues: &[QueueModel]) -> Vec<Value> {
         .filter_map(|queue| match queue_utils::convert_queue_model(queue.clone()) {
             Ok(entry) => Some(json!({
                 "id": queue.id,
+                "queue_id": format!("db-{}", queue.id),
                 "name": entry.name,
                 "description": entry.description,
                 "is_active": queue.is_active,
@@ -1425,6 +1426,7 @@ pub(crate) async fn create_routing(
             .into_response();
     }
 
+    state.mark_pending_reload();
     Json(json!({"status": "ok", "id": model.id})).into_response()
 }
 
@@ -1552,6 +1554,8 @@ pub(crate) async fn update_routing(
             .into_response();
     }
 
+    // Issue #175: mark routes as pending reload.
+    state.mark_pending_reload();
     Json(json!({"status": "ok", "id": id})).into_response()
 }
 
@@ -1577,6 +1581,7 @@ pub async fn delete_routing(
                 )
                     .into_response()
             } else {
+                state.mark_pending_reload();
                 Json(json!({"status": "ok", "rows_affected": result.rows_affected})).into_response()
             }
         }
@@ -1709,5 +1714,38 @@ mod tests {
         };
         let resp = create_routing(State(state), AuthRequired(user), Json(doc)).await;
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[test]
+    fn build_queue_options_includes_queue_id() {
+        use crate::addons::queue::models::Model as QueueModel;
+        let now = Utc::now();
+        let queue = QueueModel {
+            id: 42,
+            name: "Customer calls back".to_string(),
+            description: Some("Main support queue".to_string()),
+            metadata: None,
+            // spec must be a valid RouteQueueConfig JSON (accept_immediately is required)
+            spec: serde_json::json!({ "accept_immediately": false }),
+            is_active: true,
+            created_at: now,
+            updated_at: now,
+            last_exported_at: None,
+        };
+
+        let options = build_queue_options(&[queue]);
+        assert_eq!(
+            options.len(),
+            1,
+            "should build one option from a valid queue model"
+        );
+        let opt = &options[0];
+        assert_eq!(opt["id"], 42);
+        assert_eq!(
+            opt["queue_id"].as_str().unwrap(),
+            "db-42",
+            "queue_id must be the stable db-<id> reference (issue #176)"
+        );
+        assert_eq!(opt["name"].as_str().unwrap(), "Customer calls back");
     }
 }

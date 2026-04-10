@@ -419,4 +419,57 @@ mod tests {
             assert!(tokens.is_empty());
         }
     }
+
+    #[tokio::test]
+    async fn test_reconcile_before_set_endpoint_then_after() {
+        let registrar = TrunkRegistrar::new();
+
+        let mut trunks = HashMap::new();
+        trunks.insert(
+            "trunk-a".to_string(),
+            TrunkConfig {
+                dest: "sip:192.0.2.1:5060".to_string(),
+                username: Some("user".to_string()),
+                password: Some("pass".to_string()),
+                register_enabled: Some(true),
+                register_expires: Some(60),
+                ..Default::default()
+            },
+        );
+
+        // First call without endpoint — must be silent no-op.
+        registrar.reconcile(&trunks).await;
+        assert!(
+            registrar.cancel_tokens.read().unwrap().is_empty(),
+            "no token should be created before set_endpoint"
+        );
+
+        // Status should also be absent.
+        assert!(registrar.get_status("trunk-a").is_none());
+    }
+
+    /// A disabled trunk must not be registered even when register_enabled=true.
+    #[tokio::test]
+    async fn test_reconcile_disabled_trunk_is_skipped() {
+        let registrar = TrunkRegistrar::new();
+
+        let mut trunks = HashMap::new();
+        trunks.insert(
+            "disabled-trunk".to_string(),
+            TrunkConfig {
+                dest: "sip:192.0.2.1:5060".to_string(),
+                username: Some("u".to_string()),
+                password: Some("p".to_string()),
+                register_enabled: Some(true),
+                disabled: Some(true),
+                ..Default::default()
+            },
+        );
+
+        registrar.reconcile(&trunks).await;
+        assert!(
+            registrar.cancel_tokens.read().unwrap().is_empty(),
+            "disabled trunk must not spawn a registration task"
+        );
+    }
 }

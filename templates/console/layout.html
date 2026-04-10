@@ -1,5 +1,6 @@
 <!DOCTYPE html>
-<html lang="{{ locale | default('en') }}" x-data="{ darkMode: false }" :class="{ 'dark': darkMode }" class="bg-slate-100 text-sm">
+<html lang="{{ locale | default('en') }}" x-data="{ darkMode: false }" :class="{ 'dark': darkMode }"
+    class="bg-slate-100 text-sm">
 
 <head>
     <meta charset="utf-8" />
@@ -9,7 +10,7 @@
     {% block js_head %}
     <script>
         window.__currentUser = {{ current_user | json | safe }};
-        window.hasPermission = function(perm) {
+        window.hasPermission = function (perm) {
             // If current_user is missing but user reached this authenticated page,
             // default to showing items (backend has already authenticated)
             if (!window.__currentUser) return true;
@@ -122,69 +123,69 @@
                 open: false,
                 current: '{{ locale | default("en") }}',
                 locales: {{ available_locales | json | safe }},
-                flags: {
-                    'en': '🇺🇸', 'en-US': '🇺🇸', 'en-GB': '🇬🇧',
-                    'zh': '🇨🇳', 'zh-CN': '🇨🇳', 'zh-TW': '🇹🇼', 'zh-HK': '🇭🇰',
-                    'ja': '🇯🇵', 'ko': '🇰🇷',
-                    'fr': '🇫🇷', 'de': '🇩🇪', 'es': '🇪🇸',
-                    'pt': '🇧🇷', 'pt-BR': '🇧🇷', 'pt-PT': '🇵🇹',
-                    'it': '🇮🇹', 'ru': '🇷🇺', 'ar': '🇸🇦',
-                    'tr': '🇹🇷', 'pl': '🇵🇱', 'nl': '🇳🇱',
-                    'sv': '🇸🇪', 'da': '🇩🇰', 'fi': '🇫🇮', 'nb': '🇳🇴',
-                    'cs': '🇨🇿', 'sk': '🇸🇰', 'hu': '🇭🇺', 'ro': '🇷🇴',
-                    'uk': '🇺🇦', 'vi': '🇻🇳', 'th': '🇹🇭', 'id': '🇮🇩',
-                    'ms': '🇲🇾', 'he': '🇮🇱', 'el': '🇬🇷', 'hr': '🇭🇷',
-                },
-                flag(code) {
-                    return this.flags[code] || '🌐';
-                },
-                label(locale) {
-                    return locale.native_name || locale.name || locale.code;
-                },
-                select(code) {
-                    document.cookie = `locale=${code}; path=/; max-age=31536000; SameSite=Lax`;
-                    window.location.reload();
-                },
+            flags: {
+            'en': '🇺🇸', 'en-US': '🇺🇸', 'en-GB': '🇬🇧',
+            'zh': '🇨🇳', 'zh-CN': '🇨🇳', 'zh-TW': '🇹🇼', 'zh-HK': '🇭🇰',
+            'ja': '🇯🇵', 'ko': '🇰🇷',
+            'fr': '🇫🇷', 'de': '🇩🇪', 'es': '🇪🇸',
+            'pt': '🇧🇷', 'pt-BR': '🇧🇷', 'pt-PT': '🇵🇹',
+            'it': '🇮🇹', 'ru': '🇷🇺', 'ar': '🇸🇦',
+            'tr': '🇹🇷', 'pl': '🇵🇱', 'nl': '🇳🇱',
+            'sv': '🇸🇪', 'da': '🇩🇰', 'fi': '🇫🇮', 'nb': '🇳🇴',
+            'cs': '🇨🇿', 'sk': '🇸🇰', 'hu': '🇭🇺', 'ro': '🇷🇴',
+            'uk': '🇺🇦', 'vi': '🇻🇳', 'th': '🇹🇭', 'id': '🇮🇩',
+            'ms': '🇲🇾', 'he': '🇮🇱', 'el': '🇬🇷', 'hr': '🇭🇷',
+        },
+            flag(code) {
+            return this.flags[code] || '🌐';
+        },
+            label(locale) {
+            return locale.native_name || locale.name || locale.code;
+        },
+            select(code) {
+            document.cookie = `locale=${code}; path=/; max-age=31536000; SameSite=Lax`;
+            window.location.reload();
+        },
             }));
 
-            Alpine.data('consoleConfirmDialog', () => ({
-                open: false,
-                title: '{{ "common.confirm_title" | t }}',
-                message: '',
-                confirmLabel: '{{ "common.confirm" | t }}',
-                cancelLabel: '{{ "common.cancel" | t }}',
-                destructive: false,
-                onConfirm: null,
-                init() {
-                    window.addEventListener('console:confirm', (event) => {
-                        const detail = event.detail || {};
-                        this.title = detail.title || '{{ "common.confirm_title" | t }}';
-                        this.message = detail.message || detail.description || '';
-                        this.confirmLabel = detail.confirmLabel || '{{ "common.confirm" | t }}';
-                        this.cancelLabel = detail.cancelLabel || '{{ "common.cancel" | t }}';
-                        this.destructive = Boolean(detail.destructive);
-                        this.onConfirm = typeof detail.onConfirm === 'function' ? detail.onConfirm : null;
-                        this.open = true;
-                        this.$nextTick(() => {
-                            this.$refs.confirmButton?.focus();
-                        });
+        Alpine.data('consoleConfirmDialog', () => ({
+            open: false,
+            title: '{{ "common.confirm_title" | t }}',
+            message: '',
+            confirmLabel: '{{ "common.confirm" | t }}',
+            cancelLabel: '{{ "common.cancel" | t }}',
+            destructive: false,
+            onConfirm: null,
+            init() {
+                window.addEventListener('console:confirm', (event) => {
+                    const detail = event.detail || {};
+                    this.title = detail.title || '{{ "common.confirm_title" | t }}';
+                    this.message = detail.message || detail.description || '';
+                    this.confirmLabel = detail.confirmLabel || '{{ "common.confirm" | t }}';
+                    this.cancelLabel = detail.cancelLabel || '{{ "common.cancel" | t }}';
+                    this.destructive = Boolean(detail.destructive);
+                    this.onConfirm = typeof detail.onConfirm === 'function' ? detail.onConfirm : null;
+                    this.open = true;
+                    this.$nextTick(() => {
+                        this.$refs.confirmButton?.focus();
                     });
-                },
-                close() {
-                    this.open = false;
-                    this.onConfirm = null;
-                },
-                confirm() {
-                    if (typeof this.onConfirm === 'function') {
-                        const result = this.onConfirm();
-                        if (result && typeof result.then === 'function') {
-                            result.finally(() => this.close());
-                            return;
-                        }
+                });
+            },
+            close() {
+                this.open = false;
+                this.onConfirm = null;
+            },
+            confirm() {
+                if (typeof this.onConfirm === 'function') {
+                    const result = this.onConfirm();
+                    if (result && typeof result.then === 'function') {
+                        result.finally(() => this.close());
+                        return;
                     }
-                    this.close();
-                },
-            }));
+                }
+                this.close();
+            },
+        }));
         });
     </script>
     {% endblock %}
@@ -251,10 +252,10 @@
                         </svg>
                         <span x-show="!sidebarCollapsed" x-transition.opacity x-cloak>{{ "nav.dashboard" | t }}</span>
                     </a>
-                    <a href="{{ bp }}/extensions"
-                        x-show="can('extensions:read')" x-cloak
+                    <a href="{{ bp }}/extensions" x-show="can('extensions:read')" x-cloak
                         class="group mt-1 flex items-center gap-3 rounded-lg px-3 py-2 hover:bg-slate-50 transition-all duration-200 {{ 'bg-sky-50 text-sky-700' if nav_active=='extensions' else 'text-slate-700' }}"
-                        :class="{ 'justify-center gap-0 px-2 py-3': sidebarCollapsed }" title="{{ 'nav.extensions' | t }}">
+                        :class="{ 'justify-center gap-0 px-2 py-3': sidebarCollapsed }"
+                        title="{{ 'nav.extensions' | t }}">
                         <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5"
                             stroke="currentColor" class="size-5">
                             <path stroke-linecap="round" stroke-linejoin="round"
@@ -262,8 +263,7 @@
                         </svg>
                         <span x-show="!sidebarCollapsed" x-transition.opacity x-cloak>{{ "nav.extensions" | t }}</span>
                     </a>
-                    <a href="{{ bp }}/routing"
-                        x-show="can('routes:read')" x-cloak
+                    <a href="{{ bp }}/routing" x-show="can('routes:read')" x-cloak
                         class="group mt-1 flex items-center gap-3 rounded-lg px-3 py-2 hover:bg-slate-50 transition-all duration-200 {{ 'bg-sky-50 text-sky-700' if nav_active=='routing' else 'text-slate-700' }}"
                         :class="{ 'justify-center gap-0 px-2 py-3': sidebarCollapsed }" title="{{ 'nav.routing' | t }}">
                         <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5"
@@ -273,10 +273,10 @@
                         </svg>
                         <span x-show="!sidebarCollapsed" x-transition.opacity x-cloak>{{ "nav.routing" | t }}</span>
                     </a>
-                    <a href="{{ bp }}/sip-trunk"
-                        x-show="can('trunks:read')" x-cloak
+                    <a href="{{ bp }}/sip-trunk" x-show="can('trunks:read')" x-cloak
                         class="group mt-1 flex items-center gap-3 rounded-lg px-3 py-2 hover:bg-slate-50 transition-all duration-200 {{ 'bg-sky-50 text-sky-700' if nav_active in ['sip-trunk', 'sip-trunk-detail'] else 'text-slate-700' }}"
-                        :class="{ 'justify-center gap-0 px-2 py-3': sidebarCollapsed }" title="{{ 'nav.sip_trunk' | t }}">
+                        :class="{ 'justify-center gap-0 px-2 py-3': sidebarCollapsed }"
+                        title="{{ 'nav.sip_trunk' | t }}">
                         <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5"
                             stroke="currentColor" class="size-5">
                             <path stroke-linecap="round" stroke-linejoin="round"
@@ -284,21 +284,22 @@
                         </svg>
                         <span x-show="!sidebarCollapsed" x-transition.opacity x-cloak>{{ "nav.sip_trunk" | t }}</span>
                     </a>
-                    <a href="{{ bp }}/call-records"
-                        x-show="can('cdr:read')" x-cloak
+                    <a href="{{ bp }}/call-records" x-show="can('cdr:read')" x-cloak
                         class="group mt-1 flex items-center gap-3 rounded-lg px-3 py-2 hover:bg-slate-50 transition-all duration-200 {{ 'bg-sky-50 text-sky-700' if nav_active=='call-records' else 'text-slate-700' }}"
-                        :class="{ 'justify-center gap-0 px-2 py-3': sidebarCollapsed }" title="{{ 'nav.call_records' | t }}">
+                        :class="{ 'justify-center gap-0 px-2 py-3': sidebarCollapsed }"
+                        title="{{ 'nav.call_records' | t }}">
                         <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5"
                             stroke="currentColor" class="size-5">
                             <path stroke-linecap="round" stroke-linejoin="round"
                                 d="M19.5 14.25v-2.625a3.375 3.375 0 0 0-3.375-3.375h-1.5A1.125 1.125 0 0 1 13.5 7.125v-1.5a3.375 3.375 0 0 0-3.375-3.375H8.25M9 16.5v.75m3-3v3M15 12v5.25m-4.5-15H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 0 0-9-9Z" />
                         </svg>
-                        <span x-show="!sidebarCollapsed" x-transition.opacity x-cloak>{{ "nav.call_records" | t }}</span>
+                        <span x-show="!sidebarCollapsed" x-transition.opacity x-cloak>{{ "nav.call_records" | t
+                            }}</span>
                     </a>
-                    <a href="{{ bp }}/diagnostics"
-                        x-show="can('diagnostics:read')" x-cloak
+                    <a href="{{ bp }}/diagnostics" x-show="can('diagnostics:read')" x-cloak
                         class="group mt-1 flex items-center gap-3 rounded-lg px-3 py-2 hover:bg-slate-50 transition-all duration-200 {{ 'bg-sky-50 text-sky-700' if nav_active=='diagnostics' else 'text-slate-700' }}"
-                        :class="{ 'justify-center gap-0 px-2 py-3': sidebarCollapsed }" title="{{ 'nav.diagnostics' | t }}">
+                        :class="{ 'justify-center gap-0 px-2 py-3': sidebarCollapsed }"
+                        title="{{ 'nav.diagnostics' | t }}">
                         <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5"
                             stroke="currentColor" class="size-5">
                             <path stroke-linecap="round" stroke-linejoin="round"
@@ -306,8 +307,7 @@
                         </svg>
                         <span x-show="!sidebarCollapsed" x-transition.opacity x-cloak>{{ "nav.diagnostics" | t }}</span>
                     </a>
-                    <a href="{{ bp }}/metrics/runtime"
-                        x-show="can('metrics:read')" x-cloak
+                    <a href="{{ bp }}/metrics/runtime" x-show="can('metrics:read')" x-cloak
                         class="group mt-1 flex items-center gap-3 rounded-lg px-3 py-2 hover:bg-slate-50 transition-all duration-200 {{ 'bg-sky-50 text-sky-700' if nav_active=='metrics' else 'text-slate-700' }}"
                         :class="{ 'justify-center gap-0 px-2 py-3': sidebarCollapsed }" title="{{ 'nav.metrics' | t }}">
                         <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5"
@@ -317,8 +317,7 @@
                         </svg>
                         <span x-show="!sidebarCollapsed" x-transition.opacity x-cloak>{{ "nav.metrics" | t }}</span>
                     </a>
-                    <a href="{{ bp }}/addons"
-                        x-show="can('system:read')" x-cloak
+                    <a href="{{ bp }}/addons" x-show="can('system:read')" x-cloak
                         class="group mt-1 flex items-center gap-3 rounded-lg px-3 py-2 hover:bg-slate-50 transition-all duration-200 {{ 'bg-sky-50 text-sky-700' if nav_active=='addons' else 'text-slate-700' }}"
                         :class="{ 'justify-center gap-0 px-2 py-3': sidebarCollapsed }" title="{{ 'nav.addons' | t }}">
                         <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5"
@@ -328,11 +327,10 @@
                         </svg>
                         <span x-show="!sidebarCollapsed" x-transition.opacity x-cloak>{{ "nav.addons" | t }}</span>
                     </a>
-                    <a href="{{ bp }}/notifications"
-                        x-show="can('system:read') || can('extensions:read')" x-cloak
+                    <a href="{{ bp }}/notifications" x-show="can('system:read') || can('extensions:read')" x-cloak
                         class="group mt-1 flex items-center gap-3 rounded-lg px-3 py-2 hover:bg-slate-50 transition-all duration-200 {{ 'bg-sky-50 text-sky-700' if nav_active=='notifications' else 'text-slate-700' }}"
-                        :class="{ 'justify-center gap-0 px-2 py-3': sidebarCollapsed }" title="{{ 'nav.notifications' | t }}"
-                        x-data="{ unread: 0 }"
+                        :class="{ 'justify-center gap-0 px-2 py-3': sidebarCollapsed }"
+                        title="{{ 'nav.notifications' | t }}" x-data="{ unread: 0 }"
                         x-init="fetch('{{ bp }}/api/notifications/unread-count').then(r=>r.json()).then(d=>{ unread=d.count; })">
                         <span class="relative">
                             <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5"
@@ -344,12 +342,14 @@
                                 class="absolute -top-1 -right-1 flex h-4 min-w-4 items-center justify-center rounded-full bg-rose-500 px-0.5 text-[10px] font-bold text-white leading-none"
                                 x-text="unread > 99 ? '99+' : unread"></span>
                         </span>
-                        <span x-show="!sidebarCollapsed" x-transition.opacity x-cloak>{{ "nav.notifications" | t }}</span>
+                        <span x-show="!sidebarCollapsed" x-transition.opacity x-cloak>{{ "nav.notifications" | t
+                            }}</span>
                     </a>
                     <a href="{{ bp }}/settings"
                         x-show="can('system:read') || can('users:read') || can('departments:read')" x-cloak
                         class="group mt-1 flex items-center gap-3 rounded-lg px-3 py-2 hover:bg-slate-50 transition-all duration-200 {{ 'bg-sky-50 text-sky-700' if nav_active=='settings' else 'text-slate-700' }}"
-                        :class="{ 'justify-center gap-0 px-2 py-3': sidebarCollapsed }" title="{{ 'nav.settings' | t }}">
+                        :class="{ 'justify-center gap-0 px-2 py-3': sidebarCollapsed }"
+                        title="{{ 'nav.settings' | t }}">
                         <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5"
                             stroke="currentColor" class="size-5">
                             <path stroke-linecap="round" stroke-linejoin="round"
@@ -362,8 +362,8 @@
                     <div class="my-2 border-t border-slate-100"></div>
                     {% for item in addon_sidebar_items %}
                     {% set item_display_name = item.name_key | default(value=item.name) | t %}
-                    <a href="{{ item.url }}"
-                        {% if item.permission %}x-show="can('{{ item.permission }}')" x-cloak{% endif %}
+                    <a href="{{ item.url }}" {% if item.permission %}x-show="can('{{ item.permission }}')" x-cloak{%
+                        endif %}
                         class="group mt-1 flex items-center gap-3 rounded-lg px-3 py-2 hover:bg-slate-50 transition-all duration-200 {{ 'bg-sky-50 text-sky-700' if nav_active==item.name else 'text-slate-700' }}"
                         :class="{ 'justify-center gap-0 px-2 py-3': sidebarCollapsed }" title="{{ item_display_name }}">
                         {{ item.icon | safe }}
@@ -434,9 +434,13 @@
                             class="flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-sm hover:bg-slate-100 transition-colors"
                             :aria-expanded="open" aria-haspopup="listbox">
                             <span x-text="flag(current)" class="text-base leading-none"></span>
-                            <span x-text="current.toUpperCase()" class="hidden sm:inline text-xs font-medium text-slate-600 uppercase tracking-wide"></span>
-                            <svg class="h-3.5 w-3.5 text-slate-400 transition-transform duration-150" :class="{'rotate-180': open}" viewBox="0 0 20 20" fill="currentColor">
-                                <path fill-rule="evenodd" d="M5.23 7.21a.75.75 0 011.06.02L10 11.168l3.71-3.938a.75.75 0 111.08 1.04l-4.25 4.5a.75.75 0 01-1.08 0l-4.25-4.5a.75.75 0 01.02-1.06z" clip-rule="evenodd"/>
+                            <span x-text="current.toUpperCase()"
+                                class="hidden sm:inline text-xs font-medium text-slate-600 uppercase tracking-wide"></span>
+                            <svg class="h-3.5 w-3.5 text-slate-400 transition-transform duration-150"
+                                :class="{'rotate-180': open}" viewBox="0 0 20 20" fill="currentColor">
+                                <path fill-rule="evenodd"
+                                    d="M5.23 7.21a.75.75 0 011.06.02L10 11.168l3.71-3.938a.75.75 0 111.08 1.04l-4.25 4.5a.75.75 0 01-1.08 0l-4.25-4.5a.75.75 0 01.02-1.06z"
+                                    clip-rule="evenodd" />
                             </svg>
                         </button>
                         <div x-show="open" x-cloak x-transition:enter="transition ease-out duration-100"
@@ -454,8 +458,11 @@
                                         : 'text-slate-700 hover:bg-slate-50'">
                                     <span x-text="flag(loc.code)" class="text-base leading-none w-6 text-center"></span>
                                     <span x-text="label(loc)"></span>
-                                    <svg x-show="loc.code === current" class="ml-auto h-4 w-4 text-sky-500 shrink-0" viewBox="0 0 20 20" fill="currentColor">
-                                        <path fill-rule="evenodd" d="M16.707 5.293a1 1 0 010 1.414L8.414 15l-4.121-4.121a1 1 0 011.414-1.414L8.414 12.172l6.879-6.879a1 1 0 011.414 0z" clip-rule="evenodd"/>
+                                    <svg x-show="loc.code === current" class="ml-auto h-4 w-4 text-sky-500 shrink-0"
+                                        viewBox="0 0 20 20" fill="currentColor">
+                                        <path fill-rule="evenodd"
+                                            d="M16.707 5.293a1 1 0 010 1.414L8.414 15l-4.121-4.121a1 1 0 011.414-1.414L8.414 12.172l6.879-6.879a1 1 0 011.414 0z"
+                                            clip-rule="evenodd" />
                                     </svg>
                                 </button>
                             </template>
@@ -463,12 +470,49 @@
                     </div>
                     {% endif %}
                     <a href="{{ logout_url }}"
-                        class="rounded-lg bg-rose-500 px-3 py-1.5 text-xs font-semibold text-white hover:bg-rose-400">{{ "common.sign_out" | t }}</a>
+                        class="rounded-lg bg-rose-500 px-3 py-1.5 text-xs font-semibold text-white hover:bg-rose-400">{{
+                        "common.sign_out" | t }}</a>
                     {% endif %}
                 </div>
             </header>
 
             <main class="min-h-[calc(100vh-64px)] bg-slate-50">
+                <!-- Issue #175: pending-reload banner -->
+                <div x-data="{
+                    show: false,
+                    dismissed: false,
+                    check() {
+                        if (this.dismissed) return;
+                        fetch('{{ base_path | default('/console') }}/api/pending-reloads')
+                            .then(function(r) { return r.ok ? r.json() : null; })
+                            .then(function(d) {
+                                if (!d) return;
+                                this.show = !!d.pending;
+                            }.bind(this))
+                            .catch(function() {});
+                    },
+                    init() {
+                        this.check();
+                        setInterval(this.check.bind(this), 30000);
+                    }
+                }" x-init="init()" x-show="show" x-cloak x-transition
+                    class="mx-4 mt-4 flex items-start justify-between gap-3 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800 shadow-sm">
+                    <div class="flex items-center gap-2">
+                        <svg class="h-4 w-4 shrink-0 text-amber-500" viewBox="0 0 20 20" fill="currentColor">
+                            <path fill-rule="evenodd"
+                                d="M8.485 2.495c.673-1.167 2.357-1.167 3.03 0l6.28 10.875c.673 1.167-.17 2.625-1.516 2.625H3.72c-1.347 0-2.189-1.458-1.515-2.625L8.485 2.495zM10 5a.75.75 0 01.75.75v3.5a.75.75 0 01-1.5 0v-3.5A.75.75 0 0110 5zm0 9a1 1 0 100-2 1 1 0 000 2z"
+                                clip-rule="evenodd" />
+                        </svg>
+                        <span>{{ "common.pending_reload_notice" | t }}</span>
+                    </div>
+                    <button type="button" @click="dismissed=true; show=false"
+                        class="shrink-0 rounded p-0.5 hover:bg-amber-100" aria-label="Dismiss">
+                        <svg class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
+                            <path
+                                d="M6.28 5.22a.75.75 0 00-1.06 1.06L8.94 10l-3.72 3.72a.75.75 0 101.06 1.06L10 11.06l3.72 3.72a.75.75 0 101.06-1.06L11.06 10l3.72-3.72a.75.75 0 00-1.06-1.06L10 8.94 6.28 5.22z" />
+                        </svg>
+                    </button>
+                </div>
                 {% block content %}{% endblock %}
             </main>
 
