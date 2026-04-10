@@ -1455,12 +1455,35 @@ impl SipSession {
                     .with_cancel_token(self.caller_peer.cancel_token())
                     .with_enable_latching(self.server.proxy_config.enable_latching);
 
+                if let Some(ref external_ip) = self.server.rtp_config.external_ip {
+                    track_builder = track_builder.with_external_ip(external_ip.clone());
+                }
+
+                let (start_port, end_port) = if caller_is_webrtc {
+                    (
+                        self.server.rtp_config.webrtc_start_port,
+                        self.server.rtp_config.webrtc_end_port,
+                    )
+                } else {
+                    (
+                        self.server.rtp_config.start_port,
+                        self.server.rtp_config.end_port,
+                    )
+                };
+
+                if let (Some(start), Some(end)) = (start_port, end_port) {
+                    track_builder = track_builder.with_rtp_range(start, end);
+                }
+
                 if !codec_info.is_empty() {
                     track_builder = track_builder.with_codec_info(codec_info);
                 }
 
                 if caller_is_webrtc {
                     track_builder = track_builder.with_mode(rustrtc::TransportMode::WebRtc);
+                    if let Some(ref ice_servers) = self.server.rtp_config.ice_servers {
+                        track_builder = track_builder.with_ice_servers(ice_servers.clone());
+                    }
                 }
 
                 let track = track_builder.build();
@@ -1949,19 +1972,24 @@ impl SipSession {
                 "Media proxy enabled for same-type transport (anchored media)"
             );
 
-            let media_config = &self.context.dialplan.media;
             let mut track_builder = RtpTrackBuilder::new(track_id.clone())
                 .with_cancel_token(self.callee_peer.cancel_token())
-                .with_enable_latching(media_config.enable_latching);
+                .with_enable_latching(self.server.proxy_config.enable_latching);
 
-            if let Some(ref external_ip) = media_config.external_ip {
+            if let Some(ref external_ip) = self.server.rtp_config.external_ip {
                 track_builder = track_builder.with_external_ip(external_ip.clone());
             }
 
             let (start_port, end_port) = if callee_is_webrtc {
-                (media_config.webrtc_port_start, media_config.webrtc_port_end)
+                (
+                    self.server.rtp_config.webrtc_start_port,
+                    self.server.rtp_config.webrtc_end_port,
+                )
             } else {
-                (media_config.rtp_start_port, media_config.rtp_end_port)
+                (
+                    self.server.rtp_config.start_port,
+                    self.server.rtp_config.end_port,
+                )
             };
 
             if let (Some(start), Some(end)) = (start_port, end_port) {
@@ -1993,7 +2021,7 @@ impl SipSession {
 
             if callee_is_webrtc {
                 track_builder = track_builder.with_mode(rustrtc::TransportMode::WebRtc);
-                if let Some(ref ice_servers) = media_config.ice_servers {
+                if let Some(ref ice_servers) = self.server.rtp_config.ice_servers {
                     track_builder = track_builder.with_ice_servers(ice_servers.clone());
                 }
             }
