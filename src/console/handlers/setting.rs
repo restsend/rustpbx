@@ -191,7 +191,7 @@ pub fn urls() -> Router<Arc<ConsoleState>> {
             "/settings/users/{id}/roles",
             get(get_user_roles).post(assign_user_roles),
         )
-        .route("/settings/roles", get(list_roles).put(create_role))
+        .route("/settings/roles", get(list_roles).post(create_role))
         .route(
             "/settings/roles/{id}",
             get(get_role).patch(update_role).delete(delete_role_handler),

@@ -88,7 +88,7 @@
                             <tr class="hover:bg-slate-50">
                                 <td class="whitespace-nowrap px-4 py-2">
                                     <div class="font-medium text-slate-900">
-                                        <a href="/console/addons/{{ addon.id }}" class="hover:text-sky-600">{{
+                                        <a href="{{ base_path | default('/console') }}/addons/{{ addon.id }}" class="hover:text-sky-600">{{
                                             addon.name }}</a>
                                     </div>
                                     <div class="text-xs text-slate-400">{{ addon.id }}</div>
@@ -163,7 +163,7 @@
                                     {% endif %}
                                     {% if commerce_enabled and addon.category == "Commercial" %}
                                     {% if addon.license_status == "Valid" %}
-                                    <a href="/console/addons/{{ addon.id }}"
+                                    <a href="{{ base_path | default('/console') }}/addons/{{ addon.id }}"
                                         class="ml-2 text-green-600 hover:text-green-800 text-xs font-medium">Licensed
                                         ✓</a>
                                     {% elif addon.license_status == "Expired" %}
@@ -454,7 +454,7 @@
 
             async performToggle(id, newState) {
                 try {
-                    const response = await fetch('/console/addons/toggle', {
+                    const response = await fetch('{{ api_prefix | default('/api') }}/addons/toggle', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ id: id, enabled: newState }),
@@ -493,7 +493,7 @@
                 }
                 this.loading = true;
                 try {
-                    const response = await fetch('/console/licenses/verify', {
+                    const response = await fetch('{{ api_prefix | default('/api') }}/licenses/verify', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ license_key: key })

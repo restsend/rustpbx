@@ -44,6 +44,7 @@ impl ConsoleState {
         let session_key = key_material.to_vec();
         let mut config = config;
         config.base_path = normalize_base_path(&config.base_path);
+        config.api_prefix = normalize_api_prefix(&config.api_prefix);
 
         // Build LocaleConfig from ConsoleConfig
         let locale_config = LocaleConfig {
@@ -114,6 +115,8 @@ impl ConsoleState {
             if let Some(map) = ctx.as_object_mut() {
                 map.entry("base_path")
                     .or_insert_with(|| serde_json::Value::String(self.base_path().to_string()));
+                map.entry("api_prefix")
+                    .or_insert_with(|| serde_json::Value::String(self.api_prefix().to_string()));
 
                 // Inject addon sidebar items
                 if let Some(app_state) = self.app_state() {
@@ -478,6 +481,24 @@ impl ConsoleState {
         &self.config.base_path
     }
 
+    pub fn api_prefix(&self) -> &str {
+        &self.config.api_prefix
+    }
+
+    /// Build API URL with the configured api_prefix
+    pub fn api_url_for(&self, suffix: &str) -> String {
+        let prefix = self.api_prefix();
+        let trimmed = suffix.trim();
+        if trimmed.is_empty() {
+            return prefix.to_string();
+        }
+        if trimmed.starts_with('/') {
+            format!("{}{}", prefix, trimmed)
+        } else {
+            format!("{}/{}", prefix, trimmed)
+        }
+    }
+
     pub fn registration_allowed_by_config(&self) -> bool {
         self.config.allow_registration
     }
@@ -631,6 +652,39 @@ mod tests {
         state.clear_pending_reload();
         assert!(!state.pending_reload.load(Ordering::Relaxed));
     }
+
+    #[tokio::test]
+    async fn base_path_and_api_prefix_work_correctly() {
+        let db = Database::connect("sqlite::memory:")
+            .await
+            .expect("connect sqlite memory");
+        Migrator::up(&db, None).await.expect("run migrations");
+        
+        // Test with custom paths
+        let mut config = ConsoleConfig::default();
+        config.base_path = "/admin".to_string();
+        config.api_prefix = "/v1/api".to_string();
+        
+        let state = ConsoleState::initialize(
+            Arc::new(crate::callrecord::DefaultCallRecordFormatter::default()),
+            db,
+            config,
+        )
+        .await
+        .expect("initialize console state");
+
+        // Test base_path
+        assert_eq!(state.base_path(), "/admin");
+        assert_eq!(state.url_for("/login"), "/admin/login");
+        assert_eq!(state.url_for("/extensions"), "/admin/extensions");
+        assert_eq!(state.url_for(""), "/admin/");
+        
+        // Test api_prefix
+        assert_eq!(state.api_prefix(), "/v1/api");
+        assert_eq!(state.api_url_for("/notifications"), "/v1/api/notifications");
+        assert_eq!(state.api_url_for("/pending-reloads"), "/v1/api/pending-reloads");
+        assert_eq!(state.api_url_for(""), "/v1/api");
+    }
 }
 
 fn normalize_base_path(path: &str) -> String {
@@ -648,6 +702,26 @@ fn normalize_base_path(path: &str) -> String {
     }
     if normalized.is_empty() {
         "/console".to_string()
+    } else {
+        normalized
+    }
+}
+
+fn normalize_api_prefix(path: &str) -> String {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return "/api".to_string();
+    }
+    let mut normalized = if trimmed.starts_with('/') {
+        trimmed.to_string()
+    } else {
+        format!("/{}", trimmed)
+    };
+    while normalized.len() > 1 && normalized.ends_with('/') {
+        normalized.pop();
+    }
+    if normalized.is_empty() {
+        "/api".to_string()
     } else {
         normalized
     }

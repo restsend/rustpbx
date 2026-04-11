@@ -15,12 +15,17 @@ use sea_orm::{
 use serde_json::json;
 use std::sync::Arc;
 
+/// Page routes (nested under base_path)
 pub fn urls() -> Router<Arc<ConsoleState>> {
+    Router::new().route("/notifications", get(list_notifications))
+}
+
+/// API routes (nested under api_prefix)
+pub fn api_urls() -> Router<Arc<ConsoleState>> {
     Router::new()
-        .route("/notifications", get(list_notifications))
-        .route("/api/notifications/unread-count", get(unread_count_handler))
-        .route("/api/notifications/{id}/read", post(mark_read_handler))
-        .route("/api/notifications/read-all", post(mark_all_read_handler))
+        .route("/notifications/unread-count", get(unread_count_handler))
+        .route("/notifications/{id}/read", post(mark_read_handler))
+        .route("/notifications/read-all", post(mark_all_read_handler))
 }
 
 /// Console page: list all system notifications.

@@ -44,6 +44,10 @@ fn default_console_base_path() -> String {
     "/console".to_string()
 }
 
+fn default_console_api_prefix() -> String {
+    "/api".to_string()
+}
+
 fn default_config_rtp_start_port() -> Option<u16> {
     Some(12000)
 }
@@ -460,6 +464,10 @@ pub struct ConsoleConfig {
     pub session_secret: String,
     #[serde(default = "default_console_base_path")]
     pub base_path: String,
+    /// API prefix for REST endpoints (default: "/api")
+    /// All REST API endpoints will be prefixed with this path
+    #[serde(default = "default_console_api_prefix")]
+    pub api_prefix: String,
     #[serde(default)]
     pub allow_registration: bool,
     #[serde(default)]
@@ -499,6 +507,7 @@ impl Default for ConsoleConfig {
         Self {
             session_secret: default_console_session_secret(),
             base_path: default_console_base_path(),
+            api_prefix: default_console_api_prefix(),
             allow_registration: false,
             secure_cookie: false,
             alpine_js: None,

@@ -410,15 +410,22 @@ impl Addon for ArchiveAddon {
     }
 
     fn router(&self, state: AppState) -> Option<Router> {
+        // Get base_path and api_prefix from console config if available
+        let (base_path, api_prefix) = state
+            .console
+            .as_ref()
+            .map(|c| (c.base_path().to_string(), c.api_prefix().to_string()))
+            .unwrap_or_else(|| ("/console".to_string(), "/api".to_string()));
+
         // Re-creating router with middleware logic
         let mut protected = Router::new()
-            .route("/console/archive", get(handlers::ui_index))
-            .route("/api/archive/list", get(handlers::list_archives))
-            .route("/api/archive/delete", post(handlers::delete_archive))
-            .route("/api/archive/config", post(handlers::update_config))
-            .route("/api/archive/count", get(handlers::count_records))
-            .route("/api/archive/manual", post(handlers::manual_archive))
-            .route("/api/archive/task/{task_id}", get(handlers::task_status));
+            .route(&format!("{}/archive", base_path), get(handlers::ui_index))
+            .route(&format!("{}/archive/list", api_prefix), get(handlers::list_archives))
+            .route(&format!("{}/archive/delete", api_prefix), post(handlers::delete_archive))
+            .route(&format!("{}/archive/config", api_prefix), post(handlers::update_config))
+            .route(&format!("{}/archive/count", api_prefix), get(handlers::count_records))
+            .route(&format!("{}/archive/manual", api_prefix), post(handlers::manual_archive))
+            .route(&format!("{}/archive/task/{{task_id}}", api_prefix), get(handlers::task_status));
 
         #[cfg(feature = "console")]
         if let Some(console_state) = state.console.clone() {
@@ -445,11 +452,16 @@ impl Addon for ArchiveAddon {
         }
     }
 
-    fn sidebar_items(&self, _state: AppState) -> Vec<SidebarItem> {
+    fn sidebar_items(&self, state: AppState) -> Vec<SidebarItem> {
+        let base_path = state
+            .console
+            .as_ref()
+            .map(|c| c.base_path().to_string())
+            .unwrap_or_else(|| "/console".to_string());
         vec![SidebarItem {
             name: "Archive".to_string(),
             name_key: Some("archive.sidebar_name".to_string()),
-            url: "/console/archive".to_string(),
+            url: format!("{}/archive", base_path),
             icon: r#"<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="size-5">
   <path stroke-linecap="round" stroke-linejoin="round" d="m20.25 7.5-.625 10.632a2.25 2.25 0 0 1-2.247 2.118H6.622a2.25 2.25 0 0 1-2.247-2.118L3.75 7.5M10 11.25h4M3.375 7.5h17.25c.621 0 1.125-.504 1.125-1.125v-1.5c0-.621-.504-1.125-1.125-1.125H3.375c-.621 0-1.125.504-1.125 1.125v1.5c0 .621.504 1.125 1.125 1.125Z" />
 </svg>

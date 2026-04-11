@@ -124,7 +124,7 @@ pub async fn page_diagnostics(
         json!({
             "nav_active": "diagnostics",
             "test_data": bootstrap,
-            "addon_scripts": state.get_injected_scripts("/console/diagnostics"),
+            "addon_scripts": state.get_injected_scripts(&format!("{}/diagnostics", state.base_path())),
             "current_user": current_user,
         }),
         &headers,

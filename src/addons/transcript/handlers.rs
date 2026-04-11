@@ -871,6 +871,126 @@ pub async fn update_settings(
     Json(json!({ "message": "Settings saved" })).into_response()
 }
 
+#[derive(Debug, Deserialize)]
+pub struct DownloadModelRequest {
+    pub command: Option<String>,
+    pub models_path: Option<String>,
+    pub hf_endpoint: Option<String>,
+}
+
+pub async fn download_model(
+    State(_state): State<Arc<ConsoleState>>,
+    AuthRequired(_): AuthRequired,
+    Json(payload): Json<DownloadModelRequest>,
+) -> Response {
+    // Validate command
+    let command = match &payload.command {
+        Some(cmd) if !cmd.trim().is_empty() => cmd.trim(),
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"message": "Command is required"})),
+            )
+                .into_response();
+        }
+    };
+
+    // Check if command exists
+    if !command_exists(command) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "message": format!("Command '{}' not found in PATH", command)
+            })),
+        )
+            .into_response();
+    }
+
+    // Validate models_path
+    let models_path = match &payload.models_path {
+        Some(path) if !path.trim().is_empty() => path.trim(),
+        _ => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({"message": "Models path is required"})),
+            )
+                .into_response();
+        }
+    };
+
+    // Create models directory if it doesn't exist
+    let models_dir = std::path::Path::new(models_path);
+    if let Err(e) = tokio::fs::create_dir_all(models_dir).await {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({
+                "message": format!("Failed to create models directory: {}", e)
+            })),
+        )
+            .into_response();
+    }
+
+    // Build download command
+    let mut cmd = tokio::process::Command::new(command);
+    cmd.arg("--models-path").arg(models_path);
+    cmd.arg("--download-model");
+
+    // Add HF endpoint if provided
+    if let Some(endpoint) = payload.hf_endpoint {
+        if !endpoint.trim().is_empty() {
+            cmd.env("HF_ENDPOINT", endpoint.trim());
+        }
+    }
+
+    // Set a long timeout for download (10 minutes)
+    let download_result = match timeout(
+        StdDuration::from_secs(600),
+        cmd.output()
+    ).await {
+        Ok(result) => result,
+        Err(_) => {
+            return (
+                StatusCode::GATEWAY_TIMEOUT,
+                Json(json!({"message": "Download timed out after 10 minutes"})),
+            )
+                .into_response();
+        }
+    };
+
+    match download_result {
+        Ok(output) => {
+            if output.status.success() {
+                info!("Model downloaded successfully to {}", models_path);
+                Json(json!({
+                    "message": "Model downloaded successfully",
+                    "path": models_path
+                }))
+                .into_response()
+            } else {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                warn!("Failed to download model: {}", stderr);
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({
+                        "message": format!("Download failed: {}", stderr)
+                    })),
+                )
+                    .into_response()
+            }
+        }
+        Err(e) => {
+            warn!("Failed to execute download command: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "message": format!("Failed to execute download command: {}", e)
+                })),
+            )
+                .into_response()
+        }
+    }
+}
+
 async fn get_merged_config(app_state: &crate::app::AppState) -> TranscriptConfig {
     // Try to read from file first to get latest changes
     if let Some(path) = &app_state.config_path {

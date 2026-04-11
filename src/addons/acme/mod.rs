@@ -101,17 +101,24 @@ impl Addon for AcmeAddon {
             "static/acme"
         };
 
+        // Get base_path and api_prefix from console config if available
+        let (base_path, api_prefix) = state
+            .console
+            .as_ref()
+            .map(|c| (c.base_path().to_string(), c.api_prefix().to_string()))
+            .unwrap_or_else(|| ("/console".to_string(), "/api".to_string()));
+
         let mut protected = Router::new()
             .nest_service(
                 "/static/acme",
                 tower_http::services::ServeDir::new(static_path),
             )
-            .route("/console/acme", get(handlers::ui_index))
-            .route("/api/acme/request", post(handlers::request_cert))
-            .route("/api/acme/status", get(handlers::status))
-            .route("/api/acme/auto-renew", get(handlers::get_auto_renew_config))
+            .route(&format!("{base_path}/acme"), get(handlers::ui_index))
+            .route(&format!("{api_prefix}/acme/request"), post(handlers::request_cert))
+            .route(&format!("{api_prefix}/acme/status"), get(handlers::status))
+            .route(&format!("{api_prefix}/acme/auto-renew"), get(handlers::get_auto_renew_config))
             .route(
-                "/api/acme/auto-renew",
+                &format!("{api_prefix}/acme/auto-renew"),
                 post(handlers::set_auto_renew_config),
             );
 
@@ -150,11 +157,16 @@ impl Addon for AcmeAddon {
         if state.config().demo_mode {
             return vec![];
         }
+        let base_path = state
+            .console
+            .as_ref()
+            .map(|c| c.base_path().to_string())
+            .unwrap_or_else(|| "/console".to_string());
         vec![SidebarItem {
             name: "SSL Certificates".to_string(),
             name_key: Some("acme.sidebar_name".to_string()),
             icon: r#"<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="size-5"><path stroke-linecap="round" stroke-linejoin="round" d="M9 12.75 11.25 15 15 9.75M21 12c0 1.268-.63 2.39-1.593 3.068a3.745 3.745 0 0 1-1.043 3.296 3.745 3.745 0 0 1-3.296 1.043A3.745 3.745 0 0 1 12 21c-1.268 0-2.39-.63-3.068-1.593a3.746 3.746 0 0 1-3.296-1.043 3.745 3.745 0 0 1-1.043-3.296A3.745 3.745 0 0 1 3 12c0-1.268.63-2.39 1.593-3.068a3.745 3.745 0 0 1 1.043-3.296 3.746 3.746 0 0 1 3.296-1.043A3.746 3.746 0 0 1 12 3c1.268 0 2.39.63 3.068 1.593a3.746 3.746 0 0 1 3.296 1.043 3.746 3.746 0 0 1 1.043 3.296A3.745 3.745 0 0 1 21 12Z" /></svg>"#.to_string(),
-            url: "/console/acme".to_string(),
+            url: format!("{}/acme", base_path),
             permission: None,
         }]
     }

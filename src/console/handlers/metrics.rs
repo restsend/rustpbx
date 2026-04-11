@@ -192,11 +192,14 @@ fn collect_call_metrics(state: &ConsoleState) -> CallMetrics {
     metrics
 }
 
-/// URL routes for metrics module.
+/// Page routes (nested under base_path)
 pub fn urls() -> axum::Router<Arc<ConsoleState>> {
     use axum::routing::get;
+    axum::Router::new().route("/metrics/runtime", get(metrics_page))
+}
 
-    axum::Router::new()
-        .route("/metrics/runtime", get(metrics_page))
-        .route("/metrics/runtime/data", get(metrics_data))
+/// API routes (nested under api_prefix)
+pub fn api_urls() -> axum::Router<Arc<ConsoleState>> {
+    use axum::routing::get;
+    axum::Router::new().route("/metrics/runtime/data", get(metrics_data))
 }
