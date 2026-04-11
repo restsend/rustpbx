@@ -129,7 +129,7 @@ pub async fn login_post(
             // Check if MFA is required for this user
             if user.mfa_enabled {
                 // Create MFA session and redirect to verification
-                let redirect_target = state.url_for("/console/login/mfa");
+                let redirect_target = state.url_for("/login/mfa");
                 let mut response = Redirect::to(&redirect_target).into_response();
                 if let Some(header) =
                     state.mfa_session_cookie_header(user.id, is_secure_request(&headers))

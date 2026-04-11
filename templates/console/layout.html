@@ -331,7 +331,7 @@
                         class="group mt-1 flex items-center gap-3 rounded-lg px-3 py-2 hover:bg-slate-50 transition-all duration-200 {{ 'bg-sky-50 text-sky-700' if nav_active=='notifications' else 'text-slate-700' }}"
                         :class="{ 'justify-center gap-0 px-2 py-3': sidebarCollapsed }"
                         title="{{ 'nav.notifications' | t }}" x-data="{ unread: 0 }"
-                        x-init="fetch('{{ bp }}/api/notifications/unread-count').then(r=>r.json()).then(d=>{ unread=d.count; })">
+                        x-init="fetch('{{ api_prefix | default('/api') }}/notifications/unread-count').then(r=>r.json()).then(d=>{ unread=d.count; }).catch(()=>{})">
                         <span class="relative">
                             <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5"
                                 stroke="currentColor" class="size-5">
@@ -413,7 +413,7 @@
                     <a href="{{ base_path | default('/console') }}/notifications"
                         class="relative rounded-lg p-2 hover:bg-slate-100" title="Notifications" x-data="{ unread: 0 }"
                         x-init="
-                            const refresh = () => fetch('{{ base_path | default('/console') }}/api/notifications/unread-count').then(r=>r.json()).then(d=>{ unread=d.count; }).catch(()=>{});
+                            const refresh = () => fetch('{{ api_prefix | default('/api') }}/notifications/unread-count').then(r=>r.json()).then(d=>{ unread=d.count; }).catch(()=>{});
                             refresh();
                             window.addEventListener('notifications:refresh', refresh);
                         ">
@@ -483,7 +483,7 @@
                     dismissed: false,
                     check() {
                         if (this.dismissed) return;
-                        fetch('{{ base_path | default('/console') }}/api/pending-reloads')
+                        fetch('{{ api_prefix | default('/api') }}/pending-reloads')
                             .then(function(r) { return r.ok ? r.json() : null; })
                             .then(function(d) {
                                 if (!d) return;

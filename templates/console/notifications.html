@@ -91,7 +91,7 @@
         return {
             init() { },
             async markRead(id) {
-                const res = await fetch(`{{ base_path }}/api/notifications/${id}/read`, { method: 'POST' });
+                const res = await fetch(`{{ api_prefix | default('/api') }}/notifications/${id}/read`, { method: 'POST' });
                 if (res.ok) {
                     const el = document.getElementById(`notification-${id}`);
                     if (el) {
@@ -104,7 +104,7 @@
                 }
             },
             async markAllRead() {
-                const res = await fetch(`{{ base_path }}/api/notifications/read-all`, { method: 'POST' });
+                const res = await fetch(`{{ api_prefix | default('/api') }}/notifications/read-all`, { method: 'POST' });
                 if (res.ok) {
                     window.location.reload();
                 }

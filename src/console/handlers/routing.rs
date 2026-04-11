@@ -734,12 +734,12 @@ fn render_route_form(
 
     let script_path = if mode == "edit" {
         if let Some(id) = doc.id {
-            format!("/console/routing/{}", id)
+            format!("{}/routing/{}", state.base_path(), id)
         } else {
-            "/console/routing/edit".to_string()
+            format!("{}/routing/edit", state.base_path())
         }
     } else {
-        "/console/routing/new".to_string()
+        format!("{}/routing/new", state.base_path())
     };
 
     state.render_with_headers(

@@ -44,7 +44,10 @@ pub fn normalize_optional_string(value: &Option<String>) -> Option<String> {
 
 pub fn router(state: Arc<ConsoleState>) -> Router {
     let base_path = state.base_path().to_string();
-    let routes = Router::new()
+    let api_prefix = state.api_prefix().to_string();
+    
+    // Page routes (nested under base_path)
+    let page_routes = Router::new()
         .merge(user::urls())
         .merge(extension::urls())
         .merge(sip_trunk::urls())
@@ -53,13 +56,18 @@ pub fn router(state: Arc<ConsoleState>) -> Router {
         .merge(call_record::urls())
         .merge(diagnostics::urls())
         .merge(call_control::urls())
-        .merge(presence::urls())
         .merge(addons::urls())
         .merge(licenses::urls())
         .merge(sipflow::urls())
-        .merge(metrics::urls())
         .merge(notifications::urls())
-        .route("/api/pending-reloads", get(pending_reloads_handler));
+        .merge(metrics::urls());
+    
+    // API routes (nested under api_prefix)
+    let api_routes = Router::new()
+        .route("/pending-reloads", get(pending_reloads_handler))
+        .merge(presence::api_urls())
+        .merge(notifications::api_urls())
+        .merge(metrics::api_urls());
 
     Router::new()
         .route(&format!("{base_path}/"), get(self::dashboard::dashboard))
@@ -67,7 +75,8 @@ pub fn router(state: Arc<ConsoleState>) -> Router {
             &format!("{base_path}/dashboard/data"),
             get(self::dashboard::dashboard_data),
         )
-        .nest(&base_path, routes)
+        .nest(&base_path, page_routes)
+        .nest(&api_prefix, api_routes)
         .with_state(state)
 }
 

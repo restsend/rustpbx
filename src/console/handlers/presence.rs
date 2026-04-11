@@ -8,9 +8,10 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-pub fn urls() -> Router<Arc<ConsoleState>> {
+/// API routes (nested under api_prefix)
+pub fn api_urls() -> Router<Arc<ConsoleState>> {
     Router::new().route(
-        "/api/presence/{extension}",
+        "/presence/{extension}",
         get(get_presence).post(set_presence),
     )
 }

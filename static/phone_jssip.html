@@ -385,10 +385,43 @@
             });
         }
 
+        // Helper to get API base path from current script path
+        function getApiBasePath() {
+            // If accessed via /static/phone_jssip.html, use empty base
+            // If accessed via other paths, try to detect base
+            const path = window.location.pathname;
+            if (path.includes('/static/')) {
+                return '';
+            }
+            // Default to empty (relative to root)
+            return '';
+        }
+
+        // Detect API and WebSocket base path from current URL or fetch from server
+        async function detectServerConfig() {
+            try {
+                // Try to fetch config from server
+                const response = await fetch(getApiBasePath() + '/api/config/phone');
+                if (response.ok) {
+                    return await response.json();
+                }
+            } catch (e) {
+                // Ignore error, use defaults
+            }
+            // Default config
+            return {
+                wsPath: '/ws',
+                iceServersPath: '/iceservers'
+            };
+        }
+
         const defaultServerUrl = (() => {
             const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
             const host = window.location.host || 'localhost:8080';
-            const pathRaw = (serverInput && serverInput.dataset && serverInput.dataset.defaultPath) || '/ws';
+            // Check if we have a custom ws path from query params or localStorage
+            const urlParams = new URLSearchParams(window.location.search);
+            const customWsPath = urlParams.get('ws') || localStorage.getItem('phone_ws_path');
+            const pathRaw = customWsPath || (serverInput && serverInput.dataset && serverInput.dataset.defaultPath) || '/ws';
             const path = pathRaw.startsWith('/') ? pathRaw : `/${pathRaw}`;
             return `${protocol}//${host}${path}`;
         })();
@@ -419,7 +452,7 @@
                 return;
             }
             try {
-                const response = await fetch('/iceservers', { cache: 'no-store' });
+                const response = await fetch(getApiBasePath() + '/iceservers', { cache: 'no-store' });
                 if (!response.ok) {
                     throw new Error(`status ${response.status}`);
                 }

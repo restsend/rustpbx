@@ -41,6 +41,9 @@ database_url = "sqlite://rustpbx.sqlite3"
 [console]
 #session_secret = "please_change_me_to_a_random_secret"
 base_path = "/console"
+# API prefix for REST endpoints (default: "/api")
+# All REST API endpoints will be prefixed with this path
+api_prefix = "/api"
 # allow self-service administrator signup after the first account
 allow_registration = false
 # set to true to force Secure cookie attribute, otherwise it is auto-detected based on request

@@ -762,7 +762,7 @@ async fn page_call_record_detail(
             "call_id": model.call_id,
             "call_data": serde_json::to_string(&payload).unwrap_or_default(),
 
-            "addon_scripts": state.get_injected_scripts(&format!("/console/call-records/{}", model.id)),
+            "addon_scripts": state.get_injected_scripts(&format!("{}/call-records/{}", state.base_path(), model.id)),
             "current_user": current_user,
         }),
         &headers,

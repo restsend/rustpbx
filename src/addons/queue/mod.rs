@@ -58,19 +58,25 @@ impl Addon for QueueAddon {
         )
     }
 
-    fn sidebar_items(&self, _state: AppState) -> Vec<SidebarItem> {
+    fn sidebar_items(&self, state: AppState) -> Vec<SidebarItem> {
+        let base_path = state
+            .console
+            .as_ref()
+            .map(|c| c.base_path().to_string())
+            .unwrap_or_else(|| "/console".to_string());
         vec![SidebarItem {
             name: "Queues".to_string(),
             name_key: Some("queue.sidebar_name".to_string()),
             icon: r#"<svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke-width="1.5" stroke="currentColor" class="size-5"><path stroke-linecap="round" stroke-linejoin="round" d="M3.75 12h16.5m-16.5 3.75h16.5M3.75 19.5h16.5M5.625 4.5h12.75a1.875 1.875 0 0 1 0 3.75H5.625a1.875 1.875 0 0 1 0-3.75Z" /></svg>"#.to_string(),
-            url: "/console/queues".to_string(),
+            url: format!("{}/queues", base_path),
             permission: None,
         }]
     }
 
     fn inject_scripts(&self) -> Vec<crate::addons::ScriptInjection> {
+        // Use a regex that matches any base path followed by /extensions/ or /routing/
         vec![crate::addons::ScriptInjection {
-            url_path_regex: r"^/console/extensions/.*|/console/extensions/new$|^/console/routing/.*|/console/routing/new$",
+            url_path_regex: r"^/.+/extensions/.*|^/.+/extensions/new$|^/.+/routing/.*|^/.+/routing/new$",
             script_url: "/static/queue/queue_extension.js".to_string(),
         }]
     }

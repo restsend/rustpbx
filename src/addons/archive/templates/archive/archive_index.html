@@ -235,7 +235,7 @@
 
             async refreshList() {
                 try {
-                    const response = await fetch('/api/archive/list');
+                    const response = await fetch('{{ api_prefix | default('/api') }}/archive/list');
                     if (response.ok) {
                         this.archives = await response.json();
                     }
@@ -248,7 +248,7 @@
                 this.saving = true;
                 this.configMsg = '';
                 try {
-                    const response = await fetch('/api/archive/config', {
+                    const response = await fetch('{{ api_prefix | default('/api') }}/archive/config', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify(this.config),
@@ -280,7 +280,7 @@
                         destructive: true,
                         onConfirm: async () => {
                             try {
-                                const response = await fetch('/api/archive/delete', {
+                                const response = await fetch('{{ api_prefix | default('/api') }}/archive/delete', {
                                     method: 'POST',
                                     headers: { 'Content-Type': 'application/json' },
                                     body: JSON.stringify({ filename }),
@@ -307,7 +307,7 @@
                 this.manual.counting = true;
                 this.manual.count = null;
                 try {
-                    const url = `/api/archive/count?start_date=${this.manual.startDate}&end_date=${this.manual.endDate}`;
+                    const url = `{{ api_prefix | default('/api') }}/archive/count?start_date=${this.manual.startDate}&end_date=${this.manual.endDate}`;
                     const res = await fetch(url);
                     const data = await res.json();
                     if (data.success) {
@@ -347,7 +347,7 @@
                 this.manual.total = 0;
                 this.manual.progressMsg = this.t.manual_starting || 'Starting...';
                 try {
-                    const res = await fetch('/api/archive/manual', {
+                    const res = await fetch('{{ api_prefix | default('/api') }}/archive/manual', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ start_date: this.manual.startDate, end_date: this.manual.endDate }),

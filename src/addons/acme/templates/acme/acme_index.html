@@ -229,7 +229,7 @@
 
             async loadAutoRenewConfig() {
                 try {
-                    const response = await fetch('/api/acme/auto-renew');
+                    const response = await fetch('{{ api_prefix | default('/api') }}/acme/auto-renew');
                     if (response.ok) {
                         const data = await response.json();
                         this.autoRenewEnabled = data.config.auto_renew;
@@ -251,7 +251,7 @@
                 this.saveError = false;
 
                 try {
-                    const response = await fetch('/api/acme/auto-renew', {
+                    const response = await fetch('{{ api_prefix | default('/api') }}/acme/auto-renew', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({
@@ -284,7 +284,7 @@
                 this.statusMessage = this.t.status_starting || 'Starting request...';
 
                 try {
-                    const response = await fetch('/api/acme/request', {
+                    const response = await fetch('{{ api_prefix | default('/api') }}/acme/request', {
                         method: 'POST',
                         headers: {
                             'Content-Type': 'application/json',
@@ -316,7 +316,7 @@
 
                 const check = async () => {
                     try {
-                        const res = await fetch('/api/acme/status');
+                        const res = await fetch('{{ api_prefix | default('/api') }}/acme/status');
                         const status = await res.json();
 
                         // Handle Rust enum serialization: {"Running": "msg"} or "None"
