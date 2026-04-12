@@ -162,6 +162,7 @@ impl SipSessionHandle {
 impl SipSession {
     pub const CALLER_TRACK_ID: &'static str = "caller-track";
     pub const CALLEE_TRACK_ID: &'static str = "callee-track";
+    const SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_secs(3);
 
     pub fn with_handle(id: SessionId) -> (SipSessionHandle, mpsc::UnboundedReceiver<CallCommand>) {
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
@@ -414,7 +415,11 @@ impl SipSession {
         }
 
         let hangup_futures = FuturesUnordered::new();
+        let timeout = futures::future::pending::<()>().boxed();
+        let mut cancelled = false;
         tokio::pin!(hangup_futures);
+        tokio::pin!(timeout);
+
 
         loop {
             for dialog_id in self.pending_hangup.drain() {
@@ -427,15 +432,25 @@ impl SipSession {
                 }
             }
 
+            if cancelled
+                && hangup_futures.is_empty()
+                && self.pending_hangup.is_empty()
+                && self.server_dialog.state().is_terminated()
+                && self.callee_dialogs.is_empty()
+            {
+                break;
+            }
+
             tokio::select! {
                 res = hangup_futures.next(), if !hangup_futures.is_empty() => {
                     if let Some(res) = res {
                         tracing::info!("Hangup completed for dialog_id: {:?}", &res);
                     }
                 }
-                _ = self.cancel_token.cancelled() => {
-                    debug!(session_id = %self.context.session_id, "Session cancelled");
-                    break;
+                _ = self.cancel_token.cancelled(), if !cancelled => {
+                    debug!(session_id = %self.context.session_id, "Session cancellation observed");
+                    *timeout = tokio::time::sleep(Self::SHUTDOWN_DRAIN_TIMEOUT).boxed();
+                    cancelled = true;
                 }
 
 
@@ -460,8 +475,11 @@ impl SipSession {
                     }
                 }
 
+                _ = &mut timeout, if cancelled => {
+                    break;
+                }
 
-                Some(expired) = self.timer_queue.next(), if !self.timer_queue.is_empty() => {
+                Some(expired) = self.timer_queue.next(), if !cancelled && !self.timer_queue.is_empty() => {
                     let scheduled = expired.into_inner();
 
                     match self.next_timer_action(&scheduled) {
@@ -487,8 +505,7 @@ impl SipSession {
                         Some(TimerAction::Expired) => {
                             warn!(dialog_id = %scheduled, "Session timer expired, terminating session");
                             self.hangup_reason = Some(CallRecordHangupReason::Autohangup);
-                            self.cancel_token.cancel();
-                            break;
+                            self.pending_hangup.insert(scheduled);
                         }
                         None => {}
                     }
@@ -587,6 +604,13 @@ impl SipSession {
                         debug!(?reason, "Caller dialog terminated with reason");
                     }
                 }
+
+                let callee_ids: Vec<_> = self
+                    .callee_dialogs
+                    .iter()
+                    .map(|entry| entry.key().clone())
+                    .collect();
+                self.pending_hangup.extend(callee_ids);
                 self.cancel_token.cancel();
             }
             _ => {}
@@ -625,7 +649,6 @@ impl SipSession {
                 self.timers.remove(&terminated_dialog_id);
                 self.callee_guards
                     .retain(|guard| guard.id() != &terminated_dialog_id);
-                self.pending_hangup.insert(self.server_dialog.id());
 
                 match &reason {
                     TerminatedReason::UasBye => {
@@ -679,6 +702,8 @@ impl SipSession {
                             warn!(error = %e, "Failed to send rejection response to caller");
                         }
                     }
+                } else {
+                    self.pending_hangup.insert(self.server_dialog.id());
                 }
             }
             _ => {}
