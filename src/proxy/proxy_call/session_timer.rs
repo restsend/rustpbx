@@ -13,6 +13,7 @@ pub const HEADER_SESSION_EXPIRES: &str = "Session-Expires";
 pub const HEADER_MIN_SE: &str = "Min-SE";
 pub const HEADER_SUPPORTED: &str = "Supported";
 pub const HEADER_REQUIRE: &str = "Require";
+pub const HEADER_ALLOW: &str = "Allow";
 pub const TIMER_TAG: &str = "timer";
 
 /// Default session expiration interval (30 minutes per RFC 4028 recommendation)
@@ -353,6 +354,19 @@ pub fn has_timer_support(headers: &rsipstack::sip::Headers) -> bool {
         rsipstack::sip::Header::Other(n, v) if n.eq_ignore_ascii_case(HEADER_SUPPORTED) => {
             v.split(',').any(|v| v.trim() == TIMER_TAG)
         }
+        _ => false,
+    })
+}
+
+pub fn allows_update(headers: &rsipstack::sip::Headers) -> bool {
+    headers.iter().any(|h| match h {
+        rsipstack::sip::Header::Allow(v) => v
+            .to_string()
+            .split(',')
+            .any(|m| m.trim().eq_ignore_ascii_case("UPDATE")),
+        rsipstack::sip::Header::Other(n, v) if n.eq_ignore_ascii_case(HEADER_ALLOW) => v
+            .split(',')
+            .any(|m| m.trim().eq_ignore_ascii_case("UPDATE")),
         _ => false,
     })
 }
