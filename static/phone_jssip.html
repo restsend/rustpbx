@@ -387,21 +387,34 @@
 
         // Helper to get API base path from current script path
         function getApiBasePath() {
-            // If accessed via /static/phone_jssip.html, use empty base
-            // If accessed via other paths, try to detect base
-            const path = window.location.pathname;
-            if (path.includes('/static/')) {
+            const path = window.location.pathname || '/';
+            const staticIndex = path.indexOf('/static/');
+            if (staticIndex === -1) {
                 return '';
             }
-            // Default to empty (relative to root)
-            return '';
+
+            // /rustpbx/static/phone_jssip.html -> /rustpbx
+            const base = path.slice(0, staticIndex).replace(/\/+$/, '');
+            return base === '/' ? '' : base;
+        }
+
+        function withApiBase(pathname) {
+            const base = getApiBasePath();
+            const normalizedPath = (pathname || '/').startsWith('/') ? pathname : `/${pathname}`;
+            if (!base) {
+                return normalizedPath;
+            }
+            if (normalizedPath === base || normalizedPath.startsWith(`${base}/`)) {
+                return normalizedPath;
+            }
+            return `${base}${normalizedPath}`;
         }
 
         // Detect API and WebSocket base path from current URL or fetch from server
         async function detectServerConfig() {
             try {
                 // Try to fetch config from server
-                const response = await fetch(getApiBasePath() + '/api/config/phone');
+                const response = await fetch(withApiBase('/api/config/phone'));
                 if (response.ok) {
                     return await response.json();
                 }
@@ -410,8 +423,8 @@
             }
             // Default config
             return {
-                wsPath: '/ws',
-                iceServersPath: '/iceservers'
+                wsPath: withApiBase('/ws'),
+                iceServersPath: withApiBase('/iceservers')
             };
         }
 
@@ -421,8 +434,12 @@
             // Check if we have a custom ws path from query params or localStorage
             const urlParams = new URLSearchParams(window.location.search);
             const customWsPath = urlParams.get('ws') || localStorage.getItem('phone_ws_path');
+            if (customWsPath && /^wss?:\/\//i.test(customWsPath)) {
+                return customWsPath;
+            }
+
             const pathRaw = customWsPath || (serverInput && serverInput.dataset && serverInput.dataset.defaultPath) || '/ws';
-            const path = pathRaw.startsWith('/') ? pathRaw : `/${pathRaw}`;
+            const path = withApiBase(pathRaw);
             return `${protocol}//${host}${path}`;
         })();
 
@@ -452,7 +469,8 @@
                 return;
             }
             try {
-                const response = await fetch(getApiBasePath() + '/iceservers', { cache: 'no-store' });
+                const iceServersUrl = withApiBase('/iceservers');
+                const response = await fetch(iceServersUrl, { cache: 'no-store' });
                 if (!response.ok) {
                     throw new Error(`status ${response.status}`);
                 }
@@ -474,9 +492,9 @@
                 if (iceEnable) {
                     iceEnable.checked = true;
                 }
-                log('Loaded ICE servers from /iceservers');
+                log(`Loaded ICE servers from ${iceServersUrl}`);
             } catch (error) {
-                log(`Failed to load /iceservers: ${error.message}`);
+                log(`Failed to load ${withApiBase('/iceservers')}: ${error.message}`);
             }
         }
 
