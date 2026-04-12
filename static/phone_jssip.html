@@ -139,11 +139,13 @@
         .logs {
             height: 300px;
             overflow-y: auto;
+            overflow-x: hidden;
             background: #f8f9fa;
             padding: 10px;
             border: 1px solid #ddd;
             font-family: monospace;
             font-size: 12px;
+            word-break: break-all;
         }
 
         .incoming-call {
@@ -234,8 +236,10 @@
                     <div class="form-group">
                         <label class="checkbox-inline"><input type="checkbox" id="iceEnable" checked> Enable ICE
                             servers</label>
+                        <label class="checkbox-inline" style="margin-left:16px;"><input type="checkbox" id="relayOnly">
+                            Relay Only</label>
                         <textarea id="iceServers" rows="3"
-                            style="width:100%;">[{"urls":"stun:stun.l.google.com:19302"}]</textarea>
+                            style="width:100%;margin-top:6px;">[{"urls":"stun:stun.l.google.com:19302"}]</textarea>
                     </div>
                     <button id="registerBtn">Register</button>
                     <button id="unregisterBtn" disabled>Unregister</button>
@@ -311,6 +315,13 @@
                     <div class="logs" id="iceStats" style="height:220px;">
                         <em>No ICE data yet.</em>
                     </div>
+                    <div style="margin-top:8px;display:flex;gap:8px;">
+                        <button type="button" id="runIceDiagBtn" style="width:auto;">Run ICE Diagnostics</button>
+                        <button type="button" id="clearIceDiagBtn" style="width:auto;">Clear ICE Diagnostics</button>
+                    </div>
+                    <div class="logs" id="iceDiagResults" style="height:180px;margin-top:8px;">
+                        <em>No diagnostics yet.</em>
+                    </div>
                     <div class="video-container" id="videoContainer">
                         <div class="video-box">
                             <label>Remote Video</label>
@@ -373,11 +384,15 @@
         let videoCanvasInterval = null;
         const logs = document.getElementById('logs');
         const iceStatsPanel = document.getElementById('iceStats');
+        const runIceDiagBtn = document.getElementById('runIceDiagBtn');
+        const clearIceDiagBtn = document.getElementById('clearIceDiagBtn');
+        const iceDiagResults = document.getElementById('iceDiagResults');
         const iceEnable = document.getElementById('iceEnable');
         const iceServersInput = document.getElementById('iceServers');
         let lastOutgoingCallTime = null;
         let lastOutgoingCallLabel = null;
         let iceServersManuallyEdited = false;
+        let iceDiagInProgress = false;
 
         if (iceServersInput) {
             iceServersInput.addEventListener('input', () => {
@@ -462,7 +477,171 @@
             }
         }
 
+        function resetIceDiagnostics(message = '<em>No diagnostics yet.</em>') {
+            if (iceDiagResults) {
+                iceDiagResults.innerHTML = message;
+            }
+        }
+
+        function appendIceDiagnostic(message) {
+            if (!iceDiagResults) {
+                return;
+            }
+            if (iceDiagResults.querySelector('em')) {
+                iceDiagResults.innerHTML = '';
+            }
+            const line = document.createElement('div');
+            const timestamp = new Date().toLocaleTimeString();
+            line.textContent = `[${timestamp}] ${message}`;
+            iceDiagResults.appendChild(line);
+            iceDiagResults.scrollTop = iceDiagResults.scrollHeight;
+        }
+
+        function parseIceServersConfig(rawValue) {
+            const parsed = JSON.parse(rawValue);
+            const list = Array.isArray(parsed)
+                ? parsed
+                : (parsed && Array.isArray(parsed.iceServers))
+                    ? parsed.iceServers
+                    : parsed
+                        ? [parsed]
+                        : [];
+
+            const normalized = list.filter((item) => item && item.urls);
+            if (!normalized.length) {
+                throw new Error('iceServers is empty or invalid');
+            }
+            return normalized;
+        }
+
+        const relayOnlyCheckbox = document.getElementById('relayOnly');
+
+        function getEnabledPcConfigFromUi() {
+            if (!iceEnable || !iceEnable.checked) {
+                return null;
+            }
+            if (!iceServersInput) {
+                throw new Error('ICE servers input not found');
+            }
+            const iceServers = parseIceServersConfig(iceServersInput.value);
+            const config = { iceServers };
+            if (relayOnlyCheckbox && relayOnlyCheckbox.checked) {
+                config.iceTransportPolicy = 'relay';
+            }
+            return config;
+        }
+
+        async function runIceDiagnostics() {
+            if (iceDiagInProgress) {
+                appendIceDiagnostic('Diagnostics already running');
+                return;
+            }
+            if (!window.RTCPeerConnection) {
+                appendIceDiagnostic('RTCPeerConnection is not supported in this browser');
+                return;
+            }
+
+            let pcConfig;
+            try {
+                pcConfig = getEnabledPcConfigFromUi();
+            } catch (error) {
+                appendIceDiagnostic(`ICE config invalid: ${error.message}`);
+                return;
+            }
+
+            if (!pcConfig) {
+                appendIceDiagnostic('ICE servers are disabled. Enable the checkbox first.');
+                return;
+            }
+
+            const startedAt = Date.now();
+            const candidates = [];
+            let closed = false;
+            let timeoutId = null;
+            let pc = null;
+
+            const finish = (reason) => {
+                if (closed) {
+                    return;
+                }
+                closed = true;
+                iceDiagInProgress = false;
+                if (runIceDiagBtn) {
+                    runIceDiagBtn.disabled = false;
+                }
+                if (timeoutId) {
+                    clearTimeout(timeoutId);
+                    timeoutId = null;
+                }
+                if (pc) {
+                    try {
+                        pc.close();
+                    } catch (e) {
+                    }
+                }
+
+                const elapsed = Date.now() - startedAt;
+                const typeCounts = candidates.reduce((acc, c) => {
+                    const t = c.type || 'unknown';
+                    acc[t] = (acc[t] || 0) + 1;
+                    return acc;
+                }, {});
+                const summary = Object.keys(typeCounts).length
+                    ? Object.keys(typeCounts).map((k) => `${k}:${typeCounts[k]}`).join(', ')
+                    : 'none';
+                appendIceDiagnostic(`Diagnostics finished (${reason}) in ${formatMs(elapsed)}; candidates=${candidates.length}; types=${summary}`);
+                if (!candidates.some((c) => c.type === 'relay')) {
+                    appendIceDiagnostic('No relay candidate found. TURN may be unreachable or not configured.');
+                }
+            };
+
+            resetIceDiagnostics('<em>Running ICE diagnostics...</em>');
+            appendIceDiagnostic(`Using ${pcConfig.iceServers.length} configured ICE server(s)`);
+            iceDiagInProgress = true;
+            if (runIceDiagBtn) {
+                runIceDiagBtn.disabled = true;
+            }
+
+            try {
+                pc = new RTCPeerConnection(pcConfig);
+                pc.createDataChannel('ice-diagnostics');
+
+                pc.addEventListener('icegatheringstatechange', () => {
+                    appendIceDiagnostic(`iceGatheringState=${pc.iceGatheringState}`);
+                    if (pc.iceGatheringState === 'complete') {
+                        finish('ice gathering complete');
+                    }
+                });
+
+                pc.addEventListener('icecandidateerror', (event) => {
+                    const url = event && event.url ? event.url : 'unknown-url';
+                    const code = event && event.errorCode ? event.errorCode : 'unknown-code';
+                    appendIceDiagnostic(`icecandidateerror url=${url} code=${code}`);
+                });
+
+                pc.addEventListener('icecandidate', (event) => {
+                    if (!event || !event.candidate) {
+                        finish('null candidate');
+                        return;
+                    }
+                    const parsed = parseIceCandidate(event.candidate.candidate, event.candidate);
+                    candidates.push(parsed);
+                    const addrText = parsed.address ? `${parsed.address}${parsed.port ? `:${parsed.port}` : ''}` : 'address unavailable';
+                    appendIceDiagnostic(`candidate #${candidates.length}: ${parsed.type || 'unknown'} ${addrText}`);
+                });
+
+                timeoutId = setTimeout(() => finish('timeout'), 10000);
+
+                const offer = await pc.createOffer({ offerToReceiveAudio: false, offerToReceiveVideo: false });
+                await pc.setLocalDescription(offer);
+            } catch (error) {
+                appendIceDiagnostic(`Diagnostics failed: ${error.message}`);
+                finish('error');
+            }
+        }
+
         resetIceStats();
+        resetIceDiagnostics();
 
         async function loadDefaultIceServers() {
             if (!iceServersInput || iceServersManuallyEdited) {
@@ -681,6 +860,12 @@
         holdBtn.addEventListener('click', toggleHold);
         answerBtn.addEventListener('click', answerCall);
         rejectBtn.addEventListener('click', rejectCall);
+        if (runIceDiagBtn) {
+            runIceDiagBtn.addEventListener('click', runIceDiagnostics);
+        }
+        if (clearIceDiagBtn) {
+            clearIceDiagBtn.addEventListener('click', () => resetIceDiagnostics());
+        }
 
         if (enableVideoCheckbox) {
             enableVideoCheckbox.addEventListener('change', () => {
@@ -715,7 +900,9 @@
 
         function log(message) {
             const timestamp = new Date().toLocaleTimeString();
-            logs.innerHTML += `[${timestamp}] ${message}<br>`;
+            const entry = document.createElement('div');
+            entry.textContent = `[${timestamp}] ${message}`;
+            logs.appendChild(entry);
             logs.scrollTop = logs.scrollHeight;
             console.log(message);
         }
@@ -781,20 +968,19 @@
 
             // apply ICE servers if enabled
             try {
-                if (iceEnable && iceEnable.checked) {
-                    let parsed = null;
-                    try {
-                        parsed = JSON.parse(iceServersInput.value);
-                    } catch (e) {
-                        parsed = [{ urls: 'stun:stun.l.google.com:19302' }];
-                    }
-                    configuration.pcConfig = { iceServers: parsed };
-                    log(`Using custom ICE servers: ${JSON.stringify(configuration.pcConfig)}`);
+                const pcConfig = getEnabledPcConfigFromUi();
+                if (pcConfig) {
+                    configuration.pcConfig = pcConfig;
+                    log(`Using custom ICE servers for UA: ${JSON.stringify(configuration.pcConfig)}`);
                 } else {
                     log('ICE servers disabled (using default)');
                 }
             } catch (e) {
+                showStatus(`ICE servers config invalid: ${e.message}`, 'error');
                 log(`Error applying ICE servers for UA: ${e.message}`);
+                registerBtn.disabled = false;
+                unregisterBtn.disabled = true;
+                return;
             }
 
             ua = new JsSIP.UA(configuration);
@@ -981,6 +1167,19 @@
                 };
             }
 
+            try {
+                const pcConfig = getEnabledPcConfigFromUi();
+                if (pcConfig) {
+                    callOptions.pcConfig = pcConfig;
+                    const relayNote = pcConfig.iceTransportPolicy === 'relay' ? ' [relay only]' : '';
+                    log(`Applied ICE servers for outgoing call: ${pcConfig.iceServers.length} configured${relayNote}`);
+                }
+            } catch (error) {
+                showStatus(`ICE servers config invalid: ${error.message}`, 'error');
+                log(`Cannot place call with invalid ICE config: ${error.message}`);
+                return;
+            }
+
             lastOutgoingCallTime = Date.now();
             lastOutgoingCallLabel = target;
             ua.call(destination, callOptions);
@@ -1021,6 +1220,19 @@
                     mediaConstraints: { audio: true, video: false },
                     rtcAnswerConstraints: { offerToReceiveAudio: true, offerToReceiveVideo: false }
                 };
+            }
+
+            try {
+                const pcConfig = getEnabledPcConfigFromUi();
+                if (pcConfig) {
+                    options.pcConfig = pcConfig;
+                    const relayNote = pcConfig.iceTransportPolicy === 'relay' ? ' [relay only]' : '';
+                    log(`Applied ICE servers for incoming answer: ${pcConfig.iceServers.length} configured${relayNote}`);
+                }
+            } catch (error) {
+                showStatus(`ICE servers config invalid: ${error.message}`, 'error');
+                log(`Cannot answer call with invalid ICE config: ${error.message}`);
+                return;
             }
 
             try {
