@@ -12,6 +12,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
+use chrono::TimeZone;
 use serde::Deserialize;
 use std::sync::{Arc, atomic::Ordering};
 use tokio::time::{Duration, sleep};
@@ -33,6 +34,8 @@ pub fn ami_router(app_state: AppState) -> Router<AppState> {
             "/frequency_limits",
             get(list_frequency_limits).delete(clear_frequency_limits),
         )
+        .route("/sipflow/flow/{call_id}", get(query_sipflow_flow))
+        .route("/sipflow/media/{call_id}", get(query_sipflow_media))
         .layer(middleware::from_fn_with_state(
             app_state.clone(),
             crate::handler::middleware::ami_auth::ami_auth_middleware,
@@ -479,4 +482,242 @@ async fn clear_frequency_limits(
         )
             .into_response(),
     }
+}
+
+#[derive(Debug, Deserialize)]
+struct SipFlowQueryParams {
+    #[serde(default)]
+    start: Option<String>,
+    #[serde(default)]
+    end: Option<String>,
+}
+
+async fn query_sipflow_flow(
+    State(state): State<AppState>,
+    Path(call_id): Path<String>,
+    Query(params): Query<SipFlowQueryParams>,
+) -> Response {
+    use crate::models::call_record::{Column as CallRecordColumn, Entity as CallRecordEntity};
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+
+    let sip_server = state.sip_server();
+
+    let sipflow = match &sip_server.inner.sip_flow {
+        Some(flow) => flow,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({
+                    "error": "SipFlow not enabled"
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    let backend = match sipflow.backend() {
+        Some(backend) => backend,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({
+                    "error": "SipFlow backend not configured"
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    // Parse time range
+    let now = chrono::Local::now();
+    let mut start_time = params.start.and_then(|s| parse_datetime(&s));
+    let mut end_time = params.end.and_then(|s| parse_datetime(&s));
+
+    // Try to get time range from call record if not provided
+    if start_time.is_none() || end_time.is_none() {
+        if let Ok(Some(record)) = CallRecordEntity::find()
+            .filter(CallRecordColumn::CallId.eq(&call_id))
+            .one(state.db())
+            .await
+        {
+            if start_time.is_none() {
+                start_time = Some(
+                    record.started_at.with_timezone(&chrono::Local) - chrono::Duration::minutes(10),
+                );
+            }
+            if end_time.is_none() {
+                end_time = Some(
+                    record
+                        .ended_at
+                        .unwrap_or(record.started_at)
+                        .with_timezone(&chrono::Local)
+                        + chrono::Duration::hours(1),
+                );
+            }
+        }
+    }
+
+    let start_time = start_time.unwrap_or_else(|| now - chrono::Duration::hours(1));
+    let end_time = end_time.unwrap_or_else(|| now);
+
+    match backend.query_flow(&call_id, start_time, end_time).await {
+        Ok(items) => {
+            if items.is_empty() {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(serde_json::json!({
+                        "error": "Call flow not found"
+                    })),
+                )
+                    .into_response();
+            }
+
+            let json_items: Vec<serde_json::Value> = items
+                .iter()
+                .map(|item| {
+                    serde_json::json!({
+                        "seq": item.seq,
+                        "timestamp": item.timestamp,
+                        "msg_type": format!("{:?}", item.msg_type),
+                        "src_addr": item.src_addr,
+                        "dst_addr": item.dst_addr,
+                        "raw_message": String::from_utf8_lossy(&item.payload),
+                    })
+                })
+                .collect();
+
+            Json(serde_json::json!({
+                "status": "success",
+                "call_id": call_id,
+                "start_time": start_time.to_rfc3339(),
+                "end_time": end_time.to_rfc3339(),
+                "flow": json_items
+            }))
+            .into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "error": format!("Failed to query flow: {}", e)
+            })),
+        )
+            .into_response(),
+    }
+}
+
+async fn query_sipflow_media(
+    State(state): State<AppState>,
+    Path(call_id): Path<String>,
+    Query(params): Query<SipFlowQueryParams>,
+) -> Response {
+    use crate::models::call_record::{Column as CallRecordColumn, Entity as CallRecordEntity};
+    use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+
+    let sip_server = state.sip_server();
+
+    let sipflow = match &sip_server.inner.sip_flow {
+        Some(flow) => flow,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({
+                    "error": "SipFlow not enabled"
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    let backend = match sipflow.backend() {
+        Some(backend) => backend,
+        None => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({
+                    "error": "SipFlow backend not configured"
+                })),
+            )
+                .into_response();
+        }
+    };
+
+    let now = chrono::Local::now();
+    let mut start_time = params.start.and_then(|s| parse_datetime(&s));
+    let mut end_time = params.end.and_then(|s| parse_datetime(&s));
+
+    // Try to get time range from call record if not provided
+    if start_time.is_none() || end_time.is_none() {
+        if let Ok(Some(record)) = CallRecordEntity::find()
+            .filter(CallRecordColumn::CallId.eq(&call_id))
+            .one(state.db())
+            .await
+        {
+            if start_time.is_none() {
+                start_time = Some(
+                    record.started_at.with_timezone(&chrono::Local) - chrono::Duration::minutes(10),
+                );
+            }
+            if end_time.is_none() {
+                end_time = Some(
+                    record
+                        .ended_at
+                        .unwrap_or(record.started_at)
+                        .with_timezone(&chrono::Local)
+                        + chrono::Duration::hours(1),
+                );
+            }
+        }
+    }
+
+    let start_time = start_time.unwrap_or_else(|| now - chrono::Duration::hours(1));
+    let end_time = end_time.unwrap_or_else(|| now);
+
+    match backend.query_media(&call_id, start_time, end_time).await {
+        Ok(data) => {
+            if data.is_empty() {
+                return (
+                    StatusCode::NOT_FOUND,
+                    Json(serde_json::json!({
+                        "error": "Call media not found"
+                    })),
+                )
+                    .into_response();
+            }
+
+            use axum::http::header;
+
+            Response::builder()
+                .status(StatusCode::OK)
+                .header(header::CONTENT_TYPE, "audio/wav")
+                .header(
+                    header::CONTENT_DISPOSITION,
+                    format!("attachment; filename=\"{}.wav\"", call_id),
+                )
+                .body(axum::body::Body::from(data))
+                .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "error": format!("Failed to query media: {}", e)
+            })),
+        )
+            .into_response(),
+    }
+}
+
+fn parse_datetime(s: &str) -> Option<chrono::DateTime<chrono::Local>> {
+    // Try ISO 8601 format
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(s) {
+        return Some(dt.with_timezone(&chrono::Local));
+    }
+
+    // Try Unix timestamp
+    if let Ok(ts) = s.parse::<i64>() {
+        if let Some(dt) = chrono::Local.timestamp_opt(ts, 0).single() {
+            return Some(dt);
+        }
+    }
+
+    None
 }
