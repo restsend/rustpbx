@@ -406,6 +406,8 @@ impl CallModule {
             .with_external_ip(self.inner.server.rtp_config.external_ip.clone())
             .with_rtp_start_port(self.inner.server.rtp_config.start_port.clone())
             .with_rtp_end_port(self.inner.server.rtp_config.end_port.clone())
+            .with_webrtc_start_port(self.inner.server.rtp_config.webrtc_start_port.clone())
+            .with_webrtc_end_port(self.inner.server.rtp_config.webrtc_end_port.clone())
             .with_ice_servers(self.inner.server.rtp_config.ice_servers.clone());
 
         let caller_is_same_realm = self
