@@ -279,6 +279,8 @@ impl CallRouter for HttpCallRouter {
                 dialplan.media.external_ip = self.rtp_config.external_ip.clone();
                 dialplan.media.rtp_start_port = self.rtp_config.start_port;
                 dialplan.media.rtp_end_port = self.rtp_config.end_port;
+                dialplan.media.webrtc_port_start = self.rtp_config.webrtc_start_port;
+                dialplan.media.webrtc_port_end = self.rtp_config.webrtc_end_port;
                 dialplan.media.ice_servers = self.rtp_config.ice_servers.clone();
 
                 if let Some(from) = caller.from.as_ref() {

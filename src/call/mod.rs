@@ -646,6 +646,14 @@ impl MediaConfig {
         self.rtp_end_port = end;
         self
     }
+    pub fn with_webrtc_start_port(mut self, start: Option<u16>) -> Self {
+        self.webrtc_port_start = start;
+        self
+    }
+    pub fn with_webrtc_end_port(mut self, end: Option<u16>) -> Self {
+        self.webrtc_port_end = end;
+        self
+    }
 }
 
 #[derive(Clone, Copy, Debug)]

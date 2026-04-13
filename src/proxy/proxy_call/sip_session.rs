@@ -1807,8 +1807,10 @@ impl SipSession {
             );
 
             let mut bridge_builder = BridgePeerBuilder::new(format!("{}-bridge", self.id))
-                .with_rtp_port_range(20000, 30000)
                 .with_enable_latching(self.server.proxy_config.enable_latching);
+            if let (Some(start), Some(end)) = (self.server.rtp_config.start_port, self.server.rtp_config.end_port) {
+                bridge_builder = bridge_builder.with_rtp_port_range(start, end);
+            }
 
             // If the RTP caller offered BUNDLE (e.g. Linphone includes a=group:BUNDLE),
             // use Standard SDP mode on the RTP side so the answer includes a=group:BUNDLE
