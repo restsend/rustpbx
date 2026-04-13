@@ -1809,6 +1809,10 @@ impl SipSession {
                 bridge_builder = bridge_builder.with_external_ip(external_ip.clone());
             }
 
+            if let Some(ref ice_servers) = self.server.rtp_config.ice_servers {
+                bridge_builder = bridge_builder.with_ice_servers(ice_servers.clone());
+            }
+
             // Configure codecs from allow_codecs + caller's SDP
             if let Some(ref caller_sdp) = self.caller_offer {
                 let allow_codecs = &self.context.dialplan.allow_codecs;

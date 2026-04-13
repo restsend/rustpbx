@@ -46,7 +46,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use bytes::Bytes;
 use rustrtc::{
-    PeerConnection, PeerConnectionEvent, RtpCodecParameters, RtpSender, TransportMode,
+    IceServer, PeerConnection, PeerConnectionEvent, RtpCodecParameters, RtpSender, TransportMode,
     media::{
         MediaError, MediaKind, MediaSample, MediaStreamTrack, SampleStreamSource,
         SampleStreamTrack, VideoFrame,
@@ -853,6 +853,7 @@ pub struct BridgePeerBuilder {
     webrtc_sender_codec: Option<RtpCodecParameters>,
     rtp_sender_codec: Option<RtpCodecParameters>,
     rtp_sdp_compatibility: rustrtc::config::SdpCompatibilityMode,
+    ice_servers: Vec<IceServer>,
 }
 
 impl BridgePeerBuilder {
@@ -871,6 +872,7 @@ impl BridgePeerBuilder {
             webrtc_sender_codec: None,
             rtp_sender_codec: None,
             rtp_sdp_compatibility: rustrtc::config::SdpCompatibilityMode::LegacySip,
+            ice_servers: Vec::new(),
         }
     }
 
@@ -896,6 +898,11 @@ impl BridgePeerBuilder {
 
     pub fn with_external_ip(mut self, ip: String) -> Self {
         self.external_ip = Some(ip);
+        self
+    }
+
+    pub fn with_ice_servers(mut self, servers: Vec<IceServer>) -> Self {
+        self.ice_servers = servers;
         self
     }
 
@@ -981,6 +988,7 @@ impl BridgePeerBuilder {
                 ssrc_start: rand::random::<u32>(),
                 // WebRTC side uses Standard mode (includes rtcp-mux, a=mid)
                 sdp_compatibility: rustrtc::config::SdpCompatibilityMode::Standard,
+                ice_servers: self.ice_servers,
                 ..Default::default()
             });
 
