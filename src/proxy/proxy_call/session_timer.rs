@@ -4,6 +4,7 @@
 //! Session timers are used to detect and recover from hung SIP sessions
 //! by requiring periodic session refresh requests.
 
+use anyhow::{Result, anyhow};
 use std::str::FromStr;
 use std::time::Duration;
 use std::time::Instant;
@@ -12,6 +13,7 @@ use std::time::Instant;
 pub const HEADER_SESSION_EXPIRES: &str = "Session-Expires";
 pub const HEADER_MIN_SE: &str = "Min-SE";
 pub const HEADER_SUPPORTED: &str = "Supported";
+#[cfg(test)]
 pub const HEADER_REQUIRE: &str = "Require";
 pub const TIMER_TAG: &str = "timer";
 
@@ -312,16 +314,10 @@ pub struct TimerStats {
 
 /// Get header value by name (case-insensitive)
 pub fn get_header_value(headers: &rsipstack::sip::Headers, name: &str) -> Option<String> {
-    headers.iter().find_map(|h| match h {
-        rsipstack::sip::Header::Other(n, v) if n.eq_ignore_ascii_case(name) => Some(v.clone()),
-        rsipstack::sip::Header::Supported(h) if name.eq_ignore_ascii_case(HEADER_SUPPORTED) => {
-            Some(h.to_string())
-        }
-        rsipstack::sip::Header::Require(h) if name.eq_ignore_ascii_case(HEADER_REQUIRE) => {
-            Some(h.to_string())
-        }
-        _ => None,
-    })
+    headers
+        .iter()
+        .find(|header| header.name().eq_ignore_ascii_case(name))
+        .map(|header| header.value().to_string())
 }
 
 /// Parse Session-Expires header value
@@ -349,7 +345,7 @@ pub fn parse_session_expires(value: &str) -> Option<(Duration, Option<SessionRef
 /// Check if the message has timer support (Supported: timer header)
 pub fn has_timer_support(headers: &rsipstack::sip::Headers) -> bool {
     headers.iter().any(|h| match h {
-        rsipstack::sip::Header::Supported(s) => s.to_string().split(',').any(|v| v.trim() == TIMER_TAG),
+        rsipstack::sip::Header::Supported(s) => s.value().split(',').any(|v| v.trim() == TIMER_TAG),
         rsipstack::sip::Header::Other(n, v) if n.eq_ignore_ascii_case(HEADER_SUPPORTED) => {
             v.split(',').any(|v| v.trim() == TIMER_TAG)
         }
@@ -361,6 +357,61 @@ pub fn has_timer_support(headers: &rsipstack::sip::Headers) -> bool {
 pub fn parse_min_se(value: &str) -> Option<Duration> {
     let seconds = value.trim().parse::<u64>().ok()?;
     Some(Duration::from_secs(seconds))
+}
+
+pub fn select_timer_refresher(
+    peer_supports_timer: bool,
+    requested_refresher: Option<SessionRefresher>,
+) -> SessionRefresher {
+    if peer_supports_timer {
+        requested_refresher.unwrap_or(SessionRefresher::Uac)
+    } else {
+        SessionRefresher::Uas
+    }
+}
+
+pub fn apply_session_timer_headers(
+    timer: &mut SessionTimerState,
+    headers: &rsipstack::sip::Headers,
+) -> Result<()> {
+    if let Some(se_value) = get_header_value(headers, HEADER_SESSION_EXPIRES) {
+        if let Some((interval, refresher)) = parse_session_expires(&se_value) {
+            if interval < timer.min_se {
+                return Err(anyhow!(
+                    "Session-Expires too small: {} < {}",
+                    interval.as_secs(),
+                    timer.min_se.as_secs()
+                ));
+            }
+
+            timer.session_interval = interval;
+            if let Some(new_refresher) = refresher {
+                timer.refresher = new_refresher;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+pub fn apply_refresh_response(
+    timer: &mut SessionTimerState,
+    headers: &rsipstack::sip::Headers,
+) -> Result<()> {
+    if get_header_value(headers, HEADER_SESSION_EXPIRES).is_none() {
+        timer.complete_refresh();
+        timer.enabled = false;
+        timer.active = false;
+        return Ok(());
+    }
+
+    if let Err(e) = apply_session_timer_headers(timer, headers) {
+        timer.fail_refresh();
+        return Err(e);
+    }
+
+    timer.complete_refresh();
+    Ok(())
 }
 
 fn build_timer_headers(
@@ -407,11 +458,24 @@ pub fn build_session_timer_headers(
     )
 }
 
+pub fn build_session_timer_response_headers(
+    timer: &SessionTimerState,
+    peer_supports_timer: bool,
+) -> Vec<rsipstack::sip::Header> {
+    let mut headers = build_session_timer_headers(timer, false);
+    if peer_supports_timer && timer.refresher == SessionRefresher::Uac {
+        headers.push(rsipstack::sip::Header::Require(
+            rsipstack::sip::headers::Require::from(TIMER_TAG),
+        ));
+    }
+    headers
+}
+
 /// Check if timer is required (Require: timer header)
 #[cfg(test)]
 pub fn is_timer_required(headers: &rsipstack::sip::Headers) -> bool {
     headers.iter().any(|h| match h {
-        rsipstack::sip::Header::Require(s) => s.to_string().split(',').any(|v| v.trim() == TIMER_TAG),
+        rsipstack::sip::Header::Require(s) => s.value().split(',').any(|v| v.trim() == TIMER_TAG),
         rsipstack::sip::Header::Other(n, v) if n.eq_ignore_ascii_case(HEADER_REQUIRE) => {
             v.split(',').any(|v| v.trim() == TIMER_TAG)
         }
