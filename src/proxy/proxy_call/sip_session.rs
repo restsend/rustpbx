@@ -179,6 +179,8 @@ impl SipSessionHandle {
 impl SipSession {
     pub const CALLER_TRACK_ID: &'static str = "caller-track";
     pub const CALLEE_TRACK_ID: &'static str = "callee-track";
+    pub const CALLER_FORWARDING_TRACK_ID: &'static str = "caller-forwarding-track";
+    pub const CALLEE_FORWARDING_TRACK_ID: &'static str = "callee-forwarding-track";
     const SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_secs(3);
 
     pub fn with_handle(id: SessionId) -> (SipSessionHandle, mpsc::UnboundedReceiver<CallCommand>) {
@@ -1616,50 +1618,6 @@ impl SipSession {
 
         caller_answer
     }
-    fn build_forwarding_config(
-        source: &crate::media::negotiate::NegotiatedLegProfile,
-        target: &crate::media::negotiate::NegotiatedLegProfile,
-    ) -> (
-        Option<crate::media::transcoder::Transcoder>,
-        Option<crate::media::forwarding_track::AudioMapping>,
-        Option<crate::media::forwarding_track::DtmfMapping>,
-    ) {
-        use crate::media::forwarding_track::{AudioMapping, DtmfMapping};
-        use crate::media::transcoder::Transcoder;
-
-        let audio_mapping = match (&source.audio, &target.audio) {
-            (Some(source_audio), Some(target_audio)) => Some(AudioMapping {
-                source_pt: source_audio.payload_type,
-                target_pt: target_audio.payload_type,
-                source_clock_rate: source_audio.clock_rate,
-                target_clock_rate: target_audio.clock_rate,
-            }),
-            _ => None,
-        };
-
-        let transcoder = match (&source.audio, &target.audio) {
-            (Some(source_audio), Some(target_audio))
-                if source_audio.codec != target_audio.codec =>
-            {
-                Some(Transcoder::new(
-                    source_audio.codec,
-                    target_audio.codec,
-                    target_audio.payload_type,
-                ))
-            }
-            _ => None,
-        };
-
-        let dtmf_mapping = source.dtmf.as_ref().map(|source_dtmf| DtmfMapping {
-            source_pt: source_dtmf.payload_type,
-            target_pt: target.dtmf.as_ref().map(|codec| codec.payload_type),
-            source_clock_rate: source_dtmf.clock_rate,
-            target_clock_rate: target.dtmf.as_ref().map(|codec| codec.clock_rate),
-        });
-
-        (transcoder, audio_mapping, dtmf_mapping)
-    }
-
     async fn start_anchored_media_forwarding(
         &mut self,
         caller_answer_sdp: Option<&str>,
@@ -1699,41 +1657,60 @@ impl SipSession {
             );
         }
 
-        let (caller_to_callee_tc, caller_to_callee_audio, caller_to_callee_dtmf) =
-            Self::build_forwarding_config(&caller_profile, &callee_profile);
-        let (callee_to_caller_tc, callee_to_caller_audio, callee_to_caller_dtmf) =
-            Self::build_forwarding_config(&callee_profile, &caller_profile);
-
         let shared_recorder = self.recorder.clone();
 
-        if let Err(e) = Self::wire_with_forwarding_track(
-            Self::CALLER_TRACK_ID,
+        match Self::wire_with_forwarding_track(
+            Self::CALLER_FORWARDING_TRACK_ID,
             &caller_pc,
             &callee_pc,
-            caller_to_callee_tc,
-            caller_to_callee_audio,
+            caller_profile.clone(),
+            callee_profile.clone(),
             shared_recorder.clone(),
             Leg::A,
-            caller_to_callee_dtmf,
             session_id,
             "caller→callee",
         ) {
-            warn!(session_id = %session_id, error = %e, "Failed to wire caller→callee");
+            Ok(forwarding) => {
+                self.caller_peer
+                    .update_track(
+                        Box::new(crate::media::forwarding_track::ForwardingTrackHandle::new(
+                            Self::CALLER_FORWARDING_TRACK_ID.to_string(),
+                            forwarding,
+                        )),
+                        None,
+                    )
+                    .await;
+            }
+            Err(e) => {
+                warn!(session_id = %session_id, error = %e, "Failed to wire caller→callee");
+            }
         }
 
-        if let Err(e) = Self::wire_with_forwarding_track(
-            Self::CALLEE_TRACK_ID,
+        match Self::wire_with_forwarding_track(
+            Self::CALLEE_FORWARDING_TRACK_ID,
             &callee_pc,
             &caller_pc,
-            callee_to_caller_tc,
-            callee_to_caller_audio,
+            callee_profile,
+            caller_profile,
             shared_recorder,
             Leg::B,
-            callee_to_caller_dtmf,
             session_id,
             "callee→caller",
         ) {
-            warn!(session_id = %session_id, error = %e, "Failed to wire callee→caller");
+            Ok(forwarding) => {
+                self.callee_peer
+                    .update_track(
+                        Box::new(crate::media::forwarding_track::ForwardingTrackHandle::new(
+                            Self::CALLEE_FORWARDING_TRACK_ID.to_string(),
+                            forwarding,
+                        )),
+                        None,
+                    )
+                    .await;
+            }
+            Err(e) => {
+                warn!(session_id = %session_id, error = %e, "Failed to wire callee→caller");
+            }
         }
 
         info!(session_id = %session_id, "Anchored media forwarding wired via ForwardingTrack");
@@ -1753,18 +1730,37 @@ impl SipSession {
         None
     }
 
+    #[allow(dead_code)]
+    async fn get_forwarding_track(
+        peer: &Arc<dyn MediaPeer>,
+        track_id: &str,
+    ) -> Option<Arc<crate::media::forwarding_track::ForwardingTrack>> {
+        let tracks = peer.get_tracks().await;
+        for t in &tracks {
+            let mut guard = t.lock().await;
+            if guard.id() != track_id {
+                continue;
+            }
+
+            let handle = guard
+                .as_any_mut()
+                .downcast_mut::<crate::media::forwarding_track::ForwardingTrackHandle>()?;
+            return Some(handle.forwarding());
+        }
+        None
+    }
+
     fn wire_with_forwarding_track(
         track_id: &str,
         source_pc: &rustrtc::PeerConnection,
         target_pc: &rustrtc::PeerConnection,
-        transcoder: Option<crate::media::transcoder::Transcoder>,
-        audio_mapping: Option<crate::media::forwarding_track::AudioMapping>,
+        ingress_profile: crate::media::negotiate::NegotiatedLegProfile,
+        egress_profile: crate::media::negotiate::NegotiatedLegProfile,
         recorder: Arc<RwLock<Option<crate::media::recorder::Recorder>>>,
         leg: crate::media::recorder::Leg,
-        dtmf_mapping: Option<crate::media::forwarding_track::DtmfMapping>,
         session_id: &str,
         direction: &str,
-    ) -> Result<()> {
+    ) -> Result<Arc<crate::media::forwarding_track::ForwardingTrack>> {
         use crate::media::forwarding_track::ForwardingTrack;
 
         let source_transceiver = source_pc
@@ -1821,15 +1817,14 @@ impl SipSession {
         let forwarding = Arc::new(ForwardingTrack::new(
             track_id.to_string(),
             receiver_track,
-            transcoder,
-            audio_mapping,
             Some(recorder_tx),
             leg,
-            dtmf_mapping,
+            ingress_profile,
+            egress_profile,
         ));
 
         let sender = rustrtc::RtpSender::builder(
-            forwarding as Arc<dyn rustrtc::media::MediaStreamTrack>,
+            forwarding.clone() as Arc<dyn rustrtc::media::MediaStreamTrack>,
             existing_sender.ssrc(),
         )
         .stream_id(existing_sender.stream_id().to_string())
@@ -1844,7 +1839,7 @@ impl SipSession {
             "Wired ForwardingTrack (async recorder task, zero-blocking forwarding)"
         );
 
-        Ok(())
+        Ok(forwarding)
     }
 
     pub async fn create_callee_track(&mut self, callee_is_webrtc: bool) -> Result<String> {
@@ -2279,7 +2274,6 @@ impl SipSession {
     ) -> Result<String> {
         let offer = rustrtc::SessionDescription::parse(rustrtc::SdpType::Offer, offer_sdp)
             .map_err(|e| anyhow!("Failed to parse re-INVITE offer SDP: {}", e))?;
-
         pc.set_remote_description(offer)
             .await
             .map_err(|e| anyhow!("Failed to apply re-INVITE offer: {}", e))?;
@@ -2295,6 +2289,43 @@ impl SipSession {
         pc.local_description()
             .map(|desc| desc.to_sdp_string())
             .ok_or_else(|| anyhow!("PeerConnection has no local description after re-INVITE"))
+    }
+
+    async fn update_anchored_forwarding_from_sdp(
+        &self,
+        side: DialogSide,
+        changed_leg_sdp: &str,
+    ) -> Result<()> {
+        if self.media_profile.path != MediaPathMode::Anchored || self.media_bridge.is_some() {
+            return Ok(());
+        }
+
+        let changed_profile = MediaNegotiator::extract_leg_profile(changed_leg_sdp);
+        let caller_to_callee_forwarding =
+            Self::get_forwarding_track(&self.caller_peer, Self::CALLER_FORWARDING_TRACK_ID)
+                .await
+                .ok_or_else(|| anyhow!("Missing caller forwarding track"))?;
+        let callee_to_caller_forwarding =
+            Self::get_forwarding_track(&self.callee_peer, Self::CALLEE_FORWARDING_TRACK_ID)
+                .await
+                .ok_or_else(|| anyhow!("Missing callee forwarding track"))?;
+
+        match side {
+            DialogSide::Caller => {
+                // caller->callee track reads caller RTP, so caller-side re-INVITE updates ingress.
+                caller_to_callee_forwarding.stage_ingress_profile(changed_profile.clone());
+                // callee->caller track sends toward caller, so caller-side re-INVITE updates egress.
+                callee_to_caller_forwarding.stage_egress_profile(changed_profile);
+            }
+            DialogSide::Callee => {
+                // caller->callee track sends toward callee, so callee-side re-INVITE updates egress.
+                caller_to_callee_forwarding.stage_egress_profile(changed_profile.clone());
+                // callee->caller track reads callee RTP, so callee-side re-INVITE updates ingress.
+                callee_to_caller_forwarding.stage_ingress_profile(changed_profile);
+            }
+        }
+
+        Ok(())
     }
 
     async fn build_local_dialog_answer(
@@ -2332,6 +2363,7 @@ impl SipSession {
             }
             DialogSide::Callee => {
                 self.callee_offer = Some(answer_sdp.clone());
+                self.callee_answer_sdp = Some(answer_sdp.clone());
                 self.update_leg_state(
                     &LegId::from("callee"),
                     if Self::is_hold_direction(offer_direction) {
@@ -2342,6 +2374,9 @@ impl SipSession {
                 );
             }
         }
+
+        self.update_anchored_forwarding_from_sdp(side, &answer_sdp)
+            .await?;
 
         self.update_snapshot_cache();
         Ok(answer_sdp)

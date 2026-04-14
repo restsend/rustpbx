@@ -574,6 +574,23 @@ impl RtpTrackBuilder {
                 u.starts_with("turn:") || u.starts_with("turns:")
             })
         });
+        let audio_capabilities = match self.mode {
+            TransportMode::WebRtc => negotiate::MediaNegotiator::default_webrtc_codecs(),
+            TransportMode::Rtp | TransportMode::Srtp => {
+                negotiate::MediaNegotiator::default_rtp_codecs()
+            }
+        }
+        .into_iter()
+        .filter_map(|codec| {
+            negotiate::CodecInfo {
+                payload_type: codec.payload_type(),
+                clock_rate: codec.clock_rate(),
+                channels: codec.channels() as u16,
+                codec,
+            }
+            .to_audio_capability()
+        })
+        .collect();
 
         let config = RtcConfiguration {
             ice_servers: self.ice_servers,
@@ -587,6 +604,11 @@ impl RtpTrackBuilder {
             rtp_end_port: self.rtp_end_port,
             external_ip: self.external_ip,
             enable_latching: self.enable_latching,
+            media_capabilities: Some(rustrtc::config::MediaCapabilities {
+                audio: audio_capabilities,
+                video: self.video_capabilities.clone(),
+                application: None,
+            }),
             ssrc_start: rand::random::<u32>(),
             sdp_compatibility,
             ..Default::default()
