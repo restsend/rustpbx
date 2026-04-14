@@ -420,7 +420,6 @@ impl SipSession {
         tokio::pin!(hangup_futures);
         tokio::pin!(timeout);
 
-
         loop {
             for dialog_id in self.pending_hangup.drain() {
                 if let Some(dialog) = self.server.dialog_layer.get_dialog(&dialog_id) {
@@ -1808,7 +1807,10 @@ impl SipSession {
 
             let mut bridge_builder = BridgePeerBuilder::new(format!("{}-bridge", self.id))
                 .with_enable_latching(self.server.proxy_config.enable_latching);
-            if let (Some(start), Some(end)) = (self.server.rtp_config.start_port, self.server.rtp_config.end_port) {
+            if let (Some(start), Some(end)) = (
+                self.server.rtp_config.start_port,
+                self.server.rtp_config.end_port,
+            ) {
                 bridge_builder = bridge_builder.with_rtp_port_range(start, end);
             }
 
@@ -1821,8 +1823,7 @@ impl SipSession {
             // Also enable address latching: with BUNDLE the caller sends all media from its
             // audio (BUNDLE master) port. rustrtc's setup_direct_rtp connects to the LAST
             // m-line port (the video port) which Linphone doesn't actually use for sending.
-            // Latching lets the IceConn auto-correct to the real source (BUNDLE master port)
-            // on the first incoming packet, fixing both send and receive directions.
+            // Latching lets the IceConn auto-correct to the real source (BUNDLE master port).
             if let Some(ref caller_sdp) = self.caller_offer {
                 if !caller_is_webrtc && caller_sdp.contains("a=group:BUNDLE") {
                     bridge_builder = bridge_builder
