@@ -2,8 +2,8 @@ use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use audio_codec::CodecType;
 use rustrtc::{
-    Attribute, IceServer, MediaKind, PeerConnection, RtcConfiguration, RtpCodecParameters, SdpType,
-    SessionDescription, TransceiverDirection, TransportMode,
+    Attribute, IceServer, IceTransportPolicy, MediaKind, PeerConnection, RtcConfiguration,
+    RtpCodecParameters, SdpType, SessionDescription, TransceiverDirection, TransportMode,
 };
 use std::{
     collections::{HashMap, HashSet},
@@ -568,8 +568,20 @@ impl RtpTrackBuilder {
             }
         };
 
+        let has_turn_server = self.ice_servers.iter().any(|server| {
+            server.urls.iter().any(|url| {
+                let u = url.trim_start().to_ascii_lowercase();
+                u.starts_with("turn:") || u.starts_with("turns:")
+            })
+        });
+
         let config = RtcConfiguration {
             ice_servers: self.ice_servers,
+            ice_transport_policy: if self.mode == TransportMode::WebRtc && has_turn_server {
+                IceTransportPolicy::Relay
+            } else {
+                IceTransportPolicy::All
+            },
             transport_mode: self.mode,
             rtp_start_port: self.rtp_start_port,
             rtp_end_port: self.rtp_end_port,

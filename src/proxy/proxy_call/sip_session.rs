@@ -1973,6 +1973,11 @@ impl SipSession {
                 );
             }
 
+            // Attach recorder to bridge so audio is captured when recording starts
+            if self.context.dialplan.recording.enabled {
+                bridge_builder = bridge_builder.with_recorder(self.recorder.clone());
+            }
+
             let bridge = bridge_builder.build();
 
             bridge.setup_bridge().await?;
@@ -2348,7 +2353,13 @@ impl SipSession {
     pub async fn stop_recording(&mut self) -> Result<()> {
         if let Some((path, start_time)) = self.recording_state.take() {
             let duration = start_time.elapsed();
-            *self.recorder.write() = None;
+            {
+                let mut guard = self.recorder.write();
+                if let Some(ref mut r) = *guard {
+                    let _ = r.finalize();
+                }
+                *guard = None;
+            }
             info!(path = %path, duration = ?duration, "Recording stopped");
         }
         Ok(())
