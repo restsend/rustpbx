@@ -1,4 +1,6 @@
-use crate::media::recorder::Leg;
+use crate::media::{Track, recorder::Leg};
+use anyhow::{Result, anyhow};
+use crate::media::negotiate::NegotiatedLegProfile;
 use crate::media::transcoder::{RtpTiming, Transcoder, rewrite_dtmf_duration};
 use async_trait::async_trait;
 use parking_lot::Mutex;
@@ -8,7 +10,7 @@ use rustrtc::media::track::{MediaStreamTrack, TrackState};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AudioMapping {
     pub source_pt: u8,
     pub target_pt: u8,
@@ -17,7 +19,7 @@ pub struct AudioMapping {
 }
 
 /// Mapping for a single DTMF PT from source to target, or drop if target is absent.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DtmfMapping {
     pub source_pt: u8,
     pub target_pt: Option<u8>,
@@ -32,8 +34,12 @@ pub struct DtmfMapping {
 pub struct ForwardingTrack {
     track_id: String,
     inner: Arc<dyn MediaStreamTrack>,
+    update_ingress_profile: Mutex<Option<NegotiatedLegProfile>>,
+    update_egress_profile: Mutex<Option<NegotiatedLegProfile>>,
+    current_ingress_profile: Mutex<Option<NegotiatedLegProfile>>,
+    current_egress_profile: Mutex<Option<NegotiatedLegProfile>>,
     transcoder: Mutex<Option<Transcoder>>,
-    audio_mapping: Option<AudioMapping>,
+    audio_mapping: Mutex<Option<AudioMapping>>,
     /// Timestamp rewriting for audio frames (when audio clock rates differ)
     audio_timing: Mutex<Option<RtpTiming>>,
     /// Timestamp rewriting for DTMF frames (when DTMF clock rates differ)
@@ -45,19 +51,105 @@ pub struct ForwardingTrack {
     /// the sample rather than accumulate unbounded memory.
     recorder_tx: Option<mpsc::Sender<(Leg, MediaSample)>>,
     recorder_leg: Leg,
-    dtmf_mapping: Option<DtmfMapping>,
+    dtmf_mapping: Mutex<Option<DtmfMapping>>,
+}
+
+pub struct ForwardingTrackHandle {
+    track_id: String,
+    forwarding: Arc<ForwardingTrack>,
 }
 
 impl ForwardingTrack {
     pub fn new(
         track_id: String,
         inner: Arc<dyn MediaStreamTrack>,
-        transcoder: Option<Transcoder>,
-        audio_mapping: Option<AudioMapping>,
         recorder_tx: Option<mpsc::Sender<(Leg, MediaSample)>>,
         recorder_leg: Leg,
-        dtmf_mapping: Option<DtmfMapping>,
+        ingress_profile: NegotiatedLegProfile,
+        egress_profile: NegotiatedLegProfile,
     ) -> Self {
+        Self {
+            track_id,
+            inner,
+            update_ingress_profile: Mutex::new(Some(ingress_profile)),
+            update_egress_profile: Mutex::new(Some(egress_profile)),
+            current_ingress_profile: Mutex::new(None),
+            current_egress_profile: Mutex::new(None),
+            transcoder: Mutex::new(None),
+            audio_mapping: Mutex::new(None),
+            audio_timing: Mutex::new(None),
+            dtmf_timing: Mutex::new(None),
+            recorder_tx,
+            recorder_leg,
+            dtmf_mapping: Mutex::new(None),
+        }
+    }
+
+    pub fn stage_ingress_profile(&self, profile: NegotiatedLegProfile) {
+        *self.update_ingress_profile.lock() = Some(profile);
+    }
+
+    pub fn stage_egress_profile(&self, profile: NegotiatedLegProfile) {
+        *self.update_egress_profile.lock() = Some(profile);
+    }
+
+    fn rebuild_runtime_if_needed(&self) {
+        let (ingress_update, egress_update) = {
+            let mut ingress_update = self.update_ingress_profile.lock();
+            let mut egress_update = self.update_egress_profile.lock();
+            if ingress_update.is_none() && egress_update.is_none() {
+                return;
+            }
+            (ingress_update.take(), egress_update.take())
+        };
+
+        let (ingress, egress) = {
+            let mut current_ingress = self.current_ingress_profile.lock();
+            let mut current_egress = self.current_egress_profile.lock();
+
+            if let Some(profile) = ingress_update {
+                *current_ingress = Some(profile);
+            }
+            if let Some(profile) = egress_update {
+                *current_egress = Some(profile);
+            }
+
+            match (current_ingress.clone(), current_egress.clone()) {
+                (Some(ingress), Some(egress)) => (ingress, egress),
+                _ => return,
+            }
+        };
+
+        let audio_mapping = match (&ingress.audio, &egress.audio) {
+            (Some(source_audio), Some(target_audio)) => Some(AudioMapping {
+                source_pt: source_audio.payload_type,
+                target_pt: target_audio.payload_type,
+                source_clock_rate: source_audio.clock_rate,
+                target_clock_rate: target_audio.clock_rate,
+            }),
+            _ => None,
+        };
+
+        let dtmf_mapping = ingress.dtmf.as_ref().map(|source_dtmf| DtmfMapping {
+            source_pt: source_dtmf.payload_type,
+            target_pt: egress.dtmf.as_ref().map(|codec| codec.payload_type),
+            source_clock_rate: source_dtmf.clock_rate,
+            target_clock_rate: egress.dtmf.as_ref().map(|codec| codec.clock_rate),
+        });
+
+        let transcoder = match (&ingress.audio, &egress.audio) {
+            (Some(source_audio), Some(target_audio))
+                if source_audio.codec != target_audio.codec =>
+            {
+                Some(Transcoder::new(
+                    source_audio.codec,
+                    target_audio.codec,
+                    target_audio.payload_type,
+                ))
+            }
+            _ => None,
+        };
+
         let audio_timing = audio_mapping.as_ref().and_then(|mapping| {
             if mapping.source_clock_rate != mapping.target_clock_rate
                 || mapping.source_pt != mapping.target_pt
@@ -78,17 +170,57 @@ impl ForwardingTrack {
             })
         });
 
+        *self.transcoder.lock() = transcoder;
+        *self.audio_mapping.lock() = audio_mapping;
+        *self.audio_timing.lock() = audio_timing;
+        *self.dtmf_mapping.lock() = dtmf_mapping;
+        *self.dtmf_timing.lock() = dtmf_timing;
+    }
+}
+
+#[async_trait]
+impl Track for ForwardingTrackHandle {
+    fn id(&self) -> &str {
+        &self.track_id
+    }
+
+    async fn handshake(&self, _remote_offer: String) -> Result<String> {
+        Err(anyhow!("ForwardingTrackHandle does not support handshake"))
+    }
+
+    async fn local_description(&self) -> Result<String> {
+        Err(anyhow!(
+            "ForwardingTrackHandle does not expose a local description"
+        ))
+    }
+
+    async fn set_remote_description(&self, _remote: &str) -> Result<()> {
+        Err(anyhow!(
+            "ForwardingTrackHandle does not support remote description updates"
+        ))
+    }
+
+    async fn stop(&self) {}
+
+    async fn get_peer_connection(&self) -> Option<rustrtc::PeerConnection> {
+        None
+    }
+
+    fn as_any_mut(&mut self) -> &mut dyn std::any::Any {
+        self
+    }
+}
+
+impl ForwardingTrackHandle {
+    pub fn new(track_id: String, forwarding: Arc<ForwardingTrack>) -> Self {
         Self {
             track_id,
-            inner,
-            transcoder: Mutex::new(transcoder),
-            audio_mapping,
-            audio_timing: Mutex::new(audio_timing),
-            dtmf_timing: Mutex::new(dtmf_timing),
-            recorder_tx,
-            recorder_leg,
-            dtmf_mapping,
+            forwarding,
         }
+    }
+
+    pub fn forwarding(&self) -> Arc<ForwardingTrack> {
+        self.forwarding.clone()
     }
 }
 
@@ -108,6 +240,10 @@ impl MediaStreamTrack for ForwardingTrack {
 
     async fn recv(&self) -> MediaResult<MediaSample> {
         loop {
+            self.rebuild_runtime_if_needed();
+
+            let audio_mapping = self.audio_mapping.lock().clone();
+            let dtmf_mapping = self.dtmf_mapping.lock().clone();
             let sample = self.inner.recv().await?;
 
             if let Some(tx) = &self.recorder_tx {
@@ -115,23 +251,21 @@ impl MediaStreamTrack for ForwardingTrack {
             }
 
             if let MediaSample::Audio(ref frame) = sample {
-                let matched_dtmf = self
-                    .dtmf_mapping
+                let matched_dtmf = dtmf_mapping
                     .as_ref()
                     .is_some_and(|mapping| frame.payload_type == Some(mapping.source_pt));
-                let matched_audio = self
-                    .audio_mapping
+                let matched_audio = audio_mapping
                     .as_ref()
                     .is_some_and(|mapping| frame.payload_type == Some(mapping.source_pt));
 
-                if (self.audio_mapping.is_some() || self.dtmf_mapping.is_some())
+                if (audio_mapping.is_some() || dtmf_mapping.is_some())
                     && !matched_audio
                     && !matched_dtmf
                 {
                     continue;
                 }
 
-                if let Some(mapping) = self.dtmf_mapping.as_ref().filter(|_| matched_dtmf) {
+                if let Some(mapping) = dtmf_mapping.as_ref().filter(|_| matched_dtmf) {
                     if let Some(target_pt) = mapping.target_pt {
                         let mut dtmf_frame = frame.clone();
                         dtmf_frame.payload_type = Some(target_pt);
@@ -162,7 +296,7 @@ impl MediaStreamTrack for ForwardingTrack {
                     continue;
                 }
 
-                if let Some(audio_mapping) = self.audio_mapping.as_ref().filter(|_| matched_audio) {
+                if let Some(audio_mapping) = audio_mapping.as_ref().filter(|_| matched_audio) {
                     let mut guard = self.transcoder.lock();
                     if let Some(transcoder) = guard.as_mut() {
                         let mut output = transcoder.transcode(frame);
@@ -278,11 +412,10 @@ mod tests {
         let ft = ForwardingTrack::new(
             "test".to_string(),
             track,
-            None,
-            None,
             Some(tx),
             Leg::A,
-            None,
+            NegotiatedLegProfile::default(),
+            NegotiatedLegProfile::default(),
         );
 
         // Drive recv() once; because there is no audio_mapping the sample is
@@ -309,11 +442,10 @@ mod tests {
         let ft = ForwardingTrack::new(
             "test-no-rec".to_string(),
             track,
-            None,
-            None,
             None, // no recorder channel
             Leg::B,
-            None,
+            NegotiatedLegProfile::default(),
+            NegotiatedLegProfile::default(),
         );
 
         let result = tokio::time::timeout(std::time::Duration::from_millis(100), ft.recv())
