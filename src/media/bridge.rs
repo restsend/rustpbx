@@ -53,7 +53,10 @@ use rustrtc::{
     },
     rtp::RtcpPacket,
 };
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
 use tokio::sync::Mutex as AsyncMutex;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, trace, warn};
@@ -65,6 +68,30 @@ pub type MediaSender = SampleStreamSource;
 /// Standard Ethernet MTU (1500) minus IP (20) + UDP (8) + SRTP overhead (~20) + RTP (12) + FU-A headers (2).
 /// Using 1200 bytes gives comfortable headroom for DTLS/SRTP.
 const H264_MTU: usize = 1200;
+
+/// Per-direction statistics for a media bridge leg.
+/// All counters are cumulative since bridge start and updated atomically.
+struct LegStats {
+    /// RTP packets forwarded successfully
+    packets: AtomicU64,
+    /// Bytes forwarded (RTP payload)
+    bytes: AtomicU64,
+    /// Estimated lost packets via RTP sequence-number gaps
+    lost: AtomicU64,
+    /// Packets dropped due to send-channel errors
+    dropped: AtomicU64,
+}
+
+impl LegStats {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            packets: AtomicU64::new(0),
+            bytes: AtomicU64::new(0),
+            lost: AtomicU64::new(0),
+            dropped: AtomicU64::new(0),
+        })
+    }
+}
 
 /// Fragment a reassembled H264 NAL unit into FU-A (RFC 6184 §5.8) VideoFrame entries
 /// sized to fit within `mtu` bytes, reusing the metadata from `template`.
@@ -170,6 +197,9 @@ pub struct BridgePeer {
     /// RtpSender handles for video — used to subscribe to PLI/FIR RTCP feedback
     webrtc_video_sender: AsyncMutex<Option<Arc<RtpSender>>>,
     rtp_video_sender: AsyncMutex<Option<Arc<RtpSender>>>,
+    /// Per-direction media forwarding stats (cumulative)
+    webrtc_to_rtp_stats: Arc<LegStats>,
+    rtp_to_webrtc_stats: Arc<LegStats>,
 }
 
 impl BridgePeer {
@@ -194,6 +224,8 @@ impl BridgePeer {
             rtp_video_codec: None,
             webrtc_video_sender: AsyncMutex::new(None),
             rtp_video_sender: AsyncMutex::new(None),
+            webrtc_to_rtp_stats: LegStats::new(),
+            rtp_to_webrtc_stats: LegStats::new(),
         }
     }
 
@@ -289,8 +321,70 @@ impl BridgePeer {
         let bidirectional_task =
             self.spawn_bidirectional_forwarder(webrtc_video_sender, rtp_video_sender);
 
+        // Spawn a 5-second periodic stats logger for all bridge legs
+        let stats_task = {
+            let w2r = Arc::clone(&self.webrtc_to_rtp_stats);
+            let r2w = Arc::clone(&self.rtp_to_webrtc_stats);
+            let bridge_id = self.id.clone();
+            let cancel = self.cancel_token.clone();
+            tokio::spawn(async move {
+                let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                // skip initial immediate tick
+                interval.tick().await;
+                let (mut prev_w_pkts, mut prev_w_lost, mut prev_w_bytes) = (0u64, 0u64, 0u64);
+                let (mut prev_r_pkts, mut prev_r_lost, mut prev_r_bytes) = (0u64, 0u64, 0u64);
+                loop {
+                    tokio::select! {
+                        _ = cancel.cancelled() => break,
+                        _ = interval.tick() => {
+                            let w_pkts  = w2r.packets.load(Ordering::Relaxed);
+                            let w_bytes = w2r.bytes.load(Ordering::Relaxed);
+                            let w_lost  = w2r.lost.load(Ordering::Relaxed);
+                            let w_drop  = w2r.dropped.load(Ordering::Relaxed);
+                            let r_pkts  = r2w.packets.load(Ordering::Relaxed);
+                            let r_bytes = r2w.bytes.load(Ordering::Relaxed);
+                            let r_lost  = r2w.lost.load(Ordering::Relaxed);
+                            let r_drop  = r2w.dropped.load(Ordering::Relaxed);
+
+                            let dw_pkts  = w_pkts.saturating_sub(prev_w_pkts);
+                            let dw_bytes = w_bytes.saturating_sub(prev_w_bytes);
+                            let dw_lost  = w_lost.saturating_sub(prev_w_lost);
+                            let dr_pkts  = r_pkts.saturating_sub(prev_r_pkts);
+                            let dr_bytes = r_bytes.saturating_sub(prev_r_bytes);
+                            let dr_lost  = r_lost.saturating_sub(prev_r_lost);
+
+                            let w_loss_pct = if dw_pkts + dw_lost > 0 {
+                                dw_lost as f64 / (dw_pkts + dw_lost) as f64 * 100.0
+                            } else { 0.0 };
+                            let r_loss_pct = if dr_pkts + dr_lost > 0 {
+                                dr_lost as f64 / (dr_pkts + dr_lost) as f64 * 100.0
+                            } else { 0.0 };
+
+                            info!(
+                                bridge_id = %bridge_id,
+                                webrtc_to_rtp_pps   = dw_pkts,
+                                webrtc_to_rtp_kbps  = dw_bytes * 8 / 5 / 1000,
+                                webrtc_to_rtp_loss  = format!("{:.2}%", w_loss_pct),
+                                webrtc_to_rtp_drop  = w_drop,
+                                rtp_to_webrtc_pps   = dr_pkts,
+                                rtp_to_webrtc_kbps  = dr_bytes * 8 / 5 / 1000,
+                                rtp_to_webrtc_loss  = format!("{:.2}%", r_loss_pct),
+                                rtp_to_webrtc_drop  = r_drop,
+                                "Bridge leg stats [5s]"
+                            );
+
+                            (prev_w_pkts, prev_w_lost, prev_w_bytes) = (w_pkts, w_lost, w_bytes);
+                            (prev_r_pkts, prev_r_lost, prev_r_bytes) = (r_pkts, r_lost, r_bytes);
+                        }
+                    }
+                }
+            })
+        };
+
         let mut tasks = self.bridge_tasks.lock().await;
         tasks.push(bidirectional_task);
+        tasks.push(stats_task);
     }
 
     /// Get the WebRTC-side sender (for test injection)
@@ -325,13 +419,17 @@ impl BridgePeer {
         let webrtc_send = Arc::downgrade(&self.webrtc_send);
         let cancel_token = self.cancel_token.clone();
         let bridge_id = self.id.clone();
+        let w2r_stats = Arc::clone(&self.webrtc_to_rtp_stats);
+        let r2w_stats = Arc::clone(&self.rtp_to_webrtc_stats);
         // WebRTC -> RTP direct forwarder (inline loop, no extra sub-task spawn)
         if let Some(track) = webrtc_track {
             let cancel = cancel_token.clone();
             let id = bridge_id.clone();
+            let stats = Arc::clone(&w2r_stats);
             let task = tokio::spawn(async move {
                 info!(bridge_id = %id, "Test-mode WebRTC -> RTP forwarder started");
-                Self::run_forward_loop(id, track, rtp_send, cancel, "WebRTC→RTP", None).await;
+                Self::run_forward_loop(id, track, rtp_send, cancel, "WebRTC→RTP", None, stats)
+                    .await;
             });
             let mut tasks = self.bridge_tasks.lock().await;
             tasks.push(task);
@@ -340,10 +438,19 @@ impl BridgePeer {
         // RTP -> WebRTC direct forwarder (inline loop)
         if let Some(track) = rtp_track {
             let id = bridge_id.clone();
+            let stats = Arc::clone(&r2w_stats);
             let task = tokio::spawn(async move {
                 info!(bridge_id = %id, "Test-mode RTP -> WebRTC forwarder started");
-                Self::run_forward_loop(id, track, webrtc_send, cancel_token, "RTP→WebRTC", None)
-                    .await;
+                Self::run_forward_loop(
+                    id,
+                    track,
+                    webrtc_send,
+                    cancel_token,
+                    "RTP→WebRTC",
+                    None,
+                    stats,
+                )
+                .await;
             });
             let mut tasks = self.bridge_tasks.lock().await;
             tasks.push(task);
@@ -365,6 +472,8 @@ impl BridgePeer {
         let webrtc_video_send = Arc::downgrade(&self.webrtc_video_send);
         let cancel_token = self.cancel_token.clone();
         let bridge_id = self.id.clone();
+        let w2r_stats = Arc::clone(&self.webrtc_to_rtp_stats);
+        let r2w_stats = Arc::clone(&self.rtp_to_webrtc_stats);
 
         tokio::spawn(async move {
             info!(bridge_id = %bridge_id, "Bidirectional forwarder started");
@@ -410,6 +519,7 @@ impl BridgePeer {
                                         cancel_token.clone(),
                                         "WebRTC→RTP",
                                         None, // no audio fallback in WebRTC→RTP direction
+                                        Arc::clone(&w2r_stats),
                                     ).await;
                                 }
                                 webrtc_recv = Box::pin(webrtc_pc.recv());
@@ -457,6 +567,7 @@ impl BridgePeer {
                                         // fallback so that BUNDLE-mode audio packets arriving on the
                                         // shared RTP socket get properly forwarded instead of dropped.
                                         if is_video { Some(webrtc_send.clone()) } else { None },
+                                        Arc::clone(&r2w_stats),
                                     ).await;
                                 }
                                 rtp_recv = Box::pin(rtp_pc.recv());
@@ -489,6 +600,7 @@ impl BridgePeer {
         // arrives (BUNDLE demux: all media on one RTP socket).  Instead of
         // dropping the misrouted audio, forward it here.
         audio_fallback_weak: Option<std::sync::Weak<AsyncMutex<Option<MediaSender>>>>,
+        leg_stats: Arc<LegStats>,
     ) {
         info!(bridge_id = %bridge_id, direction = %direction, "Media forwarding started");
 
@@ -532,6 +644,8 @@ impl BridgePeer {
 
         let is_video = track.kind() == MediaKind::Video;
         let mut packet_count: u64 = 0;
+        // Last seen RTP sequence number for loss estimation
+        let mut last_seq: Option<u16> = None;
         // Per-second stats for video diagnostics
         let mut stats_packets: u64 = 0;
         let mut stats_bytes: u64 = 0;
@@ -564,6 +678,23 @@ impl BridgePeer {
                             packet_count += 1;
                             if packet_count == 1 {
                                 info!(bridge_id = %bridge_id, direction = %direction, kind = ?sample.kind(), "First media sample forwarded");
+                            }
+                            // Update per-direction stats
+                            let (sample_bytes, sample_seq) = match &sample {
+                                MediaSample::Audio(a) => (a.data.len() as u64, a.sequence_number),
+                                MediaSample::Video(v) => (v.data.len() as u64, v.sequence_number),
+                            };
+                            leg_stats.packets.fetch_add(1, Ordering::Relaxed);
+                            leg_stats.bytes.fetch_add(sample_bytes, Ordering::Relaxed);
+                            if let Some(seq) = sample_seq {
+                                if let Some(prev) = last_seq {
+                                    // wrapping gap: positive implies missing packets
+                                    let gap = seq.wrapping_sub(prev.wrapping_add(1));
+                                    if gap > 0 && gap < 512 {
+                                        leg_stats.lost.fetch_add(gap as u64, Ordering::Relaxed);
+                                    }
+                                }
+                                last_seq = Some(seq);
                             }
                             // For video samples: sanitize and re-fragment H264 NAL units.
                             //
@@ -661,6 +792,7 @@ impl BridgePeer {
                                         }
                                     }
                                     Err(e) => {
+                                        leg_stats.dropped.fetch_add(1, Ordering::Relaxed);
                                         warn!(bridge_id = %bridge_id, direction = %direction, error = ?e, "Failed to forward media sample (kind mismatch or closed)");
                                         break 'outer;
                                     }
@@ -688,6 +820,7 @@ impl BridgePeer {
         cancel_token: CancellationToken,
         direction: &'static str,
         audio_fallback_weak: Option<std::sync::Weak<AsyncMutex<Option<MediaSender>>>>,
+        leg_stats: Arc<LegStats>,
     ) {
         tokio::spawn(async move {
             Self::run_forward_loop(
@@ -697,6 +830,7 @@ impl BridgePeer {
                 cancel_token,
                 direction,
                 audio_fallback_weak,
+                leg_stats,
             )
             .await;
         });

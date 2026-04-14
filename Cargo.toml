@@ -87,8 +87,8 @@ chrono-tz = "0.10.4"
 rsipstack = "0.5.5"
 #rsipstack = { path = "../rsipstack" }
 audio-codec = { version = "0.3.30", default-features = false }
-rustrtc = "0.3.47"
 #rustrtc = { path = "../rustrtc" }
+rustrtc = "0.3.48"
 reqwest = { version = "0.13", features = [
     "json",
     "stream",
@@ -196,3 +196,7 @@ required-features = ["opus"]
 [[bin]]
 name = "verify-i18n"
 path = "tools/verify_i18n.rs"
+
+[[bin]]
+name = "dump-mysql-schema"
+path = "src/bin/dump_mysql_schema.rs"
