@@ -2160,6 +2160,25 @@ impl SipSession {
 
         self.answer_time = Some(Instant::now());
 
+        // Auto-start recording when the call is answered if configured.
+        if self.context.dialplan.recording.enabled
+            && self.context.dialplan.recording.auto_start
+            && self.recording_state.is_none()
+        {
+            if let Some(ref option) = self.context.dialplan.recording.option {
+                let path = option.recorder_file.clone();
+                if !path.is_empty() {
+                    if let Err(e) = self.start_recording(&path, None, false).await {
+                        warn!(
+                            session_id = %self.context.session_id,
+                            error = %e,
+                            "Auto-start recording failed"
+                        );
+                    }
+                }
+            }
+        }
+
         Ok(())
     }
 
