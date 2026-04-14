@@ -52,6 +52,7 @@ use dashmap::DashMap;
 use parking_lot::RwLock;
 use rsipstack::dialog::{
     DialogId, dialog::Dialog, dialog::DialogState, dialog::TerminatedReason,
+    dialog::TransactionHandle,
     server_dialog::ServerInviteDialog,
 };
 use rsipstack::sip::StatusCode;
@@ -77,6 +78,12 @@ enum UpdateRefreshOutcome {
     Retry,
     FallbackToReinvite,
     Failed(anyhow::Error),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DialogSide {
+    Caller,
+    Callee,
 }
 
 pub struct SipSession {
@@ -566,6 +573,82 @@ impl SipSession {
         *self.snapshot_cache.write() = Some(snapshot);
     }
 
+    async fn handle_updated_dialog(
+        &mut self,
+        side: DialogSide,
+        dialog_id: DialogId,
+        request: rsipstack::sip::Request,
+        tx_handle: TransactionHandle,
+    ) -> Result<()> {
+        debug!(
+            %dialog_id,
+            method = ?request.method,
+            side = ?side,
+            "Received UPDATE/INVITE on dialog"
+        );
+
+        let update_result = self.update_dialog_timer_from_headers(&dialog_id, &request.headers);
+        if let Err(e) = &update_result {
+            warn!(
+                %dialog_id,
+                error = %e,
+                side = ?side,
+                "Failed to refresh session timer"
+            );
+        }
+
+        let mut status = if update_result.is_ok() {
+            rsipstack::sip::StatusCode::OK
+        } else {
+            rsipstack::sip::StatusCode::SessionIntervalTooSmall
+        };
+
+        let mut headers = if update_result.is_err() {
+            self.timers.get(&dialog_id).map(|timer| {
+                vec![rsipstack::sip::Header::Other(
+                    HEADER_MIN_SE.to_string(),
+                    timer.min_se.as_secs().to_string(),
+                )]
+            })
+        } else {
+            self.successful_refresh_response_headers(
+                &dialog_id,
+                has_timer_support(&request.headers),
+            )
+        }
+        .unwrap_or_default();
+
+        let body = if update_result.is_ok() && !request.body.is_empty() {
+            let offer_sdp = String::from_utf8_lossy(&request.body).to_string();
+            match self.build_local_dialog_answer(side, &offer_sdp).await {
+                Ok(answer_sdp) => {
+                    headers.push(rsipstack::sip::Header::ContentType(
+                        "application/sdp".into(),
+                    ));
+                    Some(answer_sdp.into_bytes())
+                }
+                Err(e) => {
+                    warn!(
+                        %dialog_id,
+                        error = %e,
+                        side = ?side,
+                        "Failed to build local answer for re-INVITE"
+                    );
+                    status = rsipstack::sip::StatusCode::NotAcceptableHere;
+                    headers.clear();
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        let _ = tx_handle
+            .respond(status, (!headers.is_empty()).then_some(headers), body)
+            .await;
+        Ok(())
+    }
+
     async fn handle_dialog_state(&mut self, state: DialogState) -> Result<()> {
         debug!(
             session_id = %self.context.session_id,
@@ -577,40 +660,8 @@ impl SipSession {
                 self.update_leg_state(&LegId::from("caller"), LegState::Connected);
             }
             DialogState::Updated(dialog_id, request, tx_handle) => {
-                debug!(%dialog_id, method = ?request.method, "Received UPDATE/INVITE on caller dialog");
-
-                let update_result =
-                    self.update_dialog_timer_from_headers(&dialog_id, &request.headers);
-
-                if let Err(e) = &update_result {
-                    warn!(error = %e, "Failed to refresh caller session timer");
-                }
-
-                if !request.body.is_empty() {
-                    return Ok(());
-                }
-
-                let status = if update_result.is_ok() {
-                    rsipstack::sip::StatusCode::OK
-                } else {
-                    rsipstack::sip::StatusCode::SessionIntervalTooSmall
-                };
-
-                let headers = if update_result.is_err() {
-                    self.timers.get(&dialog_id).map(|timer| {
-                        vec![rsipstack::sip::Header::Other(
-                            HEADER_MIN_SE.to_string(),
-                            timer.min_se.as_secs().to_string(),
-                        )]
-                    })
-                } else {
-                    self.successful_refresh_response_headers(
-                        &dialog_id,
-                        has_timer_support(&request.headers),
-                    )
-                };
-
-                let _ = tx_handle.respond(status, headers, None).await;
+                self.handle_updated_dialog(DialogSide::Caller, dialog_id, request, tx_handle)
+                    .await?;
             }
             DialogState::Terminated(_, reason) => {
                 self.update_leg_state(&LegId::from("caller"), LegState::Ended);
@@ -653,33 +704,8 @@ impl SipSession {
                 self.update_leg_state(&LegId::from("callee"), LegState::Connected);
             }
             DialogState::Updated(dialog_id, request, tx_handle) => {
-                debug!(%dialog_id, method = ?request.method, "Received UPDATE/INVITE on callee dialog");
-
-                if let Err(e) = self.update_dialog_timer_from_headers(&dialog_id, &request.headers)
-                {
-                    warn!(%dialog_id, error = %e, "Failed to refresh callee session timer");
-                    let headers = self.timers.get(&dialog_id).map(|timer| {
-                        vec![rsipstack::sip::Header::Other(
-                            HEADER_MIN_SE.to_string(),
-                            timer.min_se.as_secs().to_string(),
-                        )]
-                    });
-                    let _ = tx_handle
-                        .respond(
-                            rsipstack::sip::StatusCode::SessionIntervalTooSmall,
-                            headers,
-                            None,
-                        )
-                        .await;
-                    return Ok(());
-                }
-                let headers = self.successful_refresh_response_headers(
-                    &dialog_id,
-                    has_timer_support(&request.headers),
-                );
-                let _ = tx_handle
-                    .respond(rsipstack::sip::StatusCode::OK, headers, None)
-                    .await;
+                self.handle_updated_dialog(DialogSide::Callee, dialog_id, request, tx_handle)
+                    .await?;
             }
             DialogState::Terminated(terminated_dialog_id, reason) => {
                 self.update_leg_state(&LegId::from("callee"), LegState::Ended);
@@ -2232,6 +2258,93 @@ impl SipSession {
         }
 
         Ok(())
+    }
+
+    fn is_hold_direction(direction: rustrtc::Direction) -> bool {
+        !matches!(direction, rustrtc::Direction::SendRecv)
+    }
+
+    async fn get_local_reinvite_pc(&self, side: DialogSide) -> Option<rustrtc::PeerConnection> {
+        let (peer, track_id) = match side {
+            DialogSide::Caller => (&self.caller_peer, Self::CALLER_TRACK_ID),
+            DialogSide::Callee => (&self.callee_peer, Self::CALLEE_TRACK_ID),
+        };
+
+        Self::get_peer_pc(peer, track_id).await
+    }
+
+    async fn build_local_answer_from_pc(
+        pc: &rustrtc::PeerConnection,
+        offer_sdp: &str,
+    ) -> Result<String> {
+        let offer = rustrtc::SessionDescription::parse(rustrtc::SdpType::Offer, offer_sdp)
+            .map_err(|e| anyhow!("Failed to parse re-INVITE offer SDP: {}", e))?;
+
+        pc.set_remote_description(offer)
+            .await
+            .map_err(|e| anyhow!("Failed to apply re-INVITE offer: {}", e))?;
+
+        let answer = pc
+            .create_answer()
+            .await
+            .map_err(|e| anyhow!("Failed to create re-INVITE answer: {}", e))?;
+
+        pc.set_local_description(answer)
+            .map_err(|e| anyhow!("Failed to set re-INVITE local answer: {}", e))?;
+
+        pc.local_description()
+            .map(|desc| desc.to_sdp_string())
+            .ok_or_else(|| anyhow!("PeerConnection has no local description after re-INVITE"))
+    }
+
+    async fn build_local_dialog_answer(
+        &mut self,
+        side: DialogSide,
+        offer_sdp: &str,
+    ) -> Result<String> {
+        let parsed = rustrtc::SessionDescription::parse(rustrtc::SdpType::Offer, offer_sdp)
+            .map_err(|e| anyhow!("Failed to parse re-INVITE offer SDP: {}", e))?;
+        let offer_direction = parsed
+            .media_sections
+            .iter()
+            .find(|section| section.kind == rustrtc::MediaKind::Audio)
+            .ok_or_else(|| anyhow!("re-INVITE offer has no audio section"))?
+            .direction;
+
+        let pc = self
+            .get_local_reinvite_pc(side)
+            .await
+            .ok_or_else(|| anyhow!("No local PeerConnection available for {:?}", side))?;
+        let answer_sdp = Self::build_local_answer_from_pc(&pc, offer_sdp).await?;
+
+        match side {
+            DialogSide::Caller => {
+                self.caller_offer = Some(offer_sdp.to_string());
+                self.answer = Some(answer_sdp.clone());
+                self.update_leg_state(
+                    &LegId::from("caller"),
+                    if Self::is_hold_direction(offer_direction) {
+                        LegState::Hold
+                    } else {
+                        LegState::Connected
+                    },
+                );
+            }
+            DialogSide::Callee => {
+                self.callee_offer = Some(answer_sdp.clone());
+                self.update_leg_state(
+                    &LegId::from("callee"),
+                    if Self::is_hold_direction(offer_direction) {
+                        LegState::Hold
+                    } else {
+                        LegState::Connected
+                    },
+                );
+            }
+        }
+
+        self.update_snapshot_cache();
+        Ok(answer_sdp)
     }
 
     pub async fn handle_reinvite(
@@ -4763,4 +4876,5 @@ mod tests {
 
         drop(handle);
     }
+
 }
