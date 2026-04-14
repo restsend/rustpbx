@@ -141,12 +141,15 @@ async fn test_rtp_to_rtp_same_codec_no_transcoding() -> Result<()> {
     let expected = CdrExpectation::default()
         .with_caller("alice")
         .with_callee("bob")
-        .with_hangup_reason(CallRecordHangupReason::ByCaller);
+        .with_hangup_reason(CallRecordHangupReason::ByCaller)
+        .with_recording(false); // no [recording] config in this test
 
     let result = super::cdr_capture::validate_cdr(record, &expected);
-    for error in &result.errors {
-        warn!("CDR validation error: {}", error);
-    }
+    assert!(
+        result.is_valid,
+        "CDR validation failed: {:?}",
+        result.errors
+    );
 
     // Cleanup
     server.stop();
@@ -461,6 +464,15 @@ async fn test_caller_hangup_cdr() -> Result<()> {
         duration
     );
 
+    // Verify no recording was started (no [recording] config in this test)
+    let expected = CdrExpectation::default().with_recording(false);
+    let result = super::cdr_capture::validate_cdr(record, &expected);
+    assert!(
+        result.is_valid,
+        "CDR validation failed: {:?}",
+        result.errors
+    );
+
     server.stop();
     info!("Caller hangup CDR test completed");
     Ok(())
@@ -619,6 +631,15 @@ async fn test_callee_hangup_cdr() -> Result<()> {
         info!(hangup_reason = ?record.hangup_reason, "CDR hangup reason");
         // Note: Depending on implementation, callee hangup may be recorded as ByCallee or ByCaller
         // depending on which side's BYE triggers the CDR
+
+        // Verify no recording was started (no [recording] config in this test)
+        let expected = CdrExpectation::default().with_recording(false);
+        let result = super::cdr_capture::validate_cdr(record, &expected);
+        assert!(
+            result.is_valid,
+            "CDR validation failed: {:?}",
+            result.errors
+        );
     }
 
     server.stop();
@@ -748,6 +769,15 @@ async fn test_multiple_calls_cdr() -> Result<()> {
                     | Some(CallRecordHangupReason::BySystem)
             ),
             "CDR should have valid hangup reason"
+        );
+
+        // Verify no recording was started (no [recording] config in this test)
+        let expected = CdrExpectation::default().with_recording(false);
+        let result = super::cdr_capture::validate_cdr(record, &expected);
+        assert!(
+            result.is_valid,
+            "CDR validation failed: {:?}",
+            result.errors
         );
     }
 
@@ -949,6 +979,15 @@ async fn test_reinvite_hold_resume() -> Result<()> {
             record.hangup_reason,
             Some(CallRecordHangupReason::ByCaller),
             "Hangup reason should be ByCaller"
+        );
+
+        // Verify no recording was started (no [recording] config in this test)
+        let expected = CdrExpectation::default().with_recording(false);
+        let result = super::cdr_capture::validate_cdr(record, &expected);
+        assert!(
+            result.is_valid,
+            "CDR validation failed: {:?}",
+            result.errors
         );
     }
 
@@ -1194,6 +1233,15 @@ async fn test_reinvite_codec_change() -> Result<()> {
     let all_records = server.cdr_capture.get_all_records().await;
     assert!(!all_records.is_empty(), "CDR should be generated");
 
+    // Verify no recording was started (no [recording] config in this test)
+    let expected = CdrExpectation::default().with_recording(false);
+    let result = super::cdr_capture::validate_cdr(&all_records[0], &expected);
+    assert!(
+        result.is_valid,
+        "CDR validation failed: {:?}",
+        result.errors
+    );
+
     server.stop();
     info!("re-INVITE codec change test completed");
     Ok(())
@@ -1277,9 +1325,14 @@ async fn test_auto_start_recording_creates_file() -> Result<()> {
     assert!(!all_records.is_empty(), "CDR should be generated");
 
     let record = &all_records[0];
+
+    // Use CdrExpectation to assert recording=true (the primary regression guard)
+    let expected = CdrExpectation::default().with_recording(true);
+    let result = super::cdr_capture::validate_cdr(record, &expected);
     assert!(
-        !record.recorder.is_empty(),
-        "CDR should contain a recorder entry (recording was started)"
+        result.is_valid,
+        "CDR validation failed: {:?}",
+        result.errors
     );
 
     let media = &record.recorder[0];

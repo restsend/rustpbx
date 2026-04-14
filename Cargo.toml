@@ -88,7 +88,7 @@ rsipstack = "0.5.5"
 #rsipstack = { path = "../rsipstack" }
 audio-codec = { version = "0.3.30", default-features = false }
 #rustrtc = { path = "../rustrtc" }
-rustrtc = "0.3.48"
+rustrtc = "0.3.49"
 reqwest = { version = "0.13", features = [
     "json",
     "stream",

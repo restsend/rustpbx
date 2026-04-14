@@ -30,7 +30,12 @@ cdr/
 /.idea/
 .vscode/
 *.pyc
-
+*.pcap
+*.md
+*.dev
+*.log
+*.txt
+*.sql
 #
 # ignore commerce addon files
 # 
