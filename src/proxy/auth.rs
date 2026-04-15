@@ -5,11 +5,13 @@ use crate::call::{CalleeDisplayName, TransactionCookie, TrunkContext};
 use crate::config::ProxyConfig;
 use anyhow::{Error, Result};
 use async_trait::async_trait;
+use rsipstack::dialog::DialogId;
 use rsipstack::sip::Header;
 use rsipstack::sip::headers::{ProxyAuthenticate, WwwAuthenticate};
 use rsipstack::sip::prelude::HeadersExt;
 use rsipstack::sip::typed::Authorization;
 use rsipstack::dialog::authenticate::verify_digest;
+use rsipstack::transaction::key::TransactionRole;
 use rsipstack::transaction::transaction::Transaction;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
@@ -214,6 +216,17 @@ impl ProxyModule for AuthModule {
             .as_ref()
             .map(|d| d.to_string())
             .unwrap_or_else(|| "unknown".to_string());
+
+        if tx.original.method == rsipstack::sip::Method::Invite {
+            if let Ok(dialog_id) = DialogId::try_from((&tx.original, TransactionRole::Server)) {
+                if !dialog_id.local_tag.is_empty()
+                    && self.server.dialog_layer.get_dialog(&dialog_id).is_some()
+                {
+                    cookie.set_user(tx_user.clone());
+                    return Ok(ProxyAction::Continue);
+                }
+            }
+        }
 
         for backend in self.server.auth_backend.iter() {
             match backend.authenticate(&tx.original, &cookie).await {

@@ -16,6 +16,7 @@ use crate::proxy::server::SipServerInner;
 use crate::proxy::user::MemoryUserBackend;
 use crate::proxy::{ProxyAction, ProxyModule};
 use rsipstack::sip::Header;
+use rsipstack::sip::Method;
 use rsipstack::sip::prelude::{HasHeaders, HeadersExt};
 use rsipstack::sip::services::DigestGenerator;
 use rsipstack::EndpointBuilder;
@@ -26,6 +27,59 @@ use rsipstack::transaction::random_text;
 use rsipstack::transaction::transaction::Transaction;
 use rsipstack::transport::TransportLayer;
 use tokio_util::sync::CancellationToken;
+
+fn create_mid_dialog_request(
+    method: Method,
+    uri: rsipstack::sip::Uri,
+    call_id: &str,
+    from_tag: &str,
+    to_tag: &str,
+    cseq: u32,
+) -> rsipstack::sip::Request {
+    let from = rsipstack::sip::typed::From {
+        display_name: None,
+        uri: uri.clone(),
+        params: vec![rsipstack::sip::Param::Tag(
+            rsipstack::sip::param::Tag::new(from_tag.to_string()),
+        )],
+    };
+    let to = rsipstack::sip::typed::To {
+        display_name: None,
+        uri: uri.clone(),
+        params: vec![rsipstack::sip::Param::Tag(
+            rsipstack::sip::param::Tag::new(to_tag.to_string()),
+        )],
+    };
+    let via = rsipstack::sip::headers::Via::new(format!(
+        "SIP/2.0/UDP rustpbx.com:5060;branch=z9hG4bK{}",
+        random_text(8)
+    ));
+    let cseq = rsipstack::sip::headers::typed::CSeq {
+        seq: cseq.into(),
+        method: method.clone(),
+    };
+    let contact = rsipstack::sip::typed::Contact {
+        display_name: None,
+        uri: uri.clone(),
+        params: vec![],
+    };
+
+    rsipstack::sip::Request {
+        method,
+        uri,
+        version: rsipstack::sip::Version::V2,
+        headers: vec![
+            from.into(),
+            to.into(),
+            via.into(),
+            rsipstack::sip::headers::CallId::new(call_id.to_string()).into(),
+            cseq.into(),
+            contact.into(),
+        ]
+        .into(),
+        body: vec![],
+    }
+}
 
 #[tokio::test]
 async fn test_auth_module_invite_success() {
@@ -1041,4 +1095,42 @@ async fn test_proxy_auth_wrong_credentials() {
 
     // Should abort due to wrong credentials
     assert!(matches!(result, ProxyAction::Abort));
+}
+
+#[tokio::test]
+async fn test_auth_module_bypasses_known_in_dialog_invite() {
+    let (server_inner, _) = create_test_server().await;
+    let module = AuthModule::new(server_inner.clone());
+
+    let initial_request = create_test_request(Method::Invite, "alice", None, "rustpbx.com", None);
+    let initial_uri = initial_request.uri.clone();
+    let (tx, _) = create_transaction(initial_request).await;
+    let (state_tx, _state_rx) = tokio::sync::mpsc::unbounded_channel();
+    let dialog = server_inner
+        .dialog_layer
+        .get_or_create_server_invite(&tx, state_tx, None, None)
+        .expect("should create server dialog");
+    let dialog_id = dialog.id();
+
+    let reinvite = create_mid_dialog_request(
+        Method::Invite,
+        initial_uri,
+        &dialog_id.call_id,
+        &dialog_id.remote_tag,
+        &dialog_id.local_tag,
+        2,
+    );
+    let (mut reinvite_tx, _) = create_transaction(reinvite).await;
+
+    let result = module
+        .on_transaction_begin(
+            CancellationToken::new(),
+            &mut reinvite_tx,
+            TransactionCookie::default(),
+        )
+        .await
+        .unwrap();
+
+    assert!(matches!(result, ProxyAction::Continue));
+    assert!(reinvite_tx.last_response.is_none());
 }
