@@ -48,8 +48,7 @@ use async_trait::async_trait;
 use audio_codec::CodecType as AudioCodecType;
 use bytes::Bytes;
 use rustrtc::{
-    IceServer, IceTransportPolicy, PeerConnection, PeerConnectionEvent, RtpCodecParameters,
-    RtpSender, TransportMode,
+    IceServer, PeerConnection, PeerConnectionEvent, RtpCodecParameters, RtpSender, TransportMode,
     media::{
         MediaError, MediaKind, MediaSample, MediaStreamTrack, SampleStreamSource,
         SampleStreamTrack, VideoFrame,
@@ -1156,13 +1155,6 @@ impl BridgePeerBuilder {
     }
 
     pub fn build(self) -> Arc<BridgePeer> {
-        let has_turn_server = self.ice_servers.iter().any(|server| {
-            server.urls.iter().any(|url| {
-                let u = url.trim_start().to_ascii_lowercase();
-                u.starts_with("turn:") || u.starts_with("turns:")
-            })
-        });
-
         let webrtc_media_caps =
             self.webrtc_audio_capabilities
                 .map(|audio| rustrtc::config::MediaCapabilities {
@@ -1171,7 +1163,7 @@ impl BridgePeerBuilder {
                     application: None,
                 });
 
-        let mut webrtc_config = self
+        let webrtc_config = self
             .webrtc_config
             .unwrap_or_else(|| rustrtc::RtcConfiguration {
                 transport_mode: TransportMode::WebRtc,
@@ -1233,10 +1225,6 @@ impl BridgePeerBuilder {
                 clock_rate: cap.clock_rate,
                 channels: 0,
             });
-
-        // NOTE: Do NOT add transceivers here. setup_bridge() calls add_track()
-        // which creates the single transceiver per PC. Adding transceivers here
-        // would cause duplicate m= lines in SDP offers/answers.
 
         Arc::new(bridge)
     }
