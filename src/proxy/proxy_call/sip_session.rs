@@ -37,10 +37,9 @@ use crate::proxy::proxy_call::{
     session_timer::{
         DEFAULT_SESSION_EXPIRES, HEADER_MIN_SE, HEADER_SESSION_EXPIRES, HEADER_SUPPORTED,
         MIN_MIN_SE, SessionRefresher, SessionTimerState, apply_refresh_response,
-        apply_session_timer_headers,
-        build_default_session_timer_headers, build_session_timer_headers,
-        build_session_timer_response_headers, get_header_value, has_timer_support, parse_min_se,
-        parse_session_expires, select_timer_refresher,
+        apply_session_timer_headers, build_default_session_timer_headers,
+        build_session_timer_headers, build_session_timer_response_headers, get_header_value,
+        has_timer_support, parse_min_se, parse_session_expires, select_timer_refresher,
     },
     state::{CallContext, CallSessionRecordSnapshot, SessionHangupMessage},
 };
@@ -52,8 +51,7 @@ use dashmap::DashMap;
 use parking_lot::RwLock;
 use rsipstack::dialog::{
     DialogId, dialog::Dialog, dialog::DialogState, dialog::TerminatedReason,
-    dialog::TransactionHandle,
-    server_dialog::ServerInviteDialog,
+    dialog::TransactionHandle, server_dialog::ServerInviteDialog,
 };
 use rsipstack::sip::StatusCode;
 use std::collections::{HashMap, HashSet};
@@ -1079,8 +1077,6 @@ impl SipSession {
 
         let callee_uri = target.aor.clone();
 
-        info!(session_id = %self.context.session_id, %caller, %callee_uri, "Sending INVITE to callee");
-
         let mut headers: Vec<rsipstack::sip::Header> =
             vec![rsipstack::sip::headers::MaxForwards::from(self.context.max_forwards).into()];
         let default_expires = self
@@ -1128,6 +1124,8 @@ impl SipSession {
             .to_string()
         });
         self.callee_call_ids.insert(callee_call_id.clone());
+
+        info!(session_id = %self.context.session_id, %caller, %callee_uri, callee_call_id, "Sending INVITE to callee");
 
         let mut invite_option = InviteOption {
             caller_display_name: self.context.dialplan.caller_display_name.clone(),
@@ -1393,9 +1391,24 @@ impl SipSession {
                     let callee_profile = MediaNegotiator::extract_leg_profile(sdp);
 
                     // 1. Set callee's RTP answer on bridge's RTP side
-                    debug!(session_id = %self.context.session_id, "Bridge: Setting RTP side remote from callee answer");
                     if let Ok(desc) = SessionDescription::parse(SdpType::Answer, sdp) {
-                        if let Err(e) = bridge.rtp_pc().set_remote_description(desc).await {
+                        let rtp_pc = bridge.rtp_pc();
+                        // If we already negotiated early media, the RTP peer is in Stable state.
+                        // To apply a new answer we must re-offer: create offer -> set local -> set remote.
+                        if rtp_pc.remote_description().is_some() {
+                            debug!(session_id = %self.context.session_id, "Bridge: Re-negotiating RTP side for changed callee answer");
+                            match rtp_pc.create_offer().await {
+                                Ok(offer) => {
+                                    if let Err(e) = rtp_pc.set_local_description(offer) {
+                                        warn!(session_id = %self.context.session_id, error = %e, "Failed to set bridge RTP local re-offer");
+                                    }
+                                }
+                                Err(e) => {
+                                    warn!(session_id = %self.context.session_id, error = %e, "Failed to create bridge RTP re-offer");
+                                }
+                            }
+                        }
+                        if let Err(e) = rtp_pc.set_remote_description(desc).await {
                             warn!(session_id = %self.context.session_id, error = %e, "Failed to set bridge RTP remote description");
                         }
                     }
@@ -1721,8 +1734,6 @@ impl SipSession {
                 warn!(session_id = %session_id, error = %e, "Failed to wire callee→caller");
             }
         }
-
-        info!(session_id = %session_id, "Anchored media forwarding wired via ForwardingTrack");
     }
 
     async fn get_peer_pc(
@@ -1858,7 +1869,7 @@ impl SipSession {
         self.caller_is_webrtc = caller_is_webrtc;
         self.callee_is_webrtc = callee_is_webrtc;
 
-        info!(
+        debug!(
             session_id = %self.id,
             caller_is_webrtc = caller_is_webrtc,
             callee_is_webrtc = callee_is_webrtc,
@@ -1872,11 +1883,6 @@ impl SipSession {
         let need_transport_bridge = transport_bridge_needed;
 
         if need_transport_bridge {
-            info!(
-                session_id = %self.id,
-                "WebRTC ↔ RTP bridge needed for media interop"
-            );
-
             let mut bridge_builder = BridgePeerBuilder::new(format!("{}-bridge", self.id))
                 .with_enable_latching(self.server.proxy_config.enable_latching);
             if let (Some(start), Some(end)) = (
@@ -1885,17 +1891,6 @@ impl SipSession {
             ) {
                 bridge_builder = bridge_builder.with_rtp_port_range(start, end);
             }
-
-            // If the RTP caller offered BUNDLE (e.g. Linphone includes a=group:BUNDLE),
-            // use Standard SDP mode on the RTP side so the answer includes a=group:BUNDLE
-            // and a=mid:, allowing both audio and video to share the same port via BUNDLE.
-            // Without this, the answer would have two m= sections on the same port
-            // without BUNDLE signaling — which is an invalid SDP that confuses SIP clients.
-            //
-            // Also enable address latching: with BUNDLE the caller sends all media from its
-            // audio (BUNDLE master) port. rustrtc's setup_direct_rtp connects to the LAST
-            // m-line port (the video port) which Linphone doesn't actually use for sending.
-            // Latching lets the IceConn auto-correct to the real source (BUNDLE master port).
             if let Some(ref caller_sdp) = self.caller_offer {
                 if !caller_is_webrtc && caller_sdp.contains("a=group:BUNDLE") {
                     bridge_builder = bridge_builder
@@ -1971,10 +1966,6 @@ impl SipSession {
                                 codecs = ?caller_video_caps.iter().map(|c| format!("{}@{}", c.codec_name, c.payload_type)).collect::<Vec<_>>(),
                                 "Video capabilities configured from caller SDP"
                             );
-                            // Ensure H264 WebRTC capabilities include packetization-mode=1 so that
-                            // Chrome's SDP answer also negotiates mode=1.  Without this, Chrome
-                            // answers with packetization-mode=0, meaning its decoder will reject
-                            // FU-A packets sent by the bridge, keeping framesReceived at 0.
                             let webrtc_video_caps: Vec<rustrtc::config::VideoCapability> =
                                 caller_video_caps
                                     .iter()
@@ -1997,10 +1988,7 @@ impl SipSession {
                                         }
                                     })
                                     .collect();
-                            // Also inject packetization-mode=1 into the RTP caps so the SDP
-                            // answer to Linphone explicitly declares we will use FU-A (mode 1).
-                            // Per RFC 6184 §8.1 receivers MUST support all modes, but some
-                            // Linphone builds are stricter; being explicit avoids ambiguity.
+
                             let rtp_video_caps: Vec<rustrtc::config::VideoCapability> =
                                 caller_video_caps
                                     .iter()
@@ -2025,11 +2013,6 @@ impl SipSession {
                             bridge_builder = bridge_builder
                                 .with_webrtc_video_capabilities(webrtc_video_caps)
                                 .with_rtp_video_capabilities(rtp_video_caps);
-                        } else {
-                            warn!(
-                                session_id = %self.id,
-                                "No video capabilities found in caller SDP — video will not be bridged"
-                            );
                         }
                     }
                     Err(e) => {
@@ -2037,7 +2020,7 @@ impl SipSession {
                     }
                 }
 
-                info!(
+                debug!(
                     session_id = %self.id,
                     webrtc_codecs = ?webrtc_side.iter().map(|c| format!("{:?}", c.codec)).collect::<Vec<_>>(),
                     rtp_codecs = ?rtp_side.iter().map(|c| format!("{:?}", c.codec)).collect::<Vec<_>>(),
@@ -2054,16 +2037,9 @@ impl SipSession {
 
             bridge.setup_bridge().await?;
 
-            // Only create offer on the callee-facing PC.
-            // The caller-facing PC will answer the caller's INVITE offer later.
             if callee_is_webrtc {
                 let offer = bridge.webrtc_pc().create_offer().await?;
                 let offer_sdp = offer.to_sdp_string();
-                info!(
-                    session_id = %self.id,
-                    has_video = offer_sdp.contains("m=video"),
-                    "Bridge WebRTC offer created for callee"
-                );
                 debug!(session_id = %self.id, sdp = %offer_sdp, "Bridge WebRTC offer SDP");
                 bridge.webrtc_pc().set_local_description(offer)?;
                 // Wait for ICE gathering so SDP contains real candidates
@@ -2071,11 +2047,6 @@ impl SipSession {
             } else {
                 let offer = bridge.rtp_pc().create_offer().await?;
                 let offer_sdp = offer.to_sdp_string();
-                info!(
-                    session_id = %self.id,
-                    has_video = offer_sdp.contains("m=video"),
-                    "Bridge RTP offer created for callee"
-                );
                 debug!(session_id = %self.id, sdp = %offer_sdp, "Bridge RTP offer SDP");
                 bridge.rtp_pc().set_local_description(offer)?;
             }
@@ -2100,13 +2071,6 @@ impl SipSession {
                 Ok(sdp)
             }
         } else if media_proxy_enabled {
-            info!(
-                session_id = %self.id,
-                caller_is_webrtc = caller_is_webrtc,
-                callee_is_webrtc = callee_is_webrtc,
-                "Media proxy enabled for same-type transport (anchored media)"
-            );
-
             let mut track_builder = RtpTrackBuilder::new(track_id.clone())
                 .with_cancel_token(self.callee_peer.cancel_token())
                 .with_enable_latching(self.server.proxy_config.enable_latching);
@@ -2217,7 +2181,7 @@ impl SipSession {
                                 timer,
                                 caller_supports_timer,
                             ));
-                            info!(
+                            debug!(
                                 session_expires = %timer.get_session_expires_value(),
                                 "Session timer negotiated in 200 OK"
                             );
@@ -2788,7 +2752,10 @@ impl SipSession {
     }
 
     fn should_fallback_to_reinvite(status: StatusCode) -> bool {
-        matches!(status, StatusCode::MethodNotAllowed | StatusCode::NotImplemented)
+        matches!(
+            status,
+            StatusCode::MethodNotAllowed | StatusCode::NotImplemented
+        )
     }
 
     fn should_try_update_refresh(&self, dialog_id: &DialogId) -> bool {
@@ -2867,7 +2834,10 @@ impl SipSession {
                     .update(Some(headers), None)
                     .await
                     .map_err(|e| anyhow!("UPDATE failed: {}", e)),
-                _ => Err(anyhow!("Dialog {} is not a client INVITE dialog", dialog_id)),
+                _ => Err(anyhow!(
+                    "Dialog {} is not a client INVITE dialog",
+                    dialog_id
+                )),
             }
         } else {
             self.server_dialog
@@ -2942,11 +2912,13 @@ impl SipSession {
                     Ok(headers) => headers,
                     Err(e) => return UpdateRefreshOutcome::Failed(e),
                 };
-                let retry_response =
-                    match self.send_update_refresh_request(dialog_id, retry_headers).await {
-                        Ok(response) => response,
-                        Err(e) => return UpdateRefreshOutcome::Failed(e),
-                    };
+                let retry_response = match self
+                    .send_update_refresh_request(dialog_id, retry_headers)
+                    .await
+                {
+                    Ok(response) => response,
+                    Err(e) => return UpdateRefreshOutcome::Failed(e),
+                };
                 self.handle_update_refresh_response(dialog_id, retry_response, false)
             }
             outcome => outcome,
@@ -2969,7 +2941,10 @@ impl SipSession {
                     .reinvite(Some(headers), body)
                     .await
                     .map_err(|e| anyhow!("re-INVITE failed: {}", e)),
-                _ => Err(anyhow!("Dialog {} is not a client INVITE dialog", dialog_id)),
+                _ => Err(anyhow!(
+                    "Dialog {} is not a client INVITE dialog",
+                    dialog_id
+                )),
             }
         } else {
             self.server_dialog
@@ -3030,7 +3005,10 @@ impl SipSession {
             }
             Ok(Some(resp)) => {
                 self.fail_refresh_if_pending(dialog_id);
-                Err(anyhow!("re-INVITE rejected with status {}", resp.status_code))
+                Err(anyhow!(
+                    "re-INVITE rejected with status {}",
+                    resp.status_code
+                ))
             }
             Ok(None) => {
                 self.fail_refresh_if_pending(dialog_id);
@@ -3052,7 +3030,9 @@ impl SipSession {
             match self.try_update_refresh(dialog_id).await {
                 UpdateRefreshOutcome::Refreshed => return Ok(()),
                 UpdateRefreshOutcome::Retry => {
-                    return Err(anyhow!("UPDATE refresh retry state should be resolved internally"));
+                    return Err(anyhow!(
+                        "UPDATE refresh retry state should be resolved internally"
+                    ));
                 }
                 UpdateRefreshOutcome::FallbackToReinvite => {}
                 UpdateRefreshOutcome::Failed(e) => {
@@ -4685,7 +4665,10 @@ mod tests {
 
         session.init_callee_timer(dialog_id.clone(), &response, DEFAULT_SESSION_EXPIRES);
 
-        let timer = session.timers.get(&dialog_id).expect("missing callee timer");
+        let timer = session
+            .timers
+            .get(&dialog_id)
+            .expect("missing callee timer");
         assert!(!timer.enabled);
         assert!(!timer.active);
         assert_eq!(
@@ -4920,5 +4903,4 @@ mod tests {
 
         drop(handle);
     }
-
 }

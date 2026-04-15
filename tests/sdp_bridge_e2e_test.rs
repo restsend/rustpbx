@@ -493,7 +493,8 @@ async fn test_e2e_callee_side_follows_allow_codecs_order() {
 o=- 1 1 IN IP4 127.0.0.1\r\n\
 s=-\r\n\
 t=0 0\r\n\
-m=audio 10000 RTP/AVP 0 8 101\r\n\
+m=audio 10000 RTP/AVP 9 0 8 101\r\n\
+a=rtpmap:9 G722/8000\r\n\
 a=rtpmap:0 PCMU/8000\r\n\
 a=rtpmap:8 PCMA/8000\r\n\
 a=rtpmap:101 telephone-event/8000\r\n";
@@ -512,4 +513,98 @@ a=rtpmap:101 telephone-event/8000\r\n";
     assert_eq!(callee_audio[0].codec, CodecType::G722, "G722 first per allow_codecs");
     assert_eq!(callee_audio[1].codec, CodecType::PCMU, "PCMU second per allow_codecs");
     assert_eq!(callee_audio[2].codec, CodecType::PCMA, "PCMA third per allow_codecs");
+}
+
+/// E2E: 183 early media followed by 200 OK with changed callee SDP address.
+/// Verifies that the bridge RTP side re-negotiates and updates the remote address
+/// without creating new tracks.
+#[tokio::test]
+async fn test_e2e_early_media_then_200_ok_address_change() {
+    use rustpbx::media::bridge::BridgePeerBuilder;
+    use rustrtc::sdp::{SessionDescription, SdpType};
+
+    let port_base: u16 = 54000;
+
+    // 1. Create bridge
+    let bridge = BridgePeerBuilder::new("e2e-183-200-change".to_string())
+        .with_rtp_port_range(port_base, port_base + 100)
+        .build();
+    bridge.setup_bridge().await.unwrap();
+
+    // 2. RTP side creates initial offer for callee
+    let rtp_offer = bridge.rtp_pc().create_offer().await.unwrap();
+    bridge.rtp_pc().set_local_description(rtp_offer).unwrap();
+    bridge.start_bridge().await;
+
+    // 3. Simulate 183 early media answer from callee
+    let callee_answer_183 = "v=0\r\n\
+        o=- 1 1 IN IP4 10.0.0.1\r\n\
+        s=-\r\n\
+        t=0 0\r\n\
+        c=IN IP4 10.0.0.1\r\n\
+        m=audio 8000 RTP/AVP 0\r\n\
+        a=rtpmap:0 PCMU/8000\r\n\
+        a=sendrecv\r\n";
+
+    let desc_183 = SessionDescription::parse(SdpType::Answer, callee_answer_183).unwrap();
+    bridge.rtp_pc().set_remote_description(desc_183).await.unwrap();
+
+    // 4. WebRTC caller sends offer, bridge answers it (early-media path)
+    let caller = create_webrtc_caller(port_base + 100);
+    let caller_offer = caller.local_description().await.unwrap();
+    let caller_desc = SessionDescription::parse(SdpType::Offer, &caller_offer).unwrap();
+    bridge.webrtc_pc().set_remote_description(caller_desc.clone()).await.unwrap();
+    let webrtc_answer = bridge.webrtc_pc().create_answer().await.unwrap();
+    bridge.webrtc_pc().set_local_description(webrtc_answer).unwrap();
+
+    // Verify initial RTP remote address
+    let initial_pair = bridge.rtp_pc().ice_transport().get_selected_pair().await;
+    assert!(initial_pair.is_some(), "RTP side should have selected pair after 183");
+    assert_eq!(
+        initial_pair.unwrap().remote.address,
+        std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::new(10, 0, 0, 1)), 8000),
+        "Initial remote address should match 183 SDP"
+    );
+
+    // Remember transceiver count to ensure no new tracks are created
+    let initial_transceiver_count = bridge.rtp_pc().get_transceivers().len();
+
+    // 5. Simulate 200 OK with changed callee address (same codec, different c=/port)
+    let callee_answer_200 = "v=0\r\n\
+        o=- 1 2 IN IP4 192.168.1.50\r\n\
+        s=-\r\n\
+        t=0 0\r\n\
+        c=IN IP4 192.168.1.50\r\n\
+        m=audio 9000 RTP/AVP 0\r\n\
+        a=rtpmap:0 PCMU/8000\r\n\
+        a=sendrecv\r\n";
+
+    // 6. Re-negotiate RTP side: create re-offer -> set local -> set remote with new answer
+    let rtp_reoffer = bridge.rtp_pc().create_offer().await.unwrap();
+    bridge.rtp_pc().set_local_description(rtp_reoffer).unwrap();
+    let desc_200 = SessionDescription::parse(SdpType::Answer, callee_answer_200).unwrap();
+    bridge.rtp_pc().set_remote_description(desc_200).await.unwrap();
+
+    // 7. Re-create WebRTC answer for caller (mimics sip_session.rs flow)
+    bridge.webrtc_pc().set_remote_description(caller_desc).await.unwrap();
+    let webrtc_answer_200 = bridge.webrtc_pc().create_answer().await.unwrap();
+    bridge.webrtc_pc().set_local_description(webrtc_answer_200).unwrap();
+
+    // 8. Verify RTP remote address updated to 200 OK values
+    let updated_pair = bridge.rtp_pc().ice_transport().get_selected_pair().await;
+    assert!(updated_pair.is_some(), "RTP side should still have selected pair after 200 OK");
+    assert_eq!(
+        updated_pair.unwrap().remote.address,
+        std::net::SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::new(192, 168, 1, 50)), 9000),
+        "Remote address should be updated after 200 OK re-negotiation"
+    );
+
+    // 9. Verify no new transceivers were created (no new tracks)
+    assert_eq!(
+        bridge.rtp_pc().get_transceivers().len(),
+        initial_transceiver_count,
+        "Re-negotiation must not create new transceivers/tracks"
+    );
+
+    bridge.stop().await;
 }

@@ -269,9 +269,9 @@ impl BridgePeer {
                 *self.webrtc_video_sender.lock().await = Some(sender);
             }
             *self.webrtc_video_send.lock().await = Some(webrtc_video_tx);
-            info!(bridge_id = %self.id, pt = webrtc_video_params.payload_type, clock_rate = webrtc_video_params.clock_rate, "WebRTC video sender setup complete");
+            debug!(bridge_id = %self.id, pt = webrtc_video_params.payload_type, clock_rate = webrtc_video_params.clock_rate, "WebRTC video sender setup complete");
         } else {
-            info!(bridge_id = %self.id, "WebRTC video sender NOT configured (no video codec)");
+            debug!(bridge_id = %self.id, "WebRTC video sender NOT configured (no video codec)");
         }
 
         if let Some(ref rtp_video_params) = self.rtp_video_codec {
@@ -284,12 +284,8 @@ impl BridgePeer {
                 *self.rtp_video_sender.lock().await = Some(sender);
             }
             *self.rtp_video_send.lock().await = Some(rtp_video_tx);
-            info!(bridge_id = %self.id, pt = rtp_video_params.payload_type, clock_rate = rtp_video_params.clock_rate, "RTP video sender setup complete");
-        } else {
-            info!(bridge_id = %self.id, "RTP video sender NOT configured (no video codec)");
+            debug!(bridge_id = %self.id, pt = rtp_video_params.payload_type, clock_rate = rtp_video_params.clock_rate, "RTP video sender setup complete");
         }
-
-        info!(bridge_id = %self.id, "Bridge setup complete with sample tracks");
         Ok(())
     }
 
@@ -316,8 +312,6 @@ impl BridgePeer {
     /// Start the bridge - begin forwarding media between sides
     /// Optimized: Merged bidirectional forwarding into a single task to reduce Tokio scheduling overhead
     pub async fn start_bridge(&self) {
-        info!(bridge_id = %self.id, "Starting media bridge");
-
         // Extract video senders now (before spawning) so PLI forwarder tasks can use them
         let webrtc_video_sender = self.webrtc_video_sender.lock().await.clone();
         let rtp_video_sender = self.rtp_video_sender.lock().await.clone();
@@ -412,70 +406,6 @@ impl BridgePeer {
         self.rtp_track.lock().await.clone()
     }
 
-    /// Start bridge in test mode: directly forwards between stored sample tracks
-    /// bypassing PeerConnection event loop. This allows load testing the core
-    /// forwarding path without full SDP negotiation.
-    pub async fn start_bridge_test_mode(&self) {
-        info!(bridge_id = %self.id, "Starting media bridge in test mode");
-
-        let webrtc_track = self.get_webrtc_track().await;
-        let rtp_track = self.get_rtp_track().await;
-        let rtp_send = Arc::downgrade(&self.rtp_send);
-        let webrtc_send = Arc::downgrade(&self.webrtc_send);
-        let cancel_token = self.cancel_token.clone();
-        let bridge_id = self.id.clone();
-        let w2r_stats = Arc::clone(&self.webrtc_to_rtp_stats);
-        let r2w_stats = Arc::clone(&self.rtp_to_webrtc_stats);
-        // WebRTC -> RTP direct forwarder (inline loop, no extra sub-task spawn)
-        if let Some(track) = webrtc_track {
-            let cancel = cancel_token.clone();
-            let id = bridge_id.clone();
-            let stats = Arc::clone(&w2r_stats);
-            let task = tokio::spawn(async move {
-                info!(bridge_id = %id, "Test-mode WebRTC -> RTP forwarder started");
-                Self::run_forward_loop(
-                    id,
-                    track,
-                    rtp_send,
-                    cancel,
-                    "WebRTC→RTP",
-                    None,
-                    stats,
-                    None,
-                    None,
-                )
-                .await;
-            });
-            let mut tasks = self.bridge_tasks.lock().await;
-            tasks.push(task);
-        }
-
-        // RTP -> WebRTC direct forwarder (inline loop)
-        if let Some(track) = rtp_track {
-            let id = bridge_id.clone();
-            let stats = Arc::clone(&r2w_stats);
-            let task = tokio::spawn(async move {
-                info!(bridge_id = %id, "Test-mode RTP -> WebRTC forwarder started");
-                Self::run_forward_loop(
-                    id,
-                    track,
-                    webrtc_send,
-                    cancel_token,
-                    "RTP→WebRTC",
-                    None,
-                    stats,
-                    None,
-                    None,
-                )
-                .await;
-            });
-            let mut tasks = self.bridge_tasks.lock().await;
-            tasks.push(task);
-        }
-    }
-
-    /// Spawn a single task that handles bidirectional forwarding
-    /// This reduces task context switching and futex contention compared to 2 separate tasks
     fn spawn_bidirectional_forwarder(
         &self,
         webrtc_video_sender: Option<Arc<RtpSender>>,
@@ -494,8 +424,6 @@ impl BridgePeer {
         let recorder = self.recorder.clone();
 
         tokio::spawn(async move {
-            info!(bridge_id = %bridge_id, "Bidirectional forwarder started");
-
             // Create fused receivers for both directions
             let mut webrtc_recv = Box::pin(webrtc_pc.recv());
             let mut rtp_recv = Box::pin(rtp_pc.recv());
@@ -513,8 +441,6 @@ impl BridgePeer {
                                 if let Some(receiver) = transceiver.receiver() {
                                     let track = receiver.track();
                                     let is_video = transceiver.kind() == rustrtc::MediaKind::Video;
-                                    info!(bridge_id = %bridge_id, kind = if is_video { "video" } else { "audio" }, "WebRTC receiver track ready");
-
                                     let sender = if is_video {
                                         // When JsSIP (WebRTC) sends video, forward PLI from rtp_video_sender back to JsSIP
                                         if let Some(ref rtp_sender) = rtp_video_sender {
@@ -560,10 +486,7 @@ impl BridgePeer {
                                 if let Some(receiver) = transceiver.receiver() {
                                     let track = receiver.track();
                                     let is_video = transceiver.kind() == rustrtc::MediaKind::Video;
-                                    info!(bridge_id = %bridge_id, kind = if is_video { "video" } else { "audio" }, "RTP receiver track ready");
-
                                     let sender = if is_video {
-                                        // When Linphone (RTP) sends video, forward PLI from webrtc_video_sender back to Linphone
                                         if let Some(ref webrtc_sender) = webrtc_video_sender {
                                             Self::spawn_pli_forwarder(
                                                 bridge_id.clone(),
@@ -583,9 +506,6 @@ impl BridgePeer {
                                         sender,
                                         cancel_token.clone(),
                                         "RTP→WebRTC",
-                                        // For the video RTP track: pass the WebRTC audio sender as a
-                                        // fallback so that BUNDLE-mode audio packets arriving on the
-                                        // shared RTP socket get properly forwarded instead of dropped.
                                         if is_video { Some(webrtc_send.clone()) } else { None },
                                         Arc::clone(&r2w_stats),
                                         if !is_video { recorder.clone() } else { None },
@@ -605,29 +525,20 @@ impl BridgePeer {
                     }
                 }
             }
-
-            info!(bridge_id = %bridge_id, "Bidirectional forwarder stopped");
         })
     }
 
-    /// Inline media forwarding loop without spawning a sub-task.
-    /// Callers that are already inside a spawned task should use this directly.
     async fn run_forward_loop(
         bridge_id: String,
         track: Arc<dyn MediaStreamTrack>,
         sender_weak: std::sync::Weak<AsyncMutex<Option<MediaSender>>>,
         cancel_token: CancellationToken,
         direction: &'static str,
-        // Optional audio sender used when the track is video but an audio packet
-        // arrives (BUNDLE demux: all media on one RTP socket).  Instead of
-        // dropping the misrouted audio, forward it here.
         audio_fallback_weak: Option<std::sync::Weak<AsyncMutex<Option<MediaSender>>>>,
         leg_stats: Arc<LegStats>,
         recorder: Option<Arc<parking_lot::RwLock<Option<Recorder>>>>,
         recorder_leg: Option<RecLeg>,
     ) {
-        info!(bridge_id = %bridge_id, direction = %direction, "Media forwarding started");
-
         // Get the sender channel from weak pointer
         let sender = if let Some(strong) = sender_weak.upgrade() {
             let guard = strong.lock().await;
@@ -655,14 +566,9 @@ impl BridgePeer {
             None
         };
 
-        // For video tracks, request an initial keyframe (IDR) from the remote sender.
-        // Without this, H264 decoding starts mid-GOP and both sides show black until the
-        // next keyframe naturally arrives (which may be tens of seconds away).
         if track.kind() == MediaKind::Video {
             if let Err(e) = track.request_key_frame().await {
-                warn!(bridge_id = %bridge_id, direction = %direction, error = %e, "Failed to request initial keyframe");
-            } else {
-                info!(bridge_id = %bridge_id, direction = %direction, "Requested initial keyframe from remote");
+                debug!(bridge_id = %bridge_id, direction = %direction, error = %e, "Failed to request initial keyframe");
             }
         }
 
@@ -701,7 +607,7 @@ impl BridgePeer {
                         Ok(sample) => {
                             packet_count += 1;
                             if packet_count == 1 {
-                                info!(bridge_id = %bridge_id, direction = %direction, kind = ?sample.kind(), "First media sample forwarded");
+                                debug!(bridge_id = %bridge_id, direction = %direction, kind = ?sample.kind(), "First media sample forwarded");
                             }
                             // Update per-direction stats
                             let (sample_bytes, sample_seq) = match &sample {
@@ -843,8 +749,6 @@ impl BridgePeer {
                 }
             }
         }
-
-        info!(bridge_id = %bridge_id, direction = %direction, "Media forwarding stopped");
     }
 
     /// Forward media from a track to a sender channel.
@@ -923,7 +827,7 @@ impl BridgePeer {
 
     /// Stop the bridge (async — waits for forwarding tasks to finish)
     pub async fn stop(&self) {
-        info!(bridge_id = %self.id, "Stopping bridge");
+        debug!(bridge_id = %self.id, "Stopping bridge");
         self.cancel_token.cancel();
         self.webrtc_pc.close();
         self.rtp_pc.close();
@@ -1496,9 +1400,6 @@ mod tests {
             bridge.rtp_pc().remote_description().is_some(),
             "RTP should have remote description from callee"
         );
-
-        info!("P2P WebRTC ↔ RTP bridge test completed successfully");
-
         // Clean up
         bridge.stop().await;
     }
