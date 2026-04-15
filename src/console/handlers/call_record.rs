@@ -98,29 +98,61 @@ pub fn urls() -> Router<Arc<ConsoleState>> {
         .route("/call-records/{id}/recording", get(stream_call_recording))
 }
 
+async fn resolve_call_record_by_id_or_call_id(
+    db: &sea_orm::DatabaseConnection,
+    identifier: &str,
+) -> Result<crate::models::call_record::Model, Response> {
+    // Try to lookup by integer ID first
+    if let Ok(id) = identifier.parse::<i64>() {
+        match CallRecordEntity::find_by_id(id).one(db).await {
+            Ok(Some(model)) => return Ok(model),
+            Ok(None) => {}
+            Err(err) => {
+                warn!(id = id, "failed to load call record: {}", err);
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({ "message": "Failed to load call record" })),
+                )
+                    .into_response());
+            }
+        }
+    }
+
+    // Fallback to lookup by call_id
+    match CallRecordEntity::find()
+        .filter(crate::models::call_record::Column::CallId.eq(identifier))
+        .one(db)
+        .await
+    {
+        Ok(Some(model)) => Ok(model),
+        Ok(None) => Err((
+            StatusCode::NOT_FOUND,
+            Json(json!({
+                "message": format!("Call record not found for identifier: {}", identifier),
+                "hint": "Provide either the numeric call record ID or the SIP Call-ID."
+            })),
+        )
+            .into_response()),
+        Err(err) => {
+            warn!(call_id = %identifier, "failed to load call record by call_id: {}", err);
+            Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "message": "Failed to load call record" })),
+            )
+                .into_response())
+        }
+    }
+}
+
 async fn download_call_record_sip_flow(
-    AxumPath(pk): AxumPath<i64>,
+    AxumPath(identifier): AxumPath<String>,
     State(state): State<Arc<ConsoleState>>,
     AuthRequired(_): AuthRequired,
 ) -> Response {
     let db = state.db();
-    let record = match CallRecordEntity::find_by_id(pk).one(db).await {
-        Ok(Some(model)) => model,
-        Ok(None) => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(json!({ "message": "Call record not found" })),
-            )
-                .into_response();
-        }
-        Err(err) => {
-            warn!(id = pk, "failed to load call record for sip flow: {}", err);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "message": "Failed to load call record" })),
-            )
-                .into_response();
-        }
+    let record = match resolve_call_record_by_id_or_call_id(db, &identifier).await {
+        Ok(model) => model,
+        Err(resp) => return resp,
     };
 
     let Some(server) = state.sip_server() else {
@@ -174,7 +206,7 @@ async fn download_call_record_sip_flow(
                 }
             }
             Err(err) => {
-                warn!(id = pk, call_id = %cid, "failed to query sip flow for leg: {}", err);
+                warn!(identifier = %identifier, call_id = %cid, "failed to query sip flow for leg: {}", err);
             }
         }
 
@@ -195,7 +227,7 @@ async fn download_call_record_sip_flow(
                 }
             }
             Err(err) => {
-                warn!(id = pk, call_id = %cid, "failed to query media stats for leg: {}", err);
+                warn!(identifier = %identifier, call_id = %cid, "failed to query media stats for leg: {}", err);
             }
         }
     }

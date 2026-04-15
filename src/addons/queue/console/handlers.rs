@@ -6,7 +6,7 @@ use crate::addons::queue::services::{exporter::QueueExporter, utils as queue_uti
 use crate::config::ProxyConfig;
 use crate::console::handlers::{bad_request, forms, normalize_optional_string, require_field};
 use crate::console::{ConsoleState, middleware::AuthRequired};
-use crate::proxy::routing::RouteQueueConfig;
+use crate::proxy::routing::{ConfigOrigin, RouteQueueConfig};
 use axum::{
     Json, Router,
     extract::{Path as AxumPath, State},
@@ -54,6 +54,17 @@ pub async fn page_queues(
     headers: HeaderMap,
     AuthRequired(_): AuthRequired,
 ) -> Response {
+    let has_file_queues = state
+        .app_state()
+        .map(|app| {
+            app.sip_server()
+                .inner
+                .data_context
+                .queues_snapshot()
+                .values()
+                .any(|q| matches!(q.origin, ConfigOrigin::File(_)))
+        })
+        .unwrap_or(false);
     state.render_with_headers(
         "queue.html",
         json!({
@@ -66,6 +77,7 @@ pub async fn page_queues(
                 ],
             },
             "create_url": state.url_for("/queues/new"),
+            "has_file_queues": has_file_queues,
         }),
         &headers,
     )
@@ -139,12 +151,52 @@ pub async fn query_queues(
         .map(|model| queue_item_payload(state.as_ref(), &model))
         .collect();
 
+    // Issue #179: collect file-sourced queues from in-memory snapshot
+    let file_queues: Vec<Value> = if let Some(app_state) = state.app_state() {
+        let snapshot = app_state
+            .sip_server()
+            .inner
+            .data_context
+            .queues_snapshot();
+        let mut file_items: Vec<Value> = snapshot
+            .into_iter()
+            .filter_map(|(name, queue)| {
+                if let ConfigOrigin::File(ref path) = queue.origin {
+                    let queue_name = queue.name.clone().unwrap_or_else(|| name.clone());
+                    Some(json!({
+                        "id": null,
+                        "name": queue_name,
+                        "description": null,
+                        "source": "file",
+                        "source_file": path,
+                        "readonly": true,
+                        "is_active": true,
+                        "spec": queue,
+                        "tags": [],
+                        "updated_at": null,
+                    }))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        file_items.sort_by(|a, b| {
+            let a_name = a["name"].as_str().unwrap_or("");
+            let b_name = b["name"].as_str().unwrap_or("");
+            a_name.cmp(b_name)
+        });
+        file_items
+    } else {
+        vec![]
+    };
+
     Json(json!({
         "page": pagination.current_page,
         "per_page": pagination.per_page,
         "total_pages": pagination.total_pages,
         "total_items": pagination.total_items,
         "items": items,
+        "file_queues": file_queues,
         "summary": {
             "total": total,
             "active": active,

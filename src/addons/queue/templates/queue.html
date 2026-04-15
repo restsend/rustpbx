@@ -1,7 +1,7 @@
 {% extends "console/layout.html" %}
 {% block title %}{{ "queue.title" | t }} · {{ site_name | default('RustPBX') }}{% endblock %}
 {% block content %}
-{% set base_url = base_path | default('/console') %}
+{% set base_url = base_path | safe %}
 <div class="p-6" x-data='queuePage({
         basePath: {{ base_url | tojson }},
         filters: {{ filters | default({}) | tojson }},
@@ -67,7 +67,8 @@
 
         <section class="grid gap-4 sm:grid-cols-3">
             <div class="rounded-xl bg-white p-4 shadow-sm ring-1 ring-black/5">
-                <div class="text-xs font-semibold uppercase tracking-wide text-slate-500">{{ "queue.total_queues" | t }}</div>
+                <div class="text-xs font-semibold uppercase tracking-wide text-slate-500">{{ "queue.total_queues" | t }}
+                </div>
                 <div class="mt-2 text-2xl font-semibold text-slate-900" x-text="summary.total || 0"></div>
             </div>
             <div class="rounded-xl bg-white p-4 shadow-sm ring-1 ring-black/5">
@@ -98,7 +99,7 @@
                         </button>
                     </template>
                 </div>
-                <label class="relative w-full lg:w-80" aria-label="{{ "queue.search_placeholder" | t }}">
+                <label class="relative w-full lg:w-80" aria-label="{{ " queue.search_placeholder" | t }}">
                     <svg class="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400"
                         viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6">
                         <path stroke-linecap="round" stroke-linejoin="round"
@@ -106,7 +107,7 @@
                     </svg>
                     <input type="search" x-model.trim="keyword" @input.debounce.400ms="applyFilters()"
                         class="w-full rounded-lg border border-slate-200 px-3 py-2 pl-9 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                        placeholder="{{ "queue.search_placeholder" | t }}">
+                        placeholder="{{ " queue.search_placeholder" | t }}">
                 </label>
             </div>
         </section>
@@ -161,7 +162,8 @@
                                                     :class="queue.is_active ? 'bg-emerald-50 text-emerald-600 ring-1 ring-emerald-100' : 'bg-amber-50 text-amber-600 ring-1 ring-amber-100'">
                                                     <span class="h-1.5 w-1.5 rounded-full"
                                                         :class="queue.is_active ? 'bg-emerald-400' : 'bg-amber-400'"></span>
-                                                    <span x-text="queue.is_active ? tt('queue.status_active') : tt('queue.status_paused')"></span>
+                                                    <span
+                                                        x-text="queue.is_active ? tt('queue.status_active') : tt('queue.status_paused')"></span>
                                                 </span>
                                                 <template x-for="tag in queue.tags" :key="tag">
                                                     <span
@@ -251,8 +253,7 @@
                         <button type="button"
                             class="inline-flex items-center gap-1 rounded-lg border border-slate-200 px-3 py-1.5 font-semibold transition"
                             :class="pagination.has_prev ? 'text-slate-600 hover:border-sky-300 hover:text-sky-700' : 'cursor-not-allowed text-slate-300'"
-                            :disabled="!pagination.has_prev" @click="prevPage()"
-                            x-text="tt('queue.prev')">
+                            :disabled="!pagination.has_prev" @click="prevPage()" x-text="tt('queue.prev')">
                         </button>
                         <div class="text-sm font-semibold text-slate-600">
                             <span x-text="tt('queue.page')"></span>
@@ -263,13 +264,72 @@
                         <button type="button"
                             class="inline-flex items-center gap-1 rounded-lg border border-slate-200 px-3 py-1.5 font-semibold transition"
                             :class="pagination.has_next ? 'text-slate-600 hover:border-sky-300 hover:text-sky-700' : 'cursor-not-allowed text-slate-300'"
-                            :disabled="!pagination.has_next" @click="nextPage()"
-                            x-text="tt('queue.next')">
+                            :disabled="!pagination.has_next" @click="nextPage()" x-text="tt('queue.next')">
                         </button>
                     </div>
                 </div>
             </template>
         </section>
+
+        <!-- Issue #179: file-sourced queues (read-only) -->
+        <template x-if="fileQueues.length > 0">
+            <section class="overflow-hidden rounded-xl bg-white shadow-sm ring-1 ring-black/5">
+                <div class="border-b border-slate-200 bg-slate-50 px-4 py-3 flex items-center gap-2">
+                    <svg class="h-4 w-4 text-slate-400" viewBox="0 0 20 20" fill="currentColor">
+                        <path fill-rule="evenodd" d="M4 4a2 2 0 012-2h4.586A2 2 0 0112 2.586L15.414 6A2 2 0 0116 7.414V16a2 2 0 01-2 2H6a2 2 0 01-2-2V4zm2 6a1 1 0 011-1h6a1 1 0 110 2H7a1 1 0 01-1-1zm1 3a1 1 0 100 2h6a1 1 0 100-2H7z" clip-rule="evenodd" />
+                    </svg>
+                    <span class="text-sm font-semibold text-slate-700">{{ "queue.file_queues_title" | t }}</span>
+                    <span class="ml-auto inline-flex items-center rounded-full bg-slate-100 px-2 py-0.5 text-xs font-medium text-slate-500" x-text="fileQueues.length"></span>
+                </div>
+                <p class="px-4 py-2 text-xs text-slate-500">{{ "queue.file_queues_notice" | t }}</p>
+                <div class="overflow-x-auto">
+                    <table class="min-w-full divide-y divide-slate-200 text-left text-sm">
+                        <thead class="bg-slate-50 text-xs font-semibold uppercase tracking-wide text-slate-500">
+                            <tr>
+                                <th scope="col" class="px-4 py-2">{{ "queue.col_queue" | t }}</th>
+                                <th scope="col" class="px-4 py-2">{{ "queue.col_hold_treatment" | t }}</th>
+                                <th scope="col" class="px-4 py-2">{{ "queue.col_targets" | t }}</th>
+                                <th scope="col" class="px-4 py-2">{{ "queue.col_fallback" | t }}</th>
+                                <th scope="col" class="px-4 py-2">{{ "sip_trunk.source_file" | t }}</th>
+                            </tr>
+                        </thead>
+                        <tbody class="divide-y divide-slate-100 bg-white text-slate-600">
+                            <template x-for="(queue, idx) in fileQueues" :key="idx">
+                                <tr class="bg-slate-50/50">
+                                    <td class="px-4 py-3">
+                                        <div class="flex items-center gap-3">
+                                            <div>
+                                                <span class="font-semibold text-slate-900" x-text="queue.name"></span>
+                                                <span class="ml-2 inline-flex items-center rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-medium text-slate-500">{{ "sip_trunk.read_only" | t }}</span>
+                                                <div class="text-xs text-slate-400" x-text="queue.description || '—'"></div>
+                                                <div class="mt-2 flex flex-wrap gap-1">
+                                                    <span class="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2 py-0.5 text-[11px] font-semibold text-emerald-600 ring-1 ring-emerald-100">
+                                                        <span class="h-1.5 w-1.5 rounded-full bg-emerald-400"></span>
+                                                        <span x-text="tt('queue.status_active')"></span>
+                                                    </span>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </td>
+                                    <td class="px-4 py-3">
+                                        <div class="text-sm font-semibold text-slate-800" x-text="holdSummary(queue)"></div>
+                                        <div class="text-xs text-slate-500" x-text="holdDetail(queue)"></div>
+                                    </td>
+                                    <td class="px-4 py-3">
+                                        <div class="text-sm text-slate-700" x-text="targetSummary(queue)"></div>
+                                        <div class="text-xs text-slate-400" x-text="targetDetails(queue)"></div>
+                                    </td>
+                                    <td class="px-4 py-3">
+                                        <span class="text-sm text-slate-700" x-text="fallbackSummary(queue)"></span>
+                                    </td>
+                                    <td class="px-4 py-3 text-xs text-slate-400 font-mono break-all" x-text="queue.source_file || '—'"></td>
+                                </tr>
+                            </template>
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+        </template>
     </div>
 </div>
 
@@ -288,6 +348,7 @@
             statusOptions: [],
             statusTabs: [],
             queues: [],
+            fileQueues: [],
             pagination: null,
             loading: false,
             error: null,
@@ -350,6 +411,7 @@
                     }
 
                     this.queues = Array.isArray(data?.items) ? data.items : [];
+                    this.fileQueues = Array.isArray(data?.file_queues) ? data.file_queues : [];
                     this.summary = typeof data?.summary === 'object' && data.summary !== null
                         ? {
                             total: Number(data.summary.total) || 0,

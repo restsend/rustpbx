@@ -8,7 +8,8 @@
         <!-- Header -->
         <div class="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
             <div>
-                <p class="text-[11px] font-semibold uppercase tracking-wide text-sky-600">{{ "archive.subtitle" | t }}</p>
+                <p class="text-[11px] font-semibold uppercase tracking-wide text-sky-600">{{ "archive.subtitle" | t }}
+                </p>
                 <h1 class="text-2xl font-semibold text-slate-900">{{ "archive.title" | t }}</h1>
                 <p class="text-sm text-slate-500">{{ "archive.subtitle_desc" | t }}</p>
             </div>
@@ -35,14 +36,16 @@
                     </div>
 
                     <div>
-                        <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400" x-text="t.field_archive_time"></label>
+                        <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400"
+                            x-text="t.field_archive_time"></label>
                         <input type="text" x-model="config.archive_time"
                             class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                             placeholder="03:00">
                     </div>
 
                     <div>
-                        <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400" x-text="t.field_timezone"></label>
+                        <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400"
+                            x-text="t.field_timezone"></label>
                         <input type="text" x-model="config.timezone"
                             class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                             placeholder="UTC">
@@ -50,14 +53,16 @@
                     </div>
 
                     <div>
-                        <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400" x-text="t.field_retention_days"></label>
+                        <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400"
+                            x-text="t.field_retention_days"></label>
                         <input type="number" x-model.number="config.retention_days"
                             class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                             placeholder="30">
                     </div>
 
                     <div>
-                        <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400" x-text="t.field_archive_after_days"></label>
+                        <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400"
+                            x-text="t.field_archive_after_days"></label>
                         <input type="number" x-model.number="config.archive_after_days" min="0"
                             class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                             placeholder="0">
@@ -65,7 +70,8 @@
                     </div>
 
                     <div>
-                        <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400" x-text="t.field_archive_dir"></label>
+                        <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400"
+                            x-text="t.field_archive_dir"></label>
                         <input type="text" x-model="config.archive_dir"
                             class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                             placeholder="{{ effective_archive_dir }}">
@@ -96,8 +102,8 @@
                         <h2 class="text-base font-semibold text-slate-900" x-text="t.section_files"></h2>
                         <p class="text-xs text-slate-500" x-text="t.section_files_desc"></p>
                     </div>
-                    <button @click="refreshList()"
-                        class="text-sky-600 hover:text-sky-800 text-xs font-semibold" x-text="t.btn_refresh"></button>
+                    <button @click="refreshList()" class="text-sky-600 hover:text-sky-800 text-xs font-semibold"
+                        x-text="t.btn_refresh"></button>
                 </div>
                 <div class="mt-4 max-h-96 overflow-y-auto overflow-x-auto">
                     <table class="min-w-full divide-y divide-slate-200 text-sm">
@@ -123,12 +129,14 @@
                                     </td>
                                     <td class="px-4 py-3 text-right">
                                         <button @click="deleteArchive(file.name)"
-                                            class="text-red-600 hover:text-red-900 text-xs font-semibold" x-text="t.btn_delete"></button>
+                                            class="text-red-600 hover:text-red-900 text-xs font-semibold"
+                                            x-text="t.btn_delete"></button>
                                     </td>
                                 </tr>
                             </template>
                             <tr x-show="archives.length === 0">
-                                <td colspan="5" class="px-4 py-8 text-center text-slate-400 italic" x-text="t.no_archives"></td>
+                                <td colspan="5" class="px-4 py-8 text-center text-slate-400 italic"
+                                    x-text="t.no_archives"></td>
                             </tr>
                         </tbody>
                     </table>
@@ -146,7 +154,8 @@
             </div>
             <div class="mt-4 grid gap-4 sm:grid-cols-3 items-end">
                 <div>
-                    <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400" x-text="t.field_start_date"></label>
+                    <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400"
+                        x-text="t.field_start_date"></label>
                     <input type="date" x-model="manual.startDate"
                         class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
                 </div>
@@ -235,7 +244,7 @@
 
             async refreshList() {
                 try {
-                    const response = await fetch('{{ api_prefix | default('/api') }}/archive/list');
+                    const response = await fetch('{{ api_prefix | safe }}/archive/list');
                     if (response.ok) {
                         this.archives = await response.json();
                     }
@@ -248,7 +257,7 @@
                 this.saving = true;
                 this.configMsg = '';
                 try {
-                    const response = await fetch('{{ api_prefix | default('/api') }}/archive/config', {
+                    const response = await fetch('{{ api_prefix | safe }}/archive/config', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify(this.config),
@@ -280,7 +289,7 @@
                         destructive: true,
                         onConfirm: async () => {
                             try {
-                                const response = await fetch('{{ api_prefix | default('/api') }}/archive/delete', {
+                                const response = await fetch('{{ api_prefix | safe }}/archive/delete', {
                                     method: 'POST',
                                     headers: { 'Content-Type': 'application/json' },
                                     body: JSON.stringify({ filename }),
@@ -307,7 +316,7 @@
                 this.manual.counting = true;
                 this.manual.count = null;
                 try {
-                    const url = `{{ api_prefix | default('/api') }}/archive/count?start_date=${this.manual.startDate}&end_date=${this.manual.endDate}`;
+                    const url = `{{ api_prefix | safe }}/archive/count?start_date=${this.manual.startDate}&end_date=${this.manual.endDate}`;
                     const res = await fetch(url);
                     const data = await res.json();
                     if (data.success) {
@@ -347,7 +356,7 @@
                 this.manual.total = 0;
                 this.manual.progressMsg = this.t.manual_starting || 'Starting...';
                 try {
-                    const res = await fetch('{{ api_prefix | default('/api') }}/archive/manual', {
+                    const res = await fetch('{{ api_prefix | safe }}/archive/manual', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ start_date: this.manual.startDate, end_date: this.manual.endDate }),

@@ -5,7 +5,8 @@
     <div class="mx-auto max-w-4xl space-y-6">
         <header class="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
             <div class="space-y-1">
-                <p class="text-xs font-semibold uppercase tracking-wide text-sky-600">{{ "notifications_page.system_notifications" | t }}</p>
+                <p class="text-xs font-semibold uppercase tracking-wide text-sky-600">{{
+                    "notifications_page.system_notifications" | t }}</p>
                 <h1 class="text-2xl font-semibold text-slate-900">{{ "notifications_page.title" | t }}</h1>
                 <p class="text-sm text-slate-500">{{ "notifications_page.system_notifications" | t }}</p>
             </div>
@@ -52,7 +53,8 @@
                         <div class="flex items-center gap-2">
                             <p class="text-sm font-semibold text-slate-900">{{ n.title }}</p>
                             {% if not n.read %}
-                            <span class="inline-block h-2 w-2 rounded-full bg-sky-500" title="{{ "notifications_page.unread" | t }}"></span>
+                            <span class="inline-block h-2 w-2 rounded-full bg-sky-500" title="{{ "
+                                notifications_page.unread" | t }}"></span>
                             {% endif %}
                         </div>
                         <time class="shrink-0 text-xs text-slate-400">{{ n.created_at }}</time>
@@ -91,7 +93,7 @@
         return {
             init() { },
             async markRead(id) {
-                const res = await fetch(`{{ api_prefix | default('/api') }}/notifications/${id}/read`, { method: 'POST' });
+                const res = await fetch(`{{ api_prefix | safe }}/notifications/${id}/read`, { method: 'POST' });
                 if (res.ok) {
                     const el = document.getElementById(`notification-${id}`);
                     if (el) {
@@ -104,7 +106,7 @@
                 }
             },
             async markAllRead() {
-                const res = await fetch(`{{ api_prefix | default('/api') }}/notifications/read-all`, { method: 'POST' });
+                const res = await fetch(`{{ api_prefix | safe }}/notifications/read-all`, { method: 'POST' });
                 if (res.ok) {
                     window.location.reload();
                 }

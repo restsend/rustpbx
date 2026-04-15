@@ -469,6 +469,80 @@
             </div>
         </section>
 
+        <!-- Issue #179: file-sourced routes (read-only) -->
+        <template x-if="fileRoutes.length > 0">
+            <section class="overflow-hidden rounded-xl bg-white shadow-sm ring-1 ring-black/5">
+                <div class="border-b border-slate-200 bg-slate-50 px-4 py-3 flex items-center gap-2">
+                    <svg class="h-4 w-4 text-slate-400" viewBox="0 0 20 20" fill="currentColor">
+                        <path fill-rule="evenodd" d="M4 4a2 2 0 012-2h4.586A2 2 0 0112 2.586L15.414 6A2 2 0 0116 7.414V16a2 2 0 01-2 2H6a2 2 0 01-2-2V4zm2 6a1 1 0 011-1h6a1 1 0 110 2H7a1 1 0 01-1-1zm1 3a1 1 0 100 2h6a1 1 0 100-2H7z" clip-rule="evenodd" />
+                    </svg>
+                    <span class="text-sm font-semibold text-slate-700">{{ "routing.file_routes_title" | t }}</span>
+                    <span class="ml-auto inline-flex items-center rounded-full bg-slate-100 px-2 py-0.5 text-xs font-medium text-slate-500" x-text="fileRoutes.length"></span>
+                </div>
+                <p class="px-4 py-2 text-xs text-slate-500">{{ "routing.file_routes_notice" | t }}</p>
+                <div class="overflow-x-auto">
+                    <table class="min-w-full divide-y divide-slate-200 text-left text-sm">
+                        <thead class="bg-slate-50 text-xs font-semibold uppercase tracking-wide text-slate-500">
+                            <tr>
+                                <th scope="col" class="px-4 py-2">{{ "routing.col_route" | t }}</th>
+                                <th scope="col" class="px-4 py-2">{{ "routing.col_match" | t }}</th>
+                                <th scope="col" class="px-4 py-2">{{ "routing.col_direction" | t }}</th>
+                                <th scope="col" class="px-4 py-2">{{ "routing.col_priority" | t }}</th>
+                                <th scope="col" class="px-4 py-2">{{ "routing.source_file" | t }}</th>
+                                <th scope="col" class="px-4 py-2">{{ "routing.col_state" | t }}</th>
+                            </tr>
+                        </thead>
+                        <tbody class="divide-y divide-slate-100 bg-white text-slate-600">
+                            <template x-for="(route, idx) in fileRoutes" :key="idx">
+                                <tr class="bg-slate-50/50">
+                                    <td class="whitespace-nowrap px-4 py-2">
+                                        <span class="font-semibold text-slate-700" x-text="routeLabel(route)"></span>
+                                        <span class="ml-2 inline-flex items-center rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-medium text-slate-500">{{ "routing.read_only" | t }}</span>
+                                    </td>
+                                    <td class="px-4 py-2 text-xs text-slate-500">
+                                        <template x-if="matchPreview(route).items.length">
+                                            <div class="flex flex-col gap-0.5">
+                                                <template x-for="item in matchPreview(route).items" :key="item.key">
+                                                    <div><span class="font-semibold" x-text="item.label"></span>: <span x-text="item.value"></span></div>
+                                                </template>
+                                            </div>
+                                        </template>
+                                        <template x-if="!matchPreview(route).items.length">
+                                            <span>—</span>
+                                        </template>
+                                    </td>
+                                    <td class="whitespace-nowrap px-4 py-2">
+                                        <span class="uppercase" x-text="route.direction || 'any'"></span>
+                                    </td>
+                                    <td class="whitespace-nowrap px-4 py-2">
+                                        <span class="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2.5 py-0.5 text-[11px] font-medium text-slate-600 ring-1 ring-slate-200">
+                                            {{ "routing.priority_badge" | t }}
+                                            <span class="font-semibold" x-text="route.priority"></span>
+                                        </span>
+                                    </td>
+                                    <td class="px-4 py-2 text-xs text-slate-400 font-mono break-all" x-text="route.source_file || '—'"></td>
+                                    <td class="whitespace-nowrap px-4 py-2">
+                                        <template x-if="!route.disabled">
+                                            <span class="inline-flex items-center gap-1 rounded-full bg-emerald-50 px-2.5 py-0.5 text-xs font-semibold text-emerald-600 ring-1 ring-emerald-100">
+                                                <span class="h-1.5 w-1.5 rounded-full bg-emerald-400"></span>
+                                                {{ "routing.filter_active" | t }}
+                                            </span>
+                                        </template>
+                                        <template x-if="route.disabled">
+                                            <span class="inline-flex items-center gap-1 rounded-full bg-amber-50 px-2.5 py-0.5 text-xs font-semibold text-amber-600 ring-1 ring-amber-200">
+                                                <span class="h-1.5 w-1.5 rounded-full bg-amber-400"></span>
+                                                {{ "routing.filter_paused" | t }}
+                                            </span>
+                                        </template>
+                                    </td>
+                                </tr>
+                            </template>
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+        </template>
+
         <div x-show="validationOpen" x-cloak x-transition.opacity.duration.150ms
             class="fixed inset-0 z-40 flex items-center justify-center px-4 py-12">
             <div class="absolute inset-0 bg-slate-900/50 backdrop-blur-sm" @click="closeValidation()"></div>
@@ -746,6 +820,7 @@
             processingClone: null,
             processingToggle: null,
             trunkOptions: [],
+            fileRoutes: [],
             validationOpen: false,
             validationAdvanced: false,
             validationInput: '',
@@ -967,6 +1042,7 @@
                         clone_url: item?.clone_url,
                         delete_url: item?.delete_url,
                     }));
+                    this.fileRoutes = Array.isArray(data?.file_routes) ? data.file_routes : [];
                     this.expandedMatch = {};
                     this.expandedRewrite = {};
                     this.summary = Object.assign(

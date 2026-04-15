@@ -104,6 +104,10 @@ impl ProxyDataContext {
         self.routes.read().unwrap().clone()
     }
 
+    pub fn queues_snapshot(&self) -> HashMap<String, RouteQueueConfig> {
+        self.queues.read().unwrap().clone()
+    }
+
     pub fn acl_rules_snapshot(&self) -> Vec<String> {
         self.acl_rules.read().unwrap().clone()
     }
@@ -315,12 +319,37 @@ impl ProxyDataContext {
         let mut config_count = 0usize;
         let mut file_count = 0usize;
         let mut files: Vec<String> = Vec::new();
+        let patterns = config.queues_files.clone();
 
         if !config.queues.is_empty() {
             config_count = config.queues.len();
             info!(count = config_count, "loading queues from embedded config");
-            for (name, queue) in config.queues.iter() {
-                queues.insert(name.clone(), queue.clone());
+            for (name, mut queue) in config.queues.clone().into_iter() {
+                queue.origin = ConfigOrigin::embedded();
+                queues.insert(name, queue);
+            }
+        }
+
+        if !config.queues_files.is_empty() {
+            match queue_utils::load_queues_from_files(&config.queues_files) {
+                Ok((file_queues, file_paths)) => {
+                    file_count = file_queues.len();
+                    if !file_paths.is_empty() {
+                        files.extend(file_paths.clone());
+                    }
+                    for (key, mut queue) in file_queues {
+                        let path = file_paths
+                            .iter()
+                            .find(|p| p.contains(&key))
+                            .cloned()
+                            .unwrap_or_else(|| config.queues_files.join(", "));
+                        queue.origin = ConfigOrigin::from_file(path);
+                        queues.insert(key, queue);
+                    }
+                }
+                Err(e) => {
+                    tracing::error!("failed to load queues from files: {}", e);
+                }
             }
         }
 
@@ -330,7 +359,7 @@ impl ProxyDataContext {
                 Ok(content) => {
                     match toml::from_str::<HashMap<String, RouteQueueConfig>>(&content) {
                         Ok(loaded) => {
-                            file_count = loaded.len();
+                            file_count += loaded.len();
                             files.push(generated_file.display().to_string());
                             queues.extend(loaded);
                         }
@@ -360,7 +389,7 @@ impl ProxyDataContext {
             file_count,
             generated: None,
             files,
-            patterns: vec![],
+            patterns,
             started_at,
             finished_at,
             duration_ms,

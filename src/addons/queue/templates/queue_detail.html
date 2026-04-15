@@ -5,7 +5,7 @@
 {% block title %}{{ model_data.name | default("queue.new_queue" | t) }} · {{ site_name | default('RustPBX') }}{%
 endblock %}
 {% block content %}
-{% set base_url = base_path | default('/console') %}
+{% set base_url = base_path | safe %}
 <div class="p-6" x-data='queueDetailPage({
         basePath: {{ base_url | tojson }},
         mode: {{ page_mode | tojson }},

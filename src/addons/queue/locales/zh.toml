@@ -67,6 +67,8 @@ queue_exported = "队列已导出。"
 
 # 错误消息
 load_error = "无法加载队列"
+file_queues_title = "文件配置队列（只读）"
+file_queues_notice = "这些队列从 .toml 配置文件加载，无法通过 GUI 编辑。"
 delete_error = "删除队列失败"
 export_error = "导出队列失败"
 export_all_error = "批量导出失败"

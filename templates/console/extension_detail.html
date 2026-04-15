@@ -5,8 +5,8 @@
 {% block title %}{{ model_data.extension | default("extension_detail.new_extension" | t) }} · {{ site_name | default('RustPBX') }}{% endblock
 %}
 {% block content %}
-{% set base_url = base_path | default('/console') %}
-{% set api_prefix_val = api_prefix | default('/api') %}
+{% set base_url = base_path | safe%}
+{% set api_prefix_val = api_prefix | safe %}
 <div class="p-6" x-data='extensionDetailPage({
         basePath: {{ base_url | tojson }},
         apiPrefix: {{ api_prefix_val | tojson }},

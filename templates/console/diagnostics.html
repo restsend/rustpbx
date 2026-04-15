@@ -5,10 +5,12 @@
 {% block title %}{{ "diagnostics.title" | t }} · {{site_name|default('RustPBX')}}{% endblock %}
 {% block content %}
 <div class="p-6">
-    <div class="mx-auto max-w-7xl space-y-6" x-data='testingConsole({data: {{ test_data | tojson }}, translations: {{ t | tojson }}})'>
+    <div class="mx-auto max-w-7xl space-y-6"
+        x-data='testingConsole({data: {{ test_data | tojson }}, translations: {{ t | tojson }}})'>
         <header class="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
             <div class="space-y-1">
-                <p class="text-xs font-semibold uppercase tracking-wide text-sky-600">{{ "diagnostics.operational_validation" | t }}</p>
+                <p class="text-xs font-semibold uppercase tracking-wide text-sky-600">{{
+                    "diagnostics.operational_validation" | t }}</p>
                 <h1 class="text-2xl font-semibold text-slate-900">{{ "diagnostics.title" | t }}</h1>
                 <p class="text-sm text-slate-500">{{ "diagnostics.subtitle" | t }}</p>
             </div>
@@ -31,7 +33,8 @@
             <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
                 <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                     <div>
-                        <h2 class="text-base font-semibold text-slate-900">{{ "diagnostics.connect_endpoints" | t }}</h2>
+                        <h2 class="text-base font-semibold text-slate-900">{{ "diagnostics.connect_endpoints" | t }}
+                        </h2>
                         <p class="text-xs text-slate-500">{{ "diagnostics.connect_endpoints_desc" | t }}</p>
                     </div>
                     <div class="flex flex-wrap items-center gap-2 text-xs text-slate-500">
@@ -43,7 +46,8 @@
                         <span
                             class="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2.5 py-1 font-semibold text-slate-600">
                             {{ "diagnostics.label_expires" | t }}
-                            <span x-text="connection.expires ? connection.expires + ' s' : '{{ 'diagnostics.label_expires_default' | t }}'"></span>
+                            <span
+                                x-text="connection.expires ? connection.expires + ' s' : '{{ 'diagnostics.label_expires_default' | t }}'"></span>
                         </span>
                     </div>
                 </div>
@@ -199,7 +203,8 @@
                             </div>
                             <div class="grid gap-3 sm:grid-cols-2">
                                 <div>
-                                    <span class="font-semibold text-slate-700">{{ "diagnostics.ice_servers_used" | t }}</span>
+                                    <span class="font-semibold text-slate-700">{{ "diagnostics.ice_servers_used" | t
+                                        }}</span>
                                     <div class="mt-1 space-y-1">
                                         <template x-for="(server, index) in webrtcTest.result.iceServers"
                                             :key="server.urls.join(',') + index">
@@ -208,10 +213,12 @@
                                                 </div>
                                                 <template x-if="server.username">
                                                     <div class="text-[10px] text-slate-400"
-                                                        x-text="'{{ 'diagnostics.label_user' | t }} ' + server.username"></div>
+                                                        x-text="'{{ 'diagnostics.label_user' | t }} ' + server.username">
+                                                    </div>
                                                 </template>
                                                 <template x-if="server.credentialSupplied">
-                                                    <div class="text-[10px] text-slate-400">{{ "diagnostics.label_credential_supplied" | t }}</div>
+                                                    <div class="text-[10px] text-slate-400">{{
+                                                        "diagnostics.label_credential_supplied" | t }}</div>
                                                 </template>
                                             </div>
                                         </template>
@@ -224,19 +231,24 @@
                                     </div>
                                 </div>
                                 <div class="space-y-1">
-                                    <div><span class="font-semibold text-slate-700">{{ "diagnostics.label_time_to_first" | t }}</span>
+                                    <div><span class="font-semibold text-slate-700">{{ "diagnostics.label_time_to_first"
+                                            | t }}</span>
                                         <span x-text="formatMs(webrtcTest.result.timeToFirstCandidateMs)"></span>
                                     </div>
-                                    <div><span class="font-semibold text-slate-700">{{ "diagnostics.label_ice_gather_complete" | t }}</span>
+                                    <div><span class="font-semibold text-slate-700">{{
+                                            "diagnostics.label_ice_gather_complete" | t }}</span>
                                         <span x-text="formatMs(webrtcTest.result.iceGatherDurationMs)"></span>
                                     </div>
-                                    <div><span class="font-semibold text-slate-700">{{ "diagnostics.label_candidates_discovered" | t }}</span>
+                                    <div><span class="font-semibold text-slate-700">{{
+                                            "diagnostics.label_candidates_discovered" | t }}</span>
                                         <span x-text="webrtcTest.result.candidateTotal"></span>
                                     </div>
-                                    <div><span class="font-semibold text-slate-700">{{ "diagnostics.label_candidate_types" | t }}</span>
+                                    <div><span class="font-semibold text-slate-700">{{
+                                            "diagnostics.label_candidate_types" | t }}</span>
                                         <span x-text="webrtcTest.result.typeSummary"></span>
                                     </div>
-                                    <div><span class="font-semibold text-slate-700">{{ "diagnostics.label_addresses_seen" | t }}</span>
+                                    <div><span class="font-semibold text-slate-700">{{
+                                            "diagnostics.label_addresses_seen" | t }}</span>
                                         <span x-text="displayValue(webrtcTest.result.addresses)"></span>
                                     </div>
                                 </div>
@@ -244,7 +256,8 @@
                             <template x-if="webrtcTest.result.errorDetail">
                                 <div
                                     class="rounded border border-amber-200 bg-amber-50 px-3 py-2 text-[11px] text-amber-700">
-                                    <div class="font-semibold text-amber-800">{{ "diagnostics.label_ice_gathering_issue" | t }}</div>
+                                    <div class="font-semibold text-amber-800">{{ "diagnostics.label_ice_gathering_issue"
+                                        | t }}</div>
                                     <div class="mt-1 break-words" x-text="webrtcTest.result.errorDetail"></div>
                                 </div>
                             </template>
@@ -331,7 +344,8 @@
             <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
                 <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                     <div>
-                        <h2 class="text-base font-semibold text-slate-900">{{ "diagnostics.routing_validation" | t }}</h2>
+                        <h2 class="text-base font-semibold text-slate-900">{{ "diagnostics.routing_validation" | t }}
+                        </h2>
                         <p class="text-xs text-slate-500">{{ "diagnostics.routing_validation_desc" | t }}</p>
                     </div>
                     <div class="flex flex-wrap items-center gap-2">
@@ -345,26 +359,30 @@
                                 stroke-width="1.6">
                                 <path stroke-linecap="round" stroke-linejoin="round" d="M10 4v12M4 10h12" />
                             </svg>
-                            <span x-text="routingAdvanced ? '{{ 'diagnostics.btn_hide_advanced' | t }}' : '{{ 'diagnostics.btn_advanced_options' | t }}'"></span>
+                            <span
+                                x-text="routingAdvanced ? '{{ 'diagnostics.btn_hide_advanced' | t }}' : '{{ 'diagnostics.btn_advanced_options' | t }}'"></span>
                         </button>
                     </div>
                 </div>
 
                 <form class="mt-4 grid gap-4 md:grid-cols-2" @submit.prevent="runRoutingCheck">
                     <label class="flex flex-col gap-2">
-                        <span class="text-xs font-semibold uppercase tracking-wide text-slate-400">{{ "diagnostics.label_dialled_number" | t }}</span>
+                        <span class="text-xs font-semibold uppercase tracking-wide text-slate-400">{{
+                            "diagnostics.label_dialled_number" | t }}</span>
                         <input type="text" x-model.trim="routingInput"
                             class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                             placeholder="e.g. +14155550123">
                     </label>
                     <label class="flex flex-col gap-2">
-                        <span class="text-xs font-semibold uppercase tracking-wide text-slate-400">{{ "diagnostics.label_caller_sip_uri" | t }}</span>
+                        <span class="text-xs font-semibold uppercase tracking-wide text-slate-400">{{
+                            "diagnostics.label_caller_sip_uri" | t }}</span>
                         <input type="text" x-model.trim="routingCaller"
                             class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                             placeholder="sip:caller@rustpbx.com">
                     </label>
                     <label class="flex flex-col gap-2">
-                        <span class="text-xs font-semibold uppercase tracking-wide text-slate-400">{{ "diagnostics.label_direction" | t }}</span>
+                        <span class="text-xs font-semibold uppercase tracking-wide text-slate-400">{{
+                            "diagnostics.label_direction" | t }}</span>
                         <select x-model="routingDirection"
                             class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
                             <option value="outbound">{{ "diagnostics.outbound" | t }}</option>
@@ -373,7 +391,8 @@
                         </select>
                     </label>
                     <label class="flex flex-col gap-2">
-                        <span class="text-xs font-semibold uppercase tracking-wide text-slate-400">{{ "diagnostics.label_source_ip" | t }}</span>
+                        <span class="text-xs font-semibold uppercase tracking-wide text-slate-400">{{
+                            "diagnostics.label_source_ip" | t }}</span>
                         <input type="text" x-model.trim="routingSourceIp"
                             class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                             placeholder="203.0.113.10">
@@ -381,13 +400,15 @@
                     <template x-if="routingAdvanced">
                         <div class="md:col-span-2 grid gap-3 sm:grid-cols-2" x-transition>
                             <label class="flex flex-col gap-2">
-                                <span class="text-xs font-semibold uppercase tracking-wide text-slate-400">{{ "diagnostics.label_request_uri" | t }}</span>
+                                <span class="text-xs font-semibold uppercase tracking-wide text-slate-400">{{
+                                    "diagnostics.label_request_uri" | t }}</span>
                                 <input type="text" x-model.trim="routingRequestUri"
                                     class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                                     placeholder="sip:destination@rustpbx.com">
                             </label>
                             <label class="flex flex-col gap-2">
-                                <span class="text-xs font-semibold uppercase tracking-wide text-slate-400">{{ "diagnostics.label_source_trunk" | t }}</span>
+                                <span class="text-xs font-semibold uppercase tracking-wide text-slate-400">{{
+                                    "diagnostics.label_source_trunk" | t }}</span>
                                 <select x-model="routingSourceTrunk"
                                     class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
                                     <option value="">{{ "diagnostics.auto_detect" | t }}</option>
@@ -447,58 +468,71 @@
                                     </span>
                                 </div>
                                 <div class="grid gap-1 sm:grid-cols-2">
-                                    <div><span class="font-semibold text-slate-700">{{ "diagnostics.label_direction_result" | t }}</span>
+                                    <div><span class="font-semibold text-slate-700">{{
+                                            "diagnostics.label_direction_result" | t }}</span>
                                         <span x-text="(routingResultSummary.direction || '—').toUpperCase()"></span>
                                     </div>
-                                    <div><span class="font-semibold text-slate-700">{{ "diagnostics.label_dialled" | t }}</span>
+                                    <div><span class="font-semibold text-slate-700">{{ "diagnostics.label_dialled" | t
+                                            }}</span>
                                         <span x-text="routingResultSummary.input || '—'"></span>
                                     </div>
-                                    <div><span class="font-semibold text-slate-700">{{ "diagnostics.label_trunk" | t }}</span>
+                                    <div><span class="font-semibold text-slate-700">{{ "diagnostics.label_trunk" | t
+                                            }}</span>
                                         <span x-text="routingResultSummary.trunk || '—'"></span>
                                     </div>
-                                    <div><span class="font-semibold text-slate-700">{{ "diagnostics.label_destination" | t }}</span>
+                                    <div><span class="font-semibold text-slate-700">{{ "diagnostics.label_destination" |
+                                            t }}</span>
                                         <span x-text="displayValue(routingResultSummary.destination)"></span>
                                     </div>
-                                    <div><span class="font-semibold text-slate-700">{{ "diagnostics.label_caller_result" | t }}</span>
+                                    <div><span class="font-semibold text-slate-700">{{ "diagnostics.label_caller_result"
+                                            | t }}</span>
                                         <span x-text="displayValue(routingResultSummary.caller)"></span>
                                     </div>
-                                    <div><span class="font-semibold text-slate-700">{{ "diagnostics.label_request_uri_result" | t }}</span>
+                                    <div><span class="font-semibold text-slate-700">{{
+                                            "diagnostics.label_request_uri_result" | t }}</span>
                                         <span x-text="displayValue(routingResultSummary.requestUri)"></span>
                                     </div>
-                                    <div><span class="font-semibold text-slate-700">{{ "diagnostics.label_source_ip_result" | t }}</span>
+                                    <div><span class="font-semibold text-slate-700">{{
+                                            "diagnostics.label_source_ip_result" | t }}</span>
                                         <span x-text="displayValue(routingResultSummary.sourceIp)"></span>
                                     </div>
                                     <template x-if="routingResultSummary.sourceTrunk">
-                                        <div><span class="font-semibold text-slate-700">{{ "diagnostics.label_provided_source_trunk" | t }}</span>
+                                        <div><span class="font-semibold text-slate-700">{{
+                                                "diagnostics.label_provided_source_trunk" | t }}</span>
                                             <span x-text="routingResultSummary.sourceTrunk"></span>
                                         </div>
                                     </template>
                                     <template x-if="routingResultSummary.detectedTrunk">
-                                        <div><span class="font-semibold text-slate-700">{{ "diagnostics.label_detected_source_trunk" | t }}</span>
+                                        <div><span class="font-semibold text-slate-700">{{
+                                                "diagnostics.label_detected_source_trunk" | t }}</span>
                                             <span x-text="routingResultSummary.detectedTrunk"></span>
                                         </div>
                                     </template>
                                 </div>
                                 <div class="text-[11px] text-slate-500">
-                                    <span class="font-semibold text-slate-700">{{ "diagnostics.label_outcome" | t }}</span>
+                                    <span class="font-semibold text-slate-700">{{ "diagnostics.label_outcome" | t
+                                        }}</span>
                                     <span x-text="routingResultSummary.outcomeLabel"></span>
                                     <template x-if="routingResultSummary.defaultRoute">
                                         <span> · {{ "diagnostics.used_default_route" | t }}</span>
                                     </template>
                                 </div>
                                 <div class="text-[11px] text-slate-500">
-                                    <span class="font-semibold text-slate-700">{{ "diagnostics.label_rewrites" | t }}</span>
+                                    <span class="font-semibold text-slate-700">{{ "diagnostics.label_rewrites" | t
+                                        }}</span>
                                     <span x-text="routingResultSummary.rewritesText"></span>
                                 </div>
                                 <template x-if="routingResultSummary.headers?.length">
                                     <div class="text-[11px] text-slate-500">
-                                        <span class="font-semibold text-slate-700">{{ "diagnostics.label_headers" | t }}</span>
+                                        <span class="font-semibold text-slate-700">{{ "diagnostics.label_headers" | t
+                                            }}</span>
                                         <span x-text="formatList(routingResultSummary.headers)"></span>
                                     </div>
                                 </template>
                                 <template x-if="routingResultSummary.credential">
                                     <div class="text-[11px] text-slate-500">
-                                        <span class="font-semibold text-slate-700">{{ "diagnostics.label_credential" | t }}</span>
+                                        <span class="font-semibold text-slate-700">{{ "diagnostics.label_credential" | t
+                                            }}</span>
                                         <span x-text="routingResultSummary.credential.username"></span>
                                         <template x-if="routingResultSummary.credential.realm">
                                             <span x-text="'@' + routingResultSummary.credential.realm"></span>
@@ -515,7 +549,8 @@
                                     </div>
                                 </template>
                                 <div class="text-[11px] text-slate-400">
-                                    {{ "diagnostics.label_evaluated" | t }} <span x-text="formatDateTime(routingResultSummary.createdAt)"></span>
+                                    {{ "diagnostics.label_evaluated" | t }} <span
+                                        x-text="formatDateTime(routingResultSummary.createdAt)"></span>
                                 </div>
                                 <template x-if="routingResultSummary.rewritesDiff?.length">
                                     <div class="rounded-lg border border-slate-200 bg-slate-50 p-3">
@@ -530,11 +565,13 @@
                                                         x-text="item.field">
                                                     </div>
                                                     <div class="text-[11px] text-slate-500"><span
-                                                            class="font-semibold">{{ "diagnostics.label_before" | t }}</span>
+                                                            class="font-semibold">{{ "diagnostics.label_before" | t
+                                                            }}</span>
                                                         <span x-text="displayValue(item.before)"></span>
                                                     </div>
                                                     <div class="text-[11px] text-slate-500"><span
-                                                            class="font-semibold">{{ "diagnostics.label_after" | t }}</span>
+                                                            class="font-semibold">{{ "diagnostics.label_after" | t
+                                                            }}</span>
                                                         <span x-text="displayValue(item.after)"></span>
                                                     </div>
                                                 </div>
@@ -559,17 +596,18 @@
                                 <span x-text="item.latency_ms + ' ms'"></span>
                             </div>
                             <div class="mt-1 text-sm font-semibold text-slate-800" x-text="item.input"></div>
-                            <div class="text-xs text-slate-500">{{ "diagnostics.label_route" | t }} → <span class="font-semibold"
-                                    x-text="item.matched_route"></span></div>
-                            <div class="text-xs text-slate-500">{{ "diagnostics.label_trunk" | t }} → <span class="font-semibold"
-                                    x-text="item.selected_trunk"></span></div>
-                            <div class="text-xs text-slate-500">{{ "diagnostics.caller" | t }} → <span class="font-semibold"
-                                    x-text="item.caller || '—'"></span></div>
-                            <div class="text-xs text-slate-500">{{ "diagnostics.source_ip" | t }} → <span class="font-semibold"
-                                    x-text="item.sourceIp || '—'"></span></div>
+                            <div class="text-xs text-slate-500">{{ "diagnostics.label_route" | t }} → <span
+                                    class="font-semibold" x-text="item.matched_route"></span></div>
+                            <div class="text-xs text-slate-500">{{ "diagnostics.label_trunk" | t }} → <span
+                                    class="font-semibold" x-text="item.selected_trunk"></span></div>
+                            <div class="text-xs text-slate-500">{{ "diagnostics.caller" | t }} → <span
+                                    class="font-semibold" x-text="item.caller || '—'"></span></div>
+                            <div class="text-xs text-slate-500">{{ "diagnostics.source_ip" | t }} → <span
+                                    class="font-semibold" x-text="item.sourceIp || '—'"></span></div>
                             <div class="mt-2 inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-semibold"
                                 :class="item.result === 'ok' ? 'bg-emerald-50 text-emerald-600 ring-1 ring-emerald-200' : 'bg-amber-50 text-amber-600 ring-1 ring-amber-200'">
-                                <span x-text="item.result === 'ok' ? '{{ 'diagnostics.label_pass' | t }}' : '{{ 'diagnostics.label_warning_result' | t }}'"></span>
+                                <span
+                                    x-text="item.result === 'ok' ? '{{ 'diagnostics.label_pass' | t }}' : '{{ 'diagnostics.label_warning_result' | t }}'"></span>
                             </div>
                         </div>
                     </template>
@@ -587,7 +625,8 @@
             <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
                 <div class="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
                     <div>
-                        <h2 class="text-base font-semibold text-slate-900">{{ "diagnostics.active_sip_dialogs" | t }}</h2>
+                        <h2 class="text-base font-semibold text-slate-900">{{ "diagnostics.active_sip_dialogs" | t }}
+                        </h2>
                         <p class="text-xs text-slate-500">{{ "diagnostics.active_sip_dialogs_desc" | t }}</p>
                     </div>
                     <div class="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-end">
@@ -663,16 +702,19 @@
                                                     </template>
                                                 </div>
                                                 <div class="text-xs text-slate-500">
-                                                    <span class="font-semibold text-slate-700">{{ "diagnostics.label_from" | t }}</span>
+                                                    <span class="font-semibold text-slate-700">{{
+                                                        "diagnostics.label_from" | t }}</span>
                                                     <span x-text="item.from_display"></span>
                                                 </div>
                                                 <div class="text-xs text-slate-500">
-                                                    <span class="font-semibold text-slate-700">{{ "diagnostics.label_to" | t }}</span>
+                                                    <span class="font-semibold text-slate-700">{{ "diagnostics.label_to"
+                                                        | t }}</span>
                                                     <span x-text="item.to_display"></span>
                                                 </div>
                                                 <template x-if="item.remote_contact">
                                                     <div class="text-xs text-slate-500">
-                                                        <span class="font-semibold text-slate-700">{{ "diagnostics.label_remote_contact" | t }}</span>
+                                                        <span class="font-semibold text-slate-700">{{
+                                                            "diagnostics.label_remote_contact" | t }}</span>
                                                         <span x-text="item.remote_contact"></span>
                                                     </div>
                                                 </template>
@@ -686,9 +728,11 @@
                                                         <path stroke-linecap="round" stroke-linejoin="round"
                                                             d="M6 8l4 4 4-4" />
                                                     </svg>
-                                                    <span x-text="expand ? '{{ 'diagnostics.btn_hide_sdp' | t }}' : '{{ 'diagnostics.btn_show_sdp' | t }}'"></span>
+                                                    <span
+                                                        x-text="expand ? '{{ 'diagnostics.btn_hide_sdp' | t }}' : '{{ 'diagnostics.btn_show_sdp' | t }}'"></span>
                                                 </button>
-                                                <div class="text-[11px] text-slate-400">{{ "diagnostics.label_dialog_id" | t }}</div>
+                                                <div class="text-[11px] text-slate-400">{{ "diagnostics.label_dialog_id"
+                                                    | t }}</div>
                                                 <div class="max-w-xs break-all font-mono text-[11px] text-slate-500"
                                                     x-text="item.id"></div>
                                             </div>
@@ -736,7 +780,8 @@
                 </div>
                 <form class="mt-4 grid gap-4 md:grid-cols-2" @submit.prevent="performLocatorLookup()">
                     <label class="flex flex-col gap-2">
-                        <span class="text-xs font-semibold uppercase tracking-wide text-slate-400">{{ "diagnostics.user" | t }}</span>
+                        <span class="text-xs font-semibold uppercase tracking-wide text-slate-400">{{ "diagnostics.user"
+                            | t }}</span>
                         <input type="text" x-model.trim="locatorUser"
                             class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                             placeholder="e.g. 1001 or 1001@rustpbx.com">
@@ -802,15 +847,18 @@
                                 class="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-xs text-slate-600">
                                 <div class="flex flex-wrap items-center gap-3">
                                     <div>
-                                        <span class="font-semibold text-slate-700">{{ "diagnostics.label_bindings" | t }}</span>
+                                        <span class="font-semibold text-slate-700">{{ "diagnostics.label_bindings" | t
+                                            }}</span>
                                         <span x-text="locatorResult.total"></span>
                                     </div>
                                     <div>
-                                        <span class="font-semibold text-slate-700">{{ "diagnostics.label_generated" | t }}</span>
+                                        <span class="font-semibold text-slate-700">{{ "diagnostics.label_generated" | t
+                                            }}</span>
                                         <span x-text="formatDateTime(locatorResult.generated_at)"></span>
                                     </div>
                                     <div>
-                                        <span class="font-semibold text-slate-700">{{ "diagnostics.label_query" | t }}</span>
+                                        <span class="font-semibold text-slate-700">{{ "diagnostics.label_query" | t
+                                            }}</span>
                                         <span x-text="locatorResult.query.uri"></span>
                                     </div>
                                 </div>
@@ -825,25 +873,28 @@
                                                     <div class="font-semibold text-slate-800"
                                                         x-text="record.binding_key"></div>
                                                     <div class="text-xs text-slate-500">
-                                                        <span class="font-semibold text-slate-700">{{ "diagnostics.label_aor" | t }}</span>
+                                                        <span class="font-semibold text-slate-700">{{
+                                                            "diagnostics.label_aor" | t }}</span>
                                                         <span x-text="record.aor"></span>
                                                     </div>
                                                     <template x-if="record.destination">
                                                         <div class="text-xs text-slate-500">
-                                                            <span
-                                                                class="font-semibold text-slate-700">{{ "diagnostics.label_destination" | t }}</span>
+                                                            <span class="font-semibold text-slate-700">{{
+                                                                "diagnostics.label_destination" | t }}</span>
                                                             <span x-text="record.destination"></span>
                                                         </div>
                                                     </template>
                                                     <template x-if="record.contact">
                                                         <div class="text-xs text-slate-500">
-                                                            <span class="font-semibold text-slate-700">{{ "diagnostics.label_contact" | t }}</span>
+                                                            <span class="font-semibold text-slate-700">{{
+                                                                "diagnostics.label_contact" | t }}</span>
                                                             <span x-text="record.contact"></span>
                                                         </div>
                                                     </template>
                                                     <template x-if="record.user_agent">
                                                         <div class="text-xs text-slate-500">
-                                                            <span class="font-semibold text-slate-700">{{ "diagnostics.label_user_agent" | t }}</span>
+                                                            <span class="font-semibold text-slate-700">{{
+                                                                "diagnostics.label_user_agent" | t }}</span>
                                                             <span x-text="record.user_agent"></span>
                                                         </div>
                                                     </template>
@@ -855,7 +906,9 @@
                                                             x-text="record.supports_webrtc ? '{{ 'diagnostics.webrtc_capable' | t }}' : '{{ 'diagnostics.sip_only' | t }}'"></span>
                                                     </div>
                                                     <div class="text-[11px] text-slate-400">
-                                                        {{ "diagnostics.expires_in" | t }} <span x-text="record.expires"></span> {{ "diagnostics.expires_s" | t }}
+                                                        {{ "diagnostics.expires_in" | t }} <span
+                                                            x-text="record.expires"></span> {{ "diagnostics.expires_s" |
+                                                        t }}
                                                     </div>
                                                     <template
                                                         x-if="record.age_seconds !== null && record.age_seconds !== undefined">
@@ -869,49 +922,57 @@
                                             <div class="mt-3 grid gap-2 text-xs text-slate-500 md:grid-cols-2">
                                                 <template x-if="record.transport">
                                                     <div>
-                                                        <span class="font-semibold text-slate-700">{{ "diagnostics.label_transport" | t }}</span>
+                                                        <span class="font-semibold text-slate-700">{{
+                                                            "diagnostics.label_transport" | t }}</span>
                                                         <span x-text="record.transport"></span>
                                                     </div>
                                                 </template>
                                                 <template x-if="record.instance_id">
                                                     <div>
-                                                        <span class="font-semibold text-slate-700">{{ "diagnostics.label_instance_id" | t }}</span>
+                                                        <span class="font-semibold text-slate-700">{{
+                                                            "diagnostics.label_instance_id" | t }}</span>
                                                         <span x-text="record.instance_id"></span>
                                                     </div>
                                                 </template>
                                                 <template x-if="record.gruu">
                                                     <div>
-                                                        <span class="font-semibold text-slate-700">{{ "diagnostics.label_gruu" | t }}</span>
+                                                        <span class="font-semibold text-slate-700">{{
+                                                            "diagnostics.label_gruu" | t }}</span>
                                                         <span x-text="record.gruu"></span>
                                                     </div>
                                                 </template>
                                                 <template x-if="record.temp_gruu">
                                                     <div>
-                                                        <span class="font-semibold text-slate-700">{{ "diagnostics.label_temp_gruu" | t }}</span>
+                                                        <span class="font-semibold text-slate-700">{{
+                                                            "diagnostics.label_temp_gruu" | t }}</span>
                                                         <span x-text="record.temp_gruu"></span>
                                                     </div>
                                                 </template>
                                                 <template x-if="record.registered_aor">
                                                     <div>
-                                                        <span class="font-semibold text-slate-700">{{ "diagnostics.label_registered_aor" | t }}</span>
+                                                        <span class="font-semibold text-slate-700">{{
+                                                            "diagnostics.label_registered_aor" | t }}</span>
                                                         <span x-text="record.registered_aor"></span>
                                                     </div>
                                                 </template>
                                                 <template x-if="record.path.length">
                                                     <div class="md:col-span-2">
-                                                        <span class="font-semibold text-slate-700">{{ "diagnostics.label_path_reg" | t }}</span>
+                                                        <span class="font-semibold text-slate-700">{{
+                                                            "diagnostics.label_path_reg" | t }}</span>
                                                         <span x-text="record.path.join(' → ')"></span>
                                                     </div>
                                                 </template>
                                                 <template x-if="record.service_route.length">
                                                     <div class="md:col-span-2">
-                                                        <span class="font-semibold text-slate-700">{{ "diagnostics.label_service_route" | t }}</span>
+                                                        <span class="font-semibold text-slate-700">{{
+                                                            "diagnostics.label_service_route" | t }}</span>
                                                         <span x-text="record.service_route.join(' → ')"></span>
                                                     </div>
                                                 </template>
                                                 <template x-if="record.contact_params">
                                                     <div class="md:col-span-2">
-                                                        <span class="font-semibold text-slate-700">{{ "diagnostics.label_contact_params" | t }}</span>
+                                                        <span class="font-semibold text-slate-700">{{
+                                                            "diagnostics.label_contact_params" | t }}</span>
                                                         <span
                                                             x-text="formatContactParams(record.contact_params)"></span>
                                                     </div>
@@ -949,27 +1010,31 @@
                             </div>
                             <div class="grid gap-4 md:grid-cols-2" x-show="callMode === 'standard'">
                                 <label class="flex flex-col gap-1.5">
-                                    <span class="text-xs font-semibold uppercase tracking-wide text-slate-400">{{ "diagnostics.label_websocket_url" | t }}</span>
+                                    <span class="text-xs font-semibold uppercase tracking-wide text-slate-400">{{
+                                        "diagnostics.label_websocket_url" | t }}</span>
                                     <input type="text" x-model.trim="sipForm.wsServer"
                                         class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                                         placeholder="wss://pbx.rustpbx.com/ws">
-                                    <span class="text-[11px] text-slate-400">{{ "diagnostics.prefer_secure_wss" | t }}</span>
+                                    <span class="text-[11px] text-slate-400">{{ "diagnostics.prefer_secure_wss" | t
+                                        }}</span>
                                 </label>
                                 <label class="flex flex-col gap-1.5">
-                                    <span class="text-xs font-semibold uppercase tracking-wide text-slate-400">{{ "diagnostics.label_sip_uri" | t }}</span>
+                                    <span class="text-xs font-semibold uppercase tracking-wide text-slate-400">{{
+                                        "diagnostics.label_sip_uri" | t }}</span>
                                     <input type="text" x-model.trim="sipForm.uri"
                                         class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                                         placeholder="sip:1001@rustpbx.com">
                                 </label>
                                 <label class="flex flex-col gap-1.5">
-                                    <span class="text-xs font-semibold uppercase tracking-wide text-slate-400">{{ "diagnostics.label_auth_user" | t }}</span>
+                                    <span class="text-xs font-semibold uppercase tracking-wide text-slate-400">{{
+                                        "diagnostics.label_auth_user" | t }}</span>
                                     <input type="text" x-model.trim="sipForm.authUser"
                                         class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                                         placeholder="">
                                 </label>
                                 <label class="flex flex-col gap-1.5">
-                                    <span
-                                        class="text-xs font-semibold uppercase tracking-wide text-slate-400">{{ "diagnostics.label_password" | t }}</span>
+                                    <span class="text-xs font-semibold uppercase tracking-wide text-slate-400">{{
+                                        "diagnostics.label_password" | t }}</span>
                                     <input type="password" x-model="sipForm.password"
                                         class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                                         placeholder="••••••">
@@ -1030,8 +1095,8 @@
                         </div>
                         <div class="mt-4 space-y-4">
                             <label class="flex flex-col gap-2">
-                                <span
-                                    class="text-xs font-semibold uppercase tracking-wide text-slate-400">{{ "diagnostics.destination" | t }}</span>
+                                <span class="text-xs font-semibold uppercase tracking-wide text-slate-400">{{
+                                    "diagnostics.destination" | t }}</span>
                                 <div class="flex gap-2">
                                     <input type="text" x-model.trim="sipForm.target"
                                         class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
@@ -1113,8 +1178,8 @@
                             <template x-if="sipIncoming">
                                 <div
                                     class="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-700">
-                                    <div class="font-semibold text-amber-800">{{ "diagnostics.label_incoming_call" | t }} <span
-                                            x-text="sipIncoming.displayName"></span></div>
+                                    <div class="font-semibold text-amber-800">{{ "diagnostics.label_incoming_call" | t
+                                        }} <span x-text="sipIncoming.displayName"></span></div>
                                     <div class="text-[11px] text-amber-600" x-text="sipIncoming.uri"></div>
                                     <div class="mt-2 flex flex-wrap gap-2">
                                         <button type="button" @click="answerIncomingCall"
@@ -1129,7 +1194,8 @@
                                 </div>
                             </template>
                             <div class="text-xs text-slate-500">
-                                <span class="font-semibold text-slate-700">{{ "diagnostics.label_call_status" | t }}</span>
+                                <span class="font-semibold text-slate-700">{{ "diagnostics.label_call_status" | t
+                                    }}</span>
                                 <span x-text="sipCallStatus"></span>
                             </div>
                             <template x-if="sipCallError">
@@ -1146,8 +1212,10 @@
                     <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
                         <div class="flex flex-wrap items-center justify-between gap-3">
                             <div>
-                                <h3 class="text-sm font-semibold text-slate-900">{{ "diagnostics.sip_requests_responses" | t }}</h3>
-                                <p class="text-xs text-slate-500">{{ "diagnostics.sip_requests_responses_desc" | t }}</p>
+                                <h3 class="text-sm font-semibold text-slate-900">{{ "diagnostics.sip_requests_responses"
+                                    | t }}</h3>
+                                <p class="text-xs text-slate-500">{{ "diagnostics.sip_requests_responses_desc" | t }}
+                                </p>
                             </div>
                             <div class="flex items-center gap-3 text-[11px]">
                                 <label class="inline-flex items-center gap-1 text-slate-500">
@@ -1206,8 +1274,10 @@
                     <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
                         <div class="flex items-center justify-between gap-3">
                             <div>
-                                <h3 class="text-sm font-semibold text-slate-900">{{ "diagnostics.registration_call_events" | t }}</h3>
-                                <p class="text-xs text-slate-500">{{ "diagnostics.registration_call_events_desc" | t }}</p>
+                                <h3 class="text-sm font-semibold text-slate-900">{{
+                                    "diagnostics.registration_call_events" | t }}</h3>
+                                <p class="text-xs text-slate-500">{{ "diagnostics.registration_call_events_desc" | t }}
+                                </p>
                             </div>
                             <button type="button" @click="clearSipEvents" :disabled="!sipEvents.length"
                                 class="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-1.5 text-[11px] font-semibold text-slate-600 transition hover:border-slate-300 hover:text-slate-700 disabled:cursor-not-allowed disabled:opacity-60">
@@ -1282,7 +1352,7 @@
                         this.routingSourceIp = firstCheck.sourceIp && firstCheck.sourceIp !== '—' ? firstCheck.sourceIp : '';
                         this.routingResultSummary = null;
                         this.routingError = null;
-                        this.basePath = "{{ base_path | default('/console')|safe }}"
+                        this.basePath = "{{ base_path |safe }}"
                         this.tabs = [
                             { id: 'dialer', label: this.t.tab_dialer || 'Web Dialer' },
                             { id: 'connection', label: this.t.tab_connection || 'Connection' },
