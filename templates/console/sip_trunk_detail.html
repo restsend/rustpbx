@@ -2,10 +2,11 @@
 {% set has_model = model is defined and model is not none %}
 {% set mode_text = '"edit"' if has_model else '"create"' %}
 {% set model_data = model if has_model else {} %}
-{% block title %}{{ model_data.display_name | default(model_data.name | default("sip_trunk_detail.new_trunk" | t)) }} · {{ site_name |
+{% block title %}{{ model_data.display_name | default(model_data.name | default("sip_trunk_detail.new_trunk" | t)) }} ·
+{{ site_name |
 default('RustPBX') }}{% endblock %}
 {% block content %}
-{% set base_url = base_path | default('/console') %}
+{% set base_url = base_path | safe %}
 <div class="p-6" x-data='sipTrunkDetailPage({
         basePath: {{ base_url | tojson }},
         mode: {{ mode_text }},
@@ -86,7 +87,8 @@ default('RustPBX') }}{% endblock %}
                             </svg>
                             <div>
                                 <span class="text-sm">{{ "sip_trunk_detail.tab_general" | t }}</span>
-                                <span class="block text-[11px] font-normal text-slate-400">{{ "sip_trunk_detail.tab_general_desc" | t }}</span>
+                                <span class="block text-[11px] font-normal text-slate-400">{{
+                                    "sip_trunk_detail.tab_general_desc" | t }}</span>
                             </div>
                         </div>
                     </button>
@@ -102,7 +104,8 @@ default('RustPBX') }}{% endblock %}
                             </svg>
                             <div>
                                 <span class="text-sm">{{ "sip_trunk_detail.tab_access" | t }}</span>
-                                <span class="block text-[11px] font-normal text-slate-400">{{ "sip_trunk_detail.tab_access_desc" | t }}</span>
+                                <span class="block text-[11px] font-normal text-slate-400">{{
+                                    "sip_trunk_detail.tab_access_desc" | t }}</span>
                             </div>
                         </div>
                     </button>
@@ -119,7 +122,8 @@ default('RustPBX') }}{% endblock %}
                             </svg>
                             <div>
                                 <span class="text-sm">{{ "sip_trunk_detail.tab_registration" | t }}</span>
-                                <span class="block text-[11px] font-normal text-slate-400">{{ "sip_trunk_detail.tab_registration_desc" | t }}</span>
+                                <span class="block text-[11px] font-normal text-slate-400">{{
+                                    "sip_trunk_detail.tab_registration_desc" | t }}</span>
                             </div>
                         </div>
                     </button>
@@ -135,20 +139,21 @@ default('RustPBX') }}{% endblock %}
                             {{ "sip_trunk_detail.field_trunk_name" | t }}
                             <input type="text" x-model.trim="form.name" maxlength="120" required
                                 class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                placeholder="{{ "sip_trunk_detail.field_trunk_name_placeholder" | t }}">
-                            <span class="text-xs font-normal text-slate-400">{{ "sip_trunk_detail.field_trunk_name_hint" | t }}</span>
+                                placeholder="{{ " sip_trunk_detail.field_trunk_name_placeholder" | t }}">
+                            <span class="text-xs font-normal text-slate-400">{{ "sip_trunk_detail.field_trunk_name_hint"
+                                | t }}</span>
                         </label>
                         <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
                             {{ "sip_trunk_detail.field_display_name" | t }}
                             <input type="text" x-model.trim="form.display_name" maxlength="160"
                                 class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                placeholder="{{ "sip_trunk_detail.field_display_name_placeholder" | t }}">
+                                placeholder="{{ " sip_trunk_detail.field_display_name_placeholder" | t }}">
                         </label>
                         <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
                             {{ "sip_trunk_detail.field_carrier" | t }}
                             <input type="text" x-model.trim="form.carrier" maxlength="160"
                                 class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                placeholder="{{ "sip_trunk_detail.field_carrier_placeholder" | t }}">
+                                placeholder="{{ " sip_trunk_detail.field_carrier_placeholder" | t }}">
                         </label>
                         <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
                             {{ "sip_trunk_detail.field_status" | t }}
@@ -181,16 +186,17 @@ default('RustPBX') }}{% endblock %}
                             {{ "sip_trunk_detail.field_sip_server" | t }}
                             <input type="text" x-model.trim="form.sip_server" maxlength="160"
                                 class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                placeholder="{{ "sip_trunk_detail.field_sip_server_placeholder" | t }}">
+                                placeholder="{{ " sip_trunk_detail.field_sip_server_placeholder" | t }}">
                         </label>
                         <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
                             {{ "sip_trunk_detail.field_outbound_proxy" | t }}
                             <input type="text" x-model.trim="form.outbound_proxy" maxlength="160"
                                 class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                placeholder="{{ "sip_trunk_detail.field_outbound_proxy_placeholder" | t }}">
+                                placeholder="{{ " sip_trunk_detail.field_outbound_proxy_placeholder" | t }}">
                         </label>
                         <div class="flex flex-col gap-2">
-                            <span class="text-sm font-medium text-slate-700">{{ "sip_trunk_detail.field_active" | t }}</span>
+                            <span class="text-sm font-medium text-slate-700">{{ "sip_trunk_detail.field_active" | t
+                                }}</span>
                             <button type="button" @click="toggleActive()"
                                 class="inline-flex items-center gap-2 rounded-lg px-3 py-1 text-xs font-semibold ring-2 transition"
                                 :class="form.is_active ? 'bg-emerald-50 text-emerald-600 ring-emerald-200' : 'bg-slate-100 text-slate-500 ring-slate-200'">
@@ -201,7 +207,8 @@ default('RustPBX') }}{% endblock %}
                                     <path stroke-linecap="round" stroke-linejoin="round" d="M6 6l8 8M6 14l8-8"
                                         x-show="!form.is_active"></path>
                                 </svg>
-                                <span x-text="form.is_active ? t.sip_trunk_detail?.status_enabled : t.sip_trunk_detail?.status_disabled"></span>
+                                <span
+                                    x-text="form.is_active ? t.sip_trunk_detail?.status_enabled : t.sip_trunk_detail?.status_disabled"></span>
                             </button>
                         </div>
                     </div>
@@ -209,7 +216,7 @@ default('RustPBX') }}{% endblock %}
                         {{ "sip_trunk_detail.field_description" | t }}
                         <textarea rows="3" x-model.trim="form.description"
                             class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                            placeholder="{{ "sip_trunk_detail.field_description_placeholder" | t }}"></textarea>
+                            placeholder="{{ " sip_trunk_detail.field_description_placeholder" | t }}"></textarea>
                     </label>
                 </section>
 
@@ -220,19 +227,19 @@ default('RustPBX') }}{% endblock %}
                             {{ "sip_trunk_detail.field_max_cps" | t }}
                             <input type="number" min="0" step="1" x-model="form.max_cps"
                                 class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                placeholder="{{ "sip_trunk_detail.field_max_cps_placeholder" | t }}">
+                                placeholder="{{ " sip_trunk_detail.field_max_cps_placeholder" | t }}">
                         </label>
                         <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
                             {{ "sip_trunk_detail.field_max_concurrent" | t }}
                             <input type="number" min="0" step="1" x-model="form.max_concurrent"
                                 class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                placeholder="{{ "sip_trunk_detail.field_max_concurrent_placeholder" | t }}">
+                                placeholder="{{ " sip_trunk_detail.field_max_concurrent_placeholder" | t }}">
                         </label>
                         <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
                             {{ "sip_trunk_detail.field_max_duration" | t }}
                             <input type="number" min="0" step="1" x-model="form.max_call_duration"
                                 class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                placeholder="{{ "sip_trunk_detail.field_max_duration_placeholder" | t }}">
+                                placeholder="{{ " sip_trunk_detail.field_max_duration_placeholder" | t }}">
                         </label>
                     </div>
                 </section>
@@ -247,20 +254,21 @@ default('RustPBX') }}{% endblock %}
                             {{ "sip_trunk_detail.field_auth_username" | t }}
                             <input type="text" x-model.trim="form.auth_username" maxlength="160"
                                 class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                placeholder="{{ "sip_trunk_detail.field_auth_username_placeholder" | t }}">
+                                placeholder="{{ " sip_trunk_detail.field_auth_username_placeholder" | t }}">
                         </label>
                         <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
                             {{ "sip_trunk_detail.field_auth_password" | t }}
                             <input type="text" x-model.trim="form.auth_password" maxlength="160"
                                 class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                placeholder="{{ "sip_trunk_detail.field_auth_password_placeholder" | t }}">
+                                placeholder="{{ " sip_trunk_detail.field_auth_password_placeholder" | t }}">
                         </label>
                     </div>
                 </section>
 
                 <section class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
                     <div class="flex flex-col gap-1">
-                        <h2 class="text-sm font-semibold text-slate-900">{{ "sip_trunk_detail.section_inbound_filters" | t }}</h2>
+                        <h2 class="text-sm font-semibold text-slate-900">{{ "sip_trunk_detail.section_inbound_filters" |
+                            t }}</h2>
                         <p class="text-sm text-slate-500">{{ "sip_trunk_detail.section_inbound_filters_desc" | t }}</p>
                     </div>
                     <div class="mt-4 grid gap-4 md:grid-cols-2">
@@ -268,15 +276,17 @@ default('RustPBX') }}{% endblock %}
                             {{ "sip_trunk_detail.field_from_prefix" | t }}
                             <input type="text" x-model.trim="form.incoming_from_user_prefix"
                                 class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                placeholder="{{ "sip_trunk_detail.field_from_prefix_placeholder" | t }}">
-                            <span class="text-xs font-normal text-slate-500">{{ "sip_trunk_detail.field_from_prefix_hint" | t }}</span>
+                                placeholder="{{ " sip_trunk_detail.field_from_prefix_placeholder" | t }}">
+                            <span class="text-xs font-normal text-slate-500">{{
+                                "sip_trunk_detail.field_from_prefix_hint" | t }}</span>
                         </label>
                         <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
                             {{ "sip_trunk_detail.field_to_prefix" | t }}
                             <input type="text" x-model.trim="form.incoming_to_user_prefix"
                                 class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                placeholder="{{ "sip_trunk_detail.field_to_prefix_placeholder" | t }}">
-                            <span class="text-xs font-normal text-slate-500">{{ "sip_trunk_detail.field_to_prefix_hint" | t }}</span>
+                                placeholder="{{ " sip_trunk_detail.field_to_prefix_placeholder" | t }}">
+                            <span class="text-xs font-normal text-slate-500">{{ "sip_trunk_detail.field_to_prefix_hint"
+                                | t }}</span>
                         </label>
                     </div>
                 </section>
@@ -288,13 +298,13 @@ default('RustPBX') }}{% endblock %}
                             {{ "sip_trunk_detail.field_allowed_ips" | t }}
                             <textarea rows="6" x-model="form.allowed_ips"
                                 class="font-mono rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                placeholder="{{ "sip_trunk_detail.field_allowed_ips_placeholder" | t }}"></textarea>
+                                placeholder="{{ " sip_trunk_detail.field_allowed_ips_placeholder" | t }}"></textarea>
                         </label>
                         <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
                             {{ "sip_trunk_detail.field_did_numbers" | t }}
                             <textarea rows="6" x-model="form.did_numbers"
                                 class="font-mono rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                placeholder="{{ "sip_trunk_detail.field_did_numbers_placeholder" | t }}"></textarea>
+                                placeholder="{{ " sip_trunk_detail.field_did_numbers_placeholder" | t }}"></textarea>
                         </label>
                     </div>
                 </section>
@@ -309,7 +319,8 @@ default('RustPBX') }}{% endblock %}
                     </p>
                     <div class="mt-4 grid gap-4 md:grid-cols-2">
                         <div class="flex flex-col gap-2">
-                            <span class="text-sm font-medium text-slate-700">{{ "sip_trunk_detail.field_reg_enabled" | t }}</span>
+                            <span class="text-sm font-medium text-slate-700">{{ "sip_trunk_detail.field_reg_enabled" | t
+                                }}</span>
                             <button type="button" @click="form.register_enabled = !form.register_enabled"
                                 class="inline-flex items-center gap-2 rounded-lg px-3 py-1 text-xs font-semibold ring-2 transition"
                                 :class="form.register_enabled ? 'bg-emerald-50 text-emerald-600 ring-emerald-200' : 'bg-slate-100 text-slate-500 ring-slate-200'">
@@ -320,7 +331,8 @@ default('RustPBX') }}{% endblock %}
                                     <path stroke-linecap="round" stroke-linejoin="round" d="M6 6l8 8M6 14l8-8"
                                         x-show="!form.register_enabled"></path>
                                 </svg>
-                                <span x-text="form.register_enabled ? t.sip_trunk_detail?.status_enabled : t.sip_trunk_detail?.status_disabled"></span>
+                                <span
+                                    x-text="form.register_enabled ? t.sip_trunk_detail?.status_enabled : t.sip_trunk_detail?.status_disabled"></span>
                             </button>
                         </div>
                         <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
@@ -329,7 +341,8 @@ default('RustPBX') }}{% endblock %}
                                 :disabled="!form.register_enabled"
                                 class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200 disabled:bg-slate-50 disabled:text-slate-400"
                                 placeholder="300">
-                            <span class="text-xs font-normal text-slate-400">{{ "sip_trunk_detail.field_reg_expires_hint" | t }}</span>
+                            <span class="text-xs font-normal text-slate-400">{{
+                                "sip_trunk_detail.field_reg_expires_hint" | t }}</span>
                         </label>
                     </div>
                     <label class="mt-4 flex flex-col gap-2 text-sm font-medium text-slate-700">
@@ -337,23 +350,27 @@ default('RustPBX') }}{% endblock %}
                         <textarea rows="4" x-model="form.register_extra_headers" :disabled="!form.register_enabled"
                             class="font-mono rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200 disabled:bg-slate-50 disabled:text-slate-400"
                             placeholder='{"X-Tenant-Id": "abc123"}'></textarea>
-                        <span class="text-xs font-normal text-slate-400">{{ "sip_trunk_detail.field_reg_extra_headers_hint" | t }}</span>
+                        <span class="text-xs font-normal text-slate-400">{{
+                            "sip_trunk_detail.field_reg_extra_headers_hint" | t }}</span>
                     </label>
                 </section>
 
                 <template x-if="form.register_enabled && mode === 'edit' && regStatus">
                     <section class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
-                        <h2 class="text-sm font-semibold text-slate-900">{{ "sip_trunk_detail.section_reg_status" | t }}</h2>
+                        <h2 class="text-sm font-semibold text-slate-900">{{ "sip_trunk_detail.section_reg_status" | t }}
+                        </h2>
                         <dl class="mt-4 grid gap-4 md:grid-cols-2 text-sm">
                             <div class="flex items-center justify-between gap-6">
-                                <dt class="font-medium text-slate-500">{{ "sip_trunk_detail.reg_status_label" | t }}</dt>
+                                <dt class="font-medium text-slate-500">{{ "sip_trunk_detail.reg_status_label" | t }}
+                                </dt>
                                 <dd>
                                     <span
                                         class="inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-xs font-semibold"
                                         :class="regStatus.registered ? 'bg-emerald-50 text-emerald-600' : 'bg-rose-50 text-rose-600'">
                                         <span class="h-1.5 w-1.5 rounded-full"
                                             :class="regStatus.registered ? 'bg-emerald-400' : 'bg-rose-400'"></span>
-                                        <span x-text="regStatus.registered ? t.sip_trunk_detail?.reg_registered : t.sip_trunk_detail?.reg_not_registered"></span>
+                                        <span
+                                            x-text="regStatus.registered ? t.sip_trunk_detail?.reg_registered : t.sip_trunk_detail?.reg_not_registered"></span>
                                     </span>
                                 </dd>
                             </div>
@@ -367,7 +384,8 @@ default('RustPBX') }}{% endblock %}
                                 </dd>
                             </div>
                             <div class="flex items-center justify-between gap-6">
-                                <dt class="font-medium text-slate-500">{{ "sip_trunk_detail.reg_last_register" | t }}</dt>
+                                <dt class="font-medium text-slate-500">{{ "sip_trunk_detail.reg_last_register" | t }}
+                                </dt>
                                 <dd class="text-slate-700"
                                     x-text="regStatus.last_register_at ? new Date(regStatus.last_register_at).toLocaleString() : '—'">
                                 </dd>
@@ -398,7 +416,8 @@ default('RustPBX') }}{% endblock %}
                             <path stroke-linecap="round" stroke-linejoin="round"
                                 d="M4 10a6 6 0 0 1 6-6m0-3v3m6 6a6 6 0 0 1-6 6m0 3v-3m9-6h-3M1 10h3m10.95 4.95-2.12-2.12M4.05 5.05l2.12 2.12m0 5.66-2.12 2.12m9.9-9.9 2.12-2.12" />
                         </svg>
-                        <span x-text="mode === 'edit' ? t.sip_trunk_detail?.btn_save : t.sip_trunk_detail?.btn_create"></span>
+                        <span
+                            x-text="mode === 'edit' ? t.sip_trunk_detail?.btn_save : t.sip_trunk_detail?.btn_create"></span>
                     </button>
                 </div>
             </div>

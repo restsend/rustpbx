@@ -775,6 +775,8 @@ pub struct ProxyConfig {
     pub session_expires: Option<u64>,
     #[serde(default)]
     pub queues: HashMap<String, RouteQueueConfig>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub queues_files: Vec<String>,
     #[serde(default)]
     pub enable_latching: bool,
     #[serde(default)]
@@ -991,6 +993,7 @@ impl Default for ProxyConfig {
             session_timer: false,
             session_expires: None,
             queues: HashMap::new(),
+            queues_files: Vec::new(),
             trunks: HashMap::new(),
             trunks_files: Vec::new(),
             queue_dir: None,

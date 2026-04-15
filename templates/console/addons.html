@@ -5,9 +5,11 @@
     <div class="mx-auto max-w-7xl space-y-6">
         <div class="flex flex-col gap-3 lg:flex-row lg:items-end lg:justify-between">
             <div class="space-y-0.5">
-                <p class="text-[11px] font-semibold uppercase tracking-wide text-sky-600">{{ "notifications.system" | t }}</p>
+                <p class="text-[11px] font-semibold uppercase tracking-wide text-sky-600">{{ "notifications.system" | t
+                    }}</p>
                 {% if commerce_enabled %}
-                <h1 class="text-2xl font-semibold text-slate-900">{{ "addons.title" | t }} &amp; {{ "licenses.title" | t }}</h1>
+                <h1 class="text-2xl font-semibold text-slate-900">{{ "addons.title" | t }} &amp; {{ "licenses.title" | t
+                    }}</h1>
                 <p class="text-sm text-slate-500 sm:max-w-xl">{{ "addons.manage_addons_licenses" | t }}</p>
                 {% else %}
                 <h1 class="text-2xl font-semibold text-slate-900">{{ "addons.title" | t }}</h1>
@@ -39,7 +41,8 @@
                 <p class="text-sm font-medium text-amber-800">{{ "addons.unlicensed_title" | t }}</p>
                 <p class="text-xs text-amber-700 mt-0.5">
                     {{ "addons.unlicensed_desc" | t }}
-                    <a href="https://miuda.ai/try" target="_blank" class="underline font-medium">{{ "addons.get_license_at" | t }}</a>
+                    <a href="https://miuda.ai/try" target="_blank" class="underline font-medium">{{
+                        "addons.get_license_at" | t }}</a>
                 </p>
             </div>
         </div>
@@ -88,13 +91,15 @@
                             <tr class="hover:bg-slate-50">
                                 <td class="whitespace-nowrap px-4 py-2">
                                     <div class="font-medium text-slate-900">
-                                        <a href="{{ base_path | default('/console') }}/addons/{{ addon.id }}" class="hover:text-sky-600">{{
+                                        <a href="{{ base_path | safe }}/addons/{{ addon.id }}"
+                                            class="hover:text-sky-600">{{
                                             addon.name }}</a>
                                     </div>
                                     <div class="text-xs text-slate-400">{{ addon.id }}</div>
                                     {% if addon.restart_required %}
                                     <span
-                                        class="inline-flex items-center rounded-md bg-yellow-50 px-2 py-1 text-xs font-medium text-yellow-800 ring-1 ring-inset ring-yellow-600/20 mt-1">{{ "addons.restart_required" | t }}</span>
+                                        class="inline-flex items-center rounded-md bg-yellow-50 px-2 py-1 text-xs font-medium text-yellow-800 ring-1 ring-inset ring-yellow-600/20 mt-1">{{
+                                        "addons.restart_required" | t }}</span>
                                     {% endif %}
                                 </td>
                                 <td class="px-4 py-2">
@@ -163,7 +168,7 @@
                                     {% endif %}
                                     {% if commerce_enabled and addon.category == "Commercial" %}
                                     {% if addon.license_status == "Valid" %}
-                                    <a href="{{ base_path | default('/console') }}/addons/{{ addon.id }}"
+                                    <a href="{{ base_path | safe }}/addons/{{ addon.id }}"
                                         class="ml-2 text-green-600 hover:text-green-800 text-xs font-medium">Licensed
                                         ✓</a>
                                     {% elif addon.license_status == "Expired" %}
@@ -454,7 +459,7 @@
 
             async performToggle(id, newState) {
                 try {
-                    const response = await fetch('{{ api_prefix | default('/api') }}/addons/toggle', {
+                    const response = await fetch('{{ api_prefix | safe }}/addons/toggle', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ id: id, enabled: newState }),
@@ -493,7 +498,7 @@
                 }
                 this.loading = true;
                 try {
-                    const response = await fetch('{{ api_prefix | default('/api') }}/licenses/verify', {
+                    const response = await fetch('{{ api_prefix | safe }}/licenses/verify', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ license_key: key })

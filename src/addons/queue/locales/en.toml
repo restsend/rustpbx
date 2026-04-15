@@ -67,6 +67,8 @@ queue_exported = "Queue exported."
 
 # Error messages
 load_error = "Unable to load queues"
+file_queues_title = "File-based queues (read-only)"
+file_queues_notice = "These queues are loaded from .toml configuration files and cannot be edited through the GUI."
 delete_error = "Failed to delete queue"
 export_error = "Failed to export queue"
 export_all_error = "Failed to export queues"

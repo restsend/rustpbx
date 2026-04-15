@@ -11,6 +11,7 @@ use crate::models::{
     },
     sip_trunk::{Column as SipTrunkColumn, Entity as SipTrunkEntity, Model as SipTrunkModel},
 };
+use crate::proxy::routing::ConfigOrigin;
 use axum::{
     Router,
     extract::{Json, Path as AxumPath, State},
@@ -812,6 +813,18 @@ pub async fn page_routing(
 
     let current_user = state.build_current_user_ctx(&user).await;
 
+    let has_file_routes = state
+        .app_state()
+        .map(|app| {
+            app.sip_server()
+                .inner
+                .data_context
+                .routes_snapshot()
+                .iter()
+                .any(|r| matches!(r.origin, ConfigOrigin::File(_)))
+        })
+        .unwrap_or(false);
+
     state.render_with_headers(
         "console/routing.html",
         json!({
@@ -824,6 +837,7 @@ pub async fn page_routing(
             },
             "create_url": state.url_for("/routing/new"),
             "current_user": current_user,
+            "has_file_routes": has_file_routes,
         }),
         &headers,
     )
@@ -935,12 +949,55 @@ pub(crate) async fn query_routing(
         })
         .collect();
 
+    // Issue #179: collect file-sourced routes from in-memory snapshot
+    let file_routes: Vec<Value> = if let Some(app_state) = state.app_state() {
+        let snapshot = app_state
+            .sip_server()
+            .inner
+            .data_context
+            .routes_snapshot();
+        let mut file_items: Vec<Value> = snapshot
+            .into_iter()
+            .filter_map(|route| {
+                if let ConfigOrigin::File(ref path) = route.origin {
+                    let action_payload = serde_json::to_value(&route.action).unwrap_or_else(|_| json!({}));
+                    Some(json!({
+                        "id": null,
+                        "name": route.name,
+                        "description": route.description,
+                        "priority": route.priority,
+                        "direction": route.direction,
+                        "disabled": route.disabled.unwrap_or(false),
+                        "source": "file",
+                        "source_file": path,
+                        "readonly": true,
+                        "match": route.match_conditions,
+                        "rewrite": route.rewrite,
+                        "action": action_payload,
+                        "source_trunk": route.source_trunks.first().cloned().unwrap_or_default(),
+                    }))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        file_items.sort_by(|a, b| {
+            let a_name = a["name"].as_str().unwrap_or("");
+            let b_name = b["name"].as_str().unwrap_or("");
+            a_name.cmp(b_name)
+        });
+        file_items
+    } else {
+        vec![]
+    };
+
     Json(json!({
         "page": pagination.current_page,
         "per_page": pagination.per_page,
         "total_pages": pagination.total_pages,
         "total_items": pagination.total_items,
         "items": items,
+        "file_routes": file_routes,
         "summary": build_routes_summary(&summary_routes),
         "filters": {
             "trunks": build_trunk_options(&trunks),

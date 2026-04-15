@@ -132,14 +132,7 @@ async fn update_settings(
     let backend_type = payload.backend_type.as_str();
     match backend_type {
         "none" => {
-            table["type"] = value("none");
-            table.remove("root");
-            table.remove("subdirs");
-            table.remove("flush_count");
-            table.remove("flush_interval_secs");
-            table.remove("udp_addr");
-            table.remove("http_addr");
-            table.remove("timeout_secs");
+            doc.remove("sipflow");
         }
         "local" => {
             table["type"] = value("local");

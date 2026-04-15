@@ -23,8 +23,10 @@
                 <div class="flex items-center gap-2">
                     <template x-if="currentDomain">
                         <span class="text-xs text-slate-500">
-                            <span x-text="t.current_cert"></span>: <span class="font-mono" x-text="currentDomain"></span>
-                            <span x-show="certExpiry"> — <span x-text="t.cert_expiry"></span>: <span x-text="certExpiry"></span></span>
+                            <span x-text="t.current_cert"></span>: <span class="font-mono"
+                                x-text="currentDomain"></span>
+                            <span x-show="certExpiry"> — <span x-text="t.cert_expiry"></span>: <span
+                                    x-text="certExpiry"></span></span>
                         </span>
                     </template>
                 </div>
@@ -37,25 +39,30 @@
                         <input type="checkbox" id="auto_renew_enabled" x-model="autoRenewEnabled"
                             class="mt-1 h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-500">
                         <div>
-                            <label for="auto_renew_enabled" class="text-sm font-semibold text-slate-700" x-text="t.auto_renew_enabled"></label>
+                            <label for="auto_renew_enabled" class="text-sm font-semibold text-slate-700"
+                                x-text="t.auto_renew_enabled"></label>
                             <p class="text-xs text-slate-500" x-text="t.auto_renew_enabled_desc"></p>
                         </div>
                     </div>
 
                     <div class="flex items-start gap-3">
-                        <input type="checkbox" id="auto_renew_https" x-model="autoRenewHttps" :disabled="!autoRenewEnabled"
+                        <input type="checkbox" id="auto_renew_https" x-model="autoRenewHttps"
+                            :disabled="!autoRenewEnabled"
                             class="mt-1 h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-500 disabled:opacity-50">
                         <div>
-                            <label for="auto_renew_https" class="text-sm font-semibold text-slate-700" :class="autoRenewEnabled ? '' : 'opacity-50'" x-text="t.auto_renew_https"></label>
+                            <label for="auto_renew_https" class="text-sm font-semibold text-slate-700"
+                                :class="autoRenewEnabled ? '' : 'opacity-50'" x-text="t.auto_renew_https"></label>
                             <p class="text-xs text-slate-500" x-text="t.auto_renew_https_desc"></p>
                         </div>
                     </div>
 
                     <div class="flex items-start gap-3">
-                        <input type="checkbox" id="auto_renew_sips" x-model="autoRenewSips" :disabled="!autoRenewEnabled"
+                        <input type="checkbox" id="auto_renew_sips" x-model="autoRenewSips"
+                            :disabled="!autoRenewEnabled"
                             class="mt-1 h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-500 disabled:opacity-50">
                         <div>
-                            <label for="auto_renew_sips" class="text-sm font-semibold text-slate-700" :class="autoRenewEnabled ? '' : 'opacity-50'" x-text="t.auto_renew_sips"></label>
+                            <label for="auto_renew_sips" class="text-sm font-semibold text-slate-700"
+                                :class="autoRenewEnabled ? '' : 'opacity-50'" x-text="t.auto_renew_sips"></label>
                             <p class="text-xs text-slate-500" x-text="t.auto_renew_sips_desc"></p>
                         </div>
                     </div>
@@ -64,14 +71,17 @@
                 <!-- Threshold and domain -->
                 <div class="space-y-4">
                     <div>
-                        <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400" x-text="t.auto_renew_threshold"></label>
-                        <input type="number" x-model="autoRenewThreshold" :disabled="!autoRenewEnabled" min="1" max="720"
+                        <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400"
+                            x-text="t.auto_renew_threshold"></label>
+                        <input type="number" x-model="autoRenewThreshold" :disabled="!autoRenewEnabled" min="1"
+                            max="720"
                             class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200 disabled:opacity-50">
                         <p class="mt-1 text-xs text-slate-400" x-text="t.auto_renew_threshold_desc"></p>
                     </div>
 
                     <div>
-                        <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400" x-text="t.auto_renew_domain"></label>
+                        <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400"
+                            x-text="t.auto_renew_domain"></label>
                         <input type="text" x-model="autoRenewDomain" :disabled="!autoRenewEnabled"
                             class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200 disabled:opacity-50"
                             :placeholder="t.auto_renew_domain_desc">
@@ -86,7 +96,8 @@
                     <span x-show="saving" x-text="t.btn_requesting"></span>
                     <span x-show="saved && !saving" class="text-green-300" x-text="t.btn_saved"></span>
                     <span x-show="saveError && !saving" class="text-red-300" x-text="t.btn_save_error"></span>
-                    <svg x-show="saved && !saving" class="h-4 w-4 text-green-300" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <svg x-show="saved && !saving" class="h-4 w-4 text-green-300" fill="none" stroke="currentColor"
+                        viewBox="0 0 24 24">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"></path>
                     </svg>
                 </button>
@@ -107,13 +118,15 @@
 
                 <div class="mt-4 space-y-4">
                     <div>
-                        <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400" x-text="t.field_domain"></label>
+                        <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400"
+                            x-text="t.field_domain"></label>
                         <input type="text" x-model="domain"
                             class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                             :placeholder="t.field_domain_placeholder">
                     </div>
                     <div>
-                        <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400" x-text="t.field_email"></label>
+                        <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400"
+                            x-text="t.field_email"></label>
                         <input type="email" x-model="email"
                             class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                             :placeholder="t.field_email_placeholder">
@@ -187,7 +200,8 @@
                         </tr>
                         {% else %}
                         <tr>
-                            <td colspan="3" class="px-4 py-3 text-xs text-slate-400 text-center">{{ "acme.no_certs" | t }}</td>
+                            <td colspan="3" class="px-4 py-3 text-xs text-slate-400 text-center">{{ "acme.no_certs" | t
+                                }}</td>
                         </tr>
                         {% endfor %}
                     </tbody>
@@ -229,7 +243,7 @@
 
             async loadAutoRenewConfig() {
                 try {
-                    const response = await fetch('{{ api_prefix | default('/api') }}/acme/auto-renew');
+                    const response = await fetch('{{ api_prefix | safe }}/acme/auto-renew');
                     if (response.ok) {
                         const data = await response.json();
                         this.autoRenewEnabled = data.config.auto_renew;
@@ -251,7 +265,7 @@
                 this.saveError = false;
 
                 try {
-                    const response = await fetch('{{ api_prefix | default('/api') }}/acme/auto-renew', {
+                    const response = await fetch('{{ api_prefix | safe }}/acme/auto-renew', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({
@@ -284,7 +298,7 @@
                 this.statusMessage = this.t.status_starting || 'Starting request...';
 
                 try {
-                    const response = await fetch('{{ api_prefix | default('/api') }}/acme/request', {
+                    const response = await fetch('{{ api_prefix | safe }}/acme/request', {
                         method: 'POST',
                         headers: {
                             'Content-Type': 'application/json',
@@ -316,7 +330,7 @@
 
                 const check = async () => {
                     try {
-                        const res = await fetch('{{ api_prefix | default('/api') }}/acme/status');
+                        const res = await fetch('{{ api_prefix | safe }}/acme/status');
                         const status = await res.json();
 
                         // Handle Rust enum serialization: {"Running": "msg"} or "None"

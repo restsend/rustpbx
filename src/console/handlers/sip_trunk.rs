@@ -14,6 +14,7 @@ use crate::{
         ActiveModel as SipTrunkActiveModel, Column as SipTrunkColumn, Entity as SipTrunkEntity,
         SipTransport, SipTrunkDirection, SipTrunkStatus,
     },
+    proxy::routing::ConfigOrigin,
 };
 use axum::{
     Json, Router,
@@ -71,6 +72,17 @@ async fn page_sip_trunks(
 ) -> Response {
     let (filters, _) = build_filters_payload(state.db()).await;
     let current_user = state.build_current_user_ctx(&user).await;
+    let has_file_trunks = state
+        .app_state()
+        .map(|app| {
+            app.sip_server()
+                .inner
+                .data_context
+                .trunks_snapshot()
+                .values()
+                .any(|t| matches!(t.origin, ConfigOrigin::File(_)))
+        })
+        .unwrap_or(false);
     state.render_with_headers(
         "console/sip_trunk.html",
         json!({
@@ -78,6 +90,7 @@ async fn page_sip_trunks(
             "filters": filters,
             "create_url": state.url_for("/sip-trunk/new"),
             "current_user": current_user,
+            "has_file_trunks": has_file_trunks,
         }),
         &headers,
     )
@@ -467,6 +480,44 @@ async fn query_sip_trunks(
         .map(|model| serde_json::to_value(&model).unwrap_or_else(|_| json!({})))
         .collect();
 
+    // Issue #179: collect file-sourced trunks from in-memory snapshot
+    let file_trunks: Vec<Value> = if let Some(app_state) = state.app_state() {
+        let snapshot = app_state
+            .sip_server()
+            .inner
+            .data_context
+            .trunks_snapshot();
+        let mut file_items: Vec<Value> = snapshot
+            .into_iter()
+            .filter_map(|(name, trunk)| {
+                if let ConfigOrigin::File(ref path) = trunk.origin {
+                    Some(json!({
+                        "id": null,
+                        "name": name,
+                        "display_name": name,
+                        "dest": trunk.dest,
+                        "source": "file",
+                        "source_file": path,
+                        "readonly": true,
+                        "is_active": trunk.disabled.map(|d| !d).unwrap_or(true),
+                        "direction": trunk.direction,
+                        "disabled": trunk.disabled.unwrap_or(false),
+                    }))
+                } else {
+                    None
+                }
+            })
+            .collect();
+        file_items.sort_by(|a, b| {
+            let a_name = a["name"].as_str().unwrap_or("");
+            let b_name = b["name"].as_str().unwrap_or("");
+            a_name.cmp(b_name)
+        });
+        file_items
+    } else {
+        vec![]
+    };
+
     Json(json!({
         "page": current_page,
         "per_page": per_page,
@@ -475,6 +526,7 @@ async fn query_sip_trunks(
         "has_prev": has_prev,
         "has_next": has_next,
         "items": enriched_items,
+        "file_trunks": file_trunks,
         "filters": filters_payload,
     }))
     .into_response()

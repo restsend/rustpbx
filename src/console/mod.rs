@@ -117,7 +117,6 @@ impl ConsoleState {
                     .or_insert_with(|| serde_json::Value::String(self.base_path().to_string()));
                 map.entry("api_prefix")
                     .or_insert_with(|| serde_json::Value::String(self.api_prefix().to_string()));
-
                 // Inject addon sidebar items
                 if let Some(app_state) = self.app_state() {
                     let addon_items = app_state
@@ -659,12 +658,12 @@ mod tests {
             .await
             .expect("connect sqlite memory");
         Migrator::up(&db, None).await.expect("run migrations");
-        
+
         // Test with custom paths
         let mut config = ConsoleConfig::default();
         config.base_path = "/admin".to_string();
         config.api_prefix = "/v1/api".to_string();
-        
+
         let state = ConsoleState::initialize(
             Arc::new(crate::callrecord::DefaultCallRecordFormatter::default()),
             db,
@@ -678,11 +677,14 @@ mod tests {
         assert_eq!(state.url_for("/login"), "/admin/login");
         assert_eq!(state.url_for("/extensions"), "/admin/extensions");
         assert_eq!(state.url_for(""), "/admin/");
-        
+
         // Test api_prefix
         assert_eq!(state.api_prefix(), "/v1/api");
         assert_eq!(state.api_url_for("/notifications"), "/v1/api/notifications");
-        assert_eq!(state.api_url_for("/pending-reloads"), "/v1/api/pending-reloads");
+        assert_eq!(
+            state.api_url_for("/pending-reloads"),
+            "/v1/api/pending-reloads"
+        );
         assert_eq!(state.api_url_for(""), "/v1/api");
     }
 }

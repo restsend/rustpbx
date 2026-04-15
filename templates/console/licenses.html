@@ -133,7 +133,8 @@
                 <!-- Header row: key name + status badge -->
                 <div class="flex items-start justify-between gap-2">
                     <div class="min-w-0">
-                        <p class="text-xs font-medium text-slate-500 uppercase tracking-wide">{{ "licenses.key" | t }}</p>
+                        <p class="text-xs font-medium text-slate-500 uppercase tracking-wide">{{ "licenses.key" | t }}
+                        </p>
                         <p class="mt-0.5 text-sm font-semibold text-slate-900 truncate font-mono">{{ lic.key_name }}</p>
                     </div>
                     {% if lic.status == "Valid" %}
@@ -260,7 +261,7 @@
                 }
                 this.loading = true;
                 try {
-                    const response = await fetch('{{ api_prefix | default('/api') }}/licenses/verify', {
+                    const response = await fetch('{{ api_prefix | safe }}/licenses/verify', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ license_key: key })
