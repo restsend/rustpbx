@@ -16,6 +16,7 @@ use crate::proxy::server::SipServerInner;
 use crate::proxy::user::MemoryUserBackend;
 use crate::proxy::{ProxyAction, ProxyModule};
 use rsipstack::sip::Header;
+use rsipstack::sip::Method;
 use rsipstack::sip::prelude::{HasHeaders, HeadersExt};
 use rsipstack::sip::services::DigestGenerator;
 use rsipstack::EndpointBuilder;
