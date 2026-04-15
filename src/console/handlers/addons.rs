@@ -17,7 +17,6 @@ use toml_edit::{Array, DocumentMut, Item, Table, Value};
 pub fn urls() -> Router<Arc<ConsoleState>> {
     let router = Router::new()
         .route("/addons", get(index))
-        .route("/addons/toggle", post(toggle_addon))
         .route("/addons/{id}", get(detail));
 
     // License verification endpoint is commerce-only.
@@ -25,6 +24,10 @@ pub fn urls() -> Router<Arc<ConsoleState>> {
     let router = router.route("/addons/verify", post(verify_addon));
 
     router
+}
+
+pub fn api_urls() -> Router<Arc<ConsoleState>> {
+    Router::new().route("/addons/toggle", post(toggle_addon))
 }
 
 pub async fn index(

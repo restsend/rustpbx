@@ -67,7 +67,8 @@ pub fn router(state: Arc<ConsoleState>) -> Router {
         .route("/pending-reloads", get(pending_reloads_handler))
         .merge(presence::api_urls())
         .merge(notifications::api_urls())
-        .merge(metrics::api_urls());
+        .merge(metrics::api_urls())
+        .merge(addons::api_urls());
 
     Router::new()
         .route(&format!("{base_path}/"), get(self::dashboard::dashboard))
