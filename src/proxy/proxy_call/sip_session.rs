@@ -1463,7 +1463,7 @@ impl SipSession {
                     use rustrtc::sdp::{SdpType, SessionDescription};
 
                     // 1. Set callee's WebRTC answer on bridge's WebRTC side
-                    debug!(session_id = %self.context.session_id, "Bridge: Setting WebRTC side remote from callee answer");
+                    debug!(session_id = %self.context.session_id, sdp= %sdp, "Bridge: Setting WebRTC side remote from callee answer");
                     if let Ok(desc) = SessionDescription::parse(SdpType::Answer, sdp) {
                         if let Err(e) = bridge.webrtc_pc().set_remote_description(desc).await {
                             warn!(session_id = %self.context.session_id, error = %e, "Failed to set bridge WebRTC remote description");
