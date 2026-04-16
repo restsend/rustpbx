@@ -27,7 +27,7 @@
                         <div class="flex items-center gap-1">
                             <button type="button"
                                 class="inline-flex h-5 w-5 items-center justify-center rounded border border-slate-200 text-slate-400 transition hover:border-slate-300 hover:text-slate-600"
-                                title="{{ " call_record.copy_call_id" | t }}" aria-label="{{ " call_record.copy_call_id"
+                                title="{{ "call_record.copy_call_id" | t }}" aria-label="{{ "call_record.copy_call_id"
                                 | t }}" @click="copyCallId(record.call_id)">
                                 <svg class="h-3 w-3" viewBox="0 0 20 20" fill="none" stroke="currentColor"
                                     stroke-width="1.6">
@@ -37,7 +37,7 @@
                             </button>
                             <span class="text-[10px] font-semibold text-emerald-600"
                                 x-show="copiedCallId === record.call_id" x-transition.opacity
-                                x-text="t.call_record_detail?.copied || '{{ " call_record_detail.copied" | t
+                                x-text="t.call_record_detail?.copied || '{{ "call_record_detail.copied" | t
                                 }}'"></span>
                         </div>
                     </template>
@@ -241,9 +241,9 @@
                                             <path stroke-linecap="round" stroke-linejoin="round" d="M8 5v14l10-7z"
                                                 x-show="!waveformPlaying" x-cloak></path>
                                         </svg>
-                                        <span x-text="waveformPlaying ? '{{ " call_record_detail.btn_pause" | t }}'
+                                        <span x-text="waveformPlaying ? '{{ "call_record_detail.btn_pause" | t }}'
                                             : '{{ "call_record_detail.btn_play" | t }}'">
-                                            {{ " call_record_detail.btn_play" | t }} </span>
+                                            {{ "call_record_detail.btn_play" | t }} </span>
                                     </button>
                                     <button type="button"
                                         class="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-2 text-sm font-semibold text-slate-700 transition hover:border-slate-300 hover:text-slate-900 focus:outline-none focus:ring-2 focus:ring-sky-200 disabled:cursor-not-allowed disabled:opacity-60"
@@ -612,7 +612,7 @@
                             <div class="flex items-center gap-2">
                                 <input type="text" x-model.trim="tagInput"
                                     class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                    placeholder="{{ " call_record_detail.tag_placeholder" | t }}"
+                                    placeholder="{{ "call_record_detail.tag_placeholder" | t }}"
                                     @keyup.enter.prevent="addTag">
                                 <button type="button"
                                     class="inline-flex items-center rounded-lg bg-sky-600 px-3 py-2 text-sm font-semibold text-white transition hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60"
@@ -661,13 +661,13 @@
                                     <path stroke-linecap="round" stroke-linejoin="round" d="M4 4h12v12H4z" />
                                     <path stroke-linecap="round" stroke-linejoin="round" d="M6 10h8M6 14h5M6 6h8" />
                                 </svg>
-                                <span x-text="noteSaving ? '{{ " call_record_detail.btn_saving_note" | t }}'
+                                <span x-text="noteSaving ? '{{ "call_record_detail.btn_saving_note" | t }}'
                                     : '{{ "call_record_detail.btn_save_note" | t }}'"></span>
                             </button>
                         </div>
                         <textarea x-model=" noteDraft" rows="6"
                                     class="mt-3 w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                    placeholder="{{ " call_record_detail.note_placeholder" | t }}"></textarea>
+                                    placeholder="{{ "call_record_detail.note_placeholder" | t }}"></textarea>
                                     <p class="mt-2 text-xs text-rose-500" x-show="noteError" x-text="noteError"></p>
                                     <p class="mt-1 text-xs text-slate-400" x-show="noteSaving">{{
                                         "call_record_detail.saving_note" | t }}</p>

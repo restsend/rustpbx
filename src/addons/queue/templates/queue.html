@@ -99,7 +99,7 @@
                         </button>
                     </template>
                 </div>
-                <label class="relative w-full lg:w-80" aria-label="{{ " queue.search_placeholder" | t }}">
+                <label class="relative w-full lg:w-80" aria-label="{{ "queue.search_placeholder" | t }}">
                     <svg class="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-slate-400"
                         viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6">
                         <path stroke-linecap="round" stroke-linejoin="round"
@@ -107,7 +107,7 @@
                     </svg>
                     <input type="search" x-model.trim="keyword" @input.debounce.400ms="applyFilters()"
                         class="w-full rounded-lg border border-slate-200 px-3 py-2 pl-9 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                        placeholder="{{ " queue.search_placeholder" | t }}">
+                        placeholder="{{ "queue.search_placeholder" | t }}">
                 </label>
             </div>
         </section>

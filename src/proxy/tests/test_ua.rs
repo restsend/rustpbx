@@ -44,6 +44,7 @@ pub struct TestUa {
     config: TestUaConfig,
     cancel_token: CancellationToken,
     dialog_layer: Option<Arc<DialogLayer>>,
+    state_sender: Option<DialogStateSender>,
     state_receiver: Option<Arc<tokio::sync::Mutex<DialogStateReceiver>>>,
     contact_uri: Option<rsipstack::sip::Uri>,
     /// Store answer SDP per dialog for re-INVITE responses
@@ -67,6 +68,8 @@ pub enum TestUaEvent {
     CallTerminated(DialogId),
     CallFailed(String),
     CallUpdated(DialogId, rsipstack::sip::Method, Option<String>),
+    /// Refer received with target URI
+    Referred(DialogId, String),
 }
 
 impl TestUa {
@@ -75,6 +78,7 @@ impl TestUa {
             config,
             cancel_token: CancellationToken::new(),
             dialog_layer: None,
+            state_sender: None,
             state_receiver: None,
             contact_uri: None,
             answer_sdps: Arc::new(Mutex::new(HashMap::new())),
@@ -103,6 +107,7 @@ impl TestUa {
         let dialog_layer = Arc::new(DialogLayer::new(endpoint.inner.clone()));
         let (state_sender, state_receiver) = dialog_layer.new_dialog_state_channel();
         self.dialog_layer = Some(dialog_layer);
+        self.state_sender = Some(state_sender.clone());
         self.state_receiver = Some(Arc::new(tokio::sync::Mutex::new(state_receiver)));
 
         // Create Contact URI
@@ -250,10 +255,15 @@ impl TestUa {
             ..Default::default()
         };
 
-        // Create a dummy state sender for the call
-        let (dummy_sender, _) = unbounded_channel();
+        let state_sender = self
+            .state_sender
+            .clone()
+            .unwrap_or_else(|| {
+                let (sender, _) = unbounded_channel();
+                sender
+            });
         let (dialog, resp) = dialog_layer
-            .do_invite(invite_option, dummy_sender)
+            .do_invite(invite_option, state_sender)
             .await
             .map_err(|e| e.into_anyhow())?;
         let resp = resp.ok_or_else(|| anyhow!("No response"))?;
@@ -423,6 +433,32 @@ impl TestUa {
             .await
     }
 
+    /// Send SIP INFO with DTMF signal
+    pub async fn send_dtmf_info(&self, dialog_id: &DialogId, digit: &str) -> Result<()> {
+        let dialog_layer = self
+            .dialog_layer
+            .as_ref()
+            .ok_or_else(|| anyhow!("TestUa not started"))?;
+
+        let body = format!("Signal={}\n", digit).into_bytes();
+        let headers = vec![
+            rsipstack::sip::Header::ContentType("application/dtmf-relay".into()),
+        ];
+
+        if let Some(dialog) = dialog_layer.get_dialog(dialog_id) {
+            match dialog {
+                Dialog::ClientInvite(d) => {
+                    d.info(Some(headers), Some(body)).await.map_err(|e| e.into_anyhow())?;
+                }
+                Dialog::ServerInvite(d) => {
+                    d.info(Some(headers), Some(body)).await.map_err(|e| e.into_anyhow())?;
+                }
+                _ => return Err(anyhow!("Dialog does not support INFO request")),
+            }
+        }
+        Ok(())
+    }
+
     async fn send_mid_dialog_request(
         &self,
         dialog_id: &DialogId,
@@ -561,6 +597,33 @@ impl TestUa {
                                 .ok();
                         } else {
                             tx_handle.reply(rsipstack::sip::StatusCode::OK).await.ok();
+                        }
+                    }
+                    DialogState::Refer(id, request, tx_handle) => {
+                        debug!("TestUa: Received Refer state for {}", id);
+                        let mut target = None;
+                        for header in request.headers.iter() {
+                            if let rsipstack::sip::Header::ReferTo(refer_to) = header {
+                                target = Some(refer_to.value().to_string());
+                                break;
+                            }
+                        }
+                        if let Some(target) = target {
+                            // Accept the REFER (202 Accepted)
+                            tx_handle
+                                .respond(rsipstack::sip::StatusCode::Accepted, None, None)
+                                .await
+                                .ok();
+                            events.push(TestUaEvent::Referred(id.clone(), target));
+                        } else {
+                            tx_handle
+                                .respond(
+                                    rsipstack::sip::StatusCode::BadRequest,
+                                    None,
+                                    None,
+                                )
+                                .await
+                                .ok();
                         }
                     }
                     _ => {}

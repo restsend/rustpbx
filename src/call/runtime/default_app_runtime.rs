@@ -5,7 +5,6 @@
 
 use async_trait::async_trait;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::{mpsc, RwLock};
 use tokio_util::sync::CancellationToken;
 
@@ -14,75 +13,6 @@ use crate::call::domain::MediaCapability;
 use crate::proxy::proxy_call::state::{SipSessionHandle, SessionAction};
 
 use super::{AppDescriptor, AppResult, AppRuntime, AppRuntimeError, AppStatus};
-
-/// Stub AppRuntime for cases where no app framework is needed
-/// This is useful for SipSession when you just need basic call control
-/// without the full CallApp/CallController framework.
-pub struct StubAppRuntime {
-    running: AtomicBool,
-}
-
-impl StubAppRuntime {
-    pub fn new() -> Self {
-        Self {
-            running: AtomicBool::new(false),
-        }
-    }
-}
-
-impl Default for StubAppRuntime {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-#[async_trait::async_trait]
-impl AppRuntime for StubAppRuntime {
-    async fn start_app(
-        &self,
-        _app_name: &str,
-        _params: Option<serde_json::Value>,
-        _auto_answer: bool,
-    ) -> AppResult<()> {
-        if self.running.swap(true, Ordering::SeqCst) {
-            return Err(AppRuntimeError::AlreadyRunning(_app_name.to_string()));
-        }
-        Ok(())
-    }
-
-    async fn stop_app(&self, _reason: Option<String>) -> AppResult<()> {
-        self.running.store(false, Ordering::SeqCst);
-        Ok(())
-    }
-
-    fn inject_event(&self, _event: serde_json::Value) -> AppResult<()> {
-        Ok(())
-    }
-
-    fn is_running(&self) -> bool {
-        self.running.load(Ordering::SeqCst)
-    }
-
-    fn status(&self) -> AppStatus {
-        if self.running.load(Ordering::SeqCst) {
-            AppStatus::Running
-        } else {
-            AppStatus::Idle
-        }
-    }
-
-    fn current_app(&self) -> Option<String> {
-        None
-    }
-
-    fn required_capabilities(&self) -> Vec<MediaCapability> {
-        vec![]
-    }
-
-    fn app_descriptor(&self, _app_name: &str) -> Option<AppDescriptor> {
-        None
-    }
-}
 
 /// State for a running application
 #[derive(Clone)]
@@ -163,13 +93,15 @@ impl AppRuntime for DefaultAppRuntime {
             }
         }
 
-        // Create event channel
-        let (_event_tx, event_rx) = mpsc::unbounded_channel();
-        let (_fired_timer_tx, fired_timer_rx) = mpsc::unbounded_channel();
+        // Create event channel for app events (DTMF, hangup, etc.)
+        let (event_tx, event_rx) = mpsc::unbounded_channel::<ControllerEvent>();
 
-        // Create controller
-        let (controller, _timer_rx) = CallController::new(self.handle.clone(), event_rx);
-        let _ = _timer_rx; // We use fired_timer_rx instead
+        // Create controller — it owns the timer sender, we get the receiver back.
+        let (controller, timer_rx) = CallController::new(self.handle.clone(), event_rx);
+
+        // Register the event sender with the session so SipSession can forward
+        // DTMF / hangup / audio-complete events to the running app.
+        self.handle.set_app_event_sender(Some(event_tx.clone()));
 
         // Create cancel token
         let cancel_token = CancellationToken::new();
@@ -183,7 +115,10 @@ impl AppRuntime for DefaultAppRuntime {
 
         let app = match app {
             Some(app) => app,
-            None => return Err(AppRuntimeError::UnknownApp(app_name.to_string())),
+            None => {
+                self.handle.set_app_event_sender(None);
+                return Err(AppRuntimeError::UnknownApp(app_name.to_string()));
+            }
         };
 
         // Store running state
@@ -210,6 +145,7 @@ impl AppRuntime for DefaultAppRuntime {
         let session_id_for_log = self.session_id.clone();
         let app_name_owned = app_name.to_string();
         let context = self.context.clone();
+        let handle = self.handle.clone();
 
         tokio::spawn(async move {
             let event_loop = crate::call::app::AppEventLoop::new(
@@ -217,15 +153,15 @@ impl AppRuntime for DefaultAppRuntime {
                 controller,
                 (*context).clone(),
                 cancel_token,
-                fired_timer_rx,
+                timer_rx,
             );
 
             if let Err(e) = event_loop.run().await {
                 tracing::error!("App {} failed for session {}: {}", app_name_owned, session_id_for_log, e);
             }
 
-            // Clean up event sender when app exits
-            // Note: This cleanup should ideally be done through the handle
+            // Clear the app event sender so the session knows the app has exited.
+            handle.set_app_event_sender(None);
             tracing::info!("App {} exited for session {}", app_name_owned, session_id_for_log);
         });
 

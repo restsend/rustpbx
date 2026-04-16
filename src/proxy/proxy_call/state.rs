@@ -589,6 +589,15 @@ impl SipSessionHandle {
         self.shared.queue_name()
     }
 
+    /// Register (or clear) the sender used to deliver [`ControllerEvent`]s to the
+    /// running `CallApp`.
+    pub fn set_app_event_sender(
+        &self,
+        sender: Option<mpsc::UnboundedSender<crate::call::app::ControllerEvent>>,
+    ) {
+        self.shared.set_app_event_sender(sender);
+    }
+
     /// Send a [`ControllerEvent`] directly to the running `CallApp` event loop.
     ///
     /// Returns `true` if the event was delivered (i.e. an app is currently running

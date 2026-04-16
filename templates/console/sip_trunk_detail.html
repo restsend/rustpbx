@@ -139,7 +139,7 @@ default('RustPBX') }}{% endblock %}
                             {{ "sip_trunk_detail.field_trunk_name" | t }}
                             <input type="text" x-model.trim="form.name" maxlength="120" required
                                 class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                placeholder="{{ " sip_trunk_detail.field_trunk_name_placeholder" | t }}">
+                                placeholder="{{ "sip_trunk_detail.field_trunk_name_placeholder" | t }}">
                             <span class="text-xs font-normal text-slate-400">{{ "sip_trunk_detail.field_trunk_name_hint"
                                 | t }}</span>
                         </label>
@@ -147,13 +147,13 @@ default('RustPBX') }}{% endblock %}
                             {{ "sip_trunk_detail.field_display_name" | t }}
                             <input type="text" x-model.trim="form.display_name" maxlength="160"
                                 class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                placeholder="{{ " sip_trunk_detail.field_display_name_placeholder" | t }}">
+                                placeholder="{{ "sip_trunk_detail.field_display_name_placeholder" | t }}">
                         </label>
                         <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
                             {{ "sip_trunk_detail.field_carrier" | t }}
                             <input type="text" x-model.trim="form.carrier" maxlength="160"
                                 class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                placeholder="{{ " sip_trunk_detail.field_carrier_placeholder" | t }}">
+                                placeholder="{{ "sip_trunk_detail.field_carrier_placeholder" | t }}">
                         </label>
                         <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
                             {{ "sip_trunk_detail.field_status" | t }}
@@ -186,13 +186,13 @@ default('RustPBX') }}{% endblock %}
                             {{ "sip_trunk_detail.field_sip_server" | t }}
                             <input type="text" x-model.trim="form.sip_server" maxlength="160"
                                 class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                placeholder="{{ " sip_trunk_detail.field_sip_server_placeholder" | t }}">
+                                placeholder="{{ "sip_trunk_detail.field_sip_server_placeholder" | t }}">
                         </label>
                         <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
                             {{ "sip_trunk_detail.field_outbound_proxy" | t }}
                             <input type="text" x-model.trim="form.outbound_proxy" maxlength="160"
                                 class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                placeholder="{{ " sip_trunk_detail.field_outbound_proxy_placeholder" | t }}">
+                                placeholder="{{ "sip_trunk_detail.field_outbound_proxy_placeholder" | t }}">
                         </label>
                         <div class="flex flex-col gap-2">
                             <span class="text-sm font-medium text-slate-700">{{ "sip_trunk_detail.field_active" | t
@@ -216,7 +216,7 @@ default('RustPBX') }}{% endblock %}
                         {{ "sip_trunk_detail.field_description" | t }}
                         <textarea rows="3" x-model.trim="form.description"
                             class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                            placeholder="{{ " sip_trunk_detail.field_description_placeholder" | t }}"></textarea>
+                            placeholder="{{ "sip_trunk_detail.field_description_placeholder" | t }}"></textarea>
                     </label>
                 </section>
 
@@ -227,19 +227,19 @@ default('RustPBX') }}{% endblock %}
                             {{ "sip_trunk_detail.field_max_cps" | t }}
                             <input type="number" min="0" step="1" x-model="form.max_cps"
                                 class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                placeholder="{{ " sip_trunk_detail.field_max_cps_placeholder" | t }}">
+                                placeholder="{{ "sip_trunk_detail.field_max_cps_placeholder" | t }}">
                         </label>
                         <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
                             {{ "sip_trunk_detail.field_max_concurrent" | t }}
                             <input type="number" min="0" step="1" x-model="form.max_concurrent"
                                 class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                placeholder="{{ " sip_trunk_detail.field_max_concurrent_placeholder" | t }}">
+                                placeholder="{{ "sip_trunk_detail.field_max_concurrent_placeholder" | t }}">
                         </label>
                         <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
                             {{ "sip_trunk_detail.field_max_duration" | t }}
                             <input type="number" min="0" step="1" x-model="form.max_call_duration"
                                 class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                placeholder="{{ " sip_trunk_detail.field_max_duration_placeholder" | t }}">
+                                placeholder="{{ "sip_trunk_detail.field_max_duration_placeholder" | t }}">
                         </label>
                     </div>
                 </section>
@@ -254,13 +254,13 @@ default('RustPBX') }}{% endblock %}
                             {{ "sip_trunk_detail.field_auth_username" | t }}
                             <input type="text" x-model.trim="form.auth_username" maxlength="160"
                                 class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                placeholder="{{ " sip_trunk_detail.field_auth_username_placeholder" | t }}">
+                                placeholder="{{ "sip_trunk_detail.field_auth_username_placeholder" | t }}">
                         </label>
                         <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
                             {{ "sip_trunk_detail.field_auth_password" | t }}
                             <input type="text" x-model.trim="form.auth_password" maxlength="160"
                                 class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                placeholder="{{ " sip_trunk_detail.field_auth_password_placeholder" | t }}">
+                                placeholder="{{ "sip_trunk_detail.field_auth_password_placeholder" | t }}">
                         </label>
                     </div>
                 </section>
@@ -276,7 +276,7 @@ default('RustPBX') }}{% endblock %}
                             {{ "sip_trunk_detail.field_from_prefix" | t }}
                             <input type="text" x-model.trim="form.incoming_from_user_prefix"
                                 class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                placeholder="{{ " sip_trunk_detail.field_from_prefix_placeholder" | t }}">
+                                placeholder="{{ "sip_trunk_detail.field_from_prefix_placeholder" | t }}">
                             <span class="text-xs font-normal text-slate-500">{{
                                 "sip_trunk_detail.field_from_prefix_hint" | t }}</span>
                         </label>
@@ -284,7 +284,7 @@ default('RustPBX') }}{% endblock %}
                             {{ "sip_trunk_detail.field_to_prefix" | t }}
                             <input type="text" x-model.trim="form.incoming_to_user_prefix"
                                 class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                placeholder="{{ " sip_trunk_detail.field_to_prefix_placeholder" | t }}">
+                                placeholder="{{ "sip_trunk_detail.field_to_prefix_placeholder" | t }}">
                             <span class="text-xs font-normal text-slate-500">{{ "sip_trunk_detail.field_to_prefix_hint"
                                 | t }}</span>
                         </label>
@@ -298,13 +298,13 @@ default('RustPBX') }}{% endblock %}
                             {{ "sip_trunk_detail.field_allowed_ips" | t }}
                             <textarea rows="6" x-model="form.allowed_ips"
                                 class="font-mono rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                placeholder="{{ " sip_trunk_detail.field_allowed_ips_placeholder" | t }}"></textarea>
+                                placeholder="{{ "sip_trunk_detail.field_allowed_ips_placeholder" | t }}"></textarea>
                         </label>
                         <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
                             {{ "sip_trunk_detail.field_did_numbers" | t }}
                             <textarea rows="6" x-model="form.did_numbers"
                                 class="font-mono rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                placeholder="{{ " sip_trunk_detail.field_did_numbers_placeholder" | t }}"></textarea>
+                                placeholder="{{ "sip_trunk_detail.field_did_numbers_placeholder" | t }}"></textarea>
                         </label>
                     </div>
                 </section>
