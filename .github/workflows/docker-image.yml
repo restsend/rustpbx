@@ -29,15 +29,19 @@ jobs:
         with:
           tool: cross
 
-      - name: Build Binaries
+      - name: Build AMD64 Binaries
         run: |
-          cross build --release --target x86_64-unknown-linux-gnu --features cross
-          cross build --release --target aarch64-unknown-linux-gnu --features cross
+          cross build --release --target x86_64-unknown-linux-gnu --features cross --bin rustpbx --bin sipflow
 
-          # Organize binaries for Docker Packaging
-          mkdir -p bin/amd64 bin/arm64
+          mkdir -p bin/amd64
           cp target/x86_64-unknown-linux-gnu/release/rustpbx bin/amd64/
           cp target/x86_64-unknown-linux-gnu/release/sipflow bin/amd64/
+
+      - name: Build ARM64 Binaries
+        run: |
+          cross build --release --target aarch64-unknown-linux-gnu --features cross --bin rustpbx --bin sipflow
+
+          mkdir -p bin/arm64
           cp target/aarch64-unknown-linux-gnu/release/rustpbx bin/arm64/
           cp target/aarch64-unknown-linux-gnu/release/sipflow bin/arm64/
 
