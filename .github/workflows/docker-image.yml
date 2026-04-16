@@ -24,20 +24,32 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Install Native Build Dependencies
+        run: |
+          sudo apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
+          sudo apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y \
+            pkg-config \
+            libopus-dev \
+            libssl-dev
+
       - name: Install Cross
         uses: taiki-e/install-action@v2
         with:
           tool: cross
 
-      - name: Build Binaries
+      - name: Build AMD64 Binaries
         run: |
-          cross build --release --target x86_64-unknown-linux-gnu --features cross
-          cross build --release --target aarch64-unknown-linux-gnu --features cross
+          cargo build --release --features cross --bin rustpbx --bin sipflow
 
-          # Organize binaries for Docker Packaging
-          mkdir -p bin/amd64 bin/arm64
-          cp target/x86_64-unknown-linux-gnu/release/rustpbx bin/amd64/
-          cp target/x86_64-unknown-linux-gnu/release/sipflow bin/amd64/
+          mkdir -p bin/amd64
+          cp target/release/rustpbx bin/amd64/
+          cp target/release/sipflow bin/amd64/
+
+      - name: Build ARM64 Binaries
+        run: |
+          cross build --release --target aarch64-unknown-linux-gnu --features cross --bin rustpbx --bin sipflow
+
+          mkdir -p bin/arm64
           cp target/aarch64-unknown-linux-gnu/release/rustpbx bin/arm64/
           cp target/aarch64-unknown-linux-gnu/release/sipflow bin/arm64/
 
