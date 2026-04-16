@@ -22,13 +22,14 @@ mod tests {
             description: Some("Test IVR".to_string()),
             lang: Some("en".to_string()),
             business_hours: None,
+            tts: None,
             root: MenuNode {
                 greeting: "sounds/welcome.wav".to_string(),
                 timeout_ms: 200, // short for tests
                 max_retries: 2,
                 invalid_prompt: Some("sounds/invalid.wav".to_string()),
                 timeout_action: Some(EntryAction::Repeat),
-                max_retries_action: Some(EntryAction::Hangup { prompt: None }),
+                max_retries_action: Some(EntryAction::Hangup { prompt: None, prompt_text: None, prompt_voice: None }),
                 entries: vec![
                     MenuEntry {
                         key: "1".to_string(),
@@ -49,6 +50,8 @@ mod tests {
                         label: Some("Address".to_string()),
                         action: EntryAction::Play {
                             prompt: "sounds/address.wav".to_string(),
+                            prompt_text: None,
+                            prompt_voice: None,
                         },
                     },
                     MenuEntry {
@@ -61,6 +64,8 @@ mod tests {
                         label: Some("Hangup".to_string()),
                         action: EntryAction::Hangup {
                             prompt: Some("sounds/goodbye.wav".to_string()),
+                            prompt_text: None,
+                            prompt_voice: None,
                         },
                     },
                 ],
@@ -561,19 +566,22 @@ action = { type = "transfer", target = "100" }
             description: None,
             lang: None,
             business_hours: None,
+            tts: None,
             root: MenuNode {
                 greeting: "sounds/collect_menu.wav".to_string(),
                 timeout_ms: 200,
                 max_retries: 1,
                 invalid_prompt: None,
-                timeout_action: Some(EntryAction::Hangup { prompt: None }),
-                max_retries_action: Some(EntryAction::Hangup { prompt: None }),
+                timeout_action: Some(EntryAction::Hangup { prompt: None, prompt_text: None, prompt_voice: None }),
+                max_retries_action: Some(EntryAction::Hangup { prompt: None, prompt_text: None, prompt_voice: None }),
                 entries: vec![
                     MenuEntry {
                         key: "1".to_string(),
                         label: Some("Dial Extension".to_string()),
                         action: EntryAction::CollectExtension {
                             prompt: "sounds/enter_extension.wav".to_string(),
+                            prompt_text: None,
+                            prompt_voice: None,
                             min_digits: 2,
                             max_digits: 4,
                             inter_digit_timeout_ms: 60,
@@ -784,13 +792,14 @@ action = { type = "transfer", target = "100" }
             description: None,
             lang: None,
             business_hours: None,
+            tts: None,
             root: MenuNode {
                 greeting: "sounds/welcome.wav".to_string(),
                 timeout_ms: 200,
                 max_retries: 1,
                 invalid_prompt: None,
-                timeout_action: Some(EntryAction::Hangup { prompt: None }),
-                max_retries_action: Some(EntryAction::Hangup { prompt: None }),
+                timeout_action: Some(EntryAction::Hangup { prompt: None, prompt_text: None, prompt_voice: None }),
+                max_retries_action: Some(EntryAction::Hangup { prompt: None, prompt_text: None, prompt_voice: None }),
                 entries: vec![MenuEntry {
                     key: "1".to_string(),
                     label: Some("Webhook".to_string()),
@@ -999,8 +1008,8 @@ action = { type = "transfer", target = "100" }
                 timeout_ms: 200,
                 max_retries: 1,
                 invalid_prompt: None,
-                timeout_action: Some(EntryAction::Hangup { prompt: None }),
-                max_retries_action: Some(EntryAction::Hangup { prompt: None }),
+                timeout_action: Some(EntryAction::Hangup { prompt: None, prompt_text: None, prompt_voice: None }),
+                max_retries_action: Some(EntryAction::Hangup { prompt: None, prompt_text: None, prompt_voice: None }),
                 entries: vec![MenuEntry {
                     key: "1".to_string(),
                     label: Some("Billing".to_string()),
@@ -1350,19 +1359,22 @@ action = { type = "transfer", target = "100" }
             description: None,
             lang: None,
             business_hours: None,
+            tts: None,
             root: MenuNode {
                 greeting: "sounds/welcome.wav".to_string(),
                 timeout_ms: 200,
                 max_retries: 1,
                 invalid_prompt: None,
-                timeout_action: Some(EntryAction::Hangup { prompt: None }),
-                max_retries_action: Some(EntryAction::Hangup { prompt: None }),
+                timeout_action: Some(EntryAction::Hangup { prompt: None, prompt_text: None, prompt_voice: None }),
+                max_retries_action: Some(EntryAction::Hangup { prompt: None, prompt_text: None, prompt_voice: None }),
                 entries: vec![
                     MenuEntry {
                         key: "4".to_string(),
                         label: Some("Busy".to_string()),
                         action: EntryAction::PlayAndHangup {
                             prompt: Some("sounds/busy.wav".to_string()),
+                            prompt_text: None,
+                            prompt_voice: None,
                             code: Some(486),
                         },
                     },
@@ -1371,6 +1383,8 @@ action = { type = "transfer", target = "100" }
                         label: Some("Service Unavailable".to_string()),
                         action: EntryAction::PlayAndHangup {
                             prompt: None,
+                            prompt_text: None,
+                            prompt_voice: None,
                             code: Some(503),
                         },
                     },
@@ -1555,13 +1569,14 @@ action = { type = "transfer", target = "100" }
             description: None,
             lang: None,
             business_hours: None,
+            tts: None,
             root: MenuNode {
                 greeting: greeting_path.clone(),
                 timeout_ms: 2000,
                 max_retries: 1,
                 invalid_prompt: None,
-                timeout_action: Some(EntryAction::Hangup { prompt: None }),
-                max_retries_action: Some(EntryAction::Hangup { prompt: None }),
+                timeout_action: Some(EntryAction::Hangup { prompt: None, prompt_text: None, prompt_voice: None }),
+                max_retries_action: Some(EntryAction::Hangup { prompt: None, prompt_text: None, prompt_voice: None }),
                 entries: vec![MenuEntry {
                     key: "1".to_string(),
                     label: Some("Transfer".to_string()),
@@ -1618,13 +1633,14 @@ action = { type = "transfer", target = "100" }
             description: None,
             lang: None,
             business_hours: None,
+            tts: None,
             root: MenuNode {
                 greeting: root_wav.clone(),
                 timeout_ms: 2000,
                 max_retries: 1,
                 invalid_prompt: None,
-                timeout_action: Some(EntryAction::Hangup { prompt: None }),
-                max_retries_action: Some(EntryAction::Hangup { prompt: None }),
+                timeout_action: Some(EntryAction::Hangup { prompt: None, prompt_text: None, prompt_voice: None }),
+                max_retries_action: Some(EntryAction::Hangup { prompt: None, prompt_text: None, prompt_voice: None }),
                 entries: vec![MenuEntry {
                     key: "2".to_string(),
                     label: Some("Support".to_string()),
@@ -1643,8 +1659,8 @@ action = { type = "transfer", target = "100" }
                         timeout_ms: 2000,
                         max_retries: 1,
                         invalid_prompt: None,
-                        timeout_action: Some(EntryAction::Hangup { prompt: None }),
-                        max_retries_action: Some(EntryAction::Hangup { prompt: None }),
+                        timeout_action: Some(EntryAction::Hangup { prompt: None, prompt_text: None, prompt_voice: None }),
+                        max_retries_action: Some(EntryAction::Hangup { prompt: None, prompt_text: None, prompt_voice: None }),
                         entries: vec![MenuEntry {
                             key: "1".to_string(),
                             label: Some("Billing".to_string()),
@@ -1711,18 +1727,21 @@ action = { type = "transfer", target = "100" }
             description: None,
             lang: None,
             business_hours: None,
+            tts: None,
             root: MenuNode {
                 greeting: greeting_wav.clone(),
                 timeout_ms: 2000,
                 max_retries: 1,
                 invalid_prompt: None,
-                timeout_action: Some(EntryAction::Hangup { prompt: None }),
-                max_retries_action: Some(EntryAction::Hangup { prompt: None }),
+                timeout_action: Some(EntryAction::Hangup { prompt: None, prompt_text: None, prompt_voice: None }),
+                max_retries_action: Some(EntryAction::Hangup { prompt: None, prompt_text: None, prompt_voice: None }),
                 entries: vec![MenuEntry {
                     key: "0".to_string(),
                     label: Some("Hangup".to_string()),
                     action: EntryAction::Hangup {
                         prompt: Some(goodbye_wav.clone()),
+                        prompt_text: None,
+                        prompt_voice: None,
                     },
                 }],
                 ..Default::default()
@@ -1775,13 +1794,14 @@ action = { type = "transfer", target = "100" }
             description: None,
             lang: None,
             business_hours: None,
+            tts: None,
             root: MenuNode {
                 greeting: greeting_wav.clone(),
                 timeout_ms: 2000,
                 max_retries: 2,
                 invalid_prompt: Some(invalid_wav.clone()),
                 timeout_action: Some(EntryAction::Repeat),
-                max_retries_action: Some(EntryAction::Hangup { prompt: None }),
+                max_retries_action: Some(EntryAction::Hangup { prompt: None, prompt_text: None, prompt_voice: None }),
                 entries: vec![MenuEntry {
                     key: "1".to_string(),
                     label: Some("Sales".to_string()),
@@ -1841,19 +1861,22 @@ action = { type = "transfer", target = "100" }
             description: None,
             lang: None,
             business_hours: None,
+            tts: None,
             root: MenuNode {
                 greeting: greeting_wav.clone(),
                 timeout_ms: 2000,
                 max_retries: 1,
                 invalid_prompt: None,
-                timeout_action: Some(EntryAction::Hangup { prompt: None }),
-                max_retries_action: Some(EntryAction::Hangup { prompt: None }),
+                timeout_action: Some(EntryAction::Hangup { prompt: None, prompt_text: None, prompt_voice: None }),
+                max_retries_action: Some(EntryAction::Hangup { prompt: None, prompt_text: None, prompt_voice: None }),
                 entries: vec![
                     MenuEntry {
                         key: "3".to_string(),
                         label: Some("Info".to_string()),
                         action: EntryAction::Play {
                             prompt: announce_wav.clone(),
+                            prompt_text: None,
+                            prompt_voice: None,
                         },
                     },
                     MenuEntry {
@@ -1917,13 +1940,14 @@ action = { type = "transfer", target = "100" }
             description: None,
             lang: None,
             business_hours: None,
+            tts: None,
             root: MenuNode {
                 greeting: greeting_wav.clone(),
                 timeout_ms: 2000,
                 max_retries: 1,
                 invalid_prompt: None,
-                timeout_action: Some(EntryAction::Hangup { prompt: None }),
-                max_retries_action: Some(EntryAction::Hangup { prompt: None }),
+                timeout_action: Some(EntryAction::Hangup { prompt: None, prompt_text: None, prompt_voice: None }),
+                max_retries_action: Some(EntryAction::Hangup { prompt: None, prompt_text: None, prompt_voice: None }),
                 entries: vec![MenuEntry {
                     key: "1".to_string(),
                     label: Some("Sales".to_string()),
@@ -1981,13 +2005,14 @@ action = { type = "transfer", target = "100" }
             description: None,
             lang: None,
             business_hours: None,
+            tts: None,
             root: MenuNode {
                 greeting: greeting_wav.clone(),
                 timeout_ms: 150, // short so test doesn't take long
                 max_retries: 2,
                 invalid_prompt: None,
                 timeout_action: Some(EntryAction::Repeat),
-                max_retries_action: Some(EntryAction::Hangup { prompt: None }),
+                max_retries_action: Some(EntryAction::Hangup { prompt: None, prompt_text: None, prompt_voice: None }),
                 entries: vec![MenuEntry {
                     key: "1".to_string(),
                     label: Some("Sales".to_string()),
@@ -2046,18 +2071,21 @@ action = { type = "transfer", target = "100" }
             description: None,
             lang: None,
             business_hours: None,
+            tts: None,
             root: MenuNode {
                 greeting: greeting_wav.clone(),
                 timeout_ms: 2000,
                 max_retries: 1,
                 invalid_prompt: None,
-                timeout_action: Some(EntryAction::Hangup { prompt: None }),
-                max_retries_action: Some(EntryAction::Hangup { prompt: None }),
+                timeout_action: Some(EntryAction::Hangup { prompt: None, prompt_text: None, prompt_voice: None }),
+                max_retries_action: Some(EntryAction::Hangup { prompt: None, prompt_text: None, prompt_voice: None }),
                 entries: vec![MenuEntry {
                     key: "4".to_string(),
                     label: Some("Busy".to_string()),
                     action: EntryAction::PlayAndHangup {
                         prompt: Some(busy_wav.clone()),
+                        prompt_text: None,
+                        prompt_voice: None,
                         code: Some(486),
                     },
                 }],
@@ -2148,6 +2176,138 @@ action = { type = "transfer", target = "100" }
                         ..
                     }
                 )
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn test_ivr_with_tts_greeting() {
+        use crate::tts::{BodyFormat, HttpTtsConfig, TtsConfig, TtsDriverConfig};
+        use axum::{Router, routing::get};
+        use std::collections::HashMap;
+
+        // Build a minimal WAV to return from mock TTS server
+        let wav = {
+            let mut tmp = tempfile::NamedTempFile::with_suffix(".wav").unwrap();
+            {
+                let spec = hound::WavSpec {
+                    channels: 1,
+                    sample_rate: 8000,
+                    bits_per_sample: 16,
+                    sample_format: hound::SampleFormat::Int,
+                };
+                let mut writer =
+                    hound::WavWriter::new(std::io::BufWriter::new(tmp.as_file_mut()), spec).unwrap();
+                for _ in 0..800 {
+                    writer.write_sample(0i16).unwrap();
+                }
+                writer.finalize().unwrap();
+            }
+            std::fs::read(tmp.path()).unwrap()
+        };
+        let wav_clone = wav.clone();
+
+        let app = Router::new().route(
+            "/tts",
+            get(
+                move |axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>| {
+                    let wav = wav_clone.clone();
+                    async move {
+                        assert_eq!(params.get("text"), Some(&"hello from tts".to_string()));
+                        assert_eq!(params.get("voice"), Some(&"xiaoxiao".to_string()));
+                        ([("content-type", "audio/wav")], wav)
+                    }
+                },
+            ),
+        );
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.ok();
+        });
+
+        let cache_dir = tempfile::tempdir().unwrap();
+        let tts_config = TtsConfig {
+            cache_dir: cache_dir.path().to_string_lossy().to_string(),
+            cache_ttl_seconds: 3600,
+            driver: TtsDriverConfig::Http(HttpTtsConfig {
+                url: format!("http://127.0.0.1:{}/tts", port),
+                method: "GET".to_string(),
+                param_name: "text".to_string(),
+                extra_params: {
+                    let mut m = HashMap::new();
+                    m.insert("voice".to_string(), "xiaoxiao".to_string());
+                    m
+                },
+                headers: HashMap::new(),
+                output_format: "wav".to_string(),
+                timeout_seconds: 5,
+                body_format: BodyFormat::Query,
+            }),
+        };
+
+        let ivr = IvrDefinition {
+            name: "tts-ivr".to_string(),
+            description: None,
+            lang: Some("en".to_string()),
+            business_hours: None,
+            tts: Some(tts_config),
+            root: MenuNode {
+                greeting: "".to_string(),
+                greeting_text: Some("hello from tts".to_string()),
+                greeting_voice: Some("xiaoxiao".to_string()),
+                timeout_ms: 200,
+                max_retries: 1,
+                invalid_prompt: None,
+                timeout_action: Some(EntryAction::Hangup {
+                    prompt: None,
+                    prompt_text: None,
+                    prompt_voice: None,
+                }),
+                max_retries_action: Some(EntryAction::Hangup {
+                    prompt: None,
+                    prompt_text: None,
+                    prompt_voice: None,
+                }),
+                entries: vec![MenuEntry {
+                    key: "1".to_string(),
+                    label: Some("Sales".to_string()),
+                    action: EntryAction::Transfer {
+                        target: "2001".to_string(),
+                    },
+                }],
+                ..Default::default()
+            },
+            menus: HashMap::new(),
+        };
+
+        let mut stack = MockCallStack::run(Box::new(IvrApp::new(ivr)), "caller", "1000");
+
+        stack
+            .assert_cmd(200, "AcceptCall", |c| {
+                matches!(c, SessionAction::AcceptCall { .. })
+            })
+            .await;
+
+        // The greeting should be resolved via TTS and the path should be under the cache dir
+        stack
+            .assert_cmd(500, "PlayPrompt-tts-greeting", |c| {
+                matches!(
+                    c,
+                    SessionAction::PlayPrompt { audio_file, .. }
+                        if audio_file.contains(cache_dir.path().to_str().unwrap()) && audio_file.ends_with(".wav")
+                )
+            })
+            .await;
+
+        stack.audio_complete("default");
+
+        // DTMF "1" → transfer
+        stack.dtmf("1");
+        stack
+            .assert_cmd(200, "Transfer", |c| {
+                matches!(c, SessionAction::TransferTarget(target) if target == "2001")
             })
             .await;
     }

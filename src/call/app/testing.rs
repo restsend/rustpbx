@@ -57,22 +57,6 @@ impl MockCallStack {
     /// * `caller` – Simulated caller-ID (e.g. `"1001"` or `"sip:alice@test"`).
     /// * `callee` – Simulated callee-ID (e.g. `"1002"`).
     pub fn run(app: Box<dyn CallApp>, caller: &str, callee: &str) -> Self {
-        // Real SipSessionHandle — backed only by channels, no SIP socket.
-        let shared = SipSessionShared::new(
-            "test-session".to_string(),
-            DialDirection::Inbound,
-            Some(caller.to_string()),
-            Some(callee.to_string()),
-            None,
-        );
-        let (handle, cmd_rx) = SipSessionHandle::with_shared(shared);
-
-        // Synthetic event channel: test → controller.
-        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel::<ControllerEvent>();
-
-        // Controller + companion timer-fire channel for AppEventLoop.
-        let (controller, timer_rx) = CallController::new(handle, event_rx);
-
         // Minimal ApplicationContext (no DB, temp-dir storage).
         let storage = crate::storage::Storage::new(&crate::storage::StorageConfig::Local {
             path: std::env::temp_dir()
@@ -94,6 +78,26 @@ impl MockCallStack {
             Arc::new(Config::default()),
             storage,
         );
+
+        Self::run_with_context(app, ctx)
+    }
+
+    pub fn run_with_context(app: Box<dyn CallApp>, ctx: ApplicationContext) -> Self {
+        // Real SipSessionHandle — backed only by channels, no SIP socket.
+        let shared = SipSessionShared::new(
+            "test-session".to_string(),
+            DialDirection::Inbound,
+            Some(ctx.call_info.caller.clone()),
+            Some(ctx.call_info.callee.clone()),
+            None,
+        );
+        let (handle, cmd_rx) = SipSessionHandle::with_shared(shared);
+
+        // Synthetic event channel: test → controller.
+        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel::<ControllerEvent>();
+
+        // Controller + companion timer-fire channel for AppEventLoop.
+        let (controller, timer_rx) = CallController::new(handle, event_rx);
 
         let cancel = CancellationToken::new();
         let event_loop = AppEventLoop::new(app, controller, ctx, cancel.child_token(), timer_rx);

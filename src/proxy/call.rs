@@ -524,7 +524,9 @@ impl CallModule {
         let queue_targets = pending_queue
             .as_ref()
             .and_then(|plan| plan.dial_strategy.clone());
-        let targets = if let Some(queue_targets) = queue_targets {
+        let targets = if pending_app.is_some() {
+            DialStrategy::Sequential(vec![])
+        } else if let Some(queue_targets) = queue_targets {
             queue_targets
         } else if let Some(option) = preview_forward.as_ref() {
             let target = Location {

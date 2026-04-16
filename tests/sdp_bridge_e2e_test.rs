@@ -608,3 +608,158 @@ async fn test_e2e_early_media_then_200_ok_address_change() {
 
     bridge.stop().await;
 }
+
+/// Parse the first audio connection address (c= / m= port) from an RTP-mode SDP.
+fn parse_rtp_audio_addr(sdp: &str) -> Option<std::net::SocketAddr> {
+    let mut ip = None;
+    let mut port = None;
+    for line in sdp.lines() {
+        if line.starts_with("c=IN IP4 ") {
+            ip = line.strip_prefix("c=IN IP4 ").and_then(|s| s.parse().ok());
+        } else if line.starts_with("m=audio ") {
+            port = line.split_whitespace().nth(1).and_then(|s| s.parse().ok());
+        }
+        if ip.is_some() && port.is_some() {
+            break;
+        }
+    }
+    ip.zip(port).map(|(i, p)| std::net::SocketAddr::new(i, p))
+}
+
+/// E2E: 183 early media followed by 200 OK with identical callee SDP.
+/// Verifies that RTP packets continue to be received on the bridge's RTP side
+/// after an unnecessary re-negotiation triggered only by o= version change.
+#[tokio::test]
+async fn test_e2e_early_media_then_200_ok_same_sdp_rtp_flow_continues() {
+    use rustpbx::media::bridge::BridgePeerBuilder;
+    use rustrtc::sdp::{SessionDescription, SdpType};
+    use rustrtc::rtp::{RtpHeader, RtpPacket};
+    use rustrtc::media::{MediaStreamTrack, MediaSample};
+
+    let port_base: u16 = 55000;
+
+    // 1. Create bridge (do NOT start_bridge so we can consume recv() ourselves)
+    let bridge = BridgePeerBuilder::new("e2e-183-200-same".to_string())
+        .with_rtp_port_range(port_base, port_base + 100)
+        .build();
+    bridge.setup_bridge().await.unwrap();
+
+    // 2. RTP side creates initial offer for callee
+    let rtp_offer = bridge.rtp_pc().create_offer().await.unwrap();
+    bridge.rtp_pc().set_local_description(rtp_offer).unwrap();
+
+    let bridge_rtp_addr = parse_rtp_audio_addr(
+        &bridge.rtp_pc().local_description().unwrap().to_sdp_string()
+    ).expect("Bridge RTP address should be present");
+
+    // 3. Simulate 183 early media answer from callee
+    let callee_answer_183 = "v=0\r\n\
+        o=- 1 1 IN IP4 10.0.0.1\r\n\
+        s=-\r\n\
+        t=0 0\r\n\
+        c=IN IP4 10.0.0.1\r\n\
+        m=audio 8000 RTP/AVP 0\r\n\
+        a=rtpmap:0 PCMU/8000\r\n\
+        a=sendrecv\r\n";
+
+    let desc_183 = SessionDescription::parse(SdpType::Answer, callee_answer_183).unwrap();
+    bridge.rtp_pc().set_remote_description(desc_183).await.unwrap();
+
+    // 4. Spawn a receiver task that waits for the RTP track and counts samples
+    let rtp_pc = bridge.rtp_pc().clone();
+    let recv_handle = tokio::spawn(async move {
+        let track = loop {
+            let rx = rtp_pc.recv();
+            match tokio::time::timeout(std::time::Duration::from_secs(3), rx).await {
+                Ok(Some(rustrtc::PeerConnectionEvent::Track(transceiver))) => {
+                    if let Some(receiver) = transceiver.receiver() {
+                        break receiver.track();
+                    }
+                }
+                Ok(Some(_)) => {}
+                Ok(None) => panic!("rtp_pc closed before track appeared"),
+                Err(_) => panic!("Timeout waiting for RTP track after first packets"),
+            }
+        };
+
+        let mut count = 0usize;
+        let mut timeouts = 0usize;
+        loop {
+            match tokio::time::timeout(
+                std::time::Duration::from_millis(500),
+                track.recv()
+            ).await {
+                Ok(Ok(MediaSample::Audio(_))) => {
+                    timeouts = 0;
+                    count += 1;
+                }
+                Ok(Ok(_)) => { timeouts = 0; }
+                Ok(Err(_)) => {
+                    timeouts += 1;
+                    if timeouts >= 3 {
+                        break;
+                    }
+                }
+                Err(_) => {
+                    timeouts += 1;
+                    if timeouts >= 3 {
+                        break;
+                    }
+                }
+            }
+        }
+        count
+    });
+
+    // 5. Send a few RTP packets from "callee" to bridge's RTP address
+    let udp = tokio::net::UdpSocket::bind("0.0.0.0:0").await.unwrap();
+    let mut seq = 1000u16;
+    for _ in 0..5 {
+        let header = RtpHeader::new(0, seq, seq as u32 * 160, 12345);
+        let packet = RtpPacket::new(header, vec![0xD5u8; 160]);
+        let bytes = packet.marshal().unwrap();
+        udp.send_to(&bytes, bridge_rtp_addr).await.unwrap();
+        seq += 1;
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+
+    // Give receiver task a moment to latch and count
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+
+    // 6. Simulate 200 OK with IDENTICAL media params (only o= version changes)
+    let callee_answer_200 = "v=0\r\n\
+        o=- 1 2 IN IP4 10.0.0.1\r\n\
+        s=-\r\n\
+        t=0 0\r\n\
+        c=IN IP4 10.0.0.1\r\n\
+        m=audio 8000 RTP/AVP 0\r\n\
+        a=rtpmap:0 PCMU/8000\r\n\
+        a=sendrecv\r\n";
+
+    // Re-negotiate RTP side exactly as sip_session.rs does
+    let rtp_reoffer = bridge.rtp_pc().create_offer().await.unwrap();
+    bridge.rtp_pc().set_local_description(rtp_reoffer).unwrap();
+    let desc_200 = SessionDescription::parse(SdpType::Answer, callee_answer_200).unwrap();
+    bridge.rtp_pc().set_remote_description(desc_200).await.unwrap();
+
+    // 7. Send more RTP packets after re-negotiation
+    for _ in 0..5 {
+        let header = RtpHeader::new(0, seq, seq as u32 * 160, 12345);
+        let packet = RtpPacket::new(header, vec![0xD5u8; 160]);
+        let bytes = packet.marshal().unwrap();
+        udp.send_to(&bytes, bridge_rtp_addr).await.unwrap();
+        seq += 1;
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+
+    // 8. Allow time for packets to propagate, then stop bridge and collect count
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    bridge.stop().await;
+
+    let total_received = recv_handle.await.unwrap();
+    assert!(
+        total_received >= 5,
+        "Expected at least 5 audio samples to be received on RTP side, got {}",
+        total_received
+    );
+}

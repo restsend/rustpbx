@@ -24,6 +24,7 @@ use crate::call::app::ivr_config::{EntryAction, IvrDefinition, WebhookResponse};
 use crate::callrecord::CallRecordHangupReason;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use std::time::Duration;
 use tracing::{debug, error, info, warn};
 
@@ -88,11 +89,17 @@ pub struct IvrApp {
     collected_variables: std::collections::HashMap<String, String>,
     /// First digit collected for unknown_key_action (direct dial scenario).
     pending_unknown_digit: Option<String>,
+    /// Optional TTS service synthesized from the IVR's own TTS config.
+    tts_service: Option<Arc<crate::tts::TtsService>>,
 }
 
 impl IvrApp {
     /// Create a new `IvrApp` from a parsed [`IvrDefinition`].
     pub fn new(definition: IvrDefinition) -> Self {
+        let tts_service = definition
+            .tts
+            .as_ref()
+            .map(|cfg| Arc::new(crate::tts::TtsService::new(cfg.clone())));
         Self {
             definition,
             state: IvrState::Init,
@@ -100,7 +107,14 @@ impl IvrApp {
             pending_retry_count: 0,
             collected_variables: std::collections::HashMap::new(),
             pending_unknown_digit: None,
+            tts_service,
         }
+    }
+
+    /// Create a new `IvrApp` with an explicit TTS config override.
+    pub fn with_tts(mut self, tts: Option<crate::tts::TtsConfig>) -> Self {
+        self.tts_service = tts.map(|cfg| Arc::new(crate::tts::TtsService::new(cfg)));
+        self
     }
 
     /// Load an `IvrApp` from a TOML file path.
@@ -188,23 +202,63 @@ impl IvrApp {
         // If already on this menu (e.g. Repeat), keep the stack as-is.
     }
 
+    /// Resolve an audio source: if `file` is non-empty use it directly;
+    /// otherwise try TTS synthesis from `text`/`voice`.
+    async fn resolve_audio(
+        &self,
+        file: Option<&str>,
+        text: Option<&str>,
+        voice: Option<&str>,
+    ) -> Option<String> {
+        if let Some(path) = file {
+            if !path.is_empty() {
+                return Some(path.to_string());
+            }
+        }
+        if let (Some(t), Some(service)) = (text, self.tts_service.as_ref()) {
+            match service.synthesize(t, voice).await {
+                Ok(path) => return Some(path),
+                Err(e) => {
+                    warn!(ivr = %self.definition.name, text = %t, error = %e, "TTS synthesis failed");
+                }
+            }
+        }
+        None
+    }
+
     /// Start playing the greeting for the specified menu.
     async fn enter_menu(
         &mut self,
         menu_key: &str,
         ctrl: &mut CallController,
+        _ctx: &ApplicationContext,
     ) -> anyhow::Result<AppAction> {
         self.navigate_to_menu(menu_key);
         let menu = self
             .definition
             .get_menu(menu_key)
             .ok_or_else(|| anyhow::anyhow!("IVR menu '{}' not found", menu_key))?;
-        let greeting = menu.greeting.clone();
+        let greeting = self
+            .resolve_audio(
+                Some(&menu.greeting),
+                menu.greeting_text.as_deref(),
+                menu.greeting_voice.as_deref(),
+            )
+            .await;
         self.state = IvrState::PlayingGreeting {
             menu_key: menu_key.to_string(),
         };
-        debug!(ivr = %self.definition.name, menu = menu_key, "Playing greeting: {}", greeting);
-        ctrl.play_audio(&greeting, false).await?;
+        if let Some(path) = greeting {
+            debug!(ivr = %self.definition.name, menu = menu_key, "Playing greeting: {}", path);
+            ctrl.play_audio(&path, false).await?;
+        } else {
+            debug!(
+                ivr = %self.definition.name,
+                menu = menu_key,
+                "No greeting audio, waiting DTMF immediately"
+            );
+            self.start_waiting_dtmf(menu_key, self.pending_retry_count, ctrl);
+        }
         Ok(AppAction::Continue)
     }
 
@@ -248,32 +302,50 @@ impl IvrApp {
             }
             EntryAction::Menu { menu } => {
                 debug!(ivr = %self.definition.name, menu, "IVR navigating to menu");
-                self.enter_menu(menu, ctrl).await
+                self.enter_menu(menu, ctrl, ctx).await
             }
             EntryAction::Voicemail { target } => {
                 info!(ivr = %self.definition.name, target, "IVR transferring to voicemail");
                 self.state = IvrState::Done;
                 Ok(AppAction::Transfer(format!("voicemail:{}", target)))
             }
-            EntryAction::Play { prompt } => {
+            EntryAction::Play {
+                prompt,
+                prompt_text,
+                prompt_voice,
+            } => {
                 let return_menu = self.current_menu_key().to_string();
                 self.state = IvrState::PlayingAnnouncement {
                     return_menu: return_menu.clone(),
                 };
-                debug!(ivr = %self.definition.name, prompt, return_menu, "Playing announcement");
-                ctrl.play_audio(prompt, false).await?;
-                Ok(AppAction::Continue)
+                if let Some(path) = self
+                    .resolve_audio(Some(prompt), prompt_text.as_deref(), prompt_voice.as_deref())
+                    .await
+                {
+                    debug!(ivr = %self.definition.name, prompt = %path, return_menu, "Playing announcement");
+                    ctrl.play_audio(&path, false).await?;
+                    Ok(AppAction::Continue)
+                } else {
+                    return self.enter_menu(&return_menu, ctrl, ctx).await;
+                }
             }
             EntryAction::Repeat => {
                 let current = self.current_menu_key().to_string();
                 debug!(ivr = %self.definition.name, menu = %current, "Repeating menu");
-                self.enter_menu(&current, ctrl).await
+                self.enter_menu(&current, ctrl, ctx).await
             }
-            EntryAction::Hangup { prompt } => {
-                if let Some(prompt) = prompt {
+            EntryAction::Hangup {
+                prompt,
+                prompt_text,
+                prompt_voice,
+            } => {
+                if let Some(path) = self
+                    .resolve_audio(prompt.as_deref(), prompt_text.as_deref(), prompt_voice.as_deref())
+                    .await
+                {
                     self.state = IvrState::PlayingHangup;
-                    debug!(ivr = %self.definition.name, prompt, "Playing hangup prompt");
-                    ctrl.play_audio(prompt, false).await?;
+                    debug!(ivr = %self.definition.name, prompt = %path, "Playing hangup prompt");
+                    ctrl.play_audio(&path, false).await?;
                     Ok(AppAction::Continue)
                 } else {
                     info!(ivr = %self.definition.name, "IVR hanging up");
@@ -284,11 +356,19 @@ impl IvrApp {
                     })
                 }
             }
-            EntryAction::PlayAndHangup { prompt, code } => {
+            EntryAction::PlayAndHangup {
+                prompt,
+                prompt_text,
+                prompt_voice,
+                code,
+            } => {
                 self.state = IvrState::PlayingAndHangup { code: *code };
-                if let Some(prompt) = prompt {
-                    debug!(ivr = %self.definition.name, prompt, code = ?code, "Playing prompt before hangup with code");
-                    ctrl.play_audio(prompt, false).await?;
+                if let Some(path) = self
+                    .resolve_audio(prompt.as_deref(), prompt_text.as_deref(), prompt_voice.as_deref())
+                    .await
+                {
+                    debug!(ivr = %self.definition.name, prompt = %path, code = ?code, "Playing prompt before hangup with code");
+                    ctrl.play_audio(&path, false).await?;
                     Ok(AppAction::Continue)
                 } else {
                     // No prompt — hang up immediately with the given code
@@ -302,14 +382,19 @@ impl IvrApp {
             }
             EntryAction::CollectExtension {
                 prompt,
+                prompt_text,
+                prompt_voice,
                 min_digits,
                 max_digits,
                 inter_digit_timeout_ms,
             } => {
                 self.state = IvrState::CollectingExtension;
+                let resolved_prompt = self
+                    .resolve_audio(Some(prompt), prompt_text.as_deref(), prompt_voice.as_deref())
+                    .await;
                 debug!(
                     ivr = %self.definition.name,
-                    prompt, min_digits, max_digits, inter_digit_timeout_ms,
+                    prompt = ?resolved_prompt, min_digits, max_digits, inter_digit_timeout_ms,
                     "Collecting extension digits"
                 );
 
@@ -329,7 +414,7 @@ impl IvrApp {
                                     *inter_digit_timeout_ms * (*max_digits as u64 + 1),
                                 ),
                                 terminator: Some('#'),
-                                play_prompt: Some(prompt.clone()),
+                                play_prompt: resolved_prompt.clone(),
                                 inter_digit_timeout: Some(Duration::from_millis(
                                     *inter_digit_timeout_ms,
                                 )),
@@ -346,7 +431,7 @@ impl IvrApp {
                             *inter_digit_timeout_ms * (*max_digits as u64 + 1),
                         ),
                         terminator: Some('#'),
-                        play_prompt: Some(prompt.clone()),
+                        play_prompt: resolved_prompt.clone(),
                         inter_digit_timeout: Some(Duration::from_millis(*inter_digit_timeout_ms)),
                     })
                     .await?
@@ -355,7 +440,7 @@ impl IvrApp {
                 if digits.is_empty() {
                     // No digits collected, go back to current menu
                     let current = self.current_menu_key().to_string();
-                    self.enter_menu(&current, ctrl).await
+                    self.enter_menu(&current, ctrl, ctx).await
                 } else {
                     info!(ivr = %self.definition.name, extension = %digits, "Transferring to collected extension");
                     self.state = IvrState::Done;
@@ -365,6 +450,8 @@ impl IvrApp {
             EntryAction::Collect {
                 variable,
                 prompt,
+                prompt_text,
+                prompt_voice,
                 min_digits,
                 max_digits,
                 end_key,
@@ -376,7 +463,9 @@ impl IvrApp {
                     "Collecting digits into variable"
                 );
                 let terminator = end_key.as_ref().and_then(|k| k.chars().next());
-                let prompt_str = prompt.as_deref().unwrap_or("");
+                let resolved_prompt = self
+                    .resolve_audio(prompt.as_deref(), prompt_text.as_deref(), prompt_voice.as_deref())
+                    .await;
 
                 // Check if we have a pending digit from unknown_key_action
                 let initial_digit = self.pending_unknown_digit.take();
@@ -396,11 +485,7 @@ impl IvrApp {
                                     *inter_digit_timeout_ms * (*max_digits as u64 + 1),
                                 ),
                                 terminator,
-                                play_prompt: if prompt_str.is_empty() {
-                                    None
-                                } else {
-                                    Some(prompt_str.to_string())
-                                },
+                                play_prompt: resolved_prompt.clone(),
                                 inter_digit_timeout: Some(Duration::from_millis(
                                     *inter_digit_timeout_ms,
                                 )),
@@ -417,11 +502,7 @@ impl IvrApp {
                             *inter_digit_timeout_ms * (*max_digits as u64 + 1),
                         ),
                         terminator,
-                        play_prompt: if prompt_str.is_empty() {
-                            None
-                        } else {
-                            Some(prompt_str.to_string())
-                        },
+                        play_prompt: resolved_prompt.clone(),
                         inter_digit_timeout: Some(Duration::from_millis(*inter_digit_timeout_ms)),
                     })
                     .await?
@@ -436,7 +517,7 @@ impl IvrApp {
 
                 // Return to current menu after collecting
                 let current = self.current_menu_key().to_string();
-                self.enter_menu(&current, ctrl).await
+                self.enter_menu(&current, ctrl, ctx).await
             }
             EntryAction::Webhook {
                 url,
@@ -484,7 +565,7 @@ impl IvrApp {
                         );
                         // On error, stay in current menu (re-play greeting)
                         let current = self.current_menu_key().to_string();
-                        self.enter_menu(&current, ctrl).await
+                        self.enter_menu(&current, ctrl, ctx).await
                     }
                 }
             }
@@ -586,7 +667,7 @@ impl IvrApp {
         ctx: &ApplicationContext,
     ) -> anyhow::Result<AppAction> {
         // Extract only what we need before any mutable borrow of self.
-        let (max_retries, timeout_action, max_retries_action, greeting) = {
+        let (max_retries, timeout_action, max_retries_action, menu) = {
             let menu = self
                 .definition
                 .get_menu(&menu_key)
@@ -595,7 +676,7 @@ impl IvrApp {
                 menu.max_retries,
                 menu.timeout_action.clone(),
                 menu.max_retries_action.clone(),
-                menu.greeting.clone(),
+                menu.clone(),
             )
         };
 
@@ -638,7 +719,18 @@ impl IvrApp {
                         menu_key: menu_key.clone(),
                     };
                     self.pending_retry_count = new_retry;
-                    ctrl.play_audio(&greeting, false).await?;
+                    if let Some(path) = self
+                        .resolve_audio(
+                            Some(&menu.greeting),
+                            menu.greeting_text.as_deref(),
+                            menu.greeting_voice.as_deref(),
+                        )
+                        .await
+                    {
+                        ctrl.play_audio(&path, false).await?;
+                    } else {
+                        self.start_waiting_dtmf(&menu_key, new_retry, ctrl);
+                    }
                     Ok(AppAction::Continue)
                 }
                 other => self.execute_action(&other, ctrl, ctx).await,
@@ -655,7 +747,18 @@ impl IvrApp {
                 menu_key: menu_key.clone(),
             };
             self.pending_retry_count = new_retry;
-            ctrl.play_audio(&greeting, false).await?;
+            if let Some(path) = self
+                .resolve_audio(
+                    Some(&menu.greeting),
+                    menu.greeting_text.as_deref(),
+                    menu.greeting_voice.as_deref(),
+                )
+                .await
+            {
+                ctrl.play_audio(&path, false).await?;
+            } else {
+                self.start_waiting_dtmf(&menu_key, new_retry, ctrl);
+            }
             Ok(AppAction::Continue)
         }
     }
@@ -672,7 +775,7 @@ impl IvrApp {
         ctrl.cancel_timeout("ivr_dtmf_timeout");
 
         // Extract only what we need before any mutable borrow of self.
-        let (max_retries, max_retries_action, invalid_prompt) = {
+        let (max_retries, max_retries_action, invalid_prompt, invalid_text, invalid_voice) = {
             let menu = self
                 .definition
                 .get_menu(menu_key)
@@ -681,6 +784,8 @@ impl IvrApp {
                 menu.max_retries,
                 menu.max_retries_action.clone(),
                 menu.invalid_prompt.clone(),
+                menu.invalid_text.clone(),
+                menu.invalid_voice.clone(),
             )
         };
 
@@ -705,12 +810,19 @@ impl IvrApp {
             }
         }
 
-        if let Some(ref invalid_prompt) = invalid_prompt {
+        if let Some(path) = self
+            .resolve_audio(
+                invalid_prompt.as_deref(),
+                invalid_text.as_deref(),
+                invalid_voice.as_deref(),
+            )
+            .await
+        {
             self.state = IvrState::PlayingInvalid {
                 menu_key: menu_key.to_string(),
                 retry_count: new_retry,
             };
-            ctrl.play_audio(invalid_prompt, false).await?;
+            ctrl.play_audio(&path, false).await?;
             Ok(AppAction::Continue)
         } else {
             // No invalid prompt — just go back to waiting
@@ -742,9 +854,16 @@ impl CallApp for IvrApp {
         let closed_action = if let Some(bh) = &self.definition.business_hours {
             if bh.enabled && !self.is_within_business_hours(bh) {
                 info!(ivr = %self.definition.name, "Outside business hours");
-                if let Some(greeting) = &bh.closed_greeting {
+                if let Some(path) = self
+                    .resolve_audio(
+                        bh.closed_greeting.as_deref(),
+                        bh.closed_text.as_deref(),
+                        None,
+                    )
+                    .await
+                {
                     self.state = IvrState::PlayingHangup;
-                    ctrl.play_audio(greeting, false).await?;
+                    ctrl.play_audio(&path, false).await?;
                     // After playing, the on_audio_complete will handle closed_action
                     return Ok(AppAction::Continue);
                 }
@@ -768,7 +887,7 @@ impl CallApp for IvrApp {
             });
         }
 
-        self.enter_menu("root", ctrl).await
+        self.enter_menu("root", ctrl, _ctx).await
     }
 
     async fn on_dtmf(
@@ -915,20 +1034,30 @@ impl CallApp for IvrApp {
                 retry_count,
             } => {
                 // Invalid prompt finished → re-play greeting
-                let greeting = self
-                    .definition
-                    .get_menu(&menu_key)
-                    .map(|m| m.greeting.clone());
-                if let Some(greeting) = greeting {
+                let menu = self.definition.get_menu(&menu_key).cloned();
+                if let Some(menu) = menu {
                     self.state = IvrState::PlayingGreeting {
                         menu_key: menu_key.clone(),
                     };
                     self.pending_retry_count = retry_count;
-                    ctrl.play_audio(&greeting, false).await?;
+                    if let Some(path) = self
+                        .resolve_audio(
+                            Some(&menu.greeting),
+                            menu.greeting_text.as_deref(),
+                            menu.greeting_voice.as_deref(),
+                        )
+                        .await
+                    {
+                        ctrl.play_audio(&path, false).await?;
+                    } else {
+                        self.start_waiting_dtmf(&menu_key, retry_count, ctrl);
+                    }
                 }
                 Ok(AppAction::Continue)
             }
-            AudioDone::Announcement { return_menu } => self.enter_menu(&return_menu, ctrl).await,
+            AudioDone::Announcement { return_menu } => {
+                self.enter_menu(&return_menu, ctrl, _ctx).await
+            }
             AudioDone::Hangup => {
                 self.state = IvrState::Done;
                 Ok(AppAction::Hangup {

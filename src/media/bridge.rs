@@ -95,6 +95,49 @@ impl LegStats {
     }
 }
 
+/// Transport kind for one bridge leg endpoint.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LegTransport {
+    WebRtc,
+    Rtp,
+}
+
+impl LegTransport {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::WebRtc => "WebRTC",
+            Self::Rtp => "RTP",
+        }
+    }
+}
+
+/// Typed metadata describing source and destination leg transports.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ForwardPath {
+    from: LegTransport,
+    to: LegTransport,
+}
+
+impl ForwardPath {
+    const fn new(from: LegTransport, to: LegTransport) -> Self {
+        Self { from, to }
+    }
+
+    /// Strip WebRTC-only fields when forwarding into a plain RTP pipeline.
+    const fn should_strip_webrtc_audio_metadata(self) -> bool {
+        matches!(
+            (self.from, self.to),
+            (LegTransport::WebRtc, LegTransport::Rtp)
+        )
+    }
+}
+
+impl std::fmt::Display for ForwardPath {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}→{}", self.from.as_str(), self.to.as_str())
+    }
+}
+
 /// Fragment a reassembled H264 NAL unit into FU-A (RFC 6184 §5.8) VideoFrame entries
 /// sized to fit within `mtu` bytes, reusing the metadata from `template`.
 ///
@@ -461,7 +504,7 @@ impl BridgePeer {
                                         track,
                                         sender,
                                         cancel_token.clone(),
-                                        "WebRTC→RTP",
+                                        ForwardPath::new(LegTransport::WebRtc, LegTransport::Rtp),
                                         None, // no audio fallback in WebRTC→RTP direction
                                         Arc::clone(&w2r_stats),
                                         if !is_video { recorder.clone() } else { None },
@@ -505,7 +548,7 @@ impl BridgePeer {
                                         track,
                                         sender,
                                         cancel_token.clone(),
-                                        "RTP→WebRTC",
+                                        ForwardPath::new(LegTransport::Rtp, LegTransport::WebRtc),
                                         if is_video { Some(webrtc_send.clone()) } else { None },
                                         Arc::clone(&r2w_stats),
                                         if !is_video { recorder.clone() } else { None },
@@ -533,7 +576,7 @@ impl BridgePeer {
         track: Arc<dyn MediaStreamTrack>,
         sender_weak: std::sync::Weak<AsyncMutex<Option<MediaSender>>>,
         cancel_token: CancellationToken,
-        direction: &'static str,
+        path: ForwardPath,
         audio_fallback_weak: Option<std::sync::Weak<AsyncMutex<Option<MediaSender>>>>,
         leg_stats: Arc<LegStats>,
         recorder: Option<Arc<parking_lot::RwLock<Option<Recorder>>>>,
@@ -544,12 +587,12 @@ impl BridgePeer {
             let guard = strong.lock().await;
             guard.clone()
         } else {
-            warn!(bridge_id = %bridge_id, direction = %direction, "Sender channel no longer available");
+            warn!(bridge_id = %bridge_id, direction = %path, "Sender channel no longer available");
             return;
         };
 
         if sender.is_none() {
-            warn!(bridge_id = %bridge_id, direction = %direction, "No sender channel available — video/audio sender was not configured");
+            warn!(bridge_id = %bridge_id, direction = %path, "No sender channel available — video/audio sender was not configured");
             return;
         }
         let sender = sender.unwrap();
@@ -568,7 +611,7 @@ impl BridgePeer {
 
         if track.kind() == MediaKind::Video {
             if let Err(e) = track.request_key_frame().await {
-                debug!(bridge_id = %bridge_id, direction = %direction, error = %e, "Failed to request initial keyframe");
+                debug!(bridge_id = %bridge_id, direction = %path, error = %e, "Failed to request initial keyframe");
             }
         }
 
@@ -591,7 +634,7 @@ impl BridgePeer {
                 _ = stats_interval.tick(), if is_video && packet_count > 0 => {
                     trace!(
                         bridge_id = %bridge_id,
-                        direction = %direction,
+                        direction = %path,
                         packets_per_sec = stats_packets,
                         bytes_per_sec = stats_bytes,
                         payload_type = ?stats_last_pt,
@@ -607,7 +650,7 @@ impl BridgePeer {
                         Ok(sample) => {
                             packet_count += 1;
                             if packet_count == 1 {
-                                debug!(bridge_id = %bridge_id, direction = %direction, kind = ?sample.kind(), "First media sample forwarded");
+                                debug!(bridge_id = %bridge_id, direction = %path, kind = ?sample.kind(), "First media sample forwarded");
                             }
                             // Update per-direction stats
                             let (sample_bytes, sample_seq) = match &sample {
@@ -641,6 +684,14 @@ impl BridgePeer {
                             // 3. Re-fragment large NAL units into FU-A chunks ≤1200 bytes so no
                             //    SRTP/UDP packet exceeds MTU.
                             let samples_to_send: Vec<MediaSample> = match sample {
+                                MediaSample::Audio(mut a) => {
+                                    if path.should_strip_webrtc_audio_metadata() {
+                                        a.header_extension = None;
+                                        a.raw_packet = None;
+                                        a.marker = false;
+                                    }
+                                    vec![MediaSample::Audio(a)]
+                                }
                                 MediaSample::Video(mut v) => {
                                     if is_video {
                                         // Route misrouted audio packets (PT < 96 arriving on the
@@ -663,7 +714,7 @@ impl BridgePeer {
                                             } else {
                                                 debug!(
                                                     bridge_id = %bridge_id,
-                                                    direction = %direction,
+                                                    direction = %path,
                                                     pt = ?v.payload_type,
                                                     "Dropping misrouted audio packet on video track"
                                                 );
@@ -692,7 +743,7 @@ impl BridgePeer {
                                                 let nal_type = nal[0] & 0x1F;
                                                 debug!(
                                                     bridge_id = %bridge_id,
-                                                    direction = %direction,
+                                                    direction = %path,
                                                     nal_type = nal_type,
                                                     nal_bytes = nal.len(),
                                                     first_byte = format!("{:02x}", nal[0]),
@@ -708,7 +759,6 @@ impl BridgePeer {
                                         vec![MediaSample::Video(v)]
                                     }
                                 }
-                                other => vec![other],
                             };
                             // Write audio samples to recorder (non-blocking: skip on lock contention)
                             if let (Some(rec), Some(leg)) = (&recorder, recorder_leg) {
@@ -729,20 +779,20 @@ impl BridgePeer {
                                     Err(MediaError::WouldBlock) => {
                                         // Fallback to async send only when channel is full
                                         if let Err(e) = sender.send(sample).await {
-                                            warn!(bridge_id = %bridge_id, direction = %direction, error = %e, "Failed to forward media sample");
+                                            warn!(bridge_id = %bridge_id, direction = %path, error = %e, "Failed to forward media sample");
                                             break 'outer;
                                         }
                                     }
                                     Err(e) => {
                                         leg_stats.dropped.fetch_add(1, Ordering::Relaxed);
-                                        warn!(bridge_id = %bridge_id, direction = %direction, error = ?e, "Failed to forward media sample (kind mismatch or closed)");
+                                        warn!(bridge_id = %bridge_id, direction = %path, error = ?e, "Failed to forward media sample (kind mismatch or closed)");
                                         break 'outer;
                                     }
                                 }
                             }
                         }
                         Err(e) => {
-                            debug!(bridge_id = %bridge_id, direction = %direction, error = %e, "Track recv ended");
+                            debug!(bridge_id = %bridge_id, direction = %path, error = %e, "Track recv ended");
                             break;
                         }
                     }
@@ -758,7 +808,7 @@ impl BridgePeer {
         track: Arc<dyn MediaStreamTrack>,
         sender_weak: std::sync::Weak<AsyncMutex<Option<MediaSender>>>,
         cancel_token: CancellationToken,
-        direction: &'static str,
+        path: ForwardPath,
         audio_fallback_weak: Option<std::sync::Weak<AsyncMutex<Option<MediaSender>>>>,
         leg_stats: Arc<LegStats>,
         recorder: Option<Arc<parking_lot::RwLock<Option<Recorder>>>>,
@@ -770,7 +820,7 @@ impl BridgePeer {
                 track,
                 sender_weak,
                 cancel_token,
-                direction,
+                path,
                 audio_fallback_weak,
                 leg_stats,
                 recorder,

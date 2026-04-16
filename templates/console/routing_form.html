@@ -19,9 +19,11 @@
                 <nav class="text-xs font-medium text-slate-400">
                     <a href="{{ back_url }}" class="hover:text-slate-600">{{ "routing_form.routing" | t }}</a>
                     <span class="mx-1">/</span>
-                    <span class="text-slate-600" x-text="mode === 'edit' ? translations.edit_rule : translations.create_rule"></span>
+                    <span class="text-slate-600"
+                        x-text="mode === 'edit' ? translations.edit_rule : translations.create_rule"></span>
                 </nav>
-                <h1 class="text-2xl font-semibold text-slate-900" x-text="mode === 'edit' ? translations.edit_routing_rule : translations.create_routing_rule"></h1>
+                <h1 class="text-2xl font-semibold text-slate-900"
+                    x-text="mode === 'edit' ? translations.edit_routing_rule : translations.create_routing_rule"></h1>
                 <p class=" mt-2 text-sm text-slate-500">{{ "routing_form.define_match" | t }}</p>
             </div>
             <div class="flex gap-3">
@@ -61,7 +63,7 @@
 
             <div class="rounded-xl bg-white p-3 shadow-sm ring-1 ring-black/5">
                 <nav class="inline-flex w-full flex-wrap gap-2 rounded-lg border border-slate-200 bg-slate-50 p-1 text-xs font-semibold text-slate-600"
-                    role="tablist" aria-label="{{ " routing_form.routing_config_tabs_label" | t }}">
+                    role="tablist" aria-label="{{ "routing_form.routing_config_tabs_label" | t }}">
                     <button type="button" class="flex-1 rounded-md px-4 py-2 text-left transition sm:flex-none"
                         :class="activeTab === 'overview' ? 'bg-white text-sky-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'"
                         :aria-selected="activeTab === 'overview'" aria-controls="routing-tab-overview"
@@ -124,7 +126,8 @@
                             <p class="text-xs text-slate-500">{{ "routing_form.set_identity" | t }}</p>
                         </div>
                         <div class="flex items-center gap-2 text-xs font-medium text-slate-600">
-                            <span class="rounded-full border border-slate-200 px-2 py-1" x-text="route.id ? translations.rule_id + ': ' + route.id : translations.new_rule"></span>
+                            <span class="rounded-full border border-slate-200 px-2 py-1"
+                                x-text="route.id ? translations.rule_id + ': ' + route.id : translations.new_rule"></span>
                             <span class="rounded-full border border-slate-200 px-2 py-1" x-text="routeSummary"></span>
                         </div>
                     </div>
@@ -278,7 +281,7 @@
                                                         </div>
                                                         <div class="mt-1 text-sm"
                                                             :class="regexPanel.lastMatch ? 'text-emerald-600' : 'text-rose-600'"
-                                                            x-text="regexPanel.lastMatch ? '{{ " routing_form.matched" |
+                                                            x-text="regexPanel.lastMatch ? '{{ "routing_form.matched" |
                                                             t }}' : '{{ "routing_form.no_match" | t }}'">
                                                         </div>
                                                         <template x-if=" regexPanel.groups &&
@@ -409,7 +412,7 @@
                                         </div>
                                         <div class="mt-1 text-sm"
                                             :class="regexPanel.lastMatch ? 'text-emerald-600' : 'text-rose-600'"
-                                            x-text="regexPanel.lastMatch ? '{{ " routing_form.matched" | t }}'
+                                            x-text="regexPanel.lastMatch ? '{{ "routing_form.matched" | t }}'
                                             : '{{ "routing_form.no_match" | t }}'">
                                                             </div>
                                                             <template
@@ -706,7 +709,7 @@
                     <div class="flex items-center justify-between">
                         <h4 class="text-xs font-semibold uppercase tracking-wide text-slate-500">{{
                             "routing_form.published_ivr_flows" | t }}</h4>
-                        <span class="text-[11px] text-slate-400" x-text="'{{ " routing_form.n_available" | t
+                        <span class="text-[11px] text-slate-400" x-text="'{{ "routing_form.n_available" | t
                             }}'.replace('{n}', ivrOptions.length)"></span>
                     </div>
                     <template x-if="ivrOptions.length">
@@ -723,7 +726,7 @@
                                         </div>
                                         <div class="inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-[11px] font-semibold"
                                             :class="option.status === 'active' ? 'bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200' : 'bg-rose-50 text-rose-600 ring-1 ring-rose-200'">
-                                            <span x-text="option.status === 'active' ? '{{ " routing_form.queue_active"
+                                            <span x-text="option.status === 'active' ? '{{ "routing_form.queue_active"
                                                 | t }}' : '{{ "routing_form.queue_disabled" | t }}'"></span>
                                                     </div>
                                                 </div>

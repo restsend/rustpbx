@@ -21,6 +21,7 @@
 //! action = { type = "transfer", target = "2001" }
 //! ```
 
+use crate::tts::TtsConfig;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -95,6 +96,9 @@ pub struct IvrDefinition {
     /// hours are routed to `closed_action` instead of the normal IVR menu.
     #[serde(default)]
     pub business_hours: Option<BusinessHours>,
+    /// Optional TTS configuration for this IVR.
+    #[serde(default)]
+    pub tts: Option<TtsConfig>,
     pub root: MenuNode,
     #[serde(default)]
     pub menus: HashMap<String, MenuNode>,
@@ -186,17 +190,31 @@ pub enum EntryAction {
     /// Transfer to voicemail for the given extension.
     Voicemail { target: String },
     /// Play an announcement and return to the current menu.
-    Play { prompt: String },
+    Play {
+        prompt: String,
+        #[serde(default)]
+        prompt_text: Option<String>,
+        #[serde(default)]
+        prompt_voice: Option<String>,
+    },
     /// Replay the current menu greeting.
     Repeat,
     /// Hang up the call, optionally playing a goodbye prompt.
     Hangup {
         #[serde(default)]
         prompt: Option<String>,
+        #[serde(default)]
+        prompt_text: Option<String>,
+        #[serde(default)]
+        prompt_voice: Option<String>,
     },
     /// Collect digits for extension dialling.
     CollectExtension {
         prompt: String,
+        #[serde(default)]
+        prompt_text: Option<String>,
+        #[serde(default)]
+        prompt_voice: Option<String>,
         #[serde(default = "default_min_digits")]
         min_digits: usize,
         #[serde(default = "default_max_digits")]
@@ -211,6 +229,10 @@ pub enum EntryAction {
         /// Prompt to play before collecting (TTS or file path).
         #[serde(default)]
         prompt: Option<String>,
+        #[serde(default)]
+        prompt_text: Option<String>,
+        #[serde(default)]
+        prompt_voice: Option<String>,
         /// Minimum digits to collect.
         #[serde(default = "default_min_digits")]
         min_digits: usize,
@@ -244,6 +266,10 @@ pub enum EntryAction {
         /// Audio file to play before hanging up.
         #[serde(default)]
         prompt: Option<String>,
+        #[serde(default)]
+        prompt_text: Option<String>,
+        #[serde(default)]
+        prompt_voice: Option<String>,
         /// SIP status code sent in the BYE/response (e.g. 486, 603, 503).
         /// Defaults to 200 if absent.
         #[serde(default)]
@@ -318,9 +344,17 @@ impl WebhookResponse {
             WebhookResponse::Queue { target } => EntryAction::Queue { target },
             WebhookResponse::Menu { menu } => EntryAction::Menu { menu },
             WebhookResponse::Voicemail { target } => EntryAction::Voicemail { target },
-            WebhookResponse::Play { prompt, .. } => EntryAction::Play { prompt },
+            WebhookResponse::Play { prompt, .. } => EntryAction::Play {
+                prompt,
+                prompt_text: None,
+                prompt_voice: None,
+            },
             WebhookResponse::Repeat => EntryAction::Repeat,
-            WebhookResponse::Hangup { prompt } => EntryAction::Hangup { prompt },
+            WebhookResponse::Hangup { prompt } => EntryAction::Hangup {
+                prompt,
+                prompt_text: None,
+                prompt_voice: None,
+            },
             WebhookResponse::CollectExtension {
                 prompt,
                 min_digits,
@@ -328,6 +362,8 @@ impl WebhookResponse {
                 inter_digit_timeout_ms,
             } => EntryAction::CollectExtension {
                 prompt,
+                prompt_text: None,
+                prompt_voice: None,
                 min_digits: min_digits.unwrap_or_else(default_min_digits),
                 max_digits: max_digits.unwrap_or_else(default_max_digits),
                 inter_digit_timeout_ms: inter_digit_timeout_ms
@@ -343,6 +379,8 @@ impl WebhookResponse {
             } => EntryAction::Collect {
                 variable,
                 prompt,
+                prompt_text: None,
+                prompt_voice: None,
                 min_digits: min_digits.unwrap_or_else(default_min_digits),
                 max_digits: max_digits.unwrap_or_else(default_max_digits),
                 end_key,
@@ -350,7 +388,12 @@ impl WebhookResponse {
                     .unwrap_or_else(default_inter_digit_timeout_ms),
             },
             WebhookResponse::PlayAndHangup { prompt, code } => {
-                EntryAction::PlayAndHangup { prompt, code }
+                EntryAction::PlayAndHangup {
+                    prompt,
+                    prompt_text: None,
+                    prompt_voice: None,
+                    code,
+                }
             }
         }
     }
@@ -643,6 +686,8 @@ action = { type = "collect", variable = "account_id", prompt = "请输入账号"
             EntryAction::Collect {
                 variable,
                 prompt,
+                prompt_text: _,
+                prompt_voice: _,
                 min_digits,
                 max_digits,
                 end_key,
@@ -752,6 +797,8 @@ action = { type = "transfer", target = "operator" }
             EntryAction::Collect {
                 variable,
                 prompt,
+                prompt_text: _,
+                prompt_voice: _,
                 min_digits,
                 max_digits,
                 end_key,

@@ -51,7 +51,7 @@
             <div class="mt-5 flex flex-col gap-2 sm:flex-row-reverse">
                 <a href="https://miuda.ai/try" target="_blank"
                     class="inline-flex w-full items-center justify-center rounded-md bg-sky-600 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-sky-500 transition-colors sm:w-auto"
-                    x-text="licenseExpired ? '{{ " addon_detail.renew_license" | t }}'
+                    x-text="licenseExpired ? '{{ "addon_detail.renew_license" | t }}'
                     : '{{ "addon_detail.get_license" | t }}'">
                 </a>
                 <button type=" button" @click="showExpiredModal = false"
@@ -267,7 +267,7 @@
                         <path
                             d="M2.695 14.763l-1.262 3.154a.5.5 0 00.65.65l3.155-1.262a4 4 0 001.343-.885L17.5 5.5a2.121 2.121 0 00-3-3L3.58 13.42a4 4 0 00-.885 1.343z" />
                     </svg>
-                    <span x-text="showInput ? '{{ " addon_detail.hide" | t }}' : '{{ "addon_detail.update_key" | t }}'"></span>
+                    <span x-text="showInput ? '{{ "addon_detail.hide" | t }}' : '{{ "addon_detail.update_key" | t }}'"></span>
                 </button>
                 <div x-show=" showInput" x-cloak>
                         {% else %}
@@ -278,7 +278,7 @@
                             <div class="flex rounded-md shadow-sm">
                                 <input type="text" x-model="licenseKey"
                                     class="block w-full rounded-none rounded-l-md border border-slate-200 px-3 py-2 text-sm text-slate-700 placeholder-slate-400 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                    placeholder="{{ " addon_detail.license_key_placeholder" | t }}"
+                                    placeholder="{{ "addon_detail.license_key_placeholder" | t }}"
                                     @keydown.enter="verifyLicense">
                                 <button type="button" @click="verifyLicense" :disabled="loading"
                                     class="relative -ml-px inline-flex items-center gap-x-1.5 rounded-r-md px-4 py-2 text-sm font-semibold text-white bg-sky-600 hover:bg-sky-500 disabled:opacity-60 disabled:cursor-not-allowed transition-colors">
