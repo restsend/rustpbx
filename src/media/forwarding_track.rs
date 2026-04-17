@@ -93,6 +93,13 @@ impl ForwardingTrack {
         *self.update_egress_profile.lock() = Some(profile);
     }
 
+    pub fn ingress_profile(&self) -> Option<NegotiatedLegProfile> {
+        self.update_ingress_profile
+            .lock()
+            .clone()
+            .or_else(|| self.current_ingress_profile.lock().clone())
+    }
+
     fn rebuild_runtime_if_needed(&self) {
         let (ingress_update, egress_update) = {
             let mut ingress_update = self.update_ingress_profile.lock();
