@@ -131,14 +131,18 @@ impl TtsService {
         match &self.config.driver {
             TtsDriverConfig::Http(cfg) => {
                 let bytes = synthesize_http(cfg, &self.client, text, voice).await?;
-                tokio::fs::create_dir_all(Path::new(&cache_path).parent().unwrap_or(Path::new(".")))
-                    .await?;
+                tokio::fs::create_dir_all(
+                    Path::new(&cache_path).parent().unwrap_or(Path::new(".")),
+                )
+                .await?;
                 tokio::fs::write(&cache_path, bytes).await?;
                 Ok(cache_path)
             }
             TtsDriverConfig::Cli(cfg) => {
-                tokio::fs::create_dir_all(Path::new(&cache_path).parent().unwrap_or(Path::new(".")))
-                    .await?;
+                tokio::fs::create_dir_all(
+                    Path::new(&cache_path).parent().unwrap_or(Path::new(".")),
+                )
+                .await?;
                 synthesize_cli(cfg, text, &cache_path).await?;
                 Ok(cache_path)
             }
@@ -250,14 +254,18 @@ mod tests {
 
         let app = Router::new().route(
             "/tts",
-            get(move |axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>| {
-                let wav = wav_clone.clone();
-                async move {
-                    assert_eq!(params.get("text"), Some(&"hello world".to_string()));
-                    assert_eq!(params.get("voice"), Some(&"zh-CN".to_string()));
-                    ([("content-type", "audio/wav")], wav)
-                }
-            }),
+            get(
+                move |axum::extract::Query(params): axum::extract::Query<
+                    HashMap<String, String>,
+                >| {
+                    let wav = wav_clone.clone();
+                    async move {
+                        assert_eq!(params.get("text"), Some(&"hello world".to_string()));
+                        assert_eq!(params.get("voice"), Some(&"zh-CN".to_string()));
+                        ([("content-type", "audio/wav")], wav)
+                    }
+                },
+            ),
         );
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -288,7 +296,9 @@ mod tests {
 
         let service = TtsService::new(config);
         let path = service.synthesize("hello world", None).await.unwrap();
-        assert!(path.contains("rustpbx_tts_cache") || path.contains(cache_dir.path().to_str().unwrap()));
+        assert!(
+            path.contains("rustpbx_tts_cache") || path.contains(cache_dir.path().to_str().unwrap())
+        );
 
         let written = tokio::fs::read(&path).await.unwrap();
         assert_eq!(written, wav);

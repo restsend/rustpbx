@@ -1,5 +1,5 @@
 use super::CliTtsConfig;
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 
 pub async fn synthesize_cli(cfg: &CliTtsConfig, text: &str, output_path: &str) -> Result<()> {
     let args: Vec<String> = cfg

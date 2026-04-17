@@ -1,11 +1,11 @@
 use anyhow::{Result, anyhow};
-use rsipstack::sip::prelude::HeadersExt;
 use rsipstack::dialog::DialogId;
 use rsipstack::dialog::authenticate::Credential;
 use rsipstack::dialog::dialog::{Dialog, DialogState, DialogStateReceiver, DialogStateSender};
 use rsipstack::dialog::dialog_layer::DialogLayer;
 use rsipstack::dialog::invitation::InviteOption;
 use rsipstack::dialog::registration::Registration;
+use rsipstack::sip::prelude::HeadersExt;
 use rsipstack::transaction::{EndpointBuilder, TransactionReceiver};
 use rsipstack::transport::TransportLayer;
 use rsipstack::transport::udp::UdpConnection;
@@ -85,6 +85,11 @@ impl TestUa {
             received_offer_sdps: Arc::new(Mutex::new(HashMap::new())),
             negotiated_answer_sdps: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    /// Return the local SIP port this UA is bound to.
+    pub fn local_port(&self) -> u16 {
+        self.config.local_port
     }
 
     /// Start the UA with simplified initialization
@@ -234,9 +239,8 @@ impl TestUa {
         )
         .try_into()
         .map_err(|e| anyhow!("Invalid proxy URI: {:?}", e))?;
-        let route_header = rsipstack::sip::Header::from(
-            rsipstack::sip::typed::Route::from(proxy_uri),
-        );
+        let route_header =
+            rsipstack::sip::Header::from(rsipstack::sip::typed::Route::from(proxy_uri));
 
         let (content_type, offer) = if let Some(sdp) = sdp_offer {
             (Some("application/sdp".to_string()), Some(sdp.into_bytes()))
@@ -255,13 +259,10 @@ impl TestUa {
             ..Default::default()
         };
 
-        let state_sender = self
-            .state_sender
-            .clone()
-            .unwrap_or_else(|| {
-                let (sender, _) = unbounded_channel();
-                sender
-            });
+        let state_sender = self.state_sender.clone().unwrap_or_else(|| {
+            let (sender, _) = unbounded_channel();
+            sender
+        });
         let (dialog, resp) = dialog_layer
             .do_invite(invite_option, state_sender)
             .await
@@ -308,7 +309,9 @@ impl TestUa {
 
                     let body = sdp_answer.map(|sdp| sdp.into_bytes());
                     let headers = if body.is_some() {
-                        vec![rsipstack::sip::Header::ContentType("application/sdp".into())]
+                        vec![rsipstack::sip::Header::ContentType(
+                            "application/sdp".into(),
+                        )]
                     } else {
                         vec![]
                     };
@@ -376,7 +379,9 @@ impl TestUa {
 
                     let mut headers = vec![contact.into()];
                     let body = if let Some(sdp) = early_media_sdp {
-                        headers.push(rsipstack::sip::Header::ContentType("application/sdp".into()));
+                        headers.push(rsipstack::sip::Header::ContentType(
+                            "application/sdp".into(),
+                        ));
                         Some(sdp.into_bytes())
                     } else {
                         None
@@ -433,6 +438,35 @@ impl TestUa {
             .await
     }
 
+    /// Send SIP REFER request on an established dialog.
+    /// Returns the status code of the REFER response (typically 202 Accepted).
+    pub async fn send_refer(&self, dialog_id: &DialogId, refer_to: &str) -> Result<u16> {
+        let dialog_layer = self
+            .dialog_layer
+            .as_ref()
+            .ok_or_else(|| anyhow!("TestUa not started"))?;
+
+        let refer_to_uri = rsipstack::sip::Uri::try_from(refer_to)
+            .map_err(|e| anyhow!("Invalid Refer-To URI: {:?}", e))?;
+
+        if let Some(dialog) = dialog_layer.get_dialog(dialog_id) {
+            let resp = match dialog {
+                Dialog::ClientInvite(d) => d
+                    .refer(refer_to_uri, None, None)
+                    .await
+                    .map_err(|e| e.into_anyhow())?,
+                Dialog::ServerInvite(d) => d
+                    .refer(refer_to_uri, None, None)
+                    .await
+                    .map_err(|e| e.into_anyhow())?,
+                _ => return Err(anyhow!("Dialog does not support REFER request")),
+            };
+            Ok(resp.map(|r| r.status_code().code()).unwrap_or(408))
+        } else {
+            Err(anyhow!("Dialog not found: {}", dialog_id))
+        }
+    }
+
     /// Send SIP INFO with DTMF signal
     pub async fn send_dtmf_info(&self, dialog_id: &DialogId, digit: &str) -> Result<()> {
         let dialog_layer = self
@@ -441,17 +475,21 @@ impl TestUa {
             .ok_or_else(|| anyhow!("TestUa not started"))?;
 
         let body = format!("Signal={}\n", digit).into_bytes();
-        let headers = vec![
-            rsipstack::sip::Header::ContentType("application/dtmf-relay".into()),
-        ];
+        let headers = vec![rsipstack::sip::Header::ContentType(
+            "application/dtmf-relay".into(),
+        )];
 
         if let Some(dialog) = dialog_layer.get_dialog(dialog_id) {
             match dialog {
                 Dialog::ClientInvite(d) => {
-                    d.info(Some(headers), Some(body)).await.map_err(|e| e.into_anyhow())?;
+                    d.info(Some(headers), Some(body))
+                        .await
+                        .map_err(|e| e.into_anyhow())?;
                 }
                 Dialog::ServerInvite(d) => {
-                    d.info(Some(headers), Some(body)).await.map_err(|e| e.into_anyhow())?;
+                    d.info(Some(headers), Some(body))
+                        .await
+                        .map_err(|e| e.into_anyhow())?;
                 }
                 _ => return Err(anyhow!("Dialog does not support INFO request")),
             }
@@ -473,7 +511,9 @@ impl TestUa {
         if let Some(mut dialog) = dialog_layer.get_dialog(dialog_id) {
             let body = sdp.map(|s| s.into_bytes());
             let headers = if body.is_some() {
-                vec![rsipstack::sip::Header::ContentType("application/sdp".into())]
+                vec![rsipstack::sip::Header::ContentType(
+                    "application/sdp".into(),
+                )]
             } else {
                 vec![]
             };
@@ -589,8 +629,9 @@ impl TestUa {
                         let sdps = self.answer_sdps.lock().await;
                         if let Some(answer_sdp) = sdps.get(&id) {
                             let body = answer_sdp.clone().into_bytes();
-                            let headers =
-                                vec![rsipstack::sip::Header::ContentType("application/sdp".into())];
+                            let headers = vec![rsipstack::sip::Header::ContentType(
+                                "application/sdp".into(),
+                            )];
                             tx_handle
                                 .respond(rsipstack::sip::StatusCode::OK, Some(headers), Some(body))
                                 .await
@@ -598,6 +639,11 @@ impl TestUa {
                         } else {
                             tx_handle.reply(rsipstack::sip::StatusCode::OK).await.ok();
                         }
+                    }
+                    DialogState::Notify(id, _request, tx_handle) => {
+                        debug!("TestUa: Received Notify state for {}", id);
+                        // Reply 200 OK to NOTIFY so the sender can proceed
+                        tx_handle.reply(rsipstack::sip::StatusCode::OK).await.ok();
                     }
                     DialogState::Refer(id, request, tx_handle) => {
                         debug!("TestUa: Received Refer state for {}", id);
@@ -617,11 +663,7 @@ impl TestUa {
                             events.push(TestUaEvent::Referred(id.clone(), target));
                         } else {
                             tx_handle
-                                .respond(
-                                    rsipstack::sip::StatusCode::BadRequest,
-                                    None,
-                                    None,
-                                )
+                                .respond(rsipstack::sip::StatusCode::BadRequest, None, None)
                                 .await
                                 .ok();
                         }
@@ -650,14 +692,18 @@ impl TestUa {
             select! {
                 tx_opt = incoming.recv() => {
                     if let Some(mut tx) = tx_opt {
+                        debug!(method=%tx.original.method, "TestUa process_incoming_request received request");
                         // Handle existing dialog
                         match tx.original.to_header()?.tag()?.as_ref() {
                             Some(_) => {
                                 if let Some(mut d) = dialog_layer.match_dialog(&tx) {
+                                    debug!(method=%tx.original.method, "TestUa matched dialog for request");
                                     tokio::spawn(async move {
                                         d.handle(&mut tx).await.ok();
                                     });
                                     continue;
+                                } else {
+                                    debug!(method=%tx.original.method, "TestUa no matching dialog found");
                                 }
                             }
                             None => {}

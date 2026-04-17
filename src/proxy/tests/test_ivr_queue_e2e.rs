@@ -320,10 +320,8 @@ action = {{ type = "transfer", target = "support" }}
                 if let TestUaEvent::Referred(_, ref target) = event {
                     info!("Caller received REFER to {}", target);
                     // Parse Refer-To which may be `<sip:support>` or `sip:support`
-                    let target_trimmed = target
-                        .trim()
-                        .trim_start_matches('<')
-                        .trim_end_matches('>');
+                    let target_trimmed =
+                        target.trim().trim_start_matches('<').trim_end_matches('>');
                     let target_user = target_trimmed
                         .trim_start_matches("sip:")
                         .split('@')
@@ -378,7 +376,10 @@ action = {{ type = "transfer", target = "support" }}
                             .as_secs(),
                         agent_port + 100
                     );
-                    agent.answer_call(&dialog_id, Some(sdp_answer)).await.unwrap();
+                    agent
+                        .answer_call(&dialog_id, Some(sdp_answer))
+                        .await
+                        .unwrap();
                     sleep(Duration::from_millis(1500)).await;
                     return Ok(());
                 }

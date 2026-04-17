@@ -1,5 +1,5 @@
 use super::{BodyFormat, HttpTtsConfig};
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use std::time::Duration;
 
 pub async fn synthesize_http(
@@ -48,13 +48,10 @@ pub async fn synthesize_http(
         req = req.header(key, value);
     }
 
-    let resp = tokio::time::timeout(
-        Duration::from_secs(cfg.timeout_seconds),
-        req.send(),
-    )
-    .await
-    .map_err(|_| anyhow!("TTS HTTP request timed out after {}s", cfg.timeout_seconds))?
-    .map_err(|e| anyhow!("TTS HTTP request failed: {}", e))?;
+    let resp = tokio::time::timeout(Duration::from_secs(cfg.timeout_seconds), req.send())
+        .await
+        .map_err(|_| anyhow!("TTS HTTP request timed out after {}s", cfg.timeout_seconds))?
+        .map_err(|e| anyhow!("TTS HTTP request failed: {}", e))?;
 
     if !resp.status().is_success() {
         return Err(anyhow!("TTS HTTP returned {}", resp.status()));

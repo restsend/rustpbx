@@ -229,8 +229,8 @@ impl RwiTestClient {
         &mut self,
         call_id: &str,
     ) -> Result<RwiResponse, Box<dyn std::error::Error + Send + Sync>> {
-        let request = RwiRequest::new("queue.dequeue")
-            .with_params(serde_json::json!({ "call_id": call_id }));
+        let request =
+            RwiRequest::new("queue.dequeue").with_params(serde_json::json!({ "call_id": call_id }));
         self.send_request(request).await
     }
 

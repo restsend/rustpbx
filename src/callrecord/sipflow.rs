@@ -1,10 +1,7 @@
 use crate::sipflow::{SipFlowBackend, SipFlowItem, SipFlowMsgType};
 use bytes::Bytes;
 use crossbeam_channel::{RecvTimeoutError, Sender, bounded};
-use rsipstack::sip::{
-    SipMessage,
-    prelude::HeadersExt,
-};
+use rsipstack::sip::{SipMessage, prelude::HeadersExt};
 use rsipstack::{transaction::endpoint::MessageInspector, transport::SipAddr};
 use std::sync::{Arc, Mutex};
 use std::thread;

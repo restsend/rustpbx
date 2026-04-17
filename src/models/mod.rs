@@ -3,6 +3,7 @@ use sea_orm::{Database, DatabaseConnection};
 use sea_orm_migration::MigratorTrait;
 
 pub mod add_leg_timeline_column;
+pub mod add_metadata_column;
 pub mod add_rewrite_columns;
 pub mod add_sip_trunk_register_columns;
 pub mod add_sip_trunk_rewrite_hostport;
@@ -16,7 +17,6 @@ pub mod department;
 pub mod extension;
 pub mod extension_department;
 pub mod frequency_limit;
-pub mod add_metadata_column;
 pub mod migration;
 pub mod policy;
 pub mod presence;

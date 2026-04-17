@@ -1,6 +1,6 @@
 use crate::callrecord::CallRecordHangupReason;
-use crate::proxy::proxy_call::state::SipSessionHandle;
 use crate::proxy::proxy_call::state::SessionAction;
+use crate::proxy::proxy_call::state::SipSessionHandle;
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -355,7 +355,7 @@ impl CallController {
 mod tests {
     use super::*;
     use crate::call::DialDirection;
-    use crate::proxy::proxy_call::state::{SipSessionHandle, SipSessionShared, SessionAction};
+    use crate::proxy::proxy_call::state::{SessionAction, SipSessionHandle, SipSessionShared};
     use tokio::time::{Duration, timeout};
 
     /// Creates a controller with access to both the event sender and command receiver.

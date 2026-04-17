@@ -44,7 +44,10 @@ async fn ws_connect(rwi_url: &str) -> WsStream {
 /// Send a JSON message and wait for the command_completed or command_failed event.
 async fn ws_send_recv(ws: &mut WsStream, json: &str) -> serde_json::Value {
     let req: serde_json::Value = serde_json::from_str(json).expect("invalid JSON");
-    let action_id = req["action_id"].as_str().expect("missing action_id").to_string();
+    let action_id = req["action_id"]
+        .as_str()
+        .expect("missing action_id")
+        .to_string();
 
     ws.send(Message::Text(json.into())).await.unwrap();
 
@@ -95,7 +98,10 @@ async fn recv_until(
             Message::Ping(_) | Message::Pong(_) => continue,
             other => panic!("unexpected frame: {other:?}"),
         };
-        eprintln!("[recv_until] checking: type={}, action_id={}", v["type"], v["action_id"]);
+        eprintln!(
+            "[recv_until] checking: type={}, action_id={}",
+            v["type"], v["action_id"]
+        );
         if predicate(&v) {
             return v;
         }
@@ -157,7 +163,10 @@ async fn test_originate_single_bob_answers() {
         }),
     );
     let v = ws_send_recv(&mut ws, &orig_json).await;
-    assert_eq!(v["type"], "command_completed", "originate response should be success: {v}");
+    assert_eq!(
+        v["type"], "command_completed",
+        "originate response should be success: {v}"
+    );
     assert_eq!(v["action_id"], orig_id, "action_id not echoed");
 
     // Expect CallRinging within 5 s
@@ -182,7 +191,7 @@ async fn test_originate_single_bob_answers() {
 
 /// Test that originate sends proper SDP (verified by successful call completion).
 /// This test verifies the fix for the issue where SDP was not being sent (Content-Length: 0).
-/// 
+///
 /// Before the fix: INVITE had Content-Length: 0, no SDP body -> sipbot answered but no media
 /// After the fix: INVITE has proper SDP with codecs -> call completes successfully
 #[tokio::test]
@@ -218,7 +227,10 @@ async fn test_originate_sends_proper_sdp() {
         }),
     );
     let v = ws_send_recv(&mut ws, &orig_json).await;
-    assert_eq!(v["type"], "command_completed", "originate should succeed: {v}");
+    assert_eq!(
+        v["type"], "command_completed",
+        "originate should succeed: {v}"
+    );
 
     // Wait for ringing - this proves the INVITE was sent and processed
     let ringing = recv_until(&mut ws, 5, |v| v.get("call_ringing").is_some()).await;
@@ -396,7 +408,8 @@ async fn test_originate_and_bridge() {
         v.get("call_ringing").map_or(false, |r| {
             r.get("call_id").and_then(|id| id.as_str()) == Some(&call_b)
         })
-    }).await;
+    })
+    .await;
     tracing::info!("Bob ringing: {:?}", ringing_b);
 
     // Wait for Bob to answer
@@ -404,11 +417,16 @@ async fn test_originate_and_bridge() {
         v.get("call_answered").map_or(false, |a| {
             a.get("call_id").and_then(|id| id.as_str()) == Some(&call_b)
         })
-    }).await;
+    })
+    .await;
     tracing::info!("Bob answered: {:?}", answered_b);
 
     // Bridge the calls
-    tracing::info!("Sending bridge command for leg_a={}, leg_b={}", call_a, call_b);
+    tracing::info!(
+        "Sending bridge command for leg_a={}, leg_b={}",
+        call_a,
+        call_b
+    );
     let (bridge_id, bridge_json) = rwi_req(
         "call.bridge",
         serde_json::json!({
@@ -417,22 +435,28 @@ async fn test_originate_and_bridge() {
         }),
     );
     tracing::info!("Bridge request: {}", bridge_json);
-    
+
     ws.send(Message::Text(bridge_json.into())).await.unwrap();
-    
+
     // Wait for bridge response with longer timeout
     let v = recv_until(&mut ws, 10, |v| {
         v.get("action_id").and_then(|id| id.as_str()) == Some(&bridge_id)
-    }).await;
+    })
+    .await;
     tracing::info!("bridge response: {:?}", v);
-    
+
     // Check if bridge command succeeded
-    assert_eq!(v["status"], "success", "Bridge command should succeed: {:?}", v);
+    assert_eq!(
+        v["status"], "success",
+        "Bridge command should succeed: {:?}",
+        v
+    );
 
     // Expect CallBridged event
     let bridged = recv_until(&mut ws, 10, |v| {
         v.get("call_bridged").is_some() || v.to_string().contains("call_bridged")
-    }).await;
+    })
+    .await;
     tracing::info!("Calls bridged: {:?}", bridged);
 
     ws.close(None).await.unwrap();
@@ -705,7 +729,10 @@ async fn test_parallel_originate_first_answer() {
         }),
     );
     ws.send(Message::Text(orig_a_json.into())).await.unwrap();
-    let v = recv_until(&mut ws, 5, |v| v.get("type").is_some() && v["type"] == "command_completed").await;
+    let v = recv_until(&mut ws, 5, |v| {
+        v.get("type").is_some() && v["type"] == "command_completed"
+    })
+    .await;
     assert_eq!(v["status"], "success");
 
     // Originate to Bob (parallel)
@@ -721,7 +748,10 @@ async fn test_parallel_originate_first_answer() {
         }),
     );
     ws.send(Message::Text(orig_b_json.into())).await.unwrap();
-    let v = recv_until(&mut ws, 5, |v| v.get("type").is_some() && v["type"] == "command_completed").await;
+    let v = recv_until(&mut ws, 5, |v| {
+        v.get("type").is_some() && v["type"] == "command_completed"
+    })
+    .await;
     tracing::info!("second originate response: {:?}", v);
     assert_eq!(v["status"], "success", "second originate failed: {:?}", v);
 
@@ -810,14 +840,13 @@ async fn test_list_calls() {
     pbx.stop();
 }
 
-
 /// Test that originate tasks are properly cleaned up after call ends
 #[tokio::test]
 async fn test_originate_task_cleanup() {
-    use rustpbx::utils::{reset_task_metrics, active_task_count, active_task_count_by_prefix};
-    
+    use rustpbx::utils::{active_task_count, active_task_count_by_prefix, reset_task_metrics};
+
     reset_task_metrics();
-    
+
     let sip_port = portpicker::pick_unused_port().expect("no free SIP port");
     let bob_port = portpicker::pick_unused_port().expect("no free bob port");
 
@@ -855,16 +884,13 @@ async fn test_originate_task_cleanup() {
 
     // Wait for answer
     let _answered = recv_until(&mut ws, 10, |v| v.get("call_answered").is_some()).await;
-    
+
     // Check task count during call (should have increased)
     let during_count = active_task_count();
     tracing::info!("Task count during call: {}", during_count);
-    
+
     // Hangup the call
-    let (_, hangup_json) = rwi_req(
-        "call.hangup",
-        serde_json::json!({"call_id": call_id}),
-    );
+    let (_, hangup_json) = rwi_req("call.hangup", serde_json::json!({"call_id": call_id}));
     let _ = ws_send_recv(&mut ws, &hangup_json).await;
 
     // Wait for cleanup
@@ -882,10 +908,10 @@ async fn test_originate_task_cleanup() {
     ws.close(None).await.unwrap();
     bob.stop();
     pbx.stop();
-    
+
     // Give time for all cleanup to complete
     tokio::time::sleep(Duration::from_millis(500)).await;
-    
+
     let after_cleanup = active_task_count();
     tracing::info!("Task count after full cleanup: {}", after_cleanup);
 }

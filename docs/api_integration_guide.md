@@ -203,6 +203,25 @@ Low-level system operations. Protected by IP whitelist (`[ami].allows` in config
 - **Reload**: `POST /reload/trunks`, `/reload/routes`, `/reload/acl` - Hot reload config without restart.
 - **Shutdown**: `POST /shutdown` - Graceful shutdown (stops accepting new calls, waits for active ones).
 - **Dialogs**: `GET /dialogs` - Raw dump of internal SIP dialog states (for debugging).
+- **SipFlow signaling**: `GET /sipflow/flow/{call_id}` - Query SIP ladder data.
+- **SipFlow media**: `GET /sipflow/media/{call_id}` - Export call media as WAV.
+
+SipFlow endpoints support optional time range query parameters:
+
+- `start`: range start time
+- `end`: range end time
+
+Accepted formats:
+
+- RFC3339 datetime, e.g. `2026-04-16T10:00:00+08:00`
+- Unix timestamp (seconds), e.g. `1713232800`
+
+Example:
+
+```http
+GET /ami/v1/sipflow/flow/abc123?start=2026-04-16T10:00:00%2B08:00&end=2026-04-16T10:30:00%2B08:00
+GET /ami/v1/sipflow/media/abc123?start=1713232800&end=1713234600
+```
 
 ---
 

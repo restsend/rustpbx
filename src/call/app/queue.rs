@@ -16,9 +16,7 @@
 //!           └─ HoldMusic ◄───┘ (while waiting)
 //! ```
 
-use super::{
-    AppAction, ApplicationContext, CallApp, CallAppType, CallController, PlaybackHandle,
-};
+use super::{AppAction, ApplicationContext, CallApp, CallAppType, CallController, PlaybackHandle};
 use crate::call::{
     DialStrategy, FailureAction, Location, QueueFallbackAction, QueueHoldConfig, QueuePlan,
 };
@@ -138,9 +136,7 @@ impl QueueApp {
                 info!(target = ?endpoint, "Queue: transfer fallback");
                 // Transfer to the endpoint
                 match endpoint {
-                    crate::call::TransferEndpoint::Uri(uri) => {
-                        AppAction::Transfer(uri.to_string())
-                    }
+                    crate::call::TransferEndpoint::Uri(uri) => AppAction::Transfer(uri.to_string()),
                     crate::call::TransferEndpoint::Queue(queue_name) => {
                         AppAction::Transfer(format!("queue:{}", queue_name))
                     }
@@ -190,10 +186,7 @@ impl CallApp for QueueApp {
     }
 
     fn name(&self) -> &str {
-        self.plan
-            .label
-            .as_deref()
-            .unwrap_or("queue")
+        self.plan.label.as_deref().unwrap_or("queue")
     }
 
     async fn on_enter(

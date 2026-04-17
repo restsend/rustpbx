@@ -172,9 +172,10 @@ impl ActiveProxyCallRegistry {
     /// Cleanup stale entries that have been inactive for longer than max_age
     /// Returns the number of entries removed
     pub fn cleanup_stale(&self, max_age: std::time::Duration) -> usize {
-        let cutoff = Utc::now() - chrono::Duration::from_std(max_age).unwrap_or_else(|_| chrono::Duration::hours(1));
+        let cutoff = Utc::now()
+            - chrono::Duration::from_std(max_age).unwrap_or_else(|_| chrono::Duration::hours(1));
         let mut guard = self.inner.lock().unwrap();
-        
+
         let stale_ids: Vec<String> = guard
             .entries
             .iter()
@@ -184,7 +185,7 @@ impl ActiveProxyCallRegistry {
             })
             .map(|(id, _)| id.clone())
             .collect();
-        
+
         let count = stale_ids.len();
         for id in stale_ids {
             guard.entries.remove(&id);
@@ -195,7 +196,7 @@ impl ActiveProxyCallRegistry {
                 }
             }
         }
-        
+
         count
     }
 }

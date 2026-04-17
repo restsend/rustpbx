@@ -23,7 +23,6 @@ pub enum CallCommand {
     // ============================================================================
     // Basic Call Control
     // ============================================================================
-
     /// Answer an incoming call leg
     Answer {
         /// The leg to answer
@@ -140,7 +139,6 @@ pub enum CallCommand {
     /// Stop recording
     StopRecording,
 
-
     /// Supervisor listen mode (monitoring only)
     SupervisorListen {
         /// Supervisor's leg
@@ -165,12 +163,19 @@ pub enum CallCommand {
         target_leg: LegId,
     },
 
+    /// Supervisor takeover mode (replace agent)
+    SupervisorTakeover {
+        /// Supervisor's leg
+        supervisor_leg: LegId,
+        /// Target leg (agent to be replaced)
+        target_leg: LegId,
+    },
+
     /// Stop supervisor mode
     SupervisorStop {
         /// Supervisor's leg
         supervisor_leg: LegId,
     },
-
 
     /// Create a conference
     ConferenceCreate {
@@ -297,6 +302,15 @@ pub enum CallCommand {
         body: String,
     },
 
+    /// Join a conference mixer (for attended-transfer or 3-way calling)
+    JoinMixer {
+        /// Mixer ID / conference room ID
+        mixer_id: String,
+    },
+
+    /// Leave the current conference mixer
+    LeaveMixer,
+
     /// Send a SIP OPTIONS ping
     SendSipOptionsPing,
 }
@@ -381,7 +395,10 @@ pub enum AppEvent {
     /// Recording completed
     RecordingComplete { recording_id: String, path: String },
     /// Custom event
-    Custom { name: String, data: serde_json::Value },
+    Custom {
+        name: String,
+        data: serde_json::Value,
+    },
     /// Timeout event
     Timeout { timer_id: String },
 }
@@ -396,6 +413,7 @@ impl CallCommand {
                 | CallCommand::SupervisorListen { .. }
                 | CallCommand::SupervisorWhisper { .. }
                 | CallCommand::SupervisorBarge { .. }
+                | CallCommand::SupervisorTakeover { .. }
                 | CallCommand::Hold { music: Some(_), .. }
         )
     }
@@ -425,12 +443,18 @@ impl CallCommand {
             CallCommand::Transfer { leg_id, .. } => Some(leg_id),
             CallCommand::Hold { leg_id, .. } => Some(leg_id),
             CallCommand::Unhold { leg_id } => Some(leg_id),
-            CallCommand::Play { leg_id: Some(leg_id), .. } => Some(leg_id),
-            CallCommand::StopPlayback { leg_id: Some(leg_id) } => Some(leg_id),
+            CallCommand::Play {
+                leg_id: Some(leg_id),
+                ..
+            } => Some(leg_id),
+            CallCommand::StopPlayback {
+                leg_id: Some(leg_id),
+            } => Some(leg_id),
             CallCommand::SendDtmf { leg_id, .. } => Some(leg_id),
             CallCommand::SupervisorListen { supervisor_leg, .. } => Some(supervisor_leg),
             CallCommand::SupervisorWhisper { supervisor_leg, .. } => Some(supervisor_leg),
             CallCommand::SupervisorBarge { supervisor_leg, .. } => Some(supervisor_leg),
+            CallCommand::SupervisorTakeover { supervisor_leg, .. } => Some(supervisor_leg),
             CallCommand::SupervisorStop { supervisor_leg } => Some(supervisor_leg),
             CallCommand::ConferenceAdd { leg_id, .. } => Some(leg_id),
             CallCommand::ConferenceRemove { leg_id, .. } => Some(leg_id),

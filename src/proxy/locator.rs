@@ -636,7 +636,8 @@ mod tests {
             Box::pin(async move { is_special || is_local_realm(&realm) })
         }));
 
-        let registered_uri: rsipstack::sip::Uri = "sip:alice@my-special-realm.com".try_into().unwrap();
+        let registered_uri: rsipstack::sip::Uri =
+            "sip:alice@my-special-realm.com".try_into().unwrap();
         let lookup_uri: rsipstack::sip::Uri = "sip:alice@localhost".try_into().unwrap();
 
         locator
@@ -659,7 +660,8 @@ mod tests {
     #[tokio::test]
     async fn test_uri_matches_relaxed() {
         let locator = MemoryLocator::new();
-        let registered_uri: rsipstack::sip::Uri = "sip:3sf0hatf@eee3se8lru7o.invalid".try_into().unwrap();
+        let registered_uri: rsipstack::sip::Uri =
+            "sip:3sf0hatf@eee3se8lru7o.invalid".try_into().unwrap();
         let lookup_uri: rsipstack::sip::Uri = "sip:3sf0hatf@eee3se8lru7o.invalid;transport=ws"
             .try_into()
             .unwrap();

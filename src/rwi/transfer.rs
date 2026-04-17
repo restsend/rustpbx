@@ -35,6 +35,7 @@ pub enum ReferTransferResult {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum TransferMode {
     SipRefer,
+    Replaces,
     ThreePccFallback,
 }
 
@@ -232,8 +233,51 @@ impl TransferController {
 
         self.verify_call_state_for_transfer(&call_id).await?;
 
-        let transaction =
+        let mut transaction =
             TransferTransaction::new(call_id.clone(), target.clone(), TransferMode::SipRefer);
+        transaction.update_status(TransferStatus::Accepted);
+
+        {
+            let mut txs = self.transactions.write().await;
+            if txs.len() >= self.config.max_concurrent_transfers {
+                crate::metrics::transfer::failed_total("refer", "max_concurrent_reached");
+                return Err(TransferFailureReason::InternalError);
+            }
+            txs.insert(transaction.transfer_id.clone(), transaction.clone());
+        }
+
+        crate::metrics::transfer::set_active_transfers(self.transactions.read().await.len());
+
+        let _handle = self
+            .get_handle(&call_id)
+            .await
+            .ok_or(TransferFailureReason::InvalidState)?;
+
+        let gw = self.gateway.read().await;
+        let event = RwiEvent::CallTransferAccepted {
+            call_id: call_id.clone(),
+        };
+        gw.send_event_to_call_owner(&call_id, &event);
+
+        Ok(transaction)
+    }
+
+    pub async fn initiate_replace_transfer(
+        &self,
+        call_id: String,
+        target: String,
+    ) -> Result<TransferTransaction, TransferFailureReason> {
+        if !self.config.refer_enabled {
+            return Err(TransferFailureReason::InternalError);
+        }
+
+        crate::metrics::transfer::attempt_total("refer", "replace");
+
+        self.verify_call_state_for_transfer(&call_id).await?;
+
+        let mut transaction =
+            TransferTransaction::new(call_id.clone(), target.clone(), TransferMode::Replaces);
+        transaction.update_status(TransferStatus::Accepted);
 
         {
             let mut txs = self.transactions.write().await;
@@ -307,6 +351,30 @@ impl TransferController {
         }
     }
 
+    pub async fn execute_replace_transfer(
+        &self,
+        call_id: String,
+        target: String,
+    ) -> Result<TransferTransaction, TransferFailureReason> {
+        let tx = self
+            .initiate_replace_transfer(call_id.clone(), target.clone())
+            .await?;
+
+        match self.try_refer_transfer_with_replaces(&tx).await {
+            Ok(_) => Ok(tx),
+            Err(ReferTransferResult::InternalError(_)) => {
+                self.fail_transfer(&tx.transfer_id, TransferFailureReason::InternalError, None)
+                    .await;
+                Err(TransferFailureReason::InternalError)
+            }
+            Err(_) => {
+                self.fail_transfer(&tx.transfer_id, TransferFailureReason::InternalError, None)
+                    .await;
+                Err(TransferFailureReason::InternalError)
+            }
+        }
+    }
+
     /// Send a `CallCommand::Transfer` to the SipSession for this transaction.
     ///
     /// **Design**: `SipSessionHandle::send_command` is an mpsc fire-and-forget channel.
@@ -333,6 +401,30 @@ impl TransferController {
             .map_err(|e| {
                 ReferTransferResult::InternalError(format!(
                     "Failed to send transfer command: {}",
+                    e
+                ))
+            })
+    }
+
+    async fn try_refer_transfer_with_replaces(
+        &self,
+        tx: &TransferTransaction,
+    ) -> Result<(), ReferTransferResult> {
+        let handle = self
+            .get_handle(&tx.call_id)
+            .await
+            .ok_or_else(|| ReferTransferResult::InternalError("Call not found".to_string()))?;
+
+        let leg_id = LegId::new(&tx.call_id);
+        handle
+            .send_command(CallCommand::Transfer {
+                leg_id,
+                target: tx.target.clone(),
+                attended: true,
+            })
+            .map_err(|e| {
+                ReferTransferResult::InternalError(format!(
+                    "Failed to send replace transfer command: {}",
                     e
                 ))
             })
@@ -526,10 +618,16 @@ impl TransferController {
             tx.set_sip_status(sip_status);
 
             let gw_event = if sip_status >= 200 && sip_status < 300 {
-                tx.update_status(TransferStatus::Accepted);
-                GatewayEvent::Accepted(tx.call_id.clone())
+                if tx.status == TransferStatus::Accepted {
+                    GatewayEvent::None
+                } else {
+                    tx.update_status(TransferStatus::Accepted);
+                    GatewayEvent::Accepted(tx.call_id.clone())
+                }
             } else if sip_status >= 400 {
-                let reason = if self.config.three_pcc_fallback_enabled {
+                let allow_3pcc_fallback =
+                    self.config.three_pcc_fallback_enabled && tx.mode == TransferMode::SipRefer;
+                let reason = if allow_3pcc_fallback {
                     tx.update_status(TransferStatus::NotifyTrying);
                     TransferFailureReason::ReferRejected
                 } else {
@@ -537,7 +635,7 @@ impl TransferController {
                     TransferFailureReason::ReferRejected
                 };
 
-                if !self.config.three_pcc_fallback_enabled || tx.mode != TransferMode::SipRefer {
+                if !allow_3pcc_fallback {
                     GatewayEvent::Failed {
                         call_id: tx.call_id.clone(),
                         sip_status,
@@ -666,6 +764,36 @@ impl TransferController {
             }
             PostAction::None => Some(result_tx),
         }
+    }
+
+    /// Handle a synchronous REFER response matched by `call_id`.
+    pub async fn handle_refer_response_by_call_id(
+        &self,
+        call_id: &str,
+        sip_status: u16,
+    ) -> Option<TransferTransaction> {
+        let transfer_id = {
+            let txs = self.transactions.read().await;
+            txs.values()
+                .find(|tx| tx.call_id == call_id && !tx.is_terminal())
+                .map(|tx| tx.transfer_id.clone())?
+        };
+        self.handle_refer_response(transfer_id, sip_status).await
+    }
+
+    /// Handle a REFER NOTIFY matched by `call_id`.
+    pub async fn handle_notify_by_call_id(
+        &self,
+        call_id: &str,
+        notify_status: u16,
+    ) -> Option<TransferTransaction> {
+        let transfer_id = {
+            let txs = self.transactions.read().await;
+            txs.values()
+                .find(|tx| tx.call_id == call_id && !tx.is_terminal())
+                .map(|tx| tx.transfer_id.clone())?
+        };
+        self.handle_notify(transfer_id, notify_status).await
     }
 
     pub async fn fallback_to_3pcc(&self, transfer_id: String) -> Option<TransferTransaction> {
@@ -834,8 +962,8 @@ impl TransferController {
         original_call_id: &str,
     ) -> Result<(), String> {
         // Parse destination URI
-        let destination_uri: rsipstack::sip::Uri =
-            rsipstack::sip::Uri::try_from(target).map_err(|e| format!("Invalid target URI: {:?}", e))?;
+        let destination_uri: rsipstack::sip::Uri = rsipstack::sip::Uri::try_from(target)
+            .map_err(|e| format!("Invalid target URI: {:?}", e))?;
 
         // Build caller URI (use server realm)
         let realm = sip_server
@@ -845,8 +973,9 @@ impl TransferController {
             .and_then(|v| v.first().cloned())
             .unwrap_or_else(|| sip_server.proxy_config.addr.clone());
         let caller_uri_str = format!("sip:transfer@{}", realm);
-        let caller_uri: rsipstack::sip::Uri = rsipstack::sip::Uri::try_from(caller_uri_str.as_str())
-            .map_err(|e| format!("Invalid caller URI: {:?}", e))?;
+        let caller_uri: rsipstack::sip::Uri =
+            rsipstack::sip::Uri::try_from(caller_uri_str.as_str())
+                .map_err(|e| format!("Invalid caller URI: {:?}", e))?;
 
         // Build headers
         let headers = vec![
@@ -1336,6 +1465,61 @@ mod tests {
         assert!(result.is_err(), "Ringing call must not be transferable");
     }
 
+    #[tokio::test]
+    async fn test_execute_replace_transfer_dispatches_attended_transfer_command() {
+        let (ctrl, registry) = make_controller_with_registry();
+        let call_id = "call-repl-001";
+        let target = "sip:target@local";
+
+        let mut cmd_rx = register_talking_call(&registry, call_id);
+
+        let result = ctrl
+            .execute_replace_transfer(call_id.to_string(), target.to_string())
+            .await;
+        assert!(result.is_ok(), "expected Ok, got {:?}", result);
+        let tx = result.unwrap();
+        assert_eq!(tx.mode, TransferMode::Replaces);
+
+        let cmd = cmd_rx
+            .try_recv()
+            .expect("expected a CallCommand to be dispatched");
+        match cmd {
+            CallCommand::Transfer {
+                leg_id,
+                target: t,
+                attended,
+            } => {
+                assert_eq!(leg_id.as_str(), call_id);
+                assert_eq!(t, target);
+                assert!(attended, "replace transfer must have attended=true");
+            }
+            other => panic!("unexpected command: {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_handle_refer_response_replace_rejected_marks_failed() {
+        let (ctrl, registry) = make_controller_with_registry();
+        let call_id = "call-repl-reject-001";
+        let _cmd_rx = register_talking_call(&registry, call_id);
+
+        let tx = ctrl
+            .execute_replace_transfer(call_id.to_string(), "sip:target@local".to_string())
+            .await
+            .expect("replace transfer should start");
+
+        let updated = ctrl
+            .handle_refer_response(tx.transfer_id.clone(), 486)
+            .await
+            .expect("transaction should exist");
+
+        assert_eq!(updated.mode, TransferMode::Replaces);
+        assert_eq!(
+            updated.status,
+            TransferStatus::Failed(TransferFailureReason::ReferRejected)
+        );
+    }
+
     // ────────────────────────────────────────────────────────────────────────────
     // initiate_attended_transfer tests
     // ────────────────────────────────────────────────────────────────────────────
@@ -1736,5 +1920,428 @@ mod tests {
         // Duration should be non-zero after some time
         std::thread::sleep(std::time::Duration::from_millis(10));
         assert!(tx.duration_ms() >= 10);
+    }
+
+    // ────────────────────────────────────────────────────────────────────────────
+    // REFER 1xx / 5xx transitions
+    // ────────────────────────────────────────────────────────────────────────────
+
+    /// REFER 1xx (e.g. 100 Trying) is a no-op: status stays Accepted.
+    #[tokio::test]
+    async fn test_handle_refer_response_1xx_is_noop() {
+        let (ctrl, registry) = make_controller_with_registry();
+        let call_id = "call-refer-1xx";
+        register_talking_call(&registry, call_id);
+
+        let tx = ctrl
+            .initiate_blind_transfer(call_id.to_string(), "sip:t@local".to_string())
+            .await
+            .expect("initiate should succeed");
+
+        let result = ctrl
+            .handle_refer_response(tx.transfer_id.clone(), 100)
+            .await;
+        assert!(result.is_some());
+        let updated = result.unwrap();
+        // 1xx must not change a pre-Accepted transaction to Failed/Completed
+        assert_eq!(updated.status, TransferStatus::Accepted);
+        assert_eq!(updated.sip_status, Some(100));
+    }
+
+    /// REFER 5xx (e.g. 500) with 3PCC disabled marks the transaction Failed.
+    #[tokio::test]
+    async fn test_handle_refer_response_5xx_fails() {
+        let registry = Arc::new(ActiveProxyCallRegistry::new());
+        let gateway = Arc::new(RwLock::new(crate::rwi::gateway::RwiGateway::new()));
+        let mut config = TransferConfig::default();
+        config.three_pcc_fallback_enabled = false;
+        let ctrl = TransferController::new(config, Arc::clone(&registry), gateway);
+
+        let call_id = "call-refer-5xx";
+        register_talking_call(&registry, call_id);
+
+        let tx = ctrl
+            .initiate_blind_transfer(call_id.to_string(), "sip:t@local".to_string())
+            .await
+            .expect("initiate should succeed");
+
+        let result = ctrl
+            .handle_refer_response(tx.transfer_id.clone(), 500)
+            .await;
+        assert!(result.is_some());
+        let updated = result.unwrap();
+        assert!(
+            matches!(updated.status, TransferStatus::Failed(_)),
+            "5xx should mark transaction Failed, got {:?}",
+            updated.status
+        );
+        assert_eq!(updated.sip_status, Some(500));
+    }
+
+    /// REFER 4xx with 3PCC **enabled** moves to NotifyTrying (fallback pending), not Failed.
+    #[tokio::test]
+    async fn test_handle_refer_response_4xx_with_3pcc_stays_trying() {
+        let (ctrl, registry) = make_controller_with_registry();
+        let call_id = "call-refer-4xx-3pcc";
+        register_talking_call(&registry, call_id);
+
+        let tx = ctrl
+            .initiate_blind_transfer(call_id.to_string(), "sip:t@local".to_string())
+            .await
+            .expect("initiate should succeed");
+
+        let result = ctrl
+            .handle_refer_response(tx.transfer_id.clone(), 405)
+            .await;
+        assert!(result.is_some());
+        let updated = result.unwrap();
+        assert_eq!(
+            updated.status,
+            TransferStatus::NotifyTrying,
+            "4xx + 3PCC enabled should transition to NotifyTrying, got {:?}",
+            updated.status
+        );
+    }
+
+    // ────────────────────────────────────────────────────────────────────────────
+    // NOTIFY 180/183 transitions
+    // ────────────────────────────────────────────────────────────────────────────
+
+    /// NOTIFY 180 moves the transaction to NotifyProgress.
+    #[tokio::test]
+    async fn test_handle_notify_180_progress() {
+        let (ctrl, registry) = make_controller_with_registry();
+        let call_id = "call-notify-180";
+        register_talking_call(&registry, call_id);
+
+        let tx = ctrl
+            .initiate_blind_transfer(call_id.to_string(), "sip:t@local".to_string())
+            .await
+            .expect("initiate should succeed");
+
+        let result = ctrl.handle_notify(tx.transfer_id.clone(), 180).await;
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().status, TransferStatus::NotifyProgress);
+    }
+
+    /// NOTIFY 183 moves the transaction to NotifyProgress.
+    #[tokio::test]
+    async fn test_handle_notify_183_progress() {
+        let (ctrl, registry) = make_controller_with_registry();
+        let call_id = "call-notify-183";
+        register_talking_call(&registry, call_id);
+
+        let tx = ctrl
+            .initiate_blind_transfer(call_id.to_string(), "sip:t@local".to_string())
+            .await
+            .expect("initiate should succeed");
+
+        let result = ctrl.handle_notify(tx.transfer_id.clone(), 183).await;
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().status, TransferStatus::NotifyProgress);
+    }
+
+    /// NOTIFY 4xx with 3PCC **enabled** triggers the 3PCC fallback path (mode →
+    /// ThreePccFallback, status → NotifyTrying) instead of marking Failed.
+    #[tokio::test]
+    async fn test_handle_notify_4xx_with_3pcc_triggers_fallback() {
+        let (ctrl, registry) = make_controller_with_registry();
+        let call_id = "call-notify-4xx-3pcc";
+        register_talking_call(&registry, call_id);
+
+        let tx = ctrl
+            .initiate_blind_transfer(call_id.to_string(), "sip:t@local".to_string())
+            .await
+            .expect("initiate should succeed");
+
+        let result = ctrl.handle_notify(tx.transfer_id.clone(), 486).await;
+        assert!(result.is_some());
+        let updated = result.unwrap();
+        assert_eq!(
+            updated.mode,
+            TransferMode::ThreePccFallback,
+            "mode should be ThreePccFallback, got {:?}",
+            updated.mode
+        );
+        assert_eq!(
+            updated.status,
+            TransferStatus::NotifyTrying,
+            "status should be NotifyTrying, got {:?}",
+            updated.status
+        );
+    }
+
+    // ────────────────────────────────────────────────────────────────────────────
+    // by_call_id routing (consultation_call_id canonical mapping)
+    // ────────────────────────────────────────────────────────────────────────────
+
+    /// handle_refer_response_by_call_id finds the active transaction by call_id.
+    #[tokio::test]
+    async fn test_handle_refer_response_by_call_id_routes_correctly() {
+        let (ctrl, registry) = make_controller_with_registry();
+        let call_id = "call-refer-byid-001";
+        register_talking_call(&registry, call_id);
+
+        let _tx = ctrl
+            .initiate_blind_transfer(call_id.to_string(), "sip:t@local".to_string())
+            .await
+            .expect("initiate should succeed");
+
+        let result = ctrl.handle_refer_response_by_call_id(call_id, 202).await;
+        assert!(result.is_some(), "should find transaction by call_id");
+        let updated = result.unwrap();
+        assert_eq!(updated.call_id, call_id);
+        assert_eq!(updated.sip_status, Some(202));
+    }
+
+    /// handle_refer_response_by_call_id returns None for unknown call_id.
+    #[tokio::test]
+    async fn test_handle_refer_response_by_call_id_not_found() {
+        let ctrl = make_controller();
+        let result = ctrl
+            .handle_refer_response_by_call_id("no-such-call", 202)
+            .await;
+        assert!(result.is_none());
+    }
+
+    /// handle_notify_by_call_id finds the active transaction by call_id.
+    #[tokio::test]
+    async fn test_handle_notify_by_call_id_routes_correctly() {
+        let (ctrl, registry) = make_controller_with_registry();
+        let call_id = "call-notify-byid-001";
+        register_talking_call(&registry, call_id);
+
+        let _tx = ctrl
+            .initiate_blind_transfer(call_id.to_string(), "sip:t@local".to_string())
+            .await
+            .expect("initiate should succeed");
+
+        let result = ctrl.handle_notify_by_call_id(call_id, 100).await;
+        assert!(result.is_some(), "should find transaction by call_id");
+        let updated = result.unwrap();
+        assert_eq!(updated.status, TransferStatus::NotifyTrying);
+    }
+
+    // ────────────────────────────────────────────────────────────────────────────
+    // complete_attended_transfer / cancel_attended_transfer
+    // ────────────────────────────────────────────────────────────────────────────
+
+    /// complete_attended_transfer with valid consultation_call_id returns Ok and
+    /// dispatches a Bridge command to the original call's SipSession.
+    #[tokio::test]
+    async fn test_complete_attended_transfer_valid() {
+        let (ctrl, registry) = make_controller_with_registry();
+        let call_id = "call-att-complete-001";
+        let mut cmd_rx = register_talking_call(&registry, call_id);
+
+        let tx = ctrl
+            .initiate_attended_transfer(call_id.to_string(), "sip:consult@local".to_string(), None)
+            .await
+            .expect("initiate should succeed");
+
+        let consult_id = tx
+            .consultation_call_id
+            .clone()
+            .expect("consultation_call_id must be set");
+
+        register_talking_call(&registry, &consult_id);
+
+        let result = ctrl
+            .complete_attended_transfer(call_id.to_string(), consult_id.clone())
+            .await;
+        assert!(
+            result.is_ok(),
+            "complete_attended_transfer should succeed, got {:?}",
+            result
+        );
+        let completed = result.unwrap();
+        assert_eq!(completed.status, TransferStatus::Completed);
+
+        // Drain commands: the first is Hold (from initiate), the second is Bridge.
+        let mut bridge_received = false;
+        while let Ok(cmd) = cmd_rx.try_recv() {
+            if let CallCommand::Bridge { leg_a, leg_b, .. } = &cmd {
+                assert_eq!(leg_a.as_str(), call_id);
+                assert_eq!(leg_b.as_str(), consult_id);
+                bridge_received = true;
+            }
+        }
+        assert!(bridge_received, "Bridge command must be dispatched");
+    }
+
+    /// complete_attended_transfer with unknown consultation_call_id returns InvalidState.
+    #[tokio::test]
+    async fn test_complete_attended_transfer_invalid_leg() {
+        let (ctrl, registry) = make_controller_with_registry();
+        let call_id = "call-att-complete-inv";
+        register_talking_call(&registry, call_id);
+
+        let _tx = ctrl
+            .initiate_attended_transfer(call_id.to_string(), "sip:consult@local".to_string(), None)
+            .await
+            .expect("initiate should succeed");
+
+        let result = ctrl
+            .complete_attended_transfer(call_id.to_string(), "totally-wrong-consult-id".to_string())
+            .await;
+        assert!(
+            matches!(result, Err(TransferFailureReason::InvalidState)),
+            "should be InvalidState, got {:?}",
+            result
+        );
+    }
+
+    /// cancel_attended_transfer with valid consultation_call_id returns Ok and
+    /// marks the transaction Canceled.
+    #[tokio::test]
+    async fn test_cancel_attended_transfer_valid() {
+        let (ctrl, registry) = make_controller_with_registry();
+        let call_id = "call-att-cancel-001";
+        register_talking_call(&registry, call_id);
+
+        let tx = ctrl
+            .initiate_attended_transfer(call_id.to_string(), "sip:consult@local".to_string(), None)
+            .await
+            .expect("initiate should succeed");
+
+        let consult_id = tx
+            .consultation_call_id
+            .clone()
+            .expect("consultation_call_id must be set");
+
+        let result = ctrl.cancel_attended_transfer(consult_id.clone()).await;
+        assert!(
+            result.is_ok(),
+            "cancel_attended_transfer should succeed, got {:?}",
+            result
+        );
+        assert_eq!(result.unwrap().status, TransferStatus::Canceled);
+    }
+
+    /// cancel_attended_transfer with unknown consultation_call_id returns InvalidState.
+    #[tokio::test]
+    async fn test_cancel_attended_transfer_invalid_leg() {
+        let ctrl = make_controller();
+        let result = ctrl
+            .cancel_attended_transfer("no-such-consult".to_string())
+            .await;
+        assert!(
+            matches!(result, Err(TransferFailureReason::InvalidState)),
+            "should be InvalidState, got {:?}",
+            result
+        );
+    }
+
+    // ────────────────────────────────────────────────────────────────────────────
+    // fallback_to_3pcc
+    // ────────────────────────────────────────────────────────────────────────────
+
+    /// fallback_to_3pcc switches the transaction mode to ThreePccFallback and
+    /// sets status to NotifyTrying.
+    #[tokio::test]
+    async fn test_fallback_to_3pcc_mode_transition() {
+        let (ctrl, registry) = make_controller_with_registry();
+        let call_id = "call-3pcc-fallback-001";
+        register_talking_call(&registry, call_id);
+
+        let tx = ctrl
+            .initiate_blind_transfer(call_id.to_string(), "sip:t@local".to_string())
+            .await
+            .expect("initiate should succeed");
+
+        let result = ctrl.fallback_to_3pcc(tx.transfer_id.clone()).await;
+        assert!(result.is_some());
+        let updated = result.unwrap();
+        assert_eq!(updated.mode, TransferMode::ThreePccFallback);
+        assert_eq!(updated.status, TransferStatus::NotifyTrying);
+    }
+
+    /// fallback_to_3pcc returns None for unknown transfer_id.
+    #[tokio::test]
+    async fn test_fallback_to_3pcc_unknown_id() {
+        let ctrl = make_controller();
+        let result = ctrl.fallback_to_3pcc("no-such-id".to_string()).await;
+        assert!(result.is_none());
+    }
+
+    /// fallback_to_3pcc with 3PCC disabled emits a failure event and marks Failed.
+    #[tokio::test]
+    async fn test_fallback_to_3pcc_disabled_marks_failed() {
+        let registry = Arc::new(ActiveProxyCallRegistry::new());
+        let gateway = Arc::new(RwLock::new(crate::rwi::gateway::RwiGateway::new()));
+        let mut config = TransferConfig::default();
+        config.three_pcc_fallback_enabled = false;
+        let ctrl = TransferController::new(config, Arc::clone(&registry), gateway);
+
+        let call_id = "call-3pcc-disabled";
+        register_talking_call(&registry, call_id);
+
+        let tx = ctrl
+            .initiate_blind_transfer(call_id.to_string(), "sip:t@local".to_string())
+            .await
+            .expect("initiate should succeed");
+
+        let result = ctrl.fallback_to_3pcc(tx.transfer_id.clone()).await;
+        assert!(result.is_some());
+        let updated = result.unwrap();
+        assert!(
+            matches!(updated.status, TransferStatus::Failed(_)),
+            "3PCC disabled fallback should mark Failed, got {:?}",
+            updated.status
+        );
+    }
+
+    /// Race condition: call is hung up (removed from registry) after transfer is initiated
+    /// but before complete_attended_transfer is called. Should return InvalidState.
+    #[tokio::test]
+    async fn test_complete_attended_transfer_after_hangup_returns_invalid_state() {
+        let (ctrl, registry) = make_controller_with_registry();
+        let call_id = "call-race-001";
+        register_talking_call(&registry, call_id);
+
+        let tx = ctrl
+            .initiate_attended_transfer(call_id.to_string(), "sip:consult@local".to_string(), None)
+            .await
+            .expect("initiate should succeed");
+
+        let consult_id = tx
+            .consultation_call_id
+            .clone()
+            .expect("consultation_call_id must be set");
+
+        // Simulate hangup by removing the original call from registry
+        registry.remove(call_id);
+
+        // complete_attended_transfer should fail because original call is gone
+        let result = ctrl
+            .complete_attended_transfer(call_id.to_string(), consult_id.clone())
+            .await;
+        assert!(
+            matches!(result, Err(TransferFailureReason::InvalidState)),
+            "should be InvalidState after hangup, got {:?}",
+            result
+        );
+    }
+
+    /// Race condition: call is hung up (removed from registry) before execute_blind_transfer.
+    #[tokio::test]
+    async fn test_execute_blind_transfer_after_hangup_returns_invalid_state() {
+        let (ctrl, registry) = make_controller_with_registry();
+        let call_id = "call-race-blind-001";
+        let target = "sip:target@local";
+        register_talking_call(&registry, call_id);
+
+        // Simulate hangup by removing the original call from registry
+        registry.remove(call_id);
+
+        // execute_blind_transfer should fail because original call is gone
+        let result = ctrl
+            .execute_blind_transfer(call_id.to_string(), target.to_string())
+            .await;
+        assert!(
+            matches!(result, Err(TransferFailureReason::InvalidState)),
+            "should be InvalidState after hangup, got {:?}",
+            result
+        );
     }
 }

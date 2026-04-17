@@ -147,7 +147,8 @@ impl ExecutionContext {
             }
             CallCommand::SupervisorListen { .. }
             | CallCommand::SupervisorWhisper { .. }
-            | CallCommand::SupervisorBarge { .. } => {
+            | CallCommand::SupervisorBarge { .. }
+            | CallCommand::SupervisorTakeover { .. } => {
                 if self.media_profile.can_supervise() {
                     MediaCapabilityCheck::Allowed
                 } else {
@@ -221,7 +222,11 @@ pub trait CommandExecutor: Send + Sync {
     /// # Returns
     /// * `Ok(CommandResult)` - Command execution result
     /// * `Err` - System error (not command failure)
-    async fn execute(&self, ctx: ExecutionContext, command: CallCommand) -> anyhow::Result<CommandResult>;
+    async fn execute(
+        &self,
+        ctx: ExecutionContext,
+        command: CallCommand,
+    ) -> anyhow::Result<CommandResult>;
 
     /// Check if a session exists
     async fn session_exists(&self, session_id: &str) -> bool;
@@ -260,20 +265,23 @@ mod tests {
 
     #[test]
     fn execution_context_media_check_signaling() {
-        let ctx = ExecutionContext::new("session-1")
-            .with_media_profile(MediaRuntimeProfile::degraded());
+        let ctx =
+            ExecutionContext::new("session-1").with_media_profile(MediaRuntimeProfile::degraded());
 
         // Signaling-only commands should always be allowed
         let cmd = CallCommand::Answer {
             leg_id: LegId::new("leg-1"),
         };
-        assert!(matches!(ctx.check_media_capability(&cmd), MediaCapabilityCheck::Allowed));
+        assert!(matches!(
+            ctx.check_media_capability(&cmd),
+            MediaCapabilityCheck::Allowed
+        ));
     }
 
     #[test]
     fn execution_context_media_check_play_bypass() {
-        let ctx = ExecutionContext::new("session-1")
-            .with_media_profile(MediaRuntimeProfile::degraded());
+        let ctx =
+            ExecutionContext::new("session-1").with_media_profile(MediaRuntimeProfile::degraded());
 
         let cmd = CallCommand::Play {
             leg_id: None,
@@ -291,8 +299,8 @@ mod tests {
 
     #[test]
     fn execution_context_media_check_record_bypass() {
-        let ctx = ExecutionContext::new("session-1")
-            .with_media_profile(MediaRuntimeProfile::degraded());
+        let ctx =
+            ExecutionContext::new("session-1").with_media_profile(MediaRuntimeProfile::degraded());
 
         let cmd = CallCommand::StartRecording {
             config: crate::call::domain::RecordConfig {
@@ -313,8 +321,8 @@ mod tests {
 
     #[test]
     fn execution_context_media_check_record_anchored() {
-        let ctx = ExecutionContext::new("session-1")
-            .with_media_profile(MediaRuntimeProfile::default()); // Anchored by default
+        let ctx =
+            ExecutionContext::new("session-1").with_media_profile(MediaRuntimeProfile::default()); // Anchored by default
 
         let cmd = CallCommand::StartRecording {
             config: crate::call::domain::RecordConfig {
@@ -325,6 +333,9 @@ mod tests {
             },
         };
 
-        assert!(matches!(ctx.check_media_capability(&cmd), MediaCapabilityCheck::Allowed));
+        assert!(matches!(
+            ctx.check_media_capability(&cmd),
+            MediaCapabilityCheck::Allowed
+        ));
     }
 }

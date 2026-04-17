@@ -1,5 +1,5 @@
 // E2E tests for Event Replay & Recovery
-// 
+//
 // These tests verify:
 // 1. Session resume returns cached events after disconnect
 // 2. Call resume returns call-specific events
@@ -168,11 +168,11 @@ fn req(action: &str, params: serde_json::Value) -> (String, String) {
 #[tokio::test]
 async fn test_full_session_resume_flow() {
     let (url, gateway, _reg) = start_test_server().await;
-    
+
     // First connection - subscribe and generate events
     let session_events = {
         let mut ws = connect(&url).await;
-        
+
         // Subscribe to context
         let (_, json) = req(
             "session.subscribe",
@@ -180,7 +180,7 @@ async fn test_full_session_resume_flow() {
         );
         let v = send_recv(&mut ws, &json).await;
         assert_eq!(v["status"], "success");
-        
+
         // Push some events via gateway
         {
             let gw = gateway.read().await;
@@ -201,40 +201,40 @@ async fn test_full_session_resume_flow() {
                     call_id: "resume-call-1".to_string(),
                 },
             ];
-            
+
             for event in events {
                 gw.fan_out_event_to_context("resume-test", &event, &"resume-call-1".to_string());
             }
         }
-        
+
         // Give time for events to be cached
         tokio::time::sleep(Duration::from_millis(100)).await;
-        
+
         // Get current sequence before disconnect
         let (action_id, json) = req("session.resume", serde_json::json!({}));
         let v = send_recv_matching(&mut ws, &json, &action_id).await;
         assert_eq!(v["status"], "success", "session.resume should succeed");
         let initial_count = v["data"]["replayed_count"].as_u64().unwrap();
-        
+
         ws.close(None).await.unwrap();
         initial_count
     };
-    
+
     // Wait for disconnect to complete
     tokio::time::sleep(Duration::from_millis(100)).await;
-    
+
     // Second connection - resume session
     {
         let mut ws = connect(&url).await;
-        
+
         // Resume with no last_sequence (should get all cached events)
         let (_, json) = req("session.resume", serde_json::json!({}));
         let v = send_recv(&mut ws, &json).await;
-        
+
         assert_eq!(v["status"], "success");
         let replayed_count = v["data"]["replayed_count"].as_u64().unwrap();
         let current_sequence = v["data"]["current_sequence"].as_u64().unwrap();
-        
+
         // Should have at least the events we pushed
         assert!(
             replayed_count >= session_events,
@@ -242,7 +242,7 @@ async fn test_full_session_resume_flow() {
             session_events,
             replayed_count
         );
-        
+
         // Current sequence should be >= replayed count
         assert!(
             current_sequence >= replayed_count,
@@ -250,11 +250,11 @@ async fn test_full_session_resume_flow() {
             current_sequence,
             replayed_count
         );
-        
+
         // Verify event structure
         let events = v["data"]["events"].as_array().unwrap();
         assert!(!events.is_empty(), "Should have events");
-        
+
         // Verify each event has required fields
         for event in events {
             assert!(event["sequence"].is_u64(), "Event should have sequence");
@@ -262,7 +262,7 @@ async fn test_full_session_resume_flow() {
             assert!(event["call_id"].is_string(), "Event should have call_id");
             assert!(event["event"].is_object(), "Event should have event data");
         }
-        
+
         ws.close(None).await.unwrap();
     }
 }
@@ -275,7 +275,7 @@ async fn test_full_session_resume_flow() {
 async fn test_incremental_resume_with_sequence() {
     let (url, gateway, _reg) = start_test_server().await;
     let mut ws = connect(&url).await;
-    
+
     // Push events to gateway cache
     {
         let gw = gateway.read().await;
@@ -286,17 +286,17 @@ async fn test_incremental_resume_with_sequence() {
             gw.cache_event(&format!("seq-call-{}", i), &event);
         }
     }
-    
+
     // Resume without sequence (get all)
     let (_, json) = req("session.resume", serde_json::json!({}));
     let v = send_recv(&mut ws, &json).await;
     let total_count = v["data"]["replayed_count"].as_u64().unwrap();
-    
+
     // Resume from sequence 2 (should get events after sequence 2)
     let (_, json) = req("session.resume", serde_json::json!({"last_sequence": 2}));
     let v = send_recv(&mut ws, &json).await;
     let partial_count = v["data"]["replayed_count"].as_u64().unwrap();
-    
+
     // Partial count should be less than total
     assert!(
         partial_count < total_count,
@@ -304,7 +304,7 @@ async fn test_incremental_resume_with_sequence() {
         partial_count,
         total_count
     );
-    
+
     ws.close(None).await.unwrap();
 }
 
@@ -316,64 +316,70 @@ async fn test_incremental_resume_with_sequence() {
 async fn test_call_resume_filters_by_call_id() {
     let (url, gateway, _reg) = start_test_server().await;
     let mut ws = connect(&url).await;
-    
+
     // Push events for multiple calls
     {
         let gw = gateway.read().await;
-        
+
         // Call A events
-        gw.cache_event(&"call-a".to_string(), &rustpbx::rwi::RwiEvent::CallRinging {
-            call_id: "call-a".to_string(),
-        });
-        gw.cache_event(&"call-a".to_string(), &rustpbx::rwi::RwiEvent::CallAnswered {
-            call_id: "call-a".to_string(),
-        });
-        
+        gw.cache_event(
+            &"call-a".to_string(),
+            &rustpbx::rwi::RwiEvent::CallRinging {
+                call_id: "call-a".to_string(),
+            },
+        );
+        gw.cache_event(
+            &"call-a".to_string(),
+            &rustpbx::rwi::RwiEvent::CallAnswered {
+                call_id: "call-a".to_string(),
+            },
+        );
+
         // Call B events
-        gw.cache_event(&"call-b".to_string(), &rustpbx::rwi::RwiEvent::CallRinging {
-            call_id: "call-b".to_string(),
-        });
-        gw.cache_event(&"call-b".to_string(), &rustpbx::rwi::RwiEvent::CallBridged {
-            leg_a: "call-b".to_string(),
-            leg_b: "call-c".to_string(),
-        });
+        gw.cache_event(
+            &"call-b".to_string(),
+            &rustpbx::rwi::RwiEvent::CallRinging {
+                call_id: "call-b".to_string(),
+            },
+        );
+        gw.cache_event(
+            &"call-b".to_string(),
+            &rustpbx::rwi::RwiEvent::CallBridged {
+                leg_a: "call-b".to_string(),
+                leg_b: "call-c".to_string(),
+            },
+        );
     }
-    
+
     // Resume call-a specifically
-    let (_, json) = req(
-        "call.resume",
-        serde_json::json!({"call_id": "call-a"}),
-    );
+    let (_, json) = req("call.resume", serde_json::json!({"call_id": "call-a"}));
     let v = send_recv(&mut ws, &json).await;
-    
+
     assert_eq!(v["status"], "success");
     assert_eq!(v["data"]["call_id"], "call-a");
-    
+
     let events = v["data"]["events"].as_array().unwrap();
     assert_eq!(events.len(), 2, "Should have exactly 2 events for call-a");
-    
+
     // Verify all events are for call-a
     for event in events {
         assert_eq!(event["call_id"], "call-a");
     }
-    
+
     // Resume call-b
-    let (_, json) = req(
-        "call.resume",
-        serde_json::json!({"call_id": "call-b"}),
-    );
+    let (_, json) = req("call.resume", serde_json::json!({"call_id": "call-b"}));
     let v = send_recv(&mut ws, &json).await;
-    
+
     let events = v["data"]["events"].as_array().unwrap();
     assert_eq!(events.len(), 2, "Should have exactly 2 events for call-b");
-    
+
     // Verify one event is bridged (checking event object contains bridged data)
     let has_bridged = events.iter().any(|e| {
         let event_json = serde_json::to_string(&e["event"]).unwrap_or_default();
         event_json.contains("bridged") || e["event"]["leg_a"].is_string()
     });
     assert!(has_bridged, "Should have a bridged event: {:?}", events);
-    
+
     ws.close(None).await.unwrap();
 }
 
@@ -382,20 +388,23 @@ async fn test_call_resume_filters_by_call_id() {
 async fn test_call_resume_nonexistent_call() {
     let (url, _gw, _reg) = start_test_server().await;
     let mut ws = connect(&url).await;
-    
+
     let (_, json) = req(
         "call.resume",
         serde_json::json!({"call_id": "non-existent-call"}),
     );
     let v = send_recv(&mut ws, &json).await;
-    
+
     assert_eq!(v["status"], "success");
     assert_eq!(v["data"]["call_id"], "non-existent-call");
-    
+
     let events = v["data"]["events"].as_array().unwrap();
-    assert!(events.is_empty(), "Should have no events for non-existent call");
+    assert!(
+        events.is_empty(),
+        "Should have no events for non-existent call"
+    );
     assert_eq!(v["data"]["replayed_count"], 0);
-    
+
     ws.close(None).await.unwrap();
 }
 
@@ -405,7 +414,7 @@ async fn test_call_resume_nonexistent_call() {
 async fn test_event_sequence_monotonicity() {
     let (url, gateway, _reg) = start_test_server().await;
     let mut ws = connect(&url).await;
-    
+
     // Push events sequentially
     {
         let gw = gateway.read().await;
@@ -417,14 +426,14 @@ async fn test_event_sequence_monotonicity() {
             gw.cache_event(&"dtmf-call".to_string(), &event);
         }
     }
-    
+
     // Resume and check sequence numbers
     let (_, json) = req("call.resume", serde_json::json!({"call_id": "dtmf-call"}));
     let v = send_recv(&mut ws, &json).await;
-    
+
     let events = v["data"]["events"].as_array().unwrap();
     assert!(!events.is_empty());
-    
+
     // Check that sequences are strictly increasing
     let mut last_seq: u64 = 0;
     for event in events {
@@ -437,6 +446,6 @@ async fn test_event_sequence_monotonicity() {
         );
         last_seq = seq;
     }
-    
+
     ws.close(None).await.unwrap();
 }

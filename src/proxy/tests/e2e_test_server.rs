@@ -274,7 +274,9 @@ impl E2eTestServer {
     }
 
     /// Get active calls from registry
-    pub fn get_active_calls(&self) -> Vec<crate::proxy::active_call_registry::ActiveProxyCallEntry> {
+    pub fn get_active_calls(
+        &self,
+    ) -> Vec<crate::proxy::active_call_registry::ActiveProxyCallEntry> {
         self.registry.list_recent(100)
     }
 

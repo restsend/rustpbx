@@ -420,12 +420,30 @@ impl Addon for ArchiveAddon {
         // Re-creating router with middleware logic
         let mut protected = Router::new()
             .route(&format!("{}/archive", base_path), get(handlers::ui_index))
-            .route(&format!("{}/archive/list", api_prefix), get(handlers::list_archives))
-            .route(&format!("{}/archive/delete", api_prefix), post(handlers::delete_archive))
-            .route(&format!("{}/archive/config", api_prefix), post(handlers::update_config))
-            .route(&format!("{}/archive/count", api_prefix), get(handlers::count_records))
-            .route(&format!("{}/archive/manual", api_prefix), post(handlers::manual_archive))
-            .route(&format!("{}/archive/task/{{task_id}}", api_prefix), get(handlers::task_status));
+            .route(
+                &format!("{}/archive/list", api_prefix),
+                get(handlers::list_archives),
+            )
+            .route(
+                &format!("{}/archive/delete", api_prefix),
+                post(handlers::delete_archive),
+            )
+            .route(
+                &format!("{}/archive/config", api_prefix),
+                post(handlers::update_config),
+            )
+            .route(
+                &format!("{}/archive/count", api_prefix),
+                get(handlers::count_records),
+            )
+            .route(
+                &format!("{}/archive/manual", api_prefix),
+                post(handlers::manual_archive),
+            )
+            .route(
+                &format!("{}/archive/task/{{task_id}}", api_prefix),
+                get(handlers::task_status),
+            );
 
         #[cfg(feature = "console")]
         if let Some(console_state) = state.console.clone() {

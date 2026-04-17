@@ -19,7 +19,7 @@
 
 use crate::call::adapters::{console_to_call_command, rwi_to_call_command};
 use crate::call::domain::CallCommand;
-use crate::call::runtime::{CommandResult, ExecutionContext, MediaCapabilityCheck, CommandSource};
+use crate::call::runtime::{CommandResult, CommandSource, ExecutionContext, MediaCapabilityCheck};
 use crate::console::handlers::call_control::CallCommandPayload;
 use crate::proxy::active_call_registry::ActiveProxyCallRegistry;
 use crate::rwi::session::RwiCommandPayload;
@@ -51,8 +51,7 @@ pub fn dispatch_rwi_command(
 
     // Step 2: Create execution context
     let session_id = session_id.unwrap_or_default();
-    let ctx = ExecutionContext::new(session_id)
-        .with_source(CommandSource::Rwi);
+    let ctx = ExecutionContext::new(session_id).with_source(CommandSource::Rwi);
 
     // Step 3: Check media capabilities
     match ctx.check_media_capability(&command) {
@@ -80,8 +79,7 @@ pub fn dispatch_console_command(
     let command = console_to_call_command(payload, session_id)?;
 
     // Step 2: Create execution context
-    let ctx = ExecutionContext::new(session_id)
-        .with_source(CommandSource::Console);
+    let ctx = ExecutionContext::new(session_id).with_source(CommandSource::Console);
 
     // Step 3: Check media capabilities
     match ctx.check_media_capability(&command) {
@@ -106,8 +104,7 @@ pub fn dispatch_call_command(
     source: CommandSource,
 ) -> anyhow::Result<CommandResult> {
     // Step 1: Create execution context
-    let ctx = ExecutionContext::new(session_id)
-        .with_source(source);
+    let ctx = ExecutionContext::new(session_id).with_source(source);
 
     // Step 2: Check media capabilities
     match ctx.check_media_capability(&command) {

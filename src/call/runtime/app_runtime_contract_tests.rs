@@ -18,9 +18,7 @@ mod tests {
     fn ivr_requires_full_capability() {
         let desc = AppDescriptor::ivr();
         assert!(!desc.required_capabilities.is_empty());
-        assert!(desc
-            .required_capabilities
-            .contains(&MediaCapability::Full));
+        assert!(desc.required_capabilities.contains(&MediaCapability::Full));
     }
 
     /// Test that signaling-only apps work in bypass mode
@@ -62,10 +60,7 @@ mod tests {
         let anchored_profile = MediaRuntimeProfile::from_media_path(MediaPathMode::Anchored);
 
         let result = desc.check_capabilities(&[anchored_profile.capability]);
-        assert!(
-            result.is_satisfied(),
-            "IVR should work in anchored mode"
-        );
+        assert!(result.is_satisfied(), "IVR should work in anchored mode");
     }
 
     /// Test voicemail capability requirements
@@ -264,9 +259,7 @@ mod tests {
         let full = MediaCapability::Full;
 
         let signaling_desc = AppDescriptor::signaling_only();
-        assert!(signaling_desc
-            .check_capabilities(&[full])
-            .is_satisfied());
+        assert!(signaling_desc.check_capabilities(&[full]).is_satisfied());
 
         // Even apps requiring Full can be satisfied by Full
         let ivr_desc = AppDescriptor::ivr();
@@ -279,13 +272,11 @@ mod tests {
         let limited = MediaCapability::Limited;
 
         let signaling_desc = AppDescriptor::signaling_only();
-        assert!(signaling_desc
-            .check_capabilities(&[limited])
-            .is_satisfied());
+        assert!(signaling_desc.check_capabilities(&[limited]).is_satisfied());
 
         // Create a limited app descriptor
-        let limited_desc = AppDescriptor::new("limited_app")
-            .with_capabilities(vec![MediaCapability::Limited]);
+        let limited_desc =
+            AppDescriptor::new("limited_app").with_capabilities(vec![MediaCapability::Limited]);
         assert!(limited_desc.check_capabilities(&[limited]).is_satisfied());
 
         // Limited cannot satisfy Full requirements

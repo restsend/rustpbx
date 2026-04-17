@@ -416,8 +416,13 @@ mod tests {
 
         let roles = build_sip_leg_roles(&snapshot);
 
-        assert_eq!(roles.get("caller-call-id").map(String::as_str), Some("caller"));
-        assert_eq!(roles.get("callee-call-id").map(String::as_str), Some("callee"));
+        assert_eq!(
+            roles.get("caller-call-id").map(String::as_str),
+            Some("caller")
+        );
+        assert_eq!(
+            roles.get("callee-call-id").map(String::as_str),
+            Some("callee")
+        );
     }
-
 }

@@ -27,7 +27,11 @@ async fn ws_send_recv(ws: &mut WsStream, json: &str) -> serde_json::Value {
 }
 
 /// Send a request with an auto-generated action_id and wait for the matching response.
-async fn ws_send_recv_with_id(ws: &mut WsStream, action: &str, params: serde_json::Value) -> serde_json::Value {
+async fn ws_send_recv_with_id(
+    ws: &mut WsStream,
+    action: &str,
+    params: serde_json::Value,
+) -> serde_json::Value {
     let action_id = Uuid::new_v4().to_string();
     let request = serde_json::json!({
         "rwi": "1.0",
@@ -70,7 +74,11 @@ async fn recv_next(ws: &mut WsStream) -> serde_json::Value {
 }
 
 /// Wait for a specific event type (snake_case variant name)
-async fn wait_for_event(ws: &mut WsStream, event_type: &str, max_wait_secs: u64) -> serde_json::Value {
+async fn wait_for_event(
+    ws: &mut WsStream,
+    event_type: &str,
+    max_wait_secs: u64,
+) -> serde_json::Value {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(max_wait_secs);
     loop {
         let remaining = deadline - tokio::time::Instant::now();
@@ -85,6 +93,32 @@ async fn wait_for_event(ws: &mut WsStream, event_type: &str, max_wait_secs: u64)
             // RWI events are serialized as {event_type: {...}}, not {event: "type"}
             if json.get(event_type).is_some() {
                 return json;
+            }
+        }
+    }
+}
+
+/// Wait for the first matching event among the provided event types.
+async fn wait_for_any_event(
+    ws: &mut WsStream,
+    event_types: &[&str],
+    max_wait_secs: u64,
+) -> (String, serde_json::Value) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(max_wait_secs);
+    loop {
+        let remaining = deadline - tokio::time::Instant::now();
+        let msg = timeout(remaining, ws.next())
+            .await
+            .expect("timeout waiting for any expected event")
+            .expect("stream closed")
+            .expect("ws error");
+
+        if let Message::Text(t) = msg {
+            let json: serde_json::Value = serde_json::from_str(&t).expect("invalid json");
+            for event_type in event_types {
+                if json.get(*event_type).is_some() {
+                    return ((*event_type).to_string(), json);
+                }
             }
         }
     }
@@ -121,7 +155,8 @@ async fn test_refer_blind_transfer_success() {
         &mut ws,
         "session.subscribe",
         serde_json::json!({"contexts": ["default"]}),
-    ).await;
+    )
+    .await;
     assert_eq!(resp["status"], "success");
 
     // Step 1: Originate call to Bob
@@ -131,7 +166,8 @@ async fn test_refer_blind_transfer_success() {
         &mut ws,
         "call.originate",
         serde_json::json!({"call_id": call_id, "destination": dest, "caller_id": "alice"}),
-    ).await;
+    )
+    .await;
     assert_eq!(resp["status"], "success", "originate failed: {:?}", resp);
 
     // Step 2: Wait for call answered (increased timeout for CI)
@@ -144,11 +180,29 @@ async fn test_refer_blind_transfer_success() {
         &mut ws,
         "call.transfer",
         serde_json::json!({"call_id": call_id, "target": charlie_dest}),
-    ).await;
+    )
+    .await;
 
-    // Note: Current implementation returns success immediately (command accepted)
-    // In full implementation, should wait for transfer completion
     println!("Transfer response: {:?}", resp);
+
+    // Step 4: Verify transfer emits at least one transfer-related event.
+    let (event_type, event) = wait_for_any_event(
+        &mut ws,
+        &[
+            "call_transfer_accepted",
+            "call_transferred",
+            "call_transfer_failed",
+        ],
+        10,
+    )
+    .await;
+    if event_type == "call_transfer_accepted" {
+        assert_eq!(event["call_transfer_accepted"]["call_id"], call_id);
+    } else if event_type == "call_transferred" {
+        assert_eq!(event["call_transferred"]["call_id"], call_id);
+    } else {
+        assert_eq!(event["call_transfer_failed"]["call_id"], call_id);
+    }
 
     // Cleanup
     bob.stop();
@@ -185,7 +239,8 @@ async fn test_refer_with_3pcc_fallback() {
         &mut ws,
         "session.subscribe",
         serde_json::json!({"contexts": ["default"]}),
-    ).await;
+    )
+    .await;
     assert_eq!(resp["status"], "success");
 
     // Step 1: Originate call to Bob
@@ -195,7 +250,8 @@ async fn test_refer_with_3pcc_fallback() {
         &mut ws,
         "call.originate",
         serde_json::json!({"call_id": call_id, "destination": dest, "caller_id": "alice"}),
-    ).await;
+    )
+    .await;
     assert_eq!(resp["status"], "success", "originate failed: {:?}", resp);
 
     // Step 2: Wait for call answered
@@ -208,21 +264,179 @@ async fn test_refer_with_3pcc_fallback() {
         &mut ws,
         "call.transfer",
         serde_json::json!({"call_id": call_id, "target": charlie_dest}),
-    ).await;
+    )
+    .await;
 
-    // The transfer command should be accepted (async processing)
     println!("Transfer response: {:?}", resp);
 
-    // Wait a bit for REFER to be processed and rejected
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    // After transfer request, we should eventually see at least one transfer event.
+    let (event_type, event) = wait_for_any_event(
+        &mut ws,
+        &[
+            "call_transfer_accepted",
+            "call_transferred",
+            "call_transfer_failed",
+        ],
+        10,
+    )
+    .await;
+    if event_type == "call_transfer_accepted" {
+        assert_eq!(event["call_transfer_accepted"]["call_id"], call_id);
+    } else if event_type == "call_transferred" {
+        assert_eq!(event["call_transferred"]["call_id"], call_id);
+    } else {
+        assert_eq!(event["call_transfer_failed"]["call_id"], call_id);
+    }
 
     // Cleanup
     bob.stop();
     charlie.stop();
 }
 
+#[tokio::test]
+async fn test_refer_replace_transfer_action() {
+    let _ = tracing_subscriber::fmt::try_init();
+    let sip_port = portpicker::pick_unused_port().expect("no free port");
+    let pbx = TestPbx::start(sip_port).await;
+    let rwi_url = pbx.rwi_url.clone();
+
+    let bob_port = portpicker::pick_unused_port().expect("no free port");
+    let bob = TestUa::callee(bob_port, 1).await;
+
+    let charlie_port = portpicker::pick_unused_port().expect("no free port");
+    let charlie = TestUa::callee(charlie_port, 1).await;
+
+    let mut ws = ws_connect(&rwi_url).await;
+
+    let resp = ws_send_recv_with_id(
+        &mut ws,
+        "session.subscribe",
+        serde_json::json!({"contexts": ["default"]}),
+    )
+    .await;
+    assert_eq!(resp["status"], "success");
+
+    let call_id = Uuid::new_v4().to_string();
+    let dest = format!("sip:bob@127.0.0.1:{}", bob_port);
+    let resp = ws_send_recv_with_id(
+        &mut ws,
+        "call.originate",
+        serde_json::json!({"call_id": call_id, "destination": dest, "caller_id": "alice"}),
+    )
+    .await;
+    assert_eq!(resp["status"], "success", "originate failed: {:?}", resp);
+
+    let event = wait_for_event(&mut ws, "call_answered", 15).await;
+    assert_eq!(event["call_answered"]["call_id"], call_id);
+
+    let charlie_dest = format!("sip:charlie@127.0.0.1:{}", charlie_port);
+    let resp = ws_send_recv_with_id(
+        &mut ws,
+        "call.transfer.replace",
+        serde_json::json!({"call_id": call_id, "target": charlie_dest}),
+    )
+    .await;
+    assert_eq!(
+        resp["status"], "success",
+        "replace transfer command failed: {:?}",
+        resp
+    );
+
+    let (event_type, event) = wait_for_any_event(
+        &mut ws,
+        &[
+            "call_transfer_accepted",
+            "call_transferred",
+            "call_transfer_failed",
+        ],
+        10,
+    )
+    .await;
+    if event_type == "call_transfer_accepted" {
+        assert_eq!(event["call_transfer_accepted"]["call_id"], call_id);
+    } else if event_type == "call_transferred" {
+        assert_eq!(event["call_transferred"]["call_id"], call_id);
+    } else {
+        assert_eq!(event["call_transfer_failed"]["call_id"], call_id);
+    }
+
+    bob.stop();
+    charlie.stop();
+}
+
+#[tokio::test]
+async fn test_refer_replace_transfer_rejected() {
+    let _ = tracing_subscriber::fmt::try_init();
+    let sip_port = portpicker::pick_unused_port().expect("no free port");
+    let pbx = TestPbx::start(sip_port).await;
+    let rwi_url = pbx.rwi_url.clone();
+
+    let bob_port = portpicker::pick_unused_port().expect("no free port");
+    let bob = TestUa::callee_with_refer_reject(bob_port, 1, 486).await;
+
+    let charlie_port = portpicker::pick_unused_port().expect("no free port");
+    let charlie = TestUa::callee(charlie_port, 1).await;
+
+    let mut ws = ws_connect(&rwi_url).await;
+
+    let resp = ws_send_recv_with_id(
+        &mut ws,
+        "session.subscribe",
+        serde_json::json!({"contexts": ["default"]}),
+    )
+    .await;
+    assert_eq!(resp["status"], "success");
+
+    let call_id = Uuid::new_v4().to_string();
+    let dest = format!("sip:bob@127.0.0.1:{}", bob_port);
+    let resp = ws_send_recv_with_id(
+        &mut ws,
+        "call.originate",
+        serde_json::json!({"call_id": call_id, "destination": dest, "caller_id": "alice"}),
+    )
+    .await;
+    assert_eq!(resp["status"], "success", "originate failed: {:?}", resp);
+
+    let event = wait_for_event(&mut ws, "call_answered", 15).await;
+    assert_eq!(event["call_answered"]["call_id"], call_id);
+
+    let charlie_dest = format!("sip:charlie@127.0.0.1:{}", charlie_port);
+    let resp = ws_send_recv_with_id(
+        &mut ws,
+        "call.transfer.replace",
+        serde_json::json!({"call_id": call_id, "target": charlie_dest}),
+    )
+    .await;
+    assert_eq!(
+        resp["status"], "success",
+        "replace transfer command failed: {:?}",
+        resp
+    );
+
+    let (event_type, event) = wait_for_any_event(
+        &mut ws,
+        &[
+            "call_transfer_accepted",
+            "call_transferred",
+            "call_transfer_failed",
+        ],
+        10,
+    )
+    .await;
+    if event_type == "call_transfer_accepted" {
+        assert_eq!(event["call_transfer_accepted"]["call_id"], call_id);
+    } else if event_type == "call_transferred" {
+        assert_eq!(event["call_transferred"]["call_id"], call_id);
+    } else {
+        assert_eq!(event["call_transfer_failed"]["call_id"], call_id);
+    }
+
+    bob.stop();
+    charlie.stop();
+}
+
 /// Test attended transfer (consultation transfer)
-/// 
+///
 /// Scenario:
 /// 1. Alice calls Bob, Bob answers
 /// 2. Alice places Bob on hold
@@ -230,7 +444,141 @@ async fn test_refer_with_3pcc_fallback() {
 /// 4. Charlie answers
 /// 5. Alice completes transfer (Bob <-> Charlie)
 #[tokio::test]
-#[ignore = "Requires full attended transfer implementation - TODO"]
 async fn test_attended_transfer() {
-    // TODO: Implement full attended transfer test
+    let _ = tracing_subscriber::fmt::try_init();
+    let sip_port = portpicker::pick_unused_port().expect("no free port");
+    let pbx = TestPbx::start(sip_port).await;
+    let rwi_url = pbx.rwi_url.clone();
+
+    let bob_port = portpicker::pick_unused_port().expect("no free port");
+    let bob = TestUa::callee(bob_port, 1).await;
+
+    let mut ws = ws_connect(&rwi_url).await;
+
+    let resp = ws_send_recv_with_id(
+        &mut ws,
+        "session.subscribe",
+        serde_json::json!({"contexts": ["default"]}),
+    )
+    .await;
+    assert_eq!(resp["status"], "success");
+
+    let call_id = Uuid::new_v4().to_string();
+    let bob_dest = format!("sip:bob@127.0.0.1:{}", bob_port);
+    let resp = ws_send_recv_with_id(
+        &mut ws,
+        "call.originate",
+        serde_json::json!({"call_id": call_id, "destination": bob_dest, "caller_id": "alice"}),
+    )
+    .await;
+    assert_eq!(resp["status"], "success", "originate failed: {:?}", resp);
+
+    let event = wait_for_event(&mut ws, "call_answered", 15).await;
+    assert_eq!(event["call_answered"]["call_id"], call_id);
+
+    let attended_resp = ws_send_recv_with_id(
+        &mut ws,
+        "call.transfer.attended",
+        serde_json::json!({
+            "call_id": call_id,
+            "target": "sip:consult@127.0.0.1:5099",
+            "timeout_secs": 20
+        }),
+    )
+    .await;
+    assert_eq!(attended_resp["status"], "success");
+
+    let consultation_call_id = attended_resp["data"]["consultation_call_id"]
+        .as_str()
+        .expect("missing consultation_call_id")
+        .to_string();
+    assert!(
+        !consultation_call_id.is_empty(),
+        "consultation_call_id should not be empty"
+    );
+
+    let complete_resp = ws_send_recv_with_id(
+        &mut ws,
+        "call.transfer.complete",
+        serde_json::json!({
+            "call_id": call_id,
+            "consultation_call_id": consultation_call_id,
+        }),
+    )
+    .await;
+    assert_eq!(
+        complete_resp["status"], "success",
+        "transfer complete failed: {:?}",
+        complete_resp
+    );
+
+    bob.stop();
+}
+
+#[tokio::test]
+async fn test_attended_transfer_cancel() {
+    let _ = tracing_subscriber::fmt::try_init();
+    let sip_port = portpicker::pick_unused_port().expect("no free port");
+    let pbx = TestPbx::start(sip_port).await;
+    let rwi_url = pbx.rwi_url.clone();
+
+    let bob_port = portpicker::pick_unused_port().expect("no free port");
+    let bob = TestUa::callee(bob_port, 1).await;
+
+    let mut ws = ws_connect(&rwi_url).await;
+
+    let resp = ws_send_recv_with_id(
+        &mut ws,
+        "session.subscribe",
+        serde_json::json!({"contexts": ["default"]}),
+    )
+    .await;
+    assert_eq!(resp["status"], "success");
+
+    let call_id = Uuid::new_v4().to_string();
+    let bob_dest = format!("sip:bob@127.0.0.1:{}", bob_port);
+    let resp = ws_send_recv_with_id(
+        &mut ws,
+        "call.originate",
+        serde_json::json!({"call_id": call_id, "destination": bob_dest, "caller_id": "alice"}),
+    )
+    .await;
+    assert_eq!(resp["status"], "success", "originate failed: {:?}", resp);
+
+    let event = wait_for_event(&mut ws, "call_answered", 15).await;
+    assert_eq!(event["call_answered"]["call_id"], call_id);
+
+    let attended_resp = ws_send_recv_with_id(
+        &mut ws,
+        "call.transfer.attended",
+        serde_json::json!({
+            "call_id": call_id,
+            "target": "sip:consult-cancel@127.0.0.1:5098",
+            "timeout_secs": 20
+        }),
+    )
+    .await;
+    assert_eq!(attended_resp["status"], "success");
+
+    let consultation_call_id = attended_resp["data"]["consultation_call_id"]
+        .as_str()
+        .expect("missing consultation_call_id")
+        .to_string();
+    assert!(!consultation_call_id.is_empty());
+
+    let cancel_resp = ws_send_recv_with_id(
+        &mut ws,
+        "call.transfer.cancel",
+        serde_json::json!({
+            "consultation_call_id": consultation_call_id,
+        }),
+    )
+    .await;
+    assert_eq!(
+        cancel_resp["status"], "success",
+        "transfer cancel failed: {:?}",
+        cancel_resp
+    );
+
+    bob.stop();
 }

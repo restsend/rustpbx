@@ -133,15 +133,15 @@ fn req(action: &str, params: serde_json::Value) -> (String, String) {
 /// Test: LegTimeline structure and serialization
 #[tokio::test]
 async fn test_leg_timeline_basic_operations() {
-    use rustpbx::callrecord::{LegTimeline, LegTimelineEventType};
     use chrono::Utc;
+    use rustpbx::callrecord::{LegTimeline, LegTimelineEventType};
 
     let mut timeline = LegTimeline::new();
-    
+
     // Verify empty timeline
     assert!(timeline.is_empty());
     assert_eq!(timeline.events.len(), 0);
-    
+
     // Add events
     timeline.add_event(
         "leg-1".to_string(),
@@ -149,33 +149,33 @@ async fn test_leg_timeline_basic_operations() {
         None,
         Some(serde_json::json!({"source": "inbound"})),
     );
-    
+
     timeline.add_event(
         "leg-1".to_string(),
         LegTimelineEventType::Bridged,
         Some("leg-2".to_string()),
         None,
     );
-    
+
     timeline.add_event(
         "leg-1".to_string(),
         LegTimelineEventType::Removed,
         None,
         Some(serde_json::json!({"reason": "hangup", "code": 200})),
     );
-    
+
     // Verify non-empty
     assert!(!timeline.is_empty());
     assert_eq!(timeline.events.len(), 3);
-    
+
     // Verify event properties
     assert_eq!(timeline.events[0].leg_id, "leg-1");
     assert_eq!(timeline.events[0].event_type, LegTimelineEventType::Added);
     assert!(timeline.events[0].timestamp <= Utc::now());
-    
+
     assert_eq!(timeline.events[1].event_type, LegTimelineEventType::Bridged);
     assert_eq!(timeline.events[1].peer_leg_id, Some("leg-2".to_string()));
-    
+
     assert_eq!(timeline.events[2].event_type, LegTimelineEventType::Removed);
 }
 
@@ -185,7 +185,7 @@ async fn test_leg_timeline_json_serialization() {
     use rustpbx::callrecord::{LegTimeline, LegTimelineEventType};
 
     let mut timeline = LegTimeline::new();
-    
+
     timeline.add_event(
         "agent-leg".to_string(),
         LegTimelineEventType::Added,
@@ -195,7 +195,7 @@ async fn test_leg_timeline_json_serialization() {
             "destination": "sip:agent@example.com"
         })),
     );
-    
+
     timeline.add_event(
         "agent-leg".to_string(),
         LegTimelineEventType::Transferred,
@@ -205,35 +205,35 @@ async fn test_leg_timeline_json_serialization() {
             "consultation_id": "consultation-leg"
         })),
     );
-    
+
     timeline.add_event(
         "agent-leg".to_string(),
         LegTimelineEventType::TransferAccepted,
         None,
         None,
     );
-    
+
     // Serialize to JSON
     let json = serde_json::to_value(&timeline).unwrap();
-    
+
     // Verify structure
     assert!(json.is_object());
     assert!(json["events"].is_array());
-    
+
     let events = json["events"].as_array().unwrap();
     assert_eq!(events.len(), 3);
-    
+
     // Verify first event
     assert_eq!(events[0]["legId"], "agent-leg");
     assert_eq!(events[0]["eventType"], "added");
     assert!(events[0]["timestamp"].is_string());
     assert!(events[0]["details"].is_object());
     assert_eq!(events[0]["details"]["direction"], "outbound");
-    
+
     // Verify transfer event
     assert_eq!(events[1]["eventType"], "transferred");
     assert_eq!(events[1]["peerLegId"], "consultation-leg");
-    
+
     // Verify accepted event
     assert_eq!(events[2]["eventType"], "transfer_accepted");
 }
@@ -244,7 +244,7 @@ async fn test_all_event_type_variants() {
     use rustpbx::callrecord::{LegTimeline, LegTimelineEventType};
 
     let mut timeline = LegTimeline::new();
-    
+
     // Add all event types
     let event_types = vec![
         (LegTimelineEventType::Added, "added"),
@@ -255,20 +255,15 @@ async fn test_all_event_type_variants() {
         (LegTimelineEventType::TransferFailed, "transfer_failed"),
         (LegTimelineEventType::Removed, "removed"),
     ];
-    
+
     for (event_type, _) in &event_types {
-        timeline.add_event(
-            "test-leg".to_string(),
-            event_type.clone(),
-            None,
-            None,
-        );
+        timeline.add_event("test-leg".to_string(), event_type.clone(), None, None);
     }
-    
+
     // Serialize and verify
     let json = serde_json::to_value(&timeline).unwrap();
     let events = json["events"].as_array().unwrap();
-    
+
     for (i, (_, expected_name)) in event_types.iter().enumerate() {
         assert_eq!(events[i]["eventType"], *expected_name);
     }
@@ -280,21 +275,16 @@ async fn test_leg_timeline_transfer_failure() {
     use rustpbx::callrecord::{LegTimeline, LegTimelineEventType};
 
     let mut timeline = LegTimeline::new();
-    
-    timeline.add_event(
-        "leg-1".to_string(),
-        LegTimelineEventType::Added,
-        None,
-        None,
-    );
-    
+
+    timeline.add_event("leg-1".to_string(), LegTimelineEventType::Added, None, None);
+
     timeline.add_event(
         "leg-1".to_string(),
         LegTimelineEventType::Transferred,
         Some("target-leg".to_string()),
         None,
     );
-    
+
     timeline.add_event(
         "leg-1".to_string(),
         LegTimelineEventType::TransferFailed,
@@ -304,18 +294,21 @@ async fn test_leg_timeline_transfer_failure() {
             "sip_status": 408
         })),
     );
-    
+
     timeline.add_event(
         "leg-1".to_string(),
         LegTimelineEventType::Removed,
         None,
         Some(serde_json::json!({"reason": "hangup"})),
     );
-    
+
     // Verify full lifecycle
     assert_eq!(timeline.events.len(), 4);
-    assert_eq!(timeline.events[2].event_type, LegTimelineEventType::TransferFailed);
-    
+    assert_eq!(
+        timeline.events[2].event_type,
+        LegTimelineEventType::TransferFailed
+    );
+
     let json = serde_json::to_value(&timeline).unwrap();
     assert_eq!(json["events"][2]["details"]["sip_status"], 408);
 }
@@ -326,11 +319,11 @@ async fn test_leg_timeline_complex_scenario() {
     use rustpbx::callrecord::{LegTimeline, LegTimelineEventType};
 
     // Scenario: Call comes in, bridged to agent, transferred to supervisor
-    
+
     let mut caller_timeline = LegTimeline::new();
     let mut agent_timeline = LegTimeline::new();
     let mut supervisor_timeline = LegTimeline::new();
-    
+
     // Caller leg
     caller_timeline.add_event(
         "caller-leg".to_string(),
@@ -338,35 +331,35 @@ async fn test_leg_timeline_complex_scenario() {
         None,
         Some(serde_json::json!({"source": "inbound", "caller": "sip:customer@example.com"})),
     );
-    
+
     caller_timeline.add_event(
         "caller-leg".to_string(),
         LegTimelineEventType::Bridged,
         Some("agent-leg".to_string()),
         None,
     );
-    
+
     caller_timeline.add_event(
         "caller-leg".to_string(),
         LegTimelineEventType::Unbridged,
         Some("agent-leg".to_string()),
         Some(serde_json::json!({"reason": "transfer_initiated"})),
     );
-    
+
     caller_timeline.add_event(
         "caller-leg".to_string(),
         LegTimelineEventType::Bridged,
         Some("supervisor-leg".to_string()),
         None,
     );
-    
+
     caller_timeline.add_event(
         "caller-leg".to_string(),
         LegTimelineEventType::Removed,
         None,
         Some(serde_json::json!({"reason": "hangup", "by": "caller"})),
     );
-    
+
     // Agent leg
     agent_timeline.add_event(
         "agent-leg".to_string(),
@@ -374,28 +367,28 @@ async fn test_leg_timeline_complex_scenario() {
         None,
         Some(serde_json::json!({"source": "queue_assignment", "agent_id": "agent-001"})),
     );
-    
+
     agent_timeline.add_event(
         "agent-leg".to_string(),
         LegTimelineEventType::Bridged,
         Some("caller-leg".to_string()),
         None,
     );
-    
+
     agent_timeline.add_event(
         "agent-leg".to_string(),
         LegTimelineEventType::Transferred,
         Some("supervisor-leg".to_string()),
         Some(serde_json::json!({"transfer_type": "attended"})),
     );
-    
+
     agent_timeline.add_event(
         "agent-leg".to_string(),
         LegTimelineEventType::Removed,
         None,
         Some(serde_json::json!({"reason": "transfer_complete"})),
     );
-    
+
     // Supervisor leg
     supervisor_timeline.add_event(
         "supervisor-leg".to_string(),
@@ -403,35 +396,41 @@ async fn test_leg_timeline_complex_scenario() {
         None,
         Some(serde_json::json!({"source": "transfer_target", "transfer_from": "agent-leg"})),
     );
-    
+
     supervisor_timeline.add_event(
         "supervisor-leg".to_string(),
         LegTimelineEventType::Bridged,
         Some("caller-leg".to_string()),
         None,
     );
-    
+
     supervisor_timeline.add_event(
         "supervisor-leg".to_string(),
         LegTimelineEventType::Removed,
         None,
         Some(serde_json::json!({"reason": "hangup", "by": "caller"})),
     );
-    
+
     // Verify all timelines
     assert_eq!(caller_timeline.events.len(), 5);
     assert_eq!(agent_timeline.events.len(), 4);
     assert_eq!(supervisor_timeline.events.len(), 3);
-    
+
     // Verify bridging relationships
-    assert_eq!(caller_timeline.events[1].peer_leg_id, Some("agent-leg".to_string()));
-    assert_eq!(caller_timeline.events[3].peer_leg_id, Some("supervisor-leg".to_string()));
-    
+    assert_eq!(
+        caller_timeline.events[1].peer_leg_id,
+        Some("agent-leg".to_string())
+    );
+    assert_eq!(
+        caller_timeline.events[3].peer_leg_id,
+        Some("supervisor-leg".to_string())
+    );
+
     // Serialize all timelines
     let caller_json = serde_json::to_value(&caller_timeline).unwrap();
     let agent_json = serde_json::to_value(&agent_timeline).unwrap();
     let supervisor_json = serde_json::to_value(&supervisor_timeline).unwrap();
-    
+
     // Verify structure
     assert!(caller_json["events"][1]["peerLegId"] == "agent-leg");
     assert!(agent_json["events"][2]["eventType"] == "transferred");
@@ -444,10 +443,10 @@ async fn test_empty_timeline_skips_serialization() {
     use rustpbx::callrecord::LegTimeline;
 
     let timeline = LegTimeline::new();
-    
+
     // Verify is_empty returns true
     assert!(timeline.is_empty());
-    
+
     // Serialize - should produce empty events array
     let json = serde_json::to_value(&timeline).unwrap();
     assert!(json["events"].as_array().unwrap().is_empty());
@@ -459,7 +458,7 @@ async fn test_timeline_timestamps_monotonic() {
     use rustpbx::callrecord::{LegTimeline, LegTimelineEventType};
 
     let mut timeline = LegTimeline::new();
-    
+
     // Add events with small delays
     for i in 0..5 {
         tokio::time::sleep(Duration::from_millis(10)).await;
@@ -470,7 +469,7 @@ async fn test_timeline_timestamps_monotonic() {
             None,
         );
     }
-    
+
     // Verify timestamps are increasing
     let mut last_timestamp = timeline.events[0].timestamp;
     for event in &timeline.events[1..] {
@@ -487,11 +486,11 @@ async fn test_timeline_timestamps_monotonic() {
 async fn test_leg_timeline_via_call_resume() {
     let (url, gateway, _reg) = start_test_server().await;
     let mut ws = connect(&url).await;
-    
+
     // Cache events
     {
         let gw = gateway.read().await;
-        
+
         // Simulate call lifecycle events
         let events = vec![
             rustpbx::rwi::RwiEvent::CallIncoming(rustpbx::rwi::CallIncomingData {
@@ -517,39 +516,41 @@ async fn test_leg_timeline_via_call_resume() {
                 call_id: "timeline-call".to_string(),
             },
         ];
-        
+
         for event in events {
             gw.cache_event(&"timeline-call".to_string(), &event);
         }
     }
-    
+
     // Resume the call and verify events
     let (_, json) = req(
         "call.resume",
         serde_json::json!({"call_id": "timeline-call"}),
     );
     let v = send_recv(&mut ws, &json).await;
-    
+
     assert_eq!(v["status"], "success");
     let events = v["data"]["events"].as_array().unwrap();
-    
+
     // Should have events
     assert!(!events.is_empty());
-    
+
     // Verify event types represent a call lifecycle
     // Event structure: {"sequence": N, "timestamp": T, "call_id": "...", "event": {...}}
     // The "event" field contains the RwiEvent which uses snake_case variant names as keys
     let event_json = serde_json::to_string(&events).unwrap_or_default();
-    
+
     // Check for event types in the serialized JSON
     assert!(
         event_json.contains("call_incoming") || event_json.contains("call_ringing"),
-        "Should have incoming or ringing event: {}", event_json
+        "Should have incoming or ringing event: {}",
+        event_json
     );
     assert!(
         event_json.contains("call_bridged"),
-        "Should have bridged event: {}", event_json
+        "Should have bridged event: {}",
+        event_json
     );
-    
+
     ws.close(None).await.unwrap();
 }

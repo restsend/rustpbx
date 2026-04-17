@@ -442,6 +442,7 @@ Valid `mode` values: `mixed`, `separate_legs`
 | `conference.mute` | Mute participant |
 | `conference.unmute` | Unmute participant |
 | `conference.destroy` | Destroy conference |
+| `conference.seat_replace` | Replace one participant with another atomically |
 
 **Create conference:**
 
@@ -459,6 +460,20 @@ Valid `mode` values: `mixed`, `separate_legs`
 ```
 
 Valid `backend` values: `internal`, `external` (external MCU)
+
+**Seat replacement (A -> A1):**
+
+```json
+{
+  "action": "conference.seat_replace",
+  "action_id": "req-conf-seat-01",
+  "params": {
+    "conference_id": "room_42",
+    "old_call_id": "call_a",
+    "new_call_id": "call_a1"
+  }
+}
+```
 
 ## 6. Event Reference
 
@@ -565,6 +580,35 @@ Valid `backend` values: `internal`, `external` (external MCU)
 | `conference.member.unmuted` | Member unmuted |
 | `conference.destroyed` | Conference destroyed |
 | `conference.error` | Conference error |
+| `conference.seat_replace.started` | Seat replacement transaction started |
+| `conference.seat_replace.succeeded` | Seat replacement completed successfully |
+| `conference.seat_replace.failed` | Seat replacement failed (rollback attempted) |
+| `conference.seat_replace.rollback_failed` | Rollback failed after replacement failure |
+
+### 6.9 Seat Replacement Event Ordering
+
+The server emits explicit seat-replacement lifecycle events in addition to member join/left events.
+
+Success path:
+
+1. `conference_seat_replace_started`
+2. `conference_member_left` (old seat)
+3. `conference_member_joined` (new seat)
+4. `conference_seat_replace_succeeded`
+
+Failure path (with rollback):
+
+1. `conference_seat_replace_started`
+2. `conference_member_left` (old seat)
+3. `conference_member_joined` (old seat rollback)
+4. `conference_seat_replace_failed`
+
+Failure path (rollback also fails):
+
+1. `conference_seat_replace_started`
+2. `conference_member_left` (old seat)
+3. `conference_seat_replace_rollback_failed`
+4. `conference_seat_replace_failed`
 
 ## 7. Error Handling
 

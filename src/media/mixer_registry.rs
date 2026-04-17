@@ -1,5 +1,3 @@
-
-
 use crate::media::mixer::{MediaMixer, SupervisorMixerMode};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -65,10 +63,8 @@ impl MixerRegistry {
     ) -> Arc<MediaMixer> {
         let mixer = Arc::new(MediaMixer::new(mixer_id.clone(), 8000));
 
-        
         mixer.set_mode(mode.clone());
 
-        
         let participants = vec![
             MixerParticipant {
                 session_id: supervisor_session_id.clone(),
@@ -79,7 +75,7 @@ impl MixerRegistry {
             },
             MixerParticipant {
                 session_id: target_session_id.clone(),
-                role: MixerParticipantRole::Agent, 
+                role: MixerParticipantRole::Agent,
                 input_enabled: true,
                 output_enabled: true,
                 muted: false,
@@ -97,13 +93,11 @@ impl MixerRegistry {
             created_at: std::time::Instant::now(),
         };
 
-        
         {
             let mut mixers = self.mixers.lock().unwrap();
             mixers.insert(mixer_id.clone(), entry);
         }
 
-        
         {
             let mut participants = self.participants.lock().unwrap();
             participants.insert(supervisor_session_id.clone(), mixer_id.clone());
@@ -255,12 +249,10 @@ impl MixerRegistry {
     }
 
     pub fn remove_mixer(&self, mixer_id: &str) -> bool {
-        
         if let Some(mixer) = self.get_mixer(mixer_id) {
             mixer.stop();
         }
 
-        
         let participant_ids: Vec<String> = {
             let mixers = self.mixers.lock().unwrap();
             if let Some(entry) = mixers.get(mixer_id) {
@@ -274,13 +266,11 @@ impl MixerRegistry {
             }
         };
 
-        
         let removed = {
             let mut mixers = self.mixers.lock().unwrap();
             mixers.remove(mixer_id).is_some()
         };
 
-        
         {
             let mut participants = self.participants.lock().unwrap();
             for session_id in participant_ids {
@@ -322,7 +312,11 @@ impl MixerRegistry {
         if let Some(mixer_id) = mixer_id {
             let mut mixers = self.mixers.lock().unwrap();
             if let Some(entry) = mixers.get_mut(&mixer_id) {
-                if let Some(participant) = entry.participants.iter_mut().find(|p| p.session_id == session_id) {
+                if let Some(participant) = entry
+                    .participants
+                    .iter_mut()
+                    .find(|p| p.session_id == session_id)
+                {
                     participant.muted = muted;
                     info!(
                         mixer_id = %mixer_id,
@@ -351,7 +345,11 @@ impl MixerRegistry {
         if let Some(mixer_id) = mixer_id {
             let mixers = self.mixers.lock().unwrap();
             if let Some(entry) = mixers.get(&mixer_id) {
-                return entry.participants.iter().find(|p| p.session_id == session_id).map(|p| p.muted);
+                return entry
+                    .participants
+                    .iter()
+                    .find(|p| p.session_id == session_id)
+                    .map(|p| p.muted);
             }
         }
 
@@ -396,7 +394,6 @@ mod tests {
             SupervisorMixerMode::Barge,
         );
 
-        
         let result = registry.add_participant(
             "test-mixer",
             "customer-1".to_string(),
@@ -406,7 +403,6 @@ mod tests {
 
         assert_eq!(registry.participant_count("test-mixer"), 3);
 
-        
         let result = registry.remove_participant("customer-1");
         assert!(result);
         assert_eq!(registry.participant_count("test-mixer"), 2);
@@ -439,7 +435,6 @@ mod tests {
 
         assert!(registry.get_mixer("room-1").is_some());
 
-        
         registry.add_participant(
             "room-1",
             "user-1".to_string(),
@@ -453,7 +448,6 @@ mod tests {
 
         assert_eq!(registry.participant_count("room-1"), 2);
 
-        
         let found = registry.get_mixer_by_session("user-1");
         assert!(found.is_some());
     }

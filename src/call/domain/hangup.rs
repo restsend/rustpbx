@@ -204,10 +204,7 @@ mod tests {
 
     #[test]
     fn hangup_command_all() {
-        let cmd = HangupCommand::all(
-            Some(CallRecordHangupReason::BySystem),
-            Some(200),
-        );
+        let cmd = HangupCommand::all(Some(CallRecordHangupReason::BySystem), Some(200));
         assert_eq!(cmd.cascade, HangupCascade::All);
         assert!(cmd.leg_id.is_none());
     }
@@ -232,9 +229,6 @@ mod tests {
 
     #[test]
     fn system_hangup_reason_display() {
-        assert_eq!(
-            SystemHangupReason::NoAnswer.to_string(),
-            "no_answer"
-        );
+        assert_eq!(SystemHangupReason::NoAnswer.to_string(), "no_answer");
     }
 }

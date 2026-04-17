@@ -153,11 +153,7 @@ pub async fn query_queues(
 
     // Issue #179: collect file-sourced queues from in-memory snapshot
     let file_queues: Vec<Value> = if let Some(app_state) = state.app_state() {
-        let snapshot = app_state
-            .sip_server()
-            .inner
-            .data_context
-            .queues_snapshot();
+        let snapshot = app_state.sip_server().inner.data_context.queues_snapshot();
         let mut file_items: Vec<Value> = snapshot
             .into_iter()
             .filter_map(|(name, queue)| {

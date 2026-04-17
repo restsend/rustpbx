@@ -566,3 +566,73 @@ async fn test_supervisor_barge_full_flow() {
     supervisor.stop();
     pbx.stop();
 }
+
+/// Test supervisor.takeover with full flow
+#[tokio::test]
+async fn test_supervisor_takeover_full_flow() {
+    let sip_port = portpicker::pick_unused_port().expect("no free SIP port");
+    let agent_port = portpicker::pick_unused_port().expect("no free agent port");
+    let sup_port = portpicker::pick_unused_port().expect("no free supervisor port");
+
+    let pbx = TestPbx::start(sip_port).await;
+    let agent = TestUa::callee(agent_port, 1).await;
+    let supervisor = TestUa::callee(sup_port, 1).await;
+
+    let mut ws = ws_connect(&pbx.rwi_url).await;
+
+    // Subscribe
+    let (sub_id, sub_json) = rwi_req(
+        "session.subscribe",
+        serde_json::json!({"contexts": ["default"]}),
+    );
+    let v = ws_send_recv_with_id(&mut ws, &sub_json, &sub_id).await;
+    assert_eq!(v["status"], "success");
+
+    // Originate agent
+    let agent_call_id = format!("e2e-takeover-agent-{}", Uuid::new_v4());
+    let (orig_id, orig_json) = rwi_req(
+        "call.originate",
+        serde_json::json!({
+            "call_id": agent_call_id,
+            "destination": agent.sip_uri("agent"),
+            "caller_id": format!("sip:rwi@{}", pbx.sip_host()),
+            "context": "default",
+            "timeout_secs": 15,
+        }),
+    );
+    ws_send_recv_with_id(&mut ws, &orig_json, &orig_id).await;
+    recv_until(&mut ws, 10, |v| v.get("call_answered").is_some()).await;
+
+    // Originate supervisor
+    let supervisor_call_id = format!("e2e-takeover-supervisor-{}", Uuid::new_v4());
+    let (sup_id, sup_json) = rwi_req(
+        "call.originate",
+        serde_json::json!({
+            "call_id": supervisor_call_id,
+            "destination": supervisor.sip_uri("supervisor"),
+            "caller_id": format!("sip:supervisor@{}", pbx.sip_host()),
+            "context": "default",
+            "timeout_secs": 15,
+        }),
+    );
+    ws_send_recv_with_id(&mut ws, &sup_json, &sup_id).await;
+    recv_until(&mut ws, 10, |v| v.get("call_answered").is_some()).await;
+
+    // Call supervisor.takeover
+    let (takeover_id, takeover_json) = rwi_req(
+        "supervisor.takeover",
+        serde_json::json!({
+            "supervisor_call_id": supervisor_call_id,
+            "target_call_id": agent_call_id,
+        }),
+    );
+    let v = ws_send_recv_with_id(&mut ws, &takeover_json, &takeover_id).await;
+
+    tracing::info!("supervisor.takeover response: {:?}", v);
+    assert_eq!(v["status"], "success", "Expected success, got: {v}");
+
+    ws.close(None).await.unwrap();
+    agent.stop();
+    supervisor.stop();
+    pbx.stop();
+}

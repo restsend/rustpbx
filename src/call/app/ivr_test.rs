@@ -29,7 +29,11 @@ mod tests {
                 max_retries: 2,
                 invalid_prompt: Some("sounds/invalid.wav".to_string()),
                 timeout_action: Some(EntryAction::Repeat),
-                max_retries_action: Some(EntryAction::Hangup { prompt: None, prompt_text: None, prompt_voice: None }),
+                max_retries_action: Some(EntryAction::Hangup {
+                    prompt: None,
+                    prompt_text: None,
+                    prompt_voice: None,
+                }),
                 entries: vec![
                     MenuEntry {
                         key: "1".to_string(),
@@ -572,8 +576,16 @@ action = { type = "transfer", target = "100" }
                 timeout_ms: 200,
                 max_retries: 1,
                 invalid_prompt: None,
-                timeout_action: Some(EntryAction::Hangup { prompt: None, prompt_text: None, prompt_voice: None }),
-                max_retries_action: Some(EntryAction::Hangup { prompt: None, prompt_text: None, prompt_voice: None }),
+                timeout_action: Some(EntryAction::Hangup {
+                    prompt: None,
+                    prompt_text: None,
+                    prompt_voice: None,
+                }),
+                max_retries_action: Some(EntryAction::Hangup {
+                    prompt: None,
+                    prompt_text: None,
+                    prompt_voice: None,
+                }),
                 entries: vec![
                     MenuEntry {
                         key: "1".to_string(),
@@ -798,8 +810,16 @@ action = { type = "transfer", target = "100" }
                 timeout_ms: 200,
                 max_retries: 1,
                 invalid_prompt: None,
-                timeout_action: Some(EntryAction::Hangup { prompt: None, prompt_text: None, prompt_voice: None }),
-                max_retries_action: Some(EntryAction::Hangup { prompt: None, prompt_text: None, prompt_voice: None }),
+                timeout_action: Some(EntryAction::Hangup {
+                    prompt: None,
+                    prompt_text: None,
+                    prompt_voice: None,
+                }),
+                max_retries_action: Some(EntryAction::Hangup {
+                    prompt: None,
+                    prompt_text: None,
+                    prompt_voice: None,
+                }),
                 entries: vec![MenuEntry {
                     key: "1".to_string(),
                     label: Some("Webhook".to_string()),
@@ -1008,8 +1028,16 @@ action = { type = "transfer", target = "100" }
                 timeout_ms: 200,
                 max_retries: 1,
                 invalid_prompt: None,
-                timeout_action: Some(EntryAction::Hangup { prompt: None, prompt_text: None, prompt_voice: None }),
-                max_retries_action: Some(EntryAction::Hangup { prompt: None, prompt_text: None, prompt_voice: None }),
+                timeout_action: Some(EntryAction::Hangup {
+                    prompt: None,
+                    prompt_text: None,
+                    prompt_voice: None,
+                }),
+                max_retries_action: Some(EntryAction::Hangup {
+                    prompt: None,
+                    prompt_text: None,
+                    prompt_voice: None,
+                }),
                 entries: vec![MenuEntry {
                     key: "1".to_string(),
                     label: Some("Billing".to_string()),
@@ -1365,8 +1393,16 @@ action = { type = "transfer", target = "100" }
                 timeout_ms: 200,
                 max_retries: 1,
                 invalid_prompt: None,
-                timeout_action: Some(EntryAction::Hangup { prompt: None, prompt_text: None, prompt_voice: None }),
-                max_retries_action: Some(EntryAction::Hangup { prompt: None, prompt_text: None, prompt_voice: None }),
+                timeout_action: Some(EntryAction::Hangup {
+                    prompt: None,
+                    prompt_text: None,
+                    prompt_voice: None,
+                }),
+                max_retries_action: Some(EntryAction::Hangup {
+                    prompt: None,
+                    prompt_text: None,
+                    prompt_voice: None,
+                }),
                 entries: vec![
                     MenuEntry {
                         key: "4".to_string(),
@@ -1575,8 +1611,16 @@ action = { type = "transfer", target = "100" }
                 timeout_ms: 2000,
                 max_retries: 1,
                 invalid_prompt: None,
-                timeout_action: Some(EntryAction::Hangup { prompt: None, prompt_text: None, prompt_voice: None }),
-                max_retries_action: Some(EntryAction::Hangup { prompt: None, prompt_text: None, prompt_voice: None }),
+                timeout_action: Some(EntryAction::Hangup {
+                    prompt: None,
+                    prompt_text: None,
+                    prompt_voice: None,
+                }),
+                max_retries_action: Some(EntryAction::Hangup {
+                    prompt: None,
+                    prompt_text: None,
+                    prompt_voice: None,
+                }),
                 entries: vec![MenuEntry {
                     key: "1".to_string(),
                     label: Some("Transfer".to_string()),
@@ -1639,8 +1683,16 @@ action = { type = "transfer", target = "100" }
                 timeout_ms: 2000,
                 max_retries: 1,
                 invalid_prompt: None,
-                timeout_action: Some(EntryAction::Hangup { prompt: None, prompt_text: None, prompt_voice: None }),
-                max_retries_action: Some(EntryAction::Hangup { prompt: None, prompt_text: None, prompt_voice: None }),
+                timeout_action: Some(EntryAction::Hangup {
+                    prompt: None,
+                    prompt_text: None,
+                    prompt_voice: None,
+                }),
+                max_retries_action: Some(EntryAction::Hangup {
+                    prompt: None,
+                    prompt_text: None,
+                    prompt_voice: None,
+                }),
                 entries: vec![MenuEntry {
                     key: "2".to_string(),
                     label: Some("Support".to_string()),
@@ -1659,8 +1711,16 @@ action = { type = "transfer", target = "100" }
                         timeout_ms: 2000,
                         max_retries: 1,
                         invalid_prompt: None,
-                        timeout_action: Some(EntryAction::Hangup { prompt: None, prompt_text: None, prompt_voice: None }),
-                        max_retries_action: Some(EntryAction::Hangup { prompt: None, prompt_text: None, prompt_voice: None }),
+                        timeout_action: Some(EntryAction::Hangup {
+                            prompt: None,
+                            prompt_text: None,
+                            prompt_voice: None,
+                        }),
+                        max_retries_action: Some(EntryAction::Hangup {
+                            prompt: None,
+                            prompt_text: None,
+                            prompt_voice: None,
+                        }),
                         entries: vec![MenuEntry {
                             key: "1".to_string(),
                             label: Some("Billing".to_string()),
@@ -1733,8 +1793,16 @@ action = { type = "transfer", target = "100" }
                 timeout_ms: 2000,
                 max_retries: 1,
                 invalid_prompt: None,
-                timeout_action: Some(EntryAction::Hangup { prompt: None, prompt_text: None, prompt_voice: None }),
-                max_retries_action: Some(EntryAction::Hangup { prompt: None, prompt_text: None, prompt_voice: None }),
+                timeout_action: Some(EntryAction::Hangup {
+                    prompt: None,
+                    prompt_text: None,
+                    prompt_voice: None,
+                }),
+                max_retries_action: Some(EntryAction::Hangup {
+                    prompt: None,
+                    prompt_text: None,
+                    prompt_voice: None,
+                }),
                 entries: vec![MenuEntry {
                     key: "0".to_string(),
                     label: Some("Hangup".to_string()),
@@ -1801,7 +1869,11 @@ action = { type = "transfer", target = "100" }
                 max_retries: 2,
                 invalid_prompt: Some(invalid_wav.clone()),
                 timeout_action: Some(EntryAction::Repeat),
-                max_retries_action: Some(EntryAction::Hangup { prompt: None, prompt_text: None, prompt_voice: None }),
+                max_retries_action: Some(EntryAction::Hangup {
+                    prompt: None,
+                    prompt_text: None,
+                    prompt_voice: None,
+                }),
                 entries: vec![MenuEntry {
                     key: "1".to_string(),
                     label: Some("Sales".to_string()),
@@ -1867,8 +1939,16 @@ action = { type = "transfer", target = "100" }
                 timeout_ms: 2000,
                 max_retries: 1,
                 invalid_prompt: None,
-                timeout_action: Some(EntryAction::Hangup { prompt: None, prompt_text: None, prompt_voice: None }),
-                max_retries_action: Some(EntryAction::Hangup { prompt: None, prompt_text: None, prompt_voice: None }),
+                timeout_action: Some(EntryAction::Hangup {
+                    prompt: None,
+                    prompt_text: None,
+                    prompt_voice: None,
+                }),
+                max_retries_action: Some(EntryAction::Hangup {
+                    prompt: None,
+                    prompt_text: None,
+                    prompt_voice: None,
+                }),
                 entries: vec![
                     MenuEntry {
                         key: "3".to_string(),
@@ -1946,8 +2026,16 @@ action = { type = "transfer", target = "100" }
                 timeout_ms: 2000,
                 max_retries: 1,
                 invalid_prompt: None,
-                timeout_action: Some(EntryAction::Hangup { prompt: None, prompt_text: None, prompt_voice: None }),
-                max_retries_action: Some(EntryAction::Hangup { prompt: None, prompt_text: None, prompt_voice: None }),
+                timeout_action: Some(EntryAction::Hangup {
+                    prompt: None,
+                    prompt_text: None,
+                    prompt_voice: None,
+                }),
+                max_retries_action: Some(EntryAction::Hangup {
+                    prompt: None,
+                    prompt_text: None,
+                    prompt_voice: None,
+                }),
                 entries: vec![MenuEntry {
                     key: "1".to_string(),
                     label: Some("Sales".to_string()),
@@ -2012,7 +2100,11 @@ action = { type = "transfer", target = "100" }
                 max_retries: 2,
                 invalid_prompt: None,
                 timeout_action: Some(EntryAction::Repeat),
-                max_retries_action: Some(EntryAction::Hangup { prompt: None, prompt_text: None, prompt_voice: None }),
+                max_retries_action: Some(EntryAction::Hangup {
+                    prompt: None,
+                    prompt_text: None,
+                    prompt_voice: None,
+                }),
                 entries: vec![MenuEntry {
                     key: "1".to_string(),
                     label: Some("Sales".to_string()),
@@ -2077,8 +2169,16 @@ action = { type = "transfer", target = "100" }
                 timeout_ms: 2000,
                 max_retries: 1,
                 invalid_prompt: None,
-                timeout_action: Some(EntryAction::Hangup { prompt: None, prompt_text: None, prompt_voice: None }),
-                max_retries_action: Some(EntryAction::Hangup { prompt: None, prompt_text: None, prompt_voice: None }),
+                timeout_action: Some(EntryAction::Hangup {
+                    prompt: None,
+                    prompt_text: None,
+                    prompt_voice: None,
+                }),
+                max_retries_action: Some(EntryAction::Hangup {
+                    prompt: None,
+                    prompt_text: None,
+                    prompt_voice: None,
+                }),
                 entries: vec![MenuEntry {
                     key: "4".to_string(),
                     label: Some("Busy".to_string()),
@@ -2197,7 +2297,8 @@ action = { type = "transfer", target = "100" }
                     sample_format: hound::SampleFormat::Int,
                 };
                 let mut writer =
-                    hound::WavWriter::new(std::io::BufWriter::new(tmp.as_file_mut()), spec).unwrap();
+                    hound::WavWriter::new(std::io::BufWriter::new(tmp.as_file_mut()), spec)
+                        .unwrap();
                 for _ in 0..800 {
                     writer.write_sample(0i16).unwrap();
                 }
@@ -2210,7 +2311,9 @@ action = { type = "transfer", target = "100" }
         let app = Router::new().route(
             "/tts",
             get(
-                move |axum::extract::Query(params): axum::extract::Query<HashMap<String, String>>| {
+                move |axum::extract::Query(params): axum::extract::Query<
+                    HashMap<String, String>,
+                >| {
                     let wav = wav_clone.clone();
                     async move {
                         assert_eq!(params.get("text"), Some(&"hello from tts".to_string()));
@@ -2306,9 +2409,11 @@ action = { type = "transfer", target = "100" }
         // DTMF "1" → transfer
         stack.dtmf("1");
         stack
-            .assert_cmd(200, "Transfer", |c| {
-                matches!(c, SessionAction::TransferTarget(target) if target == "2001")
-            })
+            .assert_cmd(
+                200,
+                "Transfer",
+                |c| matches!(c, SessionAction::TransferTarget(target) if target == "2001"),
+            )
             .await;
     }
 }

@@ -45,7 +45,7 @@ pub fn normalize_optional_string(value: &Option<String>) -> Option<String> {
 pub fn router(state: Arc<ConsoleState>) -> Router {
     let base_path = state.base_path().to_string();
     let api_prefix = state.api_prefix().to_string();
-    
+
     // Page routes (nested under base_path)
     let page_routes = Router::new()
         .merge(user::urls())
@@ -61,7 +61,7 @@ pub fn router(state: Arc<ConsoleState>) -> Router {
         .merge(sipflow::urls())
         .merge(notifications::urls())
         .merge(metrics::urls());
-    
+
     // API routes (nested under api_prefix)
     let api_routes = Router::new()
         .route("/pending-reloads", get(pending_reloads_handler))

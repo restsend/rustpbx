@@ -168,7 +168,7 @@ async fn test_update_with_sdp_flow() {
         .send_reinvite(&alice_call_id, Some(hold_sdp.clone()))
         .await
         .unwrap();
-    
+
     // Wait for Bob's background processing to complete
     let bob_processed = bob_handle.await.unwrap();
     info!("Bob processed re-INVITE in background: {}", bob_processed);
@@ -188,7 +188,7 @@ async fn test_update_with_sdp_flow() {
         bob_processed,
         "Bob should have received a forwarded re-INVITE request"
     );
-    
+
     // Verify the SDP answer contains expected content
     let alice_sdp = alice_received_sdp.unwrap();
     assert!(

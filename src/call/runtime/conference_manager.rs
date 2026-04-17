@@ -89,7 +89,7 @@ impl ConferenceRoom {
     /// Remove a participant from the conference
     pub fn remove_participant(&mut self, leg_id: &LegId) -> Result<()> {
         if self.participants.remove(leg_id).is_none() {
-            return Err(anyhow!("Leg {} not found in conference", leg_id));
+            return Err(anyhow!("Leg {} is not in conference", leg_id));
         }
         info!(conf_id = %self.id.0, leg_id = %leg_id, "Participant removed from conference");
         Ok(())
@@ -97,9 +97,10 @@ impl ConferenceRoom {
 
     /// Mute a participant
     pub fn mute_participant(&mut self, leg_id: &LegId) -> Result<()> {
-        let participant = self.participants
+        let participant = self
+            .participants
             .get_mut(leg_id)
-            .ok_or_else(|| anyhow!("Leg {} not found in conference", leg_id))?;
+            .ok_or_else(|| anyhow!("Leg {} is not in conference", leg_id))?;
         participant.muted = true;
         info!(conf_id = %self.id.0, leg_id = %leg_id, "Participant muted");
         Ok(())
@@ -107,9 +108,10 @@ impl ConferenceRoom {
 
     /// Unmute a participant
     pub fn unmute_participant(&mut self, leg_id: &LegId) -> Result<()> {
-        let participant = self.participants
+        let participant = self
+            .participants
             .get_mut(leg_id)
-            .ok_or_else(|| anyhow!("Leg {} not found in conference", leg_id))?;
+            .ok_or_else(|| anyhow!("Leg {} is not in conference", leg_id))?;
         participant.muted = false;
         info!(conf_id = %self.id.0, leg_id = %leg_id, "Participant unmuted");
         Ok(())
@@ -179,7 +181,7 @@ impl ConferenceManager {
     ) -> Result<ConferenceRoom> {
         let mut conferences = self.conferences.write().await;
         let mut audio_mixers = self.audio_mixers.write().await;
-        
+
         if conferences.contains_key(&conf_id) {
             return Err(anyhow!("Conference {} already exists", conf_id.0));
         }
@@ -191,7 +193,7 @@ impl ConferenceManager {
         let mixer = Arc::new(ConferenceAudioMixer::new(conf_id.0.clone(), 8000));
         mixer.start();
         audio_mixers.insert(conf_id.clone(), mixer);
-        
+
         info!(conf_id = %conf_id.0, "Conference created with audio mixing");
         Ok(conference)
     }
@@ -215,7 +217,7 @@ impl ConferenceManager {
         let mut conferences = self.conferences.write().await;
         let mut leg_map = self.leg_to_conference.write().await;
         let mut participant_channels = self.participant_channels.write().await;
-        
+
         if let Some(conf) = conferences.get(conf_id) {
             // Remove all leg mappings and channels
             for leg_id in conf.participant_ids() {
@@ -223,11 +225,11 @@ impl ConferenceManager {
                 participant_channels.remove(&leg_id);
             }
         }
-        
+
         conferences
             .remove(conf_id)
             .ok_or_else(|| anyhow!("Conference {} not found", conf_id.0))?;
-        
+
         info!(conf_id = %conf_id.0, "Conference destroyed");
         Ok(())
     }
@@ -273,9 +275,7 @@ impl ConferenceManager {
                 .add_participant(leg_id.clone(), CodecType::PCMU)
                 .await?;
 
-            ParticipantChannels {
-                input_tx,
-            }
+            ParticipantChannels { input_tx }
         };
 
         // Store channels and mapping
@@ -537,7 +537,10 @@ mod tests {
 
         // Add third participant (should fail due to limit)
         let result = manager.add_participant(&conf_id, leg3).await;
-        assert!(result.is_err(), "Should fail when exceeding max participants");
+        assert!(
+            result.is_err(),
+            "Should fail when exceeding max participants"
+        );
 
         manager.destroy_conference(&conf_id).await.unwrap();
     }
@@ -555,10 +558,16 @@ mod tests {
         let leg_id = LegId::new("leg1");
 
         // Add participant first time
-        manager.add_participant(&conf_id, leg_id.clone()).await.unwrap();
+        manager
+            .add_participant(&conf_id, leg_id.clone())
+            .await
+            .unwrap();
 
         // Add same participant again (should succeed but be a no-op)
-        manager.add_participant(&conf_id, leg_id.clone()).await.unwrap();
+        manager
+            .add_participant(&conf_id, leg_id.clone())
+            .await
+            .unwrap();
 
         let conf = manager.get_conference(&conf_id).await.unwrap();
         assert_eq!(conf.participant_count(), 1);
@@ -579,8 +588,14 @@ mod tests {
         let leg1 = LegId::new("leg1");
         let leg2 = LegId::new("leg2");
 
-        manager.add_participant(&conf_id, leg1.clone()).await.unwrap();
-        manager.add_participant(&conf_id, leg2.clone()).await.unwrap();
+        manager
+            .add_participant(&conf_id, leg1.clone())
+            .await
+            .unwrap();
+        manager
+            .add_participant(&conf_id, leg2.clone())
+            .await
+            .unwrap();
         manager.mute_participant(&conf_id, &leg1).await.unwrap();
 
         let stats = manager.get_conference_stats(&conf_id).await.unwrap();
@@ -598,8 +613,14 @@ mod tests {
         let conf1 = ConferenceId::from("conf1");
         let conf2 = ConferenceId::from("conf2");
 
-        manager.create_conference(conf1.clone(), None).await.unwrap();
-        manager.create_conference(conf2.clone(), None).await.unwrap();
+        manager
+            .create_conference(conf1.clone(), None)
+            .await
+            .unwrap();
+        manager
+            .create_conference(conf2.clone(), None)
+            .await
+            .unwrap();
 
         let conferences = manager.list_conferences().await;
         assert_eq!(conferences.len(), 2);
@@ -621,7 +642,10 @@ mod tests {
             .unwrap();
 
         let leg_id = LegId::new("leg1");
-        manager.add_participant(&conf_id, leg_id.clone()).await.unwrap();
+        manager
+            .add_participant(&conf_id, leg_id.clone())
+            .await
+            .unwrap();
 
         // Remove from all conferences
         manager.remove_leg_from_all(&leg_id).await.unwrap();
@@ -676,14 +700,19 @@ mod tests {
             .unwrap();
 
         let leg_id = LegId::new("leg1");
-        manager.add_participant(&conf_id, leg_id.clone()).await.unwrap();
+        manager
+            .add_participant(&conf_id, leg_id.clone())
+            .await
+            .unwrap();
 
         let found_conf = manager.get_conference_id_for_leg(&leg_id).await;
         assert!(found_conf.is_some());
         assert_eq!(found_conf.unwrap().0, "test-conf-lookup");
 
         // Non-existent leg
-        let not_found = manager.get_conference_id_for_leg(&LegId::new("nonexistent")).await;
+        let not_found = manager
+            .get_conference_id_for_leg(&LegId::new("nonexistent"))
+            .await;
         assert!(not_found.is_none());
 
         manager.destroy_conference(&conf_id).await.unwrap();
@@ -695,8 +724,14 @@ mod tests {
         let conf1 = ConferenceId::from("conf1");
         let conf2 = ConferenceId::from("conf2");
 
-        manager.create_conference(conf1.clone(), None).await.unwrap();
-        manager.create_conference(conf2.clone(), None).await.unwrap();
+        manager
+            .create_conference(conf1.clone(), None)
+            .await
+            .unwrap();
+        manager
+            .create_conference(conf2.clone(), None)
+            .await
+            .unwrap();
 
         let leg = LegId::new("shared-leg");
 
@@ -705,7 +740,10 @@ mod tests {
 
         // Try to add to second conference (should fail)
         let result = manager.add_participant(&conf2, leg.clone()).await;
-        assert!(result.is_err(), "Leg should not be able to join multiple conferences");
+        assert!(
+            result.is_err(),
+            "Leg should not be able to join multiple conferences"
+        );
 
         manager.destroy_conference(&conf1).await.unwrap();
         manager.destroy_conference(&conf2).await.unwrap();

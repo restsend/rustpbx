@@ -1,6 +1,6 @@
-use crate::proxy::proxy_call::sip_session::SessionSnapshot;
 use crate::console::{ConsoleState, middleware::AuthRequired};
 use crate::proxy::active_call_registry::ActiveProxyCallRegistry;
+use crate::proxy::proxy_call::sip_session::SessionSnapshot;
 use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -154,7 +154,9 @@ fn snapshot_for(
     registry: &Arc<ActiveProxyCallRegistry>,
     session_id: &str,
 ) -> Option<SessionSnapshot> {
-    registry.get_handle(session_id).and_then(|handle| handle.snapshot())
+    registry
+        .get_handle(session_id)
+        .and_then(|handle| handle.snapshot())
 }
 
 fn service_unavailable() -> Response {

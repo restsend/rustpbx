@@ -3,8 +3,8 @@ use crate::rwi::proto::RwiEvent;
 use crate::rwi::session::{OwnershipMode, RwiSession, SupervisorMode};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Arc as StdArc, Mutex};
-use tokio::sync::{RwLock, mpsc};
 use std::time::{SystemTime, UNIX_EPOCH};
+use tokio::sync::{RwLock, mpsc};
 
 pub type SessionId = String;
 pub type CallId = String;
@@ -63,7 +63,7 @@ impl RwiGateway {
     }
 
     /// Create gateway with custom cache configuration
-    /// 
+    ///
     /// # Arguments
     /// * `max_cache_size` - Maximum number of events to cache
     /// * `max_cache_age_secs` - Maximum age of cached events in seconds
@@ -283,9 +283,10 @@ impl RwiGateway {
     }
 
     pub fn cache_event(&self, call_id: &CallId, event: &RwiEvent) -> u64 {
-        let mut cache_state = self.event_cache.lock().unwrap_or_else(|poisoned| {
-            poisoned.into_inner()
-        });
+        let mut cache_state = self
+            .event_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
 
         let now = self.current_timestamp();
         let max_age = self.max_cache_age_secs;
@@ -320,9 +321,10 @@ impl RwiGateway {
     /// Get events for a call since a given sequence number
     /// Used for session resumption after disconnect
     pub fn get_events_since(&self, last_sequence: u64) -> Vec<EventCacheEntry> {
-        let cache_state = self.event_cache.lock().unwrap_or_else(|poisoned| {
-            poisoned.into_inner()
-        });
+        let cache_state = self
+            .event_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
 
         cache_state
             .cache
@@ -333,10 +335,15 @@ impl RwiGateway {
     }
 
     /// Get events for a specific call since a given sequence number
-    pub fn get_events_for_call_since(&self, call_id: &CallId, last_sequence: u64) -> Vec<EventCacheEntry> {
-        let cache_state = self.event_cache.lock().unwrap_or_else(|poisoned| {
-            poisoned.into_inner()
-        });
+    pub fn get_events_for_call_since(
+        &self,
+        call_id: &CallId,
+        last_sequence: u64,
+    ) -> Vec<EventCacheEntry> {
+        let cache_state = self
+            .event_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
 
         cache_state
             .cache
@@ -348,23 +355,25 @@ impl RwiGateway {
 
     /// Check if event is still in cache window
     pub fn is_sequence_in_cache(&self, sequence: u64) -> bool {
-        let cache_state = self.event_cache.lock().unwrap_or_else(|poisoned| {
-            poisoned.into_inner()
-        });
+        let cache_state = self
+            .event_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
 
         if cache_state.cache.is_empty() {
             return false;
         }
-        
+
         let min_sequence = cache_state.cache.front().map(|e| e.sequence).unwrap_or(0);
         sequence >= min_sequence && sequence < cache_state.next_sequence
     }
 
     /// Get current sequence number
     pub fn current_sequence(&self) -> u64 {
-        let cache_state = self.event_cache.lock().unwrap_or_else(|poisoned| {
-            poisoned.into_inner()
-        });
+        let cache_state = self
+            .event_cache
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         cache_state.next_sequence
     }
 
@@ -404,16 +413,17 @@ impl RwiGateway {
     }
 
     /// Resume a session after disconnect
-    /// 
+    ///
     /// Returns events that need to be replayed to the session
     /// and the current sequence number for the session to track
     pub fn resume_session(&self, last_sequence: Option<u64>) -> (Vec<EventCacheEntry>, u64) {
         let events = match last_sequence {
             Some(seq) => self.get_events_since(seq),
             None => {
-                let cache_state = self.event_cache.lock().unwrap_or_else(|poisoned| {
-                    poisoned.into_inner()
-                });
+                let cache_state = self
+                    .event_cache
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
                 cache_state.cache.iter().cloned().collect()
             }
         };
@@ -422,16 +432,21 @@ impl RwiGateway {
     }
 
     /// Resume a specific call after disconnect
-    /// 
+    ///
     /// Returns events for the call that need to be replayed
     /// and the current sequence number for the session to track
-    pub fn resume_call(&self, call_id: &CallId, last_sequence: Option<u64>) -> (Vec<EventCacheEntry>, u64) {
+    pub fn resume_call(
+        &self,
+        call_id: &CallId,
+        last_sequence: Option<u64>,
+    ) -> (Vec<EventCacheEntry>, u64) {
         let events = match last_sequence {
             Some(seq) => self.get_events_for_call_since(call_id, seq),
             None => {
-                let cache_state = self.event_cache.lock().unwrap_or_else(|poisoned| {
-                    poisoned.into_inner()
-                });
+                let cache_state = self
+                    .event_cache
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
                 cache_state
                     .cache
                     .iter()
@@ -440,7 +455,7 @@ impl RwiGateway {
                     .collect()
             }
         };
-        
+
         (events, self.current_sequence())
     }
 }
@@ -797,24 +812,32 @@ mod tests {
     #[test]
     fn test_event_cache_basic() {
         let gateway = RwiGateway::with_config(100, 60);
-        
+
         // Add some events
-        let event1 = RwiEvent::CallRinging { call_id: "c1".into() };
-        let event2 = RwiEvent::CallAnswered { call_id: "c1".into() };
-        let event3 = RwiEvent::CallHangup { call_id: "c1".into(), reason: None, sip_status: None };
-        
+        let event1 = RwiEvent::CallRinging {
+            call_id: "c1".into(),
+        };
+        let event2 = RwiEvent::CallAnswered {
+            call_id: "c1".into(),
+        };
+        let event3 = RwiEvent::CallHangup {
+            call_id: "c1".into(),
+            reason: None,
+            sip_status: None,
+        };
+
         let seq1 = gateway.cache_event(&"c1".to_string(), &event1);
         let seq2 = gateway.cache_event(&"c1".to_string(), &event2);
         let seq3 = gateway.cache_event(&"c1".to_string(), &event3);
-        
+
         // Verify sequences are increasing
         assert!(seq2 > seq1);
         assert!(seq3 > seq2);
-        
+
         // Verify we can retrieve events since a sequence
         let events = gateway.get_events_since(seq1);
         assert_eq!(events.len(), 2);
-        
+
         // Verify sequence is in cache
         assert!(gateway.is_sequence_in_cache(seq2));
         assert!(!gateway.is_sequence_in_cache(0));
@@ -824,17 +847,19 @@ mod tests {
     fn test_event_cache_size_limit() {
         // Create gateway with small cache
         let gateway = RwiGateway::with_config(5, 60);
-        
+
         // Add more events than cache size
         for i in 0..10 {
-            let event = RwiEvent::CallRinging { call_id: format!("c{}", i) };
+            let event = RwiEvent::CallRinging {
+                call_id: format!("c{}", i),
+            };
             gateway.cache_event(&format!("c{}", i), &event);
         }
-        
+
         // Verify cache size is maintained
         let cache_state = gateway.event_cache.lock().unwrap();
         assert_eq!(cache_state.cache.len(), 5);
-        
+
         // Verify oldest events were removed
         let sequences: Vec<u64> = cache_state.cache.iter().map(|e| e.sequence).collect();
         assert_eq!(sequences.len(), 5);
@@ -843,19 +868,23 @@ mod tests {
     #[test]
     fn test_resume_session() {
         let gateway = RwiGateway::with_config(100, 60);
-        
+
         // Add some events
-        let event1 = RwiEvent::CallRinging { call_id: "c1".into() };
-        let event2 = RwiEvent::CallAnswered { call_id: "c1".into() };
-        
+        let event1 = RwiEvent::CallRinging {
+            call_id: "c1".into(),
+        };
+        let event2 = RwiEvent::CallAnswered {
+            call_id: "c1".into(),
+        };
+
         gateway.cache_event(&"c1".to_string(), &event1);
         let seq2 = gateway.cache_event(&"c1".to_string(), &event2);
-        
+
         // Test resume without last_sequence (get all events)
         let (events, current_seq) = gateway.resume_session(None);
         assert_eq!(events.len(), 2);
         assert!(current_seq > seq2);
-        
+
         // Test resume with last_sequence (get only new events)
         let (events, _) = gateway.resume_session(Some(seq2));
         assert_eq!(events.len(), 0); // No events after seq2
@@ -864,20 +893,26 @@ mod tests {
     #[test]
     fn test_resume_call() {
         let gateway = RwiGateway::with_config(100, 60);
-        
+
         // Add events for different calls
-        let event1 = RwiEvent::CallRinging { call_id: "c1".into() };
-        let event2 = RwiEvent::CallRinging { call_id: "c2".into() };
-        let event3 = RwiEvent::CallAnswered { call_id: "c1".into() };
-        
+        let event1 = RwiEvent::CallRinging {
+            call_id: "c1".into(),
+        };
+        let event2 = RwiEvent::CallRinging {
+            call_id: "c2".into(),
+        };
+        let event3 = RwiEvent::CallAnswered {
+            call_id: "c1".into(),
+        };
+
         gateway.cache_event(&"c1".to_string(), &event1);
         gateway.cache_event(&"c2".to_string(), &event2);
         gateway.cache_event(&"c1".to_string(), &event3);
-        
+
         // Get events only for c1
         let (events, _seq) = gateway.resume_call(&"c1".to_string(), None);
         assert_eq!(events.len(), 2);
-        
+
         for event in &events {
             assert_eq!(event.call_id, "c1");
         }
@@ -886,23 +921,27 @@ mod tests {
     #[test]
     fn test_event_call_id_extraction() {
         // Test various events
-        let event1 = RwiEvent::CallRinging { call_id: "c1".into() };
+        let event1 = RwiEvent::CallRinging {
+            call_id: "c1".into(),
+        };
         assert_eq!(event1.call_id(), Some("c1"));
-        
+
         let event2 = RwiEvent::CallTransferFailed {
             call_id: "c2".into(),
             sip_status: Some(404),
             reason: Some("Not found".into()),
         };
         assert_eq!(event2.call_id(), Some("c2"));
-        
+
         let event3 = RwiEvent::CallBridged {
             leg_a: "a".into(),
             leg_b: "b".into(),
         };
         assert_eq!(event3.call_id(), Some("a"));
-        
-        let event4 = RwiEvent::ConferenceCreated { conf_id: "conf1".into() };
+
+        let event4 = RwiEvent::ConferenceCreated {
+            conf_id: "conf1".into(),
+        };
         assert_eq!(event4.call_id(), None);
     }
 }

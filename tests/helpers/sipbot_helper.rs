@@ -31,11 +31,6 @@ pub struct TestUa {
 }
 
 impl TestUa {
-    /// Create and start a callee UA that rings for `ring_secs` seconds then
-    /// auto-answers with echo.  The UA binds UDP on `127.0.0.1:<sip_port>`.
-    ///
-    /// The underlying `SipBot::run_wait()` loop is spawned in a background
-    /// task.  Drop (or call `stop()`) to terminate it.
     pub async fn callee(sip_port: u16, ring_secs: u64) -> Self {
         Self::callee_with_username(sip_port, ring_secs, "bob").await
     }
@@ -47,7 +42,11 @@ impl TestUa {
 
     /// Create and start a callee UA with REFER rejection (for 3PCC fallback testing).
     #[allow(dead_code)]
-    pub async fn callee_with_refer_reject(sip_port: u16, ring_secs: u64, refer_reject_code: u16) -> Self {
+    pub async fn callee_with_refer_reject(
+        sip_port: u16,
+        ring_secs: u64,
+        refer_reject_code: u16,
+    ) -> Self {
         Self::callee_with_options(sip_port, ring_secs, "bob", Some(refer_reject_code)).await
     }
 
