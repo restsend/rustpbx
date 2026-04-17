@@ -19,6 +19,21 @@ allow_registration = false
 
 # Cookie security
 secure_cookie = false # Set true behind HTTPS proxy
+
+# Optional: override CDN URLs for frontend JS libraries.
+# Configuring these to local paths or a nearby CDN mirror can significantly
+# speed up page load / first-render time in restricted-network environments.
+#
+# Default values (loaded from public CDNs when not set):
+#   alpine_js   = "https://cdnjs.cloudflare.com/ajax/libs/alpinejs/3.15.0/cdn.min.js"
+#   tailwind_js = "https://cdnjs.cloudflare.com/ajax/libs/tailwindcss-browser/4.1.13/index.global.min.js"
+#   chart_js    = "https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.5.0/chart.umd.min.js"
+#   jssip_js    = "//jssip.net/download/releases/jssip-3.10.0.js"
+#
+# alpine_js   = "/static/js/alpine.min.js"
+# tailwind_js = "/static/js/tailwind.min.js"
+# chart_js    = "/static/js/chart.umd.min.js"
+# jssip_js    = "/static/js/jssip.min.js"
 ```
 
 ## AMI (Asterisk Manager Interface)

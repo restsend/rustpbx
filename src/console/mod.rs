@@ -182,6 +182,10 @@ impl ConsoleState {
                     map.entry("chart_js")
                         .or_insert_with(|| serde_json::Value::String(chart_js.clone()));
                 }
+                if let Some(ref jssip_js) = self.config.jssip_js {
+                    map.entry("jssip_js")
+                        .or_insert_with(|| serde_json::Value::String(jssip_js.clone()));
+                }
 
                 // ── i18n context injection ──────────────────────────────
                 map.entry("locale")

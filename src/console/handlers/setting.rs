@@ -1381,6 +1381,21 @@ enum CallRecordStoragePayload {
         #[serde(default)]
         root: Option<String>,
     },
+    S3 {
+        vendor: String,
+        bucket: String,
+        region: String,
+        access_key: String,
+        secret_key: String,
+        #[serde(default)]
+        endpoint: Option<String>,
+        #[serde(default)]
+        root: Option<String>,
+        #[serde(default)]
+        with_media: Option<bool>,
+        #[serde(default)]
+        keep_media_copy: Option<bool>,
+    },
 }
 
 #[derive(Debug, Deserialize)]
@@ -1656,6 +1671,42 @@ pub(crate) async fn update_storage_settings(
                 let mut table = Table::new();
                 table["type"] = value("local");
                 table["root"] = value(root_path);
+                doc["callrecord"] = Item::Table(table);
+            }
+            Some(CallRecordStoragePayload::S3 {
+                vendor,
+                bucket,
+                region,
+                access_key,
+                secret_key,
+                endpoint,
+                root,
+                with_media,
+                keep_media_copy,
+            }) => {
+                let mut table = Table::new();
+                table["type"] = value("s3");
+                table["vendor"] = value(vendor);
+                table["bucket"] = value(bucket);
+                table["region"] = value(region);
+                table["access_key"] = value(access_key);
+                table["secret_key"] = value(secret_key);
+                if let Some(ep) = normalize_opt_string(endpoint) {
+                    table["endpoint"] = value(ep);
+                } else {
+                    table.remove("endpoint");
+                }
+                if let Some(r) = normalize_opt_string(root) {
+                    table["root"] = value(r);
+                } else {
+                    table.remove("root");
+                }
+                if let Some(wm) = with_media {
+                    table["with_media"] = value(wm);
+                }
+                if let Some(kmc) = keep_media_copy {
+                    table["keep_media_copy"] = value(kmc);
+                }
                 doc["callrecord"] = Item::Table(table);
             }
         }
@@ -2180,19 +2231,30 @@ pub(crate) async fn test_storage_connection(
     let filename = format!("test-connection-{}.txt", Uuid::new_v4());
     let content = b"RustPBX storage connection test";
 
-    if let Err(err) = storage
-        .write(&filename, bytes::Bytes::from_static(content))
-        .await
-    {
-        return json_error(
-            StatusCode::BAD_REQUEST,
-            format!("Failed to write test file: {}", err),
-        );
-    }
+    let test_fut = async {
+        storage
+            .write(&filename, bytes::Bytes::from_static(content))
+            .await?;
+        if let Err(err) = storage.delete(&filename).await {
+            warn!("Failed to delete test file {}: {}", filename, err);
+        }
+        Ok::<_, anyhow::Error>(())
+    };
 
-    if let Err(err) = storage.delete(&filename).await {
-        // Try to delete but don't fail the test if delete fails, just warn
-        warn!("Failed to delete test file {}: {}", filename, err);
+    match tokio::time::timeout(std::time::Duration::from_secs(10), test_fut).await {
+        Ok(Ok(())) => {}
+        Ok(Err(err)) => {
+            return json_error(
+                StatusCode::BAD_REQUEST,
+                format!("Failed to write test file: {}", err),
+            );
+        }
+        Err(_) => {
+            return json_error(
+                StatusCode::REQUEST_TIMEOUT,
+                "Storage connection timed out after 10 seconds",
+            );
+        }
     }
 
     Json(json!({

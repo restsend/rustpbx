@@ -300,6 +300,10 @@ pub struct RouteRule {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub codecs: Vec<String>,
 
+    /// When `true`, ice_servers will not be applied for calls matching this rule.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disable_ice_servers: Option<bool>,
+
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disabled: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -321,6 +325,7 @@ impl Default for RouteRule {
             rewrite: None,
             action: RouteAction::default(),
             codecs: Vec::new(),
+            disable_ice_servers: None,
             disabled: None,
             policy: None,
             origin: ConfigOrigin::embedded(),

@@ -1819,7 +1819,7 @@ impl SipSession {
 
                 if caller_is_webrtc {
                     track_builder = track_builder.with_mode(rustrtc::TransportMode::WebRtc);
-                    if let Some(ref ice_servers) = self.server.rtp_config.ice_servers {
+                    if let Some(ref ice_servers) = self.context.dialplan.media.ice_servers {
                         track_builder = track_builder.with_ice_servers(ice_servers.clone());
                     }
                 }
@@ -2135,7 +2135,7 @@ impl SipSession {
                 bridge_builder = bridge_builder.with_external_ip(external_ip.clone());
             }
 
-            if let Some(ref ice_servers) = self.server.rtp_config.ice_servers {
+            if let Some(ref ice_servers) = self.context.dialplan.media.ice_servers {
                 bridge_builder = bridge_builder.with_ice_servers(ice_servers.clone());
             }
 
@@ -2351,7 +2351,7 @@ impl SipSession {
 
             if callee_is_webrtc {
                 track_builder = track_builder.with_mode(rustrtc::TransportMode::WebRtc);
-                if let Some(ref ice_servers) = self.server.rtp_config.ice_servers {
+                if let Some(ref ice_servers) = self.context.dialplan.media.ice_servers {
                     track_builder = track_builder.with_ice_servers(ice_servers.clone());
                 }
             }
@@ -2420,7 +2420,7 @@ impl SipSession {
 
         if caller_is_webrtc {
             track_builder = track_builder.with_mode(rustrtc::TransportMode::WebRtc);
-            if let Some(ref ice_servers) = self.server.rtp_config.ice_servers {
+            if let Some(ref ice_servers) = self.context.dialplan.media.ice_servers {
                 track_builder = track_builder.with_ice_servers(ice_servers.clone());
             }
         }

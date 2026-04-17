@@ -422,8 +422,9 @@
     </div>
 </div>
 
+<script type="application/json" id="__addonsT">{{ t | json | safe }}</script>
 <script>
-    const addonsTranslations = {{ t | json | safe }};
+    const addonsTranslations = JSON.parse(document.getElementById('__addonsT').textContent || '{}');
     const i18n = (key) => addonsTranslations[key] || key;
 
     document.addEventListener('alpine:init', () => {

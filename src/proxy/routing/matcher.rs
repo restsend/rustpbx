@@ -270,9 +270,12 @@ async fn match_invite_impl(
             }
         }
 
-        let hints = if !rule.codecs.is_empty() {
+        let hints = if !rule.codecs.is_empty() || rule.disable_ice_servers.is_some() {
             let mut hints = DialplanHints::default();
-            hints.allow_codecs = Some(rule.codecs.clone());
+            if !rule.codecs.is_empty() {
+                hints.allow_codecs = Some(rule.codecs.clone());
+            }
+            hints.disable_ice_servers = rule.disable_ice_servers;
             Some(hints)
         } else {
             None
