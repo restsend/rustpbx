@@ -686,8 +686,9 @@
 
 <script defer src="https://unpkg.com/wavesurfer.js@7/dist/wavesurfer.min.js"></script>
 
+<script type="application/json" id="__callRecordDetailT">{{ t | json | safe }}</script>
 <script>
-    window._callRecordDetailTranslations = {{ t | json | safe }};
+    window._callRecordDetailTranslations = JSON.parse(document.getElementById('__callRecordDetailT').textContent || '{}');
     document.addEventListener('alpine:init', () => {
         Alpine.data('callRecordDetail', (payload) => ({
             t: window._callRecordDetailTranslations || {},

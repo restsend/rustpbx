@@ -363,10 +363,10 @@
     </div>
 </div>
 
+<script type="application/json" id="__addonDetailT">{{ t | json | safe }}</script>
 <script>
     document.addEventListener('alpine:init', () => {
-        const translations = {{ t | json | safe
-    }};
+        const translations = JSON.parse(document.getElementById('__addonDetailT').textContent || '{}');
     const i18n = (key) => translations[key] || key;
 
     Alpine.data('addonDetail', (id, licenseExpired, licenseUnlicensed) => ({

@@ -6,15 +6,17 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="description" content="{{site_description|default('RustPBX Admin Console')}}" />
     <meta name="author" content="RustPBX" />
+    <meta name="locale" content="{{ locale | default('en') }}" />
     <link rel="icon" href="{{favicon_url|default('/static/favicon.ico')}}" />
     <title>{% block title %}{{page_title|default('RustPBX Admin')}}{% endblock %}</title>
+    <script type="application/json" id="__authLocales">{{ available_locales | json | safe }}</script>
     {% block js_head %}
     <script>
         document.addEventListener('alpine:init', () => {
             Alpine.data('localeSwitcher', () => ({
                 open: false,
-                current: '{{ locale | default("en") }}',
-                locales: {{ available_locales | json | safe }},
+                current: (document.querySelector('meta[name="locale"]') || {}).content || 'en',
+                locales: JSON.parse(document.getElementById('__authLocales').textContent || '[]'),
                 flags: {
                     'en': '🇺🇸', 'en-US': '🇺🇸', 'en-GB': '🇬🇧',
                     'zh': '🇨🇳', 'zh-CN': '🇨🇳', 'zh-TW': '🇹🇼', 'zh-HK': '🇭🇰',

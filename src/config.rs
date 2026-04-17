@@ -475,6 +475,7 @@ pub struct ConsoleConfig {
     pub alpine_js: Option<String>,
     pub tailwind_js: Option<String>,
     pub chart_js: Option<String>,
+    pub jssip_js: Option<String>,
     /// Default locale code, e.g. "en" or "zh"
     #[serde(default = "default_locale")]
     pub locale_default: String,
@@ -513,6 +514,7 @@ impl Default for ConsoleConfig {
             alpine_js: None,
             tailwind_js: None,
             chart_js: None,
+            jssip_js: None,
             locale_default: default_locale(),
             locales: default_locales(),
         }
@@ -813,6 +815,7 @@ pub struct DialplanHints {
     pub enable_sipflow: Option<bool>,
     pub allow_codecs: Option<Vec<String>>,
     pub extensions: http::Extensions,
+    pub disable_ice_servers: Option<bool>,
 }
 
 impl std::fmt::Debug for DialplanHints {
@@ -822,6 +825,7 @@ impl std::fmt::Debug for DialplanHints {
             .field("bypass_media", &self.bypass_media)
             .field("max_duration", &self.max_duration)
             .field("enable_sipflow", &self.enable_sipflow)
+            .field("disable_ice_servers", &self.disable_ice_servers)
             .finish()
     }
 }

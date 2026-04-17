@@ -164,6 +164,8 @@ pub trait Addon: Send + Sync {
 
 pub mod registry;
 
+pub mod observability;
+
 #[cfg(feature = "addon-acme")]
 pub mod acme;
 #[cfg(feature = "addon-archive")]

@@ -10,6 +10,19 @@ impl AddonRegistry {
     pub fn new() -> Self {
         let mut addons: Vec<Box<dyn Addon>> = Vec::new();
 
+        // Observability: community build uses ObservabilityAddon (/metrics + /healthz);
+        // commercial addon-telemetry replaces it with OTel tracing + Prometheus.
+        #[cfg(not(feature = "addon-telemetry"))]
+        {
+            super::observability::ObservabilityAddon::install_recorder().ok();
+            addons.push(Box::new(super::observability::ObservabilityAddon::new()));
+        }
+        #[cfg(feature = "addon-telemetry")]
+        {
+            super::telemetry::TelemetryAddon::install_recorder().ok();
+            addons.push(Box::new(super::telemetry::TelemetryAddon::new()));
+        }
+
         // ACME Addon (Free/Built-in for now as per request)
         #[cfg(feature = "addon-acme")]
         addons.push(Box::new(super::acme::AcmeAddon::new()));

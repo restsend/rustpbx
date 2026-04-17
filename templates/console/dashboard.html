@@ -174,9 +174,10 @@
     data-endpoint="{{ base_path }}/dashboard/data"></div>
 <script defer
     src="{{chart_js|default('https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.5.0/chart.umd.min.js')|safe}}"></script>
+<script type="application/json" id="__dashboardT">{{ (t.dashboard | default({})) | tojson | safe }}</script>
 <script>
     function initDashboardPage() {
-        const dashboardT = {{ (t.dashboard | default({})) | tojson | safe }};
+        const dashboardT = JSON.parse(document.getElementById('__dashboardT').textContent || '{}');
         const bootstrapNode = document.getElementById('dashboard-bootstrap');
         let payload = null;
         let endpoint = null;

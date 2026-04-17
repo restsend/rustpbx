@@ -712,7 +712,7 @@
         </section>
 
         <section x-show="activeTab === 'storage'" x-cloak x-transition.opacity class="space-y-6"
-            id="settings-tab-storage" role="tabpanel" tabindex="0" style="display:none!important">
+            id="settings-tab-storage" role="tabpanel" tabindex="0">
             <div class="space-y-6">
                 <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
                     <div class="flex flex-col gap-2 md:flex-row md:items-end md:justify-between">
@@ -2328,8 +2328,9 @@
     </div>
 </div>
 
+<script type="application/json" id="__settingsTranslations">{{ t | json | safe }}</script>
 <script>
-    window._settingsTranslations = {{ t | json | safe }};
+    window._settingsTranslations = JSON.parse(document.getElementById('__settingsTranslations').textContent || '{}');
     document.addEventListener('alpine:init', () => {
         Alpine.data('settingsConsole', (options = {}) => ({
             basePath: options?.basePath || '/console',
@@ -2349,6 +2350,7 @@
                     { id: 'platform', label: tget(tt, 'settings_page.platform_overview') || 'Platform overview' },
                     { id: 'proxy', label: tget(tt, 'settings_page.proxy_settings') || 'Proxy settings' },
                     { id: 'sipflow', label: tget(tt, 'settings_page.sipflow_recording') || 'SipFlow recording' },
+                    { id: 'storage', label: tget(tt, 'settings_page.storage_destinations') || 'Storage' },
                     { id: 'recording', label: tget(tt, 'settings_page.recording_policy') || 'Recording policy' },
                     { id: 'security', label: tget(tt, 'settings_page.security_posture') || 'Security posture' },
                     { id: 'rwi', label: tget(tt, 'settings_page.rwi_settings') || 'RWI' },
@@ -4421,10 +4423,29 @@
                 const directionInbound = directionDefault ? true : directionList.includes('inbound');
                 const directionOutbound = directionDefault ? true : directionList.includes('outbound');
                 const directionInternal = directionDefault ? true : directionList.includes('internal');
+
+                // Load callrecord profile from storage_profiles
+                const crProfile = Array.isArray(this.server?.storage_profiles)
+                    ? this.server.storage_profiles.find(p => String(p?.id || '').startsWith('callrecord'))
+                    : null;
+                const crConfig = crProfile?.config || {};
+                const crType = crConfig?.type || (meta?.mode === 's3' ? 's3' : (meta?.mode === 'local' ? 'local' : 'disabled'));
+
                 this.storageDraft = {
                     recorder_path: recorderPath,
                     recorder_format: recorderFormat || 'wav',
                     media_cache_path: mediaCache,
+                    callrecord_mode: crType,
+                    callrecord_root: crConfig?.root || '',
+                    callrecord_s3_vendor: crConfig?.vendor || 'aws',
+                    callrecord_s3_bucket: crConfig?.bucket || '',
+                    callrecord_s3_region: crConfig?.region || '',
+                    callrecord_s3_endpoint: crConfig?.endpoint || '',
+                    callrecord_s3_access_key: '',
+                    callrecord_s3_secret_key: '',
+                    callrecord_s3_root: crConfig?.root || '',
+                    callrecord_s3_with_media: !!crConfig?.with_media,
+                    callrecord_s3_keep_media_copy: !!crConfig?.keep_media_copy,
                     recording_enabled: !!recording?.enabled,
                     recording_auto_start: recording?.auto_start !== undefined ? !!recording.auto_start : true,
                     recording_direction_inbound: directionInbound,
@@ -4495,11 +4516,48 @@
                 if (recordingDirections.length && recordingDirections.length < 3) {
                     recordingPayload.directions = recordingDirections;
                 }
+                // Build callrecord payload based on mode
+                let callrecordPayload = null;
+                const crMode = this.storageDraft.callrecord_mode || 'disabled';
+                if (crMode === 'disabled') {
+                    callrecordPayload = { mode: 'disabled' };
+                } else if (crMode === 'local') {
+                    callrecordPayload = {
+                        mode: 'local',
+                        root: this.normalizeOptionalString(this.storageDraft.callrecord_root),
+                    };
+                } else if (crMode === 's3') {
+                    const s3Vendor = this.normalizeOptionalString(this.storageDraft.callrecord_s3_vendor);
+                    const s3Bucket = this.normalizeOptionalString(this.storageDraft.callrecord_s3_bucket);
+                    const s3Region = this.normalizeOptionalString(this.storageDraft.callrecord_s3_region);
+                    const s3AccessKey = this.normalizeOptionalString(this.storageDraft.callrecord_s3_access_key);
+                    const s3SecretKey = this.normalizeOptionalString(this.storageDraft.callrecord_s3_secret_key);
+                    if (!s3Vendor || !s3Bucket || !s3Region || !s3AccessKey || !s3SecretKey) {
+                        this.$dispatch('toast', {
+                            title: 'Missing S3 fields',
+                            message: 'Vendor, bucket, region, access key, and secret key are required.',
+                        });
+                        return;
+                    }
+                    callrecordPayload = {
+                        mode: 's3',
+                        vendor: s3Vendor,
+                        bucket: s3Bucket,
+                        region: s3Region,
+                        access_key: s3AccessKey,
+                        secret_key: s3SecretKey,
+                        endpoint: this.normalizeOptionalString(this.storageDraft.callrecord_s3_endpoint),
+                        root: this.normalizeOptionalString(this.storageDraft.callrecord_s3_root),
+                        with_media: !!this.storageDraft.callrecord_s3_with_media,
+                        keep_media_copy: !!this.storageDraft.callrecord_s3_keep_media_copy,
+                    };
+                }
                 const body = {
                     recorder_path: this.normalizeOptionalString(this.storageDraft.recorder_path),
                     media_cache_path: this.normalizeOptionalString(this.storageDraft.media_cache_path),
                     recorder_format: recorderFormat,
                     recording_policy: recordingPayload,
+                    callrecord: callrecordPayload,
                 };
                 this.storageProcessing = true;
                 try {

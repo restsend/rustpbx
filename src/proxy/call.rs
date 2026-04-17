@@ -583,6 +583,9 @@ impl CallModule {
             if let Some(enable_sipflow) = hints.enable_sipflow {
                 dialplan.enable_sipflow = enable_sipflow;
             }
+            if hints.disable_ice_servers == Some(true) {
+                dialplan.media.ice_servers = None;
+            }
             if let Some(codecs) = hints.allow_codecs {
                 let mut allow_codecs = Vec::new();
                 for codec_name in codecs {

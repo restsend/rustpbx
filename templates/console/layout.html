@@ -6,10 +6,13 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="description" content="{{site_description|default('RustPBX Admin Console')}}" />
+    <meta name="locale" content="{{ locale | default('en') }}" />
     <title>{% block title %}{{page_title|default('RustPBX Admin')}}{% endblock %}</title>
+    <script type="application/json" id="__currentUser">{{ current_user | json | safe }}</script>
+    <script type="application/json" id="__locales">{{ available_locales | json | safe }}</script>
     {% block js_head %}
     <script>
-        window.__currentUser = {{ current_user | json | safe }};
+        window.__currentUser = JSON.parse(document.getElementById('__currentUser').textContent || 'null');
         window.hasPermission = function (perm) {
             // If current_user is missing but user reached this authenticated page,
             // default to showing items (backend has already authenticated)
@@ -121,8 +124,8 @@
 
             Alpine.data('localeSwitcher', () => ({
                 open: false,
-                current: '{{ locale | default("en") }}',
-                locales: {{ available_locales | json | safe }},
+                current: (document.querySelector('meta[name="locale"]') || {}).content || 'en',
+                locales: JSON.parse(document.getElementById('__locales').textContent || '[]'),
             flags: {
             'en': '🇺🇸', 'en-US': '🇺🇸', 'en-GB': '🇬🇧',
             'zh': '🇨🇳', 'zh-CN': '🇨🇳', 'zh-TW': '🇹🇼', 'zh-HK': '🇭🇰',

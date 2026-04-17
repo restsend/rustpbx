@@ -1060,6 +1060,7 @@ fn convert_route(
         policy: None,
         origin: ConfigOrigin::embedded(),
         codecs: Vec::new(),
+        disable_ice_servers: None,
     };
     Ok(Some(route))
 }
