@@ -88,6 +88,7 @@ pub struct AppStateBuilder {
     pub config_loaded_at: Option<DateTime<Utc>>,
     pub config_path: Option<String>,
     pub skip_sip_bind: bool,
+    pub skip_migrate: bool,
 }
 
 impl AppStateInner {
@@ -165,11 +166,17 @@ impl AppStateBuilder {
             config_loaded_at: None,
             config_path: None,
             skip_sip_bind: false,
+            skip_migrate: false,
         }
     }
 
     pub fn with_skip_sip_bind(mut self) -> Self {
         self.skip_sip_bind = true;
+        self
+    }
+
+    pub fn with_skip_migrate(mut self) -> Self {
+        self.skip_migrate = true;
         self
     }
 
@@ -213,7 +220,11 @@ impl AppStateBuilder {
             .unwrap_or_else(|| CancellationToken::new());
         let config_loaded_at = self.config_loaded_at.unwrap_or_else(|| Utc::now());
         let config_path = self.config_path.clone();
-        let db_conn = crate::models::create_db(&config.database_url).await?;
+        let db_conn = if self.skip_migrate {
+            crate::models::connect_db(&config.database_url).await?
+        } else {
+            crate::models::create_db(&config.database_url).await?
+        };
 
         let addon_registry = Arc::new(crate::addons::registry::AddonRegistry::new());
 

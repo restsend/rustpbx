@@ -31,6 +31,7 @@ pub struct TestUa {
 }
 
 impl TestUa {
+    #[allow(dead_code)]
     pub async fn callee(sip_port: u16, ring_secs: u64) -> Self {
         Self::callee_with_username(sip_port, ring_secs, "bob").await
     }
