@@ -44,7 +44,7 @@ use std::{
     collections::HashMap,
     net::{IpAddr, SocketAddr},
     sync::{
-        Arc,
+        Arc, OnceLock,
         atomic::{AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
@@ -495,10 +495,17 @@ impl SipServerBuilder {
             .with_option(endpoint_option)
             .with_transport_layer(transport_layer);
 
+        let advertised_methods = Arc::new(OnceLock::new());
         let mut inspectors: Vec<Box<dyn MessageInspector>> = self.message_inspectors;
         if self.config.nat_fix {
             inspectors.insert(0, Box::new(super::nat::NatInspector::new()));
         }
+        inspectors.push(Box::new(
+            super::capability_headers::CapabilityHeadersInspector::new(
+                advertised_methods.clone(),
+                self.config.session_timer,
+            ),
+        ));
 
         let mut sip_flow = None;
         let sipflow_backend = self.sipflow_backend.take().or_else(|| {
@@ -678,6 +685,9 @@ impl SipServerBuilder {
                     .join(",")
             );
         }
+        advertised_methods
+            .set(allow_methods.clone())
+            .map_err(|_| anyhow!("advertised SIP methods already initialized"))?;
         inner.endpoint.inner.allows.lock().replace(allow_methods);
         Ok(SipServer {
             inner,

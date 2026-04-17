@@ -564,19 +564,7 @@ impl ProxyModule for RegistrarModule {
                     .ok();
             }
 
-            let mut headers = Vec::new();
-            if let Some(allows) = tx.endpoint_inner.allows.lock().as_deref() {
-                if !allows.is_empty() {
-                    headers.push(rsipstack::sip::Header::Allow(
-                        allows
-                            .iter()
-                            .map(|m| m.to_string())
-                            .collect::<Vec<String>>()
-                            .join(",")
-                            .into(),
-                    ));
-                }
-            }
+            let headers = Vec::new();
             tx.reply_with(rsipstack::sip::StatusCode::OK, headers, None)
                 .await
                 .ok();
@@ -690,18 +678,6 @@ impl ProxyModule for RegistrarModule {
             response_headers.push(Header::Other("Contact".into(), rendered_contact.into()));
         }
 
-        if let Some(allows) = tx.endpoint_inner.allows.lock().as_deref() {
-            if !allows.is_empty() {
-                response_headers.push(Header::Allow(
-                    allows
-                        .iter()
-                        .map(|m| m.to_string())
-                        .collect::<Vec<String>>()
-                        .join(",")
-                        .into(),
-                ));
-            }
-        }
         response_headers.push(Header::Expires(
             global_expires.unwrap_or(default_expires).into(),
         ));

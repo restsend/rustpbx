@@ -419,7 +419,7 @@ fn build_timer_headers(
     min_se: String,
     include_content_type: bool,
 ) -> Vec<rsipstack::sip::Header> {
-    let mut headers = Vec::with_capacity(if include_content_type { 4 } else { 3 });
+    let mut headers = Vec::new();
     if include_content_type {
         headers.push(rsipstack::sip::Header::ContentType(
             "application/sdp".into(),
@@ -432,9 +432,6 @@ fn build_timer_headers(
     headers.push(rsipstack::sip::Header::Other(
         HEADER_MIN_SE.to_string(),
         min_se,
-    ));
-    headers.push(rsipstack::sip::Header::Supported(
-        rsipstack::sip::headers::Supported::from(TIMER_TAG),
     ));
     headers
 }
