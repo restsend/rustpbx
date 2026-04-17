@@ -58,7 +58,6 @@ jobs:
         uses: taiki-e/install-action@v2
         with:
           tool: cross
-
       - name: Build ARM64 Binaries
         run: |
           cross build --release --target aarch64-unknown-linux-gnu --features cross --bin rustpbx --bin sipflow
