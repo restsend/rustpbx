@@ -144,7 +144,7 @@ impl MessageInspector for NatInspector {
                 for header in resp.headers.iter_mut() {
                     match header {
                         rsipstack::sip::Header::Contact(contact) => {
-                            let mut val = contact.to_string();
+                            let mut val = contact.value().to_string();
                             let old_val = val.clone();
                             self.fix_contact_header(&mut val, &from.addr);
                             if val != old_val {
@@ -157,5 +157,63 @@ impl MessageInspector for NatInspector {
             }
         }
         msg
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::NatInspector;
+    use rsipstack::sip::SipMessage;
+    use rsipstack::transaction::endpoint::MessageInspector;
+    use rsipstack::transport::SipAddr;
+
+    #[test]
+    fn test_nat_fix_rewritten_contact_should_not_duplicate_header_name() {
+        let raw = concat!(
+            "SIP/2.0 200 OK\r\n",
+            "Via: SIP/2.0/UDP 198.51.100.24:15060;rport=15060;received=198.51.100.24;branch=z9hG4bKdDbDaK1ixkQ7\r\n",
+            "Call-ID: lFG6BkmOTiJ7fbAS5as6S2@voltecall\r\n",
+            "From: <sip:alice@198.51.100.23>;tag=aTNjBN8v\r\n",
+            "To: <sip:79900123456@203.0.113.52>;tag=df598941-c590-4772-9a26-7c9633759dd6\r\n",
+            "CSeq: 7 INVITE\r\n",
+            "Allow: PRACK, INVITE, ACK, BYE, CANCEL, UPDATE, INFO, SUBSCRIBE, NOTIFY, REFER, MESSAGE, OPTIONS\r\n",
+            "Contact: <sip:41111112222@10.10.10.10:15060>\r\n",
+            "Supported: replaces, 100rel, timer, norefersub\r\n",
+            "Content-Type: application/sdp\r\n",
+            "Content-Length:   311\r\n",
+            "\r\n",
+            "v=0\r\n",
+            "o=- 3985392156 3985392157 IN IP4 10.10.10.10\r\n",
+            "s=volte\r\n",
+            "b=AS:84\r\n",
+            "t=0 0\r\n",
+            "a=X-nat:0\r\n",
+            "m=audio 4000 RTP/AVP 8 101\r\n",
+            "c=IN IP4 10.10.10.10\r\n",
+            "b=TIAS:64000\r\n",
+            "a=rtcp:4001 IN IP4 10.10.10.10\r\n",
+            "a=sendrecv\r\n",
+            "a=rtpmap:8 PCMA/8000\r\n",
+            "a=ssrc:1173482294 cname:0ea64c6460b897ba\r\n",
+            "a=rtpmap:101 telephone-event/8000\r\n",
+            "a=fmtp:101 0-16\r\n"
+        );
+        let msg = SipMessage::try_from(raw).unwrap();
+        let from: SipAddr = rsipstack::sip::HostWithPort::try_from("198.51.100.24:15060")
+            .unwrap()
+            .into();
+
+        let rewritten = NatInspector::new().after_received(msg, &from);
+        let text = rewritten.to_string();
+        let contact_line = text
+            .lines()
+            .find(|line| line.starts_with("Contact:"))
+            .expect("Contact header should exist");
+
+        assert_eq!(
+            contact_line,
+            "Contact: <sip:41111112222@198.51.100.24:15060>",
+            "rewritten Contact header should not duplicate the header name"
+        );
     }
 }
