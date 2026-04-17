@@ -2538,6 +2538,19 @@ impl SipSession {
     }
 
     async fn get_local_reinvite_pc(&self, side: DialogSide) -> Option<rustrtc::PeerConnection> {
+        if let Some(bridge) = &self.media_bridge {
+            let leg_is_webrtc = match side {
+                DialogSide::Caller => self.caller_is_webrtc,
+                DialogSide::Callee => self.callee_is_webrtc,
+            };
+
+            return Some(if leg_is_webrtc {
+                bridge.webrtc_pc().clone()
+            } else {
+                bridge.rtp_pc().clone()
+            });
+        }
+
         let (peer, track_id) = match side {
             DialogSide::Caller => (&self.caller_peer, Self::CALLER_TRACK_ID),
             DialogSide::Callee => (&self.callee_peer, Self::CALLEE_TRACK_ID),
@@ -5189,6 +5202,69 @@ mod tests {
             Duration::from_secs(DEFAULT_SESSION_EXPIRES)
         );
         assert!(!session.timer_keys.contains_key(&dialog_id));
+    }
+
+    #[tokio::test]
+    async fn test_get_local_reinvite_pc_uses_bridge_when_present() {
+        use crate::call::{DialDirection, Dialplan, TransactionCookie};
+        use crate::proxy::proxy_call::test_util::tests::MockMediaPeer;
+        use crate::proxy::tests::common::{
+            create_test_request, create_test_server, create_transaction,
+        };
+
+        let (server, _) = create_test_server().await;
+        let request = create_test_request(
+            rsipstack::sip::Method::Invite,
+            "alice",
+            None,
+            "rustpbx.com",
+            None,
+        );
+        let original_request = request.clone();
+        let (tx, _) = create_transaction(request).await;
+        let (state_tx, _state_rx) = mpsc::unbounded_channel();
+        let server_dialog = server
+            .dialog_layer
+            .get_or_create_server_invite(&tx, state_tx, None, None)
+            .expect("failed to create server dialog");
+
+        let context = CallContext {
+            session_id: "test-session".to_string(),
+            dialplan: Arc::new(Dialplan::new(
+                "test-session".to_string(),
+                original_request,
+                DialDirection::Inbound,
+            )),
+            cookie: TransactionCookie::default(),
+            start_time: Instant::now(),
+            original_caller: "sip:alice@rustpbx.com".to_string(),
+            original_callee: "sip:bob@rustpbx.com".to_string(),
+            max_forwards: 70,
+            dtmf_digits: Vec::new(),
+        };
+
+        let caller_peer = Arc::new(MockMediaPeer::new());
+        let callee_peer = Arc::new(MockMediaPeer::new());
+        let (mut session, _handle, _cmd_rx) = SipSession::new(
+            server.clone(),
+            CancellationToken::new(),
+            None,
+            context,
+            server_dialog,
+            false,
+            caller_peer.clone(),
+            callee_peer.clone(),
+        );
+
+        session.media_bridge = Some(BridgePeerBuilder::new("test-bridge".to_string()).build());
+        session.caller_is_webrtc = true;
+        session.callee_is_webrtc = false;
+
+        let pc = session.get_local_reinvite_pc(DialogSide::Caller).await;
+
+        assert!(pc.is_some(), "bridge-backed caller leg should resolve a PC");
+        assert_eq!(caller_peer.get_tracks_call_count(), 0);
+        assert_eq!(callee_peer.get_tracks_call_count(), 0);
     }
 
     #[tokio::test]
