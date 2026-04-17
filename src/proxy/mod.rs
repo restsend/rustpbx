@@ -10,6 +10,7 @@ use tokio_util::sync::CancellationToken;
 pub mod acl;
 pub mod active_call_registry;
 pub mod auth;
+pub mod capability_headers;
 pub mod call;
 pub mod data;
 pub mod locator;
