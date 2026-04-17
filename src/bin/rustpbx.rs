@@ -63,6 +63,12 @@ struct Cli {
         help = "Email for the console super user (defaults to username@localhost)"
     )]
     super_email: Option<String>,
+    #[clap(
+        long,
+        global = true,
+        help = "Skip running database migrations on startup"
+    )]
+    skip_migrate: bool,
     #[clap(subcommand)]
     command: Option<Commands>,
 }
@@ -327,9 +333,12 @@ async fn main() -> Result<()> {
             Config::default()
         };
 
-        let state_builder = AppStateBuilder::new()
+        let mut state_builder = AppStateBuilder::new()
             .with_config(config.clone())
             .with_config_metadata(next_config_path.clone(), Utc::now());
+        if cli.skip_migrate {
+            state_builder = state_builder.with_skip_migrate();
+        }
 
         let (app_reload_requested, app_config_path) = {
             let state = match state_builder.build().await {

@@ -65,6 +65,24 @@ pub fn prepare_sqlite_database(database_url: &str) -> Result<()> {
     Ok(())
 }
 
+pub async fn connect_db(database_url: &str) -> Result<DatabaseConnection> {
+    if database_url.starts_with("sqlite://") {
+        prepare_sqlite_database(database_url).map_err(|e| {
+            tracing::error!("failed to prepare SQLite database {database_url} {:?}", e);
+            let msg = format!("failed to prepare SQLite database {database_url}: {e}");
+            anyhow::anyhow!(msg)
+        })?;
+    }
+
+    Database::connect(database_url)
+        .await
+        .map_err(|e: sea_orm::DbErr| {
+            tracing::error!("failed to connect to database {:?}", e);
+            let msg = format!("failed to connect to database {database_url}: {e}");
+            anyhow::anyhow!(msg)
+        })
+}
+
 pub async fn create_db(database_url: &str) -> Result<DatabaseConnection> {
     if database_url.starts_with("sqlite://") {
         prepare_sqlite_database(database_url).map_err(|e| {
