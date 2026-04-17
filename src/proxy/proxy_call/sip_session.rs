@@ -1588,8 +1588,6 @@ impl SipSession {
                 if let Some(ref bridge) = self.media_bridge {
                     use rustrtc::sdp::{SdpType, SessionDescription};
 
-                    let callee_profile = MediaNegotiator::extract_leg_profile(sdp);
-
                     // 1. Set callee's RTP answer on bridge's RTP side
                     if let Ok(desc) = SessionDescription::parse(SdpType::Answer, sdp) {
                         let rtp_pc = bridge.rtp_pc();
@@ -1667,9 +1665,9 @@ impl SipSession {
                                                         .local_description()
                                                         .map(|d| d.to_sdp_string())
                                                         .map(|answer_sdp| {
-                                                            MediaNegotiator::restrict_audio_answer_to_profile(
+                                                            MediaNegotiator::restrict_answer_to_callee_accepted_codecs(
                                                                 &answer_sdp,
-                                                                &callee_profile,
+                                                                sdp,
                                                             )
                                                             .unwrap_or(answer_sdp)
                                                         })
