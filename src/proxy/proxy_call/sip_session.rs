@@ -2029,6 +2029,12 @@ impl SipSession {
         let existing_sender = target_transceiver
             .sender()
             .ok_or_else(|| anyhow!("{}: no sender on target audio transceiver", direction))?;
+        {
+            let mut guard = recorder.write();
+            if let Some(recorder) = guard.as_mut() {
+                recorder.set_leg_profile(leg, ingress_profile.clone());
+            }
+        }
 
         // Issue #171: spin up a dedicated recorder drain task so that
         // write_sample (codec decode + disk I/O) never blocks the RTP recv loop.
@@ -2045,7 +2051,7 @@ impl SipSession {
                 crate::media::recorder::Leg,
                 rustrtc::media::frame::MediaSample,
             )>(RECORDER_CHANNEL_CAPACITY);
-            let recorder_arc = recorder;
+            let recorder_arc = recorder.clone();
             tokio::spawn(async move {
                 while let Some((sample_leg, sample)) = rx.recv().await {
                     let mut guard = recorder_arc.write();
@@ -2587,13 +2593,13 @@ impl SipSession {
                 // caller->callee track reads caller RTP, so caller-side re-INVITE updates ingress.
                 caller_to_callee_forwarding.stage_ingress_profile(changed_profile.clone());
                 // callee->caller track sends toward caller, so caller-side re-INVITE updates egress.
-                callee_to_caller_forwarding.stage_egress_profile(changed_profile);
+                callee_to_caller_forwarding.stage_egress_profile(changed_profile.clone());
             }
             DialogSide::Callee => {
                 // caller->callee track sends toward callee, so callee-side re-INVITE updates egress.
                 caller_to_callee_forwarding.stage_egress_profile(changed_profile.clone());
                 // callee->caller track reads callee RTP, so callee-side re-INVITE updates ingress.
-                callee_to_caller_forwarding.stage_ingress_profile(changed_profile);
+                callee_to_caller_forwarding.stage_ingress_profile(changed_profile.clone());
             }
         }
 
@@ -2790,7 +2796,27 @@ impl SipSession {
         _max_duration: Option<Duration>,
         beep: bool,
     ) -> Result<()> {
-        let recorder = Recorder::new(path, CodecType::PCMU)?;
+        let mut recorder = Recorder::new(path, CodecType::PCMU)?;
+        if let Some(forwarding) =
+            Self::get_forwarding_track(&self.caller_peer, Self::CALLER_FORWARDING_TRACK_ID).await
+        {
+            if let Some(profile) = forwarding.ingress_profile() {
+                recorder.set_leg_profile(crate::media::recorder::Leg::A, profile);
+            }
+        } else if let Some(answer_sdp) = self.answer.as_deref() {
+            let caller_profile = MediaNegotiator::extract_leg_profile(answer_sdp);
+            recorder.set_leg_profile(crate::media::recorder::Leg::A, caller_profile);
+        }
+        if let Some(forwarding) =
+            Self::get_forwarding_track(&self.callee_peer, Self::CALLEE_FORWARDING_TRACK_ID).await
+        {
+            if let Some(profile) = forwarding.ingress_profile() {
+                recorder.set_leg_profile(crate::media::recorder::Leg::B, profile);
+            }
+        } else if let Some(callee_answer_sdp) = self.callee_answer_sdp.as_deref() {
+            let callee_profile = MediaNegotiator::extract_leg_profile(callee_answer_sdp);
+            recorder.set_leg_profile(crate::media::recorder::Leg::B, callee_profile);
+        }
         {
             let mut guard = self.recorder.write();
             if guard.is_some() {

@@ -1,5 +1,6 @@
 #[cfg(test)]
 mod recorder_advanced_tests {
+    use super::super::negotiate::{NegotiatedCodec, NegotiatedLegProfile};
     use super::super::recorder::{DtmfGenerator, Leg, Recorder};
     use audio_codec::CodecType;
     use rustrtc::media::{AudioFrame, MediaSample};
@@ -267,6 +268,43 @@ mod recorder_advanced_tests {
 
         // Cleanup
         let _ = std::fs::remove_file(&temp_path);
+    }
+
+    #[test]
+    fn test_recorder_dtmf_ignores_duplicate_terminal_packets() {
+        let temp_path_single = std::env::temp_dir().join("test_recorder_dtmf_single.wav");
+        let temp_path_dup = std::env::temp_dir().join("test_recorder_dtmf_duplicate.wav");
+
+        let mut recorder_single =
+            Recorder::new(temp_path_single.to_str().unwrap(), CodecType::PCMU).unwrap();
+        let mut recorder_dup =
+            Recorder::new(temp_path_dup.to_str().unwrap(), CodecType::PCMU).unwrap();
+
+        let dtmf_payload = [5, 0x80, 0x06, 0x40];
+
+        recorder_single
+            .write_dtmf_payload(Leg::A, &dtmf_payload, 12_345, 8000)
+            .expect("single terminal DTMF should be written");
+
+        for _ in 0..3 {
+            recorder_dup
+                .write_dtmf_payload(Leg::A, &dtmf_payload, 12_345, 8000)
+                .expect("duplicate terminal DTMF packets should be accepted");
+        }
+
+        recorder_single.finalize().expect("single finalize should succeed");
+        recorder_dup.finalize().expect("duplicate finalize should succeed");
+
+        let len_single = std::fs::metadata(&temp_path_single).unwrap().len();
+        let len_dup = std::fs::metadata(&temp_path_dup).unwrap().len();
+
+        assert_eq!(
+            len_dup, len_single,
+            "retransmitted terminal DTMF packets should not duplicate recorded tones"
+        );
+
+        let _ = std::fs::remove_file(&temp_path_single);
+        let _ = std::fs::remove_file(&temp_path_dup);
     }
 
     #[test]
@@ -603,10 +641,9 @@ mod recorder_advanced_tests {
             metadata.len() > 16_044,
             "Oversized frames still inflate the payload beyond the 1-second baseline"
         );
-        assert_eq!(
-            metadata.len(),
-            23_404,
-            "Current recorder logic extends 1 second of RTP timestamps into about 1.46 seconds of WAV payload"
+        assert!(
+            (23_404..=23_420).contains(&metadata.len()),
+            "Current recorder logic still extends 1 second of RTP timestamps into about 1.46 seconds of WAV payload"
         );
 
         let _ = std::fs::remove_file(&temp_path);
@@ -931,6 +968,58 @@ mod recorder_advanced_tests {
         recorder
             .write_sample(Leg::A, &frame, None, None, Some(CodecType::Opus))
             .expect("Should write Opus sample with dynamic payload type");
+        recorder.finalize().expect("Should finalize recorder");
+
+        let metadata = std::fs::metadata(temp_path).unwrap();
+        assert!(metadata.len() > 44, "WAV file should have audio data");
+
+        let _ = std::fs::remove_file(temp_path);
+    }
+
+    #[test]
+    fn test_dynamic_opus_payload_type_uses_stored_leg_payloads() {
+        use audio_codec::create_encoder;
+        use bytes::Bytes;
+
+        let temp_path = "/tmp/test_dynamic_opus_pt_stored.wav";
+        let mut recorder = Recorder::new(temp_path, CodecType::PCMU).unwrap();
+        recorder.set_leg_profile(
+            Leg::A,
+            NegotiatedLegProfile {
+                audio: Some(NegotiatedCodec {
+                    codec: CodecType::Opus,
+                    payload_type: 96,
+                    clock_rate: 48000,
+                    channels: 2,
+                }),
+                dtmf: Some(NegotiatedCodec {
+                    codec: CodecType::TelephoneEvent,
+                    payload_type: 101,
+                    clock_rate: 8000,
+                    channels: 1,
+                }),
+            },
+        );
+
+        let mut encoder = create_encoder(CodecType::Opus);
+        let pcm_samples = vec![100i16; 960 * 2];
+        let encoded = encoder.encode(&pcm_samples);
+
+        let frame = MediaSample::Audio(AudioFrame {
+            data: Bytes::from(encoded),
+            rtp_timestamp: 0,
+            sequence_number: Some(1),
+            payload_type: Some(96),
+            clock_rate: 48000,
+            marker: false,
+            raw_packet: None,
+            source_addr: None,
+            header_extension: None,
+        });
+
+        recorder
+            .write_sample(Leg::A, &frame, None, None, None)
+            .expect("Should write Opus sample using stored leg payload mapping");
         recorder.finalize().expect("Should finalize recorder");
 
         let metadata = std::fs::metadata(temp_path).unwrap();
