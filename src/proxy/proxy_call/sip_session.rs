@@ -2029,6 +2029,12 @@ impl SipSession {
         let existing_sender = target_transceiver
             .sender()
             .ok_or_else(|| anyhow!("{}: no sender on target audio transceiver", direction))?;
+        {
+            let mut guard = recorder.write();
+            if let Some(recorder) = guard.as_mut() {
+                recorder.set_leg_profile(leg, ingress_profile.clone());
+            }
+        }
 
         // Issue #171: spin up a dedicated recorder drain task so that
         // write_sample (codec decode + disk I/O) never blocks the RTP recv loop.
@@ -2045,7 +2051,7 @@ impl SipSession {
                 crate::media::recorder::Leg,
                 rustrtc::media::frame::MediaSample,
             )>(RECORDER_CHANNEL_CAPACITY);
-            let recorder_arc = recorder;
+            let recorder_arc = recorder.clone();
             tokio::spawn(async move {
                 while let Some((sample_leg, sample)) = rx.recv().await {
                     let mut guard = recorder_arc.write();
@@ -2532,6 +2538,19 @@ impl SipSession {
     }
 
     async fn get_local_reinvite_pc(&self, side: DialogSide) -> Option<rustrtc::PeerConnection> {
+        if let Some(bridge) = &self.media_bridge {
+            let leg_is_webrtc = match side {
+                DialogSide::Caller => self.caller_is_webrtc,
+                DialogSide::Callee => self.callee_is_webrtc,
+            };
+
+            return Some(if leg_is_webrtc {
+                bridge.webrtc_pc().clone()
+            } else {
+                bridge.rtp_pc().clone()
+            });
+        }
+
         let (peer, track_id) = match side {
             DialogSide::Caller => (&self.caller_peer, Self::CALLER_TRACK_ID),
             DialogSide::Callee => (&self.callee_peer, Self::CALLEE_TRACK_ID),
@@ -2587,13 +2606,13 @@ impl SipSession {
                 // caller->callee track reads caller RTP, so caller-side re-INVITE updates ingress.
                 caller_to_callee_forwarding.stage_ingress_profile(changed_profile.clone());
                 // callee->caller track sends toward caller, so caller-side re-INVITE updates egress.
-                callee_to_caller_forwarding.stage_egress_profile(changed_profile);
+                callee_to_caller_forwarding.stage_egress_profile(changed_profile.clone());
             }
             DialogSide::Callee => {
                 // caller->callee track sends toward callee, so callee-side re-INVITE updates egress.
                 caller_to_callee_forwarding.stage_egress_profile(changed_profile.clone());
                 // callee->caller track reads callee RTP, so callee-side re-INVITE updates ingress.
-                callee_to_caller_forwarding.stage_ingress_profile(changed_profile);
+                callee_to_caller_forwarding.stage_ingress_profile(changed_profile.clone());
             }
         }
 
@@ -2790,7 +2809,27 @@ impl SipSession {
         _max_duration: Option<Duration>,
         beep: bool,
     ) -> Result<()> {
-        let recorder = Recorder::new(path, CodecType::PCMU)?;
+        let mut recorder = Recorder::new(path, CodecType::PCMU)?;
+        if let Some(forwarding) =
+            Self::get_forwarding_track(&self.caller_peer, Self::CALLER_FORWARDING_TRACK_ID).await
+        {
+            if let Some(profile) = forwarding.ingress_profile() {
+                recorder.set_leg_profile(crate::media::recorder::Leg::A, profile);
+            }
+        } else if let Some(answer_sdp) = self.answer.as_deref() {
+            let caller_profile = MediaNegotiator::extract_leg_profile(answer_sdp);
+            recorder.set_leg_profile(crate::media::recorder::Leg::A, caller_profile);
+        }
+        if let Some(forwarding) =
+            Self::get_forwarding_track(&self.callee_peer, Self::CALLEE_FORWARDING_TRACK_ID).await
+        {
+            if let Some(profile) = forwarding.ingress_profile() {
+                recorder.set_leg_profile(crate::media::recorder::Leg::B, profile);
+            }
+        } else if let Some(callee_answer_sdp) = self.callee_answer_sdp.as_deref() {
+            let callee_profile = MediaNegotiator::extract_leg_profile(callee_answer_sdp);
+            recorder.set_leg_profile(crate::media::recorder::Leg::B, callee_profile);
+        }
         {
             let mut guard = self.recorder.write();
             if guard.is_some() {
@@ -5163,6 +5202,69 @@ mod tests {
             Duration::from_secs(DEFAULT_SESSION_EXPIRES)
         );
         assert!(!session.timer_keys.contains_key(&dialog_id));
+    }
+
+    #[tokio::test]
+    async fn test_get_local_reinvite_pc_uses_bridge_when_present() {
+        use crate::call::{DialDirection, Dialplan, TransactionCookie};
+        use crate::proxy::proxy_call::test_util::tests::MockMediaPeer;
+        use crate::proxy::tests::common::{
+            create_test_request, create_test_server, create_transaction,
+        };
+
+        let (server, _) = create_test_server().await;
+        let request = create_test_request(
+            rsipstack::sip::Method::Invite,
+            "alice",
+            None,
+            "rustpbx.com",
+            None,
+        );
+        let original_request = request.clone();
+        let (tx, _) = create_transaction(request).await;
+        let (state_tx, _state_rx) = mpsc::unbounded_channel();
+        let server_dialog = server
+            .dialog_layer
+            .get_or_create_server_invite(&tx, state_tx, None, None)
+            .expect("failed to create server dialog");
+
+        let context = CallContext {
+            session_id: "test-session".to_string(),
+            dialplan: Arc::new(Dialplan::new(
+                "test-session".to_string(),
+                original_request,
+                DialDirection::Inbound,
+            )),
+            cookie: TransactionCookie::default(),
+            start_time: Instant::now(),
+            original_caller: "sip:alice@rustpbx.com".to_string(),
+            original_callee: "sip:bob@rustpbx.com".to_string(),
+            max_forwards: 70,
+            dtmf_digits: Vec::new(),
+        };
+
+        let caller_peer = Arc::new(MockMediaPeer::new());
+        let callee_peer = Arc::new(MockMediaPeer::new());
+        let (mut session, _handle, _cmd_rx) = SipSession::new(
+            server.clone(),
+            CancellationToken::new(),
+            None,
+            context,
+            server_dialog,
+            false,
+            caller_peer.clone(),
+            callee_peer.clone(),
+        );
+
+        session.media_bridge = Some(BridgePeerBuilder::new("test-bridge".to_string()).build());
+        session.caller_is_webrtc = true;
+        session.callee_is_webrtc = false;
+
+        let pc = session.get_local_reinvite_pc(DialogSide::Caller).await;
+
+        assert!(pc.is_some(), "bridge-backed caller leg should resolve a PC");
+        assert_eq!(caller_peer.get_tracks_call_count(), 0);
+        assert_eq!(callee_peer.get_tracks_call_count(), 0);
     }
 
     #[tokio::test]
