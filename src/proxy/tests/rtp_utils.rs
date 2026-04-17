@@ -1,5 +1,5 @@
 //! RTP utilities for E2E testing
-//! 
+//!
 //! Provides RTP packet construction, parsing, and validation for testing
 //! media flow through the PBX.
 
@@ -51,30 +51,30 @@ impl RtpPacket {
     /// Encode RTP packet to bytes
     pub fn encode(&self) -> Vec<u8> {
         let mut data = Vec::with_capacity(12 + self.payload.len());
-        
+
         // Byte 0: V(2) P(1) X(1) CC(4)
-        let byte0 = (self.version << 6) 
+        let byte0 = (self.version << 6)
             | (if self.padding { 0x20 } else { 0 })
             | (if self.extension { 0x10 } else { 0 })
             | (self.csrc_count & 0x0F);
         data.push(byte0);
-        
+
         // Byte 1: M(1) PT(7)
         let byte1 = (if self.marker { 0x80 } else { 0 }) | (self.payload_type & 0x7F);
         data.push(byte1);
-        
+
         // Bytes 2-3: Sequence number
         data.extend_from_slice(&self.sequence_number.to_be_bytes());
-        
+
         // Bytes 4-7: Timestamp
         data.extend_from_slice(&self.timestamp.to_be_bytes());
-        
+
         // Bytes 8-11: SSRC
         data.extend_from_slice(&self.ssrc.to_be_bytes());
-        
+
         // Payload
         data.extend_from_slice(&self.payload);
-        
+
         data
     }
 
@@ -83,32 +83,32 @@ impl RtpPacket {
         if data.len() < 12 {
             return Err(anyhow!("RTP packet too short: {} bytes", data.len()));
         }
-        
+
         let byte0 = data[0];
         let version = (byte0 >> 6) & 0x03;
         if version != 2 {
             return Err(anyhow!("Invalid RTP version: {}", version));
         }
-        
+
         let padding = (byte0 & 0x20) != 0;
         let extension = (byte0 & 0x10) != 0;
         let csrc_count = byte0 & 0x0F;
-        
+
         let byte1 = data[1];
         let marker = (byte1 & 0x80) != 0;
         let payload_type = byte1 & 0x7F;
-        
+
         let sequence_number = u16::from_be_bytes([data[2], data[3]]);
         let timestamp = u32::from_be_bytes([data[4], data[5], data[6], data[7]]);
         let ssrc = u32::from_be_bytes([data[8], data[9], data[10], data[11]]);
-        
+
         let payload_start = 12 + (csrc_count as usize * 4);
         let payload = if data.len() > payload_start {
             data[payload_start..].to_vec()
         } else {
             Vec::new()
         };
-        
+
         Ok(Self {
             version,
             padding,
@@ -162,7 +162,8 @@ pub struct RtpStats {
 
 impl RtpStats {
     pub fn packet_loss_count(&self) -> u64 {
-        self.seq_num_gaps.iter()
+        self.seq_num_gaps
+            .iter()
             .map(|(expected, actual)| (*actual as i32 - *expected as i32).max(0) as u64)
             .sum()
     }
@@ -189,7 +190,7 @@ impl RtpReceiver {
         let addr = format!("127.0.0.1:{}", port);
         let socket = Arc::new(UdpSocket::bind(&addr).await?);
         debug!("RTP receiver bound to {}", addr);
-        
+
         Ok(Self {
             socket: socket,
             stats: std::sync::Arc::new(tokio::sync::RwLock::new(RtpStats::default())),
@@ -211,11 +212,11 @@ impl RtpReceiver {
         let socket = Arc::clone(&self.socket);
         let stats = self.stats.clone();
         let cancel_token = self.cancel_token.clone();
-        
+
         tokio::spawn(async move {
             let mut buf = vec![0u8; 1500];
             let mut last_seq: Option<u16> = None;
-            
+
             loop {
                 tokio::select! {
                     _ = cancel_token.cancelled() => {
@@ -232,11 +233,11 @@ impl RtpReceiver {
                                     s.payload_types.insert(packet.payload_type);
                                     s.ssrcs.insert(packet.ssrc);
                                     s.arrival_times.push(Instant::now());
-                                    
+
                                     if s.first_seq_num.is_none() {
                                         s.first_seq_num = Some(packet.sequence_number);
                                     }
-                                    
+
                                     // Check for gaps
                                     if let Some(last) = last_seq {
                                         let expected = last.wrapping_add(1);
@@ -295,31 +296,25 @@ impl RtpSender {
         interval_ms: u64,
     ) -> Result<()> {
         let mut interval = tokio::time::interval(Duration::from_millis(interval_ms));
-        
+
         for packet in packets {
             interval.tick().await;
-            
+
             let data = packet.encode();
             self.socket.send_to(&data, target).await?;
-            
         }
-        
+
         Ok(())
     }
 
     /// Send packets in background
-    pub fn start_sending(
-        &self,
-        target: SocketAddr,
-        packets: Vec<RtpPacket>,
-        interval_ms: u64,
-    ) {
+    pub fn start_sending(&self, target: SocketAddr, packets: Vec<RtpPacket>, interval_ms: u64) {
         let socket = Arc::clone(&self.socket);
         let cancel_token = self.cancel_token.clone();
-        
+
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_millis(interval_ms));
-            
+
             for packet in packets {
                 tokio::select! {
                     _ = cancel_token.cancelled() => {
@@ -350,7 +345,7 @@ impl RtpSender {
 pub fn extract_media_endpoint(sdp: &str) -> Option<SocketAddr> {
     let mut connection_ip: Option<String> = None;
     let mut media_port: Option<u16> = None;
-    
+
     for line in sdp.lines() {
         if line.starts_with("c=IN IP4 ") {
             connection_ip = line.strip_prefix("c=IN IP4 ").map(|s| s.to_string());
@@ -361,11 +356,9 @@ pub fn extract_media_endpoint(sdp: &str) -> Option<SocketAddr> {
             }
         }
     }
-    
+
     match (connection_ip, media_port) {
-        (Some(ip), Some(port)) => {
-            format!("{}:{}", ip, port).parse().ok()
-        }
+        (Some(ip), Some(port)) => format!("{}:{}", ip, port).parse().ok(),
         _ => None,
     }
 }
@@ -408,7 +401,7 @@ impl RtpValidationResult {
             self.errors.push(msg);
             self.is_valid = false;
         }
-        
+
         // Check SSRC consistency
         if self.stats.ssrcs.len() != 1 {
             let msg = format!(
@@ -425,17 +418,14 @@ impl RtpValidationResult {
             self.errors.push(msg);
             self.is_valid = false;
         }
-        
+
         // Check for sequence gaps
         if !self.stats.seq_num_gaps.is_empty() {
-            let msg = format!(
-                "Sequence gaps detected: {:?}",
-                self.stats.seq_num_gaps
-            );
+            let msg = format!("Sequence gaps detected: {:?}", self.stats.seq_num_gaps);
             self.errors.push(msg);
             self.is_valid = false;
         }
-        
+
         // Check payload type consistency
         if self.stats.payload_types.len() != 1 {
             let msg = format!(
@@ -489,13 +479,8 @@ mod tests {
     #[test]
     fn test_create_sequence() {
         let packets = RtpPacket::create_sequence(
-            10,
-            1000,
-            50000,
-            0xABCDEF01,
-            0, // PCMU
-            160,
-            160, // 20ms at 8kHz
+            10, 1000, 50000, 0xABCDEF01, 0, // PCMU
+            160, 160, // 20ms at 8kHz
         );
 
         assert_eq!(packets.len(), 10);

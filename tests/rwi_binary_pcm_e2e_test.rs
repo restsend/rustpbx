@@ -139,24 +139,24 @@ fn build_pcm_frame(
     pcm_data: &[u8],
 ) -> Vec<u8> {
     let mut frame = vec![0u8; 16 + pcm_data.len()];
-    
+
     // Call ID (8 bytes, space-padded or null-terminated)
     let call_id_bytes = call_id.as_bytes();
     let len = call_id_bytes.len().min(8);
     frame[0..len].copy_from_slice(&call_id_bytes[0..len]);
-    
+
     // Timestamp (4 bytes, big-endian)
     frame[8..12].copy_from_slice(&timestamp_ms.to_be_bytes());
-    
+
     // Sample rate (2 bytes, big-endian)
     frame[12..14].copy_from_slice(&sample_rate.to_be_bytes());
-    
+
     // Flags (2 bytes, big-endian)
     frame[14..16].copy_from_slice(&flags.to_be_bytes());
-    
+
     // PCM data
     frame[16..].copy_from_slice(pcm_data);
-    
+
     frame
 }
 
@@ -165,25 +165,25 @@ fn build_pcm_frame(
 async fn test_valid_pcm_frame_accepted() {
     let (url, _gw, _reg) = start_test_server().await;
     let mut ws = connect(&url).await;
-    
+
     // Build a valid PCM frame
     let pcm_samples: Vec<u8> = (0..320).map(|i| (i % 256) as u8).collect(); // 160 samples * 2 bytes
     let frame = build_pcm_frame(
         "test-call",
-        12345,      // timestamp
-        8000,       // sample rate
-        0,          // flags
+        12345, // timestamp
+        8000,  // sample rate
+        0,     // flags
         &pcm_samples,
     );
-    
+
     // Send binary frame
     ws.send(Message::Binary(frame.into())).await.unwrap();
-    
+
     // Connection should remain alive and responsive
     let (_, json) = req("session.list_calls", serde_json::json!({}));
     let v = send_recv(&mut ws, &json).await;
     assert_eq!(v["status"], "success");
-    
+
     ws.close(None).await.unwrap();
 }
 
@@ -192,24 +192,24 @@ async fn test_valid_pcm_frame_accepted() {
 async fn test_pcm_frame_with_last_flag() {
     let (url, _gw, _reg) = start_test_server().await;
     let mut ws = connect(&url).await;
-    
+
     // Build PCM frame with last_frame flag (bit 0)
     let pcm_samples: Vec<u8> = vec![0x00, 0x01, 0x00, 0x02];
     let frame = build_pcm_frame(
         "test-call",
         99999,
-        16000,      // 16kHz sample rate
-        0x0001,     // last_frame flag set
+        16000,  // 16kHz sample rate
+        0x0001, // last_frame flag set
         &pcm_samples,
     );
-    
+
     ws.send(Message::Binary(frame.into())).await.unwrap();
-    
+
     // Connection should remain alive
     let (_, json) = req("session.list_calls", serde_json::json!({}));
     let v = send_recv(&mut ws, &json).await;
     assert_eq!(v["status"], "success");
-    
+
     ws.close(None).await.unwrap();
 }
 
@@ -218,27 +218,21 @@ async fn test_pcm_frame_with_last_flag() {
 async fn test_pcm_frame_various_sample_rates() {
     let (url, _gw, _reg) = start_test_server().await;
     let mut ws = connect(&url).await;
-    
+
     let sample_rates = vec![8000u16, 16000, 22050, 24000, 32000, 44100, 48000];
-    
+
     for rate in sample_rates {
         let pcm_samples: Vec<u8> = vec![0xAB; 160]; // 160 bytes
-        let frame = build_pcm_frame(
-            "test-call",
-            1000,
-            rate,
-            0,
-            &pcm_samples,
-        );
-        
+        let frame = build_pcm_frame("test-call", 1000, rate, 0, &pcm_samples);
+
         ws.send(Message::Binary(frame.into())).await.unwrap();
     }
-    
+
     // Connection should remain alive after all frames
     let (_, json) = req("session.list_calls", serde_json::json!({}));
     let v = send_recv(&mut ws, &json).await;
     assert_eq!(v["status"], "success");
-    
+
     ws.close(None).await.unwrap();
 }
 
@@ -247,23 +241,17 @@ async fn test_pcm_frame_various_sample_rates() {
 async fn test_pcm_frame_empty_payload() {
     let (url, _gw, _reg) = start_test_server().await;
     let mut ws = connect(&url).await;
-    
+
     // Frame with empty PCM data (just header)
-    let frame = build_pcm_frame(
-        "test-call",
-        12345,
-        8000,
-        0,
-        &[],
-    );
-    
+    let frame = build_pcm_frame("test-call", 12345, 8000, 0, &[]);
+
     ws.send(Message::Binary(frame.into())).await.unwrap();
-    
+
     // Connection should remain alive
     let (_, json) = req("session.list_calls", serde_json::json!({}));
     let v = send_recv(&mut ws, &json).await;
     assert_eq!(v["status"], "success");
-    
+
     ws.close(None).await.unwrap();
 }
 
@@ -272,24 +260,18 @@ async fn test_pcm_frame_empty_payload() {
 async fn test_pcm_frame_large_payload() {
     let (url, _gw, _reg) = start_test_server().await;
     let mut ws = connect(&url).await;
-    
+
     // Large PCM payload (10ms of 48kHz stereo = 1920 bytes)
     let large_pcm: Vec<u8> = vec![0x55; 1920];
-    let frame = build_pcm_frame(
-        "test-call",
-        12345,
-        48000,
-        0,
-        &large_pcm,
-    );
-    
+    let frame = build_pcm_frame("test-call", 12345, 48000, 0, &large_pcm);
+
     ws.send(Message::Binary(frame.into())).await.unwrap();
-    
+
     // Connection should remain alive
     let (_, json) = req("session.list_calls", serde_json::json!({}));
     let v = send_recv(&mut ws, &json).await;
     assert_eq!(v["status"], "success");
-    
+
     ws.close(None).await.unwrap();
 }
 
@@ -298,7 +280,7 @@ async fn test_pcm_frame_large_payload() {
 async fn test_multiple_sequential_pcm_frames() {
     let (url, _gw, _reg) = start_test_server().await;
     let mut ws = connect(&url).await;
-    
+
     // Send 10 sequential frames
     for i in 0..10 {
         let pcm_samples: Vec<u8> = (0..160).map(|j| (j % 256) as u8).collect(); // 160 bytes
@@ -309,15 +291,15 @@ async fn test_multiple_sequential_pcm_frames() {
             if i == 9 { 0x0001 } else { 0 }, // Last frame has flag
             &pcm_samples,
         );
-        
+
         ws.send(Message::Binary(frame.into())).await.unwrap();
     }
-    
+
     // Connection should remain alive
     let (_, json) = req("session.list_calls", serde_json::json!({}));
     let v = send_recv(&mut ws, &json).await;
     assert_eq!(v["status"], "success");
-    
+
     ws.close(None).await.unwrap();
 }
 
@@ -326,7 +308,7 @@ async fn test_multiple_sequential_pcm_frames() {
 async fn test_pcm_frame_exact_8_char_call_id() {
     let (url, _gw, _reg) = start_test_server().await;
     let mut ws = connect(&url).await;
-    
+
     let frame = build_pcm_frame(
         "exact-8!", // Exactly 8 characters
         12345,
@@ -334,13 +316,13 @@ async fn test_pcm_frame_exact_8_char_call_id() {
         0,
         &[0x00, 0x01],
     );
-    
+
     ws.send(Message::Binary(frame.into())).await.unwrap();
-    
+
     let (_, json) = req("session.list_calls", serde_json::json!({}));
     let v = send_recv(&mut ws, &json).await;
     assert_eq!(v["status"], "success");
-    
+
     ws.close(None).await.unwrap();
 }
 
@@ -349,7 +331,7 @@ async fn test_pcm_frame_exact_8_char_call_id() {
 async fn test_pcm_frame_long_call_id_truncated() {
     let (url, _gw, _reg) = start_test_server().await;
     let mut ws = connect(&url).await;
-    
+
     let frame = build_pcm_frame(
         "very-long-call-id-that-exceeds-8-chars",
         12345,
@@ -357,13 +339,13 @@ async fn test_pcm_frame_long_call_id_truncated() {
         0,
         &[0x00, 0x01],
     );
-    
+
     ws.send(Message::Binary(frame.into())).await.unwrap();
-    
+
     let (_, json) = req("session.list_calls", serde_json::json!({}));
     let v = send_recv(&mut ws, &json).await;
     assert_eq!(v["status"], "success");
-    
+
     ws.close(None).await.unwrap();
 }
 
@@ -372,12 +354,12 @@ async fn test_pcm_frame_long_call_id_truncated() {
 async fn test_interleaved_text_and_binary() {
     let (url, _gw, _reg) = start_test_server().await;
     let mut ws = connect(&url).await;
-    
+
     // Send text command
     let (_, json) = req("session.list_calls", serde_json::json!({}));
     let v = send_recv(&mut ws, &json).await;
     assert_eq!(v["status"], "success");
-    
+
     // Send binary frame
     let frame = build_pcm_frame(
         "interleaved-call",
@@ -387,12 +369,12 @@ async fn test_interleaved_text_and_binary() {
         &[0x00, 0x01, 0x00, 0x02],
     );
     ws.send(Message::Binary(frame.into())).await.unwrap();
-    
+
     // Send another text command
     let (_, json) = req("session.list_calls", serde_json::json!({}));
     let v = send_recv(&mut ws, &json).await;
     assert_eq!(v["status"], "success");
-    
+
     // Send another binary frame
     let frame = build_pcm_frame(
         "interleaved-call",
@@ -402,12 +384,12 @@ async fn test_interleaved_text_and_binary() {
         &[0x00, 0x03, 0x00, 0x04],
     );
     ws.send(Message::Binary(frame.into())).await.unwrap();
-    
+
     // Final text command
     let (_, json) = req("session.list_calls", serde_json::json!({}));
     let v = send_recv(&mut ws, &json).await;
     assert_eq!(v["status"], "success");
-    
+
     ws.close(None).await.unwrap();
 }
 
@@ -417,7 +399,7 @@ async fn test_interleaved_text_and_binary() {
 async fn test_pcm_frame_does_not_break_session_state() {
     let (url, gateway, _reg) = start_test_server().await;
     let mut ws = connect(&url).await;
-    
+
     // Subscribe to a context
     let (_, json) = req(
         "session.subscribe",
@@ -425,7 +407,7 @@ async fn test_pcm_frame_does_not_break_session_state() {
     );
     let v = send_recv(&mut ws, &json).await;
     assert_eq!(v["status"], "success");
-    
+
     // Send multiple binary frames
     for i in 0..5 {
         let frame = build_pcm_frame(
@@ -437,7 +419,7 @@ async fn test_pcm_frame_does_not_break_session_state() {
         );
         ws.send(Message::Binary(frame.into())).await.unwrap();
     }
-    
+
     // Verify subscription still works by pushing an event
     {
         let gw = gateway.read().await;
@@ -446,20 +428,20 @@ async fn test_pcm_frame_does_not_break_session_state() {
         };
         gw.fan_out_event_to_context("pcm-test", &event, &"test".to_string());
     }
-    
+
     // Should receive the event
     let msg = timeout(Duration::from_secs(2), ws.next())
         .await
         .expect("timeout")
         .expect("stream ended")
         .expect("ws error");
-    
+
     match msg {
         Message::Text(t) => {
             let v: serde_json::Value = serde_json::from_str(&t).unwrap();
             // Event structure varies by event type - check for common patterns
-            let is_event = v.get("type").is_some() 
-                || v.get("event").is_some() 
+            let is_event = v.get("type").is_some()
+                || v.get("event").is_some()
                 || v.get("call_id").is_some()
                 || v.get("call_ringing").is_some()
                 || v.get("call_answered").is_some()
@@ -468,6 +450,6 @@ async fn test_pcm_frame_does_not_break_session_state() {
         }
         _ => panic!("Expected text message"),
     }
-    
+
     ws.close(None).await.unwrap();
 }

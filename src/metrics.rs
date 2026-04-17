@@ -460,7 +460,6 @@ pub fn init_static_gauges() {
     let version = crate::version::get_short_version();
     metrics::gauge!("rustpbx_info", "version" => version).set(1.0);
 
-    
     system::set_uptime_seconds();
 }
 
@@ -470,8 +469,6 @@ mod tests {
 
     #[test]
     fn test_metrics_macros_compile() {
-        
-        
         sip::registration_received("localhost");
         sip::registration_succeeded("localhost");
         sip::registration_failed("localhost", "auth_failed");

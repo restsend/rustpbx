@@ -3,8 +3,8 @@
 //! Converts `CallCommandPayload` (from HTTP API) to unified `CallCommand`.
 
 use crate::call::domain::*;
-use crate::console::handlers::call_control::CallCommandPayload;
 use crate::callrecord::CallRecordHangupReason;
+use crate::console::handlers::call_control::CallCommandPayload;
 use anyhow::Result;
 
 /// Convert hangup reason string to CallRecordHangupReason
@@ -41,11 +41,8 @@ pub fn console_to_call_command(
             initiator,
         } => {
             let cdr_reason = parse_hangup_reason(reason.as_deref());
-            let mut cmd = HangupCommand::local(
-                initiator.as_deref().unwrap_or("console"),
-                cdr_reason,
-                code,
-            );
+            let mut cmd =
+                HangupCommand::local(initiator.as_deref().unwrap_or("console"), cdr_reason, code);
             cmd = cmd.with_cascade(HangupCascade::All);
             Ok(CallCommand::Hangup(cmd))
         }

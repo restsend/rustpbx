@@ -1,10 +1,10 @@
+use crate::call::app::{ApplicationContext, CallInfo};
 use crate::call::domain::{
     CallCommand, HangupCascade, HangupCommand, LegId, LegState, MediaPathMode, MediaRuntimeProfile,
     RingbackPolicy,
 };
 use crate::call::domain::{Leg, SessionState};
 use crate::call::runtime::BridgeConfig;
-use crate::call::app::{ApplicationContext, CallInfo};
 use crate::call::runtime::{
     AppFactory, AppRuntime, AppRuntimeConfig, CommandResult, DefaultAppRuntime, ExecutionContext,
     MediaCapabilityCheck, SessionId,
@@ -203,7 +203,9 @@ impl AppFactory for BuiltinAppFactory {
                 };
                 // Allow per-instance TTS override via app_params
                 if let Some(tts_value) = params.as_ref()?.get("tts") {
-                    if let Ok(tts_cfg) = serde_json::from_value::<crate::tts::TtsConfig>(tts_value.clone()) {
+                    if let Ok(tts_cfg) =
+                        serde_json::from_value::<crate::tts::TtsConfig>(tts_value.clone())
+                    {
                         app = app.with_tts(Some(tts_cfg));
                     }
                 }
@@ -212,7 +214,11 @@ impl AppFactory for BuiltinAppFactory {
             "voicemail" => {
                 let extension = params.as_ref()?.get("extension")?.as_str()?.to_string();
                 let mut app = crate::call::app::voicemail::VoicemailApp::new(extension);
-                if let Some(greeting) = params.as_ref()?.get("greeting_path").and_then(|v| v.as_str()) {
+                if let Some(greeting) = params
+                    .as_ref()?
+                    .get("greeting_path")
+                    .and_then(|v| v.as_str())
+                {
                     app = app.with_greeting_path(greeting);
                 }
                 Some(Box::new(app) as Box<dyn crate::call::app::CallApp>)
@@ -264,8 +270,9 @@ impl SipSession {
 
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         let snapshot_cache: Arc<RwLock<Option<SessionSnapshot>>> = Arc::new(RwLock::new(None));
-        let app_event_bridge: Arc<RwLock<Option<crate::proxy::proxy_call::state::SipSessionHandle>>> =
-            Arc::new(RwLock::new(None));
+        let app_event_bridge: Arc<
+            RwLock<Option<crate::proxy::proxy_call::state::SipSessionHandle>>,
+        > = Arc::new(RwLock::new(None));
 
         let sip_handle = SipSessionHandle {
             session_id: session_id.clone(),
@@ -283,7 +290,10 @@ impl SipSession {
             started_at: chrono::Utc::now(),
         };
         let app_ctx = ApplicationContext::new(
-            server.database.clone().unwrap_or(sea_orm::DatabaseConnection::Disconnected),
+            server
+                .database
+                .clone()
+                .unwrap_or(sea_orm::DatabaseConnection::Disconnected),
             call_info,
             Arc::new(crate::config::Config::default()),
             server.storage.clone().unwrap_or_else(|| {
@@ -318,7 +328,10 @@ impl SipSession {
                 match session_action_to_call_command(action) {
                     Ok(cmd) => {
                         if let Err(e) = sip_handle_clone.send_command(cmd) {
-                            tracing::warn!("SessionAction bridge failed to send CallCommand: {}", e);
+                            tracing::warn!(
+                                "SessionAction bridge failed to send CallCommand: {}",
+                                e
+                            );
                             break;
                         }
                     }
@@ -789,7 +802,8 @@ impl SipSession {
                     for line in body.lines() {
                         let line = line.trim();
                         if line.to_lowercase().starts_with("signal=") {
-                            let digit = line.trim_start_matches(|c: char| c.to_ascii_lowercase() != 's')
+                            let digit = line
+                                .trim_start_matches(|c: char| c.to_ascii_lowercase() != 's')
                                 .trim_start_matches("Signal=")
                                 .trim_start_matches("signal=")
                                 .trim();
@@ -805,7 +819,43 @@ impl SipSession {
                         }
                     }
                 }
-                tx_handle.respond(rsipstack::sip::StatusCode::OK, None, None).await.ok();
+                tx_handle
+                    .respond(rsipstack::sip::StatusCode::OK, None, None)
+                    .await
+                    .ok();
+            }
+            DialogState::Notify(_, request, tx_handle) => {
+                // Respond 200 OK to NOTIFY
+                let _ = tx_handle
+                    .respond(rsipstack::sip::StatusCode::OK, None, None)
+                    .await;
+
+                // Check if this is a REFER-related NOTIFY
+                let is_refer = request.headers.iter().any(|h| {
+                    matches!(h, rsipstack::sip::Header::Event(e) if e.value().eq_ignore_ascii_case("refer"))
+                });
+
+                if is_refer {
+                    let body = String::from_utf8_lossy(request.body());
+                    if let Some(sip_status) = parse_sipfrag_status(&body) {
+                        info!(
+                            session_id = %self.context.session_id,
+                            sip_status = %sip_status,
+                            body = %body.trim(),
+                            "Received REFER NOTIFY"
+                        );
+                        let event = crate::call::domain::ReferNotifyEvent {
+                            call_id: self.id.0.clone(),
+                            sip_status,
+                            reason: None,
+                            event_type: crate::call::domain::ReferNotifyEventType::Notify,
+                        };
+                        let subscribers = self.server.transfer_notify_subscribers.lock().await;
+                        for tx in subscribers.iter() {
+                            let _ = tx.send(event.clone());
+                        }
+                    }
+                }
             }
             DialogState::Terminated(_, reason) => {
                 self.update_leg_state(&LegId::from("caller"), LegState::Ended);
@@ -956,7 +1006,11 @@ impl SipSession {
                     auto_answer,
                 } => {
                     info!(app_name = %app_name, "Executing application flow");
-                    if let Err(e) = self.app_runtime.start_app(app_name, app_params.clone(), *auto_answer).await {
+                    if let Err(e) = self
+                        .app_runtime
+                        .start_app(app_name, app_params.clone(), *auto_answer)
+                        .await
+                    {
                         warn!(error = %e, "Failed to start application");
                     }
                     Ok(())
@@ -1561,13 +1615,21 @@ impl SipSession {
 
                     // Log post-negotiation RTP pair and payload map for diagnostics
                     if let Some(pair) = bridge.rtp_pc().ice_transport().get_selected_pair().await {
-                        let payload_map = bridge.rtp_pc().get_transceivers()
+                        let payload_map = bridge
+                            .rtp_pc()
+                            .get_transceivers()
                             .iter()
                             .find(|t| t.kind() == rustrtc::MediaKind::Audio)
                             .map(|t| t.get_payload_map())
                             .unwrap_or_default();
-                        let pt_info: Vec<String> = payload_map.iter()
-                            .map(|(pt, params)| format!("{}(clock_rate={},channels={})", pt, params.clock_rate, params.channels))
+                        let pt_info: Vec<String> = payload_map
+                            .iter()
+                            .map(|(pt, params)| {
+                                format!(
+                                    "{}(clock_rate={},channels={})",
+                                    pt, params.clock_rate, params.channels
+                                )
+                            })
                             .collect();
                         info!(
                             session_id = %self.context.session_id,
@@ -3552,6 +3614,19 @@ impl SipSession {
                 }
             }
 
+            CallCommand::SupervisorTakeover {
+                supervisor_leg,
+                target_leg,
+            } => {
+                match self
+                    .handle_supervisor_takeover(supervisor_leg, target_leg)
+                    .await
+                {
+                    Ok(_) => CommandResult::success(),
+                    Err(e) => CommandResult::failure(&e.to_string()),
+                }
+            }
+
             CallCommand::SupervisorStop { supervisor_leg } => {
                 match self.handle_supervisor_stop(supervisor_leg).await {
                     Ok(_) => CommandResult::success(),
@@ -3805,12 +3880,18 @@ impl SipSession {
         }
 
         if attended {
-            self.update_leg_state(&leg_id, LegState::Hold);
+            if !target.is_empty() {
+                self.handle_replace_transfer(leg_id, target).await?;
+            } else {
+                self.update_leg_state(&leg_id, LegState::Hold);
 
-            info!("Attended transfer initiated - consultation call should be created externally");
+                info!(
+                    "Attended transfer initiated - consultation call should be created externally"
+                );
 
-            if let Some(ref reporter) = self.reporter {
-                let _ = reporter;
+                if let Some(ref reporter) = self.reporter {
+                    let _ = reporter;
+                }
             }
         } else {
             self.handle_blind_transfer(leg_id, target).await?;
@@ -3858,9 +3939,21 @@ impl SipSession {
 
                         self.emit_transfer_event(&leg_id, "accepted", None, None)
                             .await;
+                        self.emit_refer_event(
+                            status,
+                            None,
+                            crate::call::domain::ReferNotifyEventType::ReferResponse,
+                        )
+                        .await;
                     }
                     100..=199 => {
                         info!("REFER received provisional response {}", status);
+                        self.emit_refer_event(
+                            status,
+                            None,
+                            crate::call::domain::ReferNotifyEventType::ReferResponse,
+                        )
+                        .await;
                     }
                     405 | 420 | 501 => {
                         warn!(status = %status, "REFER not supported by peer, needs 3PCC fallback");
@@ -3869,6 +3962,12 @@ impl SipSession {
                             "failed",
                             Some(status),
                             Some("refer_not_supported"),
+                        )
+                        .await;
+                        self.emit_refer_event(
+                            status,
+                            Some("refer_not_supported".to_string()),
+                            crate::call::domain::ReferNotifyEventType::ReferResponse,
                         )
                         .await;
                         return Err(anyhow!(
@@ -3885,6 +3984,12 @@ impl SipSession {
                             Some("refer_rejected"),
                         )
                         .await;
+                        self.emit_refer_event(
+                            status,
+                            Some("refer_rejected".to_string()),
+                            crate::call::domain::ReferNotifyEventType::ReferResponse,
+                        )
+                        .await;
                         return Err(anyhow!("REFER rejected with status {}", status));
                     }
                     _ => {
@@ -3896,6 +4001,12 @@ impl SipSession {
                             Some("unexpected_response"),
                         )
                         .await;
+                        self.emit_refer_event(
+                            status,
+                            Some("unexpected_response".to_string()),
+                            crate::call::domain::ReferNotifyEventType::ReferResponse,
+                        )
+                        .await;
                         return Err(anyhow!("Unexpected REFER response: {}", status));
                     }
                 }
@@ -3904,12 +4015,24 @@ impl SipSession {
                 warn!("REFER timed out, no response received");
                 self.emit_transfer_event(&leg_id, "failed", None, Some("timeout"))
                     .await;
+                self.emit_refer_event(
+                    408,
+                    Some("timeout".to_string()),
+                    crate::call::domain::ReferNotifyEventType::ReferResponse,
+                )
+                .await;
                 return Err(anyhow!("REFER timed out"));
             }
             Err(e) => {
                 warn!(error = %e, "Failed to send REFER");
                 self.emit_transfer_event(&leg_id, "failed", None, Some(&e.to_string()))
                     .await;
+                self.emit_refer_event(
+                    500,
+                    Some(e.to_string()),
+                    crate::call::domain::ReferNotifyEventType::ReferResponse,
+                )
+                .await;
                 return Err(anyhow!("Failed to send REFER: {}", e));
             }
         }
@@ -3922,7 +4045,6 @@ impl SipSession {
         Ok(())
     }
 
-    #[allow(dead_code)]
     fn build_replaces_header(&self) -> Option<String> {
         let dialog_id = self.server_dialog.id();
 
@@ -3938,6 +4060,21 @@ impl SipSession {
             "{};to-tag={};from-tag={}",
             call_id, local_tag, remote_tag
         ))
+    }
+
+    async fn handle_replace_transfer(&mut self, leg_id: LegId, target: String) -> Result<()> {
+        let replaces = self
+            .build_replaces_header()
+            .ok_or_else(|| anyhow!("Cannot build Replaces header for current dialog"))?;
+        let encoded_replaces = urlencoding::encode(&replaces).into_owned();
+
+        let refer_target = if target.contains('?') {
+            format!("{}&Replaces={}", target, encoded_replaces)
+        } else {
+            format!("{}?Replaces={}", target, encoded_replaces)
+        };
+
+        self.handle_blind_transfer(leg_id, refer_target).await
     }
 
     async fn emit_transfer_event(
@@ -3957,6 +4094,25 @@ impl SipSession {
         });
 
         info!(?event_data, "Transfer event emitted");
+    }
+
+    /// Emit a REFER-related event to all registered transfer controllers.
+    async fn emit_refer_event(
+        &self,
+        sip_status: u16,
+        reason: Option<String>,
+        event_type: crate::call::domain::ReferNotifyEventType,
+    ) {
+        let event = crate::call::domain::ReferNotifyEvent {
+            call_id: self.id.0.clone(),
+            sip_status,
+            reason,
+            event_type,
+        };
+        let subscribers = self.server.transfer_notify_subscribers.lock().await;
+        for tx in subscribers.iter() {
+            let _ = tx.send(event.clone());
+        }
     }
 
     async fn handle_transfer_complete(&mut self, consult_leg: LegId) -> Result<()> {
@@ -3979,6 +4135,8 @@ impl SipSession {
             {
                 self.update_leg_state(&original_leg, LegState::Connected);
                 self.update_leg_state(&consult_leg, LegState::Connected);
+                // Ensure the original leg is properly unheld after bridge
+                let _ = self.handle_unhold(original_leg.clone()).await;
                 info!("Attended transfer completed successfully");
             } else {
                 return Err(anyhow!("Failed to setup bridge for transfer completion"));
@@ -4007,6 +4165,8 @@ impl SipSession {
 
         if let Some(original_leg) = original_leg {
             self.update_leg_state(&original_leg, LegState::Connected);
+            // Ensure the original leg is properly unheld after cancel
+            let _ = self.handle_unhold(original_leg.clone()).await;
             info!("Attended transfer canceled, original call resumed");
         }
 
@@ -4237,6 +4397,48 @@ impl SipSession {
         Ok(())
     }
 
+    async fn handle_supervisor_takeover(
+        &mut self,
+        supervisor_leg: LegId,
+        target_leg: LegId,
+    ) -> Result<()> {
+        if !self.legs.contains_key(&supervisor_leg) {
+            return Err(anyhow!("Supervisor leg not found: {}", supervisor_leg));
+        }
+        if !self.legs.contains_key(&target_leg) {
+            return Err(anyhow!("Target leg not found: {}", target_leg));
+        }
+
+        // Stop any existing supervisor mixer
+        if let Some(ref mixer) = self.supervisor_mixer.take() {
+            mixer.stop();
+            info!(session_id = %self.id, "Stopped existing supervisor mixer for takeover");
+        }
+
+        // Determine the remaining party (the one not being replaced)
+        let other_leg = if target_leg == LegId::new("caller") {
+            LegId::new("callee")
+        } else {
+            LegId::new("caller")
+        };
+
+        // Update bridge to connect supervisor with the remaining party
+        self.bridge = BridgeConfig::bridge(supervisor_leg.clone(), other_leg.clone());
+
+        // Mark target leg as ended and supervisor as connected
+        self.update_leg_state(&target_leg, LegState::Ending);
+        self.update_leg_state(&supervisor_leg, LegState::Connected);
+
+        info!(
+            session_id = %self.id,
+            supervisor = %supervisor_leg,
+            target = %target_leg,
+            other = %other_leg,
+            "Supervisor takeover activated"
+        );
+        Ok(())
+    }
+
     async fn handle_supervisor_stop(&mut self, supervisor_leg: LegId) -> Result<()> {
         if !self.legs.contains_key(&supervisor_leg) {
             return Err(anyhow!("Supervisor leg not found: {}", supervisor_leg));
@@ -4299,7 +4501,9 @@ impl SipSession {
             warn!(error = %e, "Failed to start playback");
         }
 
-        self.caller_peer.update_track(Box::new(track.clone()), None).await;
+        self.caller_peer
+            .update_track(Box::new(track.clone()), None)
+            .await;
         self.playback_tracks.insert(track_id.clone(), track);
 
         info!(track_id = %track_id, file = %file_path, "Playback started");
@@ -4803,6 +5007,18 @@ impl SipSession {
             Ok(None) => Err(anyhow!("re-INVITE timed out")),
             Err(e) => Err(anyhow!("re-INVITE failed: {}", e)),
         }
+    }
+}
+
+/// Parse a `message/sipfrag` body and extract the SIP status code.
+/// Expected format: `SIP/2.0 <code> <reason>`
+fn parse_sipfrag_status(body: &str) -> Option<u16> {
+    let line = body.lines().next()?;
+    let parts: Vec<&str> = line.split_whitespace().collect();
+    if parts.len() >= 2 && parts[0] == "SIP/2.0" {
+        parts[1].parse().ok()
+    } else {
+        None
     }
 }
 

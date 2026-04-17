@@ -13,8 +13,13 @@ async fn test_presence_workflow() {
     assert_eq!(manager.get_state("bob").status, PresenceStatus::Offline);
 
     // 2. Alice subscribes to Bob
-    let mut alice_subscribe =
-        create_test_request(rsipstack::sip::Method::Subscribe, "alice", None, "rustpbx.com", None);
+    let mut alice_subscribe = create_test_request(
+        rsipstack::sip::Method::Subscribe,
+        "alice",
+        None,
+        "rustpbx.com",
+        None,
+    );
     let to_bob = rsipstack::sip::typed::To {
         display_name: None,
         uri: "sip:bob@rustpbx.com".try_into().unwrap(),
@@ -46,8 +51,13 @@ async fn test_presence_workflow() {
     assert!(subs[0].aor.to_string().contains("alice@rustpbx.com"));
 
     // 3. Bob publishes Busy
-    let mut bob_publish_busy =
-        create_test_request(rsipstack::sip::Method::Publish, "bob", None, "rustpbx.com", None);
+    let mut bob_publish_busy = create_test_request(
+        rsipstack::sip::Method::Publish,
+        "bob",
+        None,
+        "rustpbx.com",
+        None,
+    );
     bob_publish_busy.body = "status: busy".as_bytes().to_vec();
 
     let (mut tx_pub, _) = create_transaction(bob_publish_busy).await;

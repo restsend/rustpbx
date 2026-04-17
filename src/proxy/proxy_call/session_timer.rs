@@ -164,11 +164,7 @@ impl SessionTimerState {
     pub fn time_until_expiration(&self) -> Option<Duration> {
         self.expiration_time().map(|exp| {
             let now = Instant::now();
-            if exp > now {
-                exp - now
-            } else {
-                Duration::ZERO
-            }
+            if exp > now { exp - now } else { Duration::ZERO }
         })
     }
 
@@ -232,7 +228,11 @@ impl SessionTimerState {
 
     /// Generate Session-Expires header value
     pub fn get_session_expires_value(&self) -> String {
-        format!("{};refresher={}", self.session_interval.as_secs(), self.refresher)
+        format!(
+            "{};refresher={}",
+            self.session_interval.as_secs(),
+            self.refresher
+        )
     }
 
     /// Generate Min-SE header value
@@ -439,12 +439,11 @@ fn build_timer_headers(
     headers
 }
 
-pub fn build_default_session_timer_headers(session_expires: u64, min_se: u64) -> Vec<rsipstack::sip::Header> {
-    build_timer_headers(
-        session_expires.to_string(),
-        min_se.to_string(),
-        false,
-    )
+pub fn build_default_session_timer_headers(
+    session_expires: u64,
+    min_se: u64,
+) -> Vec<rsipstack::sip::Header> {
+    build_timer_headers(session_expires.to_string(), min_se.to_string(), false)
 }
 
 pub fn build_session_timer_headers(
@@ -485,7 +484,10 @@ pub fn is_timer_required(headers: &rsipstack::sip::Headers) -> bool {
 
 /// Build Session-Expires header
 #[cfg(test)]
-pub fn build_session_expires_header(interval: Duration, refresher: SessionRefresher) -> rsipstack::sip::Header {
+pub fn build_session_expires_header(
+    interval: Duration,
+    refresher: SessionRefresher,
+) -> rsipstack::sip::Header {
     let value = format!("{};refresher={}", interval.as_secs(), refresher);
     rsipstack::sip::Header::Other(HEADER_SESSION_EXPIRES.to_string(), value)
 }

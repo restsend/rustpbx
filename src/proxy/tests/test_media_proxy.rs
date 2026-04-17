@@ -319,13 +319,12 @@ async fn test_codec_negotiation_optimization() -> Result<()> {
     Ok(())
 }
 
-
 /// Test: WebRTC to RTP SDP bridging
 /// Verifies that the SDP bridge correctly converts WebRTC SDP to RTP SDP
 #[tokio::test]
 async fn test_webrtc_to_rtp_sdp_bridge() -> Result<()> {
     let _ = tracing_subscriber::fmt::try_init();
-    
+
     // Start Proxy Server
     let server = TestProxyServer::start().await?;
     let proxy_addr = format!("127.0.0.1:{}", server.port).parse()?;
@@ -391,15 +390,24 @@ async fn test_webrtc_to_rtp_sdp_bridge() -> Result<()> {
                 // Verify Bob received converted RTP SDP (not WebRTC)
                 if let Some(ref sdp_str) = sdp {
                     info!("Bob received SDP:\n{}", sdp_str);
-                    
+
                     // Check conversion happened
-                    assert!(!sdp_str.contains("SAVPF"), "SAVPF should be removed from RTP SDP");
-                    assert!(!sdp_str.contains("fingerprint"), "DTLS fingerprint should be removed");
-                    assert!(!sdp_str.contains("ice-ufrag"), "ICE ufrag should be removed");
+                    assert!(
+                        !sdp_str.contains("SAVPF"),
+                        "SAVPF should be removed from RTP SDP"
+                    );
+                    assert!(
+                        !sdp_str.contains("fingerprint"),
+                        "DTLS fingerprint should be removed"
+                    );
+                    assert!(
+                        !sdp_str.contains("ice-ufrag"),
+                        "ICE ufrag should be removed"
+                    );
                     assert!(sdp_str.contains("RTP/AVP"), "Should use RTP/AVP protocol");
                     info!("✓ SDP bridge: WebRTC -> RTP conversion verified");
                 }
-                
+
                 // Bob answers with RTP SDP
                 let bob_rtp_sdp = "v=0\r\n\
                     o=- 789012 789012 IN IP4 127.0.0.1\r\n\
@@ -410,7 +418,7 @@ async fn test_webrtc_to_rtp_sdp_bridge() -> Result<()> {
                     a=rtpmap:0 PCMU/8000\r\n\
                     a=rtpmap:101 telephone-event/8000\r\n\
                     a=sendrecv\r\n";
-                
+
                 bob.answer_call(&id, Some(bob_rtp_sdp.to_string())).await?;
                 info!("Bob answered with RTP SDP");
                 break;
@@ -426,7 +434,7 @@ async fn test_webrtc_to_rtp_sdp_bridge() -> Result<()> {
     }
 
     assert!(bob_dialog_id.is_some(), "Bob should receive the call");
-    
+
     // Wait for call to establish
     match tokio::time::timeout(Duration::from_secs(5), caller_handle).await {
         Ok(Ok(Ok(alice_dialog_id))) => {
@@ -457,9 +465,9 @@ async fn test_rtp_to_webrtc_sdp_bridge() -> Result<()> {
     use crate::call::SipUser;
     use crate::config::MediaProxyMode;
     use crate::proxy::tests::test_ua::{TestUa, TestUaConfig};
-    
+
     let _ = tracing_subscriber::fmt::try_init();
-    
+
     // For this test, we need Bob to support WebRTC
     // Create test proxy with users configured
     let port = portpicker::pick_unused_port().unwrap_or(15090);
@@ -478,29 +486,33 @@ async fn test_rtp_to_webrtc_sdp_bridge() -> Result<()> {
         media_proxy: MediaProxyMode::All, // Force media proxy for SDP bridging
         ..Default::default()
     };
-    
+
     let proxy_addr = format!("127.0.0.1:{}", port).parse()?;
 
     // Create user backend with Alice (RTP) and Bob (WebRTC)
     let user_backend = crate::proxy::user::MemoryUserBackend::new(None);
-    user_backend.create_user(SipUser {
-        id: 1,
-        username: "alice".to_string(),
-        password: Some("password123".to_string()),
-        enabled: true,
-        realm: Some("127.0.0.1".to_string()),
-        is_support_webrtc: false, // Alice is RTP
-        ..Default::default()
-    }).await?;
-    user_backend.create_user(SipUser {
-        id: 2,
-        username: "bob".to_string(),
-        password: Some("password456".to_string()),
-        enabled: true,
-        realm: Some("127.0.0.1".to_string()),
-        is_support_webrtc: true, // Bob supports WebRTC
-        ..Default::default()
-    }).await?;
+    user_backend
+        .create_user(SipUser {
+            id: 1,
+            username: "alice".to_string(),
+            password: Some("password123".to_string()),
+            enabled: true,
+            realm: Some("127.0.0.1".to_string()),
+            is_support_webrtc: false, // Alice is RTP
+            ..Default::default()
+        })
+        .await?;
+    user_backend
+        .create_user(SipUser {
+            id: 2,
+            username: "bob".to_string(),
+            password: Some("password456".to_string()),
+            enabled: true,
+            realm: Some("127.0.0.1".to_string()),
+            is_support_webrtc: true, // Bob supports WebRTC
+            ..Default::default()
+        })
+        .await?;
 
     // Setup server
     let locator = crate::proxy::locator::MemoryLocator::new();
@@ -512,7 +524,9 @@ async fn test_rtp_to_webrtc_sdp_bridge() -> Result<()> {
 
     builder = builder
         .register_module("registrar", |inner, config| {
-            Ok(Box::new(crate::proxy::registrar::RegistrarModule::new(inner, config)))
+            Ok(Box::new(crate::proxy::registrar::RegistrarModule::new(
+                inner, config,
+            )))
         })
         .register_module("auth", |inner, _config| {
             Ok(Box::new(crate::proxy::auth::AuthModule::new(inner)))
@@ -520,7 +534,7 @@ async fn test_rtp_to_webrtc_sdp_bridge() -> Result<()> {
         .register_module("call", |inner, config| {
             Ok(Box::new(crate::proxy::call::CallModule::new(config, inner)))
         });
-    
+
     let server = std::sync::Arc::new(builder.build().await?);
     let server_clone = server.clone();
 
@@ -586,13 +600,13 @@ async fn test_rtp_to_webrtc_sdp_bridge() -> Result<()> {
                 // Verify Bob received converted WebRTC SDP
                 if let Some(ref sdp_str) = sdp {
                     info!("Bob received SDP:\n{}", sdp_str);
-                    
+
                     // Note: For RTP -> WebRTC conversion, we expect SAVPF to be present
                     // But the test might fail because bob (TestUa) might not properly
                     // signal WebRTC support. This is a known limitation.
                     info!("Note: RTP -> WebRTC bridge test depends on proper WebRTC signaling");
                 }
-                
+
                 // Bob answers with WebRTC SDP
                 let bob_webrtc_sdp = "v=0\r\n\
                     o=- 789012 789012 IN IP4 127.0.0.1\r\n\
@@ -609,8 +623,9 @@ async fn test_rtp_to_webrtc_sdp_bridge() -> Result<()> {
                     a=mid:0\r\n\
                     a=sendrecv\r\n\
                     a=rtcp-mux\r\n";
-                
-                bob.answer_call(&id, Some(bob_webrtc_sdp.to_string())).await?;
+
+                bob.answer_call(&id, Some(bob_webrtc_sdp.to_string()))
+                    .await?;
                 info!("Bob answered with WebRTC SDP");
                 break;
             }

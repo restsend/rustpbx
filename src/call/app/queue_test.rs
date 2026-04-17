@@ -5,10 +5,12 @@
 
 #[cfg(test)]
 mod tests {
+    use crate::call::app::CallApp;
     use crate::call::app::queue::{QueueApp, QueueConfig};
     use crate::call::app::testing::MockCallStack;
-    use crate::call::app::CallApp;
-    use crate::call::{DialStrategy, FailureAction, Location, QueueFallbackAction, QueueHoldConfig, QueuePlan};
+    use crate::call::{
+        DialStrategy, FailureAction, Location, QueueFallbackAction, QueueHoldConfig, QueuePlan,
+    };
     use crate::proxy::proxy_call::state::SessionAction;
     use rsipstack::sip::Uri;
     use std::time::Duration;
@@ -108,32 +110,29 @@ mod tests {
     /// Build a queue plan with parallel dialing.
     #[allow(dead_code)]
     fn build_parallel_queue() -> QueuePlan {
-        let agents: Vec<Location> = vec![
-            "sip:agent1@example.com",
-            "sip:agent2@example.com",
-        ]
-        .into_iter()
-        .map(|uri| Location {
-            aor: Uri::try_from(uri).unwrap(),
-            expires: 3600,
-            destination: None,
-            last_modified: None,
-            supports_webrtc: false,
-            credential: None,
-            headers: None,
-            registered_aor: None,
-            contact_raw: None,
-            contact_params: None,
-            path: None,
-            service_route: None,
-            instance_id: None,
-            gruu: None,
-            temp_gruu: None,
-            reg_id: None,
-            transport: None,
-            user_agent: None,
-        })
-        .collect();
+        let agents: Vec<Location> = vec!["sip:agent1@example.com", "sip:agent2@example.com"]
+            .into_iter()
+            .map(|uri| Location {
+                aor: Uri::try_from(uri).unwrap(),
+                expires: 3600,
+                destination: None,
+                last_modified: None,
+                supports_webrtc: false,
+                credential: None,
+                headers: None,
+                registered_aor: None,
+                contact_raw: None,
+                contact_params: None,
+                path: None,
+                service_route: None,
+                instance_id: None,
+                gruu: None,
+                temp_gruu: None,
+                reg_id: None,
+                transport: None,
+                user_agent: None,
+            })
+            .collect();
 
         QueuePlan {
             accept_immediately: true,
@@ -213,7 +212,14 @@ mod tests {
         // No AcceptCall is sent because there are no agents to dial
         stack
             .assert_cmd(200, "Hangup", |c| {
-                matches!(c, SessionAction::Hangup { reason: Some(crate::callrecord::CallRecordHangupReason::ServerUnavailable), code: Some(480), .. })
+                matches!(
+                    c,
+                    SessionAction::Hangup {
+                        reason: Some(crate::callrecord::CallRecordHangupReason::ServerUnavailable),
+                        code: Some(480),
+                        ..
+                    }
+                )
             })
             .await;
     }
@@ -223,12 +229,14 @@ mod tests {
     #[tokio::test]
     async fn test_queue_play_then_hangup_fallback() {
         let mut plan = build_simple_queue();
-        plan.fallback = Some(QueueFallbackAction::Failure(FailureAction::PlayThenHangup {
-            audio_file: "sounds/all_busy.wav".to_string(),
-            use_early_media: false,
-            status_code: rsipstack::sip::StatusCode::TemporarilyUnavailable,
-            reason: Some("All agents are busy".to_string()),
-        }));
+        plan.fallback = Some(QueueFallbackAction::Failure(
+            FailureAction::PlayThenHangup {
+                audio_file: "sounds/all_busy.wav".to_string(),
+                use_early_media: false,
+                status_code: rsipstack::sip::StatusCode::TemporarilyUnavailable,
+                reason: Some("All agents are busy".to_string()),
+            },
+        ));
         plan.dial_strategy = Some(DialStrategy::Sequential(vec![]));
 
         let mut stack = MockCallStack::run(Box::new(QueueApp::new(plan)), "caller", "1000");
@@ -329,9 +337,11 @@ mod tests {
 
         // Should transfer to the connected agent
         stack
-            .assert_cmd(200, "Transfer", |c| {
-                matches!(c, SessionAction::TransferTarget(t) if t == "sip:agent1@example.com")
-            })
+            .assert_cmd(
+                200,
+                "Transfer",
+                |c| matches!(c, SessionAction::TransferTarget(t) if t == "sip:agent1@example.com"),
+            )
             .await;
 
         stack.join().await.expect("should exit after transfer");
@@ -371,9 +381,11 @@ mod tests {
 
         // Should transfer to the second agent
         stack
-            .assert_cmd(200, "Transfer", |c| {
-                matches!(c, SessionAction::TransferTarget(t) if t == "sip:agent2@example.com")
-            })
+            .assert_cmd(
+                200,
+                "Transfer",
+                |c| matches!(c, SessionAction::TransferTarget(t) if t == "sip:agent2@example.com"),
+            )
             .await;
 
         stack.join().await.expect("should exit after transfer");
@@ -422,9 +434,11 @@ mod tests {
 
         // Queue detects no agents and executes redirect fallback
         stack
-            .assert_cmd(200, "Transfer", |c| {
-                matches!(c, SessionAction::TransferTarget(t) if t == "sip:backup@example.com")
-            })
+            .assert_cmd(
+                200,
+                "Transfer",
+                |c| matches!(c, SessionAction::TransferTarget(t) if t == "sip:backup@example.com"),
+            )
             .await;
 
         stack.join().await.expect("should exit after redirect");
@@ -444,12 +458,17 @@ mod tests {
 
         // Queue detects no agents and executes queue transfer fallback
         stack
-            .assert_cmd(200, "Transfer", |c| {
-                matches!(c, SessionAction::TransferTarget(t) if t == "queue:overflow")
-            })
+            .assert_cmd(
+                200,
+                "Transfer",
+                |c| matches!(c, SessionAction::TransferTarget(t) if t == "queue:overflow"),
+            )
             .await;
 
-        stack.join().await.expect("should exit after queue transfer");
+        stack
+            .join()
+            .await
+            .expect("should exit after queue transfer");
     }
 
     // ── 12. Queue with no hold music configured ──
@@ -577,9 +596,11 @@ mod tests {
 
         // Should transfer to agent 3
         stack
-            .assert_cmd(200, "Transfer", |c| {
-                matches!(c, SessionAction::TransferTarget(t) if t == "sip:agent3@example.com")
-            })
+            .assert_cmd(
+                200,
+                "Transfer",
+                |c| matches!(c, SessionAction::TransferTarget(t) if t == "sip:agent3@example.com"),
+            )
             .await;
 
         stack.join().await.expect("should complete successfully");

@@ -26,8 +26,8 @@
 //! In such cases, the conversion returns an error.
 
 use crate::call::domain::*;
-use crate::proxy::proxy_call::state::SessionAction;
 use crate::callrecord::CallRecordHangupReason;
+use crate::proxy::proxy_call::state::SessionAction;
 use anyhow::Result;
 
 use super::AdapterError;
@@ -73,7 +73,10 @@ pub fn call_command_to_session_action(cmd: CallCommand) -> Result<SessionAction>
             })
         }
 
-        CallCommand::Ring { leg_id: _, ringback } => {
+        CallCommand::Ring {
+            leg_id: _,
+            ringback,
+        } => {
             let (rb, passthrough) = match ringback {
                 Some(RingbackPolicy::PassThrough) => (None, true),
                 Some(RingbackPolicy::Replace { source }) => {
@@ -101,7 +104,9 @@ pub fn call_command_to_session_action(cmd: CallCommand) -> Result<SessionAction>
         // ========================================================================
         // Bridging
         // ========================================================================
-        CallCommand::Bridge { leg_a: _, leg_b, .. } => {
+        CallCommand::Bridge {
+            leg_a: _, leg_b, ..
+        } => {
             // Bridge currently uses target_session_id, not leg-based
             // This is a simplified mapping using leg_b as target
             Ok(SessionAction::BridgeTo {
@@ -152,7 +157,11 @@ pub fn call_command_to_session_action(cmd: CallCommand) -> Result<SessionAction>
         } => {
             let path = match source {
                 MediaSource::File { path } => path,
-                _ => return Err(AdapterError::NotSupported("non-file media source".to_string()).into()),
+                _ => {
+                    return Err(
+                        AdapterError::NotSupported("non-file media source".to_string()).into(),
+                    );
+                }
             };
             let opts = options.unwrap_or_default();
             Ok(SessionAction::PlayPrompt {
@@ -177,7 +186,9 @@ pub fn call_command_to_session_action(cmd: CallCommand) -> Result<SessionAction>
         // ========================================================================
         CallCommand::StartRecording { config } => Ok(SessionAction::StartRecording {
             path: config.path,
-            max_duration: config.max_duration_secs.map(|s| std::time::Duration::from_secs(s as u64)),
+            max_duration: config
+                .max_duration_secs
+                .map(|s| std::time::Duration::from_secs(s as u64)),
             beep: config.beep,
         }),
 
@@ -201,6 +212,12 @@ pub fn call_command_to_session_action(cmd: CallCommand) -> Result<SessionAction>
         CallCommand::SupervisorBarge { target_leg, .. } => Ok(SessionAction::SupervisorBarge {
             target_session_id: target_leg.into(),
         }),
+
+        CallCommand::SupervisorTakeover { target_leg, .. } => {
+            Ok(SessionAction::SupervisorTakeover {
+                target_session_id: target_leg.into(),
+            })
+        }
 
         CallCommand::SupervisorStop { .. } => Ok(SessionAction::SupervisorStop),
 
@@ -226,7 +243,9 @@ pub fn call_command_to_session_action(cmd: CallCommand) -> Result<SessionAction>
         | CallCommand::ConferenceRemove { .. }
         | CallCommand::ConferenceMute { .. }
         | CallCommand::ConferenceUnmute { .. }
-        | CallCommand::ConferenceDestroy { .. } => {
+        | CallCommand::ConferenceDestroy { .. }
+        | CallCommand::JoinMixer { .. }
+        | CallCommand::LeaveMixer => {
             Err(AdapterError::NotSupported("conference commands".to_string()).into())
         }
 
@@ -329,22 +348,35 @@ pub fn session_action_to_call_command(action: SessionAction) -> Result<CallComma
         SessionAction::RefreshSession => Ok(CallCommand::RefreshSession),
         SessionAction::MuteTrack(track_id) => Ok(CallCommand::MuteTrack { track_id }),
         SessionAction::UnmuteTrack(track_id) => Ok(CallCommand::UnmuteTrack { track_id }),
-        SessionAction::SupervisorListen { target_session_id } => Ok(CallCommand::SupervisorListen {
-            supervisor_leg: LegId::new("supervisor"),
-            target_leg: target_session_id.into(),
-        }),
-        SessionAction::SupervisorWhisper { target_session_id } => Ok(CallCommand::SupervisorWhisper {
-            supervisor_leg: LegId::new("supervisor"),
-            target_leg: target_session_id.into(),
-        }),
+        SessionAction::SupervisorListen { target_session_id } => {
+            Ok(CallCommand::SupervisorListen {
+                supervisor_leg: LegId::new("supervisor"),
+                target_leg: target_session_id.into(),
+            })
+        }
+        SessionAction::SupervisorWhisper { target_session_id } => {
+            Ok(CallCommand::SupervisorWhisper {
+                supervisor_leg: LegId::new("supervisor"),
+                target_leg: target_session_id.into(),
+            })
+        }
         SessionAction::SupervisorBarge { target_session_id } => Ok(CallCommand::SupervisorBarge {
             supervisor_leg: LegId::new("supervisor"),
             target_leg: target_session_id.into(),
         }),
+        SessionAction::SupervisorTakeover { target_session_id } => {
+            Ok(CallCommand::SupervisorTakeover {
+                supervisor_leg: LegId::new("supervisor"),
+                target_leg: target_session_id.into(),
+            })
+        }
         SessionAction::SupervisorStop => Ok(CallCommand::SupervisorStop {
             supervisor_leg: LegId::new("supervisor"),
         }),
-        SessionAction::StartRinging { ringback, passthrough } => Ok(CallCommand::Ring {
+        SessionAction::StartRinging {
+            ringback,
+            passthrough,
+        } => Ok(CallCommand::Ring {
             leg_id: LegId::new("caller"),
             ringback: if passthrough {
                 Some(RingbackPolicy::PassThrough)

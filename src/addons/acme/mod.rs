@@ -114,9 +114,15 @@ impl Addon for AcmeAddon {
                 tower_http::services::ServeDir::new(static_path),
             )
             .route(&format!("{base_path}/acme"), get(handlers::ui_index))
-            .route(&format!("{api_prefix}/acme/request"), post(handlers::request_cert))
+            .route(
+                &format!("{api_prefix}/acme/request"),
+                post(handlers::request_cert),
+            )
             .route(&format!("{api_prefix}/acme/status"), get(handlers::status))
-            .route(&format!("{api_prefix}/acme/auto-renew"), get(handlers::get_auto_renew_config))
+            .route(
+                &format!("{api_prefix}/acme/auto-renew"),
+                get(handlers::get_auto_renew_config),
+            )
             .route(
                 &format!("{api_prefix}/acme/auto-renew"),
                 post(handlers::set_auto_renew_config),

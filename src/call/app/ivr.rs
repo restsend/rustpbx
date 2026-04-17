@@ -319,7 +319,11 @@ impl IvrApp {
                     return_menu: return_menu.clone(),
                 };
                 if let Some(path) = self
-                    .resolve_audio(Some(prompt), prompt_text.as_deref(), prompt_voice.as_deref())
+                    .resolve_audio(
+                        Some(prompt),
+                        prompt_text.as_deref(),
+                        prompt_voice.as_deref(),
+                    )
                     .await
                 {
                     debug!(ivr = %self.definition.name, prompt = %path, return_menu, "Playing announcement");
@@ -340,7 +344,11 @@ impl IvrApp {
                 prompt_voice,
             } => {
                 if let Some(path) = self
-                    .resolve_audio(prompt.as_deref(), prompt_text.as_deref(), prompt_voice.as_deref())
+                    .resolve_audio(
+                        prompt.as_deref(),
+                        prompt_text.as_deref(),
+                        prompt_voice.as_deref(),
+                    )
                     .await
                 {
                     self.state = IvrState::PlayingHangup;
@@ -364,7 +372,11 @@ impl IvrApp {
             } => {
                 self.state = IvrState::PlayingAndHangup { code: *code };
                 if let Some(path) = self
-                    .resolve_audio(prompt.as_deref(), prompt_text.as_deref(), prompt_voice.as_deref())
+                    .resolve_audio(
+                        prompt.as_deref(),
+                        prompt_text.as_deref(),
+                        prompt_voice.as_deref(),
+                    )
                     .await
                 {
                     debug!(ivr = %self.definition.name, prompt = %path, code = ?code, "Playing prompt before hangup with code");
@@ -390,7 +402,11 @@ impl IvrApp {
             } => {
                 self.state = IvrState::CollectingExtension;
                 let resolved_prompt = self
-                    .resolve_audio(Some(prompt), prompt_text.as_deref(), prompt_voice.as_deref())
+                    .resolve_audio(
+                        Some(prompt),
+                        prompt_text.as_deref(),
+                        prompt_voice.as_deref(),
+                    )
                     .await;
                 debug!(
                     ivr = %self.definition.name,
@@ -464,7 +480,11 @@ impl IvrApp {
                 );
                 let terminator = end_key.as_ref().and_then(|k| k.chars().next());
                 let resolved_prompt = self
-                    .resolve_audio(prompt.as_deref(), prompt_text.as_deref(), prompt_voice.as_deref())
+                    .resolve_audio(
+                        prompt.as_deref(),
+                        prompt_text.as_deref(),
+                        prompt_voice.as_deref(),
+                    )
                     .await;
 
                 // Check if we have a pending digit from unknown_key_action

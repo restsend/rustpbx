@@ -85,8 +85,8 @@ mod event_loop;
 
 pub mod ivr;
 pub mod ivr_config;
-pub mod voicemail;
 pub mod queue;
+pub mod voicemail;
 
 /// Test helpers: build a mock call stack without a real SIP session.
 /// Only compiled in test builds.

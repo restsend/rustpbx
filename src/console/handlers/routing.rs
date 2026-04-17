@@ -951,16 +951,13 @@ pub(crate) async fn query_routing(
 
     // Issue #179: collect file-sourced routes from in-memory snapshot
     let file_routes: Vec<Value> = if let Some(app_state) = state.app_state() {
-        let snapshot = app_state
-            .sip_server()
-            .inner
-            .data_context
-            .routes_snapshot();
+        let snapshot = app_state.sip_server().inner.data_context.routes_snapshot();
         let mut file_items: Vec<Value> = snapshot
             .into_iter()
             .filter_map(|route| {
                 if let ConfigOrigin::File(ref path) = route.origin {
-                    let action_payload = serde_json::to_value(&route.action).unwrap_or_else(|_| json!({}));
+                    let action_payload =
+                        serde_json::to_value(&route.action).unwrap_or_else(|_| json!({}));
                     Some(json!({
                         "id": null,
                         "name": route.name,

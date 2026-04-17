@@ -5,12 +5,12 @@
 
 use async_trait::async_trait;
 use std::sync::Arc;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{RwLock, mpsc};
 use tokio_util::sync::CancellationToken;
 
 use crate::call::app::{ApplicationContext, CallApp, CallController, ControllerEvent};
 use crate::call::domain::MediaCapability;
-use crate::proxy::proxy_call::state::{SipSessionHandle, SessionAction};
+use crate::proxy::proxy_call::state::{SessionAction, SipSessionHandle};
 
 use super::{AppDescriptor, AppResult, AppRuntime, AppRuntimeError, AppStatus};
 
@@ -157,12 +157,21 @@ impl AppRuntime for DefaultAppRuntime {
             );
 
             if let Err(e) = event_loop.run().await {
-                tracing::error!("App {} failed for session {}: {}", app_name_owned, session_id_for_log, e);
+                tracing::error!(
+                    "App {} failed for session {}: {}",
+                    app_name_owned,
+                    session_id_for_log,
+                    e
+                );
             }
 
             // Clear the app event sender so the session knows the app has exited.
             handle.set_app_event_sender(None);
-            tracing::info!("App {} exited for session {}", app_name_owned, session_id_for_log);
+            tracing::info!(
+                "App {} exited for session {}",
+                app_name_owned,
+                session_id_for_log
+            );
         });
 
         tracing::info!("App {} started for session {}", app_name, self.session_id);
@@ -256,16 +265,13 @@ impl AppRuntime for DefaultAppRuntime {
 
 /// Parse a JSON event into a ControllerEvent
 fn parse_json_event(value: &serde_json::Value) -> AppResult<ControllerEvent> {
-    let obj = value.as_object().ok_or_else(|| {
-        AppRuntimeError::InjectFailed("event must be a JSON object".to_string())
-    })?;
+    let obj = value
+        .as_object()
+        .ok_or_else(|| AppRuntimeError::InjectFailed("event must be a JSON object".to_string()))?;
 
-    let event_type = obj
-        .get("type")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| {
-            AppRuntimeError::InjectFailed("event must have a 'type' field".to_string())
-        })?;
+    let event_type = obj.get("type").and_then(|v| v.as_str()).ok_or_else(|| {
+        AppRuntimeError::InjectFailed("event must have a 'type' field".to_string())
+    })?;
 
     match event_type {
         "dtmf" => {
@@ -282,7 +288,10 @@ fn parse_json_event(value: &serde_json::Value) -> AppResult<ControllerEvent> {
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
-            let interrupted = obj.get("interrupted").and_then(|v| v.as_bool()).unwrap_or(false);
+            let interrupted = obj
+                .get("interrupted")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
             Ok(ControllerEvent::AudioComplete {
                 track_id,
                 interrupted,

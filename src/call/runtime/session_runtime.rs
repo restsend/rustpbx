@@ -7,8 +7,8 @@
 //!
 //! The actual session implementation is in `crate::proxy::proxy_call::sip_session::SipSession`.
 
+use crate::call::domain::LegId;
 use serde::Serialize;
-use crate::call::domain::{LegId};
 
 /// Unique identifier for a session
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)]

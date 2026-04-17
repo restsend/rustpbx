@@ -1,10 +1,7 @@
 use crate::handler::middleware::clientaddr::ClientAddr;
 use axum::extract::ws::{Message, WebSocket};
 use futures::{SinkExt, StreamExt};
-use rsipstack::sip::{
-    SipMessage,
-    prelude::HeadersExt,
-};
+use rsipstack::sip::{SipMessage, prelude::HeadersExt};
 use rsipstack::{
     transaction::endpoint::EndpointInnerRef,
     transport::{SipAddr, SipConnection, TransportEvent, channel::ChannelConnection},

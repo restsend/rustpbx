@@ -806,11 +806,9 @@ mod tests {
 
     #[test]
     fn test_get_header_value_typed_session_expires() {
-        let headers = rsipstack::sip::Headers::from(vec![
-            rsipstack::sip::Header::SessionExpires(
-                rsipstack::sip::headers::SessionExpires::new("1800;refresher=uac"),
-            ),
-        ]);
+        let headers = rsipstack::sip::Headers::from(vec![rsipstack::sip::Header::SessionExpires(
+            rsipstack::sip::headers::SessionExpires::new("1800;refresher=uac"),
+        )]);
 
         let value = get_header_value(&headers, HEADER_SESSION_EXPIRES);
         assert_eq!(value, Some("1800;refresher=uac".to_string()));
@@ -829,9 +827,9 @@ mod tests {
 
     #[test]
     fn test_get_header_value_typed_min_se() {
-        let headers = rsipstack::sip::Headers::from(vec![
-            rsipstack::sip::Header::MinSE(rsipstack::sip::headers::MinSE::new("90")),
-        ]);
+        let headers = rsipstack::sip::Headers::from(vec![rsipstack::sip::Header::MinSE(
+            rsipstack::sip::headers::MinSE::new("90"),
+        )]);
 
         let value = get_header_value(&headers, HEADER_MIN_SE);
         assert_eq!(value, Some("90".to_string()));
@@ -935,7 +933,8 @@ mod tests {
         timer.refresher = SessionRefresher::Uac;
         timer.session_interval = Duration::from_secs(1800);
 
-        let headers = rsipstack::sip::Headers::from(build_session_timer_response_headers(&timer, true));
+        let headers =
+            rsipstack::sip::Headers::from(build_session_timer_response_headers(&timer, true));
 
         assert!(is_timer_required(&headers));
         assert_eq!(
@@ -952,7 +951,8 @@ mod tests {
         timer.refresher = SessionRefresher::Uas;
         timer.session_interval = Duration::from_secs(1800);
 
-        let headers = rsipstack::sip::Headers::from(build_session_timer_response_headers(&timer, true));
+        let headers =
+            rsipstack::sip::Headers::from(build_session_timer_response_headers(&timer, true));
 
         assert!(!is_timer_required(&headers));
     }
@@ -965,7 +965,8 @@ mod tests {
         timer.refresher = SessionRefresher::Uac;
         timer.session_interval = Duration::from_secs(1800);
 
-        let headers = rsipstack::sip::Headers::from(build_session_timer_response_headers(&timer, false));
+        let headers =
+            rsipstack::sip::Headers::from(build_session_timer_response_headers(&timer, false));
 
         assert!(!is_timer_required(&headers));
     }

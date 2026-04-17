@@ -4,8 +4,6 @@ pub mod gateway;
 pub mod handler;
 pub mod processor;
 pub mod proto;
-pub mod routing;
-pub mod rule_engine;
 pub mod session;
 pub mod transfer;
 

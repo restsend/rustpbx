@@ -69,7 +69,11 @@ async fn establish_call(
     callee: &str,
     caller_rtp_port: u16,
     callee_rtp_port: u16,
-) -> Result<(EstablishedCall, super::test_ua::TestUa, super::test_ua::TestUa)> {
+) -> Result<(
+    EstablishedCall,
+    super::test_ua::TestUa,
+    super::test_ua::TestUa,
+)> {
     let caller_ua = Arc::new(server.create_ua(caller).await?);
     let callee_ua = server.create_ua(callee).await?;
 
@@ -80,11 +84,8 @@ async fn establish_call(
 
     let caller_clone = caller_ua.clone();
     let callee_str = callee.to_string();
-    let caller_handle = tokio::spawn(async move {
-        caller_clone
-            .make_call(&callee_str, Some(caller_sdp))
-            .await
-    });
+    let caller_handle =
+        tokio::spawn(async move { caller_clone.make_call(&callee_str, Some(caller_sdp)).await });
 
     let mut callee_dialog_id = None;
     let mut callee_offer_sdp: Option<String> = None;
@@ -105,8 +106,8 @@ async fn establish_call(
         sleep(Duration::from_millis(100)).await;
     }
 
-    let callee_id = callee_dialog_id
-        .ok_or_else(|| anyhow::anyhow!("Callee never received INVITE"))?;
+    let callee_id =
+        callee_dialog_id.ok_or_else(|| anyhow::anyhow!("Callee never received INVITE"))?;
 
     let caller_id = tokio::time::timeout(Duration::from_secs(5), caller_handle)
         .await
@@ -119,8 +120,7 @@ async fn establish_call(
         .await
         .ok_or_else(|| anyhow::anyhow!("No answer SDP on caller"))?;
 
-    let callee_offer = callee_offer_sdp
-        .ok_or_else(|| anyhow::anyhow!("No offer SDP on callee"))?;
+    let callee_offer = callee_offer_sdp.ok_or_else(|| anyhow::anyhow!("No offer SDP on callee"))?;
 
     let callee_target = extract_media_endpoint(&callee_offer)
         .ok_or_else(|| anyhow::anyhow!("Failed to parse callee proxy endpoint"))?;
@@ -160,10 +160,22 @@ async fn exchange_rtp(
     let callee_ssrc = 0xB2B2B2B2u32;
 
     let caller_packets = RtpPacket::create_sequence(
-        packet_count, 1000, 50000, caller_ssrc, payload_type, 160, 160,
+        packet_count,
+        1000,
+        50000,
+        caller_ssrc,
+        payload_type,
+        160,
+        160,
     );
     let callee_packets = RtpPacket::create_sequence(
-        packet_count, 2000, 60000, callee_ssrc, payload_type, 160, 160,
+        packet_count,
+        2000,
+        60000,
+        callee_ssrc,
+        payload_type,
+        160,
+        160,
     );
 
     caller_sender.start_sending(callee_target, caller_packets, 20);
@@ -219,19 +231,23 @@ async fn test_wholesale_inbound_caller_hangup_rtp_cdr() -> Result<()> {
     let caller_port = caller_receiver.port()?;
     let callee_port = callee_receiver.port()?;
 
-    let (call, caller_ua, _callee_ua) = establish_call(
-        &server, "alice", "bob", caller_port, callee_port,
-    ).await?;
+    let (call, caller_ua, _callee_ua) =
+        establish_call(&server, "alice", "bob", caller_port, callee_port).await?;
 
     info!("Wholesale inbound call established");
 
     // Exchange RTP for ~2 seconds
     let (caller_stats, callee_stats) = exchange_rtp(
-        &caller_sender, &callee_sender,
-        &caller_receiver, &callee_receiver,
-        call.caller_target, call.callee_target,
-        0, 2000,
-    ).await?;
+        &caller_sender,
+        &callee_sender,
+        &caller_receiver,
+        &callee_receiver,
+        call.caller_target,
+        call.callee_target,
+        0,
+        2000,
+    )
+    .await?;
 
     info!(
         caller_received = caller_stats.packets_received,
@@ -240,23 +256,32 @@ async fn test_wholesale_inbound_caller_hangup_rtp_cdr() -> Result<()> {
     );
 
     // Verify bidirectional RTP
-    assert!(callee_stats.packets_received > 0, "Callee should receive RTP from caller");
-    assert!(caller_stats.packets_received > 0, "Caller should receive RTP from callee");
+    assert!(
+        callee_stats.packets_received > 0,
+        "Callee should receive RTP from caller"
+    );
+    assert!(
+        caller_stats.packets_received > 0,
+        "Caller should receive RTP from callee"
+    );
 
     // Verify correct payload type (PCMU = 0)
     assert!(
         callee_stats.payload_types.contains(&0),
-        "Callee should see PCMU (PT 0), got {:?}", callee_stats.payload_types
+        "Callee should see PCMU (PT 0), got {:?}",
+        callee_stats.payload_types
     );
     assert!(
         caller_stats.payload_types.contains(&0),
-        "Caller should see PCMU (PT 0), got {:?}", caller_stats.payload_types
+        "Caller should see PCMU (PT 0), got {:?}",
+        caller_stats.payload_types
     );
 
     // Verify low packet loss
     assert!(
         callee_stats.packet_loss_rate() < 0.10,
-        "Callee packet loss too high: {:.1}%", callee_stats.packet_loss_rate() * 100.0
+        "Callee packet loss too high: {:.1}%",
+        callee_stats.packet_loss_rate() * 100.0
     );
 
     // Trunk side (caller) hangs up
@@ -270,7 +295,8 @@ async fn test_wholesale_inbound_caller_hangup_rtp_cdr() -> Result<()> {
     assert_eq!(record.details.status, "completed");
     assert!(
         matches!(record.hangup_reason, Some(CallRecordHangupReason::ByCaller)),
-        "Expected ByCaller, got {:?}", record.hangup_reason
+        "Expected ByCaller, got {:?}",
+        record.hangup_reason
     );
 
     caller_receiver.stop();
@@ -296,19 +322,29 @@ async fn test_wholesale_inbound_user_hangup_rtp_cdr() -> Result<()> {
     let caller_port = caller_receiver.port()?;
     let callee_port = callee_receiver.port()?;
 
-    let (call, _caller_ua, callee_ua) = establish_call(
-        &server, "alice", "bob", caller_port, callee_port,
-    ).await?;
+    let (call, _caller_ua, callee_ua) =
+        establish_call(&server, "alice", "bob", caller_port, callee_port).await?;
 
     let (caller_stats, callee_stats) = exchange_rtp(
-        &caller_sender, &callee_sender,
-        &caller_receiver, &callee_receiver,
-        call.caller_target, call.callee_target,
-        0, 1500,
-    ).await?;
+        &caller_sender,
+        &callee_sender,
+        &caller_receiver,
+        &callee_receiver,
+        call.caller_target,
+        call.callee_target,
+        0,
+        1500,
+    )
+    .await?;
 
-    assert!(callee_stats.packets_received > 0, "Callee should receive RTP");
-    assert!(caller_stats.packets_received > 0, "Caller should receive RTP");
+    assert!(
+        callee_stats.packets_received > 0,
+        "Callee should receive RTP"
+    );
+    assert!(
+        caller_stats.packets_received > 0,
+        "Caller should receive RTP"
+    );
 
     // Internal user (callee) hangs up
     callee_ua.hangup(&call.callee_id).await?;
@@ -321,7 +357,8 @@ async fn test_wholesale_inbound_user_hangup_rtp_cdr() -> Result<()> {
     assert_eq!(record.details.status, "completed");
     assert!(
         matches!(record.hangup_reason, Some(CallRecordHangupReason::ByCallee)),
-        "Expected ByCallee, got {:?}", record.hangup_reason
+        "Expected ByCallee, got {:?}",
+        record.hangup_reason
     );
 
     caller_receiver.stop();
@@ -347,9 +384,8 @@ async fn test_wholesale_reject_486_cdr() -> Result<()> {
 
     let alice_clone = alice.clone();
     let sdp_clone = sdp.clone();
-    let caller_handle = tokio::spawn(async move {
-        alice_clone.make_call("bob", Some(sdp_clone)).await
-    });
+    let caller_handle =
+        tokio::spawn(async move { alice_clone.make_call("bob", Some(sdp_clone)).await });
 
     // Bob rejects with 486
     let mut bob_rejected = false;
@@ -377,7 +413,11 @@ async fn test_wholesale_reject_486_cdr() -> Result<()> {
     match call_result {
         Ok(Ok(Err(e))) => {
             let err_str = e.to_string();
-            assert!(err_str.contains("486"), "Alice should get 486, got: {}", err_str);
+            assert!(
+                err_str.contains("486"),
+                "Alice should get 486, got: {}",
+                err_str
+            );
         }
         Ok(Ok(Ok(_))) => panic!("Call should have been rejected"),
         _ => {}
@@ -399,7 +439,8 @@ async fn test_wholesale_reject_486_cdr() -> Result<()> {
                 record.hangup_reason,
                 Some(CallRecordHangupReason::Rejected) | Some(CallRecordHangupReason::Failed)
             ),
-            "Expected Rejected or Failed, got {:?}", record.hangup_reason
+            "Expected Rejected or Failed, got {:?}",
+            record.hangup_reason
         );
     } else {
         warn!("No CDR for rejected wholesale call — 486 passthrough verified at SIP level");
@@ -436,9 +477,8 @@ async fn test_wholesale_pcma_rtp_cdr() -> Result<()> {
 
     // Establish call
     let caller_clone = caller_ua.clone();
-    let caller_handle = tokio::spawn(async move {
-        caller_clone.make_call("bob", Some(caller_sdp)).await
-    });
+    let caller_handle =
+        tokio::spawn(async move { caller_clone.make_call("bob", Some(caller_sdp)).await });
 
     let mut callee_dialog_id = None;
     let mut callee_offer_sdp: Option<String> = None;
@@ -466,7 +506,9 @@ async fn test_wholesale_pcma_rtp_cdr() -> Result<()> {
         .map_err(|e| anyhow::anyhow!("join: {}", e))?
         .map_err(|e| anyhow::anyhow!("call: {}", e))?;
 
-    let caller_answer = caller_ua.get_negotiated_answer_sdp(&caller_id).await
+    let caller_answer = caller_ua
+        .get_negotiated_answer_sdp(&caller_id)
+        .await
         .ok_or_else(|| anyhow::anyhow!("No answer SDP"))?;
     let callee_offer = callee_offer_sdp.ok_or_else(|| anyhow::anyhow!("No offer SDP"))?;
 
@@ -477,11 +519,16 @@ async fn test_wholesale_pcma_rtp_cdr() -> Result<()> {
 
     // Exchange RTP with PCMA (PT=8)
     let (caller_stats, callee_stats) = exchange_rtp(
-        &caller_sender, &callee_sender,
-        &caller_receiver, &callee_receiver,
-        caller_target, callee_target,
-        8, 2000,
-    ).await?;
+        &caller_sender,
+        &callee_sender,
+        &caller_receiver,
+        &callee_receiver,
+        caller_target,
+        callee_target,
+        8,
+        2000,
+    )
+    .await?;
 
     info!(
         caller_received = caller_stats.packets_received,
@@ -491,17 +538,25 @@ async fn test_wholesale_pcma_rtp_cdr() -> Result<()> {
         "PCMA wholesale results"
     );
 
-    assert!(callee_stats.packets_received > 0, "Callee should receive PCMA RTP");
-    assert!(caller_stats.packets_received > 0, "Caller should receive PCMA RTP");
+    assert!(
+        callee_stats.packets_received > 0,
+        "Callee should receive PCMA RTP"
+    );
+    assert!(
+        caller_stats.packets_received > 0,
+        "Caller should receive PCMA RTP"
+    );
 
     // Verify PCMA (PT=8), not PCMU
     assert!(
         callee_stats.payload_types.contains(&8),
-        "Callee should see PCMA (PT 8), got {:?}", callee_stats.payload_types
+        "Callee should see PCMA (PT 8), got {:?}",
+        callee_stats.payload_types
     );
     assert!(
         caller_stats.payload_types.contains(&8),
-        "Caller should see PCMA (PT 8), got {:?}", caller_stats.payload_types
+        "Caller should see PCMA (PT 8), got {:?}",
+        caller_stats.payload_types
     );
 
     // Hang up and verify CDR
@@ -511,9 +566,10 @@ async fn test_wholesale_pcma_rtp_cdr() -> Result<()> {
     let records = server.cdr_capture.get_all_records().await;
     let record = &records[0];
     assert_eq!(record.details.status, "completed");
-    assert!(
-        matches!(record.hangup_reason, Some(CallRecordHangupReason::ByCaller))
-    );
+    assert!(matches!(
+        record.hangup_reason,
+        Some(CallRecordHangupReason::ByCaller)
+    ));
 
     caller_receiver.stop();
     callee_receiver.stop();
@@ -539,9 +595,8 @@ async fn test_wholesale_cdr_duration_accuracy() -> Result<()> {
 
     let alice_clone = alice.clone();
     let sdp_clone = sdp.clone();
-    let caller_handle = tokio::spawn(async move {
-        alice_clone.make_call("bob", Some(sdp_clone)).await
-    });
+    let caller_handle =
+        tokio::spawn(async move { alice_clone.make_call("bob", Some(sdp_clone)).await });
 
     let mut bob_dialog_id = None;
     for _ in 0..50 {
@@ -584,12 +639,14 @@ async fn test_wholesale_cdr_duration_accuracy() -> Result<()> {
 
     assert!(
         duration_secs >= 1 && duration_secs <= 5,
-        "Duration should be ~2s, got {}s", duration_secs
+        "Duration should be ~2s, got {}s",
+        duration_secs
     );
     assert_eq!(record.details.status, "completed");
-    assert!(
-        matches!(record.hangup_reason, Some(CallRecordHangupReason::ByCaller))
-    );
+    assert!(matches!(
+        record.hangup_reason,
+        Some(CallRecordHangupReason::ByCaller)
+    ));
 
     server.stop();
     info!("test_wholesale_cdr_duration_accuracy PASSED");
@@ -621,9 +678,8 @@ async fn test_wholesale_rtp_payload_integrity() -> Result<()> {
     let callee_sdp = pcmu_sdp("127.0.0.1", callee_port);
 
     let caller_clone = caller_ua.clone();
-    let caller_handle = tokio::spawn(async move {
-        caller_clone.make_call("bob", Some(caller_sdp)).await
-    });
+    let caller_handle =
+        tokio::spawn(async move { caller_clone.make_call("bob", Some(caller_sdp)).await });
 
     let mut callee_dialog_id = None;
     let mut callee_offer_sdp: Option<String> = None;
@@ -651,7 +707,9 @@ async fn test_wholesale_rtp_payload_integrity() -> Result<()> {
         .map_err(|e| anyhow::anyhow!("join: {}", e))?
         .map_err(|e| anyhow::anyhow!("call: {}", e))?;
 
-    let caller_answer = caller_ua.get_negotiated_answer_sdp(&caller_id).await
+    let caller_answer = caller_ua
+        .get_negotiated_answer_sdp(&caller_id)
+        .await
         .ok_or_else(|| anyhow::anyhow!("No answer SDP"))?;
     let callee_offer = callee_offer_sdp.ok_or_else(|| anyhow::anyhow!("No offer SDP"))?;
 
@@ -679,7 +737,13 @@ async fn test_wholesale_rtp_payload_integrity() -> Result<()> {
         for j in 4..160 {
             payload[j] = ((i as u8).wrapping_add(j as u8)) ^ 0x55;
         }
-        test_packets.push(RtpPacket::new(0, 5000 + i, 100000 + (i as u32) * 160, 0xCAFEBABE, payload));
+        test_packets.push(RtpPacket::new(
+            0,
+            5000 + i,
+            100000 + (i as u32) * 160,
+            0xCAFEBABE,
+            payload,
+        ));
     }
 
     caller_sender.start_sending(callee_target, test_packets, 20);
@@ -699,10 +763,14 @@ async fn test_wholesale_rtp_payload_integrity() -> Result<()> {
         "Payload integrity results"
     );
 
-    assert!(callee_stats.packets_received > 0, "Callee should receive RTP through proxy");
+    assert!(
+        callee_stats.packets_received > 0,
+        "Callee should receive RTP through proxy"
+    );
     assert!(
         callee_stats.payload_types.contains(&0),
-        "Callee should see PT 0 (PCMU), got {:?}", callee_stats.payload_types
+        "Callee should see PT 0 (PCMU), got {:?}",
+        callee_stats.payload_types
     );
 
     if !callee_stats.ssrcs.contains(&0xCAFEBABE) {
@@ -756,7 +824,9 @@ async fn test_wholesale_two_concurrent_calls() -> Result<()> {
                 break;
             }
         }
-        if bob1_id.is_some() { break; }
+        if bob1_id.is_some() {
+            break;
+        }
         sleep(Duration::from_millis(100)).await;
     }
 
@@ -785,7 +855,9 @@ async fn test_wholesale_two_concurrent_calls() -> Result<()> {
                 break;
             }
         }
-        if bob2_id.is_some() { break; }
+        if bob2_id.is_some() {
+            break;
+        }
         sleep(Duration::from_millis(100)).await;
     }
 
@@ -865,7 +937,9 @@ async fn test_wholesale_no_answer() -> Result<()> {
                 let _ = id;
             }
         }
-        if bob_received { break; }
+        if bob_received {
+            break;
+        }
         sleep(Duration::from_millis(100)).await;
     }
 

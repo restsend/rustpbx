@@ -14,11 +14,11 @@ pub trait MediaPeer: Send + Sync {
     async fn remove_track(&self, track_id: &str, stop: bool);
     async fn serve(&self) -> Result<()>;
     fn stop(&self);
-    
+
     /// Mute a track by ID
     /// Returns true if the track was found and muted
     async fn mute_track(&self, track_id: &str) -> bool;
-    
+
     /// Unmute a track by ID
     /// Returns true if the track was found and unmuted
     async fn unmute_track(&self, track_id: &str) -> bool;
@@ -65,11 +65,11 @@ impl MediaPeer for VoiceEnginePeer {
     fn stop(&self) {
         self.stream.cancel_token.cancel();
     }
-    
+
     async fn mute_track(&self, track_id: &str) -> bool {
         self.stream.mute_track(track_id).await
     }
-    
+
     async fn unmute_track(&self, track_id: &str) -> bool {
         self.stream.unmute_track(track_id).await
     }

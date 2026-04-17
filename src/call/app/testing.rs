@@ -25,7 +25,7 @@ use super::{AppEventLoop, CallApp, CallController, ControllerEvent, RecordingInf
 use crate::call::DialDirection;
 use crate::call::app::{ApplicationContext, CallInfo};
 use crate::config::Config;
-use crate::proxy::proxy_call::state::{SipSessionHandle, SipSessionShared, SessionAction};
+use crate::proxy::proxy_call::state::{SessionAction, SipSessionHandle, SipSessionShared};
 use chrono::Utc;
 use sea_orm::DatabaseConnection;
 use std::sync::Arc;

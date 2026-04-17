@@ -1,10 +1,9 @@
 use crate::{
     addons::registry::AddonRegistry,
-
     call::{Dialplan, TransactionCookie},
     callrecord::CallRecordSender,
-    proxy::proxy_call::state::CallContext,
     proxy::proxy_call::sip_session::SipSession,
+    proxy::proxy_call::state::CallContext,
     proxy::server::SipServerRef,
 };
 use anyhow::Result;
@@ -16,8 +15,8 @@ use tokio_util::sync::CancellationToken;
 pub(crate) mod media_peer;
 pub(crate) mod reporter;
 pub(crate) mod session_timer;
-pub(crate) mod state;
 pub(crate) mod sip_session;
+pub(crate) mod state;
 
 #[cfg(test)]
 pub(crate) mod test_util;

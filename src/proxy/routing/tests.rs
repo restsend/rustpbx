@@ -10,8 +10,8 @@ use crate::proxy::routing::{
     TrunkDirection,
 };
 use async_trait::async_trait;
-use rsipstack::sip::StatusCode;
 use rsipstack::dialog::invitation::InviteOption;
+use rsipstack::sip::StatusCode;
 use std::sync::Arc;
 use std::{collections::HashMap, net::IpAddr};
 
@@ -1307,8 +1307,12 @@ fn create_sip_request(
     };
 
     if !body.is_empty() {
-        headers.push(rsipstack::sip::Header::ContentType("application/sdp".into()));
-        headers.push(rsipstack::sip::Header::ContentLength((body.len() as u32).into()));
+        headers.push(rsipstack::sip::Header::ContentType(
+            "application/sdp".into(),
+        ));
+        headers.push(rsipstack::sip::Header::ContentLength(
+            (body.len() as u32).into(),
+        ));
     }
 
     rsipstack::sip::Request {
@@ -2032,8 +2036,7 @@ async fn test_apply_trunk_config_rewrite_hostport_false() {
         "caller host should NOT be rewritten when rewrite_hostport is false"
     );
     assert_eq!(
-        option.caller.host_with_port.port,
-        None,
+        option.caller.host_with_port.port, None,
         "caller port should NOT be rewritten when rewrite_hostport is false"
     );
 
@@ -2081,8 +2084,14 @@ async fn test_apply_trunk_config_rewrite_hostport_preserves_user() {
 
     // Test that callee user is preserved regardless of rewrite_hostport setting
     let test_cases = vec![
-        (true, "callee user should be preserved with rewrite_hostport=true"),
-        (false, "callee user should be preserved with rewrite_hostport=false"),
+        (
+            true,
+            "callee user should be preserved with rewrite_hostport=true",
+        ),
+        (
+            false,
+            "callee user should be preserved with rewrite_hostport=false",
+        ),
     ];
 
     for (rewrite, msg) in test_cases {
@@ -2102,11 +2111,6 @@ async fn test_apply_trunk_config_rewrite_hostport_preserves_user() {
 
         apply_trunk_config(&mut option, &trunk).unwrap();
 
-        assert_eq!(
-            option.callee.user().unwrap_or_default(),
-            "12345",
-            "{}",
-            msg
-        );
+        assert_eq!(option.callee.user().unwrap_or_default(), "12345", "{}", msg);
     }
 }

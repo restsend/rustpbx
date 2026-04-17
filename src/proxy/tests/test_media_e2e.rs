@@ -123,9 +123,8 @@ impl MediaTestCtx {
         callee_sdp: String,
     ) -> Result<(DialogId, DialogId, Option<String>)> {
         let caller = Arc::new(self.caller_ua.clone());
-        let caller_handle = tokio::spawn(async move {
-            caller.make_call("bob", Some(caller_sdp)).await
-        });
+        let caller_handle =
+            tokio::spawn(async move { caller.make_call("bob", Some(caller_sdp)).await });
 
         let mut callee_dialog_id = None;
         let mut received_offer_sdp: Option<String> = None;
@@ -149,8 +148,7 @@ impl MediaTestCtx {
             sleep(Duration::from_millis(100)).await;
         }
 
-        let callee_id = callee_dialog_id
-            .ok_or_else(|| anyhow!("Callee never received INVITE"))?;
+        let callee_id = callee_dialog_id.ok_or_else(|| anyhow!("Callee never received INVITE"))?;
 
         let caller_id = tokio::time::timeout(Duration::from_secs(5), caller_handle)
             .await
@@ -185,10 +183,22 @@ impl MediaTestCtx {
         };
 
         let caller_packets = RtpPacket::create_sequence(
-            packet_count, 1000, 50000, caller_ssrc, payload_type, payload_size, ts_increment,
+            packet_count,
+            1000,
+            50000,
+            caller_ssrc,
+            payload_type,
+            payload_size,
+            ts_increment,
         );
         let callee_packets = RtpPacket::create_sequence(
-            packet_count, 2000, 60000, callee_ssrc, payload_type, payload_size, ts_increment,
+            packet_count,
+            2000,
+            60000,
+            callee_ssrc,
+            payload_type,
+            payload_size,
+            ts_increment,
         );
 
         // Start receivers before senders
@@ -275,7 +285,10 @@ async fn test_p2p_caller_hangup_rtp_and_cdr() -> Result<()> {
     let (caller_id, callee_id, callee_offer_sdp) =
         ctx.establish_call(caller_sdp, callee_sdp).await?;
 
-    info!("Call established: caller={}, callee={}", caller_id, callee_id);
+    info!(
+        "Call established: caller={}, callee={}",
+        caller_id, callee_id
+    );
 
     // 2. Extract proxy media endpoints from SDPs
     let caller_answer_sdp = ctx
@@ -284,8 +297,7 @@ async fn test_p2p_caller_hangup_rtp_and_cdr() -> Result<()> {
         .await
         .ok_or_else(|| anyhow!("No answer SDP on caller side"))?;
 
-    let callee_offer = callee_offer_sdp
-        .ok_or_else(|| anyhow!("No offer SDP on callee side"))?;
+    let callee_offer = callee_offer_sdp.ok_or_else(|| anyhow!("No offer SDP on callee side"))?;
 
     let callee_target = extract_media_endpoint(&callee_offer)
         .ok_or_else(|| anyhow!("Failed to parse callee-side proxy media endpoint"))?;
@@ -387,8 +399,7 @@ async fn test_p2p_callee_hangup_rtp_and_cdr() -> Result<()> {
         .await
         .ok_or_else(|| anyhow!("No answer SDP on caller side"))?;
 
-    let callee_offer = callee_offer_sdp
-        .ok_or_else(|| anyhow!("No offer SDP on callee side"))?;
+    let callee_offer = callee_offer_sdp.ok_or_else(|| anyhow!("No offer SDP on callee side"))?;
 
     let callee_target = extract_media_endpoint(&callee_offer)
         .ok_or_else(|| anyhow!("Failed to parse callee-side proxy endpoint"))?;
@@ -445,9 +456,8 @@ async fn test_p2p_callee_reject_486_cdr() -> Result<()> {
     // Alice calls Bob
     let alice_clone = alice.clone();
     let sdp_clone = sdp.clone();
-    let caller_handle = tokio::spawn(async move {
-        alice_clone.make_call("bob", Some(sdp_clone)).await
-    });
+    let caller_handle =
+        tokio::spawn(async move { alice_clone.make_call("bob", Some(sdp_clone)).await });
 
     // Bob rejects with 486
     let mut bob_rejected = false;
@@ -468,7 +478,10 @@ async fn test_p2p_callee_reject_486_cdr() -> Result<()> {
         sleep(Duration::from_millis(100)).await;
     }
 
-    assert!(bob_rejected, "Bob should have received and rejected the call");
+    assert!(
+        bob_rejected,
+        "Bob should have received and rejected the call"
+    );
 
     // Alice's call should fail
     let call_result = tokio::time::timeout(Duration::from_secs(5), caller_handle).await;
@@ -510,8 +523,7 @@ async fn test_p2p_callee_reject_486_cdr() -> Result<()> {
         assert!(
             matches!(
                 record.hangup_reason,
-                Some(CallRecordHangupReason::Rejected)
-                    | Some(CallRecordHangupReason::Failed)
+                Some(CallRecordHangupReason::Rejected) | Some(CallRecordHangupReason::Failed)
             ),
             "Expected Rejected or Failed, got {:?}",
             record.hangup_reason
@@ -544,9 +556,8 @@ async fn test_p2p_caller_cancel_cdr() -> Result<()> {
     // Alice calls Bob
     let alice_clone = alice.clone();
     let sdp_clone = sdp.clone();
-    let caller_handle = tokio::spawn(async move {
-        alice_clone.make_call("bob", Some(sdp_clone)).await
-    });
+    let caller_handle =
+        tokio::spawn(async move { alice_clone.make_call("bob", Some(sdp_clone)).await });
 
     // Wait for Bob to receive the call (ringing)
     let mut bob_dialog_id = None;
@@ -654,8 +665,7 @@ async fn test_p2p_pcmu_codec_through_proxy() -> Result<()> {
         .get_negotiated_answer_sdp(&caller_id)
         .await
         .ok_or_else(|| anyhow!("No answer SDP on caller side"))?;
-    let callee_offer = callee_offer_sdp
-        .ok_or_else(|| anyhow!("No offer SDP on callee side"))?;
+    let callee_offer = callee_offer_sdp.ok_or_else(|| anyhow!("No offer SDP on callee side"))?;
 
     let callee_target = extract_media_endpoint(&callee_offer)
         .ok_or_else(|| anyhow!("Failed to parse callee proxy endpoint"))?;
@@ -743,8 +753,7 @@ async fn test_p2p_pcma_codec_through_proxy() -> Result<()> {
         .get_negotiated_answer_sdp(&caller_id)
         .await
         .ok_or_else(|| anyhow!("No answer SDP on caller side"))?;
-    let callee_offer = callee_offer_sdp
-        .ok_or_else(|| anyhow!("No offer SDP on callee side"))?;
+    let callee_offer = callee_offer_sdp.ok_or_else(|| anyhow!("No offer SDP on callee side"))?;
 
     let callee_target = extract_media_endpoint(&callee_offer)
         .ok_or_else(|| anyhow!("Failed to parse callee proxy endpoint"))?;
@@ -1012,8 +1021,7 @@ async fn test_rtp_payload_integrity_through_proxy() -> Result<()> {
         .get_negotiated_answer_sdp(&caller_id)
         .await
         .ok_or_else(|| anyhow!("No answer SDP on caller side"))?;
-    let callee_offer = callee_offer_sdp
-        .ok_or_else(|| anyhow!("No offer SDP on callee side"))?;
+    let callee_offer = callee_offer_sdp.ok_or_else(|| anyhow!("No offer SDP on callee side"))?;
 
     let callee_target = extract_media_endpoint(&callee_offer)
         .ok_or_else(|| anyhow!("Failed to parse callee proxy endpoint"))?;
@@ -1040,7 +1048,7 @@ async fn test_rtp_payload_integrity_through_proxy() -> Result<()> {
         }
 
         packets.push(RtpPacket::new(
-            0,       // PCMU
+            0, // PCMU
             5000 + i,
             100000 + (i as u32) * 160,
             0xCAFEBABE,
@@ -1140,9 +1148,8 @@ async fn test_p2p_direct_media_none_mode() -> Result<()> {
     // Establish call
     let alice_clone = alice.clone();
     let alice_sdp_clone = alice_sdp.clone();
-    let caller_handle = tokio::spawn(async move {
-        alice_clone.make_call("bob", Some(alice_sdp_clone)).await
-    });
+    let caller_handle =
+        tokio::spawn(async move { alice_clone.make_call("bob", Some(alice_sdp_clone)).await });
 
     let mut bob_dialog_id = None;
     let mut bob_offer_sdp = None;
@@ -1170,9 +1177,7 @@ async fn test_p2p_direct_media_none_mode() -> Result<()> {
 
     // In None mode, SDP addresses may or may not be rewritten.
     // Try to extract endpoints and send RTP
-    let alice_answer = alice
-        .get_negotiated_answer_sdp(&alice_id)
-        .await;
+    let alice_answer = alice.get_negotiated_answer_sdp(&alice_id).await;
     let bob_offer = bob_offer_sdp.unwrap_or_default();
 
     // Try the proxy endpoints first, then fall back to original
@@ -1264,8 +1269,7 @@ async fn test_p2p_unidirectional_rtp_caller_only() -> Result<()> {
         .await
         .ok_or_else(|| anyhow!("No answer SDP on caller side"))?;
 
-    let callee_offer = callee_offer_sdp
-        .ok_or_else(|| anyhow!("No offer SDP on callee side"))?;
+    let callee_offer = callee_offer_sdp.ok_or_else(|| anyhow!("No offer SDP on callee side"))?;
 
     let callee_target = extract_media_endpoint(&callee_offer)
         .ok_or_else(|| anyhow!("Failed to parse callee-side proxy media endpoint"))?;
@@ -1289,9 +1293,8 @@ async fn test_p2p_unidirectional_rtp_caller_only() -> Result<()> {
     // 4. ONLY caller sends RTP — callee is silent
     let caller_ssrc = 0xA1A1A1A1u32;
     let packet_count = 100usize;
-    let caller_packets = RtpPacket::create_sequence(
-        packet_count, 1000, 50000, caller_ssrc, 0, 160, 160,
-    );
+    let caller_packets =
+        RtpPacket::create_sequence(packet_count, 1000, 50000, caller_ssrc, 0, 160, 160);
 
     ctx.caller_sender
         .start_sending(caller_target, caller_packets, 20);

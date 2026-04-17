@@ -159,7 +159,13 @@ async fn test_registrar_non_register_method() {
     let (server_inner, config) = create_test_server().await;
 
     // Create an INVITE request instead of REGISTER
-    let request = create_test_request(rsipstack::sip::Method::Invite, "alice", None, "rustpbx.com", None);
+    let request = create_test_request(
+        rsipstack::sip::Method::Invite,
+        "alice",
+        None,
+        "rustpbx.com",
+        None,
+    );
 
     // Create the registrar module
     let module = RegistrarModule::new(server_inner, config);

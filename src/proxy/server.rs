@@ -82,6 +82,12 @@ pub struct SipServerInner {
     pub tls_listener: Option<rsipstack::transport::TlsListenerConnection>,
     pub queue_manager: Arc<crate::call::runtime::QueueManager>,
     pub conference_manager: Arc<crate::call::runtime::ConferenceManager>,
+    /// Subscribers for REFER NOTIFY events from SipSession.
+    pub transfer_notify_subscribers: Arc<
+        tokio::sync::Mutex<
+            Vec<tokio::sync::mpsc::UnboundedSender<crate::call::domain::ReferNotifyEvent>>,
+        >,
+    >,
 }
 
 pub type SipServerRef = Arc<SipServerInner>;
@@ -598,6 +604,7 @@ impl SipServerBuilder {
             tls_listener: tls_listener_clone,
             queue_manager,
             conference_manager,
+            transfer_notify_subscribers: Arc::new(tokio::sync::Mutex::new(Vec::new())),
         });
 
         let inner_weak = Arc::downgrade(&inner);

@@ -3,7 +3,7 @@ use crate::proxy::active_call_registry::ActiveProxyCallRegistry;
 use crate::proxy::server::SipServerRef;
 use crate::rwi::auth::{RwiAuth, RwiIdentity};
 use crate::rwi::gateway::RwiGateway;
-use crate::rwi::processor::{RwiCommandProcessor, CommandResult, CommandError};
+use crate::rwi::processor::{CommandError, CommandResult, RwiCommandProcessor};
 use crate::rwi::session::{RwiCommandMessage, RwiCommandPayload};
 use axum::{
     Extension,
@@ -97,7 +97,11 @@ async fn handle_websocket(
     let (ws_tx, mut ws_rx) = mpsc::unbounded_channel::<String>();
 
     let processor = {
-        let p = RwiCommandProcessor::new(call_registry, gateway.clone());
+        let conference_manager = sip_server
+            .as_ref()
+            .map(|s| s.conference_manager.clone())
+            .unwrap_or_else(|| Arc::new(crate::call::runtime::ConferenceManager::new()));
+        let p = RwiCommandProcessor::new(call_registry, gateway.clone(), conference_manager);
         let p = if let Some(server) = sip_server {
             p.with_sip_server(server)
         } else {
@@ -105,6 +109,8 @@ async fn handle_websocket(
         };
         Arc::new(p)
     };
+
+    processor.register_transfer_notify_listener().await;
 
     let session_id = {
         let mut gw = gateway.write().await;
@@ -208,7 +214,11 @@ async fn handle_text_message(
         Some(a) => a.to_string(),
         None => {
             tracing::warn!("Missing action field");
-            let action_id = value.get("action_id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let action_id = value
+                .get("action_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
             let err_resp = serde_json::to_string(&serde_json::json!({
                 "type": "command_failed",
                 "status": "error",
@@ -291,7 +301,11 @@ async fn handle_text_message(
 
     // Auto-claim call ownership when originate or attach succeeds
     if should_claim_ownership {
-        if let Ok(CommandResult::Originated { call_id: ref cid } | CommandResult::CallFound { call_id: ref cid }) = result {
+        if let Ok(
+            CommandResult::Originated { call_id: ref cid }
+            | CommandResult::CallFound { call_id: ref cid },
+        ) = result
+        {
             let mut gw = gateway.write().await;
             let _ = gw
                 .claim_call_ownership(
@@ -347,7 +361,10 @@ fn build_command_result_event(
                     event["status"] = serde_json::json!("success");
                     event["data"] = serde_json::json!({ "track_id": track_id });
                 }
-                CommandResult::TransferAttended { original_call_id, consultation_call_id } => {
+                CommandResult::TransferAttended {
+                    original_call_id,
+                    consultation_call_id,
+                } => {
                     event["status"] = serde_json::json!("success");
                     event["data"] = serde_json::json!({
                         "original_call_id": original_call_id,
@@ -378,7 +395,11 @@ fn build_command_result_event(
                     event["status"] = serde_json::json!("success");
                     event["data"] = serde_json::json!({ "conf_id": conf_id });
                 }
-                CommandResult::SessionResumed { replayed_count, current_sequence, events } => {
+                CommandResult::SessionResumed {
+                    replayed_count,
+                    current_sequence,
+                    events,
+                } => {
                     event["status"] = serde_json::json!("success");
                     event["data"] = serde_json::json!({
                         "replayed_count": replayed_count,
@@ -386,7 +407,12 @@ fn build_command_result_event(
                         "events": events,
                     });
                 }
-                CommandResult::CallResumed { call_id: cid, replayed_count, current_sequence, events } => {
+                CommandResult::CallResumed {
+                    call_id: cid,
+                    replayed_count,
+                    current_sequence,
+                    events,
+                } => {
                     event["status"] = serde_json::json!("success");
                     event["data"] = serde_json::json!({
                         "call_id": cid,
@@ -476,12 +502,13 @@ async fn handle_binary_message(
     );
 }
 
-fn parse_action(action: &str, params: &serde_json::Value, action_id: &str) -> Result<RwiCommandPayload, String> {
+fn parse_action(
+    action: &str,
+    params: &serde_json::Value,
+    action_id: &str,
+) -> Result<RwiCommandPayload, String> {
     const UNIT_VARIANTS: &[&str] = &["session.list_calls"];
-    const NEED_EMPTY_PARAMS: &[&str] = &[
-        "session.resume",
-        "call.resume",
-    ];
+    const NEED_EMPTY_PARAMS: &[&str] = &["session.resume", "call.resume"];
 
     let json = if params.is_null() {
         serde_json::json!({
@@ -545,6 +572,7 @@ fn extract_call_id(cmd: &RwiCommandPayload) -> Option<String> {
         RwiCommandPayload::Bridge { leg_a, .. } => Some(leg_a.clone()),
         RwiCommandPayload::Unbridge { call_id } => Some(call_id.clone()),
         RwiCommandPayload::Transfer { call_id, .. } => Some(call_id.clone()),
+        RwiCommandPayload::TransferReplace { call_id, .. } => Some(call_id.clone()),
         RwiCommandPayload::TransferAttended { call_id, .. } => Some(call_id.clone()),
         RwiCommandPayload::TransferComplete { call_id, .. } => Some(call_id.clone()),
         RwiCommandPayload::TransferCancel {
@@ -573,6 +601,9 @@ fn extract_call_id(cmd: &RwiCommandPayload) -> Option<String> {
         RwiCommandPayload::SupervisorListen { target_call_id, .. } => Some(target_call_id.clone()),
         RwiCommandPayload::SupervisorWhisper { target_call_id, .. } => Some(target_call_id.clone()),
         RwiCommandPayload::SupervisorBarge { target_call_id, .. } => Some(target_call_id.clone()),
+        RwiCommandPayload::SupervisorTakeover { target_call_id, .. } => {
+            Some(target_call_id.clone())
+        }
         RwiCommandPayload::SupervisorStop { target_call_id, .. } => Some(target_call_id.clone()),
         RwiCommandPayload::SipMessage { call_id, .. } => Some(call_id.clone()),
         RwiCommandPayload::SipNotify { call_id, .. } => Some(call_id.clone()),
@@ -584,6 +615,7 @@ fn extract_call_id(cmd: &RwiCommandPayload) -> Option<String> {
         RwiCommandPayload::ConferenceUnmute { conf_id, .. } => Some(conf_id.clone()),
         RwiCommandPayload::ConferenceDestroy { conf_id } => Some(conf_id.clone()),
         RwiCommandPayload::ConferenceMerge { conf_id, .. } => Some(conf_id.clone()),
+        RwiCommandPayload::ConferenceSeatReplace { conf_id, .. } => Some(conf_id.clone()),
         RwiCommandPayload::ParallelOriginate(req) => Some(req.operation_id.clone()),
         RwiCommandPayload::SessionResume { .. } => None,
         RwiCommandPayload::CallResume { call_id, .. } => Some(call_id.clone()),

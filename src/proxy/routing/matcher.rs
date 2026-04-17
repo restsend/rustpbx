@@ -301,7 +301,10 @@ async fn match_invite_impl(
                             reason: None,
                         });
                     }
-                    return Ok(RouteResult::Abort(rsipstack::sip::StatusCode::Forbidden, None));
+                    return Ok(RouteResult::Abort(
+                        rsipstack::sip::StatusCode::Forbidden,
+                        None,
+                    ));
                 }
             }
             ActionType::Busy => {
@@ -311,7 +314,10 @@ async fn match_invite_impl(
                         reason: None,
                     });
                 }
-                return Ok(RouteResult::Abort(rsipstack::sip::StatusCode::BusyHere, None));
+                return Ok(RouteResult::Abort(
+                    rsipstack::sip::StatusCode::BusyHere,
+                    None,
+                ));
             }
             ActionType::Forward => {
                 if let Some(dest_config) = &rule.action.dest {
@@ -747,7 +753,9 @@ fn get_header_value(request: &rsipstack::sip::Request, header_name: &str) -> Opt
             {
                 return Some(value.clone());
             }
-            rsipstack::sip::Header::UserAgent(value) if header_name.to_lowercase() == "user-agent" => {
+            rsipstack::sip::Header::UserAgent(value)
+                if header_name.to_lowercase() == "user-agent" =>
+            {
                 return Some(value.to_string());
             }
             rsipstack::sip::Header::Contact(contact) if header_name.to_lowercase() == "contact" => {
@@ -962,7 +970,11 @@ fn extract_capture_group(original: &str, group_num: usize) -> Option<String> {
 }
 
 /// Apply rewrite pattern
-fn apply_rewrite_pattern(pattern: &str, original: &str, _origin: &rsipstack::sip::Request) -> Result<String> {
+fn apply_rewrite_pattern(
+    pattern: &str,
+    original: &str,
+    _origin: &rsipstack::sip::Request,
+) -> Result<String> {
     // Support simple replacement patterns like "96123{1}" where {1} is capture group
     if pattern.contains('{') && pattern.contains('}') {
         // This is a pattern with capture groups, need to extract from original value
@@ -1071,39 +1083,39 @@ fn select_trunk_weighted(
     trunks_config: Option<&std::collections::HashMap<String, crate::proxy::routing::TrunkConfig>>,
 ) -> Result<String> {
     use rand::RngExt;
-    
+
     if trunks.is_empty() {
         return Err(anyhow!("No trunks for weighted selection"));
     }
-    
+
     if trunks.len() == 1 {
         return Ok(trunks[0].clone());
     }
-    
+
     // Collect weights for each trunk
     let mut weights: Vec<u32> = Vec::with_capacity(trunks.len());
     let mut total_weight: u32 = 0;
-    
+
     for trunk_name in trunks {
         let weight = trunks_config
             .and_then(|configs| configs.get(trunk_name))
             .and_then(|config| config.weight)
             .unwrap_or(100); // Default weight: 100
-        
+
         weights.push(weight);
         total_weight = total_weight.saturating_add(weight);
     }
-    
+
     if total_weight == 0 {
         // Fall back to uniform random if all weights are 0
         let index = rand::rng().random_range(0..trunks.len());
         return Ok(trunks[index].clone());
     }
-    
+
     // Generate random value between 0 and total_weight
     let mut rng = rand::rng();
     let random_val = rng.random_range(0..total_weight);
-    
+
     // Find the trunk corresponding to the random value
     let mut cumulative_weight: u32 = 0;
     for (idx, weight) in weights.iter().enumerate() {
@@ -1112,7 +1124,7 @@ fn select_trunk_weighted(
             return Ok(trunks[idx].clone());
         }
     }
-    
+
     // Fallback to last trunk (shouldn't reach here)
     Ok(trunks[trunks.len() - 1].clone())
 }

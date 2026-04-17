@@ -42,9 +42,7 @@
 //! 4. The bridge's RTP side connects to the SIP/RTP endpoint
 
 use crate::media::recorder::{Leg as RecLeg, Recorder};
-use crate::media::{RecorderOption, Track};
 use anyhow::Result;
-use async_trait::async_trait;
 use audio_codec::CodecType as AudioCodecType;
 use bytes::Bytes;
 use rustrtc::{
@@ -221,9 +219,6 @@ pub struct BridgePeer {
     bridge_tasks: AsyncMutex<Vec<tokio::task::JoinHandle<()>>>,
     /// Cancellation token
     cancel_token: CancellationToken,
-    /// Recorder option (future use)
-    #[allow(dead_code)]
-    recorder_option: Option<RecorderOption>,
     /// Shared recorder for call recording (written by both bridge directions)
     recorder: Option<Arc<parking_lot::RwLock<Option<Recorder>>>>,
     /// Audio sender channels for forwarding
@@ -258,7 +253,6 @@ impl BridgePeer {
             rtp_pc,
             bridge_tasks: AsyncMutex::new(Vec::new()),
             cancel_token: CancellationToken::new(),
-            recorder_option: None,
             recorder: None,
             webrtc_send: Arc::new(AsyncMutex::new(None)),
             rtp_send: Arc::new(AsyncMutex::new(None)),
@@ -905,67 +899,6 @@ impl Drop for BridgePeer {
     }
 }
 
-/// BridgeTrack implements the Track trait for bridging
-pub struct BridgeTrack {
-    bridge: Arc<BridgePeer>,
-    track_id: String,
-}
-
-impl BridgeTrack {
-    pub fn new(track_id: String, bridge: Arc<BridgePeer>) -> Self {
-        Self { bridge, track_id }
-    }
-
-    pub fn bridge(&self) -> &BridgePeer {
-        &self.bridge
-    }
-}
-
-#[async_trait]
-impl Track for BridgeTrack {
-    fn id(&self) -> &str {
-        &self.track_id
-    }
-
-    async fn handshake(&self, _remote_offer: String) -> Result<String> {
-        // The bridge needs to handle SDP negotiation on both sides
-        // For now, this is handled externally by setting up both PCs
-        // before creating the bridge
-        Err(anyhow::anyhow!(
-            "BridgeTrack handshake not supported - setup PCs externally"
-        ))
-    }
-
-    async fn local_description(&self) -> Result<String> {
-        // Return WebRTC side's local description
-        self.bridge
-            .webrtc_pc()
-            .local_description()
-            .map(|d| Ok(d.to_sdp_string()))
-            .unwrap_or_else(|| Err(anyhow::anyhow!("No local description")))
-    }
-
-    async fn set_remote_description(&self, remote: &str) -> Result<()> {
-        // Set remote on WebRTC side
-        use rustrtc::sdp::{SdpType, SessionDescription};
-        let desc = SessionDescription::parse(SdpType::Answer, remote)
-            .map_err(|e| anyhow::anyhow!("failed to parse sdp: {:?}", e))?;
-        self.bridge
-            .webrtc_pc()
-            .set_remote_description(desc)
-            .await
-            .map_err(|e| anyhow::anyhow!("{}", e))
-    }
-
-    async fn stop(&self) {
-        self.bridge.stop().await;
-    }
-
-    async fn get_peer_connection(&self) -> Option<PeerConnection> {
-        Some(self.bridge.webrtc_pc.clone())
-    }
-}
-
 /// Builder for creating BridgePeer instances
 pub struct BridgePeerBuilder {
     bridge_id: String,
@@ -1245,13 +1178,13 @@ mod tests {
         );
     }
 
+    use crate::media::Track;
+
     /// Test bridge setup with external RTP track
     /// This simulates the scenario where:
     /// - Bridge RTP side connects to an RTP endpoint (SIP leg)
     #[tokio::test]
     async fn test_bridge_setup_with_external_tracks() {
-        use crate::media::Track;
-
         // Create bridge
         let bridge = BridgePeerBuilder::new("test-bridge-integration".to_string())
             .with_rtp_port_range(26000, 26100)

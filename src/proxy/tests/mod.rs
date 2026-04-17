@@ -21,6 +21,7 @@ pub mod cdr_capture;
 pub mod e2e_test_server;
 pub mod rtp_utils;
 mod test_call_e2e;
+mod test_inbound_refer;
 mod test_ivr_queue_e2e;
 mod test_media_e2e;
 mod test_rtp_e2e;

@@ -223,7 +223,11 @@ impl SipUser {
             self.password.as_ref().unwrap_or(&"".to_string()),
         );
         fn to_hex(bytes: impl AsRef<[u8]>) -> String {
-            bytes.as_ref().iter().map(|b| format!("{:02x}", b)).collect()
+            bytes
+                .as_ref()
+                .iter()
+                .map(|b| format!("{:02x}", b))
+                .collect()
         }
         match algorithm {
             Algorithm::Md5 | Algorithm::Md5Sess => {
@@ -386,7 +390,8 @@ pub fn check_authorization_headers(
     req: &rsipstack::sip::Request,
 ) -> Result<Option<(SipUser, Authorization)>> {
     // First try Authorization header (for backward compatibility with existing tests)
-    if let Some(auth_header) = rsipstack::sip_header_opt!(req.headers.iter(), Header::Authorization) {
+    if let Some(auth_header) = rsipstack::sip_header_opt!(req.headers.iter(), Header::Authorization)
+    {
         let challenge = Authorization::parse(auth_header.value())?;
         let user = SipUser {
             username: challenge.username.to_string(),

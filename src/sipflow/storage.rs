@@ -81,6 +81,10 @@ pub fn process_packet(packet: Packet) -> ProcessedPacket {
 }
 
 impl StorageManager {
+    fn datetime_to_storage_ts(dt: DateTime<Local>) -> i64 {
+        dt.timestamp_micros()
+    }
+
     pub fn new(
         base_path: &Path,
         flush_count: usize,
@@ -318,6 +322,8 @@ impl StorageManager {
         end_dt: DateTime<Local>,
     ) -> Result<Vec<SipFlowItem>> {
         let mut results = Vec::new();
+        let start_ts = Self::datetime_to_storage_ts(start_dt);
+        let end_ts = Self::datetime_to_storage_ts(end_dt);
         let folders = self.get_folders_in_range(start_dt, end_dt);
 
         for dir in folders {
@@ -337,10 +343,14 @@ impl StorageManager {
                 "SELECT s.src, s.dst, s.timestamp, s.offset, s.size 
                  FROM sip_msgs s
                  JOIN call_meta c ON s.call_id = c.id
-                 WHERE c.callid = ? 
+                  WHERE c.callid = ?
+                  AND s.timestamp >= ?
+                  AND s.timestamp <= ?
                  ORDER BY s.timestamp ASC",
             )
             .bind(&callid)
+            .bind(start_ts)
+            .bind(end_ts)
             .fetch_all(&mut conn)
             .await?;
 
@@ -388,6 +398,8 @@ impl StorageManager {
         end_dt: DateTime<Local>,
     ) -> Result<Vec<SipFlowItem>> {
         let mut results = Vec::new();
+        let start_ts = Self::datetime_to_storage_ts(start_dt);
+        let end_ts = Self::datetime_to_storage_ts(end_dt);
         let folders = self.get_folders_in_range(start_dt, end_dt);
 
         for dir in folders {
@@ -405,8 +417,12 @@ impl StorageManager {
             let rows = sqlx::query(
                 "SELECT s.src, s.dst, s.timestamp, s.offset, s.size
                  FROM sip_msgs s
+                  WHERE s.timestamp >= ?
+                  AND s.timestamp <= ?
                  ORDER BY s.timestamp ASC",
             )
+            .bind(start_ts)
+            .bind(end_ts)
             .fetch_all(&mut conn)
             .await?;
 
@@ -455,6 +471,8 @@ impl StorageManager {
         end_dt: DateTime<Local>,
     ) -> Result<Vec<(i32, String, usize)>> {
         let mut results = std::collections::HashMap::new();
+        let start_ts = Self::datetime_to_storage_ts(start_dt);
+        let end_ts = Self::datetime_to_storage_ts(end_dt);
         let folders = self.get_folders_in_range(start_dt, end_dt);
 
         for dir in folders {
@@ -471,10 +489,14 @@ impl StorageManager {
                 "SELECT m.leg, m.src, COUNT(*) as count 
                  FROM media_msgs m
                  JOIN call_meta c ON m.call_id = c.id
-                 WHERE c.callid = ? 
+                  WHERE c.callid = ?
+                  AND m.timestamp >= ?
+                  AND m.timestamp <= ?
                  GROUP BY m.leg, m.src",
             )
             .bind(&callid)
+            .bind(start_ts)
+            .bind(end_ts)
             .fetch_all(&mut conn)
             .await?;
 
@@ -500,6 +522,8 @@ impl StorageManager {
         end_dt: DateTime<Local>,
     ) -> Result<Vec<(i32, u64, Vec<u8>)>> {
         let mut results = Vec::new();
+        let start_ts = Self::datetime_to_storage_ts(start_dt);
+        let end_ts = Self::datetime_to_storage_ts(end_dt);
         let folders = self.get_folders_in_range(start_dt, end_dt);
 
         for dir in folders {
@@ -519,9 +543,13 @@ impl StorageManager {
                  FROM media_msgs s
                  JOIN call_meta c ON s.call_id = c.id
                  WHERE c.callid = ?
+                  AND s.timestamp >= ?
+                  AND s.timestamp <= ?
                  ORDER BY s.timestamp ASC",
             )
             .bind(&callid)
+            .bind(start_ts)
+            .bind(end_ts)
             .fetch_all(&mut conn)
             .await?;
 
@@ -620,6 +648,49 @@ pub fn extract_callid(payload: &[u8]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeZone;
+    use std::net::IpAddr;
+
+    fn local_dt_from_micros(ts_micros: i64) -> DateTime<Local> {
+        Local
+            .timestamp_micros(ts_micros)
+            .single()
+            .expect("valid local datetime")
+    }
+
+    fn make_sip_processed(ts_micros: u64, call_id: &str) -> ProcessedPacket {
+        let payload = format!(
+            "INVITE sip:test@example.com SIP/2.0\r\nCall-ID: {}\r\n",
+            call_id
+        );
+        process_packet(Packet {
+            msg_type: MsgType::Sip,
+            src: (IpAddr::from([127, 0, 0, 1]), 5060),
+            dst: (IpAddr::from([127, 0, 0, 2]), 5060),
+            timestamp: ts_micros,
+            payload: Bytes::from(payload),
+        })
+    }
+
+    fn make_rtp_processed(
+        ts_micros: u64,
+        call_id: &str,
+        leg: i32,
+        src: &str,
+        payload: &[u8],
+    ) -> ProcessedPacket {
+        let mut packet = process_packet(Packet {
+            msg_type: MsgType::Rtp,
+            src: (IpAddr::from([127, 0, 0, 1]), 30000),
+            dst: (IpAddr::from([127, 0, 0, 2]), 30002),
+            timestamp: ts_micros,
+            payload: Bytes::from(payload.to_vec()),
+        });
+        packet.callid = Some(call_id.to_string());
+        packet.leg = Some(leg);
+        packet.src = src.to_string();
+        packet
+    }
 
     #[test]
     fn test_extract_callid() {
@@ -630,5 +701,115 @@ mod tests {
         let msg2 = b"INVITE sip:test@example.com SIP/2.0\r\ni: compact-form-id\r\n";
         let callid2 = extract_callid(msg2);
         assert_eq!(callid2, Some("compact-form-id".to_string()));
+    }
+
+    #[tokio::test]
+    async fn test_query_flow_respects_time_range_inclusive() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut storage = StorageManager::new(dir.path(), 1000, 3600, 128, SipFlowSubdirs::None);
+
+        let call_id = "flow-range-test";
+        let base = chrono::Utc::now().timestamp_micros();
+        let t0 = (base + 1_000) as u64;
+        let t1 = (base + 2_000) as u64;
+        let t2 = (base + 3_000) as u64;
+
+        storage
+            .write_processed(make_sip_processed(t0, call_id))
+            .await
+            .expect("write t0");
+        storage
+            .write_processed(make_sip_processed(t1, call_id))
+            .await
+            .expect("write t1");
+        storage
+            .write_processed(make_sip_processed(t2, call_id))
+            .await
+            .expect("write t2");
+        storage.force_flush().await.expect("flush");
+
+        let items = storage
+            .query_flow(
+                call_id,
+                local_dt_from_micros(t1 as i64),
+                local_dt_from_micros(t1 as i64),
+            )
+            .await
+            .expect("query flow");
+
+        assert_eq!(items.len(), 1, "expected only one item in narrow range");
+        assert_eq!(items[0].timestamp, t1);
+    }
+
+    #[tokio::test]
+    async fn test_query_media_and_stats_respect_time_range() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut storage = StorageManager::new(dir.path(), 1000, 3600, 128, SipFlowSubdirs::None);
+
+        let call_id = "media-range-test";
+        let base = chrono::Utc::now().timestamp_micros();
+        let t0 = (base + 10_000) as u64;
+        let t1 = (base + 20_000) as u64;
+        let t2 = (base + 30_000) as u64;
+
+        let p0 = b"rtp-payload-0";
+        let p1 = b"rtp-payload-1";
+        let p2 = b"rtp-payload-2";
+
+        storage
+            .write_processed(make_rtp_processed(
+                t0,
+                call_id,
+                0,
+                "LegA_127.0.0.1:4000",
+                p0,
+            ))
+            .await
+            .expect("write t0");
+        storage
+            .write_processed(make_rtp_processed(
+                t1,
+                call_id,
+                0,
+                "LegA_127.0.0.1:4000",
+                p1,
+            ))
+            .await
+            .expect("write t1");
+        storage
+            .write_processed(make_rtp_processed(
+                t2,
+                call_id,
+                0,
+                "LegA_127.0.0.1:4000",
+                p2,
+            ))
+            .await
+            .expect("write t2");
+        storage.force_flush().await.expect("flush");
+
+        let start = local_dt_from_micros((t1 as i64) - 1);
+        let end = local_dt_from_micros((t1 as i64) + 1);
+
+        let packets = storage
+            .query_media(call_id, start, end)
+            .await
+            .expect("query media");
+        assert_eq!(packets.len(), 1, "expected only one media packet");
+        assert_eq!(packets[0].1, t1, "expected middle packet only");
+        assert_eq!(packets[0].2, p1.to_vec(), "payload should match t1 packet");
+
+        let stats = storage
+            .query_media_stats(
+                call_id,
+                local_dt_from_micros((t1 as i64) - 1),
+                local_dt_from_micros((t1 as i64) + 1),
+            )
+            .await
+            .expect("query media stats");
+
+        assert_eq!(stats.len(), 1, "expected one (leg,src) stats row");
+        assert_eq!(stats[0].0, 0);
+        assert_eq!(stats[0].2, 1, "expected count=1 in narrow time range");
     }
 }

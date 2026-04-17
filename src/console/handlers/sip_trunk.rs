@@ -241,7 +241,7 @@ async fn create_sip_trunk(
                     model.id, err
                 );
             }
-            
+
             state.mark_pending_reload();
             Json(json!({"status": "ok", "id": model.id})).into_response()
         }
@@ -310,7 +310,7 @@ async fn update_sip_trunk(
                     model.id, err
                 );
             }
-            
+
             state.mark_pending_reload();
             Json(json!({"status": "ok"})).into_response()
         }
@@ -482,11 +482,7 @@ async fn query_sip_trunks(
 
     // Issue #179: collect file-sourced trunks from in-memory snapshot
     let file_trunks: Vec<Value> = if let Some(app_state) = state.app_state() {
-        let snapshot = app_state
-            .sip_server()
-            .inner
-            .data_context
-            .trunks_snapshot();
+        let snapshot = app_state.sip_server().inner.data_context.trunks_snapshot();
         let mut file_items: Vec<Value> = snapshot
             .into_iter()
             .filter_map(|(name, trunk)| {

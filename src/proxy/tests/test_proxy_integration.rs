@@ -3,8 +3,12 @@ use crate::call::user::SipUser;
 
 use crate::config::ProxyConfig;
 use crate::proxy::{
-    auth::AuthModule, call::CallModule, locator::{MemoryLocator, Locator}, registrar::RegistrarModule,
-    server::SipServerBuilder, user::MemoryUserBackend,
+    auth::AuthModule,
+    call::CallModule,
+    locator::{Locator, MemoryLocator},
+    registrar::RegistrarModule,
+    server::SipServerBuilder,
+    user::MemoryUserBackend,
 };
 use anyhow::Result;
 use std::net::SocketAddr;
@@ -132,7 +136,11 @@ impl TestProxyServer {
 
         info!("Test proxy server started on port {}", port);
 
-        Ok(Self { cancel_token, port, server })
+        Ok(Self {
+            cancel_token,
+            port,
+            server,
+        })
     }
 
     pub fn get_locator(&self) -> Arc<Box<dyn Locator>> {
@@ -305,7 +313,9 @@ async fn test_call_success() {
                 match event {
                     TestUaEvent::IncomingCall(dialog_id, _) => {
                         info!("Bob received incoming call: {}", dialog_id);
-                        bob.answer_call(&dialog_id, Some(bob_sdp.clone())).await.unwrap();
+                        bob.answer_call(&dialog_id, Some(bob_sdp.clone()))
+                            .await
+                            .unwrap();
                         return Ok::<_, anyhow::Error>(dialog_id);
                     }
                     _ => {}
@@ -481,7 +491,9 @@ async fn test_call_hangup_flow() {
                 match event {
                     TestUaEvent::IncomingCall(dialog_id, _) => {
                         info!("Bob received incoming call: {}", dialog_id);
-                        bob.answer_call(&dialog_id, Some(bob_sdp.clone())).await.unwrap();
+                        bob.answer_call(&dialog_id, Some(bob_sdp.clone()))
+                            .await
+                            .unwrap();
 
                         // Wait for a while after answering, then hang up
                         sleep(Duration::from_millis(500)).await;
@@ -503,7 +515,6 @@ async fn test_call_hangup_flow() {
 
     proxy.stop();
 }
-
 
 #[tokio::test]
 async fn test_locator_lookup() {
@@ -531,20 +542,17 @@ async fn test_locator_lookup() {
     let lookup_uri: rsipstack::sip::Uri = format!("sip:testuser@127.0.0.1:{}", proxy.port)
         .try_into()
         .unwrap();
-    
+
     let locations = locator.lookup(&lookup_uri).await;
-    
-    assert!(
-        locations.is_ok(),
-        "Locator lookup should succeed"
-    );
-    
+
+    assert!(locations.is_ok(), "Locator lookup should succeed");
+
     let locations = locations.unwrap();
     assert!(
         !locations.is_empty(),
         "Locator should return at least one location for registered user"
     );
-    
+
     // Verify the location contains the expected information
     let location = &locations[0];
     assert_eq!(
@@ -552,8 +560,11 @@ async fn test_locator_lookup() {
         "testuser",
         "Location AoR should have username 'testuser'"
     );
-    
-    info!("Locator lookup test passed: found {} location(s)", locations.len());
+
+    info!(
+        "Locator lookup test passed: found {} location(s)",
+        locations.len()
+    );
     info!("Location details: {:?}", location);
 
     testuser.stop();

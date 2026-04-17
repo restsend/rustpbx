@@ -6,8 +6,8 @@ use crate::models::presence;
 use crate::proxy::locator::LocatorEvent;
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
-use rsipstack::sip::prelude::{HeadersExt, ToTypedHeader};
 use rsipstack::dialog::DialogId;
+use rsipstack::sip::prelude::{HeadersExt, ToTypedHeader};
 use rsipstack::transaction::transaction::Transaction;
 use sea_orm::{DatabaseConnection, EntityTrait, Set};
 use serde::{Deserialize, Serialize};
@@ -698,15 +698,23 @@ impl PresenceModule {
             .as_secs();
         let headers = vec![
             rsipstack::sip::Header::Event(rsipstack::sip::headers::Event::new("presence")),
-            rsipstack::sip::Header::SubscriptionState(rsipstack::sip::headers::SubscriptionState::new(format!(
-                "active;expires={}",
-                expires_left
-            ))),
-            rsipstack::sip::Header::ContentType(rsipstack::sip::headers::ContentType::from("application/pidf+xml")),
+            rsipstack::sip::Header::SubscriptionState(
+                rsipstack::sip::headers::SubscriptionState::new(format!(
+                    "active;expires={}",
+                    expires_left
+                )),
+            ),
+            rsipstack::sip::Header::ContentType(rsipstack::sip::headers::ContentType::from(
+                "application/pidf+xml",
+            )),
         ];
 
         dialog
-            .request(rsipstack::sip::Method::Notify, Some(headers), Some(body.into_bytes()))
+            .request(
+                rsipstack::sip::Method::Notify,
+                Some(headers),
+                Some(body.into_bytes()),
+            )
             .await
             .map_err(|e| anyhow!("{:?}", e))?;
 
@@ -807,17 +815,23 @@ impl PresenceModule {
 
         let headers = vec![
             rsipstack::sip::Header::Event(rsipstack::sip::headers::Event::new("message-summary")),
-            rsipstack::sip::Header::SubscriptionState(rsipstack::sip::headers::SubscriptionState::new(format!(
-                "active;expires={}",
-                expires_left
-            ))),
+            rsipstack::sip::Header::SubscriptionState(
+                rsipstack::sip::headers::SubscriptionState::new(format!(
+                    "active;expires={}",
+                    expires_left
+                )),
+            ),
             rsipstack::sip::Header::ContentType(rsipstack::sip::headers::ContentType::from(
                 "application/simple-message-summary",
             )),
         ];
 
         dialog
-            .request(rsipstack::sip::Method::Notify, Some(headers), Some(body.into_bytes()))
+            .request(
+                rsipstack::sip::Method::Notify,
+                Some(headers),
+                Some(body.into_bytes()),
+            )
             .await
             .map_err(|e| anyhow!("{:?}", e))?;
 

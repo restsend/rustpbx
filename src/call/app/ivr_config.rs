@@ -387,14 +387,12 @@ impl WebhookResponse {
                 inter_digit_timeout_ms: inter_digit_timeout_ms
                     .unwrap_or_else(default_inter_digit_timeout_ms),
             },
-            WebhookResponse::PlayAndHangup { prompt, code } => {
-                EntryAction::PlayAndHangup {
-                    prompt,
-                    prompt_text: None,
-                    prompt_voice: None,
-                    code,
-                }
-            }
+            WebhookResponse::PlayAndHangup { prompt, code } => EntryAction::PlayAndHangup {
+                prompt,
+                prompt_text: None,
+                prompt_voice: None,
+                code,
+            },
         }
     }
 }

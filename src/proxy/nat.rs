@@ -19,7 +19,11 @@ impl NatInspector {
         }
     }
 
-    fn fix_contact_header(&self, header_value: &mut String, from_addr: &rsipstack::sip::HostWithPort) {
+    fn fix_contact_header(
+        &self,
+        header_value: &mut String,
+        from_addr: &rsipstack::sip::HostWithPort,
+    ) {
         // Simple regex-less replacement of host:port in Contact header if it contains a private IP
         // Contact header looks like: "Display Name" <sip:user@host:port;params> or <sip:host:port> or sip:host:port
 
@@ -132,7 +136,8 @@ impl MessageInspector for NatInspector {
             let kind = resp.status_code.kind();
             let is_target_forming = matches!(
                 kind,
-                rsipstack::sip::StatusCodeKind::Provisional | rsipstack::sip::StatusCodeKind::Successful
+                rsipstack::sip::StatusCodeKind::Provisional
+                    | rsipstack::sip::StatusCodeKind::Successful
             );
 
             if is_target_forming {

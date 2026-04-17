@@ -724,25 +724,6 @@ async fn read_transcript_file(
     Ok(transcript)
 }
 
-// fn transcript_file_from_cdr(record: &CallRecord) -> Option<String> {
-//     record
-//         .extensions
-//         .get::<crate::callrecord::CallRecordExtras>()
-//         .and_then(|extras| extras.0.get("transcript_file"))
-//         .and_then(|value| value.as_str())
-//         .map(|value| value.trim().to_string())
-//         .filter(|value| !value.is_empty())
-// }
-
-// fn transcript_file_from_metadata(metadata: &Option<Value>) -> Option<String> {
-//     metadata
-//         .as_ref()
-//         .and_then(|m| m.get("transcript_file"))
-//         .and_then(|v| v.as_str())
-//         .map(|v| v.trim().to_string())
-//         .filter(|v| !v.is_empty())
-// }
-
 fn build_transcript_payload_value(
     record: &CallRecordModel,
     transcript: Option<&StoredTranscript>,
@@ -943,10 +924,7 @@ pub async fn download_model(
     }
 
     // Set a long timeout for download (10 minutes)
-    let download_result = match timeout(
-        StdDuration::from_secs(600),
-        cmd.output()
-    ).await {
+    let download_result = match timeout(StdDuration::from_secs(600), cmd.output()).await {
         Ok(result) => result,
         Err(_) => {
             return (

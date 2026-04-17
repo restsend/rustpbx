@@ -7,8 +7,8 @@ use crate::proxy::proxy_call::sip_session::SipSessionHandle as NewSipSessionHand
 use crate::rwi::SupervisorMode;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use rsipstack::sip::StatusCode;
 use rsipstack::dialog::DialogId;
+use rsipstack::sip::StatusCode;
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, RwLock, Weak};
 use std::time::Instant;
@@ -122,6 +122,9 @@ pub enum SessionAction {
     SupervisorBarge {
         target_session_id: String,
     },
+    SupervisorTakeover {
+        target_session_id: String,
+    },
     SupervisorStop,
     StartSupervisorMode {
         supervisor_session_id: String,
@@ -154,7 +157,7 @@ pub enum ProxyCallPhase {
 }
 
 #[derive(Clone, Debug, Serialize)]
-pub struct SipSessionSnapshot {
+pub(crate) struct SipSessionSnapshot {
     session_id: String,
     phase: ProxyCallPhase,
     started_at: DateTime<Utc>,
@@ -246,7 +249,8 @@ impl SipSessionShared {
         }
     }
 
-    pub fn snapshot(&self) -> SipSessionSnapshot {
+    #[cfg(test)]
+    pub(crate) fn snapshot(&self) -> SipSessionSnapshot {
         let inner = self.inner.read().unwrap();
         inner.clone()
     }
@@ -305,7 +309,7 @@ impl SipSessionShared {
         }
     }
 
-    pub fn emit_custom_event(&self, event: ProxyCallEvent) {
+    pub(crate) fn emit_custom_event(&self, event: ProxyCallEvent) {
         if let Some(sender) = self.event_sender() {
             let _ = sender.send(event);
         }
@@ -540,8 +544,8 @@ pub enum ProxyCallEvent {
     },
 }
 
-pub type SessionActionSender = mpsc::UnboundedSender<SessionAction>;
-pub type SessionActionReceiver = mpsc::UnboundedReceiver<SessionAction>;
+pub(crate) type SessionActionSender = mpsc::UnboundedSender<SessionAction>;
+pub(crate) type SessionActionReceiver = mpsc::UnboundedReceiver<SessionAction>;
 pub type ProxyCallEventSender = mpsc::UnboundedSender<ProxyCallEvent>;
 
 #[derive(Clone)]
@@ -573,7 +577,8 @@ impl SipSessionHandle {
         &self.session_id
     }
 
-    pub fn snapshot(&self) -> SipSessionSnapshot {
+    #[cfg(test)]
+    pub(crate) fn snapshot(&self) -> SipSessionSnapshot {
         self.shared.snapshot()
     }
 

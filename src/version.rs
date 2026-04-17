@@ -5,7 +5,7 @@ use tracing::debug;
 #[allow(unused_imports)]
 use tracing::info;
 
-pub const VERSION_INFO: &str = concat!(
+const VERSION_INFO: &str = concat!(
     "rustpbx ",
     env!("CARGO_PKG_VERSION"),
     "\nBuild Time: ",
@@ -18,7 +18,7 @@ pub const VERSION_INFO: &str = concat!(
     env!("GIT_DIRTY")
 );
 
-pub const SHORT_VERSION: &str = env!("SHORT_VERSION");
+const SHORT_VERSION: &str = env!("SHORT_VERSION");
 
 pub fn get_version_info() -> &'static str {
     VERSION_INFO

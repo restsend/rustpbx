@@ -1,7 +1,10 @@
 use crate::addons::{Addon, ScriptInjection, SidebarItem};
 use crate::app::AppState;
 use async_trait::async_trait;
-use axum::{Router, routing::{get, post}};
+use axum::{
+    Router,
+    routing::{get, post},
+};
 
 pub mod handlers;
 pub mod models;

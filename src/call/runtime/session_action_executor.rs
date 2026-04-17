@@ -48,7 +48,10 @@ impl SessionActionExecutor {
         // Send the command directly to SipSessionHandle
         match handle.send_command(command) {
             Ok(_) => Ok(CommandResult::success()),
-            Err(e) => Ok(CommandResult::failure(format!("failed to apply command: {}", e))),
+            Err(e) => Ok(CommandResult::failure(format!(
+                "failed to apply command: {}",
+                e
+            ))),
         }
     }
 }
