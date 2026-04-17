@@ -34,3 +34,16 @@ addons = ["wholesale", "queue"]
 [addons.wholesale]
 license = "key-123"
 ```
+
+## Configuration Reference
+
+| # | File | Topics |
+|---|---|---|
+| 01 | [Platform & Networking](01-platform.md) | HTTP/HTTPS, ports, TLS, external IP |
+| 02 | [Proxy Core](02-proxy-core.md) | SIP stack, realms, locators, dialplan |
+| 03 | [Auth & Users](03-auth-users.md) | User accounts, passwords, RBAC |
+| 04 | [Routing](04-routing.md) | Route rules, pattern matching |
+| 05 | [Trunks & Queues](05-trunks-queues.md) | SIP trunks, call queues |
+| 06 | [Media & Recording](06-media-recording.md) | RTP proxy, codecs, call recording, CDR |
+| 07 | [Addons, Console & Storage](07-addons-admin-storage.md) | Web console, AMI, blob storage |
+| 08 | [SipFlow](08-sipflow.md) | SIP+RTP flow recording, query API |
