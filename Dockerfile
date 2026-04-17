@@ -24,8 +24,8 @@ RUN mkdir -p /app/config /app/sounds /app/templates
 # Automatically pick the correct binary based on the architecture being built
 # We expect binaries to be placed in bin/amd64/ and bin/arm64/ by the build script
 ARG TARGETARCH
-COPY bin/${TARGETARCH}/rustpbx /app/rustpbx
-COPY bin/${TARGETARCH}/sipflow /app/sipflow
+COPY --chmod=0755 bin/${TARGETARCH}/rustpbx /app/rustpbx
+COPY --chmod=0755 bin/${TARGETARCH}/sipflow /app/sipflow
 
 # Copy static resources
 COPY ./static /app/static
