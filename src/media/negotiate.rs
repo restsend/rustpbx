@@ -385,20 +385,48 @@ impl MediaNegotiator {
         value.split_whitespace().next()?.parse::<u8>().ok()
     }
 
-    /// Restrict an already-generated SDP answer to the negotiated audio profile
-    /// selected by the opposite leg. This keeps the bridge PCs intact while
-    /// forcing the remote endpoint to send the codec the callee actually accepted.
-    pub fn restrict_audio_answer_to_profile(
-        answer_sdp: &str,
-        profile: &NegotiatedLegProfile,
-    ) -> Option<String> {
-        let selected_audio = profile.audio.as_ref()?;
+    fn codec_signature(codec: &CodecInfo) -> String {
+        format!("{:?}/{}/{}", codec.codec, codec.clock_rate, codec.channels)
+    }
 
-        let mut allowed_pts = vec![selected_audio.payload_type];
-        if let Some(dtmf) = profile.dtmf.as_ref() {
-            if !allowed_pts.contains(&dtmf.payload_type) {
-                allowed_pts.push(dtmf.payload_type);
+    /// Restrict an already-generated caller-facing SDP answer to the subset of
+    /// caller codecs that also appear in the callee's answer.
+    ///
+    /// The generated answer stays the source of truth for WebRTC-specific SDP,
+    /// ICE, DTLS, and candidates. Filtering is done by codec identity using
+    /// the generated caller answer order, while preserving caller-leg payload
+    /// types already chosen by create_answer().
+    pub fn restrict_answer_to_callee_accepted_codecs(
+        answer_sdp: &str,
+        callee_answer_sdp: &str,
+    ) -> Option<String> {
+        let caller_answer_codecs = Self::extract_codec_params(answer_sdp);
+        let callee_answer_codecs = Self::extract_codec_params(callee_answer_sdp);
+
+        let accepted_by_callee: HashSet<String> = callee_answer_codecs
+            .audio
+            .iter()
+            .chain(callee_answer_codecs.dtmf.iter())
+            .map(Self::codec_signature)
+            .collect();
+        if accepted_by_callee.is_empty() {
+            return None;
+        }
+
+        let mut allowed_pts = Vec::new();
+        let mut seen_pts = HashSet::new();
+        for codec in caller_answer_codecs
+            .audio
+            .iter()
+            .chain(caller_answer_codecs.dtmf.iter())
+        {
+            let signature = Self::codec_signature(codec);
+            if accepted_by_callee.contains(&signature) && seen_pts.insert(codec.payload_type) {
+                allowed_pts.push(codec.payload_type);
             }
+        }
+        if allowed_pts.is_empty() {
+            return None;
         }
 
         let mut desc = SessionDescription::parse(SdpType::Answer, answer_sdp).ok()?;
@@ -1291,49 +1319,48 @@ a=rtpmap:101 telephone-event/8000\r\n";
     }
 
     #[test]
-    fn test_restrict_audio_answer_to_profile_keeps_only_selected_codec_and_dtmf() {
+    fn test_restrict_answer_to_callee_accepted_codecs_preserves_caller_payload_types() {
         let answer_sdp = "v=0\r\n\
 o=- 1 1 IN IP4 127.0.0.1\r\n\
 s=-\r\n\
 t=0 0\r\n\
-m=audio 9 UDP/TLS/RTP/SAVPF 111 9 0 8 110 126\r\n\
+m=audio 9 UDP/TLS/RTP/SAVPF 96 0 110 126\r\n\
 c=IN IP4 0.0.0.0\r\n\
 a=mid:0\r\n\
 a=sendrecv\r\n\
 a=rtcp-mux\r\n\
-a=rtpmap:111 opus/48000/2\r\n\
-a=fmtp:111 minptime=10;useinbandfec=1\r\n\
-a=rtpmap:9 G722/8000\r\n\
+a=rtpmap:96 opus/48000/2\r\n\
+a=fmtp:96 minptime=10;useinbandfec=1\r\n\
 a=rtpmap:0 PCMU/8000\r\n\
-a=rtpmap:8 PCMA/8000\r\n\
 a=rtpmap:110 telephone-event/48000\r\n\
 a=fmtp:110 0-16\r\n\
 a=rtpmap:126 telephone-event/8000\r\n\
 a=fmtp:126 0-16\r\n";
 
-        let profile = NegotiatedLegProfile {
-            audio: Some(NegotiatedCodec {
-                codec: CodecType::G722,
-                payload_type: 9,
-                clock_rate: 8000,
-                channels: 1,
-            }),
-            dtmf: Some(NegotiatedCodec {
-                codec: CodecType::TelephoneEvent,
-                payload_type: 126,
-                clock_rate: 8000,
-                channels: 1,
-            }),
-        };
+        let callee_answer = "v=0\r\n\
+o=- 1 1 IN IP4 127.0.0.1\r\n\
+s=-\r\n\
+t=0 0\r\n\
+m=audio 9 RTP/AVP 111 0 101\r\n\
+c=IN IP4 0.0.0.0\r\n\
+a=rtpmap:111 opus/48000/2\r\n\
+a=fmtp:111 useinbandfec=1\r\n\
+a=rtpmap:0 PCMU/8000\r\n\
+a=rtpmap:101 telephone-event/8000\r\n\
+a=fmtp:101 0-16\r\n";
 
-        let filtered =
-            MediaNegotiator::restrict_audio_answer_to_profile(answer_sdp, &profile).unwrap();
+        let filtered = MediaNegotiator::restrict_answer_to_callee_accepted_codecs(
+            answer_sdp,
+            callee_answer,
+        )
+        .unwrap();
 
-        assert!(filtered.contains("m=audio 9 UDP/TLS/RTP/SAVPF 9 126"));
-        assert!(filtered.contains("a=rtpmap:9 G722/8000"));
+        assert!(filtered.contains("m=audio 9 UDP/TLS/RTP/SAVPF 96 0 126"));
+        assert!(filtered.contains("a=rtpmap:96 opus/48000/2"));
+        assert!(filtered.contains("a=rtpmap:0 PCMU/8000"));
         assert!(filtered.contains("a=rtpmap:126 telephone-event/8000"));
-        assert!(!filtered.contains("a=rtpmap:111 opus/48000/2"));
         assert!(!filtered.contains("a=rtpmap:110 telephone-event/48000"));
+        assert!(!filtered.contains("a=rtpmap:101 telephone-event/8000"));
     }
 
     /// to_audio_capability converts all known codecs
