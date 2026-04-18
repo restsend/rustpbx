@@ -503,7 +503,6 @@ impl SipServerBuilder {
         inspectors.push(Box::new(
             super::capability_headers::CapabilityHeadersInspector::new(
                 advertised_methods.clone(),
-                self.config.session_timer,
             ),
         ));
 

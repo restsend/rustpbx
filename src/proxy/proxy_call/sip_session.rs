@@ -37,8 +37,8 @@ use crate::proxy::proxy_call::{
     media_peer::{MediaPeer, VoiceEnginePeer},
     reporter::CallReporter,
     session_timer::{
-        DEFAULT_SESSION_EXPIRES, HEADER_MIN_SE, HEADER_SESSION_EXPIRES, HEADER_SUPPORTED,
-        MIN_MIN_SE, SessionRefresher, SessionTimerState, apply_refresh_response,
+        DEFAULT_SESSION_EXPIRES, HEADER_MIN_SE, HEADER_SESSION_EXPIRES, MIN_MIN_SE,
+        SessionRefresher, SessionTimerState, apply_refresh_response,
         apply_session_timer_headers, build_default_session_timer_headers,
         build_session_timer_headers, build_session_timer_response_headers, get_header_value,
         has_timer_support, parse_min_se, parse_session_expires, select_timer_refresher,
@@ -1383,38 +1383,6 @@ impl SipSession {
                                                             || name.eq_ignore_ascii_case(HEADER_MIN_SE) =>
                                                     {
                                                         false
-                                                    }
-                                                    _ => true,
-                                                });
-
-                                                for header in headers.iter_mut() {
-                                                    if let rsipstack::sip::Header::Supported(value) = header {
-                                                        let filtered: Vec<String> = value
-                                                            .to_string()
-                                                            .split(',')
-                                                            .map(str::trim)
-                                                            .filter(|entry| !entry.is_empty() && *entry != "timer")
-                                                            .map(ToString::to_string)
-                                                            .collect();
-                                                        *header = rsipstack::sip::Header::Other(
-                                                            HEADER_SUPPORTED.to_string(),
-                                                            filtered.join(", "),
-                                                        );
-                                                    }
-                                                }
-
-                                                headers.retain(|header| match header {
-                                                    rsipstack::sip::Header::Other(name, value)
-                                                        if name.eq_ignore_ascii_case(HEADER_SUPPORTED) =>
-                                                    {
-                                                        !value.trim().is_empty()
-                                                    }
-                                                    rsipstack::sip::Header::Other(name, _) => {
-                                                        !name.eq_ignore_ascii_case(
-                                                            HEADER_SESSION_EXPIRES,
-                                                        ) && !name.eq_ignore_ascii_case(
-                                                            HEADER_MIN_SE,
-                                                        )
                                                     }
                                                     _ => true,
                                                 });

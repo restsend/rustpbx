@@ -1659,6 +1659,7 @@ impl ProxyModule for CallModule {
             rsipstack::sip::Method::Invite,
             rsipstack::sip::Method::Bye,
             rsipstack::sip::Method::Info,
+            rsipstack::sip::Method::Update,
             rsipstack::sip::Method::Ack,
             rsipstack::sip::Method::Cancel,
             rsipstack::sip::Method::Options,

@@ -433,6 +433,9 @@ fn build_timer_headers(
         HEADER_MIN_SE.to_string(),
         min_se,
     ));
+    headers.push(rsipstack::sip::Header::Supported(
+        rsipstack::sip::headers::Supported::from(TIMER_TAG),
+    ));
     headers
 }
 
@@ -458,7 +461,10 @@ pub fn build_session_timer_response_headers(
     timer: &SessionTimerState,
     peer_supports_timer: bool,
 ) -> Vec<rsipstack::sip::Header> {
-    let mut headers = build_session_timer_headers(timer, false);
+    let mut headers = vec![rsipstack::sip::Header::Other(
+        HEADER_SESSION_EXPIRES.to_string(),
+        timer.get_session_expires_value(),
+    )];
     if peer_supports_timer && timer.refresher == SessionRefresher::Uac {
         headers.push(rsipstack::sip::Header::Require(
             rsipstack::sip::headers::Require::from(TIMER_TAG),
