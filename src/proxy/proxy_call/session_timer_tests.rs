@@ -972,6 +972,37 @@ mod tests {
     }
 
     #[test]
+    fn test_build_default_session_timer_headers_include_supported_timer() {
+        let headers = rsipstack::sip::Headers::from(build_default_session_timer_headers(1800, 90));
+
+        assert!(has_timer_support(&headers));
+        assert_eq!(
+            get_header_value(&headers, HEADER_SESSION_EXPIRES),
+            Some("1800".to_string())
+        );
+        assert_eq!(get_header_value(&headers, HEADER_MIN_SE), Some("90".to_string()));
+    }
+
+    #[test]
+    fn test_build_session_timer_response_headers_omit_min_se() {
+        let mut timer = SessionTimerState::default();
+        timer.enabled = true;
+        timer.active = true;
+        timer.refresher = SessionRefresher::Uas;
+        timer.session_interval = Duration::from_secs(1800);
+
+        let headers =
+            rsipstack::sip::Headers::from(build_session_timer_response_headers(&timer, true));
+
+        assert_eq!(
+            get_header_value(&headers, HEADER_SESSION_EXPIRES),
+            Some("1800;refresher=uas".to_string())
+        );
+        assert_eq!(get_header_value(&headers, HEADER_MIN_SE), None);
+        assert!(!has_timer_support(&headers));
+    }
+
+    #[test]
     fn test_select_timer_refresher_defaults_to_uas_without_timer_support() {
         assert_eq!(select_timer_refresher(false, None), SessionRefresher::Uas);
         assert_eq!(
