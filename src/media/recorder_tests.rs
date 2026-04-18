@@ -275,25 +275,27 @@ mod recorder_advanced_tests {
         let temp_path_single = std::env::temp_dir().join("test_recorder_dtmf_single.wav");
         let temp_path_dup = std::env::temp_dir().join("test_recorder_dtmf_duplicate.wav");
 
-        let mut recorder_single =
-            Recorder::new(temp_path_single.to_str().unwrap(), CodecType::PCMU).unwrap();
-        let mut recorder_dup =
-            Recorder::new(temp_path_dup.to_str().unwrap(), CodecType::PCMU).unwrap();
-
         let dtmf_payload = [5, 0x80, 0x06, 0x40];
 
+        let mut recorder_single =
+            Recorder::new(temp_path_single.to_str().unwrap(), CodecType::PCMU).unwrap();
         recorder_single
             .write_dtmf_payload(Leg::A, &dtmf_payload, 12_345, 8000)
             .expect("single terminal DTMF should be written");
+        recorder_single
+            .finalize()
+            .expect("single finalize should succeed");
 
+        let mut recorder_dup =
+            Recorder::new(temp_path_dup.to_str().unwrap(), CodecType::PCMU).unwrap();
         for _ in 0..3 {
             recorder_dup
                 .write_dtmf_payload(Leg::A, &dtmf_payload, 12_345, 8000)
                 .expect("duplicate terminal DTMF packets should be accepted");
         }
-
-        recorder_single.finalize().expect("single finalize should succeed");
-        recorder_dup.finalize().expect("duplicate finalize should succeed");
+        recorder_dup
+            .finalize()
+            .expect("duplicate finalize should succeed");
 
         let len_single = std::fs::metadata(&temp_path_single).unwrap().len();
         let len_dup = std::fs::metadata(&temp_path_dup).unwrap().len();

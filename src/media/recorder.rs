@@ -1,5 +1,5 @@
-use crate::media::negotiate::NegotiatedLegProfile;
 use crate::media::StreamWriter;
+use crate::media::negotiate::NegotiatedLegProfile;
 use crate::media::wav_writer::WavWriter;
 use anyhow::Result;
 use audio_codec::{CodecType, Decoder, Encoder, create_decoder, create_encoder};
@@ -353,9 +353,8 @@ impl Recorder {
                         / 1000) as u32;
                 }
                 let relative = timestamp.wrapping_sub(self.base_timestamp_a.unwrap());
-                let scaled_relative =
-                    (relative as u64 * self.sample_rate as u64 / timestamp_clock_rate as u64)
-                        as u32;
+                let scaled_relative = (relative as u64 * self.sample_rate as u64
+                    / timestamp_clock_rate as u64) as u32;
                 self.start_offset_a.wrapping_add(scaled_relative)
             }
             Leg::B => {
@@ -366,9 +365,8 @@ impl Recorder {
                         / 1000) as u32;
                 }
                 let relative = timestamp.wrapping_sub(self.base_timestamp_b.unwrap());
-                let scaled_relative =
-                    (relative as u64 * self.sample_rate as u64 / timestamp_clock_rate as u64)
-                        as u32;
+                let scaled_relative = (relative as u64 * self.sample_rate as u64
+                    / timestamp_clock_rate as u64) as u32;
                 self.start_offset_b.wrapping_add(scaled_relative)
             }
         }
@@ -547,42 +545,34 @@ impl Recorder {
         let duration_samples =
             (duration as u64 * self.sample_rate as u64).div_ceil(clock_rate.max(1) as u64) as u32;
         let duration_ms = (duration as u64 * 1000).div_ceil(clock_rate.max(1) as u64) as u32;
-        let absolute_ts = self.timestamp_to_absolute(leg, timestamp, clock_rate);
 
         if let Some(state) = self.active_dtmf_state(leg)
             && state.digit_code == digit_code
             && state.rtp_timestamp == timestamp
-            && duration_samples < state.duration_samples
+            && duration_samples <= state.duration_samples
         {
             return Ok(());
         }
 
-        let state = self.active_dtmf_state(leg);
-        let should_regenerate = !matches!(
-            state,
-            Some(existing)
-                if existing.digit_code == digit_code
-                    && existing.rtp_timestamp == timestamp
-                    && existing.duration_samples == duration_samples
-        );
+        let absolute_ts = self.timestamp_to_absolute(leg, timestamp, clock_rate);
 
-        if should_regenerate {
-            debug!(
-                leg = ?leg,
-                digit = %digit,
-                duration_ms = %duration_ms,
-                duration_samples,
-                "Recording DTMF digit"
-            );
-            let pcm = self.dtmf_gen.generate_samples(digit, duration_samples as usize);
-            let encoded = if let Some(enc) = self.encoder.as_mut() {
-                Bytes::from(enc.encode(&pcm))
-            } else {
-                Bytes::from(audio_codec::samples_to_bytes(&pcm))
-            };
-            let end_ts = absolute_ts.saturating_add(duration_samples);
-            self.overlay_dtmf_range(leg, absolute_ts, end_ts, encoded);
-        }
+        debug!(
+            leg = ?leg,
+            digit = %digit,
+            duration_ms = %duration_ms,
+            duration_samples,
+            "Recording DTMF digit"
+        );
+        let pcm = self
+            .dtmf_gen
+            .generate_samples(digit, duration_samples as usize);
+        let encoded = if let Some(enc) = self.encoder.as_mut() {
+            Bytes::from(enc.encode(&pcm))
+        } else {
+            Bytes::from(audio_codec::samples_to_bytes(&pcm))
+        };
+        let end_ts = absolute_ts.saturating_add(duration_samples);
+        self.overlay_dtmf_range(leg, absolute_ts, end_ts, encoded);
 
         self.set_dtmf_state(
             leg,
