@@ -47,6 +47,18 @@
             color: #333;
         }
 
+        .section-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            margin-bottom: 10px;
+        }
+
+        .section-header h3 {
+            margin: 0;
+        }
+
         .form-group {
             margin-bottom: 15px;
         }
@@ -97,6 +109,43 @@
 
         button:hover {
             background: #0056b3;
+        }
+
+        .icon-btn {
+            width: 32px;
+            height: 32px;
+            padding: 0;
+            margin-top: 0;
+            flex-shrink: 0;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            background: #fff;
+            color: #475569;
+            border: 1px solid #d0d7de;
+        }
+
+        .icon-btn:hover {
+            background: #f1f5f9;
+            color: #0f172a;
+        }
+
+        .icon-btn svg {
+            width: 16px;
+            height: 16px;
+            fill: currentColor;
+        }
+
+        .icon-btn.copied {
+            background: #dcfce7;
+            border-color: #86efac;
+            color: #166534;
+        }
+
+        .icon-btn.copy-failed {
+            background: #fee2e2;
+            border-color: #fca5a5;
+            color: #991b1b;
         }
 
         button:disabled {
@@ -247,9 +296,18 @@
                 </div>
 
                 <div class="section">
-                    <h3>Logs</h3>
+                    <div class="section-header">
+                        <h3>Logs</h3>
+                        <button type="button" id="copyLogsBtn" class="icon-btn" title="Copy Logs"
+                            aria-label="Copy Logs">
+                            <svg viewBox="0 0 24 24" aria-hidden="true">
+                                <path
+                                    d="M16 1H6a2 2 0 0 0-2 2v12h2V3h10V1zm3 4H10a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h9a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2zm0 16h-9V7h9v14z" />
+                            </svg>
+                        </button>
+                    </div>
                     <div class="logs" id="logs"></div>
-                    <div style="margin-top:8px;">
+                    <div style="margin-top:8px;display:flex;gap:8px;">
                         <button onclick="clearLogs()">Clear Logs</button>
                     </div>
                 </div>
@@ -311,7 +369,16 @@
                 </div>
 
                 <div class="section">
-                    <h3>ICE Stats</h3>
+                    <div class="section-header">
+                        <h3>ICE Stats</h3>
+                        <button type="button" id="copyIceStatsBtn" class="icon-btn" title="Copy ICE Stats"
+                            aria-label="Copy ICE Stats">
+                            <svg viewBox="0 0 24 24" aria-hidden="true">
+                                <path
+                                    d="M16 1H6a2 2 0 0 0-2 2v12h2V3h10V1zm3 4H10a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h9a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2zm0 16h-9V7h9v14z" />
+                            </svg>
+                        </button>
+                    </div>
                     <div class="logs" id="iceStats" style="height:220px;">
                         <em>No ICE data yet.</em>
                     </div>
@@ -339,7 +406,7 @@
         </div>
     </div>
 
-    <script src="//jssip.net/download/releases/jssip-3.10.0.min.js"></script>
+    <script src="https://jssip.net/download/releases/jssip-3.10.0.min.js"></script>
     <script>
         'use strict';
 
@@ -384,6 +451,8 @@
         let videoCanvasInterval = null;
         const logs = document.getElementById('logs');
         const iceStatsPanel = document.getElementById('iceStats');
+        const copyLogsBtn = document.getElementById('copyLogsBtn');
+        const copyIceStatsBtn = document.getElementById('copyIceStatsBtn');
         const runIceDiagBtn = document.getElementById('runIceDiagBtn');
         const clearIceDiagBtn = document.getElementById('clearIceDiagBtn');
         const iceDiagResults = document.getElementById('iceDiagResults');
@@ -495,6 +564,69 @@
             line.textContent = `[${timestamp}] ${message}`;
             iceDiagResults.appendChild(line);
             iceDiagResults.scrollTop = iceDiagResults.scrollHeight;
+        }
+
+        async function writeTextToClipboard(text) {
+            if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+                await navigator.clipboard.writeText(text);
+                return;
+            }
+
+            const helper = document.createElement('textarea');
+            helper.value = text;
+            helper.setAttribute('readonly', '');
+            helper.style.position = 'fixed';
+            helper.style.opacity = '0';
+            helper.style.pointerEvents = 'none';
+            document.body.appendChild(helper);
+            helper.focus();
+            helper.select();
+            const success = document.execCommand('copy');
+            document.body.removeChild(helper);
+            if (!success) {
+                throw new Error('clipboard API unavailable');
+            }
+        }
+
+        function setButtonFeedback(button, stateClass, label) {
+            if (!button) {
+                return;
+            }
+            const originalTitle = button.dataset.originalTitle || button.title || '';
+            const originalAriaLabel = button.dataset.originalAriaLabel || button.getAttribute('aria-label') || '';
+            button.dataset.originalTitle = originalTitle;
+            button.dataset.originalAriaLabel = originalAriaLabel;
+            button.classList.remove('copied', 'copy-failed');
+            if (stateClass) {
+                button.classList.add(stateClass);
+            }
+            if (label) {
+                button.title = label;
+                button.setAttribute('aria-label', label);
+            }
+            window.setTimeout(() => {
+                button.classList.remove('copied', 'copy-failed');
+                button.title = originalTitle;
+                button.setAttribute('aria-label', originalAriaLabel || originalTitle);
+            }, 1200);
+        }
+
+        async function copyPanelText(panel, button, emptyMessage, successLabel) {
+            const text = panel && typeof panel.innerText === 'string'
+                ? panel.innerText.trim()
+                : '';
+            if (!text) {
+                setButtonFeedback(button, 'copy-failed', emptyMessage);
+                return;
+            }
+
+            try {
+                await writeTextToClipboard(text);
+                setButtonFeedback(button, 'copied', successLabel);
+            } catch (error) {
+                setButtonFeedback(button, 'copy-failed', 'Copy Failed');
+                console.error('Copy to clipboard failed:', error);
+            }
         }
 
         function parseIceServersConfig(rawValue) {
@@ -678,6 +810,7 @@
         }
 
         const ICE_INACTIVITY_TIMEOUT = 2500;
+        const WEBRTC_STATS_INTERVAL = 1000;
 
         function getIceTracker(session, label = 'session') {
             if (!session) {
@@ -691,7 +824,22 @@
                     endedAt: null,
                     inactivityTimer: null,
                     gatherDuration: null,
-                    status: 'waiting for candidates'
+                    status: 'waiting for candidates',
+                    pcStates: {
+                        iceConnectionState: null,
+                        connectionState: null,
+                        signalingState: null
+                    },
+                    selectedPair: null,
+                    mediaStats: {
+                        inbound: {},
+                        outbound: {}
+                    },
+                    lastStatsByReportId: {},
+                    statsIntervalId: null,
+                    statsInFlight: false,
+                    statsPc: null,
+                    statsError: null
                 };
             } else if (label && session._iceTracker.label !== label) {
                 session._iceTracker.label = label;
@@ -699,6 +847,310 @@
 
             session._iceCandidates = session._iceTracker.candidates;
             return session._iceTracker;
+        }
+
+        function escapeHtml(value) {
+            return String(value == null ? '' : value)
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#39;');
+        }
+
+        function parseNumber(value) {
+            const numeric = typeof value === 'number' ? value : Number(value);
+            return Number.isFinite(numeric) ? numeric : null;
+        }
+
+        function formatBitrate(bitsPerSecond) {
+            const numeric = parseNumber(bitsPerSecond);
+            if (numeric == null || numeric < 0) {
+                return '--';
+            }
+            if (numeric >= 1000000) {
+                return `${(numeric / 1000000).toFixed(2)} Mbps`;
+            }
+            if (numeric >= 1000) {
+                return `${(numeric / 1000).toFixed(1)} kbps`;
+            }
+            return `${Math.round(numeric)} bps`;
+        }
+
+        function formatPercent(fraction) {
+            const numeric = parseNumber(fraction);
+            if (numeric == null) {
+                return '--';
+            }
+            return `${(numeric * 100).toFixed(1)}%`;
+        }
+
+        function shortCodecName(mimeType, fallbackPayloadType) {
+            if (typeof mimeType === 'string' && mimeType.includes('/')) {
+                return mimeType.split('/').pop();
+            }
+            if (fallbackPayloadType != null) {
+                return `pt:${fallbackPayloadType}`;
+            }
+            return null;
+        }
+
+        function createMediaBucket(kind) {
+            return {
+                kind,
+                bitrate: 0,
+                bitrateSamples: 0,
+                bytes: 0,
+                packets: 0,
+                packetsLost: 0,
+                jitterSeconds: null,
+                codecs: new Set()
+            };
+        }
+
+        function getMediaBucket(directionStats, kind) {
+            const normalizedKind = kind || 'unknown';
+            if (!directionStats[normalizedKind]) {
+                directionStats[normalizedKind] = createMediaBucket(normalizedKind);
+            }
+            return directionStats[normalizedKind];
+        }
+
+        function finalizeMediaDirection(directionStats) {
+            const finalized = {};
+            Object.keys(directionStats).forEach((kind) => {
+                const bucket = directionStats[kind];
+                const lossBase = bucket.packets + bucket.packetsLost;
+                finalized[kind] = {
+                    kind,
+                    bitrate: bucket.bitrateSamples > 0 ? bucket.bitrate : null,
+                    bytes: bucket.bytes,
+                    packets: bucket.packets,
+                    packetsLost: bucket.packetsLost,
+                    lossRate: lossBase > 0 ? (bucket.packetsLost / lossBase) : null,
+                    jitterSeconds: bucket.jitterSeconds,
+                    codecs: Array.from(bucket.codecs).sort()
+                };
+            });
+            return finalized;
+        }
+
+        function summarizeSelectedCandidate(candidateStats) {
+            if (!candidateStats) {
+                return null;
+            }
+            return {
+                id: candidateStats.id || null,
+                address: candidateStats.address || candidateStats.ip || null,
+                port: parseNumber(candidateStats.port),
+                protocol: candidateStats.protocol || null,
+                candidateType: candidateStats.candidateType || candidateStats.type || null,
+                relayProtocol: candidateStats.relayProtocol || null,
+                networkType: candidateStats.networkType || null
+            };
+        }
+
+        function formatCandidateSummary(candidate) {
+            if (!candidate) {
+                return '—';
+            }
+            const pieces = [];
+            if (candidate.candidateType) {
+                pieces.push(candidate.candidateType);
+            }
+            if (candidate.protocol) {
+                pieces.push(String(candidate.protocol).toUpperCase());
+            }
+            const address = candidate.address || 'address unavailable';
+            const port = candidate.port != null ? `:${candidate.port}` : '';
+            pieces.push(`${address}${port}`);
+            if (candidate.relayProtocol) {
+                pieces.push(`relay=${candidate.relayProtocol}`);
+            }
+            if (candidate.networkType) {
+                pieces.push(`net=${candidate.networkType}`);
+            }
+            return pieces.join(' ');
+        }
+
+        function findSelectedCandidatePair(stats) {
+            if (!stats) {
+                return null;
+            }
+
+            let pairStats = null;
+            stats.forEach((report) => {
+                if (pairStats || report.type !== 'transport' || !report.selectedCandidatePairId) {
+                    return;
+                }
+                pairStats = stats.get(report.selectedCandidatePairId) || null;
+            });
+
+            if (!pairStats) {
+                stats.forEach((report) => {
+                    if (pairStats || report.type !== 'candidate-pair') {
+                        return;
+                    }
+                    if (report.selected || (report.nominated && report.state === 'succeeded')) {
+                        pairStats = report;
+                    }
+                });
+            }
+
+            if (!pairStats) {
+                return null;
+            }
+
+            return {
+                state: pairStats.state || null,
+                nominated: Boolean(pairStats.nominated),
+                currentRoundTripTime: parseNumber(pairStats.currentRoundTripTime),
+                availableIncomingBitrate: parseNumber(pairStats.availableIncomingBitrate),
+                availableOutgoingBitrate: parseNumber(pairStats.availableOutgoingBitrate),
+                local: summarizeSelectedCandidate(stats.get(pairStats.localCandidateId)),
+                remote: summarizeSelectedCandidate(stats.get(pairStats.remoteCandidateId))
+            };
+        }
+
+        function collectMediaStats(stats, previousStatsByReportId) {
+            const codecNames = {};
+            const nextStatsByReportId = {};
+            const directionStats = {
+                inbound: {},
+                outbound: {}
+            };
+
+            stats.forEach((report) => {
+                if (report.type !== 'codec') {
+                    return;
+                }
+                const codecName = shortCodecName(report.mimeType, report.payloadType);
+                if (codecName) {
+                    codecNames[report.id] = codecName;
+                }
+            });
+
+            stats.forEach((report) => {
+                if ((report.type !== 'inbound-rtp' && report.type !== 'outbound-rtp') || report.isRemote) {
+                    return;
+                }
+
+                const direction = report.type === 'inbound-rtp' ? 'inbound' : 'outbound';
+                const kind = report.kind || report.mediaType || 'unknown';
+                const bucket = getMediaBucket(directionStats[direction], kind);
+                const timestamp = parseNumber(report.timestamp);
+                const bytesField = direction === 'inbound' ? 'bytesReceived' : 'bytesSent';
+                const packetsField = direction === 'inbound' ? 'packetsReceived' : 'packetsSent';
+                const bytes = parseNumber(report[bytesField]) || 0;
+                const packets = parseNumber(report[packetsField]) || 0;
+
+                if (timestamp != null) {
+                    nextStatsByReportId[report.id] = {
+                        timestamp,
+                        bytes
+                    };
+                }
+
+                bucket.bytes += bytes;
+                bucket.packets += packets;
+
+                if (direction === 'inbound') {
+                    bucket.packetsLost += parseNumber(report.packetsLost) || 0;
+                    const jitterSeconds = parseNumber(report.jitter);
+                    if (jitterSeconds != null) {
+                        bucket.jitterSeconds = bucket.jitterSeconds == null
+                            ? jitterSeconds
+                            : Math.max(bucket.jitterSeconds, jitterSeconds);
+                    }
+                }
+
+                const codecName = codecNames[report.codecId];
+                if (codecName) {
+                    bucket.codecs.add(codecName);
+                }
+
+                const previous = previousStatsByReportId ? previousStatsByReportId[report.id] : null;
+                if (!previous || previous.timestamp == null || previous.bytes == null || timestamp == null) {
+                    return;
+                }
+                const deltaMs = timestamp - previous.timestamp;
+                const deltaBytes = bytes - previous.bytes;
+                if (deltaMs <= 0 || deltaBytes < 0) {
+                    return;
+                }
+                bucket.bitrate += (deltaBytes * 8 * 1000) / deltaMs;
+                bucket.bitrateSamples += 1;
+            });
+
+            return {
+                inbound: finalizeMediaDirection(directionStats.inbound),
+                outbound: finalizeMediaDirection(directionStats.outbound),
+                nextStatsByReportId
+            };
+        }
+
+        function stopSessionStatsPolling(session) {
+            const tracker = session && session._iceTracker;
+            if (!tracker) {
+                return;
+            }
+            if (tracker.statsIntervalId) {
+                clearInterval(tracker.statsIntervalId);
+                tracker.statsIntervalId = null;
+            }
+            tracker.statsInFlight = false;
+            tracker.statsPc = null;
+            tracker.lastStatsByReportId = {};
+        }
+
+        async function pollPeerConnectionStats(session, pc) {
+            const tracker = getIceTracker(session, session && (session._iceLabel || `${session.direction || 'session'}`));
+            if (!tracker || !pc || tracker.statsInFlight || typeof pc.getStats !== 'function') {
+                return;
+            }
+
+            tracker.statsInFlight = true;
+            try {
+                const stats = await pc.getStats();
+                if (tracker.statsPc !== pc) {
+                    return;
+                }
+                tracker.pcStates = {
+                    iceConnectionState: pc.iceConnectionState || null,
+                    connectionState: pc.connectionState || null,
+                    signalingState: pc.signalingState || null
+                };
+                tracker.selectedPair = findSelectedCandidatePair(stats);
+                const mediaStats = collectMediaStats(stats, tracker.lastStatsByReportId);
+                tracker.mediaStats = {
+                    inbound: mediaStats.inbound,
+                    outbound: mediaStats.outbound
+                };
+                tracker.lastStatsByReportId = mediaStats.nextStatsByReportId;
+                tracker.statsError = null;
+                updateIceStatsDisplay(session);
+            } catch (error) {
+                tracker.statsError = error.message;
+            } finally {
+                tracker.statsInFlight = false;
+            }
+        }
+
+        function startSessionStatsPolling(session, pc) {
+            const tracker = getIceTracker(session, session && (session._iceLabel || `${session.direction || 'session'}`));
+            if (!tracker || !pc || typeof pc.getStats !== 'function') {
+                return;
+            }
+            if (tracker.statsPc === pc && tracker.statsIntervalId) {
+                return;
+            }
+
+            stopSessionStatsPolling(session);
+            tracker.statsPc = pc;
+            void pollPeerConnectionStats(session, pc);
+            tracker.statsIntervalId = setInterval(() => {
+                void pollPeerConnectionStats(session, pc);
+            }, WEBRTC_STATS_INTERVAL);
         }
 
         function updateIceStatsDisplay(session, statusText) {
@@ -714,20 +1166,90 @@
             }
 
             const parts = [
-                `<div><strong>Call:</strong> ${tracker.label}</div>`,
+                `<div><strong>Call:</strong> ${escapeHtml(tracker.label)}</div>`,
                 `<div><strong>Candidates:</strong> ${tracker.candidates.length}</div>`
             ];
             if (tracker.gatherDuration != null) {
                 parts.push(`<div><strong>Gathering time:</strong> ${formatMs(tracker.gatherDuration)}</div>`);
             }
             if (tracker.status) {
-                parts.push(`<div><strong>Status:</strong> ${tracker.status}</div>`);
+                parts.push(`<div><strong>Status:</strong> ${escapeHtml(tracker.status)}</div>`);
+            }
+            if (tracker.pcStates && (tracker.pcStates.iceConnectionState || tracker.pcStates.connectionState || tracker.pcStates.signalingState)) {
+                const stateBits = [];
+                if (tracker.pcStates.iceConnectionState) {
+                    stateBits.push(`ice=${tracker.pcStates.iceConnectionState}`);
+                }
+                if (tracker.pcStates.connectionState) {
+                    stateBits.push(`pc=${tracker.pcStates.connectionState}`);
+                }
+                if (tracker.pcStates.signalingState) {
+                    stateBits.push(`sig=${tracker.pcStates.signalingState}`);
+                }
+                parts.push(`<div><strong>States:</strong> ${escapeHtml(stateBits.join(', '))}</div>`);
+            }
+            if (tracker.selectedPair) {
+                const pair = tracker.selectedPair;
+                const pairBits = [];
+                if (pair.state) {
+                    pairBits.push(`state=${pair.state}`);
+                }
+                if (pair.nominated) {
+                    pairBits.push('nominated');
+                }
+                if (pair.currentRoundTripTime != null) {
+                    pairBits.push(`rtt=${formatMs(Math.round(pair.currentRoundTripTime * 1000))}`);
+                }
+                if (pair.availableOutgoingBitrate != null) {
+                    pairBits.push(`avail-out=${formatBitrate(pair.availableOutgoingBitrate)}`);
+                }
+                if (pair.availableIncomingBitrate != null) {
+                    pairBits.push(`avail-in=${formatBitrate(pair.availableIncomingBitrate)}`);
+                }
+                parts.push('<hr>');
+                parts.push(`<div><strong>Selected pair:</strong> ${escapeHtml(pairBits.join(', ') || 'detected')}</div>`);
+                parts.push(`<div><strong>Local:</strong> ${escapeHtml(formatCandidateSummary(pair.local))}</div>`);
+                parts.push(`<div><strong>Remote:</strong> ${escapeHtml(formatCandidateSummary(pair.remote))}</div>`);
+            }
+
+            const mediaSections = [];
+            ['inbound', 'outbound'].forEach((direction) => {
+                const directionStats = tracker.mediaStats && tracker.mediaStats[direction] ? tracker.mediaStats[direction] : {};
+                const kinds = Object.keys(directionStats).sort();
+                kinds.forEach((kind) => {
+                    const metric = directionStats[kind];
+                    const fragments = [
+                        `${kind}: ${formatBitrate(metric.bitrate)}`,
+                        `packets=${metric.packets}`
+                    ];
+                    if (direction === 'inbound') {
+                        fragments.push(`lost=${metric.packetsLost}`);
+                        if (metric.lossRate != null) {
+                            fragments.push(`loss=${formatPercent(metric.lossRate)}`);
+                        }
+                        if (metric.jitterSeconds != null) {
+                            fragments.push(`jitter=${formatMs(Math.round(metric.jitterSeconds * 1000))}`);
+                        }
+                    }
+                    if (metric.codecs && metric.codecs.length) {
+                        fragments.push(`codec=${metric.codecs.join('/')}`);
+                    }
+                    mediaSections.push(`<div>${escapeHtml(`${direction} ${fragments.join(', ')}`)}</div>`);
+                });
+            });
+            if (mediaSections.length) {
+                parts.push('<hr>');
+                parts.push('<div><strong>Media:</strong></div>');
+                parts.push(mediaSections.join(''));
+            } else if (tracker.statsError) {
+                parts.push('<hr>');
+                parts.push(`<div><strong>Media:</strong> ${escapeHtml(`stats unavailable (${tracker.statsError})`)}</div>`);
             }
             if (tracker.candidates.length) {
                 const rows = tracker.candidates.map((c, i) => {
                     const primaryAddress = c.address ? `${c.address}${c.port ? `:${c.port}` : ''}` : 'address unavailable';
                     const relayInfo = c.relatedAddress ? ` via ${c.relatedAddress}${c.relatedPort ? `:${c.relatedPort}` : ''}` : '';
-                    return `${i + 1}. ${c.type || 'unknown'} ${primaryAddress}${relayInfo ? ` (${relayInfo.trim()})` : ''} (+${formatMs(c.ts)})`;
+                    return escapeHtml(`${i + 1}. ${c.type || 'unknown'} ${primaryAddress}${relayInfo ? ` (${relayInfo.trim()})` : ''} (+${formatMs(c.ts)})`);
                 });
                 parts.push('<hr>');
                 parts.push(rows.join('<br>'));
@@ -865,6 +1387,16 @@
         }
         if (clearIceDiagBtn) {
             clearIceDiagBtn.addEventListener('click', () => resetIceDiagnostics());
+        }
+        if (copyLogsBtn) {
+            copyLogsBtn.addEventListener('click', () => {
+                void copyPanelText(logs, copyLogsBtn, 'Logs Empty', 'Logs Copied');
+            });
+        }
+        if (copyIceStatsBtn) {
+            copyIceStatsBtn.addEventListener('click', () => {
+                void copyPanelText(iceStatsPanel, copyIceStatsBtn, 'Stats Empty', 'Stats Copied');
+            });
         }
 
         if (enableVideoCheckbox) {
@@ -1069,6 +1601,12 @@
 
                 const tracker = getIceTracker(session, label);
                 const statsLabel = tracker.label;
+                tracker.pcStates = {
+                    iceConnectionState: pc.iceConnectionState || null,
+                    connectionState: pc.connectionState || null,
+                    signalingState: pc.signalingState || null
+                };
+                startSessionStatsPolling(session, pc);
                 updateIceStatsDisplay(session, tracker.status);
 
                 pc.addEventListener('icegatheringstatechange', () => {
@@ -1086,15 +1624,23 @@
 
                 pc.addEventListener('iceconnectionstatechange', () => {
                     const state = pc.iceConnectionState;
+                    tracker.pcStates.iceConnectionState = state || null;
                     log(`${statsLabel} - iceConnectionState -> ${state}`);
                     if ((state === 'connected' || state === 'completed') && tracker.startedAt && !tracker.endedAt) {
                         concludeIceGathering(session, 'ice connection completed');
                     }
+                    void pollPeerConnectionStats(session, pc);
                 });
 
                 pc.addEventListener('connectionstatechange', () => {
                     const state = pc.connectionState;
+                    tracker.pcStates.connectionState = state || null;
                     log(`${statsLabel} - connectionState -> ${state}`);
+                    if (state === 'closed' || state === 'failed') {
+                        stopSessionStatsPolling(session);
+                    } else {
+                        void pollPeerConnectionStats(session, pc);
+                    }
                 });
 
                 updateIceStatsDisplay(session, tracker.status);
@@ -1547,6 +2093,9 @@
         }
 
         function endCall() {
+            if (currentSession) {
+                stopSessionStatsPolling(currentSession);
+            }
             callControls.classList.remove('active');
             incomingCallDiv.classList.remove('active');
             callInfo.textContent = '';
