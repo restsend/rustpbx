@@ -533,6 +533,90 @@ impl SipSession {
         matches!(mode, MediaProxyMode::All)
     }
 
+    fn bypasses_local_media(&self) -> bool {
+        self.media_profile.path == MediaPathMode::Bypass && self.media_bridge.is_none()
+    }
+
+    async fn send_mid_dialog_request_to_side(
+        &mut self,
+        side: DialogSide,
+        method: rsipstack::sip::Method,
+        headers: Vec<rsipstack::sip::Header>,
+        body: Option<Vec<u8>>,
+    ) -> Result<Option<rsipstack::sip::Response>> {
+        let dialog_id = match side {
+            DialogSide::Caller => self.caller_dialog_id(),
+            DialogSide::Callee => self
+                .callee_dialogs
+                .iter()
+                .map(|entry| entry.key().clone())
+                .next()
+                .ok_or_else(|| anyhow!("No callee dialog available for {}", method))?,
+        };
+
+        let mut dialog = self
+            .server
+            .dialog_layer
+            .get_dialog(&dialog_id)
+            .or_else(|| {
+                (side == DialogSide::Caller).then(|| Dialog::ServerInvite(self.server_dialog.clone()))
+            })
+            .ok_or_else(|| anyhow!("No dialog found for {}", dialog_id))?;
+
+        match (method, &mut dialog) {
+            (rsipstack::sip::Method::Invite, Dialog::ClientInvite(d)) => d
+                .reinvite(Some(headers), body)
+                .await
+                .map_err(|e| anyhow!("re-INVITE failed: {}", e)),
+            (rsipstack::sip::Method::Invite, Dialog::ServerInvite(d)) => d
+                .reinvite(Some(headers), body)
+                .await
+                .map_err(|e| anyhow!("re-INVITE failed: {}", e)),
+            (rsipstack::sip::Method::Update, Dialog::ClientInvite(d)) => d
+                .update(Some(headers), body)
+                .await
+                .map_err(|e| anyhow!("UPDATE failed: {}", e)),
+            (rsipstack::sip::Method::Update, Dialog::ServerInvite(d)) => d
+                .update(Some(headers), body)
+                .await
+                .map_err(|e| anyhow!("UPDATE failed: {}", e)),
+            (other, _) => Err(anyhow!("Dialog does not support {} request", other)),
+        }
+    }
+
+    async fn relay_signaling_only_offer(
+        &mut self,
+        side: DialogSide,
+        method: rsipstack::sip::Method,
+        offer_sdp: &str,
+    ) -> Result<(StatusCode, Option<String>)> {
+        let target_side = match side {
+            DialogSide::Caller => DialogSide::Callee,
+            DialogSide::Callee => DialogSide::Caller,
+        };
+        let headers = vec![rsipstack::sip::Header::ContentType(
+            "application/sdp".into(),
+        )];
+        let response = self
+            .send_mid_dialog_request_to_side(
+                target_side,
+                method,
+                headers,
+                Some(offer_sdp.as_bytes().to_vec()),
+            )
+            .await?
+            .ok_or_else(|| anyhow!("{} timed out", method))?;
+
+        let status = response.status_code.clone();
+        let answer_sdp = if response.body().is_empty() {
+            None
+        } else {
+            Some(String::from_utf8_lossy(response.body()).to_string())
+        };
+
+        Ok((status, answer_sdp))
+    }
+
     pub async fn process(
         &mut self,
         mut state_rx: mpsc::UnboundedReceiver<DialogState>,
@@ -745,21 +829,52 @@ impl SipSession {
 
         let body = if update_result.is_ok() && !request.body.is_empty() {
             let offer_sdp = String::from_utf8_lossy(&request.body).to_string();
-            match self.build_local_dialog_answer(side, &offer_sdp).await {
-                Ok(answer_sdp) => {
-                    headers.push(rsipstack::sip::Header::ContentType(
-                        "application/sdp".into(),
-                    ));
-                    Some(answer_sdp.into_bytes())
+            let answer_result = if self.bypasses_local_media() {
+                self.relay_signaling_only_offer(side, request.method.clone(), &offer_sdp)
+                    .await
+                    .map_err(|e| {
+                        (
+                            rsipstack::sip::StatusCode::ServerInternalError,
+                            "Failed to relay signaling-only dialog offer",
+                            e,
+                        )
+                    })
+            } else {
+                self.build_local_dialog_answer(side, &offer_sdp)
+                    .await
+                    .map(|answer_sdp| (status.clone(), Some(answer_sdp)))
+                    .map_err(|e| {
+                        (
+                            rsipstack::sip::StatusCode::NotAcceptableHere,
+                            "Failed to build local answer for re-INVITE",
+                            e,
+                        )
+                    })
+            };
+
+            match answer_result {
+                Ok((result_status, answer_sdp)) => {
+                    status = result_status;
+                    if status.kind() != rsipstack::sip::status_code::StatusCodeKind::Successful {
+                        headers.clear();
+                    }
+                    if let Some(answer_sdp) = answer_sdp {
+                        headers.push(rsipstack::sip::Header::ContentType(
+                            "application/sdp".into(),
+                        ));
+                        Some(answer_sdp.into_bytes())
+                    } else {
+                        None
+                    }
                 }
-                Err(e) => {
+                Err((error_status, message, error)) => {
                     warn!(
                         %dialog_id,
-                        error = %e,
+                        error = %error,
                         side = ?side,
-                        "Failed to build local answer for re-INVITE"
+                        "{message}"
                     );
-                    status = rsipstack::sip::StatusCode::NotAcceptableHere;
+                    status = error_status;
                     headers.clear();
                     None
                 }
@@ -1292,8 +1407,16 @@ impl SipSession {
         }
 
         let callee_is_webrtc = target.supports_webrtc;
+        let caller_is_webrtc = self.is_caller_webrtc();
+        self.caller_is_webrtc = caller_is_webrtc;
+        self.callee_is_webrtc = callee_is_webrtc;
 
-        let callee_sdp = self.create_callee_track(callee_is_webrtc).await.ok();
+        let callee_sdp =
+            if self.bypasses_local_media() && caller_is_webrtc == callee_is_webrtc {
+                self.caller_offer.clone()
+            } else {
+                self.create_callee_track(callee_is_webrtc).await.ok()
+            };
         self.callee_offer = callee_sdp.clone();
 
         let offer = if self.media_bridge.is_some() {
@@ -2352,6 +2475,13 @@ impl SipSession {
             return Some(answer.clone());
         }
 
+        if self.bypasses_local_media() {
+            if let Some(answer_sdp) = self.callee_answer_sdp.clone() {
+                self.answer = Some(answer_sdp.clone());
+                return Some(answer_sdp);
+            }
+        }
+
         let caller_offer = self.caller_offer.clone()?;
         let caller_is_webrtc = self.is_caller_webrtc();
 
@@ -2662,7 +2792,9 @@ impl SipSession {
                 return Ok(self.answer.clone());
             }
         };
-        self.caller_offer = Some(offer_sdp.clone());
+        if !self.bypasses_local_media() {
+            self.caller_offer = Some(offer_sdp.clone());
+        }
 
         let callee_dialogs: Vec<DialogId> = self
             .callee_dialogs
@@ -2703,8 +2835,6 @@ impl SipSession {
                                 .await;
                         } else {
                             final_answer = Some(answer_sdp.clone());
-                            self.answer = Some(answer_sdp.clone());
-                            self.callee_answer_sdp = Some(answer_sdp);
                         }
                     }
                 }
@@ -4920,10 +5050,13 @@ impl SipSession {
                 info!(%leg_id, "Hold re-INVITE sent successfully");
 
                 if let Some(media_source) = music {
-                    if let crate::call::domain::MediaSource::File { path } = media_source {
-                        if let Err(e) = self.play_audio_file(&path, false, "hold-music", true).await
-                        {
-                            warn!(error = %e, "Failed to start hold music");
+                    if self.media_profile.supports_media_injection {
+                        if let crate::call::domain::MediaSource::File { path } = media_source {
+                            if let Err(e) =
+                                self.play_audio_file(&path, false, "hold-music", true).await
+                            {
+                                warn!(error = %e, "Failed to start hold music");
+                            }
                         }
                     }
                 }
