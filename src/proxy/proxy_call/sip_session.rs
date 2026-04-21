@@ -41,7 +41,8 @@ use crate::proxy::proxy_call::{
         SessionRefresher, SessionTimerState, apply_refresh_response,
         apply_session_timer_headers, build_default_session_timer_headers,
         build_session_timer_headers, build_session_timer_response_headers, get_header_value,
-        has_timer_support, parse_min_se, parse_session_expires, select_timer_refresher,
+        has_timer_support, parse_min_se, parse_session_expires, select_client_timer_refresher,
+        select_server_timer_refresher,
     },
     state::{CallContext, CallSessionRecordSnapshot, SessionHangupMessage},
 };
@@ -736,10 +737,7 @@ impl SipSession {
                 )]
             })
         } else {
-            self.successful_refresh_response_headers(
-                &dialog_id,
-                has_timer_support(&request.headers),
-            )
+            self.successful_refresh_response_headers(&dialog_id)
         }
         .unwrap_or_default();
 
@@ -1284,7 +1282,7 @@ impl SipSession {
             .proxy_config
             .session_expires
             .unwrap_or(DEFAULT_SESSION_EXPIRES);
-        if self.server.proxy_config.session_timer {
+        if self.server.proxy_config.session_timer_mode().is_enabled() {
             headers.extend(build_default_session_timer_headers(
                 default_expires,
                 MIN_MIN_SE,
@@ -1366,7 +1364,7 @@ impl SipSession {
                     break match res {
                         Ok((dialog, response)) => {
                             if let Some(ref resp) = response {
-                                if self.server.proxy_config.session_timer
+                                if self.server.proxy_config.session_timer_mode().is_enabled()
                                     && resp.status_code == StatusCode::SessionIntervalTooSmall
                                     && retry_count < 1
                                 {
@@ -1505,9 +1503,22 @@ impl SipSession {
         .map_err(|e| (StatusCode::ServerInternalError, Some(e.to_string())))?;
 
         self.callee_dialogs.insert(dialog_id.clone(), ());
-        if self.server.proxy_config.session_timer {
+        if self.server.proxy_config.session_timer_mode().is_enabled() {
             if let Some(ref response) = response {
-                self.init_callee_timer(dialog_id.clone(), response, default_expires);
+                let requested_session_interval = invite_option
+                    .headers
+                    .as_ref()
+                    .and_then(|headers| {
+                        headers
+                            .iter()
+                            .find(|header| header.name().eq_ignore_ascii_case(HEADER_SESSION_EXPIRES))
+                            .map(|header| header.value().to_string())
+                    })
+                    .as_deref()
+                    .and_then(parse_session_expires)
+                    .map(|(interval, _)| interval)
+                    .unwrap_or_else(|| Duration::from_secs(default_expires));
+                self.init_callee_timer(dialog_id.clone(), response, requested_session_interval);
             }
         }
         self.callee_guards.push(ClientDialogGuard::new(
@@ -2431,7 +2442,7 @@ impl SipSession {
         self.connected_callee = callee.clone();
 
         let mut timer_headers = vec![];
-        if self.server.proxy_config.session_timer {
+        if self.server.proxy_config.session_timer_mode().is_enabled() {
             let default_expires = self
                 .server
                 .proxy_config
@@ -2442,12 +2453,7 @@ impl SipSession {
                     let caller_dialog_id = self.caller_dialog_id();
                     if let Some(timer) = self.timers.get(&caller_dialog_id) {
                         if timer.enabled {
-                            let caller_supports_timer =
-                                has_timer_support(&self.server_dialog.initial_request().headers);
-                            timer_headers.extend(build_session_timer_response_headers(
-                                timer,
-                                caller_supports_timer,
-                            ));
+                            timer_headers.extend(build_session_timer_response_headers(timer));
                             debug!(
                                 session_expires = %timer.get_session_expires_value(),
                                 "Session timer negotiated in 200 OK"
@@ -2716,10 +2722,8 @@ impl SipSession {
                 "application/sdp".into(),
             )];
             let caller_dialog_id = self.caller_dialog_id();
-            if let Some(timer_headers) = self.successful_refresh_response_headers(
-                &caller_dialog_id,
-                has_timer_support(&self.server_dialog.initial_request().headers),
-            ) {
+            if let Some(timer_headers) = self.successful_refresh_response_headers(&caller_dialog_id)
+            {
                 headers.extend(timer_headers);
             }
             self.server_dialog
@@ -2928,31 +2932,41 @@ impl SipSession {
         let request = self.server_dialog.initial_request();
         let headers = &request.headers;
         let dialog_id = self.caller_dialog_id();
+        let session_timer_mode = self.server.proxy_config.session_timer_mode();
 
         let supported = has_timer_support(headers);
         let session_expires_value = get_header_value(headers, HEADER_SESSION_EXPIRES);
         let mut timer = SessionTimerState::default();
+        timer.mode = session_timer_mode;
 
-        let local_min_se = Duration::from_secs(MIN_MIN_SE);
+        if let Some(min_se) = get_header_value(headers, HEADER_MIN_SE)
+            .as_deref()
+            .and_then(parse_min_se)
+        {
+            if timer.min_se < min_se {
+                timer.min_se = min_se;
+            }
+        }
+
         if let Some(value) = session_expires_value {
             if let Some((interval, refresher)) = parse_session_expires(&value) {
-                if interval < local_min_se {
+                if interval < timer.min_se {
                     return Err((
                         StatusCode::SessionIntervalTooSmall,
-                        Some(local_min_se.as_secs().to_string()),
+                        Some(timer.min_se.as_secs().to_string()),
                     ));
                 }
 
                 timer.enabled = true;
                 timer.session_interval = interval;
                 timer.active = true;
-                timer.refresher = select_timer_refresher(supported, refresher);
+                timer.refresher = select_server_timer_refresher(supported, true, refresher);
             }
-        } else {
+        } else if session_timer_mode.is_always() {
             timer.enabled = true;
-            timer.session_interval = Duration::from_secs(default_expires);
+            timer.session_interval = Duration::from_secs(default_expires).max(timer.min_se);
             timer.active = true;
-            timer.refresher = select_timer_refresher(supported, None);
+            timer.refresher = select_server_timer_refresher(supported, false, None);
         }
 
         self.timers.insert(dialog_id.clone(), timer);
@@ -2965,24 +2979,30 @@ impl SipSession {
         &mut self,
         dialog_id: DialogId,
         response: &rsipstack::sip::Response,
-        default_expires: u64,
+        requested_session_interval: Duration,
     ) {
         let headers = &response.headers;
         let session_expires_value = get_header_value(headers, HEADER_SESSION_EXPIRES);
 
         let mut timer = SessionTimerState::default();
+        timer.mode = self.server.proxy_config.session_timer_mode();
         if let Some((session_interval, refresher)) = session_expires_value
             .as_deref()
             .and_then(parse_session_expires)
-            .map(|(interval, refresher)| (interval, refresher.unwrap_or(SessionRefresher::Uac)))
         {
             timer.enabled = true;
             timer.active = true;
             timer.last_refresh = Instant::now();
             timer.session_interval = session_interval;
-            timer.refresher = refresher;
+            timer.refresher = select_client_timer_refresher(refresher);
+        } else if timer.mode.is_always() {
+            timer.enabled = true;
+            timer.active = true;
+            timer.last_refresh = Instant::now();
+            timer.session_interval = requested_session_interval;
+            timer.refresher = SessionRefresher::Uac;
         } else {
-            timer.session_interval = Duration::from_secs(default_expires);
+            timer.session_interval = requested_session_interval;
         }
 
         self.timers.insert(dialog_id.clone(), timer);
@@ -3042,17 +3062,13 @@ impl SipSession {
     fn successful_refresh_response_headers(
         &self,
         dialog_id: &DialogId,
-        peer_supports_timer: bool,
     ) -> Option<Vec<rsipstack::sip::Header>> {
         let timer = self.timers.get(dialog_id)?;
         if !timer.enabled || !timer.active {
             return None;
         }
 
-        Some(build_session_timer_response_headers(
-            timer,
-            peer_supports_timer,
-        ))
+        Some(build_session_timer_response_headers(timer))
     }
 
     fn should_fallback_to_reinvite(status: StatusCode) -> bool {
@@ -3097,8 +3113,9 @@ impl SipSession {
         dialog_id: &DialogId,
         response: &rsipstack::sip::Response,
     ) -> Result<()> {
+        let we_are_uac = self.is_uac_dialog(dialog_id);
         if let Some(timer) = self.timers.get_mut(dialog_id) {
-            apply_refresh_response(timer, &response.headers)?;
+            apply_refresh_response(timer, &response.headers, we_are_uac)?;
         }
         Ok(())
     }
@@ -5157,7 +5174,11 @@ mod tests {
             body: Vec::new(),
         };
 
-        session.init_callee_timer(dialog_id.clone(), &response, DEFAULT_SESSION_EXPIRES);
+        session.init_callee_timer(
+            dialog_id.clone(),
+            &response,
+            Duration::from_secs(DEFAULT_SESSION_EXPIRES),
+        );
 
         let timer = session
             .timers

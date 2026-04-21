@@ -1,5 +1,6 @@
 #[cfg(test)]
 mod tests {
+    use crate::config::SessionTimerMode;
     use crate::proxy::proxy_call::session_timer::*;
     use std::str::FromStr;
     use std::sync::{Arc, Mutex};
@@ -39,6 +40,7 @@ mod tests {
     #[test]
     fn test_session_timer_state_memory() {
         let timer = Arc::new(Mutex::new(SessionTimerState {
+            mode: SessionTimerMode::Supported,
             enabled: true,
             active: true,
             refresher: SessionRefresher::Uas,
@@ -382,6 +384,7 @@ mod tests {
     #[test]
     fn test_session_timer_expiration_logic() {
         let mut timer = SessionTimerState {
+            mode: SessionTimerMode::Supported,
             enabled: true,
             active: true,
             refresher: SessionRefresher::Uas,
@@ -407,6 +410,7 @@ mod tests {
     #[test]
     fn test_session_timer_refresh_logic() {
         let mut timer = SessionTimerState {
+            mode: SessionTimerMode::Supported,
             enabled: true,
             active: true,
             refresher: SessionRefresher::Uas,
@@ -926,17 +930,16 @@ mod tests {
     }
 
     #[test]
-    fn test_build_session_timer_response_headers_require_timer_for_uac_refresher() {
+    fn test_build_session_timer_response_headers_do_not_require_timer_for_uac_refresher() {
         let mut timer = SessionTimerState::default();
         timer.enabled = true;
         timer.active = true;
         timer.refresher = SessionRefresher::Uac;
         timer.session_interval = Duration::from_secs(1800);
 
-        let headers =
-            rsipstack::sip::Headers::from(build_session_timer_response_headers(&timer, true));
+        let headers = rsipstack::sip::Headers::from(build_session_timer_response_headers(&timer));
 
-        assert!(is_timer_required(&headers));
+        assert!(!is_timer_required(&headers));
         assert_eq!(
             get_header_value(&headers, HEADER_SESSION_EXPIRES),
             Some("1800;refresher=uac".to_string())
@@ -951,8 +954,7 @@ mod tests {
         timer.refresher = SessionRefresher::Uas;
         timer.session_interval = Duration::from_secs(1800);
 
-        let headers =
-            rsipstack::sip::Headers::from(build_session_timer_response_headers(&timer, true));
+        let headers = rsipstack::sip::Headers::from(build_session_timer_response_headers(&timer));
 
         assert!(!is_timer_required(&headers));
     }
@@ -965,8 +967,7 @@ mod tests {
         timer.refresher = SessionRefresher::Uac;
         timer.session_interval = Duration::from_secs(1800);
 
-        let headers =
-            rsipstack::sip::Headers::from(build_session_timer_response_headers(&timer, false));
+        let headers = rsipstack::sip::Headers::from(build_session_timer_response_headers(&timer));
 
         assert!(!is_timer_required(&headers));
     }
@@ -991,8 +992,7 @@ mod tests {
         timer.refresher = SessionRefresher::Uas;
         timer.session_interval = Duration::from_secs(1800);
 
-        let headers =
-            rsipstack::sip::Headers::from(build_session_timer_response_headers(&timer, true));
+        let headers = rsipstack::sip::Headers::from(build_session_timer_response_headers(&timer));
 
         assert_eq!(
             get_header_value(&headers, HEADER_SESSION_EXPIRES),
@@ -1003,19 +1003,42 @@ mod tests {
     }
 
     #[test]
-    fn test_select_timer_refresher_defaults_to_uas_without_timer_support() {
-        assert_eq!(select_timer_refresher(false, None), SessionRefresher::Uas);
+    fn test_select_server_timer_refresher_defaults_to_uas_without_timer_support() {
         assert_eq!(
-            select_timer_refresher(false, Some(SessionRefresher::Uac)),
+            select_server_timer_refresher(false, true, None),
+            SessionRefresher::Uas
+        );
+        assert_eq!(
+            select_server_timer_refresher(false, true, Some(SessionRefresher::Uac)),
+            SessionRefresher::Uac
+        );
+    }
+
+    #[test]
+    fn test_select_server_timer_refresher_uses_request_when_peer_supports_timer() {
+        assert_eq!(
+            select_server_timer_refresher(true, true, None),
+            SessionRefresher::Uac
+        );
+        assert_eq!(
+            select_server_timer_refresher(true, true, Some(SessionRefresher::Uas)),
             SessionRefresher::Uas
         );
     }
 
     #[test]
-    fn test_select_timer_refresher_uses_request_when_peer_supports_timer() {
-        assert_eq!(select_timer_refresher(true, None), SessionRefresher::Uac);
+    fn test_select_server_timer_refresher_defaults_to_uas_without_session_expires() {
         assert_eq!(
-            select_timer_refresher(true, Some(SessionRefresher::Uas)),
+            select_server_timer_refresher(true, false, None),
+            SessionRefresher::Uas
+        );
+    }
+
+    #[test]
+    fn test_select_client_timer_refresher_defaults_to_uac() {
+        assert_eq!(select_client_timer_refresher(None), SessionRefresher::Uac);
+        assert_eq!(
+            select_client_timer_refresher(Some(SessionRefresher::Uas)),
             SessionRefresher::Uas
         );
     }
@@ -1023,18 +1046,61 @@ mod tests {
     #[test]
     fn test_apply_refresh_response_disables_timer_without_session_expires() {
         let mut timer = SessionTimerState::default();
+        timer.mode = SessionTimerMode::Supported;
         timer.enabled = true;
         timer.active = true;
         timer.refreshing = true;
         timer.session_interval = Duration::from_secs(1800);
 
         let headers = rsipstack::sip::Headers::default();
-        let result = apply_refresh_response(&mut timer, &headers);
+        let result = apply_refresh_response(&mut timer, &headers, false);
 
         assert!(result.is_ok());
         assert!(!timer.enabled);
         assert!(!timer.active);
         assert!(!timer.refreshing);
+        assert_eq!(timer.refresh_count, 1);
+    }
+
+    #[test]
+    fn test_apply_refresh_response_keeps_local_uas_without_session_expires_in_always_mode() {
+        let mut timer = SessionTimerState::default();
+        timer.mode = SessionTimerMode::Always;
+        timer.enabled = true;
+        timer.active = true;
+        timer.refreshing = true;
+        timer.refresher = SessionRefresher::Uas;
+        timer.session_interval = Duration::from_secs(1800);
+
+        let headers = rsipstack::sip::Headers::default();
+        let result = apply_refresh_response(&mut timer, &headers, false);
+
+        assert!(result.is_ok());
+        assert!(timer.enabled);
+        assert!(timer.active);
+        assert!(!timer.refreshing);
+        assert_eq!(timer.refresher, SessionRefresher::Uas);
+        assert_eq!(timer.refresh_count, 1);
+    }
+
+    #[test]
+    fn test_apply_refresh_response_keeps_local_uac_without_session_expires_in_always_mode() {
+        let mut timer = SessionTimerState::default();
+        timer.mode = SessionTimerMode::Always;
+        timer.enabled = true;
+        timer.active = true;
+        timer.refreshing = true;
+        timer.refresher = SessionRefresher::Uas;
+        timer.session_interval = Duration::from_secs(1800);
+
+        let headers = rsipstack::sip::Headers::default();
+        let result = apply_refresh_response(&mut timer, &headers, true);
+
+        assert!(result.is_ok());
+        assert!(timer.enabled);
+        assert!(timer.active);
+        assert!(!timer.refreshing);
+        assert_eq!(timer.refresher, SessionRefresher::Uac);
         assert_eq!(timer.refresh_count, 1);
     }
 
@@ -1051,7 +1117,7 @@ mod tests {
             HEADER_SESSION_EXPIRES.to_string(),
             "900;refresher=uas".to_string(),
         )]);
-        let result = apply_refresh_response(&mut timer, &headers);
+        let result = apply_refresh_response(&mut timer, &headers, false);
 
         assert!(result.is_ok());
         assert!(timer.enabled);
