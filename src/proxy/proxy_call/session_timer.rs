@@ -4,6 +4,7 @@
 //! Session timers are used to detect and recover from hung SIP sessions
 //! by requiring periodic session refresh requests.
 
+use crate::config::SessionTimerMode;
 use anyhow::{Result, anyhow};
 use std::str::FromStr;
 use std::time::Duration;
@@ -54,6 +55,14 @@ impl FromStr for SessionRefresher {
 }
 
 impl SessionRefresher {
+    pub fn for_local_role(we_are_uac: bool) -> Self {
+        if we_are_uac {
+            SessionRefresher::Uac
+        } else {
+            SessionRefresher::Uas
+        }
+    }
+
     /// Check if we are the refresher based on our role
     pub fn is_our_role(&self, we_are_uac: bool) -> bool {
         matches!(
@@ -66,6 +75,8 @@ impl SessionRefresher {
 /// Session timer state machine
 #[derive(Debug, Clone)]
 pub struct SessionTimerState {
+    /// Session timer policy for this dialog
+    pub mode: SessionTimerMode,
     /// Timer is enabled (negotiated via Session-Expires header)
     pub enabled: bool,
     /// Session expiration interval
@@ -92,6 +103,7 @@ pub struct SessionTimerState {
 impl Default for SessionTimerState {
     fn default() -> Self {
         Self {
+            mode: SessionTimerMode::Off,
             enabled: false,
             session_interval: Duration::from_secs(DEFAULT_SESSION_EXPIRES),
             min_se: Duration::from_secs(MIN_MIN_SE),
@@ -112,6 +124,7 @@ impl SessionTimerState {
     #[cfg(test)]
     pub fn new(session_interval: Duration, min_se: Duration, refresher: SessionRefresher) -> Self {
         Self {
+            mode: SessionTimerMode::Supported,
             enabled: true,
             session_interval,
             min_se,
@@ -359,15 +372,24 @@ pub fn parse_min_se(value: &str) -> Option<Duration> {
     Some(Duration::from_secs(seconds))
 }
 
-pub fn select_timer_refresher(
+pub fn select_server_timer_refresher(
     peer_supports_timer: bool,
+    session_expires_present: bool,
     requested_refresher: Option<SessionRefresher>,
 ) -> SessionRefresher {
-    if peer_supports_timer {
-        requested_refresher.unwrap_or(SessionRefresher::Uac)
+    if let Some(refresher) = requested_refresher {
+        refresher
+    } else if peer_supports_timer && session_expires_present {
+        SessionRefresher::Uac
     } else {
         SessionRefresher::Uas
     }
+}
+
+pub fn select_client_timer_refresher(
+    requested_refresher: Option<SessionRefresher>,
+) -> SessionRefresher {
+    requested_refresher.unwrap_or(SessionRefresher::Uac)
 }
 
 pub fn apply_session_timer_headers(
@@ -397,11 +419,18 @@ pub fn apply_session_timer_headers(
 pub fn apply_refresh_response(
     timer: &mut SessionTimerState,
     headers: &rsipstack::sip::Headers,
+    we_are_uac: bool,
 ) -> Result<()> {
     if get_header_value(headers, HEADER_SESSION_EXPIRES).is_none() {
         timer.complete_refresh();
-        timer.enabled = false;
-        timer.active = false;
+        if timer.mode.is_always() {
+            // Keep the local side responsible for refreshes when always mode is forcing
+            // session timers but the peer omits Session-Expires in a successful refresh.
+            timer.refresher = SessionRefresher::for_local_role(we_are_uac);
+        } else {
+            timer.enabled = false;
+            timer.active = false;
+        }
         return Ok(());
     }
 
@@ -457,20 +486,11 @@ pub fn build_session_timer_headers(
     )
 }
 
-pub fn build_session_timer_response_headers(
-    timer: &SessionTimerState,
-    peer_supports_timer: bool,
-) -> Vec<rsipstack::sip::Header> {
-    let mut headers = vec![rsipstack::sip::Header::Other(
+pub fn build_session_timer_response_headers(timer: &SessionTimerState) -> Vec<rsipstack::sip::Header> {
+    vec![rsipstack::sip::Header::Other(
         HEADER_SESSION_EXPIRES.to_string(),
         timer.get_session_expires_value(),
-    )];
-    if peer_supports_timer && timer.refresher == SessionRefresher::Uac {
-        headers.push(rsipstack::sip::Header::Require(
-            rsipstack::sip::headers::Require::from(TIMER_TAG),
-        ));
-    }
-    headers
+    )]
 }
 
 /// Check if timer is required (Require: timer header)
