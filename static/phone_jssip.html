@@ -462,6 +462,7 @@
         let lastOutgoingCallLabel = null;
         let iceServersManuallyEdited = false;
         let iceDiagInProgress = false;
+        let lastIceConfigWarning = '';
 
         if (iceServersInput) {
             iceServersInput.addEventListener('input', () => {
@@ -639,7 +640,30 @@
                         ? [parsed]
                         : [];
 
-            const normalized = list.filter((item) => item && item.urls);
+            const normalized = list.reduce((acc, item, index) => {
+                if (!item || !item.urls) {
+                    return acc;
+                }
+
+                const normalizedItem = { ...item };
+                if (normalizedItem.credentialType == null && normalizedItem.credential_type != null) {
+                    normalizedItem.credentialType = normalizedItem.credential_type;
+                }
+
+                const urls = Array.isArray(normalizedItem.urls) ? normalizedItem.urls : [normalizedItem.urls];
+                const hasTurnUrl = urls.some((url) => typeof url === 'string' && /^turns?:/i.test(url));
+                const hasCredentials = Boolean(normalizedItem.username || normalizedItem.credential);
+                if (!hasTurnUrl && hasCredentials) {
+                    const warning = `ICE server #${index + 1} uses stun: URL(s) with username/credential. TURN credentials are ignored unless the URL uses turn: or turns:.`;
+                    if (warning !== lastIceConfigWarning) {
+                        lastIceConfigWarning = warning;
+                        log(warning);
+                    }
+                }
+
+                acc.push(normalizedItem);
+                return acc;
+            }, []);
             if (!normalized.length) {
                 throw new Error('iceServers is empty or invalid');
             }
@@ -810,6 +834,8 @@
         }
 
         const ICE_INACTIVITY_TIMEOUT = 2500;
+        const ICE_EARLY_READY_SETTLE_MS = 250;
+        const ICE_EARLY_READY_MAX_WAIT_MS = 1800;
         const WEBRTC_STATS_INTERVAL = 1000;
 
         function getIceTracker(session, label = 'session') {
@@ -820,11 +846,16 @@
                 session._iceTracker = {
                     label,
                     candidates: [],
-                    startedAt: null,
-                    endedAt: null,
+                    waitStartedAt: null,
+                    waitFinishedAt: null,
                     inactivityTimer: null,
-                    gatherDuration: null,
-                    status: 'waiting for candidates',
+                    readyTimer: null,
+                    fallbackReadyTimer: null,
+                    waitDuration: null,
+                    candidateWaitStatus: 'waiting for candidates for initial SDP',
+                    gatheringState: 'waiting to start',
+                    sendInitialSdpCallback: null,
+                    initialSdpSent: false,
                     pcStates: {
                         iceConnectionState: null,
                         connectionState: null,
@@ -845,8 +876,118 @@
                 session._iceTracker.label = label;
             }
 
-            session._iceCandidates = session._iceTracker.candidates;
             return session._iceTracker;
+        }
+
+        function clearIceReadyTimers(tracker) {
+            if (!tracker) {
+                return;
+            }
+            if (tracker.readyTimer) {
+                clearTimeout(tracker.readyTimer);
+                tracker.readyTimer = null;
+            }
+            if (tracker.fallbackReadyTimer) {
+                clearTimeout(tracker.fallbackReadyTimer);
+                tracker.fallbackReadyTimer = null;
+            }
+        }
+
+        function clearIceTrackerTimers(tracker) {
+            if (!tracker) {
+                return;
+            }
+            if (tracker.inactivityTimer) {
+                clearTimeout(tracker.inactivityTimer);
+                tracker.inactivityTimer = null;
+            }
+            clearIceReadyTimers(tracker);
+        }
+
+        function startInitialSdpCandidateWait(tracker) {
+            if (!tracker || tracker.waitStartedAt) {
+                return;
+            }
+
+            tracker.waitStartedAt = Date.now();
+            tracker.candidateWaitStatus = 'collecting candidates for initial SDP';
+        }
+
+        function finishInitialSdpCandidateWait(session, reason, allowSend = false) {
+            const tracker = session && session._iceTracker;
+            if (!tracker) {
+                return false;
+            }
+
+            const readableReason = reason || 'gathered enough candidates';
+            if (!tracker.waitFinishedAt) {
+                tracker.waitFinishedAt = Date.now();
+                tracker.waitDuration = tracker.waitStartedAt ? (tracker.waitFinishedAt - tracker.waitStartedAt) : null;
+                tracker.candidateWaitStatus = `finished waiting (${readableReason})`;
+                clearIceTrackerTimers(tracker);
+                log(`${tracker.label} - finished waiting for initial SDP candidates (${readableReason})${tracker.waitDuration != null ? `, duration=${formatMs(tracker.waitDuration)}` : ''}`);
+                updateIceStatsDisplay(session);
+            }
+
+            if (!allowSend || tracker.initialSdpSent || typeof tracker.sendInitialSdpCallback !== 'function') {
+                return true;
+            }
+
+            const ready = tracker.sendInitialSdpCallback;
+            tracker.sendInitialSdpCallback = null;
+            tracker.initialSdpSent = true;
+            log(`${tracker.label} - allowing JsSIP to send SDP (${readableReason})`);
+
+            try {
+                ready();
+                return true;
+            } catch (error) {
+                log(`${tracker.label} - sending SDP failed: ${error.message}`);
+                return false;
+            }
+        }
+
+        function scheduleInitialSdpSend(session, reason, delayMs, timerField = 'readyTimer') {
+            const tracker = session && session._iceTracker;
+            if (!tracker || tracker.initialSdpSent || typeof tracker.sendInitialSdpCallback !== 'function') {
+                return;
+            }
+
+            if (timerField === 'fallbackReadyTimer' && tracker.fallbackReadyTimer) {
+                return;
+            }
+
+            if (tracker[timerField]) {
+                clearTimeout(tracker[timerField]);
+            }
+
+            tracker[timerField] = setTimeout(() => {
+                tracker[timerField] = null;
+                finishInitialSdpCandidateWait(session, reason, true);
+            }, delayMs);
+        }
+
+        function considerCandidateForInitialSdp(session, candidateType) {
+            const tracker = session && session._iceTracker;
+            if (!tracker || tracker.initialSdpSent || typeof tracker.sendInitialSdpCallback !== 'function') {
+                return;
+            }
+
+            const relayOnly = Boolean(relayOnlyCheckbox && relayOnlyCheckbox.checked);
+            const normalizedType = candidateType || 'unknown';
+
+            if (!relayOnly && !tracker.fallbackReadyTimer) {
+                scheduleInitialSdpSend(session, 'max wait reached with gathered candidates', ICE_EARLY_READY_MAX_WAIT_MS, 'fallbackReadyTimer');
+            }
+
+            if (normalizedType === 'relay') {
+                scheduleInitialSdpSend(session, 'relay candidate ready', ICE_EARLY_READY_SETTLE_MS);
+                return;
+            }
+
+            if (!relayOnly && normalizedType === 'srflx') {
+                scheduleInitialSdpSend(session, 'server reflexive candidate ready', ICE_EARLY_READY_SETTLE_MS);
+            }
         }
 
         function escapeHtml(value) {
@@ -935,7 +1076,7 @@
             return finalized;
         }
 
-        function summarizeSelectedCandidate(candidateStats) {
+        function summarizeSelectedCandidate(candidateStats, isRemote = false) {
             if (!candidateStats) {
                 return null;
             }
@@ -946,13 +1087,14 @@
                 protocol: candidateStats.protocol || null,
                 candidateType: candidateStats.candidateType || candidateStats.type || null,
                 relayProtocol: candidateStats.relayProtocol || null,
-                networkType: candidateStats.networkType || null
+                networkType: candidateStats.networkType || null,
+                isRemote: Boolean(isRemote)
             };
         }
 
         function formatCandidateSummary(candidate) {
             if (!candidate) {
-                return '—';
+                return 'candidate details unavailable';
             }
             const pieces = [];
             if (candidate.candidateType) {
@@ -961,9 +1103,20 @@
             if (candidate.protocol) {
                 pieces.push(String(candidate.protocol).toUpperCase());
             }
-            const address = candidate.address || 'address unavailable';
-            const port = candidate.port != null ? `:${candidate.port}` : '';
-            pieces.push(`${address}${port}`);
+            if (candidate.address) {
+                const port = candidate.port != null ? `:${candidate.port}` : '';
+                pieces.push(`${candidate.address}${port}`);
+            } else if (candidate.isRemote) {
+                if (candidate.port != null) {
+                    pieces.push(`port=${candidate.port} (address hidden by browser)`);
+                } else {
+                    pieces.push('address hidden by browser');
+                }
+            } else if (candidate.port != null) {
+                pieces.push(`port=${candidate.port} (address not reported)`);
+            } else {
+                pieces.push('candidate details unavailable');
+            }
             if (candidate.relayProtocol) {
                 pieces.push(`relay=${candidate.relayProtocol}`);
             }
@@ -1007,8 +1160,8 @@
                 currentRoundTripTime: parseNumber(pairStats.currentRoundTripTime),
                 availableIncomingBitrate: parseNumber(pairStats.availableIncomingBitrate),
                 availableOutgoingBitrate: parseNumber(pairStats.availableOutgoingBitrate),
-                local: summarizeSelectedCandidate(stats.get(pairStats.localCandidateId)),
-                remote: summarizeSelectedCandidate(stats.get(pairStats.remoteCandidateId))
+                local: summarizeSelectedCandidate(stats.get(pairStats.localCandidateId), false),
+                remote: summarizeSelectedCandidate(stats.get(pairStats.remoteCandidateId), true)
             };
         }
 
@@ -1153,7 +1306,7 @@
             }, WEBRTC_STATS_INTERVAL);
         }
 
-        function updateIceStatsDisplay(session, statusText) {
+        function updateIceStatsDisplay(session) {
             if (!iceStatsPanel) {
                 return;
             }
@@ -1161,19 +1314,17 @@
             if (!tracker) {
                 return;
             }
-            if (statusText) {
-                tracker.status = statusText;
-            }
 
             const parts = [
                 `<div><strong>Call:</strong> ${escapeHtml(tracker.label)}</div>`,
-                `<div><strong>Candidates:</strong> ${tracker.candidates.length}</div>`
+                `<div><strong>Candidates:</strong> ${tracker.candidates.length}</div>`,
+                `<div><strong>Initial SDP:</strong> ${escapeHtml(tracker.candidateWaitStatus)}</div>`
             ];
-            if (tracker.gatherDuration != null) {
-                parts.push(`<div><strong>Gathering time:</strong> ${formatMs(tracker.gatherDuration)}</div>`);
+            if (tracker.waitDuration != null) {
+                parts.push(`<div><strong>Wait time:</strong> ${formatMs(tracker.waitDuration)}</div>`);
             }
-            if (tracker.status) {
-                parts.push(`<div><strong>Status:</strong> ${escapeHtml(tracker.status)}</div>`);
+            if (tracker.gatheringState) {
+                parts.push(`<div><strong>Browser ICE:</strong> ${escapeHtml(tracker.gatheringState)}</div>`);
             }
             if (tracker.pcStates && (tracker.pcStates.iceConnectionState || tracker.pcStates.connectionState || tracker.pcStates.signalingState)) {
                 const stateBits = [];
@@ -1299,21 +1450,14 @@
             return out;
         }
 
-        function concludeIceGathering(session, reason) {
+        function markBrowserIceGatheringFinished(session, reason) {
             const tracker = session && session._iceTracker;
-            if (!tracker || tracker.endedAt) {
+            if (!tracker) {
                 return;
             }
-            tracker.endedAt = Date.now();
-            tracker.gatherDuration = tracker.startedAt ? (tracker.endedAt - tracker.startedAt) : null;
             const readableReason = reason ? reason.replace(/_/g, ' ') : 'completed';
-            tracker.status = readableReason;
-            session._iceGatherDuration = tracker.gatherDuration;
-            log(`${tracker.label} - ICE gathering finished (${readableReason})${tracker.gatherDuration != null ? `, duration=${formatMs(tracker.gatherDuration)}` : ''}`);
-            if (tracker.inactivityTimer) {
-                clearTimeout(tracker.inactivityTimer);
-                tracker.inactivityTimer = null;
-            }
+            tracker.gatheringState = readableReason;
+            log(`${tracker.label} - browser ICE gathering finished (${readableReason})`);
             updateIceStatsDisplay(session);
         }
 
@@ -1325,34 +1469,37 @@
             if (tracker.inactivityTimer) {
                 clearTimeout(tracker.inactivityTimer);
             }
-            tracker.inactivityTimer = setTimeout(() => concludeIceGathering(session, 'inactivity timeout'), ICE_INACTIVITY_TIMEOUT);
+            tracker.inactivityTimer = setTimeout(() => finishInitialSdpCandidateWait(session, 'inactivity timeout', true), ICE_INACTIVITY_TIMEOUT);
         }
 
-        function handleSessionIceCandidate(session, candidateObj) {
+        function handleSessionIceCandidate(session, candidateObj, sendInitialSdpCallback) {
             if (!session || !candidateObj) {
-                concludeIceGathering(session, 'no candidate');
+                finishInitialSdpCandidateWait(session, 'no candidate', false);
                 return;
             }
 
             const label = session._iceLabel || `${session.direction || 'session'}`;
             const tracker = getIceTracker(session, label);
+            if (typeof sendInitialSdpCallback === 'function') {
+                tracker.sendInitialSdpCallback = sendInitialSdpCallback;
+            }
             const candidateString = candidateObj.candidate || '';
 
             if (!candidateString) {
-                concludeIceGathering(session, 'null candidate');
+                finishInitialSdpCandidateWait(session, 'null candidate', false);
                 return;
             }
 
             const now = Date.now();
-            if (!tracker.startedAt) {
-                tracker.startedAt = now;
-                tracker.status = 'gathering';
-                log(`${tracker.label} - ICE gathering started`);
+            if (!tracker.waitStartedAt) {
+                startInitialSdpCandidateWait(tracker);
+                log(`${tracker.label} - started waiting for initial SDP candidates`);
+                updateIceStatsDisplay(session);
             }
 
             const parsed = parseIceCandidate(candidateString, candidateObj);
             const entry = {
-                ts: tracker.startedAt ? now - tracker.startedAt : 0,
+                ts: tracker.waitStartedAt ? now - tracker.waitStartedAt : 0,
                 candidate: parsed.raw,
                 type: parsed.type,
                 address: parsed.address,
@@ -1362,15 +1509,17 @@
             };
 
             if (entry.candidate && tracker.candidates.some((c) => c.candidate === entry.candidate)) {
+                considerCandidateForInitialSdp(session, parsed.type);
                 scheduleIceInactivityTimeout(session);
-                updateIceStatsDisplay(session, 'gathering');
+                updateIceStatsDisplay(session);
                 return;
             }
 
             tracker.candidates.push(entry);
             const addrText = parsed.address ? `${parsed.address}${parsed.port ? `:${parsed.port}` : ''}` : 'address unavailable';
             log(`${tracker.label} - candidate #${tracker.candidates.length}: ${parsed.type || 'unknown'} ${addrText} (+${formatMs(entry.ts)})`);
-            updateIceStatsDisplay(session, 'gathering');
+            considerCandidateForInitialSdp(session, parsed.type);
+            updateIceStatsDisplay(session);
             scheduleIceInactivityTimeout(session);
         }
 
@@ -1568,7 +1717,7 @@
                 const outgoingName = lastOutgoingCallLabel || callTargetInput.value.trim() || remoteUser || 'unknown';
                 const incomingName = remoteUser || 'unknown';
                 session._iceLabel = isIncoming ? `incoming:${incomingName}` : `outgoing:${outgoingName}`;
-                resetIceStats(`<div><strong>Call:</strong> ${session._iceLabel}</div><div><strong>Status:</strong> waiting for candidates</div>`);
+                resetIceStats(`<div><strong>Call:</strong> ${session._iceLabel}</div><div><strong>Initial SDP:</strong> waiting for candidates for initial SDP</div>`);
 
                 session._timing = {};
                 if (data.originator === 'local') {
@@ -1607,28 +1756,29 @@
                     signalingState: pc.signalingState || null
                 };
                 startSessionStatsPolling(session, pc);
-                updateIceStatsDisplay(session, tracker.status);
 
                 pc.addEventListener('icegatheringstatechange', () => {
                     const state = pc.iceGatheringState;
+                    tracker.gatheringState = state || 'unknown';
                     log(`${statsLabel} - iceGatheringState -> ${state}`);
-                    if (state === 'gathering' && !tracker.startedAt) {
-                        tracker.startedAt = Date.now();
-                        tracker.status = 'gathering';
+                    if (state === 'gathering' && !tracker.waitStartedAt) {
+                        startInitialSdpCandidateWait(tracker);
                         updateIceStatsDisplay(session);
                     }
-                    if (state === 'complete' && tracker.startedAt && !tracker.endedAt) {
-                        concludeIceGathering(session, 'ice gathering complete');
+                    if (state === 'complete') {
+                        markBrowserIceGatheringFinished(session, 'ice gathering complete');
+                        if (!tracker.waitFinishedAt) {
+                            finishInitialSdpCandidateWait(session, 'ice gathering complete', false);
+                        }
+                        return;
                     }
+                    updateIceStatsDisplay(session);
                 });
 
                 pc.addEventListener('iceconnectionstatechange', () => {
                     const state = pc.iceConnectionState;
                     tracker.pcStates.iceConnectionState = state || null;
                     log(`${statsLabel} - iceConnectionState -> ${state}`);
-                    if ((state === 'connected' || state === 'completed') && tracker.startedAt && !tracker.endedAt) {
-                        concludeIceGathering(session, 'ice connection completed');
-                    }
                     void pollPeerConnectionStats(session, pc);
                 });
 
@@ -1643,7 +1793,12 @@
                     }
                 });
 
-                updateIceStatsDisplay(session, tracker.status);
+                pc.addEventListener('icecandidateerror', (event) => {
+                    const url = event && event.url ? event.url : 'unknown-url';
+                    const code = event && event.errorCode ? event.errorCode : 'unknown-code';
+                    const text = event && event.errorText ? ` ${event.errorText}` : '';
+                    log(`${statsLabel} - icecandidateerror url=${url} code=${code}${text}`);
+                });
             } catch (e) {
                 log(`monitorIceGatheringJs error: ${e.message}`);
             }
@@ -1883,10 +2038,7 @@
             session.on('confirmed', () => {
                 log('Call state: Established');
                 callInfo.textContent = `Connected to ${session.remote_identity.display_name || session.remote_identity.uri.user}`;
-            });
 
-            // log handshake timings when call is confirmed/established
-            session.on('confirmed', () => {
                 try {
                     const t = session._timing || {};
                     const remoteUser = (session.remote_identity && session.remote_identity.uri && session.remote_identity.uri.user) || 'peer';
@@ -1963,7 +2115,7 @@
 
             session.on('icecandidate', (event) => {
                 try {
-                    handleSessionIceCandidate(session, event ? event.candidate : null);
+                    handleSessionIceCandidate(session, event ? event.candidate : null, event ? event.ready : null);
                 } catch (error) {
                     log(`handleSessionIceCandidate error: ${error.message}`);
                 }
@@ -1971,6 +2123,11 @@
         }
 
         function attachMedia(peerconnection) {
+            if (!peerconnection || peerconnection._mediaAttached) {
+                return;
+            }
+            peerconnection._mediaAttached = true;
+
             const remoteAudioStream = new MediaStream();
             const remoteVideoStream = new MediaStream();
 
@@ -2095,6 +2252,7 @@
         function endCall() {
             if (currentSession) {
                 stopSessionStatsPolling(currentSession);
+                clearIceTrackerTimers(currentSession._iceTracker);
             }
             callControls.classList.remove('active');
             incomingCallDiv.classList.remove('active');
