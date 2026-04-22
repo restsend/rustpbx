@@ -701,6 +701,23 @@ impl Default for MediaProxyMode {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionTimerMode {
+    Off,
+    Supported,
+    Always,
+}
+
+impl SessionTimerMode {
+    pub fn is_enabled(self) -> bool {
+        !matches!(self, Self::Off)
+    }
+
+    pub fn is_always(self) -> bool {
+        matches!(self, Self::Always)
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, Default)]
 pub struct RtpConfig {
     pub external_ip: Option<String>,
@@ -773,6 +790,8 @@ pub struct ProxyConfig {
     pub routes: Option<Vec<RouteRule>>,
     #[serde(default)]
     pub session_timer: bool,
+    #[serde(default)]
+    pub session_timer_always: bool,
     #[serde(default)]
     pub session_expires: Option<u64>,
     #[serde(default)]
@@ -869,6 +888,16 @@ impl Default for AmiConfig {
 }
 
 impl ProxyConfig {
+    pub fn session_timer_mode(&self) -> SessionTimerMode {
+        if !self.session_timer {
+            SessionTimerMode::Off
+        } else if self.session_timer_always {
+            SessionTimerMode::Always
+        } else {
+            SessionTimerMode::Supported
+        }
+    }
+
     pub fn normalize_realm(realm: &str) -> &str {
         let realm = if let Some(pos) = realm.find(':') {
             &realm[..pos]
@@ -995,6 +1024,7 @@ impl Default for ProxyConfig {
             acl_files: Vec::new(),
             routes: None,
             session_timer: false,
+            session_timer_always: false,
             session_expires: None,
             queues: HashMap::new(),
             queues_files: Vec::new(),
@@ -1255,5 +1285,39 @@ mod tests {
         assert_eq!(config.select_realm("other.com"), "example.com");
         // No match with port, return first realm if configured
         assert_eq!(config.select_realm("other.com:5060"), "example.com");
+    }
+
+    #[test]
+    fn test_session_timer_mode_defaults_to_supported_when_enabled() {
+        #[derive(Deserialize)]
+        struct SessionTimerWrapper {
+            session_timer: bool,
+            #[serde(default)]
+            session_timer_always: bool,
+        }
+
+        let disabled: SessionTimerWrapper = toml::from_str("session_timer=false").unwrap();
+        assert!(!disabled.session_timer);
+        assert!(!disabled.session_timer_always);
+
+        let enabled: SessionTimerWrapper = toml::from_str("session_timer=true").unwrap();
+        assert!(enabled.session_timer);
+        assert!(!enabled.session_timer_always);
+    }
+
+    #[test]
+    fn test_session_timer_mode_uses_always_flag() {
+        let mut config = ProxyConfig::default();
+
+        assert_eq!(config.session_timer_mode(), SessionTimerMode::Off);
+
+        config.session_timer = true;
+        assert_eq!(config.session_timer_mode(), SessionTimerMode::Supported);
+
+        config.session_timer_always = true;
+        assert_eq!(config.session_timer_mode(), SessionTimerMode::Always);
+
+        config.session_timer = false;
+        assert_eq!(config.session_timer_mode(), SessionTimerMode::Off);
     }
 }
