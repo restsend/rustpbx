@@ -40,8 +40,6 @@ cdr/
 #
 # ignore commerce addon files
 # 
-src/addons/wholesale
-miuda.docs
 config/cdr
 config/recorders
 config/models
@@ -59,18 +57,13 @@ config.toml.dev
 *.log
 rustpbx.toml
 .DS_Store
-model.md
 *.raw
 *.db
 /archive/
 /storage/
+*.md
 PRODUCT_ROADMAP.md
 config/voicemail.toml
 config.toml.test
-docs/mcu.md
-docs/rwi_plan.md
-docs/rwi_testing.md
-docs/media_mixer_plan.md
-docs/permission_design.md
 docs/qrcode.png
 docs/rustpbx-product-brief.zh.html
