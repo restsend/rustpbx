@@ -435,32 +435,32 @@ impl MigrationTrait for Migration {
     }
 }
 
-impl Into<CallRecord> for Model {
-    fn into(self) -> CallRecord {
+impl From<Model> for CallRecord {
+    fn from(val: Model) -> Self {
         let details = crate::callrecord::CallDetails {
-            direction: self.direction,
-            status: self.status,
-            from_number: self.from_number.clone(),
-            to_number: self.to_number.clone(),
-            caller_name: self.caller_name,
-            agent_name: self.agent_name,
-            queue: self.queue,
-            department_id: self.department_id,
-            extension_id: self.extension_id,
-            sip_trunk_id: self.sip_trunk_id,
-            route_id: self.route_id,
-            sip_gateway: self.sip_gateway,
-            recording_url: self.recording_url,
-            recording_duration_secs: self.recording_duration_secs,
-            has_transcript: self.has_transcript,
-            transcript_status: Some(self.transcript_status),
-            transcript_language: self.transcript_language,
-            tags: self.tags,
-            metadata: self.metadata.and_then(|v| serde_json::from_value(v).ok()),
+            direction: val.direction,
+            status: val.status,
+            from_number: val.from_number.clone(),
+            to_number: val.to_number.clone(),
+            caller_name: val.caller_name,
+            agent_name: val.agent_name,
+            queue: val.queue,
+            department_id: val.department_id,
+            extension_id: val.extension_id,
+            sip_trunk_id: val.sip_trunk_id,
+            route_id: val.route_id,
+            sip_gateway: val.sip_gateway,
+            recording_url: val.recording_url,
+            recording_duration_secs: val.recording_duration_secs,
+            has_transcript: val.has_transcript,
+            transcript_status: Some(val.transcript_status),
+            transcript_language: val.transcript_language,
+            tags: val.tags,
+            metadata: val.metadata.and_then(|v| serde_json::from_value(v).ok()),
             rewrite: crate::callrecord::CallRecordRewrite {
-                caller_original: self.rewrite_original_from.unwrap_or_default(),
+                caller_original: val.rewrite_original_from.unwrap_or_default(),
                 caller_final: String::new(),
-                callee_original: self.rewrite_original_to.unwrap_or_default(),
+                callee_original: val.rewrite_original_to.unwrap_or_default(),
                 callee_final: String::new(),
                 contact: None,
                 destination: None,
@@ -468,23 +468,23 @@ impl Into<CallRecord> for Model {
             last_error: None,
         };
 
-        let leg_timeline = self
+        let leg_timeline = val
             .leg_timeline
             .and_then(|json| serde_json::from_value(json).ok())
             .unwrap_or_default();
 
         CallRecord {
-            call_id: self.call_id,
-            start_time: self.started_at,
+            call_id: val.call_id,
+            start_time: val.started_at,
             ring_time: None,   // No ring_time in Model
             answer_time: None, // No answer_time in Model
-            end_time: self.ended_at.unwrap_or(self.started_at),
-            caller: self
+            end_time: val.ended_at.unwrap_or(val.started_at),
+            caller: val
                 .caller_uri
-                .unwrap_or_else(|| self.from_number.unwrap_or_default()),
-            callee: self
+                .unwrap_or_else(|| val.from_number.unwrap_or_default()),
+            callee: val
                 .callee_uri
-                .unwrap_or_else(|| self.to_number.unwrap_or_default()),
+                .unwrap_or_else(|| val.to_number.unwrap_or_default()),
             status_code: 0,                                  // No status_code in Model
             hangup_reason: None,                             // No hangup_reason in Model
             hangup_messages: Vec::new(),                     // No hangup_messages in Model

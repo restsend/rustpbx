@@ -234,6 +234,42 @@ pub enum RwiCommandPayload {
         call_id: String,
         last_sequence: Option<u64>,
     },
+    // CC addon commands
+    AgentRegister {
+        agent_id: String,
+        tenant_id: String,
+        skills: Vec<String>,
+        max_concurrency: u32,
+    },
+    AgentUnregister {
+        agent_id: String,
+    },
+    AgentStatusUpdate {
+        agent_id: String,
+        status: String,
+        call_id: Option<String>,
+    },
+    AgentStats {
+        agent_id: Option<String>,
+    },
+    QueueStats {
+        queue_id: Option<String>,
+    },
+    ConsultInitiate {
+        call_id: String,
+        target: String,
+    },
+    ConsultMerge {
+        call_id: String,
+        consultation_call_id: String,
+    },
+    ConsultComplete {
+        call_id: String,
+        consultation_call_id: String,
+    },
+    ConsultCancel {
+        consultation_call_id: String,
+    },
 }
 
 #[derive(Debug, Clone, Deserialize)]

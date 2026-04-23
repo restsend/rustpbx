@@ -80,10 +80,10 @@ pub async fn create_test_server_with_config(
         cancel_token: CancellationToken::new(),
         data_context,
         database: None,
-        user_backend: user_backend,
+        user_backend,
         auth_backend: Vec::new(),
         call_router: None,
-        locator: locator,
+        locator,
         callrecord_sender: None,
         endpoint,
         dialog_layer,
@@ -103,6 +103,7 @@ pub async fn create_test_server_with_config(
         tls_listener: None,
         queue_manager: Arc::new(crate::call::runtime::QueueManager::new()),
         conference_manager: Arc::new(crate::call::runtime::ConferenceManager::new()),
+        agent_registry: None,
         transfer_notify_subscribers: Arc::new(tokio::sync::Mutex::new(Vec::new())),
     });
 
@@ -224,7 +225,7 @@ pub fn create_test_request(
 
     let call_id = rsipstack::sip::headers::CallId::new(random_text(16));
     let cseq = rsipstack::sip::headers::typed::CSeq {
-        seq: 1u32.into(),
+        seq: 1u32,
         method,
     };
 
@@ -277,7 +278,7 @@ pub fn create_test_request(
             username,
             realm,
             demo_nonce,
-            uri.to_string(),
+            uri,
             digest.compute()
         ));
         headers.push(auth_header.into());
@@ -371,7 +372,7 @@ pub fn create_proxy_auth_request_with_nonce(
 
     let call_id = rsipstack::sip::headers::CallId::new(random_text(16));
     let cseq = rsipstack::sip::headers::typed::CSeq {
-        seq: 1u32.into(),
+        seq: 1u32,
         method,
     };
 
@@ -420,7 +421,7 @@ pub fn create_proxy_auth_request_with_nonce(
             username,
             realm,
             nonce,
-            uri.to_string(),
+            uri,
             digest.compute()
         ));
         headers.push(proxy_auth_header.into());

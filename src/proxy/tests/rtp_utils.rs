@@ -192,7 +192,7 @@ impl RtpReceiver {
         debug!("RTP receiver bound to {}", addr);
 
         Ok(Self {
-            socket: socket,
+            socket,
             stats: std::sync::Arc::new(tokio::sync::RwLock::new(RtpStats::default())),
 
             cancel_token: tokio_util::sync::CancellationToken::new(),
@@ -278,7 +278,7 @@ impl RtpSender {
     pub async fn bind() -> Result<Self> {
         let socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await?);
         Ok(Self {
-            socket: socket,
+            socket,
             stats: std::sync::Arc::new(tokio::sync::RwLock::new(RtpStats::default())),
             cancel_token: tokio_util::sync::CancellationToken::new(),
         })

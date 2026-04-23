@@ -192,7 +192,7 @@ impl Locator for DbLocator {
         let SipAddr { r#type, addr } = destination;
         let transport = location
             .transport
-            .or_else(|| r#type.clone())
+            .or(*r#type)
             .unwrap_or(rsipstack::sip::transport::Transport::Udp);
         let host = addr.to_string();
 
@@ -390,7 +390,7 @@ impl Locator for DbLocator {
             if self.is_local_realm(&realm_key).await {
                 realm_key = "localhost".to_string();
             }
-            let username_raw = uri.user().unwrap_or_else(|| "");
+            let username_raw = uri.user().unwrap_or("");
             let username_trimmed = username_raw.trim();
             let username_key = username_trimmed.to_ascii_lowercase();
 

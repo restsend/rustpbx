@@ -1,202 +1,112 @@
 <!DOCTYPE html>
 <html lang="en">
-
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>SIP Phone(jssip version 3.10.0)</title>
+    <title>CC SIP Phone (jssip 3.10.0)</title>
     <style>
+        * { box-sizing: border-box; }
         body {
-            font-family: Arial, sans-serif;
-            max-width: 1100px;
+            font-family: 'Segoe UI', Arial, sans-serif;
+            max-width: 1400px;
             margin: 0 auto;
             padding: 20px;
             background-color: #f5f5f5;
         }
-
         .container {
             background: white;
             padding: 30px;
             border-radius: 10px;
-            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.1);
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
         }
-
         .layout {
             display: flex;
             gap: 20px;
             flex-wrap: wrap;
         }
-
-        .left-panel,
-        .right-panel {
-            flex: 1 1 320px;
+        .left-panel, .right-panel {
+            flex: 1 1 380px;
             display: flex;
             flex-direction: column;
             gap: 20px;
         }
-
         .section {
-            margin-bottom: 30px;
+            margin-bottom: 20px;
             padding: 20px;
             border: 1px solid #ddd;
             border-radius: 5px;
         }
-
         .section h3 {
             margin-top: 0;
             color: #333;
+            border-bottom: 2px solid #007bff;
+            padding-bottom: 8px;
         }
-
-        .section-header {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            gap: 12px;
-            margin-bottom: 10px;
-        }
-
-        .section-header h3 {
-            margin: 0;
-        }
-
         .form-group {
             margin-bottom: 15px;
         }
-
         label {
             display: block;
             margin-bottom: 5px;
             font-weight: bold;
+            font-size: 13px;
         }
-
-        input[type="text"],
-        input[type="password"],
-        input[type="url"],
-        input[type="tel"],
-        input[type="number"],
-        textarea,
-        button {
+        input[type="text"], input[type="password"], input[type="url"], input[type="tel"], input[type="number"], textarea, button, select {
             padding: 10px;
             border: 1px solid #ddd;
             border-radius: 4px;
             width: 100%;
             box-sizing: border-box;
+            font-size: 13px;
         }
-
-        input[type="checkbox"] {
-            width: auto;
-            margin-right: 8px;
-        }
-
-        input::placeholder,
-        textarea::placeholder {
-            color: rgba(148, 163, 184, 0.7);
-            opacity: 1;
-        }
-
+        input[type="checkbox"] { width: auto; margin-right: 8px; }
         label.checkbox-inline {
             display: inline-flex;
             align-items: center;
             gap: 8px;
+            font-weight: normal;
         }
-
         button {
             background: #007bff;
             color: white;
             cursor: pointer;
             margin-top: 10px;
+            font-weight: 600;
         }
-
-        button:hover {
-            background: #0056b3;
-        }
-
-        .icon-btn {
-            width: 32px;
-            height: 32px;
-            padding: 0;
-            margin-top: 0;
-            flex-shrink: 0;
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            background: #fff;
-            color: #475569;
-            border: 1px solid #d0d7de;
-        }
-
-        .icon-btn:hover {
-            background: #f1f5f9;
-            color: #0f172a;
-        }
-
-        .icon-btn svg {
-            width: 16px;
-            height: 16px;
-            fill: currentColor;
-        }
-
-        .icon-btn.copied {
-            background: #dcfce7;
-            border-color: #86efac;
-            color: #166534;
-        }
-
-        .icon-btn.copy-failed {
-            background: #fee2e2;
-            border-color: #fca5a5;
-            color: #991b1b;
-        }
-
-        button:disabled {
-            background: #ccc;
-            cursor: not-allowed;
-        }
-
+        button:hover { background: #0056b3; }
+        button:disabled { background: #ccc; cursor: not-allowed; }
+        button.secondary { background: #6c757d; }
+        button.secondary:hover { background: #545b62; }
+        button.danger { background: #dc3545; }
+        button.danger:hover { background: #c82333; }
+        button.success { background: #28a745; }
+        button.success:hover { background: #218838; }
+        button.warning { background: #ffc107; color: #212529; }
+        button.warning:hover { background: #e0a800; }
         .status {
             padding: 10px;
             margin: 10px 0;
             border-radius: 4px;
+            font-size: 13px;
         }
-
-        .status.success {
-            background: #d4edda;
-            color: #155724;
-            border: 1px solid #c3e6cb;
-        }
-
-        .status.error {
-            background: #f8d7da;
-            color: #721c24;
-            border: 1px solid #f5c6cb;
-        }
-
-        .status.info {
-            background: #d1ecf1;
-            color: #0c5460;
-            border: 1px solid #bee5eb;
-        }
-
-        .call-controls {
-            display: none;
-        }
-
-        .call-controls.active {
-            display: block;
-        }
-
+        .status.success { background: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
+        .status.error { background: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
+        .status.info { background: #d1ecf1; color: #0c5460; border: 1px solid #bee5eb; }
+        .status.warning { background: #fff3cd; color: #856404; border: 1px solid #ffeaa7; }
+        .call-controls { display: none; }
+        .call-controls.active { display: block; }
         .logs {
-            height: 300px;
+            height: 280px;
             overflow-y: auto;
             overflow-x: hidden;
             background: #f8f9fa;
             padding: 10px;
             border: 1px solid #ddd;
-            font-family: monospace;
+            font-family: 'Consolas', 'Monaco', monospace;
             font-size: 12px;
             word-break: break-all;
+            border-radius: 4px;
         }
-
         .incoming-call {
             display: none;
             background: #fff3cd;
@@ -205,38 +115,21 @@
             border-radius: 5px;
             margin: 10px 0;
         }
-
-        .incoming-call.active {
-            display: block;
-        }
-
-        .call-info {
-            margin: 10px 0;
-        }
-
+        .incoming-call.active { display: block; }
+        .call-info { margin: 10px 0; font-weight: bold; }
         .video-container {
             display: none;
             gap: 10px;
             flex-wrap: wrap;
         }
-
-        .video-container.active {
-            display: flex;
-        }
-
+        .video-container.active { display: flex; }
         .video-box {
             flex: 1 1 200px;
             display: flex;
             flex-direction: column;
             align-items: center;
         }
-
-        .video-box label {
-            font-size: 12px;
-            color: #666;
-            margin-bottom: 4px;
-        }
-
+        .video-box label { font-size: 12px; color: #666; margin-bottom: 4px; }
         .video-box video {
             width: 100%;
             max-width: 320px;
@@ -246,24 +139,147 @@
             aspect-ratio: 16/9;
         }
 
-        @media (max-width: 768px) {
-            body {
-                max-width: 100%;
-            }
+        /* Stats Panel */
+        .stats-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+            margin-top: 10px;
+        }
+        .stat-box {
+            background: #f8f9fa;
+            border: 1px solid #e9ecef;
+            border-radius: 4px;
+            padding: 10px;
+            text-align: center;
+        }
+        .stat-box .stat-label {
+            font-size: 11px;
+            color: #6c757d;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+        .stat-box .stat-value {
+            font-size: 18px;
+            font-weight: bold;
+            color: #212529;
+            margin-top: 4px;
+        }
+        .stat-box .stat-value.good { color: #28a745; }
+        .stat-box .stat-value.warning { color: #ffc107; }
+        .stat-box .stat-value.bad { color: #dc3545; }
 
-            .layout {
-                flex-direction: column;
-            }
+        /* Quality Bar */
+        .quality-bar {
+            width: 100%;
+            height: 8px;
+            background: #e9ecef;
+            border-radius: 4px;
+            overflow: hidden;
+            margin-top: 6px;
+        }
+        .quality-bar-fill {
+            height: 100%;
+            border-radius: 4px;
+            transition: width 0.5s ease, background-color 0.5s ease;
+        }
+        .quality-bar-fill.good { background: #28a745; }
+        .quality-bar-fill.warning { background: #ffc107; }
+        .quality-bar-fill.bad { background: #dc3545; }
+
+        /* CC Controls */
+        .cc-controls {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 8px;
+            margin-top: 10px;
+        }
+        .cc-controls button {
+            margin-top: 0;
+            padding: 8px;
+            font-size: 12px;
+        }
+
+        /* Debug Panel */
+        .debug-panel {
+            background: #1e1e1e;
+            color: #d4d4d4;
+            font-family: 'Consolas', 'Monaco', monospace;
+            font-size: 12px;
+            padding: 10px;
+            border-radius: 4px;
+            max-height: 200px;
+            overflow-y: auto;
+        }
+        .debug-panel .debug-entry {
+            margin-bottom: 4px;
+            padding: 2px 0;
+            border-bottom: 1px solid #333;
+        }
+        .debug-panel .debug-time { color: #858585; }
+        .debug-panel .debug-info { color: #4fc1ff; }
+        .debug-panel .debug-warn { color: #ffcc00; }
+        .debug-panel .debug-error { color: #f48771; }
+
+        /* Tabs */
+        .tabs {
+            display: flex;
+            border-bottom: 2px solid #dee2e6;
+            margin-bottom: 15px;
+        }
+        .tab {
+            padding: 10px 20px;
+            cursor: pointer;
+            border: none;
+            background: none;
+            color: #6c757d;
+            font-weight: 600;
+            margin: 0;
+            border-bottom: 2px solid transparent;
+            margin-bottom: -2px;
+        }
+        .tab:hover { color: #495057; }
+        .tab.active {
+            color: #007bff;
+            border-bottom-color: #007bff;
+        }
+        .tab-content { display: none; }
+        .tab-content.active { display: block; }
+
+        /* Transfer Dialog */
+        .transfer-dialog {
+            display: none;
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: rgba(0,0,0,0.5);
+            z-index: 1000;
+            justify-content: center;
+            align-items: center;
+        }
+        .transfer-dialog.active { display: flex; }
+        .transfer-dialog-content {
+            background: white;
+            padding: 30px;
+            border-radius: 8px;
+            max-width: 400px;
+            width: 90%;
+        }
+
+        @media (max-width: 768px) {
+            body { max-width: 100%; padding: 10px; }
+            .layout { flex-direction: column; }
+            .stats-grid { grid-template-columns: 1fr; }
+            .cc-controls { grid-template-columns: 1fr; }
         }
     </style>
 </head>
-
 <body>
     <div class="container">
-        <h1>SIP Phone(jssip version 3.10.0)</h1>
+        <h1>CC SIP Phone <small style="font-size:14px;color:#6c757d;">(jssip 3.10.0 + CC Debug)</small></h1>
 
         <div class="layout">
             <div class="left-panel">
+                <!-- Registration -->
                 <div class="section">
                     <h3>Registration</h3>
                     <div class="form-group">
@@ -283,29 +299,64 @@
                         <input type="text" id="displayName" value="Bob" placeholder="Bob">
                     </div>
                     <div class="form-group">
-                        <label class="checkbox-inline"><input type="checkbox" id="iceEnable" checked> Enable ICE
-                            servers</label>
-                        <label class="checkbox-inline" style="margin-left:16px;"><input type="checkbox" id="relayOnly">
-                            Relay Only</label>
-                        <textarea id="iceServers" rows="3"
-                            style="width:100%;margin-top:6px;">[{"urls":"stun:stun.l.google.com:19302"}]</textarea>
+                        <label class="checkbox-inline"><input type="checkbox" id="iceEnable" checked> Enable ICE servers</label>
+                        <label class="checkbox-inline" style="margin-left:16px;"><input type="checkbox" id="relayOnly"> Relay Only</label>
+                        <textarea id="iceServers" rows="3" style="width:100%;margin-top:6px;">[{"urls":"stun:stun.l.google.com:19302"}]</textarea>
                     </div>
                     <button id="registerBtn">Register</button>
-                    <button id="unregisterBtn" disabled>Unregister</button>
+                    <button id="unregisterBtn" disabled class="secondary">Unregister</button>
                     <div id="registrationStatus"></div>
                 </div>
 
+                <!-- Call Quality & Stats -->
                 <div class="section">
-                    <div class="section-header">
-                        <h3>Logs</h3>
-                        <button type="button" id="copyLogsBtn" class="icon-btn" title="Copy Logs"
-                            aria-label="Copy Logs">
-                            <svg viewBox="0 0 24 24" aria-hidden="true">
-                                <path
-                                    d="M16 1H6a2 2 0 0 0-2 2v12h2V3h10V1zm3 4H10a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h9a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2zm0 16h-9V7h9v14z" />
-                            </svg>
-                        </button>
+                    <h3>Call Quality & Stats</h3>
+                    <div class="stats-grid">
+                        <div class="stat-box">
+                            <div class="stat-label">Quality (MOS)</div>
+                            <div class="stat-value" id="mosValue">--</div>
+                            <div class="quality-bar">
+                                <div class="quality-bar-fill" id="mosBar" style="width:0%"></div>
+                            </div>
+                        </div>
+                        <div class="stat-box">
+                            <div class="stat-label">RTT (ms)</div>
+                            <div class="stat-value" id="rttValue">--</div>
+                        </div>
+                        <div class="stat-box">
+                            <div class="stat-label">Packet Loss</div>
+                            <div class="stat-value" id="lossValue">--</div>
+                        </div>
+                        <div class="stat-box">
+                            <div class="stat-label">Jitter (ms)</div>
+                            <div class="stat-value" id="jitterValue">--</div>
+                        </div>
+                        <div class="stat-box">
+                            <div class="stat-label">RX Packets</div>
+                            <div class="stat-value" id="rxPackets">--</div>
+                        </div>
+                        <div class="stat-box">
+                            <div class="stat-label">TX Packets</div>
+                            <div class="stat-value" id="txPackets">--</div>
+                        </div>
+                        <div class="stat-box">
+                            <div class="stat-label">RX Bytes</div>
+                            <div class="stat-value" id="rxBytes">--</div>
+                        </div>
+                        <div class="stat-box">
+                            <div class="stat-label">TX Bytes</div>
+                            <div class="stat-value" id="txBytes">--</div>
+                        </div>
                     </div>
+                    <div style="margin-top:10px;">
+                        <button type="button" id="refreshStatsBtn" style="width:auto;">Refresh Stats</button>
+                        <button type="button" id="resetStatsBtn" class="secondary" style="width:auto;">Reset</button>
+                    </div>
+                </div>
+
+                <!-- Logs -->
+                <div class="section">
+                    <h3>Logs</h3>
                     <div class="logs" id="logs"></div>
                     <div style="margin-top:8px;display:flex;gap:8px;">
                         <button onclick="clearLogs()">Clear Logs</button>
@@ -314,6 +365,7 @@
             </div>
 
             <div class="right-panel">
+                <!-- Make Call -->
                 <div class="section">
                     <h3>Make Call</h3>
                     <div class="form-group">
@@ -327,66 +379,72 @@
                         <label>Video Source:</label>
                         <div style="margin-bottom:6px;">
                             <label class="checkbox-inline" style="margin-right:16px;">
-                                <input type="radio" name="videoSource" id="videoSourceCamera" value="camera" checked>
-                                Camera
+                                <input type="radio" name="videoSource" id="videoSourceCamera" value="camera" checked> Camera
                             </label>
                             <label class="checkbox-inline">
-                                <input type="radio" name="videoSource" id="videoSourceClock" value="clock">
-                                Clock (Virtual)
+                                <input type="radio" name="videoSource" id="videoSourceClock" value="clock"> Clock (Virtual)
                             </label>
                         </div>
                         <div id="cameraSelectorDiv">
                             <div style="display:flex;gap:6px;align-items:center;">
-                                <select id="cameraSelect"
-                                    style="flex:1;padding:8px;border:1px solid #ddd;border-radius:4px;font-size:13px;">
+                                <select id="cameraSelect" style="flex:1;padding:8px;border:1px solid #ddd;border-radius:4px;font-size:13px;">
                                     <option value="">Default Camera</option>
                                 </select>
-                                <button type="button" id="refreshCamerasBtn"
-                                    style="width:auto;flex-shrink:0;margin:0;padding:8px 10px;"
-                                    title="Refresh camera list">&#x21BB;</button>
+                                <button type="button" id="refreshCamerasBtn" style="width:auto;flex-shrink:0;margin:0;padding:8px 10px;" title="Refresh camera list">&#x21BB;</button>
                             </div>
                         </div>
                         <div id="videoPreviewDiv" style="display:none;margin-top:8px;">
-                            <canvas id="clockCanvas" width="320" height="240"
-                                style="width:100%;border-radius:4px;display:block;background:#111;"></canvas>
+                            <canvas id="clockCanvas" width="320" height="240" style="width:100%;border-radius:4px;display:block;background:#111;"></canvas>
                         </div>
                     </div>
                     <button id="callBtn" disabled>Call</button>
 
                     <div class="call-controls" id="callControls">
                         <div class="call-info" id="callInfo"></div>
-                        <button id="hangupBtn">Hang Up</button>
+                        <button id="hangupBtn" class="danger">Hang Up</button>
                         <button id="muteBtn">Mute</button>
                         <button id="holdBtn">Hold</button>
+                        <button id="transferBtn" class="warning">Transfer</button>
+                        <button id="consultBtn" class="success">Consult (BC)</button>
                     </div>
                 </div>
 
                 <div class="incoming-call" id="incomingCall">
                     <h3>Incoming Call</h3>
                     <div id="callerInfo"></div>
-                    <button id="answerBtn">Answer</button>
-                    <button id="rejectBtn">Reject</button>
+                    <button id="answerBtn" class="success">Answer</button>
+                    <button id="rejectBtn" class="danger">Reject</button>
                 </div>
 
+                <!-- CC Call Control -->
                 <div class="section">
-                    <div class="section-header">
-                        <h3>ICE Stats</h3>
-                        <button type="button" id="copyIceStatsBtn" class="icon-btn" title="Copy ICE Stats"
-                            aria-label="Copy ICE Stats">
-                            <svg viewBox="0 0 24 24" aria-hidden="true">
-                                <path
-                                    d="M16 1H6a2 2 0 0 0-2 2v12h2V3h10V1zm3 4H10a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h9a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2zm0 16h-9V7h9v14z" />
-                            </svg>
-                        </button>
+                    <h3>CC Call Control</h3>
+                    <div id="ccStatus" class="status info">No active CC call</div>
+                    <div class="cc-controls">
+                        <button id="ccHoldBtn" disabled>Hold</button>
+                        <button id="ccUnholdBtn" disabled>Unhold</button>
+                        <button id="ccTransferBtn" disabled>Blind Transfer</button>
+                        <button id="ccConsultBtn" disabled>Consult</button>
+                        <button id="ccMergeBtn" disabled>Merge (3-way)</button>
+                        <button id="ccSwapBtn" disabled>Swap</button>
                     </div>
-                    <div class="logs" id="iceStats" style="height:220px;">
+                    <div class="form-group" style="margin-top:10px;">
+                        <label for="transferTarget">Transfer/Consult Target:</label>
+                        <input type="text" id="transferTarget" placeholder="sip:user@domain or extension">
+                    </div>
+                </div>
+
+                <!-- ICE Stats -->
+                <div class="section">
+                    <h3>ICE Stats</h3>
+                    <div class="logs" id="iceStats" style="height:180px;">
                         <em>No ICE data yet.</em>
                     </div>
                     <div style="margin-top:8px;display:flex;gap:8px;">
                         <button type="button" id="runIceDiagBtn" style="width:auto;">Run ICE Diagnostics</button>
                         <button type="button" id="clearIceDiagBtn" style="width:auto;">Clear ICE Diagnostics</button>
                     </div>
-                    <div class="logs" id="iceDiagResults" style="height:180px;margin-top:8px;">
+                    <div class="logs" id="iceDiagResults" style="height:140px;margin-top:8px;">
                         <em>No diagnostics yet.</em>
                     </div>
                     <div class="video-container" id="videoContainer">
@@ -402,20 +460,77 @@
                     <audio id="remoteAudio" autoplay style="display:none;"></audio>
                     <audio id="localAudio" muted autoplay style="display:none;"></audio>
                 </div>
+
+                <!-- CC Debug Panel -->
+                <div class="section">
+                    <h3>CC Debug & Test</h3>
+                    <div class="tabs">
+                        <button class="tab active" data-tab="debug-ws">WebSocket</button>
+                        <button class="tab" data-tab="debug-state">Call State</button>
+                        <button class="tab" data-tab="debug-sip">SIP Messages</button>
+                    </div>
+                    <div class="tab-content active" id="debug-ws">
+                        <div class="form-group">
+                            <label>CC WebSocket URL:</label>
+                            <input type="text" id="ccWsUrl" placeholder="ws://localhost:8080/ws/ccphone">
+                        </div>
+                        <div class="form-group">
+                            <label>CC Raw Command (JSON):</label>
+                            <textarea id="ccRawCommand" rows="3">{"action":"status.update","status":"idle"}</textarea>
+                        </div>
+                        <button type="button" id="connectCcWsBtn" style="width:auto;">Connect CC WS</button>
+                        <button type="button" id="disconnectCcWsBtn" class="secondary" style="width:auto;">Disconnect</button>
+                        <button type="button" id="sendCcCmdBtn" class="warning" style="width:auto;">Send Command</button>
+                        <div id="ccWsStatus" class="status info" style="margin-top:10px;">CC WS: disconnected</div>
+                        <div class="debug-panel" id="ccWsLog" style="margin-top:10px;height:150px;"></div>
+                    </div>
+                    <div class="tab-content" id="debug-state">
+                        <div class="debug-panel" id="callStateDebug" style="height:200px;">
+                            <div class="debug-entry">No active call</div>
+                        </div>
+                        <button type="button" id="refreshStateBtn" style="width:auto;margin-top:8px;">Refresh State</button>
+                    </div>
+                    <div class="tab-content" id="debug-sip">
+                        <div class="debug-panel" id="sipMessagesLog" style="height:200px;"></div>
+                        <button type="button" id="clearSipLogBtn" class="secondary" style="width:auto;margin-top:8px;">Clear SIP Log</button>
+                    </div>
+                </div>
             </div>
         </div>
     </div>
 
-    <script src="https://jssip.net/download/releases/jssip-3.10.0.min.js"></script>
+    <!-- Transfer Dialog -->
+    <div class="transfer-dialog" id="transferDialog">
+        <div class="transfer-dialog-content">
+            <h3>Transfer Call</h3>
+            <div class="form-group">
+                <label>Transfer To:</label>
+                <input type="text" id="dialogTransferTarget" placeholder="Extension or SIP URI">
+            </div>
+            <div style="display:flex;gap:10px;">
+                <button id="confirmTransferBtn" class="success" style="flex:1;">Transfer</button>
+                <button id="cancelTransferBtn" class="secondary" style="flex:1;">Cancel</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="//jssip.net/download/releases/jssip-3.10.0.min.js"></script>
     <script>
         'use strict';
 
+        // ========== Global State ==========
         let ua = null;
         let currentSession = null;
+        let consultSession = null;  // For consultative transfer (BC)
         let isMuted = false;
         let isOnHold = false;
+        let isConsultOnHold = false;
         let isRegistered = false;
+        let statsInterval = null;
+        let ccWs = null;
+        let sipMessageLog = [];
 
+        // ========== DOM Elements ==========
         const serverInput = document.getElementById('server');
         const usernameInput = document.getElementById('username');
         const passwordInput = document.getElementById('password');
@@ -430,6 +545,8 @@
         const hangupBtn = document.getElementById('hangupBtn');
         const muteBtn = document.getElementById('muteBtn');
         const holdBtn = document.getElementById('holdBtn');
+        const transferBtn = document.getElementById('transferBtn');
+        const consultBtn = document.getElementById('consultBtn');
         const incomingCallDiv = document.getElementById('incomingCall');
         const callerInfo = document.getElementById('callerInfo');
         const answerBtn = document.getElementById('answerBtn');
@@ -463,21 +580,158 @@
         let iceServersManuallyEdited = false;
         let iceDiagInProgress = false;
 
+        // CC Elements
+        const ccStatus = document.getElementById('ccStatus');
+        const ccHoldBtn = document.getElementById('ccHoldBtn');
+        const ccUnholdBtn = document.getElementById('ccUnholdBtn');
+        const ccTransferBtn = document.getElementById('ccTransferBtn');
+        const ccConsultBtn = document.getElementById('ccConsultBtn');
+        const ccMergeBtn = document.getElementById('ccMergeBtn');
+        const ccSwapBtn = document.getElementById('ccSwapBtn');
+        const transferTargetInput = document.getElementById('transferTarget');
+        const transferDialog = document.getElementById('transferDialog');
+        const dialogTransferTarget = document.getElementById('dialogTransferTarget');
+        const confirmTransferBtn = document.getElementById('confirmTransferBtn');
+        const cancelTransferBtn = document.getElementById('cancelTransferBtn');
+
+        // Debug Elements
+        const ccWsUrlInput = document.getElementById('ccWsUrl');
+        const connectCcWsBtn = document.getElementById('connectCcWsBtn');
+        const disconnectCcWsBtn = document.getElementById('disconnectCcWsBtn');
+        const ccWsStatus = document.getElementById('ccWsStatus');
+        const ccWsLog = document.getElementById('ccWsLog');
+        const ccRawCommandInput = document.getElementById('ccRawCommand');
+        const sendCcCmdBtn = document.getElementById('sendCcCmdBtn');
+        const callStateDebug = document.getElementById('callStateDebug');
+        const refreshStateBtn = document.getElementById('refreshStateBtn');
+        const sipMessagesLog = document.getElementById('sipMessagesLog');
+        const clearSipLogBtn = document.getElementById('clearSipLogBtn');
+
+        // Stats Elements
+        const mosValue = document.getElementById('mosValue');
+        const mosBar = document.getElementById('mosBar');
+        const rttValue = document.getElementById('rttValue');
+        const lossValue = document.getElementById('lossValue');
+        const jitterValue = document.getElementById('jitterValue');
+        const rxPackets = document.getElementById('rxPackets');
+        const txPackets = document.getElementById('txPackets');
+        const rxBytes = document.getElementById('rxBytes');
+        const txBytes = document.getElementById('txBytes');
+
+        // ========== Event Listeners ==========
+        registerBtn.addEventListener('click', register);
+        unregisterBtn.addEventListener('click', unregister);
+        callBtn.addEventListener('click', makeCall);
+        hangupBtn.addEventListener('click', hangup);
+        muteBtn.addEventListener('click', toggleMute);
+        holdBtn.addEventListener('click', toggleHold);
+        transferBtn.addEventListener('click', showTransferDialog);
+        consultBtn.addEventListener('click', startConsultation);
+        answerBtn.addEventListener('click', answerCall);
+        rejectBtn.addEventListener('click', rejectCall);
+
+        // CC Controls
+        ccHoldBtn.addEventListener('click', () => ccHold(true));
+        ccUnholdBtn.addEventListener('click', () => ccHold(false));
+        ccTransferBtn.addEventListener('click', () => ccBlindTransfer());
+        ccConsultBtn.addEventListener('click', () => startConsultation());
+        ccMergeBtn.addEventListener('click', () => mergeCalls());
+        ccSwapBtn.addEventListener('click', () => swapCalls());
+
+        // Transfer Dialog
+        confirmTransferBtn.addEventListener('click', doTransfer);
+        cancelTransferBtn.addEventListener('click', hideTransferDialog);
+
+        // Debug
+        connectCcWsBtn.addEventListener('click', connectCcWebSocket);
+        disconnectCcWsBtn.addEventListener('click', disconnectCcWebSocket);
+        if (sendCcCmdBtn) sendCcCmdBtn.addEventListener('click', sendRawCcCommand);
+        refreshStateBtn.addEventListener('click', updateCallStateDebug);
+        clearSipLogBtn.addEventListener('click', () => {
+            sipMessageLog = [];
+            sipMessagesLog.innerHTML = '';
+        });
+
         if (iceServersInput) {
             iceServersInput.addEventListener('input', () => {
                 iceServersManuallyEdited = true;
             });
         }
 
-        // Helper to get API base path from current script path
+        // Stats
+        document.getElementById('refreshStatsBtn').addEventListener('click', refreshStats);
+        document.getElementById('resetStatsBtn').addEventListener('click', resetStats);
+
+        if (runIceDiagBtn) runIceDiagBtn.addEventListener('click', runIceDiagnostics);
+        if (clearIceDiagBtn) clearIceDiagBtn.addEventListener('click', () => resetIceDiagnostics());
+
+        if (enableVideoCheckbox) {
+            enableVideoCheckbox.addEventListener('change', () => {
+                if (videoSourceGroup) videoSourceGroup.style.display = enableVideoCheckbox.checked ? '' : 'none';
+                if (enableVideoCheckbox.checked) {
+                    enumerateCameras();
+                    const isClock = document.getElementById('videoSourceClock') && document.getElementById('videoSourceClock').checked;
+                    if (isClock) startClockPreview();
+                } else {
+                    stopClockPreview();
+                }
+            });
+        }
+
+        document.querySelectorAll('input[name="videoSource"]').forEach((radio) => {
+            radio.addEventListener('change', () => {
+                const isCam = document.getElementById('videoSourceCamera').checked;
+                if (cameraSelectorDiv) cameraSelectorDiv.style.display = isCam ? '' : 'none';
+                if (isCam) stopClockPreview(); else startClockPreview();
+            });
+        });
+
+        if (refreshCamerasBtn) refreshCamerasBtn.addEventListener('click', enumerateCameras);
+
+        // Tabs
+        document.querySelectorAll('.tab').forEach(tab => {
+            tab.addEventListener('click', () => {
+                document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+                document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+                tab.classList.add('active');
+                document.getElementById(tab.dataset.tab).classList.add('active');
+            });
+        });
+
+        // ========== Helper Functions ==========
+        function log(message) {
+            const timestamp = new Date().toLocaleTimeString();
+            const entry = document.createElement('div');
+            entry.textContent = `[${timestamp}] ${message}`;
+            logs.appendChild(entry);
+            logs.scrollTop = logs.scrollHeight;
+            console.log(message);
+        }
+
+        function clearLogs() {
+            logs.innerHTML = '';
+            resetIceStats();
+        }
+
+        function showStatus(message, type = 'info') {
+            registrationStatus.className = `status ${type}`;
+            registrationStatus.textContent = message;
+        }
+
+        function getDomain(serverUrl) {
+            try {
+                const url = new URL(serverUrl);
+                return url.hostname;
+            } catch (error) {
+                log(`Invalid server URL: ${error.message}`);
+                throw error;
+            }
+        }
+
         function getApiBasePath() {
             const path = window.location.pathname || '/';
             const staticIndex = path.indexOf('/static/');
-            if (staticIndex === -1) {
-                return '';
-            }
-
-            // /rustpbx/static/phone_jssip.html -> /rustpbx
+            if (staticIndex === -1) return '';
             const base = path.slice(0, staticIndex).replace(/\/+$/, '');
             return base === '/' ? '' : base;
         }
@@ -485,43 +739,25 @@
         function withApiBase(pathname) {
             const base = getApiBasePath();
             const normalizedPath = (pathname || '/').startsWith('/') ? pathname : `/${pathname}`;
-            if (!base) {
-                return normalizedPath;
-            }
-            if (normalizedPath === base || normalizedPath.startsWith(`${base}/`)) {
-                return normalizedPath;
-            }
+            if (!base) return normalizedPath;
+            if (normalizedPath === base || normalizedPath.startsWith(`${base}/`)) return normalizedPath;
             return `${base}${normalizedPath}`;
         }
 
-        // Detect API and WebSocket base path from current URL or fetch from server
         async function detectServerConfig() {
             try {
-                // Try to fetch config from server
                 const response = await fetch(withApiBase('/api/config/phone'));
-                if (response.ok) {
-                    return await response.json();
-                }
-            } catch (e) {
-                // Ignore error, use defaults
-            }
-            // Default config
-            return {
-                wsPath: withApiBase('/ws'),
-                iceServersPath: withApiBase('/iceservers')
-            };
+                if (response.ok) return await response.json();
+            } catch (e) {}
+            return { wsPath: withApiBase('/ws'), iceServersPath: withApiBase('/iceservers') };
         }
 
         const defaultServerUrl = (() => {
             const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
             const host = window.location.host || 'localhost:8080';
-            // Check if we have a custom ws path from query params or localStorage
             const urlParams = new URLSearchParams(window.location.search);
             const customWsPath = urlParams.get('ws') || localStorage.getItem('phone_ws_path');
-            if (customWsPath && /^wss?:\/\//i.test(customWsPath)) {
-                return customWsPath;
-            }
-
+            if (customWsPath && /^wss?:\/\//i.test(customWsPath)) return customWsPath;
             const pathRaw = customWsPath || (serverInput && serverInput.dataset && serverInput.dataset.defaultPath) || '/ws';
             const path = withApiBase(pathRaw);
             return `${protocol}//${host}${path}`;
@@ -534,31 +770,38 @@
             }
         }
 
+        // Set default CC WS URL
+        if (ccWsUrlInput) {
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const host = window.location.host || 'localhost:8080';
+            ccWsUrlInput.value = `${protocol}//${host}${withApiBase('/ws/ccphone')}`;
+        }
+
         function formatMs(ms) {
             if (ms == null) return '--';
             if (ms < 1000) return ms + ' ms';
             return (ms / 1000).toFixed(2) + ' s';
         }
 
+        function formatBytes(bytes) {
+            if (bytes == null) return '--';
+            if (bytes < 1024) return bytes + ' B';
+            if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+            return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+        }
+
+        // ========== ICE Functions ==========
         function resetIceStats(message = '<em>No ICE data yet.</em>') {
-            if (iceStatsPanel) {
-                iceStatsPanel.innerHTML = message;
-            }
+            if (iceStatsPanel) iceStatsPanel.innerHTML = message;
         }
 
         function resetIceDiagnostics(message = '<em>No diagnostics yet.</em>') {
-            if (iceDiagResults) {
-                iceDiagResults.innerHTML = message;
-            }
+            if (iceDiagResults) iceDiagResults.innerHTML = message;
         }
 
         function appendIceDiagnostic(message) {
-            if (!iceDiagResults) {
-                return;
-            }
-            if (iceDiagResults.querySelector('em')) {
-                iceDiagResults.innerHTML = '';
-            }
+            if (!iceDiagResults) return;
+            if (iceDiagResults.querySelector('em')) iceDiagResults.innerHTML = '';
             const line = document.createElement('div');
             const timestamp = new Date().toLocaleTimeString();
             line.textContent = `[${timestamp}] ${message}`;
@@ -631,139 +874,73 @@
 
         function parseIceServersConfig(rawValue) {
             const parsed = JSON.parse(rawValue);
-            const list = Array.isArray(parsed)
-                ? parsed
-                : (parsed && Array.isArray(parsed.iceServers))
-                    ? parsed.iceServers
-                    : parsed
-                        ? [parsed]
-                        : [];
-
+            const list = Array.isArray(parsed) ? parsed : (parsed && Array.isArray(parsed.iceServers)) ? parsed.iceServers : parsed ? [parsed] : [];
             const normalized = list.filter((item) => item && item.urls);
-            if (!normalized.length) {
-                throw new Error('iceServers is empty or invalid');
-            }
+            if (!normalized.length) throw new Error('iceServers is empty or invalid');
             return normalized;
         }
 
         const relayOnlyCheckbox = document.getElementById('relayOnly');
 
         function getEnabledPcConfigFromUi() {
-            if (!iceEnable || !iceEnable.checked) {
-                return null;
-            }
-            if (!iceServersInput) {
-                throw new Error('ICE servers input not found');
-            }
+            if (!iceEnable || !iceEnable.checked) return null;
+            if (!iceServersInput) throw new Error('ICE servers input not found');
             const iceServers = parseIceServersConfig(iceServersInput.value);
             const config = { iceServers };
-            if (relayOnlyCheckbox && relayOnlyCheckbox.checked) {
-                config.iceTransportPolicy = 'relay';
-            }
+            if (relayOnlyCheckbox && relayOnlyCheckbox.checked) config.iceTransportPolicy = 'relay';
             return config;
         }
 
         async function runIceDiagnostics() {
-            if (iceDiagInProgress) {
-                appendIceDiagnostic('Diagnostics already running');
-                return;
-            }
-            if (!window.RTCPeerConnection) {
-                appendIceDiagnostic('RTCPeerConnection is not supported in this browser');
-                return;
-            }
+            if (iceDiagInProgress) { appendIceDiagnostic('Diagnostics already running'); return; }
+            if (!window.RTCPeerConnection) { appendIceDiagnostic('RTCPeerConnection is not supported'); return; }
 
             let pcConfig;
-            try {
-                pcConfig = getEnabledPcConfigFromUi();
-            } catch (error) {
-                appendIceDiagnostic(`ICE config invalid: ${error.message}`);
-                return;
+            try { pcConfig = getEnabledPcConfigFromUi(); } catch (error) {
+                appendIceDiagnostic(`ICE config invalid: ${error.message}`); return;
             }
-
-            if (!pcConfig) {
-                appendIceDiagnostic('ICE servers are disabled. Enable the checkbox first.');
-                return;
-            }
+            if (!pcConfig) { appendIceDiagnostic('ICE servers are disabled'); return; }
 
             const startedAt = Date.now();
             const candidates = [];
-            let closed = false;
-            let timeoutId = null;
-            let pc = null;
+            let closed = false, timeoutId = null, pc = null;
 
             const finish = (reason) => {
-                if (closed) {
-                    return;
-                }
-                closed = true;
-                iceDiagInProgress = false;
-                if (runIceDiagBtn) {
-                    runIceDiagBtn.disabled = false;
-                }
-                if (timeoutId) {
-                    clearTimeout(timeoutId);
-                    timeoutId = null;
-                }
-                if (pc) {
-                    try {
-                        pc.close();
-                    } catch (e) {
-                    }
-                }
-
+                if (closed) return;
+                closed = true; iceDiagInProgress = false;
+                if (runIceDiagBtn) runIceDiagBtn.disabled = false;
+                if (timeoutId) { clearTimeout(timeoutId); timeoutId = null; }
+                if (pc) { try { pc.close(); } catch (e) {} }
                 const elapsed = Date.now() - startedAt;
-                const typeCounts = candidates.reduce((acc, c) => {
-                    const t = c.type || 'unknown';
-                    acc[t] = (acc[t] || 0) + 1;
-                    return acc;
-                }, {});
-                const summary = Object.keys(typeCounts).length
-                    ? Object.keys(typeCounts).map((k) => `${k}:${typeCounts[k]}`).join(', ')
-                    : 'none';
-                appendIceDiagnostic(`Diagnostics finished (${reason}) in ${formatMs(elapsed)}; candidates=${candidates.length}; types=${summary}`);
-                if (!candidates.some((c) => c.type === 'relay')) {
-                    appendIceDiagnostic('No relay candidate found. TURN may be unreachable or not configured.');
-                }
+                const typeCounts = candidates.reduce((acc, c) => { acc[c.type || 'unknown'] = (acc[c.type || 'unknown'] || 0) + 1; return acc; }, {});
+                const summary = Object.keys(typeCounts).length ? Object.keys(typeCounts).map((k) => `${k}:${typeCounts[k]}`).join(', ') : 'none';
+                appendIceDiagnostic(`Finished (${reason}) in ${formatMs(elapsed)}; candidates=${candidates.length}; types=${summary}`);
+                if (!candidates.some((c) => c.type === 'relay')) appendIceDiagnostic('No relay candidate found');
             };
 
             resetIceDiagnostics('<em>Running ICE diagnostics...</em>');
             appendIceDiagnostic(`Using ${pcConfig.iceServers.length} configured ICE server(s)`);
             iceDiagInProgress = true;
-            if (runIceDiagBtn) {
-                runIceDiagBtn.disabled = true;
-            }
+            if (runIceDiagBtn) runIceDiagBtn.disabled = true;
 
             try {
                 pc = new RTCPeerConnection(pcConfig);
                 pc.createDataChannel('ice-diagnostics');
-
                 pc.addEventListener('icegatheringstatechange', () => {
                     appendIceDiagnostic(`iceGatheringState=${pc.iceGatheringState}`);
-                    if (pc.iceGatheringState === 'complete') {
-                        finish('ice gathering complete');
-                    }
+                    if (pc.iceGatheringState === 'complete') finish('ice gathering complete');
                 });
-
                 pc.addEventListener('icecandidateerror', (event) => {
-                    const url = event && event.url ? event.url : 'unknown-url';
-                    const code = event && event.errorCode ? event.errorCode : 'unknown-code';
-                    appendIceDiagnostic(`icecandidateerror url=${url} code=${code}`);
+                    appendIceDiagnostic(`icecandidateerror url=${event && event.url || 'unknown'} code=${event && event.errorCode || 'unknown'}`);
                 });
-
                 pc.addEventListener('icecandidate', (event) => {
-                    if (!event || !event.candidate) {
-                        finish('null candidate');
-                        return;
-                    }
+                    if (!event || !event.candidate) { finish('null candidate'); return; }
                     const parsed = parseIceCandidate(event.candidate.candidate, event.candidate);
                     candidates.push(parsed);
                     const addrText = parsed.address ? `${parsed.address}${parsed.port ? `:${parsed.port}` : ''}` : 'address unavailable';
                     appendIceDiagnostic(`candidate #${candidates.length}: ${parsed.type || 'unknown'} ${addrText}`);
                 });
-
                 timeoutId = setTimeout(() => finish('timeout'), 10000);
-
                 const offer = await pc.createOffer({ offerToReceiveAudio: false, offerToReceiveVideo: false });
                 await pc.setLocalDescription(offer);
             } catch (error) {
@@ -772,38 +949,18 @@
             }
         }
 
-        resetIceStats();
-        resetIceDiagnostics();
-
         async function loadDefaultIceServers() {
-            if (!iceServersInput || iceServersManuallyEdited) {
-                return;
-            }
+            if (!iceServersInput || iceServersManuallyEdited) return;
             try {
-                const iceServersUrl = withApiBase('/iceservers');
-                const response = await fetch(iceServersUrl, { cache: 'no-store' });
-                if (!response.ok) {
-                    throw new Error(`status ${response.status}`);
-                }
+                const response = await fetch(withApiBase('/iceservers'), { cache: 'no-store' });
+                if (!response.ok) throw new Error(`status ${response.status}`);
                 const payload = await response.json();
-                const servers = Array.isArray(payload)
-                    ? payload
-                    : (payload && Array.isArray(payload.iceServers))
-                        ? payload.iceServers
-                        : payload
-                            ? [payload]
-                            : null;
-                if (!servers || !servers.length) {
-                    throw new Error('empty ICE server list');
-                }
-                if (iceServersManuallyEdited) {
-                    return;
-                }
+                const servers = Array.isArray(payload) ? payload : (payload && Array.isArray(payload.iceServers)) ? payload.iceServers : payload ? [payload] : null;
+                if (!servers || !servers.length) throw new Error('empty ICE server list');
+                if (iceServersManuallyEdited) return;
                 iceServersInput.value = JSON.stringify(servers);
-                if (iceEnable) {
-                    iceEnable.checked = true;
-                }
-                log(`Loaded ICE servers from ${iceServersUrl}`);
+                if (iceEnable) iceEnable.checked = true;
+                log(`Loaded ICE servers from ${withApiBase('/iceservers')}`);
             } catch (error) {
                 log(`Failed to load ${withApiBase('/iceservers')}: ${error.message}`);
             }
@@ -813,438 +970,25 @@
         const WEBRTC_STATS_INTERVAL = 1000;
 
         function getIceTracker(session, label = 'session') {
-            if (!session) {
-                return null;
-            }
+            if (!session) return null;
             if (!session._iceTracker) {
-                session._iceTracker = {
-                    label,
-                    candidates: [],
-                    startedAt: null,
-                    endedAt: null,
-                    inactivityTimer: null,
-                    gatherDuration: null,
-                    status: 'waiting for candidates',
-                    pcStates: {
-                        iceConnectionState: null,
-                        connectionState: null,
-                        signalingState: null
-                    },
-                    selectedPair: null,
-                    mediaStats: {
-                        inbound: {},
-                        outbound: {}
-                    },
-                    lastStatsByReportId: {},
-                    statsIntervalId: null,
-                    statsInFlight: false,
-                    statsPc: null,
-                    statsError: null
-                };
-            } else if (label && session._iceTracker.label !== label) {
-                session._iceTracker.label = label;
-            }
-
+                session._iceTracker = { label, candidates: [], startedAt: null, endedAt: null, inactivityTimer: null, gatherDuration: null, status: 'waiting for candidates' };
+            } else if (label && session._iceTracker.label !== label) session._iceTracker.label = label;
             session._iceCandidates = session._iceTracker.candidates;
             return session._iceTracker;
         }
 
-        function escapeHtml(value) {
-            return String(value == null ? '' : value)
-                .replace(/&/g, '&amp;')
-                .replace(/</g, '&lt;')
-                .replace(/>/g, '&gt;')
-                .replace(/"/g, '&quot;')
-                .replace(/'/g, '&#39;');
-        }
-
-        function parseNumber(value) {
-            const numeric = typeof value === 'number' ? value : Number(value);
-            return Number.isFinite(numeric) ? numeric : null;
-        }
-
-        function formatBitrate(bitsPerSecond) {
-            const numeric = parseNumber(bitsPerSecond);
-            if (numeric == null || numeric < 0) {
-                return '--';
-            }
-            if (numeric >= 1000000) {
-                return `${(numeric / 1000000).toFixed(2)} Mbps`;
-            }
-            if (numeric >= 1000) {
-                return `${(numeric / 1000).toFixed(1)} kbps`;
-            }
-            return `${Math.round(numeric)} bps`;
-        }
-
-        function formatPercent(fraction) {
-            const numeric = parseNumber(fraction);
-            if (numeric == null) {
-                return '--';
-            }
-            return `${(numeric * 100).toFixed(1)}%`;
-        }
-
-        function shortCodecName(mimeType, fallbackPayloadType) {
-            if (typeof mimeType === 'string' && mimeType.includes('/')) {
-                return mimeType.split('/').pop();
-            }
-            if (fallbackPayloadType != null) {
-                return `pt:${fallbackPayloadType}`;
-            }
-            return null;
-        }
-
-        function createMediaBucket(kind) {
-            return {
-                kind,
-                bitrate: 0,
-                bitrateSamples: 0,
-                bytes: 0,
-                packets: 0,
-                packetsLost: 0,
-                jitterSeconds: null,
-                codecs: new Set()
-            };
-        }
-
-        function getMediaBucket(directionStats, kind) {
-            const normalizedKind = kind || 'unknown';
-            if (!directionStats[normalizedKind]) {
-                directionStats[normalizedKind] = createMediaBucket(normalizedKind);
-            }
-            return directionStats[normalizedKind];
-        }
-
-        function finalizeMediaDirection(directionStats) {
-            const finalized = {};
-            Object.keys(directionStats).forEach((kind) => {
-                const bucket = directionStats[kind];
-                const lossBase = bucket.packets + bucket.packetsLost;
-                finalized[kind] = {
-                    kind,
-                    bitrate: bucket.bitrateSamples > 0 ? bucket.bitrate : null,
-                    bytes: bucket.bytes,
-                    packets: bucket.packets,
-                    packetsLost: bucket.packetsLost,
-                    lossRate: lossBase > 0 ? (bucket.packetsLost / lossBase) : null,
-                    jitterSeconds: bucket.jitterSeconds,
-                    codecs: Array.from(bucket.codecs).sort()
-                };
-            });
-            return finalized;
-        }
-
-        function summarizeSelectedCandidate(candidateStats) {
-            if (!candidateStats) {
-                return null;
-            }
-            return {
-                id: candidateStats.id || null,
-                address: candidateStats.address || candidateStats.ip || null,
-                port: parseNumber(candidateStats.port),
-                protocol: candidateStats.protocol || null,
-                candidateType: candidateStats.candidateType || candidateStats.type || null,
-                relayProtocol: candidateStats.relayProtocol || null,
-                networkType: candidateStats.networkType || null
-            };
-        }
-
-        function formatCandidateSummary(candidate) {
-            if (!candidate) {
-                return '—';
-            }
-            const pieces = [];
-            if (candidate.candidateType) {
-                pieces.push(candidate.candidateType);
-            }
-            if (candidate.protocol) {
-                pieces.push(String(candidate.protocol).toUpperCase());
-            }
-            const address = candidate.address || 'address unavailable';
-            const port = candidate.port != null ? `:${candidate.port}` : '';
-            pieces.push(`${address}${port}`);
-            if (candidate.relayProtocol) {
-                pieces.push(`relay=${candidate.relayProtocol}`);
-            }
-            if (candidate.networkType) {
-                pieces.push(`net=${candidate.networkType}`);
-            }
-            return pieces.join(' ');
-        }
-
-        function findSelectedCandidatePair(stats) {
-            if (!stats) {
-                return null;
-            }
-
-            let pairStats = null;
-            stats.forEach((report) => {
-                if (pairStats || report.type !== 'transport' || !report.selectedCandidatePairId) {
-                    return;
-                }
-                pairStats = stats.get(report.selectedCandidatePairId) || null;
-            });
-
-            if (!pairStats) {
-                stats.forEach((report) => {
-                    if (pairStats || report.type !== 'candidate-pair') {
-                        return;
-                    }
-                    if (report.selected || (report.nominated && report.state === 'succeeded')) {
-                        pairStats = report;
-                    }
-                });
-            }
-
-            if (!pairStats) {
-                return null;
-            }
-
-            return {
-                state: pairStats.state || null,
-                nominated: Boolean(pairStats.nominated),
-                currentRoundTripTime: parseNumber(pairStats.currentRoundTripTime),
-                availableIncomingBitrate: parseNumber(pairStats.availableIncomingBitrate),
-                availableOutgoingBitrate: parseNumber(pairStats.availableOutgoingBitrate),
-                local: summarizeSelectedCandidate(stats.get(pairStats.localCandidateId)),
-                remote: summarizeSelectedCandidate(stats.get(pairStats.remoteCandidateId))
-            };
-        }
-
-        function collectMediaStats(stats, previousStatsByReportId) {
-            const codecNames = {};
-            const nextStatsByReportId = {};
-            const directionStats = {
-                inbound: {},
-                outbound: {}
-            };
-
-            stats.forEach((report) => {
-                if (report.type !== 'codec') {
-                    return;
-                }
-                const codecName = shortCodecName(report.mimeType, report.payloadType);
-                if (codecName) {
-                    codecNames[report.id] = codecName;
-                }
-            });
-
-            stats.forEach((report) => {
-                if ((report.type !== 'inbound-rtp' && report.type !== 'outbound-rtp') || report.isRemote) {
-                    return;
-                }
-
-                const direction = report.type === 'inbound-rtp' ? 'inbound' : 'outbound';
-                const kind = report.kind || report.mediaType || 'unknown';
-                const bucket = getMediaBucket(directionStats[direction], kind);
-                const timestamp = parseNumber(report.timestamp);
-                const bytesField = direction === 'inbound' ? 'bytesReceived' : 'bytesSent';
-                const packetsField = direction === 'inbound' ? 'packetsReceived' : 'packetsSent';
-                const bytes = parseNumber(report[bytesField]) || 0;
-                const packets = parseNumber(report[packetsField]) || 0;
-
-                if (timestamp != null) {
-                    nextStatsByReportId[report.id] = {
-                        timestamp,
-                        bytes
-                    };
-                }
-
-                bucket.bytes += bytes;
-                bucket.packets += packets;
-
-                if (direction === 'inbound') {
-                    bucket.packetsLost += parseNumber(report.packetsLost) || 0;
-                    const jitterSeconds = parseNumber(report.jitter);
-                    if (jitterSeconds != null) {
-                        bucket.jitterSeconds = bucket.jitterSeconds == null
-                            ? jitterSeconds
-                            : Math.max(bucket.jitterSeconds, jitterSeconds);
-                    }
-                }
-
-                const codecName = codecNames[report.codecId];
-                if (codecName) {
-                    bucket.codecs.add(codecName);
-                }
-
-                const previous = previousStatsByReportId ? previousStatsByReportId[report.id] : null;
-                if (!previous || previous.timestamp == null || previous.bytes == null || timestamp == null) {
-                    return;
-                }
-                const deltaMs = timestamp - previous.timestamp;
-                const deltaBytes = bytes - previous.bytes;
-                if (deltaMs <= 0 || deltaBytes < 0) {
-                    return;
-                }
-                bucket.bitrate += (deltaBytes * 8 * 1000) / deltaMs;
-                bucket.bitrateSamples += 1;
-            });
-
-            return {
-                inbound: finalizeMediaDirection(directionStats.inbound),
-                outbound: finalizeMediaDirection(directionStats.outbound),
-                nextStatsByReportId
-            };
-        }
-
-        function stopSessionStatsPolling(session) {
-            const tracker = session && session._iceTracker;
-            if (!tracker) {
-                return;
-            }
-            if (tracker.statsIntervalId) {
-                clearInterval(tracker.statsIntervalId);
-                tracker.statsIntervalId = null;
-            }
-            tracker.statsInFlight = false;
-            tracker.statsPc = null;
-            tracker.lastStatsByReportId = {};
-        }
-
-        async function pollPeerConnectionStats(session, pc) {
-            const tracker = getIceTracker(session, session && (session._iceLabel || `${session.direction || 'session'}`));
-            if (!tracker || !pc || tracker.statsInFlight || typeof pc.getStats !== 'function') {
-                return;
-            }
-
-            tracker.statsInFlight = true;
-            try {
-                const stats = await pc.getStats();
-                if (tracker.statsPc !== pc) {
-                    return;
-                }
-                tracker.pcStates = {
-                    iceConnectionState: pc.iceConnectionState || null,
-                    connectionState: pc.connectionState || null,
-                    signalingState: pc.signalingState || null
-                };
-                tracker.selectedPair = findSelectedCandidatePair(stats);
-                const mediaStats = collectMediaStats(stats, tracker.lastStatsByReportId);
-                tracker.mediaStats = {
-                    inbound: mediaStats.inbound,
-                    outbound: mediaStats.outbound
-                };
-                tracker.lastStatsByReportId = mediaStats.nextStatsByReportId;
-                tracker.statsError = null;
-                updateIceStatsDisplay(session);
-            } catch (error) {
-                tracker.statsError = error.message;
-            } finally {
-                tracker.statsInFlight = false;
-            }
-        }
-
-        function startSessionStatsPolling(session, pc) {
-            const tracker = getIceTracker(session, session && (session._iceLabel || `${session.direction || 'session'}`));
-            if (!tracker || !pc || typeof pc.getStats !== 'function') {
-                return;
-            }
-            if (tracker.statsPc === pc && tracker.statsIntervalId) {
-                return;
-            }
-
-            stopSessionStatsPolling(session);
-            tracker.statsPc = pc;
-            void pollPeerConnectionStats(session, pc);
-            tracker.statsIntervalId = setInterval(() => {
-                void pollPeerConnectionStats(session, pc);
-            }, WEBRTC_STATS_INTERVAL);
-        }
-
         function updateIceStatsDisplay(session, statusText) {
-            if (!iceStatsPanel) {
-                return;
-            }
+            if (!iceStatsPanel) return;
             const tracker = getIceTracker(session, session && (session._iceLabel || `${session.direction || 'session'}`));
-            if (!tracker) {
-                return;
-            }
-            if (statusText) {
-                tracker.status = statusText;
-            }
-
+            if (!tracker) return;
+            if (statusText) tracker.status = statusText;
             const parts = [
                 `<div><strong>Call:</strong> ${escapeHtml(tracker.label)}</div>`,
                 `<div><strong>Candidates:</strong> ${tracker.candidates.length}</div>`
             ];
-            if (tracker.gatherDuration != null) {
-                parts.push(`<div><strong>Gathering time:</strong> ${formatMs(tracker.gatherDuration)}</div>`);
-            }
-            if (tracker.status) {
-                parts.push(`<div><strong>Status:</strong> ${escapeHtml(tracker.status)}</div>`);
-            }
-            if (tracker.pcStates && (tracker.pcStates.iceConnectionState || tracker.pcStates.connectionState || tracker.pcStates.signalingState)) {
-                const stateBits = [];
-                if (tracker.pcStates.iceConnectionState) {
-                    stateBits.push(`ice=${tracker.pcStates.iceConnectionState}`);
-                }
-                if (tracker.pcStates.connectionState) {
-                    stateBits.push(`pc=${tracker.pcStates.connectionState}`);
-                }
-                if (tracker.pcStates.signalingState) {
-                    stateBits.push(`sig=${tracker.pcStates.signalingState}`);
-                }
-                parts.push(`<div><strong>States:</strong> ${escapeHtml(stateBits.join(', '))}</div>`);
-            }
-            if (tracker.selectedPair) {
-                const pair = tracker.selectedPair;
-                const pairBits = [];
-                if (pair.state) {
-                    pairBits.push(`state=${pair.state}`);
-                }
-                if (pair.nominated) {
-                    pairBits.push('nominated');
-                }
-                if (pair.currentRoundTripTime != null) {
-                    pairBits.push(`rtt=${formatMs(Math.round(pair.currentRoundTripTime * 1000))}`);
-                }
-                if (pair.availableOutgoingBitrate != null) {
-                    pairBits.push(`avail-out=${formatBitrate(pair.availableOutgoingBitrate)}`);
-                }
-                if (pair.availableIncomingBitrate != null) {
-                    pairBits.push(`avail-in=${formatBitrate(pair.availableIncomingBitrate)}`);
-                }
-                parts.push('<hr>');
-                parts.push(`<div><strong>Selected pair:</strong> ${escapeHtml(pairBits.join(', ') || 'detected')}</div>`);
-                parts.push(`<div><strong>Local:</strong> ${escapeHtml(formatCandidateSummary(pair.local))}</div>`);
-                parts.push(`<div><strong>Remote:</strong> ${escapeHtml(formatCandidateSummary(pair.remote))}</div>`);
-            }
-
-            const mediaSections = [];
-            ['inbound', 'outbound'].forEach((direction) => {
-                const directionStats = tracker.mediaStats && tracker.mediaStats[direction] ? tracker.mediaStats[direction] : {};
-                const kinds = Object.keys(directionStats).sort();
-                kinds.forEach((kind) => {
-                    const metric = directionStats[kind];
-                    const fragments = [
-                        `${kind}: ${formatBitrate(metric.bitrate)}`,
-                        `packets=${metric.packets}`
-                    ];
-                    if (direction === 'inbound') {
-                        fragments.push(`lost=${metric.packetsLost}`);
-                        if (metric.lossRate != null) {
-                            fragments.push(`loss=${formatPercent(metric.lossRate)}`);
-                        }
-                        if (metric.jitterSeconds != null) {
-                            fragments.push(`jitter=${formatMs(Math.round(metric.jitterSeconds * 1000))}`);
-                        }
-                    }
-                    if (metric.codecs && metric.codecs.length) {
-                        fragments.push(`codec=${metric.codecs.join('/')}`);
-                    }
-                    mediaSections.push(`<div>${escapeHtml(`${direction} ${fragments.join(', ')}`)}</div>`);
-                });
-            });
-            if (mediaSections.length) {
-                parts.push('<hr>');
-                parts.push('<div><strong>Media:</strong></div>');
-                parts.push(mediaSections.join(''));
-            } else if (tracker.statsError) {
-                parts.push('<hr>');
-                parts.push(`<div><strong>Media:</strong> ${escapeHtml(`stats unavailable (${tracker.statsError})`)}</div>`);
-            }
+            if (tracker.gatherDuration != null) parts.push(`<div><strong>Gathering time:</strong> ${formatMs(tracker.gatherDuration)}</div>`);
+            if (tracker.status) parts.push(`<div><strong>Status:</strong> ${tracker.status}</div>`);
             if (tracker.candidates.length) {
                 const rows = tracker.candidates.map((c, i) => {
                     const primaryAddress = c.address ? `${c.address}${c.port ? `:${c.port}` : ''}` : 'address unavailable';
@@ -1254,7 +998,6 @@
                 parts.push('<hr>');
                 parts.push(rows.join('<br>'));
             }
-
             iceStatsPanel.innerHTML = parts.join('');
         }
 
@@ -1276,97 +1019,52 @@
                     }
                     if (!out.type) {
                         const typeIndex = parts.indexOf('typ');
-                        if (typeIndex > -1 && parts[typeIndex + 1]) {
-                            out.type = parts[typeIndex + 1];
-                        }
+                        if (typeIndex > -1 && parts[typeIndex + 1]) out.type = parts[typeIndex + 1];
                     }
-                    if (!out.protocol && parts.length >= 3) {
-                        out.protocol = parts[2];
-                    }
+                    if (!out.protocol && parts.length >= 3) out.protocol = parts[2];
                     const raddrIndex = parts.indexOf('raddr');
                     const rportIndex = parts.indexOf('rport');
-                    if (!out.relatedAddress && raddrIndex > -1 && parts[raddrIndex + 1]) {
-                        out.relatedAddress = parts[raddrIndex + 1];
-                    }
+                    if (!out.relatedAddress && raddrIndex > -1 && parts[raddrIndex + 1]) out.relatedAddress = parts[raddrIndex + 1];
                     if (!out.relatedPort && rportIndex > -1 && parts[rportIndex + 1]) {
                         const parsedRport = parseInt(parts[rportIndex + 1], 10);
                         out.relatedPort = Number.isNaN(parsedRport) ? null : parsedRport;
                     }
                 }
-            } catch (error) {
-                // ignore parsing errors, we fall back to raw candidate
-            }
+            } catch (error) {}
             return out;
         }
 
         function concludeIceGathering(session, reason) {
             const tracker = session && session._iceTracker;
-            if (!tracker || tracker.endedAt) {
-                return;
-            }
+            if (!tracker || tracker.endedAt) return;
             tracker.endedAt = Date.now();
             tracker.gatherDuration = tracker.startedAt ? (tracker.endedAt - tracker.startedAt) : null;
             const readableReason = reason ? reason.replace(/_/g, ' ') : 'completed';
             tracker.status = readableReason;
             session._iceGatherDuration = tracker.gatherDuration;
             log(`${tracker.label} - ICE gathering finished (${readableReason})${tracker.gatherDuration != null ? `, duration=${formatMs(tracker.gatherDuration)}` : ''}`);
-            if (tracker.inactivityTimer) {
-                clearTimeout(tracker.inactivityTimer);
-                tracker.inactivityTimer = null;
-            }
+            if (tracker.inactivityTimer) { clearTimeout(tracker.inactivityTimer); tracker.inactivityTimer = null; }
             updateIceStatsDisplay(session);
         }
 
         function scheduleIceInactivityTimeout(session) {
             const tracker = session && session._iceTracker;
-            if (!tracker) {
-                return;
-            }
-            if (tracker.inactivityTimer) {
-                clearTimeout(tracker.inactivityTimer);
-            }
+            if (!tracker) return;
+            if (tracker.inactivityTimer) clearTimeout(tracker.inactivityTimer);
             tracker.inactivityTimer = setTimeout(() => concludeIceGathering(session, 'inactivity timeout'), ICE_INACTIVITY_TIMEOUT);
         }
 
         function handleSessionIceCandidate(session, candidateObj) {
-            if (!session || !candidateObj) {
-                concludeIceGathering(session, 'no candidate');
-                return;
-            }
-
+            if (!session || !candidateObj) { concludeIceGathering(session, 'no candidate'); return; }
             const label = session._iceLabel || `${session.direction || 'session'}`;
             const tracker = getIceTracker(session, label);
             const candidateString = candidateObj.candidate || '';
-
-            if (!candidateString) {
-                concludeIceGathering(session, 'null candidate');
-                return;
-            }
-
+            if (!candidateString) { concludeIceGathering(session, 'null candidate'); return; }
             const now = Date.now();
-            if (!tracker.startedAt) {
-                tracker.startedAt = now;
-                tracker.status = 'gathering';
-                log(`${tracker.label} - ICE gathering started`);
-            }
-
+            if (!tracker.startedAt) { tracker.startedAt = now; tracker.status = 'gathering'; log(`${tracker.label} - ICE gathering started`); }
             const parsed = parseIceCandidate(candidateString, candidateObj);
-            const entry = {
-                ts: tracker.startedAt ? now - tracker.startedAt : 0,
-                candidate: parsed.raw,
-                type: parsed.type,
-                address: parsed.address,
-                port: parsed.port,
-                relatedAddress: parsed.relatedAddress,
-                relatedPort: parsed.relatedPort
-            };
-
-            if (entry.candidate && tracker.candidates.some((c) => c.candidate === entry.candidate)) {
-                scheduleIceInactivityTimeout(session);
-                updateIceStatsDisplay(session, 'gathering');
-                return;
-            }
-
+            const entry = { ts: tracker.startedAt ? now - tracker.startedAt : 0, candidate: parsed.raw, type: parsed.type, address: parsed.address, port: parsed.port, relatedAddress: parsed.relatedAddress, relatedPort: parsed.relatedPort };
+            if (entry.candidate && tracker.candidates.some((c) => c.candidate === entry.candidate)) { scheduleIceInactivityTimeout(session); updateIceStatsDisplay(session, 'gathering'); return; }
             tracker.candidates.push(entry);
             const addrText = parsed.address ? `${parsed.address}${parsed.port ? `:${parsed.port}` : ''}` : 'address unavailable';
             log(`${tracker.label} - candidate #${tracker.candidates.length}: ${parsed.type || 'unknown'} ${addrText} (+${formatMs(entry.ts)})`);
@@ -1374,162 +1072,40 @@
             scheduleIceInactivityTimeout(session);
         }
 
-        registerBtn.addEventListener('click', register);
-        unregisterBtn.addEventListener('click', unregister);
-        callBtn.addEventListener('click', makeCall);
-        hangupBtn.addEventListener('click', hangup);
-        muteBtn.addEventListener('click', toggleMute);
-        holdBtn.addEventListener('click', toggleHold);
-        answerBtn.addEventListener('click', answerCall);
-        rejectBtn.addEventListener('click', rejectCall);
-        if (runIceDiagBtn) {
-            runIceDiagBtn.addEventListener('click', runIceDiagnostics);
-        }
-        if (clearIceDiagBtn) {
-            clearIceDiagBtn.addEventListener('click', () => resetIceDiagnostics());
-        }
-        if (copyLogsBtn) {
-            copyLogsBtn.addEventListener('click', () => {
-                void copyPanelText(logs, copyLogsBtn, 'Logs Empty', 'Logs Copied');
-            });
-        }
-        if (copyIceStatsBtn) {
-            copyIceStatsBtn.addEventListener('click', () => {
-                void copyPanelText(iceStatsPanel, copyIceStatsBtn, 'Stats Empty', 'Stats Copied');
-            });
-        }
-
-        if (enableVideoCheckbox) {
-            enableVideoCheckbox.addEventListener('change', () => {
-                if (videoSourceGroup) {
-                    videoSourceGroup.style.display = enableVideoCheckbox.checked ? '' : 'none';
-                }
-                if (enableVideoCheckbox.checked) {
-                    enumerateCameras();
-                    const isClock = document.getElementById('videoSourceClock') && document.getElementById('videoSourceClock').checked;
-                    if (isClock) startClockPreview();
-                } else {
-                    stopClockPreview();
-                }
-            });
-        }
-
-        document.querySelectorAll('input[name="videoSource"]').forEach((radio) => {
-            radio.addEventListener('change', () => {
-                const isCam = document.getElementById('videoSourceCamera').checked;
-                if (cameraSelectorDiv) cameraSelectorDiv.style.display = isCam ? '' : 'none';
-                if (isCam) {
-                    stopClockPreview();
-                } else {
-                    startClockPreview();
-                }
-            });
-        });
-
-        if (refreshCamerasBtn) {
-            refreshCamerasBtn.addEventListener('click', enumerateCameras);
-        }
-
-        function log(message) {
-            const timestamp = new Date().toLocaleTimeString();
-            const entry = document.createElement('div');
-            entry.textContent = `[${timestamp}] ${message}`;
-            logs.appendChild(entry);
-            logs.scrollTop = logs.scrollHeight;
-            console.log(message);
-        }
-
-        function clearLogs() {
-            logs.innerHTML = '';
-            resetIceStats();
-        }
-
-        function showStatus(message, type = 'info') {
-            registrationStatus.className = `status ${type}`;
-            registrationStatus.textContent = message;
-        }
-
-        function getDomain(serverUrl) {
-            try {
-                const url = new URL(serverUrl);
-                return url.hostname;
-            } catch (error) {
-                log(`Invalid server URL: ${error.message}`);
-                throw error;
-            }
-        }
-
+        // ========== Registration ==========
         function register() {
-            if (ua) {
-                log('Reusing existing UA, stopping first.');
-                ua.stop();
-                resetRegistrationState();
-            }
-
+            if (ua) { log('Reusing existing UA, stopping first.'); ua.stop(); resetRegistrationState(); }
             const server = serverInput.value.trim();
             const username = usernameInput.value.trim();
             const password = passwordInput.value;
             const displayName = displayNameInput.value.trim();
-
-            if (!server || !username) {
-                showStatus('Please enter server and username', 'error');
-                return;
-            }
-
+            if (!server || !username) { showStatus('Please enter server and username', 'error'); return; }
             let domain;
-            try {
-                domain = getDomain(server);
-            } catch (error) {
-                showStatus('Server URL is invalid', 'error');
-                return;
-            }
-
+            try { domain = getDomain(server); } catch (error) { showStatus('Server URL is invalid', 'error'); return; }
             registerBtn.disabled = true;
             unregisterBtn.disabled = true;
             showStatus('Connecting...', 'info');
             log('Attempting to register via JsSIP...');
 
             const socket = new JsSIP.WebSocketInterface(server);
-            const configuration = {
-                sockets: [socket],
-                uri: `sip:${username}@${domain}`,
-                password: password,
-                display_name: displayName || username,
-                register: true
-            };
-
-            // apply ICE servers if enabled
+            const configuration = { sockets: [socket], uri: `sip:${username}@${domain}`, password: password, display_name: displayName || username, register: true };
             try {
                 const pcConfig = getEnabledPcConfigFromUi();
-                if (pcConfig) {
-                    configuration.pcConfig = pcConfig;
-                    log(`Using custom ICE servers for UA: ${JSON.stringify(configuration.pcConfig)}`);
-                } else {
-                    log('ICE servers disabled (using default)');
-                }
+                if (pcConfig) { configuration.pcConfig = pcConfig; log(`Using custom ICE servers for UA: ${JSON.stringify(configuration.pcConfig)}`); }
+                else log('ICE servers disabled (using default)');
             } catch (e) {
                 showStatus(`ICE servers config invalid: ${e.message}`, 'error');
                 log(`Error applying ICE servers for UA: ${e.message}`);
-                registerBtn.disabled = false;
-                unregisterBtn.disabled = true;
-                return;
+                registerBtn.disabled = false; unregisterBtn.disabled = true; return;
             }
 
             ua = new JsSIP.UA(configuration);
-
-            ua.on('connected', () => {
-                log('WebSocket connected');
-                showStatus('Connected', 'success');
-            });
-
+            ua.on('connected', () => { log('WebSocket connected'); showStatus('Connected', 'success'); });
             ua.on('disconnected', () => {
                 log('WebSocket disconnected');
-                if (isRegistered) {
-                    showStatus('Disconnected', 'error');
-                }
+                if (isRegistered) showStatus('Disconnected', 'error');
                 resetRegistrationState();
             });
-
             ua.on('registered', () => {
                 isRegistered = true;
                 log('Registered successfully');
@@ -1538,29 +1114,19 @@
                 unregisterBtn.disabled = false;
                 callBtn.disabled = false;
             });
-
-            ua.on('unregistered', () => {
-                log('Unregistered from server');
-                showStatus('Unregistered', 'info');
-                resetRegistrationState();
-            });
-
+            ua.on('unregistered', () => { log('Unregistered from server'); showStatus('Unregistered', 'info'); resetRegistrationState(); });
             ua.on('registrationFailed', (data) => {
                 log(`Registration failed: ${data.cause}`);
                 showStatus(`Registration failed: ${data.cause}`, 'error');
-                ua.stop();
-                resetRegistrationState();
+                ua.stop(); resetRegistrationState();
             });
-
             ua.on('newRTCSession', (data) => {
                 const session = data.session;
-
-                if (currentSession) {
-                    log('Already handling a session, rejecting the new one');
+                if (currentSession && consultSession) {
+                    log('Already handling two sessions, rejecting the new one');
                     session.terminate({ status_code: 486, reason_phrase: 'Busy Here' });
                     return;
                 }
-
                 const isIncoming = data.originator === 'remote';
                 incomingCallDiv.classList.remove('active');
                 const remoteIdentity = session.remote_identity || {};
@@ -1569,150 +1135,72 @@
                 const incomingName = remoteUser || 'unknown';
                 session._iceLabel = isIncoming ? `incoming:${incomingName}` : `outgoing:${outgoingName}`;
                 resetIceStats(`<div><strong>Call:</strong> ${session._iceLabel}</div><div><strong>Status:</strong> waiting for candidates</div>`);
-
                 session._timing = {};
-                if (data.originator === 'local') {
-                    session._timing.callSent = lastOutgoingCallTime || Date.now();
-                } else {
-                    session._timing.incomingReceived = Date.now();
-                }
+                if (data.originator === 'local') session._timing.callSent = lastOutgoingCallTime || Date.now();
+                else session._timing.incomingReceived = Date.now();
 
-                currentSession = session;
-                bindSessionEvents(session, isIncoming);
-
-                if (isIncoming) {
-                    const caller = incomingName;
-                    callerInfo.textContent = `Incoming call from: ${caller}`;
-                    incomingCallDiv.classList.add('active');
-                    log(`Incoming call from ${caller}`);
+                if (currentSession && !consultSession) {
+                    // This is a consult call
+                    consultSession = session;
+                    bindConsultSessionEvents(session);
+                    log(`Consult call started to ${outgoingName}`);
+                    updateCcStatus('Consult call in progress');
                 } else {
-                    callInfo.textContent = `Calling ${outgoingName}...`;
-                    callControls.classList.add('active');
+                    currentSession = session;
+                    bindSessionEvents(session, isIncoming);
+                    if (isIncoming) {
+                        callerInfo.textContent = `Incoming call from: ${incomingName}`;
+                        incomingCallDiv.classList.add('active');
+                        log(`Incoming call from ${incomingName}`);
+                    } else {
+                        callInfo.textContent = `Calling ${outgoingName}...`;
+                        callControls.classList.add('active');
+                    }
                 }
             });
-
             ua.start();
         }
 
-        function monitorIceGatheringJs(session, pc, label = 'session') {
-            try {
-                if (!pc || session._iceMonitorAttached) return;
-                session._iceMonitorAttached = true;
-
-                const tracker = getIceTracker(session, label);
-                const statsLabel = tracker.label;
-                tracker.pcStates = {
-                    iceConnectionState: pc.iceConnectionState || null,
-                    connectionState: pc.connectionState || null,
-                    signalingState: pc.signalingState || null
-                };
-                startSessionStatsPolling(session, pc);
-                updateIceStatsDisplay(session, tracker.status);
-
-                pc.addEventListener('icegatheringstatechange', () => {
-                    const state = pc.iceGatheringState;
-                    log(`${statsLabel} - iceGatheringState -> ${state}`);
-                    if (state === 'gathering' && !tracker.startedAt) {
-                        tracker.startedAt = Date.now();
-                        tracker.status = 'gathering';
-                        updateIceStatsDisplay(session);
-                    }
-                    if (state === 'complete' && tracker.startedAt && !tracker.endedAt) {
-                        concludeIceGathering(session, 'ice gathering complete');
-                    }
-                });
-
-                pc.addEventListener('iceconnectionstatechange', () => {
-                    const state = pc.iceConnectionState;
-                    tracker.pcStates.iceConnectionState = state || null;
-                    log(`${statsLabel} - iceConnectionState -> ${state}`);
-                    if ((state === 'connected' || state === 'completed') && tracker.startedAt && !tracker.endedAt) {
-                        concludeIceGathering(session, 'ice connection completed');
-                    }
-                    void pollPeerConnectionStats(session, pc);
-                });
-
-                pc.addEventListener('connectionstatechange', () => {
-                    const state = pc.connectionState;
-                    tracker.pcStates.connectionState = state || null;
-                    log(`${statsLabel} - connectionState -> ${state}`);
-                    if (state === 'closed' || state === 'failed') {
-                        stopSessionStatsPolling(session);
-                    } else {
-                        void pollPeerConnectionStats(session, pc);
-                    }
-                });
-
-                updateIceStatsDisplay(session, tracker.status);
-            } catch (e) {
-                log(`monitorIceGatheringJs error: ${e.message}`);
-            }
-        }
-
         function unregister() {
-            if (!ua) {
-                return;
-            }
-
+            if (!ua) return;
             log('Unregistering from server...');
-            if (currentSession) {
-                hangup();
-            }
-
-            ua.unregister();
-            ua.stop();
-            resetRegistrationState();
-            showStatus('Unregistered', 'info');
+            if (currentSession) hangup();
+            ua.unregister(); ua.stop(); resetRegistrationState(); showStatus('Unregistered', 'info');
         }
 
+        function resetRegistrationState() {
+            isRegistered = false;
+            registerBtn.disabled = false;
+            unregisterBtn.disabled = true;
+            callBtn.disabled = true;
+            endCall();
+            ua = null;
+        }
+
+        // ========== Call Functions ==========
         async function makeCall() {
-            if (!ua || !isRegistered) {
-                log('UA is not registered');
-                return;
-            }
-
+            if (!ua || !isRegistered) { log('UA is not registered'); return; }
             const target = callTargetInput.value.trim();
-            if (!target) {
-                showStatus('Please enter a call target', 'error');
-                return;
-            }
-
+            if (!target) { showStatus('Please enter a call target', 'error'); return; }
             let domain;
-            try {
-                domain = getDomain(serverInput.value);
-            } catch (error) {
-                showStatus('Server URL is invalid', 'error');
-                return;
-            }
-
+            try { domain = getDomain(serverInput.value); } catch (error) { showStatus('Server URL is invalid', 'error'); return; }
             const destination = target.startsWith('sip:') ? target : `sip:${target}@${domain}`;
             log(`Calling ${destination}`);
-
             const videoEnabled = enableVideoCheckbox && enableVideoCheckbox.checked;
             let callOptions;
             if (videoEnabled) {
                 try {
                     localMediaStream = await getVideoSourceStream();
                     if (localVideo) { localVideo.srcObject = localMediaStream; videoContainer.classList.add('active'); }
-                    callOptions = {
-                        mediaStream: localMediaStream,
-                        rtcOfferConstraints: { offerToReceiveAudio: true, offerToReceiveVideo: true }
-                    };
+                    callOptions = { mediaStream: localMediaStream, rtcOfferConstraints: { offerToReceiveAudio: true, offerToReceiveVideo: true } };
                     log('Video source stream acquired');
                 } catch (e) {
-                    log(`Failed to get video stream: ${e.message} — falling back to audio-only`);
-                    callOptions = {
-                        mediaConstraints: { audio: true, video: false },
-                        rtcOfferConstraints: { offerToReceiveAudio: true, offerToReceiveVideo: false }
-                    };
+                    log(`Failed to get video stream: ${e.message} - falling back to audio-only`);
+                    callOptions = { mediaConstraints: { audio: true, video: false }, rtcOfferConstraints: { offerToReceiveAudio: true, offerToReceiveVideo: false } };
                 }
             } else {
-                callOptions = {
-                    mediaConstraints: { audio: true, video: false },
-                    rtcOfferConstraints: { offerToReceiveAudio: true, offerToReceiveVideo: false }
-                };
+                callOptions = { mediaConstraints: { audio: true, video: false }, rtcOfferConstraints: { offerToReceiveAudio: true, offerToReceiveVideo: false } };
             }
-
             try {
                 const pcConfig = getEnabledPcConfigFromUi();
                 if (pcConfig) {
@@ -1725,7 +1213,6 @@
                 log(`Cannot place call with invalid ICE config: ${error.message}`);
                 return;
             }
-
             lastOutgoingCallTime = Date.now();
             lastOutgoingCallLabel = target;
             ua.call(destination, callOptions);
@@ -1734,40 +1221,24 @@
         }
 
         async function answerCall() {
-            if (!currentSession) {
-                return;
-            }
-
+            if (!currentSession) return;
             log('Answering incoming call');
-            // For incoming calls, enable video if the remote offer includes video
-            const offerHasVideo = currentSession && currentSession.request &&
-                currentSession.request.body && currentSession.request.body.includes('m=video');
+            const offerHasVideo = currentSession && currentSession.request && currentSession.request.body && currentSession.request.body.includes('m=video');
             const videoEnabled = offerHasVideo || (enableVideoCheckbox && enableVideoCheckbox.checked);
-
             let options;
             if (videoEnabled) {
                 try {
                     localMediaStream = await getVideoSourceStream();
                     if (localVideo) { localVideo.srcObject = localMediaStream; videoContainer.classList.add('active'); }
-                    options = {
-                        mediaStream: localMediaStream,
-                        rtcAnswerConstraints: { offerToReceiveAudio: true, offerToReceiveVideo: true }
-                    };
+                    options = { mediaStream: localMediaStream, rtcAnswerConstraints: { offerToReceiveAudio: true, offerToReceiveVideo: true } };
                     log('Video source stream acquired');
                 } catch (e) {
-                    log(`Failed to get video stream: ${e.message} — answering audio-only`);
-                    options = {
-                        mediaConstraints: { audio: true, video: false },
-                        rtcAnswerConstraints: { offerToReceiveAudio: true, offerToReceiveVideo: false }
-                    };
+                    log(`Failed to get video stream: ${e.message} - answering audio-only`);
+                    options = { mediaConstraints: { audio: true, video: false }, rtcAnswerConstraints: { offerToReceiveAudio: true, offerToReceiveVideo: false } };
                 }
             } else {
-                options = {
-                    mediaConstraints: { audio: true, video: false },
-                    rtcAnswerConstraints: { offerToReceiveAudio: true, offerToReceiveVideo: false }
-                };
+                options = { mediaConstraints: { audio: true, video: false }, rtcAnswerConstraints: { offerToReceiveAudio: true, offerToReceiveVideo: false } };
             }
-
             try {
                 const pcConfig = getEnabledPcConfigFromUi();
                 if (pcConfig) {
@@ -1780,14 +1251,13 @@
                 log(`Cannot answer call with invalid ICE config: ${error.message}`);
                 return;
             }
-
             try {
-                // record answer time to compute handshake
                 currentSession._timing = currentSession._timing || {};
                 currentSession._timing.answerTime = Date.now();
                 currentSession.answer(options);
                 incomingCallDiv.classList.remove('active');
                 callControls.classList.add('active');
+                notifyCcCallAction('call.answer', currentSession);
             } catch (error) {
                 log(`Failed to answer call: ${error.message}`);
                 endCall();
@@ -1795,121 +1265,276 @@
         }
 
         function rejectCall() {
-            if (!currentSession) {
-                return;
-            }
-
+            if (!currentSession) return;
             log('Rejecting incoming call');
+            notifyCcCallAction('call.reject', currentSession);
             currentSession.terminate({ status_code: 486, reason_phrase: 'Busy Here' });
             endCall();
         }
 
         function hangup() {
-            if (!currentSession) {
-                return;
-            }
-
+            if (!currentSession) return;
             log('Hanging up call');
-            try {
-                currentSession.terminate();
-            } catch (error) {
-                log(`Error terminating session: ${error.message}`);
-            }
+            notifyCcCallAction('call.hangup', currentSession);
+            try { currentSession.terminate(); } catch (error) { log(`Error terminating session: ${error.message}`); }
             endCall();
         }
 
         function toggleMute() {
-            if (!currentSession) {
-                log('No active session to mute');
-                return;
-            }
-
+            if (!currentSession) { log('No active session to mute'); return; }
             try {
-                if (isMuted) {
-                    currentSession.unmute({ audio: true });
-                    muteBtn.textContent = 'Mute';
-                    log('Audio unmuted');
-                } else {
-                    currentSession.mute({ audio: true });
-                    muteBtn.textContent = 'Unmute';
-                    log('Audio muted');
-                }
+                if (isMuted) { currentSession.unmute({ audio: true }); muteBtn.textContent = 'Mute'; log('Audio unmuted'); }
+                else { currentSession.mute({ audio: true }); muteBtn.textContent = 'Unmute'; log('Audio muted'); }
                 isMuted = !isMuted;
-            } catch (error) {
-                log(`Error toggling mute: ${error.message}`);
-            }
+            } catch (error) { log(`Error toggling mute: ${error.message}`); }
         }
 
         function toggleHold() {
-            if (!currentSession) {
-                log('No active session to hold');
-                return;
-            }
+            if (!currentSession) { log('No active session to hold'); return; }
+            try {
+                if (typeof currentSession.isEstablished === 'function' && !currentSession.isEstablished()) { log('Call is not yet established, cannot toggle hold'); return; }
+                if (isOnHold) { currentSession.unhold(); holdBtn.textContent = 'Hold'; log('Call resumed'); }
+                else { currentSession.hold(); holdBtn.textContent = 'Unhold'; log('Call placed on hold'); }
+                isOnHold = !isOnHold;
+            } catch (error) { log(`Error toggling hold: ${error.message}`); }
+        }
+
+        // ========== CC Functions ==========
+        function updateCcStatus(message, type = 'info') {
+            ccStatus.className = `status ${type}`;
+            ccStatus.textContent = message;
+        }
+
+        function updateCcControls() {
+            const hasPrimary = !!currentSession;
+            const hasConsult = !!consultSession;
+            const primaryEstablished = hasPrimary && currentSession.isEstablished && currentSession.isEstablished();
+            const consultEstablished = hasConsult && consultSession.isEstablished && consultSession.isEstablished();
+
+            ccHoldBtn.disabled = !primaryEstablished || isOnHold;
+            ccUnholdBtn.disabled = !primaryEstablished || !isOnHold;
+            ccTransferBtn.disabled = !primaryEstablished;
+            ccConsultBtn.disabled = !primaryEstablished || hasConsult;
+            ccMergeBtn.disabled = !(primaryEstablished && consultEstablished);
+            ccSwapBtn.disabled = !(primaryEstablished && consultEstablished);
+        }
+
+        function ccHold(hold) {
+            if (!currentSession) return;
+            try {
+                if (hold) { currentSession.hold(); isOnHold = true; log('CC: Primary call held'); }
+                else { currentSession.unhold(); isOnHold = false; log('CC: Primary call resumed'); }
+                updateCcControls();
+            } catch (error) { log(`CC Hold error: ${error.message}`); }
+        }
+
+        function showTransferDialog() {
+            if (!currentSession) { log('No active call to transfer'); return; }
+            transferDialog.classList.add('active');
+            dialogTransferTarget.value = transferTargetInput.value || '';
+            dialogTransferTarget.focus();
+        }
+
+        function hideTransferDialog() {
+            transferDialog.classList.remove('active');
+        }
+
+        function doTransfer() {
+            const target = dialogTransferTarget.value.trim();
+            if (!target) { log('Please enter transfer target'); return; }
+            hideTransferDialog();
+            ccBlindTransfer(target);
+        }
+
+        function ccBlindTransfer(target) {
+            if (!currentSession) { log('No active call to transfer'); return; }
+            const transferTo = target || transferTargetInput.value.trim();
+            if (!transferTo) { log('Please enter transfer target'); return; }
 
             try {
-                if (typeof currentSession.isEstablished === 'function' && !currentSession.isEstablished()) {
-                    log('Call is not yet established, cannot toggle hold');
-                    return;
-                }
-                if (isOnHold) {
-                    currentSession.unhold();
-                    holdBtn.textContent = 'Hold';
-                    log('Call resumed');
-                } else {
-                    currentSession.hold();
-                    holdBtn.textContent = 'Unhold';
-                    log('Call placed on hold');
-                }
-                isOnHold = !isOnHold;
+                let domain;
+                try { domain = getDomain(serverInput.value); } catch (e) { domain = 'localhost'; }
+                const referTo = transferTo.startsWith('sip:') ? transferTo : `sip:${transferTo}@${domain}`;
+
+                log(`Initiating blind transfer to ${referTo}`);
+
+                // Build Refer-To URI
+                const referToUri = new JsSIP.URI('sip', transferTo.startsWith('sip:') ? transferTo.replace('sip:', '').split('@')[0] : transferTo, domain);
+
+                // Send REFER
+                currentSession.refer(referTo, {
+                    eventHandlers: {
+                        requestSucceeded: () => { log('Transfer REFER accepted'); },
+                        requestFailed: (data) => { log(`Transfer REFER failed: ${data.cause}`); },
+                        trying: () => { log('Transfer: trying...'); },
+                        progress: () => { log('Transfer: in progress...'); },
+                        accepted: () => { log('Transfer: accepted by target'); endCall(); },
+                        failed: (data) => { log(`Transfer failed: ${data.cause}`); }
+                    }
+                });
+                updateCcStatus('Transfer in progress...', 'warning');
             } catch (error) {
-                log(`Error toggling hold: ${error.message}`);
+                log(`Transfer error: ${error.message}`);
+                updateCcStatus(`Transfer failed: ${error.message}`, 'error');
             }
         }
 
+        function startConsultation() {
+            if (!currentSession) { log('No active primary call'); return; }
+            if (consultSession) { log('Consult call already in progress'); return; }
+
+            const target = transferTargetInput.value.trim();
+            if (!target) { log('Please enter consult target in Transfer/Consult Target field'); return; }
+
+            // Hold primary call
+            try {
+                if (!isOnHold) { currentSession.hold(); isOnHold = true; log('Primary call held for consultation'); }
+            } catch (e) { log(`Error holding primary: ${e.message}`); }
+
+            // Make consult call
+            let domain;
+            try { domain = getDomain(serverInput.value); } catch (e) { domain = 'localhost'; }
+            const destination = target.startsWith('sip:') ? target : `sip:${target}@${domain}`;
+            log(`Starting consultation call to ${destination}`);
+
+            const callOptions = {
+                mediaConstraints: { audio: true, video: false },
+                rtcOfferConstraints: { offerToReceiveAudio: true, offerToReceiveVideo: false }
+            };
+            try {
+                const pcConfig = getEnabledPcConfigFromUi();
+                if (pcConfig) callOptions.pcConfig = pcConfig;
+            } catch (e) {}
+
+            lastOutgoingCallTime = Date.now();
+            lastOutgoingCallLabel = target;
+            ua.call(destination, callOptions);
+            updateCcStatus('Consultation call in progress...', 'warning');
+        }
+
+        function mergeCalls() {
+            if (!currentSession || !consultSession) { log('Need both primary and consult calls to merge'); return; }
+            log('Merging calls for 3-way conference (sending REFER with Replaces)');
+
+            try {
+                // Send REFER on consult session to join primary
+                const primaryRemote = currentSession.remote_identity && currentSession.remote_identity.uri;
+                if (!primaryRemote) { log('Cannot get primary call remote URI'); return; }
+
+                // Build Replaces header for the primary call
+                const callId = currentSession.dialog && currentSession.dialog.call_id || '';
+                const localTag = currentSession.dialog && currentSession.dialog.local_tag || '';
+                const remoteTag = currentSession.dialog && currentSession.dialog.remote_tag || '';
+                const replaces = encodeURIComponent(`${callId};to-tag=${remoteTag};from-tag=${localTag}`);
+
+                const referTo = `sip:${primaryRemote.user}@${primaryRemote.host}?Replaces=${replaces}`;
+
+                consultSession.refer(referTo, {
+                    eventHandlers: {
+                        requestSucceeded: () => { log('Merge REFER accepted'); },
+                        requestFailed: (data) => { log(`Merge REFER failed: ${data.cause}`); },
+                        accepted: () => {
+                            log('3-way conference established');
+                            updateCcStatus('3-way conference active', 'success');
+                        },
+                        failed: (data) => { log(`Merge failed: ${data.cause}`); }
+                    }
+                });
+            } catch (error) {
+                log(`Merge error: ${error.message}`);
+            }
+        }
+
+        function swapCalls() {
+            if (!currentSession || !consultSession) { log('Need both calls to swap'); return; }
+            log('Swapping active call...');
+            try {
+                if (isOnHold) { currentSession.unhold(); isOnHold = false; }
+                else { currentSession.hold(); isOnHold = true; }
+                if (isConsultOnHold) { consultSession.unhold(); isConsultOnHold = false; }
+                else { consultSession.hold(); isConsultOnHold = true; }
+                log('Calls swapped');
+            } catch (error) { log(`Swap error: ${error.message}`); }
+        }
+
+        function bindConsultSessionEvents(session) {
+            session.on('progress', () => { log('Consult call: Establishing'); });
+            session.on('accepted', () => { log('Consult call: Accepted'); });
+            session.on('confirmed', () => {
+                log('Consult call: Established');
+                updateCcStatus('Consult call connected', 'success');
+                updateCcControls();
+                startStatsMonitoring();
+            });
+            session.on('ended', (data) => {
+                log(`Consult call ended: ${data.cause}`);
+                consultSession = null;
+                isConsultOnHold = false;
+                updateCcControls();
+                updateCcStatus('Consult call ended', 'info');
+            });
+            session.on('failed', (data) => {
+                log(`Consult call failed: ${data.cause}`);
+                consultSession = null;
+                isConsultOnHold = false;
+                updateCcControls();
+                updateCcStatus(`Consult failed: ${data.cause}`, 'error');
+            });
+            session.on('hold', () => { isConsultOnHold = true; log('Consult call held'); });
+            session.on('unhold', () => { isConsultOnHold = false; log('Consult call resumed'); });
+            session.on('peerconnection', (data) => {
+                attachMedia(data.peerconnection);
+                try {
+                    const fallbackRemote = (session.remote_identity && session.remote_identity.uri && session.remote_identity.uri.user) || 'peer';
+                    const label = session._iceLabel || `consult:${fallbackRemote}`;
+                    monitorIceGatheringJs(session, data.peerconnection, label);
+                } catch (e) {}
+            });
+            if (session.connection) {
+                attachMedia(session.connection);
+                try {
+                    const fallbackRemote = (session.remote_identity && session.remote_identity.uri && session.remote_identity.uri.user) || 'peer';
+                    const label = session._iceLabel || `consult:${fallbackRemote}`;
+                    monitorIceGatheringJs(session, session.connection, label);
+                } catch (e) {}
+            }
+            session.on('icecandidate', (event) => {
+                try { handleSessionIceCandidate(session, event ? event.candidate : null); } catch (error) {}
+            });
+        }
+
+        // ========== Session Events ==========
         function bindSessionEvents(session, isIncoming) {
             callBtn.disabled = true;
-
             session.on('progress', () => {
                 log('Call state: Establishing');
-                if (!isIncoming) {
-                    callInfo.textContent = 'Ringing...';
-                }
+                if (!isIncoming) callInfo.textContent = 'Ringing...';
             });
-
-            session.on('accepted', () => {
-                log('Call state: Accepted');
-            });
-
+            session.on('accepted', () => { log('Call state: Accepted'); });
             session.on('confirmed', () => {
                 log('Call state: Established');
                 callInfo.textContent = `Connected to ${session.remote_identity.display_name || session.remote_identity.uri.user}`;
+                updateCcStatus('Call connected', 'success');
+                updateCcControls();
+                startStatsMonitoring();
             });
-
-            // log handshake timings when call is confirmed/established
             session.on('confirmed', () => {
                 try {
                     const t = session._timing || {};
                     const remoteUser = (session.remote_identity && session.remote_identity.uri && session.remote_identity.uri.user) || 'peer';
-                    if (t.callSent) {
-                        const dur = Date.now() - t.callSent;
-                        log(`Outgoing handshake time to ${remoteUser}: ${formatMs(dur)}`);
-                    } else {
+                    if (t.callSent) log(`Outgoing handshake time to ${remoteUser}: ${formatMs(Date.now() - t.callSent)}`);
+                    else {
                         const base = t.answerTime || t.incomingReceived;
-                        if (base) {
-                            const dur = Date.now() - base;
-                            log(`Incoming handshake time from ${remoteUser}: ${formatMs(dur)}`);
-                        }
+                        if (base) log(`Incoming handshake time from ${remoteUser}: ${formatMs(Date.now() - base)}`);
                     }
                 } catch (e) { log(`handshake timing error: ${e.message}`); }
             });
-
             session.on('ended', (data) => {
                 const directionLabel = isIncoming ? 'Incoming' : 'Outgoing';
                 const cause = data && data.cause ? ` (${data.cause})` : '';
                 log(`${directionLabel} call state: Terminated${cause}`);
                 endCall();
             });
-
             session.on('failed', (data) => {
                 const directionLabel = isIncoming ? 'Incoming' : 'Outgoing';
                 const cause = data && data.cause ? ` (${data.cause})` : '';
@@ -1917,40 +1542,26 @@
                 showStatus(`Call failed: ${data.cause}`, 'error');
                 endCall();
             });
-
-            session.on('hold', () => {
-                isOnHold = true;
-                holdBtn.textContent = 'Unhold';
-                log('Call is on hold');
+            session.on('hold', () => { isOnHold = true; holdBtn.textContent = 'Unhold'; log('Call is on hold'); updateCcControls(); });
+            session.on('unhold', () => { isOnHold = false; holdBtn.textContent = 'Hold'; log('Call is resumed from hold'); updateCcControls(); });
+            session.on('muted', () => { isMuted = true; muteBtn.textContent = 'Unmute'; log('Call audio muted'); });
+            session.on('unmuted', () => { isMuted = false; muteBtn.textContent = 'Mute'; log('Call audio unmuted'); });
+            session.on('refer', (data) => {
+                log(`Received REFER to ${data.refer_to}`);
+                updateCcStatus(`Received transfer request to ${data.refer_to}`, 'warning');
             });
-
-            session.on('unhold', () => {
-                isOnHold = false;
-                holdBtn.textContent = 'Hold';
-                log('Call is resumed from hold');
+            session.on('reinvite', (data) => {
+                log('Received re-INVITE');
+                logSipMessage('RECEIVED', 're-INVITE', JSON.stringify(data.request && data.request.body ? data.request.body.substring(0, 200) : 'no body'));
             });
-
-            session.on('muted', () => {
-                isMuted = true;
-                muteBtn.textContent = 'Unmute';
-                log('Call audio muted');
-            });
-
-            session.on('unmuted', () => {
-                isMuted = false;
-                muteBtn.textContent = 'Mute';
-                log('Call audio unmuted');
-            });
-
             session.on('peerconnection', (data) => {
                 attachMedia(data.peerconnection);
                 try {
                     const fallbackRemote = (session.remote_identity && session.remote_identity.uri && session.remote_identity.uri.user) || 'peer';
                     const label = session._iceLabel || `${session.direction || 'session'}:${fallbackRemote}`;
                     monitorIceGatheringJs(session, data.peerconnection, label);
-                } catch (e) { }
+                } catch (e) {}
             });
-
             if (session.connection) {
                 log('bindSessionEvents: PeerConnection already exists, attaching media immediately');
                 attachMedia(session.connection);
@@ -1958,38 +1569,177 @@
                     const fallbackRemote = (session.remote_identity && session.remote_identity.uri && session.remote_identity.uri.user) || 'peer';
                     const label = session._iceLabel || `${session.direction || 'session'}:${fallbackRemote}`;
                     monitorIceGatheringJs(session, session.connection, label);
-                } catch (e) { }
+                } catch (e) {}
             }
-
             session.on('icecandidate', (event) => {
-                try {
-                    handleSessionIceCandidate(session, event ? event.candidate : null);
-                } catch (error) {
-                    log(`handleSessionIceCandidate error: ${error.message}`);
-                }
+                try { handleSessionIceCandidate(session, event ? event.candidate : null); } catch (error) {}
+            });
+            session.on('sdp', (data) => {
+                logSipMessage(data.originator === 'local' ? 'SENT' : 'RECEIVED', 'SDP', data.sdp.substring(0, 300));
             });
         }
 
         function attachMedia(peerconnection) {
             const remoteAudioStream = new MediaStream();
             const remoteVideoStream = new MediaStream();
-
             peerconnection.addEventListener('track', (event) => {
                 const { track } = event;
-                if (track.kind === 'audio') {
-                    remoteAudioStream.addTrack(track);
-                    remoteAudio.srcObject = remoteAudioStream;
-                    log('Remote audio track attached');
-                } else if (track.kind === 'video') {
-                    remoteVideoStream.addTrack(track);
-                    remoteVideo.srcObject = remoteVideoStream;
-                    videoContainer.classList.add('active');
-                    log('Remote video track attached');
-                }
+                if (track.kind === 'audio') { remoteAudioStream.addTrack(track); remoteAudio.srcObject = remoteAudioStream; log('Remote audio track attached'); }
+                else if (track.kind === 'video') { remoteVideoStream.addTrack(track); remoteVideo.srcObject = remoteVideoStream; videoContainer.classList.add('active'); log('Remote video track attached'); }
             });
-            // Local video is set directly in makeCall/answerCall after stream is acquired
         }
 
+        function endCall() {
+            callControls.classList.remove('active');
+            incomingCallDiv.classList.remove('active');
+            callInfo.textContent = '';
+            videoContainer.classList.remove('active');
+            stopLocalVideoSource();
+            if (remoteAudio.srcObject) { remoteAudio.srcObject.getTracks().forEach((track) => track.stop()); remoteAudio.srcObject = null; }
+            if (localAudio.srcObject) { localAudio.srcObject.getTracks().forEach((track) => track.stop()); localAudio.srcObject = null; }
+            if (remoteVideo.srcObject) { remoteVideo.srcObject.getTracks().forEach((track) => track.stop()); remoteVideo.srcObject = null; }
+            if (localVideo.srcObject) { localVideo.srcObject.getTracks().forEach((track) => track.stop()); localVideo.srcObject = null; }
+            currentSession = null;
+            consultSession = null;
+            isMuted = false;
+            isOnHold = false;
+            isConsultOnHold = false;
+            muteBtn.textContent = 'Mute';
+            holdBtn.textContent = 'Hold';
+            callBtn.disabled = !isRegistered;
+            resetIceStats();
+            stopStatsMonitoring();
+            resetStats();
+            updateCcStatus('No active CC call', 'info');
+            updateCcControls();
+        }
+
+        // ========== Stats & Quality ==========
+        function startStatsMonitoring() {
+            if (statsInterval) clearInterval(statsInterval);
+            statsInterval = setInterval(refreshStats, 2000);
+        }
+
+        function stopStatsMonitoring() {
+            if (statsInterval) { clearInterval(statsInterval); statsInterval = null; }
+        }
+
+        async function refreshStats() {
+            const session = currentSession || consultSession;
+            if (!session || !session.connection) return;
+            try {
+                const stats = await session.connection.getStats();
+                let rxAudio = null, txAudio = null;
+                stats.forEach((report) => {
+                    if (report.type === 'inbound-rtp' && (report.mediaType === 'audio' || report.kind === 'audio')) rxAudio = report;
+                    if (report.type === 'outbound-rtp' && (report.mediaType === 'audio' || report.kind === 'audio')) txAudio = report;
+                });
+                if (rxAudio) {
+                    rxPackets.textContent = rxAudio.packetsReceived || 0;
+                    rxBytes.textContent = formatBytes(rxAudio.bytesReceived);
+                    const jitter = rxAudio.jitter ? (rxAudio.jitter * 1000).toFixed(2) : '--';
+                    jitterValue.textContent = jitter;
+                    const packetsLost = rxAudio.packetsLost || 0;
+                    const totalPackets = (rxAudio.packetsReceived || 0) + packetsLost;
+                    const lossPercent = totalPackets > 0 ? ((packetsLost / totalPackets) * 100).toFixed(2) : '0.00';
+                    lossValue.textContent = `${lossPercent}%`;
+                    if (parseFloat(lossPercent) < 1) lossValue.className = 'stat-value good';
+                    else if (parseFloat(lossPercent) < 5) lossValue.className = 'stat-value warning';
+                    else lossValue.className = 'stat-value bad';
+                }
+                if (txAudio) {
+                    txPackets.textContent = txAudio.packetsSent || 0;
+                    txBytes.textContent = formatBytes(txAudio.bytesSent);
+                }
+                // Calculate MOS
+                const mos = calculateMOS(rxAudio);
+                if (mos) {
+                    mosValue.textContent = mos.toFixed(2);
+                    const mosPercent = (mos / 4.5) * 100;
+                    mosBar.style.width = `${mosPercent}%`;
+                    if (mos >= 4) { mosValue.className = 'stat-value good'; mosBar.className = 'quality-bar-fill good'; }
+                    else if (mos >= 3) { mosValue.className = 'stat-value warning'; mosBar.className = 'quality-bar-fill warning'; }
+                    else { mosValue.className = 'stat-value bad'; mosBar.className = 'quality-bar-fill bad'; }
+                }
+                // Get RTT from candidate-pair
+                stats.forEach((report) => {
+                    if (report.type === 'candidate-pair' && report.currentRoundTripTime) {
+                        const rtt = (report.currentRoundTripTime * 1000).toFixed(0);
+                        rttValue.textContent = rtt;
+                        if (rtt < 150) rttValue.className = 'stat-value good';
+                        else if (rtt < 300) rttValue.className = 'stat-value warning';
+                        else rttValue.className = 'stat-value bad';
+                    }
+                });
+            } catch (error) {
+                log(`Stats error: ${error.message}`);
+            }
+        }
+
+        function calculateMOS(rxAudio) {
+            if (!rxAudio) return null;
+            const jitter = rxAudio.jitter ? rxAudio.jitter * 1000 : 0;
+            const packetsLost = rxAudio.packetsLost || 0;
+            const packetsReceived = rxAudio.packetsReceived || 0;
+            const totalPackets = packetsReceived + packetsLost;
+            const lossRate = totalPackets > 0 ? packetsLost / totalPackets : 0;
+            // E-Model based MOS calculation (simplified)
+            // R = 93.2 - I_d - I_e
+            // I_d = delay impairment (using jitter as proxy)
+            // I_e = equipment impairment (using packet loss)
+            const delay = jitter * 2; // Approximate one-way delay from jitter
+            const Id = delay > 177.3 ? 0.024 * delay + 0.11 * (delay - 177.3) : delay * 0.024;
+            const Ie = 0; // Assume G.711 with no codec impairment
+            const Bpl = 4.3; // Packet loss robustness factor for G.711
+            const Ie_eff = Ie + (95 - Ie) * (lossRate / (lossRate + Bpl));
+            const R = 93.2 - Id - Ie_eff;
+            let mos;
+            if (R < 0) mos = 1;
+            else if (R > 100) mos = 4.5;
+            else mos = 1 + 0.035 * R + R * (R - 60) * (100 - R) * 7 * 0.000001;
+            return Math.max(1, Math.min(4.5, mos));
+        }
+
+        function resetStats() {
+            mosValue.textContent = '--';
+            mosBar.style.width = '0%';
+            rttValue.textContent = '--';
+            lossValue.textContent = '--';
+            jitterValue.textContent = '--';
+            rxPackets.textContent = '--';
+            txPackets.textContent = '--';
+            rxBytes.textContent = '--';
+            txBytes.textContent = '--';
+            [mosValue, rttValue, lossValue, jitterValue, rxPackets, txPackets, rxBytes, txBytes].forEach(el => el.className = 'stat-value');
+        }
+
+        // ========== ICE Monitoring ==========
+        function monitorIceGatheringJs(session, pc, label = 'session') {
+            try {
+                if (!pc || session._iceMonitorAttached) return;
+                session._iceMonitorAttached = true;
+                const tracker = getIceTracker(session, label);
+                const statsLabel = tracker.label;
+                updateIceStatsDisplay(session, tracker.status);
+                pc.addEventListener('icegatheringstatechange', () => {
+                    const state = pc.iceGatheringState;
+                    log(`${statsLabel} - iceGatheringState -> ${state}`);
+                    if (state === 'gathering' && !tracker.startedAt) { tracker.startedAt = Date.now(); tracker.status = 'gathering'; updateIceStatsDisplay(session); }
+                    if (state === 'complete' && tracker.startedAt && !tracker.endedAt) concludeIceGathering(session, 'ice gathering complete');
+                });
+                pc.addEventListener('iceconnectionstatechange', () => {
+                    const state = pc.iceConnectionState;
+                    log(`${statsLabel} - iceConnectionState -> ${state}`);
+                    if ((state === 'connected' || state === 'completed') && tracker.startedAt && !tracker.endedAt) concludeIceGathering(session, 'ice connection completed');
+                });
+                pc.addEventListener('connectionstatechange', () => {
+                    log(`${statsLabel} - connectionState -> ${pc.connectionState}`);
+                });
+                updateIceStatsDisplay(session, tracker.status);
+            } catch (e) { log(`monitorIceGatheringJs error: ${e.message}`); }
+        }
+
+        // ========== Video Functions ==========
         function startClockPreview() {
             if (!clockCanvas) return;
             if (videoCanvasInterval) { clearInterval(videoCanvasInterval); videoCanvasInterval = null; }
@@ -2005,25 +1755,17 @@
         }
 
         function stopLocalVideoSource() {
-            // Keep clock preview (videoCanvasInterval) running between calls
-            if (localMediaStream) {
-                localMediaStream.getTracks().forEach((t) => t.stop());
-                localMediaStream = null;
-            }
+            if (localMediaStream) { localMediaStream.getTracks().forEach((t) => t.stop()); localMediaStream = null; }
             if (localVideo) localVideo.srcObject = null;
         }
 
         function drawTestPattern(ctx, width, height) {
-            // Background gradient
             const grad = ctx.createLinearGradient(0, 0, 0, height);
             grad.addColorStop(0, '#0d1b2a');
             grad.addColorStop(1, '#1b2838');
             ctx.fillStyle = grad;
             ctx.fillRect(0, 0, width, height);
-
             const now = new Date();
-
-            // Large HH:MM:SS clock
             const timeStr = now.toLocaleTimeString('en-US', { hour12: false });
             ctx.font = `bold ${Math.floor(height * 0.22)}px monospace`;
             ctx.textAlign = 'center';
@@ -2032,18 +1774,13 @@
             ctx.shadowColor = '#00e5ff';
             ctx.shadowBlur = 14;
             ctx.fillText(timeStr, width / 2, height * 0.42);
-
-            // Date below
             ctx.shadowBlur = 0;
             ctx.font = `${Math.floor(height * 0.09)}px monospace`;
             ctx.fillStyle = '#90a4ae';
             ctx.fillText(now.toLocaleDateString(), width / 2, height * 0.65);
-
-            // Label
             ctx.font = `${Math.floor(height * 0.07)}px sans-serif`;
             ctx.fillStyle = '#546e7a';
             ctx.fillText('rustpbx virtual camera', width / 2, height * 0.88);
-
             ctx.textAlign = 'left';
             ctx.textBaseline = 'alphabetic';
             ctx.shadowBlur = 0;
@@ -2052,22 +1789,16 @@
         async function getVideoSourceStream() {
             const source = document.querySelector('input[name="videoSource"]:checked');
             const sourceValue = source ? source.value : 'camera';
-
             if (sourceValue === 'camera') {
                 const deviceId = cameraSelect && cameraSelect.value;
                 const videoConstraint = deviceId ? { deviceId: { exact: deviceId } } : true;
                 return navigator.mediaDevices.getUserMedia({ audio: true, video: videoConstraint });
             }
-
-            // --- Clock virtual camera: use the DOM canvas (already visible as preview) ---
             if (!clockCanvas) throw new Error('Clock canvas element not found');
-            if (!videoCanvasInterval) startClockPreview(); // ensure drawing is running
+            if (!videoCanvasInterval) startClockPreview();
             const canvasStream = clockCanvas.captureStream(15);
             const audioStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-            return new MediaStream([
-                ...audioStream.getAudioTracks(),
-                ...canvasStream.getVideoTracks()
-            ]);
+            return new MediaStream([...audioStream.getAudioTracks(), ...canvasStream.getVideoTracks()]);
         }
 
         async function enumerateCameras() {
@@ -2076,82 +1807,196 @@
                 const devices = await navigator.mediaDevices.enumerateDevices();
                 const cameras = devices.filter((d) => d.kind === 'videoinput');
                 cameraSelect.innerHTML = '';
-                if (cameras.length === 0) {
-                    cameraSelect.innerHTML = '<option value="">No cameras found</option>';
-                    return;
-                }
-                cameras.forEach((cam, i) => {
-                    const opt = document.createElement('option');
-                    opt.value = cam.deviceId;
-                    opt.textContent = cam.label || `Camera ${i + 1}`;
-                    cameraSelect.appendChild(opt);
-                });
+                if (cameras.length === 0) { cameraSelect.innerHTML = '<option value="">No cameras found</option>'; return; }
+                cameras.forEach((cam, i) => { const opt = document.createElement('option'); opt.value = cam.deviceId; opt.textContent = cam.label || `Camera ${i + 1}`; cameraSelect.appendChild(opt); });
                 log(`Found ${cameras.length} camera(s)`);
+            } catch (e) { log(`Failed to enumerate cameras: ${e.message}`); }
+        }
+
+        // ========== CC WebSocket Debug ==========
+        function connectCcWebSocket() {
+            if (ccWs) { log('CC WebSocket already connected'); return; }
+            const rawUrl = ccWsUrlInput.value.trim();
+            if (!rawUrl) { log('Please enter CC WebSocket URL'); return; }
+            const agentId = usernameInput.value.trim();
+            if (!agentId) { log('Please input username(agent_id) first'); return; }
+
+            let finalUrl = rawUrl;
+            try {
+                const u = new URL(rawUrl, window.location.href);
+                if (!u.searchParams.get('agent_id')) {
+                    u.searchParams.set('agent_id', agentId);
+                }
+                finalUrl = u.toString();
             } catch (e) {
-                log(`Failed to enumerate cameras: ${e.message}`);
+                const glue = rawUrl.includes('?') ? '&' : '?';
+                if (!rawUrl.includes('agent_id=')) {
+                    finalUrl = `${rawUrl}${glue}agent_id=${encodeURIComponent(agentId)}`;
+                }
+            }
+
+            ccWsUrlInput.value = finalUrl;
+            log(`Connecting to CC WebSocket: ${finalUrl}`);
+            ccWs = new WebSocket(finalUrl);
+            ccWs.onopen = () => {
+                log('CC WebSocket connected');
+                ccWsStatus.className = 'status success';
+                ccWsStatus.textContent = 'CC WS: connected';
+                logCcWs('Connected', 'info');
+
+                const registerMsg = { action: 'agent.register', skills: [], max_concurrency: 1 };
+                ccWs.send(JSON.stringify(registerMsg));
+                logCcWs(`Sent: ${JSON.stringify(registerMsg)}`, 'info');
+
+                const statusMsg = { action: 'status.update', status: 'idle' };
+                ccWs.send(JSON.stringify(statusMsg));
+                logCcWs(`Sent: ${JSON.stringify(statusMsg)}`, 'info');
+            };
+            ccWs.onmessage = (event) => {
+                logCcWs(`Received: ${event.data}`, 'info');
+                try {
+                    const msg = JSON.parse(event.data);
+                    handleCcMessage(msg);
+                } catch (e) {
+                    logCcWs(`Raw message: ${event.data}`, 'warn');
+                }
+            };
+            ccWs.onerror = (error) => {
+                log('CC WebSocket error');
+                ccWsStatus.className = 'status error';
+                ccWsStatus.textContent = 'CC WS: error';
+                logCcWs('Error occurred', 'error');
+            };
+            ccWs.onclose = () => {
+                log('CC WebSocket disconnected');
+                ccWsStatus.className = 'status info';
+                ccWsStatus.textContent = 'CC WS: disconnected';
+                logCcWs('Disconnected', 'warn');
+                ccWs = null;
+            };
+        }
+
+        function disconnectCcWebSocket() {
+            if (!ccWs) return;
+            ccWs.close();
+            ccWs = null;
+        }
+
+        function logCcWs(message, type = 'info') {
+            const entry = document.createElement('div');
+            entry.className = 'debug-entry';
+            const timestamp = new Date().toLocaleTimeString();
+            entry.innerHTML = `<span class="debug-time">[${timestamp}]</span> <span class="debug-${type}">${message}</span>`;
+            ccWsLog.appendChild(entry);
+            ccWsLog.scrollTop = ccWsLog.scrollHeight;
+        }
+
+        function handleCcMessage(msg) {
+            const eventType = msg.event || msg.type;
+            if (eventType === 'call.ringing') {
+                updateCcStatus(`CC: Call ringing - ${msg.call_id || '-'}`, 'warning');
+            } else if (eventType === 'call.connected') {
+                updateCcStatus(`CC: Call connected - ${msg.call_id || '-'}`, 'success');
+            } else if (eventType === 'call.ended') {
+                updateCcStatus(`CC: Call ended - ${msg.call_id || '-'}`, 'info');
+            } else if (eventType === 'agent.status_changed') {
+                log(`CC Agent status: ${msg.status || 'unknown'}`);
+            } else if (eventType === 'error') {
+                updateCcStatus(`CC error: ${msg.message || 'unknown error'}`, 'error');
             }
         }
 
-        function endCall() {
+        function sendRawCcCommand() {
+            if (!ccWs || ccWs.readyState !== WebSocket.OPEN) {
+                log('CC WebSocket not connected');
+                return;
+            }
+            const raw = ccRawCommandInput ? ccRawCommandInput.value.trim() : '';
+            if (!raw) {
+                log('Please input CC command JSON');
+                return;
+            }
+            try {
+                const parsed = JSON.parse(raw);
+                ccWs.send(JSON.stringify(parsed));
+                logCcWs(`Sent: ${JSON.stringify(parsed)}`, 'info');
+            } catch (e) {
+                log(`Invalid CC command JSON: ${e.message}`);
+            }
+        }
+
+        function getSessionCallId(session) {
+            if (!session) return null;
+            if (session.id) return session.id;
+            if (session._id) return session._id;
+            if (session.request && session.request.call_id) return session.request.call_id;
+            if (session.request && session.request.headers && session.request.headers['Call-ID']) {
+                const hdr = session.request.headers['Call-ID'];
+                if (Array.isArray(hdr) && hdr[0] && hdr[0].raw) return hdr[0].raw;
+            }
+            if (session.dialog && session.dialog.id && session.dialog.id.call_id) return session.dialog.id.call_id;
+            if (session.dialog && session.dialog.call_id) return session.dialog.call_id;
+            return null;
+        }
+
+        function notifyCcCallAction(action, session) {
+            if (!ccWs || ccWs.readyState !== WebSocket.OPEN) return;
+            const callId = getSessionCallId(session);
+            if (!callId) return;
+            const payload = { action, call_id: callId };
+            ccWs.send(JSON.stringify(payload));
+            logCcWs(`Sent: ${JSON.stringify(payload)}`, 'info');
+        }
+
+        // ========== Call State Debug ==========
+        function updateCallStateDebug() {
+            const html = [];
             if (currentSession) {
-                stopSessionStatsPolling(currentSession);
+                html.push(`<div class="debug-entry"><strong>Primary Call:</strong></div>`);
+                html.push(`<div class="debug-entry">  Direction: ${currentSession.direction || 'unknown'}</div>`);
+                html.push(`<div class="debug-entry">  State: ${currentSession.status || 'unknown'}</div>`);
+                html.push(`<div class="debug-entry">  Established: ${currentSession.isEstablished ? currentSession.isEstablished() : 'unknown'}</div>`);
+                html.push(`<div class="debug-entry">  On Hold: ${isOnHold}</div>`);
+                html.push(`<div class="debug-entry">  Muted: ${isMuted}</div>`);
+                if (currentSession.remote_identity) {
+                    const ri = currentSession.remote_identity;
+                    html.push(`<div class="debug-entry">  Remote: ${ri.display_name || ''} &lt;${ri.uri || 'unknown'}&gt;</div>`);
+                }
+                if (currentSession.connection) {
+                    html.push(`<div class="debug-entry">  ICE State: ${currentSession.connection.iceConnectionState}</div>`);
+                    html.push(`<div class="debug-entry">  Conn State: ${currentSession.connection.connectionState}</div>`);
+                }
+            } else {
+                html.push(`<div class="debug-entry">No primary call</div>`);
             }
-            callControls.classList.remove('active');
-            incomingCallDiv.classList.remove('active');
-            callInfo.textContent = '';
-            videoContainer.classList.remove('active');
-
-            stopLocalVideoSource();
-
-            if (remoteAudio.srcObject) {
-                remoteAudio.srcObject.getTracks().forEach((track) => track.stop());
-                remoteAudio.srcObject = null;
+            if (consultSession) {
+                html.push(`<div class="debug-entry"><strong>Consult Call:</strong></div>`);
+                html.push(`<div class="debug-entry">  Direction: ${consultSession.direction || 'unknown'}</div>`);
+                html.push(`<div class="debug-entry">  State: ${consultSession.status || 'unknown'}</div>`);
+                html.push(`<div class="debug-entry">  Established: ${consultSession.isEstablished ? consultSession.isEstablished() : 'unknown'}</div>`);
+                html.push(`<div class="debug-entry">  On Hold: ${isConsultOnHold}</div>`);
             }
-
-            if (localAudio.srcObject) {
-                localAudio.srcObject.getTracks().forEach((track) => track.stop());
-                localAudio.srcObject = null;
-            }
-
-            if (remoteVideo.srcObject) {
-                remoteVideo.srcObject.getTracks().forEach((track) => track.stop());
-                remoteVideo.srcObject = null;
-            }
-
-            if (localVideo.srcObject) {
-                localVideo.srcObject.getTracks().forEach((track) => track.stop());
-                localVideo.srcObject = null;
-            }
-
-            currentSession = null;
-            isMuted = false;
-            isOnHold = false;
-            muteBtn.textContent = 'Mute';
-            holdBtn.textContent = 'Hold';
-            callBtn.disabled = !isRegistered;
-            resetIceStats();
+            callStateDebug.innerHTML = html.join('');
         }
 
-        function resetRegistrationState() {
-            isRegistered = false;
-            registerBtn.disabled = false;
-            unregisterBtn.disabled = true;
-            callBtn.disabled = true;
-            endCall();
-            ua = null;
+        // ========== SIP Message Logging ==========
+        function logSipMessage(direction, method, body) {
+            const entry = document.createElement('div');
+            entry.className = 'debug-entry';
+            const timestamp = new Date().toLocaleTimeString();
+            const dirClass = direction === 'SENT' ? 'debug-info' : 'debug-warn';
+            entry.innerHTML = `<span class="debug-time">[${timestamp}]</span> <span class="${dirClass}">${direction} ${method}</span> ${body}`;
+            sipMessagesLog.appendChild(entry);
+            sipMessagesLog.scrollTop = sipMessagesLog.scrollHeight;
+            sipMessageLog.push({ time: timestamp, direction, method, body });
+            if (sipMessageLog.length > 100) sipMessageLog.shift();
         }
 
-        window.addEventListener('beforeunload', () => {
-            if (ua) {
-                ua.stop();
-            }
-        });
-
+        // ========== Init ==========
+        window.addEventListener('beforeunload', () => { if (ua) ua.stop(); if (ccWs) ccWs.close(); });
         loadDefaultIceServers();
-        // Enumerate cameras once (may return limited info until permission granted)
         enumerateCameras();
-        log('SIP Phone initialized');
+        log('CC SIP Phone initialized');
     </script>
 </body>
-
 </html>

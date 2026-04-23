@@ -37,8 +37,10 @@ async fn test_acl_module_allow_normal_request() {
 #[tokio::test]
 async fn test_acl_module_block_denied_ip() {
     // Add a denied IP to the config
-    let mut config = ProxyConfig::default();
-    config.acl_rules = Some(vec!["deny 192.168.1.100".to_string()]);
+    let config = ProxyConfig {
+        acl_rules: Some(vec!["deny 192.168.1.100".to_string()]),
+        ..Default::default()
+    };
     let config = Arc::new(config);
 
     // Create a request from denied IP
@@ -67,8 +69,10 @@ async fn test_acl_module_block_denied_ip() {
 #[tokio::test]
 async fn test_acl_module_allow_specific_ip() {
     // Add an allowed IP to the config
-    let mut config = ProxyConfig::default();
-    config.acl_rules = Some(vec!["allow 192.168.1.100".to_string()]);
+    let config = ProxyConfig {
+        acl_rules: Some(vec!["allow 192.168.1.100".to_string()]),
+        ..Default::default()
+    };
     let config = Arc::new(config);
 
     // Create a request from allowed IP
@@ -97,8 +101,10 @@ async fn test_acl_module_allow_specific_ip() {
 #[tokio::test]
 async fn test_acl_module_block_not_allowed_ip() {
     // Add an allowed IP to the config (but we'll test with a different IP)
-    let mut config = ProxyConfig::default();
-    config.acl_rules = Some(vec!["allow 192.168.1.100".to_string()]);
+    let config = ProxyConfig {
+        acl_rules: Some(vec!["allow 192.168.1.100".to_string()]),
+        ..Default::default()
+    };
     let config = Arc::new(config);
 
     // Create a request from a different IP (not allowed)
@@ -126,12 +132,14 @@ async fn test_acl_module_block_not_allowed_ip() {
 
 #[tokio::test]
 async fn test_acl_cidr_rules() {
-    let mut config = ProxyConfig::default();
-    config.acl_rules = Some(vec![
-        "deny 192.168.1.100".to_string(),
-        "allow 192.168.1.0/24".to_string(),
-        "deny all".to_string(),
-    ]);
+    let config = ProxyConfig {
+        acl_rules: Some(vec![
+            "deny 192.168.1.100".to_string(),
+            "allow 192.168.1.0/24".to_string(),
+            "deny all".to_string(),
+        ]),
+        ..Default::default()
+    };
     let config = Arc::new(config);
 
     let module = AclModule::new(config);
@@ -169,8 +177,10 @@ async fn test_acl_cidr_rules() {
 
 #[tokio::test]
 async fn test_acl_invalid_rules() {
-    let mut config = ProxyConfig::default();
-    config.acl_rules = Some(vec!["invalid_rule".to_string(), "allow all".to_string()]);
+    let config = ProxyConfig {
+        acl_rules: Some(vec!["invalid_rule".to_string(), "allow all".to_string()]),
+        ..Default::default()
+    };
     let config = Arc::new(config);
 
     let module = AclModule::new(config);
@@ -194,11 +204,13 @@ async fn test_acl_invalid_rules() {
 #[tokio::test]
 async fn test_acl_ipv6() {
     // Test IPv6 support directly using the AclModule unit tests
-    let mut config = ProxyConfig::default();
-    config.acl_rules = Some(vec![
-        "allow 2001:db8::/32".to_string(),
-        "deny all".to_string(),
-    ]);
+    let config = ProxyConfig {
+        acl_rules: Some(vec![
+            "allow 2001:db8::/32".to_string(),
+            "deny all".to_string(),
+        ]),
+        ..Default::default()
+    };
     let config = Arc::new(config);
 
     let module = AclModule::new(config);
@@ -214,11 +226,13 @@ async fn test_acl_ipv6() {
 
 #[tokio::test]
 async fn test_acl_rule_order() {
-    let mut config = ProxyConfig::default();
-    config.acl_rules = Some(vec![
-        "deny all".to_string(),
-        "allow 192.168.1.100".to_string(),
-    ]);
+    let config = ProxyConfig {
+        acl_rules: Some(vec![
+            "deny all".to_string(),
+            "allow 192.168.1.100".to_string(),
+        ]),
+        ..Default::default()
+    };
     let config = Arc::new(config);
 
     let module = AclModule::new(config);

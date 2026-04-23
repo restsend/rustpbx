@@ -126,7 +126,7 @@ impl RwiGateway {
             for ctx in contexts {
                 self.context_subscriptions
                     .entry(ctx)
-                    .or_insert_with(HashSet::new)
+                    .or_default()
                     .insert(session_id.clone());
             }
             true
@@ -156,11 +156,10 @@ impl RwiGateway {
         call_id: CallId,
         mode: OwnershipMode,
     ) -> Result<(), ClaimError> {
-        if let Some(current_owner) = self.call_ownership.get(&call_id) {
-            if current_owner != session_id {
+        if let Some(current_owner) = self.call_ownership.get(&call_id)
+            && current_owner != session_id {
                 return Err(ClaimError::AlreadyOwned);
             }
-        }
 
         if let Some(session) = self.sessions.get(session_id) {
             let mut session = session.write().await;
@@ -179,11 +178,10 @@ impl RwiGateway {
         session_id: &SessionId,
         call_id: &CallId,
     ) -> bool {
-        if let Some(current_owner) = self.call_ownership.get(call_id) {
-            if current_owner != session_id {
+        if let Some(current_owner) = self.call_ownership.get(call_id)
+            && current_owner != session_id {
                 return false;
             }
-        }
 
         if let Some(session) = self.sessions.get(session_id) {
             let mut session = session.write().await;
@@ -267,11 +265,10 @@ impl RwiGateway {
 
     /// Send an event to a single session by session_id.
     pub fn send_event_to_session(&self, session_id: &SessionId, event: &RwiEvent) {
-        if let Some(sender) = self.session_event_senders.get(session_id) {
-            if let Ok(value) = serde_json::to_value(event) {
+        if let Some(sender) = self.session_event_senders.get(session_id)
+            && let Ok(value) = serde_json::to_value(event) {
                 let _ = sender.send(value);
             }
-        }
     }
 
     /// Get current timestamp in seconds

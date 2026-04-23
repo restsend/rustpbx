@@ -296,15 +296,14 @@ action = {{ type = "transfer", target = "support" }}
         // Inject AudioComplete to simulate greeting finishing
         let registry = &server.server.active_call_registry;
         let sessions = registry.list_recent(1);
-        if let Some(entry) = sessions.first() {
-            if let Some(handle) = registry.get_handle(&entry.session_id) {
+        if let Some(entry) = sessions.first()
+            && let Some(handle) = registry.get_handle(&entry.session_id) {
                 let _ = handle.send_app_event(crate::call::app::ControllerEvent::AudioComplete {
                     track_id: "greeting".to_string(),
                     interrupted: false,
                 });
                 info!("Injected AudioComplete for session {}", entry.session_id);
             }
-        }
 
         sleep(Duration::from_millis(200)).await;
 
@@ -330,11 +329,10 @@ action = {{ type = "transfer", target = "support" }}
                     new_dialog = Some(caller.make_call(target_user, None).await?);
                     info!("Caller re-invited to {}", target_user);
                 }
-                if let TestUaEvent::CallEstablished(ref id) = event {
-                    if Some(id) == new_dialog.as_ref() {
+                if let TestUaEvent::CallEstablished(ref id) = event
+                    && Some(id) == new_dialog.as_ref() {
                         info!("Caller established queue call");
                     }
-                }
             }
             if new_dialog.is_some() {
                 break;
@@ -421,6 +419,6 @@ fn create_minimal_wav(path: &std::path::Path) {
     wav.extend_from_slice(&16u16.to_le_bytes()); // BitsPerSample
     wav.extend_from_slice(b"data");
     wav.extend_from_slice(&data_size.to_le_bytes());
-    wav.extend(std::iter::repeat(0u8).take(data_size as usize));
+    wav.extend(std::iter::repeat_n(0u8, data_size as usize));
     std::fs::write(path, wav).expect("failed to write wav");
 }

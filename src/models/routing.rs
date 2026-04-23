@@ -10,10 +10,12 @@ use serde::{Deserialize, Serialize};
 #[derive(Copy, Clone, Debug, PartialEq, Eq, EnumIter, DeriveActiveEnum, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 #[sea_orm(rs_type = "String", db_type = "Text")]
+#[derive(Default)]
 pub enum RoutingDirection {
     #[sea_orm(string_value = "inbound")]
     Inbound,
     #[sea_orm(string_value = "outbound")]
+    #[default]
     Outbound,
 }
 
@@ -26,18 +28,15 @@ impl RoutingDirection {
     }
 }
 
-impl Default for RoutingDirection {
-    fn default() -> Self {
-        Self::Outbound
-    }
-}
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, EnumIter, DeriveActiveEnum, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 #[sea_orm(rs_type = "String", db_type = "Text")]
+#[derive(Default)]
 pub enum RoutingSelectionStrategy {
     #[sea_orm(string_value = "rr")]
     #[serde(alias = "rr", alias = "round_robin", alias = "round-robin")]
+    #[default]
     RoundRobin,
     #[sea_orm(string_value = "weight")]
     #[serde(alias = "weight")]
@@ -56,11 +55,6 @@ impl RoutingSelectionStrategy {
     }
 }
 
-impl Default for RoutingSelectionStrategy {
-    fn default() -> Self {
-        Self::RoundRobin
-    }
-}
 
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Serialize, Deserialize)]
 #[sea_orm(table_name = "rustpbx_routes")]

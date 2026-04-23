@@ -112,6 +112,7 @@ impl CallRecordHook for SipFlowUploadHook {
 
 // ── Internal upload helpers ───────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 async fn upload_s3(
     vendor: &crate::config::S3Vendor,
     bucket: &str,

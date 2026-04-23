@@ -142,6 +142,7 @@ async fn establish_call(
 }
 
 /// Send bidirectional RTP and collect stats.
+#[allow(clippy::too_many_arguments)]
 async fn exchange_rtp(
     caller_sender: &RtpSender,
     callee_sender: &RtpSender,
@@ -638,7 +639,7 @@ async fn test_wholesale_cdr_duration_accuracy() -> Result<()> {
     info!(duration_secs, status = %record.details.status, "CDR duration");
 
     assert!(
-        duration_secs >= 1 && duration_secs <= 5,
+        (1..=5).contains(&duration_secs),
         "Duration should be ~2s, got {}s",
         duration_secs
     );
@@ -734,8 +735,8 @@ async fn test_wholesale_rtp_payload_integrity() -> Result<()> {
         payload[1] = (i & 0xFF) as u8;
         payload[2] = 0xDE;
         payload[3] = 0xAD;
-        for j in 4..160 {
-            payload[j] = ((i as u8).wrapping_add(j as u8)) ^ 0x55;
+        for (j, byte) in payload.iter_mut().enumerate().skip(4) {
+            *byte = ((i as u8).wrapping_add(j as u8)) ^ 0x55;
         }
         test_packets.push(RtpPacket::new(
             0,

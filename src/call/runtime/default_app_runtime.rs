@@ -249,12 +249,11 @@ impl AppRuntime for DefaultAppRuntime {
     }
 
     fn required_capabilities(&self) -> Vec<MediaCapability> {
-        if let Ok(guard) = self.running.try_read() {
-            if let Some(running) = guard.as_ref() {
+        if let Ok(guard) = self.running.try_read()
+            && let Some(running) = guard.as_ref() {
                 let descriptor = self.get_descriptor(&running.name);
                 return descriptor.required_capabilities;
             }
-        }
         vec![]
     }
 

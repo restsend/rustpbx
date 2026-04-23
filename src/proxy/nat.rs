@@ -5,6 +5,12 @@ use tracing::debug;
 
 pub struct NatInspector;
 
+impl Default for NatInspector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl NatInspector {
     pub fn new() -> Self {
         Self
@@ -56,14 +62,13 @@ impl NatInspector {
                 host_part
             };
 
-            if let Ok(ip) = host_only.parse::<IpAddr>() {
-                if Self::is_private_ip(&ip) {
+            if let Ok(ip) = host_only.parse::<IpAddr>()
+                && Self::is_private_ip(&ip) {
                     let from_host = from_addr.host.to_string();
-                    if let Ok(from_ip) = from_host.parse::<IpAddr>() {
-                        if from_ip == ip || Self::is_private_ip(&from_ip) {
+                    if let Ok(from_ip) = from_host.parse::<IpAddr>()
+                        && (from_ip == ip || Self::is_private_ip(&from_ip)) {
                             return;
                         }
-                    }
 
                     let from_port = from_addr.port.as_ref().map(|p| p.to_string());
 
@@ -83,24 +88,21 @@ impl NatInspector {
                     debug!(old = %header_value, new = %new_header, "Fixed NAT Contact header");
                     *header_value = new_header;
                 }
-            }
-        } else if uri_str.starts_with("sip:") {
-            let host_part = &uri_str[4..];
+        } else if let Some(host_part) = uri_str.strip_prefix("sip:") {
             let host_only = if let Some(col_idx) = host_part.find(':') {
                 &host_part[..col_idx]
             } else {
                 host_part
             };
 
-            if let Ok(ip) = host_only.parse::<IpAddr>() {
-                if Self::is_private_ip(&ip) {
+            if let Ok(ip) = host_only.parse::<IpAddr>()
+                && Self::is_private_ip(&ip) {
                     let from_host = from_addr.host.to_string();
                     // If the ip is the same as the source ip, we don't need to fix it
-                    if let Ok(from_ip) = from_host.parse::<IpAddr>() {
-                        if from_ip == ip {
+                    if let Ok(from_ip) = from_host.parse::<IpAddr>()
+                        && from_ip == ip {
                             return;
                         }
-                    }
 
                     let from_port = from_addr.port.as_ref().map(|p| p.to_string());
 
@@ -119,7 +121,6 @@ impl NatInspector {
                     debug!(old = %header_value, new = %new_header, "Fixed NAT Contact header");
                     *header_value = new_header;
                 }
-            }
         }
     }
 }
@@ -142,16 +143,13 @@ impl MessageInspector for NatInspector {
 
             if is_target_forming {
                 for header in resp.headers.iter_mut() {
-                    match header {
-                        rsipstack::sip::Header::Contact(contact) => {
-                            let mut val = contact.value().to_string();
-                            let old_val = val.clone();
-                            self.fix_contact_header(&mut val, &from.addr);
-                            if val != old_val {
-                                *contact = val.into();
-                            }
+                    if let rsipstack::sip::Header::Contact(contact) = header {
+                        let mut val = contact.value().to_string();
+                        let old_val = val.clone();
+                        self.fix_contact_header(&mut val, &from.addr);
+                        if val != old_val {
+                            *contact = val.into();
                         }
-                        _ => {}
                     }
                 }
             }

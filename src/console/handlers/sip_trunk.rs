@@ -609,6 +609,7 @@ async fn handle_tenant_update(
     Ok(())
 }
 
+#[allow(clippy::result_large_err)]
 fn apply_form_to_active_model(
     active: &mut SipTrunkActiveModel,
     form: &SipTrunkForm,
@@ -746,6 +747,7 @@ fn apply_form_to_active_model(
     Ok(())
 }
 
+#[allow(clippy::result_large_err)]
 fn parse_list_field(
     value: &Option<String>,
     field: &str,
@@ -776,6 +778,7 @@ fn parse_list_field(
     }
 }
 
+#[allow(clippy::result_large_err)]
 fn normalize_list_json(
     value: Value,
     field: &str,
@@ -850,6 +853,7 @@ fn extract_list_entry(value: Value, preferred_keys: &[&str]) -> Result<Option<St
     }
 }
 
+#[allow(clippy::result_large_err)]
 fn parse_json_field(value: &Option<String>, field: &str) -> Result<Option<Value>, Response> {
     let Some(raw) = value.as_ref().map(|v| v.trim()).filter(|v| !v.is_empty()) else {
         return Ok(None);

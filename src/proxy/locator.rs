@@ -71,6 +71,7 @@ pub struct DialogTargetLocator {
 }
 
 impl DialogTargetLocator {
+    #[allow(clippy::new_ret_no_self)]
     pub fn new(locator: Arc<Box<dyn Locator>>) -> Box<dyn TargetLocator> {
         Box::new(Self { locator }) as Box<dyn TargetLocator>
     }
@@ -79,17 +80,12 @@ impl DialogTargetLocator {
 #[async_trait]
 impl TargetLocator for DialogTargetLocator {
     async fn locate(&self, uri: &rsipstack::sip::Uri) -> Result<SipAddr, rsipstack::Error> {
-        match self.locator.lookup(uri).await {
-            Ok(locs) => {
-                if let Some(loc) = locs.first() {
-                    if let Some(dest) = &loc.destination {
-                        debug!(%uri, %dest, "Located target for dialog");
-                        return Ok(dest.clone());
-                    }
+        if let Ok(locs) = self.locator.lookup(uri).await
+            && let Some(loc) = locs.first()
+                && let Some(dest) = &loc.destination {
+                    debug!(%uri, %dest, "Located target for dialog");
+                    return Ok(dest.clone());
                 }
-            }
-            Err(_) => {}
-        }
         SipAddr::try_from(uri).map_err(|e| {
             rsipstack::Error::Error(format!(
                 "failed to convert uri to sip addr: {}, error: {}",
@@ -105,6 +101,7 @@ pub struct TransportInspectorLocator {
 }
 
 impl TransportInspectorLocator {
+    #[allow(clippy::new_ret_no_self)]
     pub fn new(
         locator: Arc<Box<dyn Locator>>,
         locator_events: LocatorEventSender,
@@ -119,23 +116,20 @@ impl TransportInspectorLocator {
 #[async_trait]
 impl TransportEventInspector for TransportInspectorLocator {
     async fn handle(&self, event: TransportEvent) -> Option<TransportEvent> {
-        match &event {
-            TransportEvent::Closed(conn) => {
-                match self.locator.unregister_with_address(conn.get_addr()).await {
-                    Ok(Some(removed)) => {
-                        if !removed.is_empty() {
-                            self.locator_events
-                                .send(LocatorEvent::Offline(removed))
-                                .ok();
-                        }
-                    }
-                    Ok(None) => {}
-                    Err(e) => {
-                        debug!(error = %e, "Error unregistering location on transport close");
+        if let TransportEvent::Closed(conn) = &event {
+            match self.locator.unregister_with_address(conn.get_addr()).await {
+                Ok(Some(removed)) => {
+                    if !removed.is_empty() {
+                        self.locator_events
+                            .send(LocatorEvent::Offline(removed))
+                            .ok();
                     }
                 }
+                Ok(None) => {}
+                Err(e) => {
+                    debug!(error = %e, "Error unregistering location on transport close");
+                }
             }
-            _ => {}
         }
         Some(event)
     }
@@ -231,11 +225,10 @@ impl Locator for MemoryLocator {
             let keys_to_remove: Vec<String> = map
                 .iter()
                 .filter_map(|(key, loc)| {
-                    if let Some(dest) = &loc.destination {
-                        if dest == addr {
+                    if let Some(dest) = &loc.destination
+                        && dest == addr {
                             return Some(key.clone());
                         }
-                    }
                     None
                 })
                 .collect();
@@ -283,18 +276,16 @@ impl Locator for MemoryLocator {
                     direct_hits.push(loc.clone());
                     continue;
                 }
-                if let Some(registered) = &loc.registered_aor {
-                    if registered == uri || uri_matches(registered, uri) {
+                if let Some(registered) = &loc.registered_aor
+                    && (registered == uri || uri_matches(registered, uri)) {
                         direct_hits.push(loc.clone());
                         continue;
                     }
-                }
-                if let Some(gruu) = &loc.gruu {
-                    if gruu == &uri_string || gruu.eq_ignore_ascii_case(&uri_string) {
+                if let Some(gruu) = &loc.gruu
+                    && (gruu == &uri_string || gruu.eq_ignore_ascii_case(&uri_string)) {
                         direct_hits.push(loc.clone());
                         continue;
                     }
-                }
             }
         }
 
@@ -303,7 +294,7 @@ impl Locator for MemoryLocator {
         }
 
         // Fall back to classic AoR lookup by username/realm
-        let username_raw = uri.user().unwrap_or_else(|| "");
+        let username_raw = uri.user().unwrap_or("");
         let username = username_raw.trim();
         let username_lower = username.to_ascii_lowercase();
         let realm_raw = uri.host().to_string();
@@ -319,12 +310,11 @@ impl Locator for MemoryLocator {
         }
 
         for id in identifiers {
-            if let Some(map) = locations.get(&id) {
-                if !map.is_empty() {
+            if let Some(map) = locations.get(&id)
+                && !map.is_empty() {
                     let results: Vec<_> = map.values().cloned().collect();
                     return Ok(sort_locations_by_recency(results));
                 }
-            }
         }
 
         if !username.is_empty() {
@@ -389,11 +379,10 @@ fn compare_location_recency(a: &Location, b: &Location) -> Ordering {
 
 fn host_without_port(value: &str) -> &str {
     let trimmed = value.trim();
-    if trimmed.starts_with('[') {
-        if let Some(end) = trimmed.find(']') {
+    if trimmed.starts_with('[')
+        && let Some(end) = trimmed.find(']') {
             return &trimmed[1..end];
         }
-    }
 
     // If it contains more than one colon, it's likely an IPv6 address without brackets
     if trimmed.matches(':').count() > 1 {
@@ -420,11 +409,10 @@ pub(crate) fn is_local_realm(realm: &str) -> bool {
         if ip.is_loopback() || ip.is_unspecified() {
             return true;
         }
-        if let std::net::IpAddr::V4(v4) = ip {
-            if v4.is_private() {
+        if let std::net::IpAddr::V4(v4) = ip
+            && v4.is_private() {
                 return true;
             }
-        }
     }
     false
 }
@@ -463,11 +451,10 @@ pub fn uri_matches(a: &rsipstack::sip::Uri, b: &rsipstack::sip::Uri) -> bool {
         }
 
         // Special handling for .invalid domains often used in WebRTC
-        if a_host.ends_with(".invalid") || b_host.ends_with(".invalid") {
-            if a_host.eq_ignore_ascii_case(&b_host) {
+        if (a_host.ends_with(".invalid") || b_host.ends_with(".invalid"))
+            && a_host.eq_ignore_ascii_case(&b_host) {
                 return true;
             }
-        }
     }
 
     // Fallback to case-insensitive string comparison for the whole URI

@@ -84,8 +84,8 @@ impl Model {
             .await
             .with_context(|| format!("failed to lookup user by username: {}", username))?;
 
-        if user.is_none() {
-            if let Some(existing) = Entity::find()
+        if user.is_none()
+            && let Some(existing) = Entity::find()
                 .filter(Column::Email.eq(email.clone()))
                 .one(db)
                 .await
@@ -93,7 +93,6 @@ impl Model {
             {
                 user = Some(existing);
             }
-        }
 
         if let Some(user) = user {
             let mut model: ActiveModel = user.into();
@@ -111,17 +110,19 @@ impl Model {
                 .await
                 .context("failed to update super user")
         } else {
-            let mut model: ActiveModel = Default::default();
-            model.username = Set(username.to_string());
-            model.email = Set(email.clone());
-            model.password_hash = Set(hashed);
-            model.created_at = Set(now);
-            model.updated_at = Set(now);
-            model.is_active = Set(true);
-            model.is_staff = Set(true);
-            model.is_superuser = Set(true);
-            model.reset_token = Set(None);
-            model.reset_token_expires = Set(None);
+            let model = ActiveModel {
+                username: Set(username.to_string()),
+                email: Set(email.clone()),
+                password_hash: Set(hashed),
+                created_at: Set(now),
+                updated_at: Set(now),
+                is_active: Set(true),
+                is_staff: Set(true),
+                is_superuser: Set(true),
+                reset_token: Set(None),
+                reset_token_expires: Set(None),
+                ..Default::default()
+            };
             model
                 .insert(db)
                 .await

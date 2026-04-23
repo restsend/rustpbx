@@ -23,6 +23,7 @@
 
 use super::{AppEventLoop, CallApp, CallController, ControllerEvent, RecordingInfo};
 use crate::call::DialDirection;
+use tokio::sync::mpsc;
 use crate::call::app::{ApplicationContext, CallInfo};
 use crate::config::Config;
 use crate::proxy::proxy_call::state::{SessionAction, SipSessionHandle, SipSessionShared};
@@ -32,6 +33,11 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
+/// Type alias for mock call stack command sender.
+pub type MockCmdTx = tokio::sync::mpsc::UnboundedSender<SessionAction>;
+/// Type alias for mock call stack command receiver.
+pub type MockCmdRx = tokio::sync::mpsc::UnboundedReceiver<SessionAction>;
+
 /// Fully assembled, in-memory [`CallApp`] harness — no SIP stack required.
 ///
 /// The harness wires up:
@@ -40,9 +46,9 @@ use tokio_util::sync::CancellationToken;
 /// - A real [`AppEventLoop`] running the app in a background Tokio task.
 pub struct MockCallStack {
     /// Inject SIP-originated events into the running app.
-    event_tx: tokio::sync::mpsc::UnboundedSender<ControllerEvent>,
+    event_tx: mpsc::UnboundedSender<ControllerEvent>,
     /// Observe [`SessionAction`]s emitted by the app toward the SIP layer.
-    cmd_rx: tokio::sync::mpsc::UnboundedReceiver<SessionAction>,
+    cmd_rx: MockCmdRx,
     /// Cancel token wired to the AppEventLoop's child token.
     cancel: CancellationToken,
     /// Background task running the AppEventLoop.
@@ -57,15 +63,7 @@ impl MockCallStack {
     /// * `caller` – Simulated caller-ID (e.g. `"1001"` or `"sip:alice@test"`).
     /// * `callee` – Simulated callee-ID (e.g. `"1002"`).
     pub fn run(app: Box<dyn CallApp>, caller: &str, callee: &str) -> Self {
-        // Minimal ApplicationContext (no DB, temp-dir storage).
-        let storage = crate::storage::Storage::new(&crate::storage::StorageConfig::Local {
-            path: std::env::temp_dir()
-                .join("rustpbx-mock-test")
-                .to_string_lossy()
-                .to_string(),
-        })
-        .expect("temp storage for mock");
-
+        // Minimal ApplicationContext (no DB, no storage).
         let ctx = ApplicationContext::new(
             DatabaseConnection::Disconnected,
             CallInfo {
@@ -76,7 +74,6 @@ impl MockCallStack {
                 started_at: Utc::now(),
             },
             Arc::new(Config::default()),
-            storage,
         );
 
         Self::run_with_context(app, ctx)
@@ -174,7 +171,7 @@ impl MockCallStack {
     /// Return a clone of the event sender so callers can inject events
     /// asynchronously (e.g. from a background task wired to a real FileTrack
     /// completion_notify).
-    pub fn event_sender(&self) -> tokio::sync::mpsc::UnboundedSender<ControllerEvent> {
+    pub fn event_sender(&self) -> mpsc::UnboundedSender<ControllerEvent> {
         self.event_tx.clone()
     }
 
@@ -224,5 +221,19 @@ impl MockCallStack {
     /// Wait for the event loop task to complete and surface any error.
     pub async fn join(self) -> anyhow::Result<()> {
         self.join_handle.await.expect("MockCallStack task panicked")
+    }
+
+    /// Inject a timeout event.
+    pub fn timeout(&self, id: impl Into<String>) -> &Self {
+        let _ = self
+            .event_tx
+            .send(ControllerEvent::Timeout(id.into()));
+        self
+    }
+
+    /// Simulate entering the app (calls on_enter and processes initial commands).
+    pub async fn enter(&mut self) {
+        // Wait for initial commands from on_enter
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }

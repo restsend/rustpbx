@@ -310,15 +310,12 @@ async fn test_call_success() {
         for _ in 0..50 {
             let events = bob.process_dialog_events().await.unwrap_or_default();
             for event in events {
-                match event {
-                    TestUaEvent::IncomingCall(dialog_id, _) => {
-                        info!("Bob received incoming call: {}", dialog_id);
-                        bob.answer_call(&dialog_id, Some(bob_sdp.clone()))
-                            .await
-                            .unwrap();
-                        return Ok::<_, anyhow::Error>(dialog_id);
-                    }
-                    _ => {}
+                if let TestUaEvent::IncomingCall(dialog_id, _) = event {
+                    info!("Bob received incoming call: {}", dialog_id);
+                    bob.answer_call(&dialog_id, Some(bob_sdp.clone()))
+                        .await
+                        .unwrap();
+                    return Ok::<_, anyhow::Error>(dialog_id);
                 }
             }
             sleep(Duration::from_millis(100)).await;
@@ -425,13 +422,10 @@ async fn test_call_rejection() {
         for _ in 0..50 {
             let events = bob.process_dialog_events().await.unwrap_or_default();
             for event in events {
-                match event {
-                    TestUaEvent::IncomingCall(dialog_id, _) => {
-                        info!("Bob received incoming call: {}", dialog_id);
-                        bob.reject_call(&dialog_id).await.unwrap();
-                        return Ok::<_, anyhow::Error>(());
-                    }
-                    _ => {}
+                if let TestUaEvent::IncomingCall(dialog_id, _) = event {
+                    info!("Bob received incoming call: {}", dialog_id);
+                    bob.reject_call(&dialog_id).await.unwrap();
+                    return Ok::<_, anyhow::Error>(());
                 }
             }
             sleep(Duration::from_millis(100)).await;
@@ -443,9 +437,8 @@ async fn test_call_rejection() {
 
     // call_result is Ok(Result<DialogId, Error>), we need to check the inner result
     assert!(call_result.is_ok(), "Call task should complete");
-    match call_result.unwrap() {
-        Ok(_) => panic!("Call should be rejected, but it succeeded"),
-        Err(_) => {} // This is what we expect - the call was rejected
+    if call_result.unwrap().is_ok() {
+        panic!("Call should be rejected, but it succeeded");
     }
     assert!(reject_result.is_ok(), "Bob should reject the call");
 
@@ -488,19 +481,16 @@ async fn test_call_hangup_flow() {
         for _ in 0..50 {
             let events = bob.process_dialog_events().await.unwrap_or_default();
             for event in events {
-                match event {
-                    TestUaEvent::IncomingCall(dialog_id, _) => {
-                        info!("Bob received incoming call: {}", dialog_id);
-                        bob.answer_call(&dialog_id, Some(bob_sdp.clone()))
-                            .await
-                            .unwrap();
+                if let TestUaEvent::IncomingCall(dialog_id, _) = event {
+                    info!("Bob received incoming call: {}", dialog_id);
+                    bob.answer_call(&dialog_id, Some(bob_sdp.clone()))
+                        .await
+                        .unwrap();
 
-                        // Wait for a while after answering, then hang up
-                        sleep(Duration::from_millis(500)).await;
-                        bob.hangup(&dialog_id).await.unwrap();
-                        return Ok::<_, anyhow::Error>(dialog_id);
-                    }
-                    _ => {}
+                    // Wait for a while after answering, then hang up
+                    sleep(Duration::from_millis(500)).await;
+                    bob.hangup(&dialog_id).await.unwrap();
+                    return Ok::<_, anyhow::Error>(dialog_id);
                 }
             }
             sleep(Duration::from_millis(100)).await;

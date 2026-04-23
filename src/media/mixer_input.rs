@@ -87,11 +87,7 @@ impl MixerInput {
     /// Returns decoded PCM samples
     pub fn decode(&mut self, encoded_data: &[u8]) -> Option<Vec<i16>> {
         self.ensure_decoder();
-        if let Some(ref mut decoder) = self.decoder {
-            Some(decoder.decode(encoded_data))
-        } else {
-            None
-        }
+        self.decoder.as_mut().map(|decoder| decoder.decode(encoded_data))
     }
 
     /// Get the sample rate of the decoder

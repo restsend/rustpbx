@@ -456,6 +456,302 @@ pub mod transfer {
     }
 }
 
+pub mod conference {
+    pub fn created() {
+        metrics::counter!("rustpbx_conference_created_total").increment(1);
+    }
+
+    pub fn destroyed(reason: &str) {
+        metrics::counter!(
+            "rustpbx_conference_destroyed_total",
+            "reason" => reason.to_string()
+        )
+        .increment(1);
+    }
+
+    pub fn set_participants(conference_id: &str, count: usize) {
+        metrics::gauge!(
+            "rustpbx_conference_participants",
+            "conference" => conference_id.to_string()
+        )
+        .set(count as f64);
+    }
+
+    pub fn media_injected_bytes(conference_id: &str, bytes: u64) {
+        metrics::counter!(
+            "rustpbx_conference_media_injected_bytes_total",
+            "conference" => conference_id.to_string()
+        )
+        .increment(bytes);
+    }
+}
+
+pub mod cc {
+    // ===== Queue Metrics =====
+    pub fn queue_call_enqueued(queue_id: &str) {
+        metrics::counter!(
+            "rustpbx_cc_queue_calls_total",
+            "queue" => queue_id.to_string()
+        )
+        .increment(1);
+    }
+
+    pub fn queue_call_answered(queue_id: &str, wait_secs: f64) {
+        metrics::counter!(
+            "rustpbx_cc_queue_calls_answered_total",
+            "queue" => queue_id.to_string()
+        )
+        .increment(1);
+        metrics::histogram!(
+            "rustpbx_cc_queue_wait_time_seconds",
+            "queue" => queue_id.to_string()
+        )
+        .record(wait_secs);
+    }
+
+    pub fn queue_call_abandoned(queue_id: &str, wait_secs: f64) {
+        metrics::counter!(
+            "rustpbx_cc_queue_calls_abandoned_total",
+            "queue" => queue_id.to_string()
+        )
+        .increment(1);
+        metrics::histogram!(
+            "rustpbx_cc_queue_wait_time_seconds",
+            "queue" => queue_id.to_string()
+        )
+        .record(wait_secs);
+    }
+
+    pub fn queue_call_transferred(queue_id: &str) {
+        metrics::counter!(
+            "rustpbx_cc_queue_calls_transferred_total",
+            "queue" => queue_id.to_string()
+        )
+        .increment(1);
+    }
+
+    pub fn queue_call_voicemail(queue_id: &str) {
+        metrics::counter!(
+            "rustpbx_cc_queue_calls_voicemail_total",
+            "queue" => queue_id.to_string()
+        )
+        .increment(1);
+    }
+
+    pub fn queue_call_handle_time(queue_id: &str, handle_secs: f64) {
+        metrics::histogram!(
+            "rustpbx_cc_queue_handle_time_seconds",
+            "queue" => queue_id.to_string()
+        )
+        .record(handle_secs);
+    }
+
+    pub fn set_queue_size(queue_id: &str, count: usize) {
+        metrics::gauge!(
+            "rustpbx_cc_queue_size",
+            "queue" => queue_id.to_string()
+        )
+        .set(count as f64);
+    }
+
+    pub fn set_queue_longest_wait(queue_id: &str, secs: u64) {
+        metrics::gauge!(
+            "rustpbx_cc_queue_longest_wait_seconds",
+            "queue" => queue_id.to_string()
+        )
+        .set(secs as f64);
+    }
+
+    pub fn set_queue_sla_percentage(queue_id: &str, percentage: f64) {
+        metrics::gauge!(
+            "rustpbx_cc_queue_sla_percentage",
+            "queue" => queue_id.to_string()
+        )
+        .set(percentage);
+    }
+
+    // ===== Agent Metrics =====
+    pub fn agent_status_changed(agent_id: &str, status: &str) {
+        metrics::gauge!(
+            "rustpbx_cc_agent_status",
+            "agent" => agent_id.to_string(),
+            "status" => status.to_string()
+        )
+        .set(1.0);
+    }
+
+    pub fn agent_call_handled(agent_id: &str) {
+        metrics::counter!(
+            "rustpbx_cc_agent_calls_handled_total",
+            "agent" => agent_id.to_string()
+        )
+        .increment(1);
+    }
+
+    pub fn agent_talk_time(agent_id: &str, secs: f64) {
+        metrics::histogram!(
+            "rustpbx_cc_agent_talk_time_seconds",
+            "agent" => agent_id.to_string()
+        )
+        .record(secs);
+    }
+
+    pub fn agent_wrapup_time(agent_id: &str, secs: f64) {
+        metrics::histogram!(
+            "rustpbx_cc_agent_wrapup_time_seconds",
+            "agent" => agent_id.to_string()
+        )
+        .record(secs);
+    }
+
+    pub fn agent_ringing_time(agent_id: &str, secs: f64) {
+        metrics::histogram!(
+            "rustpbx_cc_agent_ringing_time_seconds",
+            "agent" => agent_id.to_string()
+        )
+        .record(secs);
+    }
+
+    pub fn set_agent_concurrent_calls(agent_id: &str, count: u32) {
+        metrics::gauge!(
+            "rustpbx_cc_agent_concurrent_calls",
+            "agent" => agent_id.to_string()
+        )
+        .set(count as f64);
+    }
+
+    pub fn set_agents_by_status(status: &str, count: usize) {
+        metrics::gauge!(
+            "rustpbx_cc_agents_active",
+            "status" => status.to_string()
+        )
+        .set(count as f64);
+    }
+
+    // ===== SLA Metrics =====
+    pub fn sla_answered_within_target(queue_id: &str) {
+        metrics::counter!(
+            "rustpbx_cc_sla_answered_within_target_total",
+            "queue" => queue_id.to_string()
+        )
+        .increment(1);
+    }
+
+    pub fn sla_answered_after_target(queue_id: &str) {
+        metrics::counter!(
+            "rustpbx_cc_sla_answered_after_target_total",
+            "queue" => queue_id.to_string()
+        )
+        .increment(1);
+    }
+
+    pub fn sla_breached(queue_id: &str) {
+        metrics::counter!(
+            "rustpbx_cc_sla_breached_total",
+            "queue" => queue_id.to_string()
+        )
+        .increment(1);
+    }
+
+    pub fn sla_alert_triggered(queue_id: &str, action_type: &str) {
+        metrics::counter!(
+            "rustpbx_cc_sla_alert_total",
+            "queue" => queue_id.to_string(),
+            "action" => action_type.to_string()
+        )
+        .increment(1);
+    }
+
+    // ===== Transfer Metrics =====
+    pub fn transfer_consult_initiated(queue_id: &str) {
+        metrics::counter!(
+            "rustpbx_cc_transfer_consult_total",
+            "queue" => queue_id.to_string()
+        )
+        .increment(1);
+    }
+
+    pub fn transfer_consult_success(queue_id: &str) {
+        metrics::counter!(
+            "rustpbx_cc_transfer_consult_success_total",
+            "queue" => queue_id.to_string()
+        )
+        .increment(1);
+    }
+
+    pub fn transfer_consult_failed(queue_id: &str, reason: &str) {
+        metrics::counter!(
+            "rustpbx_cc_transfer_consult_failed_total",
+            "queue" => queue_id.to_string(),
+            "reason" => reason.to_string()
+        )
+        .increment(1);
+    }
+
+    // ===== Conference Metrics =====
+    pub fn conference_created() {
+        metrics::counter!("rustpbx_cc_conference_created_total").increment(1);
+    }
+
+    pub fn conference_destroyed(reason: &str) {
+        metrics::counter!(
+            "rustpbx_cc_conference_destroyed_total",
+            "reason" => reason.to_string()
+        )
+        .increment(1);
+    }
+
+    pub fn set_conference_participants(conference_id: &str, count: usize) {
+        metrics::gauge!(
+            "rustpbx_cc_conference_participants",
+            "conference" => conference_id.to_string()
+        )
+        .set(count as f64);
+    }
+
+    pub fn conference_media_injected_bytes(conference_id: &str, bytes: u64) {
+        metrics::counter!(
+            "rustpbx_cc_conference_media_injected_bytes_total",
+            "conference" => conference_id.to_string()
+        )
+        .increment(bytes);
+    }
+
+    // ===== SIP MESSAGE Metrics =====
+    pub fn sip_message_sent(agent_id: &str, status: &str) {
+        metrics::counter!(
+            "rustpbx_cc_sip_message_sent_total",
+            "agent" => agent_id.to_string(),
+            "status" => status.to_string()
+        )
+        .increment(1);
+    }
+
+    // ===== Autonomous Mode Metrics =====
+    pub fn set_autonomous_mode(enabled: bool) {
+        metrics::gauge!("rustpbx_cc_autonomous_mode_enabled")
+            .set(if enabled { 1.0 } else { 0.0 });
+    }
+
+    pub fn autonomous_decision(decision_type: &str) {
+        metrics::counter!(
+            "rustpbx_cc_autonomous_decisions_total",
+            "type" => decision_type.to_string()
+        )
+        .increment(1);
+    }
+
+    // ===== No-Answer Action Metrics =====
+    pub fn no_answer_action_executed(queue_id: &str, action: &str) {
+        metrics::counter!(
+            "rustpbx_cc_no_answer_action_total",
+            "queue" => queue_id.to_string(),
+            "action" => action.to_string()
+        )
+        .increment(1);
+    }
+}
+
 pub fn init_static_gauges() {
     let version = crate::version::get_short_version();
     metrics::gauge!("rustpbx_info", "version" => version).set(1.0);
@@ -540,5 +836,44 @@ mod tests {
         transfer::attended_consult_initiated();
         transfer::attended_completed();
         transfer::attended_cancelled();
+
+        cc::queue_call_enqueued("support");
+        cc::queue_call_answered("support", 15.0);
+        cc::queue_call_abandoned("support", 30.0);
+        cc::queue_call_transferred("support");
+        cc::queue_call_voicemail("support");
+        cc::queue_call_handle_time("support", 120.0);
+        cc::set_queue_size("support", 3);
+        cc::set_queue_longest_wait("support", 45);
+        cc::set_queue_sla_percentage("support", 0.85);
+
+        cc::agent_status_changed("agent-1", "idle");
+        cc::agent_call_handled("agent-1");
+        cc::agent_talk_time("agent-1", 60.0);
+        cc::agent_wrapup_time("agent-1", 10.0);
+        cc::agent_ringing_time("agent-1", 5.0);
+        cc::set_agent_concurrent_calls("agent-1", 1);
+        cc::set_agents_by_status("idle", 5);
+
+        cc::sla_answered_within_target("support");
+        cc::sla_answered_after_target("support");
+        cc::sla_breached("support");
+        cc::sla_alert_triggered("support", "webhook");
+
+        cc::transfer_consult_initiated("support");
+        cc::transfer_consult_success("support");
+        cc::transfer_consult_failed("support", "timeout");
+
+        cc::conference_created();
+        cc::conference_destroyed("p2p_fallback");
+        cc::set_conference_participants("conf-1", 3);
+        cc::conference_media_injected_bytes("conf-1", 1024);
+
+        cc::sip_message_sent("agent-1", "success");
+
+        cc::set_autonomous_mode(true);
+        cc::autonomous_decision("assign_agent");
+
+        cc::no_answer_action_executed("support", "voicemail");
     }
 }

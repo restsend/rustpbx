@@ -78,6 +78,11 @@ pub trait SessionRegistry: Send + Sync {
     /// Get the number of active sessions
     fn len(&self) -> usize;
 
+    /// Check if there are no active sessions
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     /// Get all active session IDs
     fn session_ids(&self) -> Vec<String>;
 }

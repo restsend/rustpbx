@@ -348,7 +348,7 @@ impl StorageManager {
                   AND s.timestamp <= ?
                  ORDER BY s.timestamp ASC",
             )
-            .bind(&callid)
+            .bind(callid)
             .bind(start_ts)
             .bind(end_ts)
             .fetch_all(&mut conn)
@@ -494,7 +494,7 @@ impl StorageManager {
                   AND m.timestamp <= ?
                  GROUP BY m.leg, m.src",
             )
-            .bind(&callid)
+            .bind(callid)
             .bind(start_ts)
             .bind(end_ts)
             .fetch_all(&mut conn)
@@ -547,7 +547,7 @@ impl StorageManager {
                   AND s.timestamp <= ?
                  ORDER BY s.timestamp ASC",
             )
-            .bind(&callid)
+            .bind(callid)
             .bind(start_ts)
             .bind(end_ts)
             .fetch_all(&mut conn)

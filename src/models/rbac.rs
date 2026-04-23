@@ -91,6 +91,7 @@ pub mod user_role {
     }
 
     impl Model {
+        #[allow(clippy::new_ret_no_self)]
         pub fn new(user_id: i64, role_id: i64) -> ActiveModel {
             ActiveModel {
                 user_id: Set(user_id),
@@ -128,6 +129,10 @@ pub const SYSTEM_ROLES: &[(&str, &str)] = &[
     ("viewer", "Read-only auditor for compliance"),
     #[cfg(feature = "addon-ivr-editor")]
     ("ivr_editor", "IVR flow editor"),
+    #[cfg(feature = "addon-cc")]
+    ("cc_supervisor", "Contact Center Supervisor - can monitor agents and view reports"),
+    #[cfg(feature = "addon-cc")]
+    ("cc_manager", "Contact Center Manager - can manage agents, skill groups, and monitor"),
     #[cfg(feature = "addon-wholesale")]
     ("wholesale_admin", "Wholesale tenant and billing manager"),
     #[cfg(feature = "addon-wholesale")]
@@ -265,6 +270,35 @@ const ROLE_PERMISSIONS: &[(&str, &[(&str, &str)])] = &[
     ),
     #[cfg(feature = "addon-ivr-editor")]
     ("ivr_editor", &[("ivr", "read"), ("ivr", "write")]),
+    #[cfg(feature = "addon-cc")]
+    (
+        "cc_supervisor",
+        &[
+            ("cc_agent", "read"),
+            ("cc_skill_group", "read"),
+            ("cc_supervisor", "monitor"),
+            ("cc_queue", "realtime"),
+            ("cc_reports", "read"),
+            ("cc_conference", "read"),
+        ],
+    ),
+    #[cfg(feature = "addon-cc")]
+    (
+        "cc_manager",
+        &[
+            ("cc_agent", "read"),
+            ("cc_agent", "write"),
+            ("cc_skill_group", "read"),
+            ("cc_skill_group", "write"),
+            ("cc_supervisor", "monitor"),
+            ("cc_supervisor", "takeover"),
+            ("cc_queue", "realtime"),
+            ("cc_reports", "read"),
+            ("cc_transfer", "settings"),
+            ("cc_conference", "read"),
+            ("cc_conference", "write"),
+        ],
+    ),
     #[cfg(feature = "addon-wholesale")]
     (
         "wholesale_admin",

@@ -21,6 +21,8 @@ pub mod i18n;
 pub mod middleware;
 pub use handlers::router;
 
+pub type PermCache = HashMap<i64, (Instant, HashSet<String>)>;
+
 #[derive(Clone)]
 pub struct ConsoleState {
     db: DatabaseConnection,
@@ -30,9 +32,16 @@ pub struct ConsoleState {
     app_state: Arc<RwLock<Option<Weak<AppStateInner>>>>,
     callrecord_formatter: Arc<dyn CallRecordFormatter>,
     i18n: Arc<I18n>,
-    perm_cache: Arc<Mutex<HashMap<i64, (Instant, HashSet<String>)>>>,
+    perm_cache: Arc<Mutex<PermCache>>,
     pub pending_reload: Arc<AtomicBool>,
+    /// Addon-specific state storage using http::Extensions for type-safe access
+    addon_extensions: Arc<std::sync::RwLock<http::Extensions>>,
 }
+
+/// Trait for addon state types that can be stored in ConsoleState.
+pub trait AddonState: std::any::Any + Send + Sync + Clone + 'static {}
+
+impl<T: std::any::Any + Send + Sync + Clone + 'static> AddonState for T {}
 
 impl ConsoleState {
     pub async fn initialize(
@@ -71,6 +80,7 @@ impl ConsoleState {
             i18n,
             perm_cache: Arc::new(Mutex::new(HashMap::new())),
             pending_reload: Arc::new(AtomicBool::new(false)),
+            addon_extensions: Arc::new(std::sync::RwLock::new(http::Extensions::new())),
         }))
     }
 
@@ -111,8 +121,8 @@ impl ConsoleState {
         locale: &str,
     ) -> Response {
         let mut ctx = ctx;
-        if ctx.is_object() {
-            if let Some(map) = ctx.as_object_mut() {
+        if ctx.is_object()
+            && let Some(map) = ctx.as_object_mut() {
                 map.entry("base_path")
                     .or_insert_with(|| serde_json::Value::String(self.base_path().to_string()));
                 map.entry("api_prefix")
@@ -197,7 +207,6 @@ impl ConsoleState {
                         .unwrap_or(serde_json::Value::Array(vec![]))
                 });
             }
-        }
 
         let mut tmpl_env = Environment::new();
 
@@ -245,20 +254,17 @@ impl ConsoleState {
         tmpl_env.add_filter(
             "tvars",
             move |key: &str, vars: minijinja::Value| -> Result<String, minijinja::Error> {
-                let vars_map: std::collections::HashMap<String, String> = if let Ok(obj) =
-                    serde_json::from_str::<serde_json::Value>(
-                        &serde_json::to_string(&vars).unwrap_or_default(),
-                    ) {
-                    if let serde_json::Value::Object(m) = obj {
+                let vars_map: std::collections::HashMap<String, String> =
+                    if let Ok(serde_json::Value::Object(m)) = serde_json::from_str::<
+                        serde_json::Value,
+                    >(&serde_json::to_string(&vars).unwrap_or_default())
+                    {
                         m.into_iter()
                             .filter_map(|(k, v)| v.as_str().map(|s| (k, s.to_string())))
                             .collect()
                     } else {
                         Default::default()
-                    }
-                } else {
-                    Default::default()
-                };
+                    };
                 Ok(i18n_tv.t_with_vars(&locale_tv, key, &vars_map))
             },
         );
@@ -325,13 +331,11 @@ impl ConsoleState {
         }
 
         const TTL_SECS: u64 = 300;
-        if let Ok(cache) = self.perm_cache.lock() {
-            if let Some((ts, perms)) = cache.get(&user.id) {
-                if ts.elapsed().as_secs() < TTL_SECS {
+        if let Ok(cache) = self.perm_cache.lock()
+            && let Some((ts, perms)) = cache.get(&user.id)
+                && ts.elapsed().as_secs() < TTL_SECS {
                     return perms.clone();
                 }
-            }
-        }
 
         let perms = self.load_permissions_from_db(user.id).await;
 
@@ -462,6 +466,20 @@ impl ConsoleState {
         })
     }
 
+    /// Register an addon state by type.
+    /// The type itself serves as the key, providing compile-time safety.
+    pub fn insert_addon_state<T: AddonState>(&self, state: T) {
+        let mut ext = self.addon_extensions.write().unwrap();
+        ext.insert(state);
+    }
+
+    /// Get an addon state by type.
+    /// Returns None if the state of this type has not been registered.
+    pub fn get_addon_state<T: AddonState>(&self) -> Option<T> {
+        let ext = self.addon_extensions.read().unwrap();
+        ext.get::<T>().cloned()
+    }
+
     pub fn url_for(&self, suffix: &str) -> String {
         let trimmed = suffix.trim();
         if trimmed.is_empty() || trimmed == "/" {
@@ -528,6 +546,46 @@ impl ConsoleState {
 
     pub fn get_sip_server(&self) -> Option<SipServerRef> {
         self.sip_server.read().unwrap().clone()
+    }
+}
+
+fn normalize_base_path(path: &str) -> String {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return "/console".to_string();
+    }
+    let mut normalized = if trimmed.starts_with('/') {
+        trimmed.to_string()
+    } else {
+        format!("/{}", trimmed)
+    };
+    while normalized.len() > 1 && normalized.ends_with('/') {
+        normalized.pop();
+    }
+    if normalized.is_empty() {
+        "/console".to_string()
+    } else {
+        normalized
+    }
+}
+
+fn normalize_api_prefix(path: &str) -> String {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return "/api".to_string();
+    }
+    let mut normalized = if trimmed.starts_with('/') {
+        trimmed.to_string()
+    } else {
+        format!("/{}", trimmed)
+    };
+    while normalized.len() > 1 && normalized.ends_with('/') {
+        normalized.pop();
+    }
+    if normalized.is_empty() {
+        "/api".to_string()
+    } else {
+        normalized
     }
 }
 
@@ -690,45 +748,5 @@ mod tests {
             "/v1/api/pending-reloads"
         );
         assert_eq!(state.api_url_for(""), "/v1/api");
-    }
-}
-
-fn normalize_base_path(path: &str) -> String {
-    let trimmed = path.trim();
-    if trimmed.is_empty() {
-        return "/console".to_string();
-    }
-    let mut normalized = if trimmed.starts_with('/') {
-        trimmed.to_string()
-    } else {
-        format!("/{}", trimmed)
-    };
-    while normalized.len() > 1 && normalized.ends_with('/') {
-        normalized.pop();
-    }
-    if normalized.is_empty() {
-        "/console".to_string()
-    } else {
-        normalized
-    }
-}
-
-fn normalize_api_prefix(path: &str) -> String {
-    let trimmed = path.trim();
-    if trimmed.is_empty() {
-        return "/api".to_string();
-    }
-    let mut normalized = if trimmed.starts_with('/') {
-        trimmed.to_string()
-    } else {
-        format!("/{}", trimmed)
-    };
-    while normalized.len() > 1 && normalized.ends_with('/') {
-        normalized.pop();
-    }
-    if normalized.is_empty() {
-        "/api".to_string()
-    } else {
-        normalized
     }
 }

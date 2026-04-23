@@ -38,9 +38,7 @@ fn trunk_test_proxy_config() -> ProxyConfig {
         },
     );
 
-    let mut routes = Vec::new();
-
-    routes.push(RouteRule {
+    let mut routes = vec![RouteRule {
         name: "route_national_via_provider_a".to_string(),
         description: Some("Route national calls via provider_a".to_string()),
         priority: 1,
@@ -54,7 +52,7 @@ fn trunk_test_proxy_config() -> ProxyConfig {
             ..Default::default()
         },
         ..Default::default()
-    });
+    }];
 
     routes.push(RouteRule {
         name: "route_international_via_provider_b".to_string(),
@@ -272,9 +270,7 @@ mod tests {
         let _sdp = super::super::rtp_utils::RtpPacket::create_sequence(
             50, 1000, 50000, 0xA1A1A1A1, 0, 160, 160,
         );
-        let _caller_sdp = format!(
-            "v=0\r\no=- 1234 1234 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 12345 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=sendrecv\r\n"
-        );
+        let _caller_sdp = "v=0\r\no=- 1234 1234 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 12345 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=sendrecv\r\n".to_string();
 
         let alice_clone = alice.clone();
         let caller_sdp = _caller_sdp.clone();

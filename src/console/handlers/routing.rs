@@ -105,18 +105,15 @@ impl Default for RouteDocument {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub(crate) enum RouteTargetKind {
+    #[default]
     SipTrunk,
     Queue,
     Voicemail,
     Ivr,
 }
 
-impl Default for RouteTargetKind {
-    fn default() -> Self {
-        Self::SipTrunk
-    }
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct RouteActionDocument {
@@ -187,8 +184,8 @@ impl Default for RouteActionDocument {
 }
 impl RouteDocument {
     fn from_model(model: &RoutingModel) -> Self {
-        if let Some(meta) = model.metadata.clone() {
-            if let Ok(mut doc) = serde_json::from_value::<RouteDocument>(meta) {
+        if let Some(meta) = model.metadata.clone()
+            && let Ok(mut doc) = serde_json::from_value::<RouteDocument>(meta) {
                 doc.id = Some(model.id);
                 doc.name = model.name.clone();
                 doc.description = model.description.clone();
@@ -218,7 +215,6 @@ impl RouteDocument {
                 doc.ensure_consistency();
                 return doc;
             }
-        }
 
         let mut doc = RouteDocument {
             id: Some(model.id),
@@ -371,22 +367,20 @@ impl RouteDocument {
     }
 
     fn apply_trunk_context(&mut self, model: &RoutingModel, trunks: &HashMap<i64, SipTrunkModel>) {
-        if self.source_trunk.is_none() {
-            if let Some(source_id) = model.source_trunk_id {
-                if let Some(trunk) = trunks.get(&source_id) {
+        if self.source_trunk.is_none()
+            && let Some(source_id) = model.source_trunk_id
+                && let Some(trunk) = trunks.get(&source_id) {
                     self.source_trunk = Some(trunk.name.clone());
                 }
-            }
-        }
 
         if !matches!(self.action.target_type, RouteTargetKind::SipTrunk) {
             return;
         }
 
         if self.action.trunks.is_empty() {
-            if let Some(default_id) = model.default_trunk_id {
-                if let Some(trunk) = trunks.get(&default_id) {
-                    if !self
+            if let Some(default_id) = model.default_trunk_id
+                && let Some(trunk) = trunks.get(&default_id)
+                    && !self
                         .action
                         .trunks
                         .iter()
@@ -397,8 +391,6 @@ impl RouteDocument {
                             weight: DEFAULT_PRIORITY,
                         });
                     }
-                }
-            }
             self.ensure_consistency();
         }
     }
@@ -704,6 +696,7 @@ fn status_options_value() -> Value {
     ])
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_route_form(
     state: &ConsoleState,
     mode: &str,
@@ -1267,11 +1260,10 @@ pub async fn clone_routing(
     }
 
     doc.source_trunk = sanitize_optional_string(doc.source_trunk.take());
-    if let Some(ref name) = doc.source_trunk {
-        if resolve_trunk_id(&trunk_lookup, Some(name.as_str())).is_none() {
+    if let Some(ref name) = doc.source_trunk
+        && resolve_trunk_id(&trunk_lookup, Some(name.as_str())).is_none() {
             return bad_request(format!("Source trunk \"{}\" was not found", name));
         }
-    }
 
     let tx = match db.begin().await {
         Ok(tx) => tx,
@@ -1289,8 +1281,10 @@ pub async fn clone_routing(
     };
 
     let now = Utc::now();
-    let mut active: RoutingActiveModel = Default::default();
-    active.created_at = Set(now);
+    let mut active = RoutingActiveModel {
+        created_at: Set(now),
+        ..Default::default()
+    };
     apply_document_to_active(&mut active, &doc, &trunk_lookup, now);
 
     let new_model = match active.insert(&tx).await {
@@ -1414,11 +1408,10 @@ pub(crate) async fn create_routing(
 
     let trunk_lookup = build_trunk_name_lookup(&trunks);
     doc.source_trunk = sanitize_optional_string(doc.source_trunk.take());
-    if let Some(ref name) = doc.source_trunk {
-        if resolve_trunk_id(&trunk_lookup, Some(name.as_str())).is_none() {
+    if let Some(ref name) = doc.source_trunk
+        && resolve_trunk_id(&trunk_lookup, Some(name.as_str())).is_none() {
             return bad_request(format!("Source trunk \"{}\" was not found", name));
         }
-    }
 
     let tx = match db.begin().await {
         Ok(tx) => tx,
@@ -1454,8 +1447,10 @@ pub(crate) async fn create_routing(
     }
 
     let now = Utc::now();
-    let mut active: RoutingActiveModel = Default::default();
-    active.created_at = Set(now);
+    let mut active = RoutingActiveModel {
+        created_at: Set(now),
+        ..Default::default()
+    };
     apply_document_to_active(&mut active, &doc, &trunk_lookup, now);
 
     let model = match active.insert(&tx).await {
@@ -1540,11 +1535,10 @@ pub(crate) async fn update_routing(
     }
 
     doc.source_trunk = sanitize_optional_string(doc.source_trunk.take());
-    if let Some(ref name) = doc.source_trunk {
-        if resolve_trunk_id(&trunk_lookup, Some(name.as_str())).is_none() {
+    if let Some(ref name) = doc.source_trunk
+        && resolve_trunk_id(&trunk_lookup, Some(name.as_str())).is_none() {
             return bad_request(format!("Source trunk \"{}\" was not found", name));
         }
-    }
 
     let tx = match db.begin().await {
         Ok(tx) => tx,

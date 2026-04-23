@@ -62,7 +62,7 @@ async fn wait_for_event(
         let remaining = deadline - tokio::time::Instant::now();
         let msg = timeout(remaining, ws.next())
             .await
-            .expect(&format!("timeout waiting for {}", event_type))
+            .unwrap_or_else(|_| panic!("timeout waiting for {}", event_type))
             .expect("stream closed")
             .expect("ws error");
 

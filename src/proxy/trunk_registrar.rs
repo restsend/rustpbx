@@ -51,6 +51,12 @@ pub struct TrunkRegistrar {
     endpoint: RwLock<Option<EndpointInnerRef>>,
 }
 
+impl Default for TrunkRegistrar {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TrunkRegistrar {
     pub fn new() -> Self {
         Self {

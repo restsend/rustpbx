@@ -11,8 +11,10 @@ use serde::{Deserialize, Serialize};
 #[derive(Copy, Clone, Debug, PartialEq, Eq, EnumIter, DeriveActiveEnum, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 #[sea_orm(rs_type = "String", db_type = "Text")]
+#[derive(Default)]
 pub enum SipTrunkStatus {
     #[sea_orm(string_value = "healthy")]
+    #[default]
     Healthy,
     #[sea_orm(string_value = "warning")]
     Warning,
@@ -33,21 +35,18 @@ impl SipTrunkStatus {
     }
 }
 
-impl Default for SipTrunkStatus {
-    fn default() -> Self {
-        Self::Healthy
-    }
-}
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, EnumIter, DeriveActiveEnum, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 #[sea_orm(rs_type = "String", db_type = "Text")]
+#[derive(Default)]
 pub enum SipTrunkDirection {
     #[sea_orm(string_value = "inbound")]
     Inbound,
     #[sea_orm(string_value = "outbound")]
     Outbound,
     #[sea_orm(string_value = "bidirectional")]
+    #[default]
     Bidirectional,
 }
 
@@ -61,17 +60,14 @@ impl SipTrunkDirection {
     }
 }
 
-impl Default for SipTrunkDirection {
-    fn default() -> Self {
-        Self::Bidirectional
-    }
-}
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq, EnumIter, DeriveActiveEnum, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 #[sea_orm(rs_type = "String", db_type = "Text")]
+#[derive(Default)]
 pub enum SipTransport {
     #[sea_orm(string_value = "udp")]
+    #[default]
     Udp,
     #[sea_orm(string_value = "tcp")]
     Tcp,
@@ -89,11 +85,6 @@ impl SipTransport {
     }
 }
 
-impl Default for SipTransport {
-    fn default() -> Self {
-        Self::Udp
-    }
-}
 
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Serialize, Deserialize, Default)]
 #[sea_orm(table_name = "rustpbx_sip_trunks")]

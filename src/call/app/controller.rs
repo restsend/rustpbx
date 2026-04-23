@@ -7,6 +7,9 @@ use std::time::Duration;
 use thiserror::Error;
 use tokio::sync::mpsc;
 use tokio::time::Instant;
+use tracing::info;
+
+
 
 /// An audio playback session.
 #[derive(Debug, Clone)]
@@ -323,11 +326,10 @@ impl CallController {
 
             match tokio::time::timeout(wait, self.event_rx.recv()).await {
                 Ok(Some(ControllerEvent::DtmfReceived(digit))) => {
-                    if let Some(term) = config.terminator {
-                        if digit.contains(term) {
+                    if let Some(term) = config.terminator
+                        && digit.contains(term) {
                             break;
                         }
-                    }
                     collected.push_str(&digit);
                     if collected.len() >= config.max_digits {
                         break;
@@ -349,6 +351,40 @@ impl CallController {
     pub async fn wait_event(&mut self) -> Option<ControllerEvent> {
         self.event_rx.recv().await
     }
+
+    /// Send a command to originate a call to an agent.
+    /// This creates a new leg and bridges it to the current call.
+    pub async fn originate_call(
+        &self,
+        target_uri: impl Into<String>,
+        caller_id: Option<String>,
+    ) -> anyhow::Result<String> {
+        let target = target_uri.into();
+        let call_id = uuid::Uuid::new_v4().to_string();
+        
+        self.session.send_command(SessionAction::OriginateCall {
+            target: target.clone(),
+            caller_id,
+            call_id: call_id.clone(),
+        })?;
+        
+        info!(target = %target, call_id = %call_id, "Queue: originated call to agent");
+        Ok(call_id)
+    }
+
+    /// Send a custom event to notify external systems (e.g., WebSocket, RWI).
+    pub async fn notify_event(
+        &self,
+        event_name: impl Into<String>,
+        data: serde_json::Value,
+    ) -> anyhow::Result<()> {
+        let name = event_name.into();
+        self.session.send_command(SessionAction::NotifyEvent {
+            event: name,
+            data,
+        })?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -362,8 +398,8 @@ mod tests {
     /// Returns (controller, event_tx, cmd_rx)
     fn make_controller_with_channels() -> (
         CallController,
-        tokio::sync::mpsc::UnboundedSender<ControllerEvent>,
-        tokio::sync::mpsc::UnboundedReceiver<SessionAction>,
+        mpsc::UnboundedSender<ControllerEvent>,
+        mpsc::UnboundedReceiver<SessionAction>,
     ) {
         let shared = SipSessionShared::new(
             "test-session".to_string(),

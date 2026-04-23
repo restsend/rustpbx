@@ -83,6 +83,7 @@ mod app_context;
 mod controller;
 mod event_loop;
 
+pub mod agent_registry;
 pub mod ivr;
 pub mod ivr_config;
 pub mod queue;

@@ -74,10 +74,6 @@ fn main() {
         "{}",
         build_sql(&schema.create_table_from_entity(models::system_notification::Entity))
     );
-    print!(
-        "{}",
-        build_sql(&schema.create_table_from_entity(models::wholesale_agent::Entity))
-    );
 
     // RBAC: multiple entities in one module
     use rustpbx::models::rbac;
@@ -170,6 +166,16 @@ fn main() {
         print!(
             "{}",
             build_sql(&schema.create_table_from_entity(models::sales_tenant_access::Entity))
+        );
+        print!(
+            "{}",
+            build_sql(&schema.create_table_from_entity(models::wholesale_agent::Entity))
+        );
+        print!(
+            "{}",
+            build_sql(&schema.create_table_from_entity(
+                models::wholesale_agent::tenant_discount::Entity
+            ))
         );
     }
 

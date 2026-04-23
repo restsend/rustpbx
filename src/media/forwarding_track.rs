@@ -277,8 +277,8 @@ impl MediaStreamTrack for ForwardingTrack {
                         let mut dtmf_frame = frame.clone();
                         dtmf_frame.payload_type = Some(target_pt);
 
-                        if let Some(target_clock_rate) = mapping.target_clock_rate {
-                            if mapping.source_clock_rate != target_clock_rate {
+                        if let Some(target_clock_rate) = mapping.target_clock_rate
+                            && mapping.source_clock_rate != target_clock_rate {
                                 dtmf_frame.data = rewrite_dtmf_duration(
                                     &dtmf_frame.data,
                                     mapping.source_clock_rate,
@@ -294,7 +294,6 @@ impl MediaStreamTrack for ForwardingTrack {
                                     );
                                 }
                             }
-                        }
 
                         return Ok(MediaSample::Audio(dtmf_frame));
                     }

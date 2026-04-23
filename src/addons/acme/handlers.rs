@@ -41,8 +41,8 @@ async fn reload_certificates(
     let key_path_str = key_path.to_string_lossy().to_string();
 
     // Reload HTTPS if enabled
-    if enable_https {
-        if let Some(registry_guard) = app_state.tls_reloader.read().await.as_ref() {
+    if enable_https
+        && let Some(registry_guard) = app_state.tls_reloader.read().await.as_ref() {
             if registry_guard.has_https_reloader().await {
                 match registry_guard
                     .reload_https(&cert_path_str, &key_path_str)
@@ -55,11 +55,10 @@ async fn reload_certificates(
                 info!("HTTPS reloader not available, certificate saved but not reloaded");
             }
         }
-    }
 
     // Reload SIP TLS if enabled
-    if enable_sip_tls {
-        if let Some(registry_guard) = app_state.tls_reloader.read().await.as_ref() {
+    if enable_sip_tls
+        && let Some(registry_guard) = app_state.tls_reloader.read().await.as_ref() {
             if registry_guard.has_sip_tls_reloader().await {
                 let cert_data = tokio::fs::read(&cert_path).await?;
                 let key_data = tokio::fs::read(&key_path).await?;
@@ -71,7 +70,6 @@ async fn reload_certificates(
                 info!("SIP TLS reloader not available, certificate saved but not reloaded");
             }
         }
-    }
 
     Ok(())
 }
@@ -296,8 +294,8 @@ async fn process_acme(
                             info!("Manual check for auth url: {}", url);
                             match reqwest::get(url.clone()).await {
                                 Ok(resp) => {
-                                    if let Ok(json) = resp.json::<serde_json::Value>().await {
-                                        if let Some(s) = json.get("status").and_then(|s| s.as_str())
+                                    if let Ok(json) = resp.json::<serde_json::Value>().await
+                                        && let Some(s) = json.get("status").and_then(|s| s.as_str())
                                         {
                                             info!("Manual check status: {}", s);
                                             if s == "invalid" {
@@ -310,19 +308,15 @@ async fn process_acme(
                                                     for c in challenges {
                                                         if let Some(c_status) =
                                                             c.get("status").and_then(|s| s.as_str())
-                                                        {
-                                                            if c_status == "invalid" {
-                                                                if let Some(err) = c.get("error") {
+                                                            && c_status == "invalid"
+                                                                && let Some(err) = c.get("error") {
                                                                     challenge_error =
                                                                         Some(format!("{}", err));
                                                                 }
-                                                            }
-                                                        }
                                                     }
                                                 }
                                             }
                                         }
-                                    }
                                 }
                                 Err(e) => warn!("Manual check failed: {}", e),
                             }
@@ -413,7 +407,7 @@ async fn process_acme(
             let mut status = acme_state.status.write().unwrap();
             *status = AcmeStatus::Running("Finalizing order...".to_string());
         }
-        order.finalize_csr(&csr.der()).await?;
+        order.finalize_csr(csr.der()).await?;
     }
 
     let mut retries = 0;
@@ -504,20 +498,28 @@ fn save_cert_and_update_config(
         let config_content = std::fs::read_to_string(&config_path)?;
         let mut doc = config_content.parse::<DocumentMut>()?;
 
-        if !doc.contains_key("proxy") {
-            doc["proxy"] = toml_edit::table();
+        let needs_proxy_init = doc
+            .as_table()
+            .get("proxy")
+            .map(|item| !item.is_table())
+            .unwrap_or(true);
+        if needs_proxy_init {
+            doc.insert("proxy", toml_edit::table());
         }
 
-        let proxy = &mut doc["proxy"];
+        let proxy = doc
+            .as_table_mut()
+            .get_mut("proxy")
+            .and_then(toml_edit::Item::as_table_mut)
+            .ok_or_else(|| anyhow::anyhow!("[proxy] must be a table"))?;
 
         proxy["ssl_certificate"] = value(cert_path.to_string_lossy().to_string());
         proxy["ssl_private_key"] = value(key_path.to_string_lossy().to_string());
 
-        if enable_sip_tls {
-            if proxy.get("tls_port").is_none() {
+        if enable_sip_tls
+            && proxy.get("tls_port").is_none() {
                 proxy["tls_port"] = value(5061);
             }
-        }
 
         if enable_https {
             doc["ssl_certificate"] = value(cert_path.to_string_lossy().to_string());
@@ -555,7 +557,7 @@ async fn solve_http01_challenge<'a>(
 // Auto-Renew Handlers
 // ============================================================================
 
-use crate::config::AcmeConfig;
+use crate::addons::acme::AcmeConfig;
 
 /// Response for auto-renew config
 #[derive(Serialize)]
@@ -671,7 +673,7 @@ fn get_cert_expiry(cert_path: &StdPath) -> anyhow::Result<std::time::SystemTime>
         let after_not_after = &der_str[not_after_pos + 8..];
         // Find the ASN.1 UTCTime or GeneralizedTime value
         let time_start = after_not_after
-            .find(|c| c == 'Z' || c == '+' || c == '-')
+            .find(['Z', '+', '-'])
             .map(|p| {
                 // UTCTime format: YYMMDDHHMMSSZ
                 // Go back 13 chars to include the type byte, length, and start of time

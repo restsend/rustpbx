@@ -82,12 +82,9 @@ pub struct SipServerInner {
     pub tls_listener: Option<rsipstack::transport::TlsListenerConnection>,
     pub queue_manager: Arc<crate::call::runtime::QueueManager>,
     pub conference_manager: Arc<crate::call::runtime::ConferenceManager>,
+    pub agent_registry: Option<Arc<dyn crate::call::app::agent_registry::AgentRegistry>>,
     /// Subscribers for REFER NOTIFY events from SipSession.
-    pub transfer_notify_subscribers: Arc<
-        tokio::sync::Mutex<
-            Vec<tokio::sync::mpsc::UnboundedSender<crate::call::domain::ReferNotifyEvent>>,
-        >,
-    >,
+    pub transfer_notify_subscribers: Arc<tokio::sync::Mutex<Vec<crate::call::domain::ReferNotifyTx>>>,
 }
 
 pub type SipServerRef = Arc<SipServerInner>;
@@ -126,6 +123,8 @@ pub struct SipServerBuilder {
     addon_registry: Option<Arc<crate::addons::registry::AddonRegistry>>,
     /// RWI gateway to wire into the server for call-app factory use.
     rwi_gateway: Option<Arc<tokio::sync::RwLock<crate::rwi::gateway::RwiGateway>>>,
+    /// AgentRegistry for agent management and presence state.
+    agent_registry: Option<Arc<dyn crate::call::app::agent_registry::AgentRegistry>>,
 }
 
 impl SipServerBuilder {
@@ -155,6 +154,7 @@ impl SipServerBuilder {
             no_bind: false,
             addon_registry: None,
             rwi_gateway: None,
+            agent_registry: None,
         }
     }
 
@@ -288,6 +288,14 @@ impl SipServerBuilder {
         self
     }
 
+    pub fn with_agent_registry(
+        mut self,
+        registry: Arc<dyn crate::call::app::agent_registry::AgentRegistry>,
+    ) -> Self {
+        self.agent_registry = Some(registry);
+        self
+    }
+
     pub async fn build(mut self) -> Result<SipServer> {
         let user_backend = if let Some(backend) = self.user_backend {
             backend
@@ -352,7 +360,7 @@ impl SipServerBuilder {
                 let local_addr = SocketAddr::new(local_addr, udp_port);
                 let external_addr = external_ip
                     .as_ref()
-                    .map(|ip| SocketAddr::new(ip.clone(), udp_port));
+                    .map(|ip| SocketAddr::new(*ip, udp_port));
                 let udp_conn = UdpConnection::create_connection(
                     local_addr,
                     external_addr,
@@ -370,7 +378,7 @@ impl SipServerBuilder {
                 let local_addr = SocketAddr::new(local_addr, tcp_port);
                 let external_addr = external_ip
                     .as_ref()
-                    .map(|ip| SocketAddr::new(ip.clone(), tcp_port));
+                    .map(|ip| SocketAddr::new(*ip, tcp_port));
                 let tcp_conn = TcpListenerConnection::new(local_addr.into(), external_addr)
                     .await
                     .map_err(|e| anyhow!("Failed to create TCP connection: {}", e))?;
@@ -382,7 +390,7 @@ impl SipServerBuilder {
                 let local_addr = SocketAddr::new(local_addr, tls_port);
                 let external_addr = external_ip
                     .as_ref()
-                    .map(|ip| SocketAddr::new(ip.clone(), tls_port));
+                    .map(|ip| SocketAddr::new(*ip, tls_port));
 
                 let cert_path = config
                     .ssl_certificate
@@ -462,7 +470,7 @@ impl SipServerBuilder {
                 let local_addr = SocketAddr::new(local_addr, ws_port);
                 let external_addr = external_ip
                     .as_ref()
-                    .map(|ip| SocketAddr::new(ip.clone(), ws_port));
+                    .map(|ip| SocketAddr::new(*ip, ws_port));
                 let ws_conn =
                     WebSocketListenerConnection::new(local_addr.into(), external_addr, false)
                         .await
@@ -540,15 +548,14 @@ impl SipServerBuilder {
         let endpoint = endpoint_builder.build();
 
         let mut call_router = self.call_router;
-        if call_router.is_none() {
-            if let Some(http_router_config) = &self.config.http_router {
+        if call_router.is_none()
+            && let Some(http_router_config) = &self.config.http_router {
                 call_router = Some(Box::new(crate::proxy::routing::http::HttpCallRouter::new(
                     http_router_config.clone(),
                     rtp_config.clone(),
                     self.config.media_proxy,
                 )));
             }
-        }
         let dialog_layer = Arc::new(DialogLayer::new(endpoint.inner.clone()));
 
         let database = self.database.clone();
@@ -579,6 +586,8 @@ impl SipServerBuilder {
         presence_manager.load_from_db().await.ok();
 
         let queue_manager = Arc::new(crate::call::runtime::QueueManager::new());
+
+        // Create conference manager with in-server audio mixing
         let conference_manager = Arc::new(crate::call::runtime::ConferenceManager::new());
 
         let inner = Arc::new(SipServerInner {
@@ -587,9 +596,9 @@ impl SipServerBuilder {
             cancel_token,
             data_context,
             database: database.clone(),
-            user_backend: user_backend,
-            auth_backend: auth_backend,
-            call_router: call_router,
+            user_backend,
+            auth_backend,
+            call_router,
             locator: locator.clone(),
             callrecord_sender: self.callrecord_sender,
             endpoint,
@@ -610,6 +619,7 @@ impl SipServerBuilder {
             tls_listener: tls_listener_clone,
             queue_manager,
             conference_manager,
+            agent_registry: self.agent_registry,
             transfer_notify_subscribers: Arc::new(tokio::sync::Mutex::new(Vec::new())),
         });
 
@@ -705,15 +715,14 @@ impl SipServer {
         let incoming = self.inner.endpoint.incoming_transactions()?;
         let cancel_token = self.inner.cancel_token.clone();
 
-        if let Some(webhook_config) = &self.inner.proxy_config.locator_webhook {
-            if let Some(events) = &self.inner.locator_events {
+        if let Some(webhook_config) = &self.inner.proxy_config.locator_webhook
+            && let Some(events) = &self.inner.locator_events {
                 let rx = events.subscribe();
                 crate::utils::spawn(super::locator_webhook::handle_locator_webhook(
                     webhook_config.clone(),
                     rx,
                 ));
             }
-        }
 
         // Spawn registry cleanup task
         let registry = self.inner.active_call_registry.clone();
@@ -781,15 +790,14 @@ impl SipServer {
             let token = tx
                 .connection
                 .as_ref()
-                .map(|c| c.cancel_token())
-                .flatten()
+                .and_then(|c| c.cancel_token())
                 .unwrap_or_else(|| self.inner.cancel_token.clone())
                 .child_token();
 
             let runnings_tx = self.inner.runnings_tx.clone();
 
-            if let Some(max_concurrency) = self.inner.proxy_config.max_concurrency {
-                if runnings_tx.load(Ordering::Relaxed) >= max_concurrency {
+            if let Some(max_concurrency) = self.inner.proxy_config.max_concurrency
+                && runnings_tx.load(Ordering::Relaxed) >= max_concurrency {
                     info!(
                         key = %tx.key,
                         runnings = runnings_tx.load(Ordering::Relaxed),
@@ -800,7 +808,6 @@ impl SipServer {
                         .ok();
                     continue;
                 }
-            }
             // Spam protection for OPTIONS requests
             // If the OPTIONS request is out-of-dialog and the tag is not present, ignore it
             if matches!(
@@ -927,11 +934,10 @@ impl SipServerInner {
     pub fn default_contact_uri(&self) -> Option<rsipstack::sip::Uri> {
         let addr = self.endpoint.get_addrs().first()?.clone();
         let mut params = Vec::new();
-        if let Some(transport) = addr.r#type {
-            if !matches!(transport, Transport::Udp) {
+        if let Some(transport) = addr.r#type
+            && !matches!(transport, Transport::Udp) {
                 params.push(Param::Transport(transport));
             }
-        }
         Some(rsipstack::sip::Uri {
             scheme: addr.r#type.map(|t| t.sip_scheme()),
             auth: Some(Auth {
@@ -963,14 +969,13 @@ impl SipServerInner {
 
         match host {
             "localhost" | "127.0.0.1" | "::1" => {
-                return port.map(is_my_port).unwrap_or(true);
+                port.map(is_my_port).unwrap_or(true)
             }
             _ => {
-                if let Some(external_ip) = self.rtp_config.external_ip.as_ref() {
-                    if external_ip == host {
+                if let Some(external_ip) = self.rtp_config.external_ip.as_ref()
+                    && external_ip == host {
                         return port.map(is_my_port).unwrap_or(true);
                     }
-                }
                 if let Some(realms) = self.proxy_config.realms.as_ref() {
                     for item in realms {
                         if item == callee_realm {
@@ -983,10 +988,10 @@ impl SipServerInner {
                 }
                 if self.endpoint.get_addrs().iter().any(|addr| {
                     if addr.addr.host.to_string() == host {
-                        let matched = port
+                        
+                        port
                             .map(|p| addr.addr.port == Some(p.into()))
-                            .unwrap_or(true);
-                        matched
+                            .unwrap_or(true)
                     } else {
                         false
                     }

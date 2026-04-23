@@ -17,6 +17,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tokio::sync::mpsc;
 
+#[allow(clippy::too_many_arguments)]
 pub async fn rwi_ws_handler(
     _client_addr: ClientAddr,
     ws: WebSocketUpgrade,
@@ -62,13 +63,11 @@ fn extract_token(
     headers: &HeaderMap,
     query_params: &std::collections::HashMap<String, String>,
 ) -> Option<String> {
-    if let Some(auth_header) = headers.get("authorization") {
-        if let Ok(auth_str) = auth_header.to_str() {
-            if auth_str.starts_with("Bearer ") {
+    if let Some(auth_header) = headers.get("authorization")
+        && let Ok(auth_str) = auth_header.to_str()
+            && auth_str.starts_with("Bearer ") {
                 return Some(auth_str[7..].to_string());
             }
-        }
-    }
 
     query_params.get("token").cloned()
 }
@@ -300,8 +299,8 @@ async fn handle_text_message(
     let result = processor.process_command(command).await;
 
     // Auto-claim call ownership when originate or attach succeeds
-    if should_claim_ownership {
-        if let Ok(
+    if should_claim_ownership
+        && let Ok(
             CommandResult::Originated { call_id: ref cid }
             | CommandResult::CallFound { call_id: ref cid },
         ) = result
@@ -315,7 +314,6 @@ async fn handle_text_message(
                 )
                 .await;
         }
-    }
 
     let event = build_command_result_event(&action_id, &action, call_id.as_deref(), result);
     if let Ok(json) = serde_json::to_string(&event) {
@@ -619,5 +617,15 @@ fn extract_call_id(cmd: &RwiCommandPayload) -> Option<String> {
         RwiCommandPayload::ParallelOriginate(req) => Some(req.operation_id.clone()),
         RwiCommandPayload::SessionResume { .. } => None,
         RwiCommandPayload::CallResume { call_id, .. } => Some(call_id.clone()),
+        // CC addon commands
+        RwiCommandPayload::AgentRegister { agent_id, .. } => Some(agent_id.clone()),
+        RwiCommandPayload::AgentUnregister { agent_id } => Some(agent_id.clone()),
+        RwiCommandPayload::AgentStatusUpdate { agent_id, .. } => Some(agent_id.clone()),
+        RwiCommandPayload::AgentStats { agent_id } => agent_id.clone(),
+        RwiCommandPayload::QueueStats { queue_id } => queue_id.clone(),
+        RwiCommandPayload::ConsultInitiate { call_id, .. } => Some(call_id.clone()),
+        RwiCommandPayload::ConsultMerge { call_id, .. } => Some(call_id.clone()),
+        RwiCommandPayload::ConsultComplete { call_id, .. } => Some(call_id.clone()),
+        RwiCommandPayload::ConsultCancel { consultation_call_id } => Some(consultation_call_id.clone()),
     }
 }

@@ -289,10 +289,10 @@ async fn build_filters(state: Arc<ConsoleState>) -> serde_json::Value {
         }
     };
 
-    return json!({
+    json!({
         "departments": departments,
         "statuses": statuses,
-    });
+    })
 }
 
 async fn build_forwarding_catalog(state: Arc<ConsoleState>) -> ForwardingCatalog {
@@ -474,8 +474,8 @@ async fn create_extension(
         }
     };
 
-    if let Some(ref dept_ids) = payload.department_ids {
-        if let Err(err) = ExtensionEntity::replace_departments(db, model.id, dept_ids).await {
+    if let Some(ref dept_ids) = payload.department_ids
+        && let Err(err) = ExtensionEntity::replace_departments(db, model.id, dept_ids).await {
             warn!(
                 "failed to set departments for extension {}: {}",
                 model.id, err
@@ -486,7 +486,6 @@ async fn create_extension(
             )
                 .into_response();
         }
-    }
 
     state.mark_pending_reload();
     Json(json!({"status": "ok", "id": model.id})).into_response()
@@ -562,29 +561,25 @@ async fn query_extensions(
             selector = selector.filter(ExtensionColumn::LoginDisabled.eq(!login_allowed));
         }
 
-        if let Some(ref from_raw) = filters.created_at_from {
-            if let Some(from) = parse_datetime_filter(from_raw) {
+        if let Some(ref from_raw) = filters.created_at_from
+            && let Some(from) = parse_datetime_filter(from_raw) {
                 selector = selector.filter(ExtensionColumn::CreatedAt.gte(from));
             }
-        }
 
-        if let Some(ref to_raw) = filters.created_at_to {
-            if let Some(to) = parse_datetime_filter(to_raw) {
+        if let Some(ref to_raw) = filters.created_at_to
+            && let Some(to) = parse_datetime_filter(to_raw) {
                 selector = selector.filter(ExtensionColumn::CreatedAt.lte(to));
             }
-        }
 
-        if let Some(ref from_raw) = filters.registered_at_from {
-            if let Some(from) = parse_datetime_filter(from_raw) {
+        if let Some(ref from_raw) = filters.registered_at_from
+            && let Some(from) = parse_datetime_filter(from_raw) {
                 selector = selector.filter(ExtensionColumn::RegisteredAt.gte(from));
             }
-        }
 
-        if let Some(ref to_raw) = filters.registered_at_to {
-            if let Some(to) = parse_datetime_filter(to_raw) {
+        if let Some(ref to_raw) = filters.registered_at_to
+            && let Some(to) = parse_datetime_filter(to_raw) {
                 selector = selector.filter(ExtensionColumn::RegisteredAt.lte(to));
             }
-        }
     }
     let sort_key = payload.sort.as_deref().unwrap_or("created_at_desc");
     match sort_key {
@@ -742,8 +737,8 @@ async fn update_extension(
         )
             .into_response();
     }
-    if let Some(ref dept_ids) = payload.department_ids {
-        if let Err(err) = ExtensionEntity::replace_departments(db, id, dept_ids).await {
+    if let Some(ref dept_ids) = payload.department_ids
+        && let Err(err) = ExtensionEntity::replace_departments(db, id, dept_ids).await {
             warn!("failed to update departments for extension {}: {}", id, err);
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -751,7 +746,6 @@ async fn update_extension(
             )
                 .into_response();
         }
-    }
     state.mark_pending_reload();
     Json(json!({"status": "ok"})).into_response()
 }
@@ -775,11 +769,11 @@ async fn delete_extension(
         }
         Err(err) => {
             warn!("failed to delete extension {}: {}", id, err);
-            return (
+            (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({"message": err.to_string()})),
             )
-                .into_response();
+                .into_response()
         }
     }
 }

@@ -121,30 +121,27 @@ impl PolicyGuard {
         origin_country: Option<&str>,
     ) -> Result<PolicyCheckStatus> {
         // 1. Static Checks
-        if let Some(prefix) = &policy.called_prefix {
-            if !callee.starts_with(prefix) {
+        if let Some(prefix) = &policy.called_prefix
+            && !callee.starts_with(prefix) {
                 // If prefix doesn't match, does the policy apply?
                 // Usually policy applies if conditions match.
                 // If this is a restriction, maybe we skip this policy?
                 // Assuming this is a filter for the policy.
                 return Ok(PolicyCheckStatus::Allowed);
             }
-        }
 
-        if let Some(tc) = &policy.trunk_country {
-            if let Some(oc) = origin_country {
-                if tc != oc {
+        if let Some(tc) = &policy.trunk_country
+            && let Some(oc) = origin_country
+                && tc != oc {
                     // Policy for different country
                     return Ok(PolicyCheckStatus::Allowed);
                 }
-            }
-        }
 
         // Parse the callee number to get country and type
         let parsed_number = phonenumber::parse(None, callee).ok();
 
-        if !policy.allowed_destination_countries.is_empty() {
-            if let Some(ref number) = parsed_number {
+        if !policy.allowed_destination_countries.is_empty()
+            && let Some(ref number) = parsed_number {
                 if let Some(id) = number.country().id() {
                     let region_str = id.as_ref();
                     if !policy
@@ -169,10 +166,9 @@ impl PolicyGuard {
                     )));
                 }
             }
-        }
 
-        if let Some(allow_landline) = policy.allow_landline {
-            if let Some(ref number) = parsed_number {
+        if let Some(allow_landline) = policy.allow_landline
+            && let Some(ref number) = parsed_number {
                 let num_type = number.number_type(&phonenumber::metadata::DATABASE);
                 let is_fixed = matches!(
                     num_type,
@@ -187,7 +183,6 @@ impl PolicyGuard {
                     ));
                 }
             }
-        }
 
         if let Some(window) = &policy.time_window {
             use chrono::NaiveTime;
@@ -235,8 +230,8 @@ impl PolicyGuard {
 
         if !policy.deny_regions.is_empty() {
             // Check Callee Region
-            if let Some(ref number) = parsed_number {
-                if let Some(id) = number.country().id() {
+            if let Some(ref number) = parsed_number
+                && let Some(id) = number.country().id() {
                     let region_str = id.as_ref();
                     if policy
                         .deny_regions
@@ -253,12 +248,11 @@ impl PolicyGuard {
                         )));
                     }
                 }
-            }
 
             // Check Caller Region
             let parsed_caller = phonenumber::parse(None, caller).ok();
-            if let Some(ref number) = parsed_caller {
-                if let Some(id) = number.country().id() {
+            if let Some(ref number) = parsed_caller
+                && let Some(id) = number.country().id() {
                     let region_str = id.as_ref();
                     if policy
                         .deny_regions
@@ -275,11 +269,10 @@ impl PolicyGuard {
                         )));
                     }
                 }
-            }
 
             // Check Origin Country
-            if let Some(oc) = origin_country {
-                if policy
+            if let Some(oc) = origin_country
+                && policy
                     .deny_regions
                     .iter()
                     .any(|r| r.eq_ignore_ascii_case(oc))
@@ -290,12 +283,11 @@ impl PolicyGuard {
                         reason,
                     )));
                 }
-            }
         }
 
         // 2. Dynamic Checks (Frequency Limit)
-        if let Some(limit) = &policy.frequency_limit {
-            if !self
+        if let Some(limit) = &policy.frequency_limit
+            && !self
                 .limiter
                 .check_and_increment(policy_id, "caller", caller, limit.count, limit.window_hours)
                 .await?
@@ -306,10 +298,9 @@ impl PolicyGuard {
                     PolicyRejection::FrequencyLimitExceeded(reason),
                 ));
             }
-        }
 
-        if let Some(limit) = &policy.daily_limit {
-            if !self
+        if let Some(limit) = &policy.daily_limit
+            && !self
                 .limiter
                 .check_daily_limit(policy_id, "caller", caller, limit.count)
                 .await?
@@ -320,10 +311,9 @@ impl PolicyGuard {
                     PolicyRejection::DailyLimitExceeded(reason),
                 ));
             }
-        }
 
-        if let Some(limit) = &policy.concurrency {
-            if !self
+        if let Some(limit) = &policy.concurrency
+            && !self
                 .limiter
                 .check_concurrency(policy_id, "caller", caller, limit.max_total)
                 .await?
@@ -334,7 +324,6 @@ impl PolicyGuard {
                     PolicyRejection::ConcurrencyLimitExceeded(reason),
                 ));
             }
-        }
 
         Ok(PolicyCheckStatus::Allowed)
     }
@@ -548,11 +537,10 @@ impl FrequencyLimiter for InMemoryFrequencyLimiter {
     ) -> Result<()> {
         let key = self.get_key(policy_id, scope, scope_value, "concurrency");
         let mut counts = self.counts.write().unwrap();
-        if let Some((count, _)) = counts.get_mut(&key) {
-            if *count > 0 {
+        if let Some((count, _)) = counts.get_mut(&key)
+            && *count > 0 {
                 *count -= 1;
             }
-        }
         Ok(())
     }
 
@@ -575,26 +563,22 @@ impl FrequencyLimiter for InMemoryFrequencyLimiter {
             let s_val = parts[2];
             let l_type = parts[3];
 
-            if let Some(ref pid) = policy_id {
-                if pid != p_id {
+            if let Some(ref pid) = policy_id
+                && pid != p_id {
                     continue;
                 }
-            }
-            if let Some(ref sc) = scope {
-                if sc != s {
+            if let Some(ref sc) = scope
+                && sc != s {
                     continue;
                 }
-            }
-            if let Some(ref sv) = scope_value {
-                if sv != s_val {
+            if let Some(ref sv) = scope_value
+                && sv != s_val {
                     continue;
                 }
-            }
-            if let Some(ref lt) = limit_type {
-                if lt != l_type {
+            if let Some(ref lt) = limit_type
+                && lt != l_type {
                     continue;
                 }
-            }
 
             results.push(crate::models::frequency_limit::Model {
                 id: 0, // Dummy ID
@@ -633,26 +617,22 @@ impl FrequencyLimiter for InMemoryFrequencyLimiter {
             let s_val = parts[2];
             let l_type = parts[3];
 
-            if let Some(ref pid) = policy_id {
-                if pid != p_id {
+            if let Some(ref pid) = policy_id
+                && pid != p_id {
                     return true;
                 }
-            }
-            if let Some(ref sc) = scope {
-                if sc != s {
+            if let Some(ref sc) = scope
+                && sc != s {
                     return true;
                 }
-            }
-            if let Some(ref sv) = scope_value {
-                if sv != s_val {
+            if let Some(ref sv) = scope_value
+                && sv != s_val {
                     return true;
                 }
-            }
-            if let Some(ref lt) = limit_type {
-                if lt != l_type {
+            if let Some(ref lt) = limit_type
+                && lt != l_type {
                     return true;
                 }
-            }
             false // Remove
         });
         Ok((initial_len - counts.len()) as u64)
@@ -913,15 +893,14 @@ impl FrequencyLimiter for DbFrequencyLimiter {
             .one(&self.db)
             .await?;
 
-        if let Some(model) = record {
-            if model.count > 0 {
+        if let Some(model) = record
+            && model.count > 0 {
                 let count = model.count;
                 let mut active: frequency_limit::ActiveModel = model.into();
                 active.count = Set(count - 1);
                 active.updated_at = Set(now);
                 active.update(&self.db).await?;
             }
-        }
         Ok(())
     }
 
@@ -1073,11 +1052,13 @@ mod tests {
         let limiter = RecordingLimiter::new();
         let guard = PolicyGuard::new(limiter.clone());
 
-        let mut policy = PolicySpec::default();
-        policy.frequency_limit = Some(FrequencyLimit {
-            count: 10,
-            window_hours: 1,
-        });
+        let policy = PolicySpec {
+            frequency_limit: Some(FrequencyLimit {
+                count: 10,
+                window_hours: 1,
+            }),
+            ..Default::default()
+        };
 
         let result = guard
             .check_policy("test-policy-123", &policy, "caller1", "callee1", None)
@@ -1095,8 +1076,10 @@ mod tests {
         let limiter = RecordingLimiter::new();
         let guard = PolicyGuard::new(limiter.clone());
 
-        let mut policy = PolicySpec::default();
-        policy.daily_limit = Some(DailyLimit { count: 100 });
+        let policy = PolicySpec {
+            daily_limit: Some(DailyLimit { count: 100 }),
+            ..Default::default()
+        };
 
         let result = guard
             .check_policy("daily-policy-456", &policy, "caller1", "callee1", None)
@@ -1114,11 +1097,13 @@ mod tests {
         let limiter = RecordingLimiter::new();
         let guard = PolicyGuard::new(limiter.clone());
 
-        let mut policy = PolicySpec::default();
-        policy.concurrency = Some(ConcurrencyLimit {
-            max_total: 5,
-            max_per_account: HashMap::new(),
-        });
+        let policy = PolicySpec {
+            concurrency: Some(ConcurrencyLimit {
+                max_total: 5,
+                max_per_account: HashMap::new(),
+            }),
+            ..Default::default()
+        };
 
         let result = guard
             .check_policy(

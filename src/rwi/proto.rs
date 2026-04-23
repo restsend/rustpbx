@@ -310,16 +310,18 @@ pub struct ConferenceCreateParams {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum ConferenceBackend {
+    #[default]
     Internal,
     External,
 }
 
-impl Default for ConferenceBackend {
-    fn default() -> Self {
-        ConferenceBackend::Internal
-    }
-}
+
+/// Type alias for RWI event sender.
+pub type RwiEventTx = tokio::sync::mpsc::UnboundedSender<RwiEvent>;
+/// Type alias for RWI event receiver.
+pub type RwiEventRx = tokio::sync::mpsc::UnboundedReceiver<RwiEvent>;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -535,6 +537,51 @@ pub enum RwiEvent {
         call_id: String,
         reason: String,
     },
+    // CC addon events
+    AgentStateChanged {
+        agent_id: String,
+        from_status: String,
+        to_status: String,
+        call_id: Option<String>,
+    },
+    QueueCandidatesFound {
+        call_id: String,
+        queue_id: String,
+        candidates: Vec<String>,
+        trace_id: String,
+    },
+    QueueAgentRinging {
+        call_id: String,
+        queue_id: String,
+        agent_id: String,
+        trace_id: String,
+    },
+    QueueAgentNoAnswer {
+        call_id: String,
+        queue_id: String,
+        agent_id: String,
+        attempt: u32,
+        trace_id: String,
+    },
+    QueueAgentRejected {
+        call_id: String,
+        queue_id: String,
+        agent_id: String,
+        attempt: u32,
+        trace_id: String,
+    },
+    QueueFallbackExecuted {
+        call_id: String,
+        queue_id: String,
+        action: String,
+        reason: String,
+        trace_id: String,
+    },
+    QueueAlert {
+        queue_id: String,
+        alert_type: String,
+        message: String,
+    },
     ConferenceSeatReplaceStarted {
         conf_id: String,
         old_call_id: String,
@@ -673,6 +720,15 @@ impl RwiEvent {
             RwiEvent::ParallelOriginateFailed { .. } => None,
 
             RwiEvent::CallBridged { leg_a, .. } => Some(leg_a),
+            // CC addon events
+            RwiEvent::AgentStateChanged { call_id, .. } => call_id.as_deref(),
+            RwiEvent::QueueCandidatesFound { call_id, .. } => Some(call_id),
+            RwiEvent::QueueAgentRinging { call_id, .. } => Some(call_id),
+            RwiEvent::QueueAgentNoAnswer { call_id, .. } => Some(call_id),
+            RwiEvent::QueueAgentRejected { call_id, .. } => Some(call_id),
+            RwiEvent::QueueFallbackExecuted { call_id, .. } => Some(call_id),
+            RwiEvent::QueueAlert { .. } => None,
+
             RwiEvent::ConferenceCreated { .. } => None,
             RwiEvent::ConferenceDestroyed { .. } => None,
             RwiEvent::ConferenceError { .. } => None,

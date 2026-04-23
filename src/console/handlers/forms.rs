@@ -170,7 +170,7 @@ where
     let total_pages_u64 = if total_items == 0 {
         1
     } else {
-        cmp::max((total_items + per_page - 1) / per_page, 1)
+        cmp::max(total_items.div_ceil(per_page), 1)
     };
 
     let total_pages = cmp::max(u32::try_from(total_pages_u64).unwrap_or(u32::MAX), 1);

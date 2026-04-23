@@ -324,8 +324,8 @@ fn resolve_default_realm(proxy_cfg: &ProxyConfig) -> String {
 }
 
 fn resolve_preferred_host(config: Option<&Config>, proxy_cfg: &ProxyConfig, realm: &str) -> String {
-    if let Some(cfg) = config {
-        if let Some(external) = cfg
+    if let Some(cfg) = config
+        && let Some(external) = cfg
             .external_ip
             .as_ref()
             .map(|value| value.trim())
@@ -333,7 +333,6 @@ fn resolve_preferred_host(config: Option<&Config>, proxy_cfg: &ProxyConfig, real
         {
             return external.to_string();
         }
-    }
 
     let addr = proxy_cfg.addr.trim();
     if addr.is_empty() || addr == "0.0.0.0" || addr == "::" || addr == "[::]" || addr == "*" {
@@ -512,7 +511,7 @@ fn build_trunk_overview(
         let limit = model
             .max_concurrent
             .and_then(|v| (v > 0).then_some(v as u32))
-            .or_else(|| config.max_calls)
+            .or(config.max_calls)
             .unwrap_or(0);
         let ingress_ips = if !config.inbound_hosts.is_empty() {
             config.inbound_hosts.clone()
@@ -594,11 +593,10 @@ fn trunk_config_from_model(model: &sip_trunk::Model) -> Option<routing::TrunkCon
         push_unique_string(&mut inbound_hosts, host);
     }
 
-    if let Some(backup) = backup_dest.as_ref() {
-        if let Some(host) = extract_host_from_uri(backup) {
+    if let Some(backup) = backup_dest.as_ref()
+        && let Some(host) = extract_host_from_uri(backup) {
             push_unique_string(&mut inbound_hosts, host);
         }
-    }
 
     let recording = model
         .metadata
@@ -675,7 +673,7 @@ pub async fn list_dialogs(
 
     let dialog_layer = server.dialog_layer.clone();
     const MAX_DIALOGS: usize = 20;
-    let limit = params.limit.unwrap_or(MAX_DIALOGS).max(1).min(MAX_DIALOGS);
+    let limit = params.limit.unwrap_or(MAX_DIALOGS).clamp(1, MAX_DIALOGS);
     let call_id_filter = params
         .call_id
         .as_ref()
@@ -687,13 +685,12 @@ pub async fn list_dialogs(
     let mut has_more = false;
 
     for id in dialog_layer.all_dialog_ids() {
-        if let Some(dialog) = dialog_layer.get_dialog_with(&id) {
-            if let Some(summary) = summarize_dialog(&dialog) {
-                if let Some(ref call_id) = call_id_filter {
-                    if summary.call_id != *call_id {
+        if let Some(dialog) = dialog_layer.get_dialog_with(&id)
+            && let Some(summary) = summarize_dialog(&dialog) {
+                if let Some(ref call_id) = call_id_filter
+                    && summary.call_id != *call_id {
                         continue;
                     }
-                }
 
                 if items.len() >= limit {
                     has_more = true;
@@ -702,7 +699,6 @@ pub async fn list_dialogs(
 
                 items.push(summary);
             }
-        }
     }
 
     Json(DialogListResponse {
@@ -866,11 +862,10 @@ async fn test_trunk(
             matched_sources.push("dest".to_string());
         }
 
-        if let Some(backup) = &trunk.backup_dest {
-            if routing::candidate_matches_ip(backup, ip).await {
+        if let Some(backup) = &trunk.backup_dest
+            && routing::candidate_matches_ip(backup, ip).await {
                 matched_sources.push("backup_dest".to_string());
             }
-        }
 
         let matched = !matched_sources.is_empty();
         overall_match |= matched;
@@ -1152,19 +1147,22 @@ async fn route_evaluate(
         Err(err) => return bad_request(format!("invalid request uri: {}", err)),
     };
 
-    let mut invite_option = InviteOption::default();
-    invite_option.caller = caller_uri.clone();
-    invite_option.callee = callee_uri.clone();
-    invite_option.contact = caller_uri.clone();
-
     let custom_headers = payload
         .headers
         .as_ref()
-        .map(|headers| headers_to_vec(headers))
+        .map(headers_to_vec)
         .unwrap_or_default();
-    if !custom_headers.is_empty() {
-        invite_option.headers = Some(custom_headers.clone());
-    }
+    let invite_option = InviteOption {
+        caller: caller_uri.clone(),
+        callee: callee_uri.clone(),
+        contact: caller_uri.clone(),
+        headers: if custom_headers.is_empty() {
+            None
+        } else {
+            Some(custom_headers.clone())
+        },
+        ..Default::default()
+    };
 
     let request =
         match build_diagnostics_request(&caller_uri, &callee_uri, &request_uri, custom_headers) {
@@ -1644,7 +1642,11 @@ impl From<&crate::call::QueuePlan> for QueuePlanView {
                 format!("redirect: {}", target)
             }
             crate::call::QueueFallbackAction::Queue { name } => {
-                format!("queue: {}", name)
+                if name.starts_with("skill-group:") {
+                    format!("skill-group: {}", name.strip_prefix("skill-group:").unwrap_or(name))
+                } else {
+                    format!("queue: {}", name)
+                }
             }
         });
         Self {
@@ -1699,8 +1701,7 @@ fn build_diagnostics_request(
 
     let mut base_headers = vec![
         SipHeader::Via(
-            via.try_into()
-                .map_err(|_| "invalid via header".to_string())?,
+            via.into(),
         ),
         SipHeader::From(
             format!("Diagnostics <{}>;tag={}", caller, from_tag)
@@ -1826,7 +1827,7 @@ fn extract_sip_host(candidate: &str) -> Option<(String, u16)> {
 
     if let Some(rest) = candidate.strip_prefix("sip:") {
         let host = rest
-            .split(|c| c == ';' || c == '?')
+            .split([';', '?'])
             .next()
             .map(|value| value.trim())
             .filter(|value| !value.is_empty())?;
@@ -1885,11 +1886,10 @@ fn default_host_for_probe(server: &SipServerRef, uri: &Uri) -> String {
 }
 
 fn select_bind_ip(config_addr: &str, destination: &SocketAddr) -> IpAddr {
-    if let Ok(ip) = config_addr.parse::<IpAddr>() {
-        if !ip.is_unspecified() && ip.is_ipv4() == destination.is_ipv4() {
+    if let Ok(ip) = config_addr.parse::<IpAddr>()
+        && !ip.is_unspecified() && ip.is_ipv4() == destination.is_ipv4() {
             return ip;
         }
-    }
 
     if destination.is_ipv4() {
         IpAddr::V4(Ipv4Addr::UNSPECIFIED)
@@ -2039,11 +2039,10 @@ fn summarize_sip_response(raw: &str) -> SipResponseSummary {
     if let Some(first_line) = raw.lines().next() {
         let mut parts = first_line.split_whitespace();
         if matches!(parts.next(), Some(proto) if proto.eq_ignore_ascii_case("SIP/2.0")) {
-            if let Some(code_part) = parts.next() {
-                if let Ok(code) = code_part.parse::<u16>() {
+            if let Some(code_part) = parts.next()
+                && let Ok(code) = code_part.parse::<u16>() {
                     summary.status_code = Some(code);
                 }
-            }
             let reason = parts.collect::<Vec<_>>().join(" ");
             if !reason.is_empty() {
                 summary.reason = Some(reason);
@@ -2053,7 +2052,7 @@ fn summarize_sip_response(raw: &str) -> SipResponseSummary {
 
     for line in raw.lines() {
         if line.to_ascii_lowercase().starts_with("server:") {
-            if let Some(rest) = line.splitn(2, ':').nth(1) {
+            if let Some(rest) = line.split_once(':').map(|x| x.1) {
                 let value = rest.trim();
                 if !value.is_empty() {
                     summary.server = Some(value.to_string());
@@ -2339,6 +2338,7 @@ fn truncate(text: &str, limit: usize) -> String {
     text.chars().take(limit).collect::<String>() + "…"
 }
 
+#[allow(clippy::result_large_err)]
 fn resolve_target_uri(payload: &LocatorPayload) -> Result<Uri, Response> {
     if let Some(uri) = payload.uri.as_ref().and_then(|s| normalize_non_empty(s)) {
         return parse_uri(&uri);
@@ -2363,8 +2363,9 @@ fn normalize_non_empty(value: &str) -> Option<String> {
     }
 }
 
+#[allow(clippy::result_large_err)]
 fn parse_uri(value: &str) -> Result<Uri, Response> {
-    Uri::try_from(value).map_err(|err| bad_request(&format!("invalid uri: {}", err)))
+    Uri::try_from(value).map_err(|err| bad_request(format!("invalid uri: {}", err)))
 }
 
 fn extract_user_realm(payload: &LocatorPayload, uri: &Uri) -> Option<(String, Option<String>)> {

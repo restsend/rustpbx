@@ -470,8 +470,8 @@ async fn active_call_stats(state: &ConsoleState, limit: usize) -> (usize, Vec<Ac
     let mut previews = Vec::new();
     let mut active_count = 0;
     // 2. Proxy Calls (including Wholesale)
-    if let Ok(guard) = state.sip_server.read() {
-        if let Some(server) = guard.as_ref() {
+    if let Ok(guard) = state.sip_server.read()
+        && let Some(server) = guard.as_ref() {
             active_count += server.active_call_registry.count();
             let proxy_calls = server.active_call_registry.list_recent(limit);
             for call in proxy_calls {
@@ -512,15 +512,14 @@ async fn active_call_stats(state: &ConsoleState, limit: usize) -> (usize, Vec<Ac
                 });
             }
         }
-    }
 
     // Sort and limit
-    previews.sort_by(|a, b| b.started_at_ts.cmp(&a.started_at_ts));
+    previews.sort_by_key(|b| std::cmp::Reverse(b.started_at_ts));
     if previews.len() > limit {
         previews.truncate(limit);
     }
 
-    previews.sort_by(|a, b| b.started_at_ts.cmp(&a.started_at_ts));
+    previews.sort_by_key(|b| std::cmp::Reverse(b.started_at_ts));
     if previews.len() > limit {
         previews.truncate(limit);
     }
@@ -595,7 +594,7 @@ fn direction_label(direction: &str) -> String {
         "inbound" => "Inbound".to_string(),
         "outbound" => "Outbound".to_string(),
         "internal" => "Internal".to_string(),
-        other if other.is_empty() => "Unknown".to_string(),
+        "" => "Unknown".to_string(),
         other => {
             let mut chars = other.chars();
             match chars.next() {

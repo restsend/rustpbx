@@ -143,8 +143,10 @@ impl SessionPolicy {
 /// Ringback policy - how to handle ringback tone
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
+#[derive(Default)]
 pub enum RingbackPolicy {
     /// Pass through carrier early media
+    #[default]
     PassThrough,
     /// Block early media, no ringback
     Block,
@@ -157,11 +159,6 @@ pub enum RingbackPolicy {
     },
 }
 
-impl Default for RingbackPolicy {
-    fn default() -> Self {
-        Self::PassThrough
-    }
-}
 
 /// Media source for playback
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -30,7 +30,7 @@ impl ClientAddr {
             Some("wss") | Some("https") => true,
             _ => headers
                 .get("x-forwarded-proto")
-                .map_or(false, |v| v == "https"),
+                .is_some_and(|v| v == "https"),
         };
 
         let mut remote_addr = connect_info
@@ -42,15 +42,14 @@ impl ClientAddr {
             "x-real-ip",
             "cf-connecting-ip",
         ] {
-            if let Some(value) = headers.get(header) {
-                if let Ok(ip) = value.to_str() {
+            if let Some(value) = headers.get(header)
+                && let Ok(ip) = value.to_str() {
                     let first_ip = ip.split(',').next().unwrap_or(ip).trim();
                     if let Ok(parsed_ip) = first_ip.parse::<IpAddr>() {
                         remote_addr.set_ip(parsed_ip);
                     }
                     break;
                 }
-            }
         }
 
         ClientAddr {

@@ -11,6 +11,12 @@ pub mod models;
 
 pub struct TranscriptAddon;
 
+impl Default for TranscriptAddon {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TranscriptAddon {
     pub fn new() -> Self {
         Self

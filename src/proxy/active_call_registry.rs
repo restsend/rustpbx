@@ -10,11 +10,11 @@ pub enum ActiveProxyCallStatus {
     Talking,
 }
 
-impl ToString for ActiveProxyCallStatus {
-    fn to_string(&self) -> String {
+impl std::fmt::Display for ActiveProxyCallStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ActiveProxyCallStatus::Ringing => "ringing".to_string(),
-            ActiveProxyCallStatus::Talking => "talking".to_string(),
+            ActiveProxyCallStatus::Ringing => write!(f, "ringing"),
+            ActiveProxyCallStatus::Talking => write!(f, "talking"),
         }
     }
 }
@@ -41,6 +41,12 @@ struct RegistryState {
 
 pub struct ActiveProxyCallRegistry {
     inner: Mutex<RegistryState>,
+}
+
+impl Default for ActiveProxyCallRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ActiveProxyCallRegistry {
@@ -70,14 +76,13 @@ impl ActiveProxyCallRegistry {
 
     pub fn unregister_dialog(&self, dialog_id: &str) {
         let mut guard = self.inner.lock().unwrap();
-        if let Some(handle) = guard.handles_by_dialog.remove(dialog_id) {
-            if let Some(dialogs) = guard.dialog_by_session.get_mut(handle.session_id()) {
+        if let Some(handle) = guard.handles_by_dialog.remove(dialog_id)
+            && let Some(dialogs) = guard.dialog_by_session.get_mut(handle.session_id()) {
                 dialogs.retain(|d| d != dialog_id);
                 if dialogs.is_empty() {
                     guard.dialog_by_session.remove(handle.session_id());
                 }
             }
-        }
     }
 
     pub fn get_handle_by_dialog(&self, dialog_id: &str) -> Option<SipSessionHandle> {
@@ -119,7 +124,7 @@ impl ActiveProxyCallRegistry {
             .values()
             .cloned()
             .collect();
-        entries.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+        entries.sort_by_key(|b| std::cmp::Reverse(b.started_at));
         if entries.len() > limit {
             entries.truncate(limit);
         }
@@ -142,6 +147,10 @@ impl ActiveProxyCallRegistry {
     /// Alias for count() for SessionRegistry compatibility
     pub fn len(&self) -> usize {
         self.count()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.count() == 0
     }
 
     /// Register a unified session handle

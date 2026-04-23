@@ -64,10 +64,12 @@ struct RpidEmpty {}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum PresenceStatus {
     Available,
     Busy,
     Away,
+    #[default]
     Offline,
 }
 
@@ -82,11 +84,6 @@ impl std::fmt::Display for PresenceStatus {
     }
 }
 
-impl Default for PresenceStatus {
-    fn default() -> Self {
-        PresenceStatus::Offline
-    }
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PresenceState {
@@ -242,7 +239,7 @@ impl PresenceManager {
 
     pub fn add_subscriber(&self, identity: &str, sub: Subscriber) {
         let mut map = self.subscribers.write().unwrap();
-        let subs = map.entry(identity.to_string()).or_insert_with(Vec::new);
+        let subs = map.entry(identity.to_string()).or_default();
         // Remove old sub with same dialog_id or similar if needed
         subs.retain(|s| s.dialog_id != sub.dialog_id);
         subs.push(sub);

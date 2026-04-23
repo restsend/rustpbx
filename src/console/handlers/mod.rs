@@ -27,6 +27,7 @@ pub fn bad_request(message: impl Into<String>) -> axum::response::Response {
     (StatusCode::BAD_REQUEST, Json(json!({ "message": text }))).into_response()
 }
 
+#[allow(clippy::result_large_err)]
 pub fn require_field(
     value: &Option<String>,
     field: &str,
@@ -61,6 +62,8 @@ pub fn router(state: Arc<ConsoleState>) -> Router {
         .merge(sipflow::urls())
         .merge(notifications::urls())
         .merge(metrics::urls());
+    #[cfg(feature = "addon-cc")]
+    let page_routes = page_routes.merge(crate::addons::cc::console_handlers::page_urls());
 
     // API routes (nested under api_prefix)
     let api_routes = Router::new()
@@ -69,6 +72,8 @@ pub fn router(state: Arc<ConsoleState>) -> Router {
         .merge(notifications::api_urls())
         .merge(metrics::api_urls())
         .merge(addons::api_urls());
+    #[cfg(feature = "addon-cc")]
+    let api_routes = api_routes.merge(crate::addons::cc::console_handlers::api_urls());
 
     Router::new()
         .route(&format!("{base_path}/"), get(self::dashboard::dashboard))

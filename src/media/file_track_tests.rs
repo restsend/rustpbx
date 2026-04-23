@@ -43,7 +43,7 @@ async fn test_file_track_creation() {
 
     assert_eq!(track.id(), "test-track");
     assert_eq!(track.file_path, Some("/tmp/test.wav".to_string()));
-    assert_eq!(track.loop_playback, false);
+    assert!(!track.loop_playback);
     assert_eq!(
         track.codec_preference,
         vec![CodecType::PCMU, CodecType::PCMA]

@@ -1043,8 +1043,8 @@ async fn test_rtp_payload_integrity_through_proxy() -> Result<()> {
         payload[1] = (i & 0xFF) as u8;
         payload[2] = 0xDE;
         payload[3] = 0xAD;
-        for j in 4..160 {
-            payload[j] = ((i as u8).wrapping_add(j as u8)) ^ 0x55;
+        for (j, byte) in payload.iter_mut().enumerate().skip(4) {
+            *byte = ((i as u8).wrapping_add(j as u8)) ^ 0x55;
         }
 
         packets.push(RtpPacket::new(

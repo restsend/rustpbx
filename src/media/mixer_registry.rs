@@ -311,8 +311,8 @@ impl MixerRegistry {
 
         if let Some(mixer_id) = mixer_id {
             let mut mixers = self.mixers.lock().unwrap();
-            if let Some(entry) = mixers.get_mut(&mixer_id) {
-                if let Some(participant) = entry
+            if let Some(entry) = mixers.get_mut(&mixer_id)
+                && let Some(participant) = entry
                     .participants
                     .iter_mut()
                     .find(|p| p.session_id == session_id)
@@ -326,7 +326,6 @@ impl MixerRegistry {
                     );
                     return true;
                 }
-            }
         }
 
         warn!(

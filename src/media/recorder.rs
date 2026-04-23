@@ -192,8 +192,8 @@ impl Recorder {
         };
         let dtmf_pt = dtmf_pt.or(profile_dtmf_pt);
         let dtmf_clock_rate = dtmf_clock_rate.or(profile_dtmf_clock_rate);
-        if let (Some(pt), Some(dpt)) = (frame.payload_type, dtmf_pt) {
-            if pt == dpt {
+        if let (Some(pt), Some(dpt)) = (frame.payload_type, dtmf_pt)
+            && pt == dpt {
                 return self.write_dtmf_payload(
                     leg,
                     &frame.data,
@@ -201,9 +201,8 @@ impl Recorder {
                     dtmf_clock_rate.unwrap_or(self.sample_rate),
                 );
             }
-        }
 
-        let codec_hint = codec_hint.or_else(|| match (frame.payload_type, profile_audio_pt) {
+        let codec_hint = codec_hint.or(match (frame.payload_type, profile_audio_pt) {
             (Some(pt), Some(audio_pt)) if pt == audio_pt => profile_audio_codec,
             _ => None,
         });

@@ -97,15 +97,14 @@ impl CallReporter {
             });
 
         let mut hangup_messages = snapshot.hangup_messages.clone();
-        if hangup_messages.is_empty() {
-            if let Some((code, reason)) = snapshot.last_error.as_ref() {
+        if hangup_messages.is_empty()
+            && let Some((code, reason)) = snapshot.last_error.as_ref() {
                 hangup_messages.push(CallRecordHangupMessage {
                     code: u16::from(code.clone()),
                     reason: reason.clone(),
                     target: None,
                 });
             }
-        }
 
         let rewrite = CallRecordRewrite {
             caller_original: original_caller.clone(),
@@ -147,9 +146,9 @@ impl CallReporter {
 
         let mut recorder = Vec::new();
 
-        if self.context.dialplan.recording.enabled {
-            if let Some(recorder_config) = self.context.dialplan.recording.option.as_ref() {
-                if !recorder_config.recorder_file.is_empty() {
+        if self.context.dialplan.recording.enabled
+            && let Some(recorder_config) = self.context.dialplan.recording.option.as_ref()
+                && !recorder_config.recorder_file.is_empty() {
                     let size = fs::metadata(&recorder_config.recorder_file)
                         .map(|meta| meta.len())
                         .unwrap_or(0);
@@ -160,8 +159,6 @@ impl CallReporter {
                         extra: None,
                     });
                 }
-            }
-        }
         tracing::info!(
             recording = ?self.context.dialplan.recording,
             has_sipflow_backend = ?has_sipflow_backend,
@@ -173,25 +170,27 @@ impl CallReporter {
 
         let recording_path_for_db = recorder.first().map(|media| media.path.clone());
 
-        let mut details = CallDetails::default();
-        details.direction = direction;
-        details.status = status;
-        details.from_number = from_number;
-        details.to_number = to_number;
-        details.caller_name = from_name;
-        details.agent_name = to_name;
-        details.queue = snapshot.last_queue_name.clone();
-        details.department_id = department_id;
-        details.extension_id = extension_id;
-        details.sip_trunk_id = sip_trunk_id;
-        details.sip_gateway = sip_gateway;
-        details.recording_url = recording_path_for_db;
-        details.rewrite = rewrite;
-        details.last_error = last_error;
-        details.metadata = snapshot
-            .extensions
-            .get::<HashMap<String, String>>()
-            .cloned();
+        let details = CallDetails {
+            direction,
+            status,
+            from_number,
+            to_number,
+            caller_name: from_name,
+            agent_name: to_name,
+            queue: snapshot.last_queue_name.clone(),
+            department_id,
+            extension_id,
+            sip_trunk_id,
+            sip_gateway,
+            recording_url: recording_path_for_db,
+            rewrite,
+            last_error,
+            metadata: snapshot
+                .extensions
+                .get::<HashMap<String, String>>()
+                .cloned(),
+            ..Default::default()
+        };
 
         let record = CallRecord {
             call_id: self.context.session_id.clone(),
@@ -273,10 +272,12 @@ mod tests {
     #[test]
     fn test_resolve_user_info_wholesale() {
         let cookie = TransactionCookie::default();
-        let mut user = SipUser::default();
-        user.username = "1234".to_string();
-        user.display_name = Some("alice".to_string());
-        user.departments = Some(vec!["tenant:100".to_string()]);
+        let user = SipUser {
+            username: "1234".to_string(),
+            display_name: Some("alice".to_string()),
+            departments: Some(vec!["tenant:100".to_string()]),
+            ..Default::default()
+        };
         cookie.set_user(user);
 
         let caller = "sip:mock-uuid@1.2.3.4";
@@ -291,11 +292,13 @@ mod tests {
     #[test]
     fn test_resolve_user_info_mixed() {
         let cookie = TransactionCookie::default();
-        let mut user = SipUser::default();
-        user.username = "1234".to_string();
-        user.display_name = Some("alice".to_string());
-        user.departments = Some(vec!["tenant:100".to_string(), "5".to_string()]);
-        user.id = 99;
+        let user = SipUser {
+            username: "1234".to_string(),
+            display_name: Some("alice".to_string()),
+            departments: Some(vec!["tenant:100".to_string(), "5".to_string()]),
+            id: 99,
+            ..Default::default()
+        };
         cookie.set_user(user);
 
         let caller = "sip:mock-uuid@1.2.3.4";
@@ -310,11 +313,13 @@ mod tests {
     #[test]
     fn test_resolve_user_info_normal() {
         let cookie = TransactionCookie::default();
-        let mut user = SipUser::default();
-        user.username = "1001".to_string();
-        user.display_name = Some("alice".to_string());
-        user.departments = Some(vec!["5".to_string()]);
-        user.id = 99;
+        let user = SipUser {
+            username: "1001".to_string(),
+            display_name: Some("alice".to_string()),
+            departments: Some(vec!["5".to_string()]),
+            id: 99,
+            ..Default::default()
+        };
         cookie.set_user(user);
 
         let caller = "sip:1001@1.2.3.4";

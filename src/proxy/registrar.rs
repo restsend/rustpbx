@@ -116,12 +116,11 @@ impl ParsedContact {
     }
 
     fn transport(&self) -> Option<Transport> {
-        if let Some(param) = self.params.iter().find(|p| p.matches("transport")) {
-            if let Some(value) = &param.value {
-                if let Some(t) = parse_transport_token(value) {
-                    return Some(t);
-                }
-            }
+        if let Some(param) = self.params.iter().find(|p| p.matches("transport"))
+            && let Some(value) = &param.value
+            && let Some(t) = parse_transport_token(value)
+        {
+            return Some(t);
         }
 
         self.uri.params.iter().find_map(|param| match param {
@@ -398,44 +397,6 @@ fn escape_display_name(input: &str) -> String {
     input.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parse_contact_with_gruu_and_instance() {
-        let value = "\"Alice\" <sip:alice@rustpbx.com;transport=ws>;expires=600;+sip.instance=\"urn:uuid:1234\";pub-gruu=\"sip:alice-gruu@rustpbx.com\"";
-        let parsed = parse_contact_entry(value).expect("parse contact");
-        assert!(!parsed.is_wildcard());
-        assert_eq!(parsed.expires(), Some(600));
-        assert_eq!(parsed.instance_id().as_deref(), Some("urn:uuid:1234"));
-        assert_eq!(parsed.gruu().as_deref(), Some("sip:alice-gruu@rustpbx.com"));
-        assert!(matches!(parsed.transport(), Some(Transport::Ws)));
-        let rendered = parsed.contact_value(300);
-        assert!(rendered.contains("+sip.instance=\"urn:uuid:1234\""));
-        assert!(rendered.contains("expires=300"));
-    }
-
-    #[test]
-    fn parse_contact_wildcard() {
-        let parsed = parse_contact_entry("*").expect("parse wildcard");
-        assert!(parsed.is_wildcard());
-    }
-
-    #[test]
-    fn parse_contact_without_angle_brackets() {
-        let value = "sip:alice@rustpbx.com;transport=ws;expires=120";
-        let parsed = parse_contact_entry(value).expect("parse contact");
-        assert!(!parsed.is_wildcard());
-        let rendered = parsed.contact_value(60);
-        assert!(rendered.starts_with("sip:alice@rustpbx.com"));
-        assert!(!rendered.contains('<'));
-        assert!(!rendered.contains('>'));
-        assert!(rendered.contains("transport=ws"));
-        assert!(rendered.contains("expires=60"));
-    }
-}
-
 impl RegistrarModule {
     pub fn create(server: SipServerRef, config: Arc<ProxyConfig>) -> Result<Box<dyn ProxyModule>> {
         let module = RegistrarModule::new(server, config);
@@ -675,9 +636,21 @@ impl ProxyModule for RegistrarModule {
                 }
             }
 
-            response_headers.push(Header::Other("Contact".into(), rendered_contact.into()));
+            response_headers.push(Header::Other("Contact".into(), rendered_contact));
         }
 
+        if let Some(allows) = tx.endpoint_inner.allows.lock().as_deref()
+            && !allows.is_empty()
+        {
+            response_headers.push(Header::Allow(
+                allows
+                    .iter()
+                    .map(|m| m.to_string())
+                    .collect::<Vec<String>>()
+                    .join(",")
+                    .into(),
+            ));
+        }
         response_headers.push(Header::Expires(
             global_expires.unwrap_or(default_expires).into(),
         ));
@@ -686,5 +659,43 @@ impl ProxyModule for RegistrarModule {
             .await
             .ok();
         Ok(ProxyAction::Abort)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_contact_with_gruu_and_instance() {
+        let value = "\"Alice\" <sip:alice@rustpbx.com;transport=ws>;expires=600;+sip.instance=\"urn:uuid:1234\";pub-gruu=\"sip:alice-gruu@rustpbx.com\"";
+        let parsed = parse_contact_entry(value).expect("parse contact");
+        assert!(!parsed.is_wildcard());
+        assert_eq!(parsed.expires(), Some(600));
+        assert_eq!(parsed.instance_id().as_deref(), Some("urn:uuid:1234"));
+        assert_eq!(parsed.gruu().as_deref(), Some("sip:alice-gruu@rustpbx.com"));
+        assert!(matches!(parsed.transport(), Some(Transport::Ws)));
+        let rendered = parsed.contact_value(300);
+        assert!(rendered.contains("+sip.instance=\"urn:uuid:1234\""));
+        assert!(rendered.contains("expires=300"));
+    }
+
+    #[test]
+    fn parse_contact_wildcard() {
+        let parsed = parse_contact_entry("*").expect("parse wildcard");
+        assert!(parsed.is_wildcard());
+    }
+
+    #[test]
+    fn parse_contact_without_angle_brackets() {
+        let value = "sip:alice@rustpbx.com;transport=ws;expires=120";
+        let parsed = parse_contact_entry(value).expect("parse contact");
+        assert!(!parsed.is_wildcard());
+        let rendered = parsed.contact_value(60);
+        assert!(rendered.starts_with("sip:alice@rustpbx.com"));
+        assert!(!rendered.contains('<'));
+        assert!(!rendered.contains('>'));
+        assert!(rendered.contains("transport=ws"));
+        assert!(rendered.contains("expires=60"));
     }
 }

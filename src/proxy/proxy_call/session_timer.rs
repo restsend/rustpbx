@@ -396,8 +396,8 @@ pub fn apply_session_timer_headers(
     timer: &mut SessionTimerState,
     headers: &rsipstack::sip::Headers,
 ) -> Result<()> {
-    if let Some(se_value) = get_header_value(headers, HEADER_SESSION_EXPIRES) {
-        if let Some((interval, refresher)) = parse_session_expires(&se_value) {
+    if let Some(se_value) = get_header_value(headers, HEADER_SESSION_EXPIRES)
+        && let Some((interval, refresher)) = parse_session_expires(&se_value) {
             if interval < timer.min_se {
                 return Err(anyhow!(
                     "Session-Expires too small: {} < {}",
@@ -411,7 +411,6 @@ pub fn apply_session_timer_headers(
                 timer.refresher = new_refresher;
             }
         }
-    }
 
     Ok(())
 }

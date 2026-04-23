@@ -596,6 +596,22 @@ fn build_storage_profiles(config: &crate::config::Config) -> (JsonValue, Vec<Jso
             }
             ("http".to_string(), profile)
         }
+        Some(CallRecordConfig::Database {
+            database_url,
+            table_name,
+        }) => {
+            let mut profile = Profile::new(
+                "callrecord-database",
+                "Call recordings",
+                "Storing call detail records in database",
+            );
+            profile.insert("type", json!("database"));
+            if let Some(url) = database_url {
+                profile.insert("database_url", json!(url));
+            }
+            profile.insert("table_name", json!(table_name));
+            ("database".to_string(), profile)
+        }
         None => {
             let mut profile = Profile::new(
                 "callrecord-local",
@@ -615,11 +631,10 @@ fn build_storage_profiles(config: &crate::config::Config) -> (JsonValue, Vec<Jso
     );
     spool_profile.insert("recorder_path", json!(&recorder_path));
 
-    if let Some(policy) = config.recording.as_ref() {
-        if let Ok(policy_value) = serde_json::to_value(policy) {
+    if let Some(policy) = config.recording.as_ref()
+        && let Ok(policy_value) = serde_json::to_value(policy) {
             spool_profile.insert("recording", policy_value);
         }
-    }
 
     let active_profile_id = callrecord_profile.id.clone();
     let active_description = callrecord_profile.description.clone();
@@ -658,8 +673,8 @@ async fn query_departments(
     }
     let db = state.db();
     let mut selector = DepartmentEntity::find().order_by_asc(DepartmentColumn::Name);
-    if let Some(filters) = payload.filters.as_ref() {
-        if let Some(keyword) = filters
+    if let Some(filters) = payload.filters.as_ref()
+        && let Some(keyword) = filters
             .q
             .as_ref()
             .map(|v| v.trim())
@@ -673,7 +688,6 @@ async fn query_departments(
                     .add(DepartmentColumn::Slug.like(pattern)),
             );
         }
-    }
 
     let paginator = selector.paginate(db, payload.normalize().1);
     let pagination = match forms::paginate(paginator, &payload).await {
@@ -924,11 +938,10 @@ async fn query_users(
                     .add(UserColumn::Username.like(pattern)),
             );
         }
-        if let Some(active_only) = filters.active {
-            if active_only {
+        if let Some(active_only) = filters.active
+            && active_only {
                 selector = selector.filter(UserColumn::IsActive.eq(true));
             }
-        }
     }
 
     let paginator = selector.paginate(db, query.normalize().1);
@@ -1055,15 +1068,17 @@ async fn create_user(
         }
     };
 
-    let mut active: UserActiveModel = Default::default();
-    active.email = Set(email.to_lowercase());
-    active.username = Set(username.to_string());
-    active.password_hash = Set(hashed);
-    active.created_at = Set(now);
-    active.updated_at = Set(now);
-    active.is_active = Set(payload.is_active.unwrap_or(true));
-    active.is_staff = Set(payload.is_staff.unwrap_or(false));
-    active.is_superuser = Set(payload.is_superuser.unwrap_or(false));
+    let active = UserActiveModel {
+        email: Set(email.to_lowercase()),
+        username: Set(username.to_string()),
+        password_hash: Set(hashed),
+        created_at: Set(now),
+        updated_at: Set(now),
+        is_active: Set(payload.is_active.unwrap_or(true)),
+        is_staff: Set(payload.is_staff.unwrap_or(false)),
+        is_superuser: Set(payload.is_superuser.unwrap_or(false)),
+        ..Default::default()
+    };
 
     match active.insert(state.db()).await {
         Ok(model) => (
@@ -1314,6 +1329,14 @@ fn summarize_callrecord(config: Option<&CallRecordConfig>) -> Option<JsonValue> 
             "label": "Call record storage",
             "value": format!("HTTP {}", url),
         })),
+        CallRecordConfig::Database {
+            database_url,
+            table_name,
+        } => Some(json!({
+            "label": "Call record storage",
+            "value": format!("Database ({})", table_name),
+            "hint": database_url.as_deref().unwrap_or("default"),
+        })),
     }
 }
 
@@ -1515,20 +1538,18 @@ pub(crate) async fn update_platform_settings(
         Err(resp) => return resp,
     };
 
-    if let (Some(start), Some(end)) = (config.rtp_start_port, config.rtp_end_port) {
-        if start > end {
+    if let (Some(start), Some(end)) = (config.rtp_start_port, config.rtp_end_port)
+        && start > end {
             return json_error(
                 StatusCode::UNPROCESSABLE_ENTITY,
                 "rtp_start_port must be less than or equal to rtp_end_port",
             );
         }
-    }
 
-    if modified {
-        if let Err(resp) = persist_document(&config_path, doc_text) {
+    if modified
+        && let Err(resp) = persist_document(&config_path, doc_text) {
             return resp;
         }
-    }
 
     Json(json!({
         "status": "ok",
@@ -1574,27 +1595,80 @@ pub(crate) async fn update_proxy_settings(
     }
 
     if let Some(webhook) = payload.locator_webhook {
-        let toml_s = toml::to_string(&webhook).unwrap_or_default();
-        if let Ok(new_doc) = toml_s.parse::<DocumentMut>() {
-            table["locator_webhook"] = new_doc.as_item().clone();
-            modified = true;
-        }
+        let toml_s = match toml::to_string(&webhook) {
+            Ok(s) => s,
+            Err(err) => {
+                return json_error(
+                    StatusCode::BAD_REQUEST,
+                    format!("Failed to serialize locator_webhook: {err}"),
+                );
+            }
+        };
+        let new_doc = match toml_s.parse::<DocumentMut>() {
+            Ok(doc) => doc,
+            Err(err) => {
+                return json_error(
+                    StatusCode::BAD_REQUEST,
+                    format!("Invalid locator_webhook payload: {err}"),
+                );
+            }
+        };
+        table["locator_webhook"] = new_doc.as_item().clone();
+        modified = true;
     }
 
     if let Some(backends) = payload.user_backends {
-        let toml_s = toml::to_string(&json!({ "b": backends })).unwrap_or_default();
-        if let Ok(new_doc) = toml_s.parse::<DocumentMut>() {
-            table["user_backends"] = new_doc["b"].clone();
-            modified = true;
+        #[derive(Serialize)]
+        struct UserBackendsToml {
+            b: Vec<UserBackendConfig>,
         }
+
+        let toml_s = match toml::to_string(&UserBackendsToml { b: backends }) {
+            Ok(s) => s,
+            Err(err) => {
+                return json_error(
+                    StatusCode::BAD_REQUEST,
+                    format!("Failed to serialize user_backends: {err}"),
+                );
+            }
+        };
+        let new_doc = match toml_s.parse::<DocumentMut>() {
+            Ok(doc) => doc,
+            Err(err) => {
+                return json_error(
+                    StatusCode::BAD_REQUEST,
+                    format!("Invalid user_backends payload: {err}"),
+                );
+            }
+        };
+        let Some(backends_item) = new_doc.get("b").cloned() else {
+            return json_error(StatusCode::BAD_REQUEST, "Invalid user_backends payload");
+        };
+        table["user_backends"] = backends_item;
+        modified = true;
     }
 
     if let Some(router) = payload.http_router {
-        let toml_s = toml::to_string(&router).unwrap_or_default();
-        if let Ok(new_doc) = toml_s.parse::<DocumentMut>() {
-            table["http_router"] = new_doc.as_item().clone();
-            modified = true;
-        }
+        let toml_s = match toml::to_string(&router) {
+            Ok(s) => s,
+            Err(err) => {
+                return json_error(
+                    StatusCode::BAD_REQUEST,
+                    format!("Failed to serialize http_router: {err}"),
+                );
+            }
+        };
+        let new_doc = match toml_s.parse::<DocumentMut>() {
+            Ok(doc) => doc,
+            Err(err) => {
+                return json_error(
+                    StatusCode::BAD_REQUEST,
+                    format!("Invalid http_router payload: {err}"),
+                );
+            }
+        };
+        table["http_router"] = new_doc.as_item().clone();
+        modified = true;
     }
 
     if modified {
@@ -1868,11 +1942,10 @@ pub(crate) async fn update_storage_settings(
         Err(resp) => return resp,
     };
 
-    if modified {
-        if let Err(resp) = persist_document(&config_path, doc_text) {
+    if modified
+        && let Err(resp) = persist_document(&config_path, doc_text) {
             return resp;
         }
-    }
 
     let (storage_meta, storage_profiles) = build_storage_profiles(&config);
 
@@ -1930,11 +2003,10 @@ pub(crate) async fn update_security_settings(
         Err(resp) => return resp,
     };
 
-    if modified {
-        if let Err(resp) = persist_document(&config_path, doc_text) {
+    if modified
+        && let Err(resp) = persist_document(&config_path, doc_text) {
             return resp;
         }
-    }
 
     let acl_rules = config.proxy.acl_rules.clone().unwrap_or_default();
     if let Some(app_state) = state.app_state() {
@@ -1967,13 +2039,13 @@ pub(crate) struct RwiSettingsPayload {
     contexts: Option<Vec<RwiContextPayload>>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 struct RwiTokenPayload {
     token: String,
     scopes: Vec<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 struct RwiContextPayload {
     name: String,
     no_answer_timeout_secs: Option<u32>,
@@ -2033,64 +2105,66 @@ pub(crate) async fn update_rwi_settings(
 
     // Update tokens
     if let Some(tokens) = payload.tokens {
-        // Use toml serialization to build the tokens array
-        let tokens_vec: Vec<toml::Value> = tokens
-            .into_iter()
-            .map(|t| {
-                let mut m = toml::map::Map::new();
-                m.insert("token".to_string(), toml::Value::String(t.token));
-                m.insert(
-                    "scopes".to_string(),
-                    toml::Value::Array(t.scopes.into_iter().map(toml::Value::String).collect()),
-                );
-                toml::Value::Table(m)
-            })
-            .collect();
-        let tokens_toml = toml::Value::Array(tokens_vec);
-        // Set using toml::to_string and parse back to toml_edit
-        let tokens_str = toml::to_string(&tokens_toml).unwrap_or_default();
-        // Parse the tokens section from string
-        if let Ok(tokens_doc) = tokens_str.parse::<DocumentMut>() {
-            if let Some(tokens_item) = tokens_doc.as_table().get("") {
-                rwi_table["tokens"] = tokens_item.clone();
-                modified = true;
-            }
+        #[derive(Serialize)]
+        struct RwiTokensToml {
+            tokens: Vec<RwiTokenPayload>,
         }
+
+        let tokens_str = match toml::to_string(&RwiTokensToml { tokens }) {
+            Ok(s) => s,
+            Err(err) => {
+                return json_error(
+                    StatusCode::BAD_REQUEST,
+                    format!("Failed to serialize RWI tokens: {err}"),
+                );
+            }
+        };
+        let tokens_doc = match tokens_str.parse::<DocumentMut>() {
+            Ok(doc) => doc,
+            Err(err) => {
+                return json_error(
+                    StatusCode::BAD_REQUEST,
+                    format!("Invalid RWI tokens payload: {err}"),
+                );
+            }
+        };
+        let Some(tokens_item) = tokens_doc.get("tokens").cloned() else {
+            return json_error(StatusCode::BAD_REQUEST, "Invalid RWI tokens payload");
+        };
+        rwi_table["tokens"] = tokens_item;
+        modified = true;
     }
 
     // Update contexts
     if let Some(contexts) = payload.contexts {
-        let contexts_vec: Vec<toml::Value> = contexts
-            .into_iter()
-            .map(|c| {
-                let mut m = toml::map::Map::new();
-                m.insert("name".to_string(), toml::Value::String(c.name));
-                if let Some(timeout) = c.no_answer_timeout_secs {
-                    m.insert(
-                        "no_answer_timeout_secs".to_string(),
-                        toml::Value::Integer(timeout as i64),
-                    );
-                }
-                if let Some(action) = c.no_answer_action {
-                    m.insert("no_answer_action".to_string(), toml::Value::String(action));
-                }
-                if let Some(target) = c.no_answer_transfer_target {
-                    m.insert(
-                        "no_answer_transfer_target".to_string(),
-                        toml::Value::String(target),
-                    );
-                }
-                toml::Value::Table(m)
-            })
-            .collect();
-        let contexts_toml = toml::Value::Array(contexts_vec);
-        let contexts_str = toml::to_string(&contexts_toml).unwrap_or_default();
-        if let Ok(contexts_doc) = contexts_str.parse::<DocumentMut>() {
-            if let Some(contexts_item) = contexts_doc.as_table().get("") {
-                rwi_table["contexts"] = contexts_item.clone();
-                modified = true;
-            }
+        #[derive(Serialize)]
+        struct RwiContextsToml {
+            contexts: Vec<RwiContextPayload>,
         }
+
+        let contexts_str = match toml::to_string(&RwiContextsToml { contexts }) {
+            Ok(s) => s,
+            Err(err) => {
+                return json_error(
+                    StatusCode::BAD_REQUEST,
+                    format!("Failed to serialize RWI contexts: {err}"),
+                );
+            }
+        };
+        let contexts_doc = match contexts_str.parse::<DocumentMut>() {
+            Ok(doc) => doc,
+            Err(err) => {
+                return json_error(
+                    StatusCode::BAD_REQUEST,
+                    format!("Invalid RWI contexts payload: {err}"),
+                );
+            }
+        };
+        let Some(contexts_item) = contexts_doc.get("contexts").cloned() else {
+            return json_error(StatusCode::BAD_REQUEST, "Invalid RWI contexts payload");
+        };
+        rwi_table["contexts"] = contexts_item;
+        modified = true;
     }
 
     let doc_text = doc.to_string();
@@ -2099,11 +2173,10 @@ pub(crate) async fn update_rwi_settings(
         Err(resp) => return resp,
     };
 
-    if modified {
-        if let Err(resp) = persist_document(&config_path, doc_text) {
+    if modified
+        && let Err(resp) = persist_document(&config_path, doc_text) {
             return resp;
         }
-    }
 
     let rwi_config = config.rwi.unwrap_or_default();
     Json(json!({
@@ -2115,6 +2188,7 @@ pub(crate) async fn update_rwi_settings(
     .into_response()
 }
 
+#[allow(clippy::result_large_err)]
 fn get_config_path(state: &ConsoleState) -> Result<String, Response> {
     let Some(app_state) = state.app_state() else {
         return Err(json_error(
@@ -2132,6 +2206,7 @@ fn get_config_path(state: &ConsoleState) -> Result<String, Response> {
     Ok(path)
 }
 
+#[allow(clippy::result_large_err)]
 fn load_document(path: &str) -> Result<DocumentMut, Response> {
     let contents = match fs::read_to_string(path) {
         Ok(raw) => raw,
@@ -2151,6 +2226,7 @@ fn load_document(path: &str) -> Result<DocumentMut, Response> {
     })
 }
 
+#[allow(clippy::result_large_err)]
 fn persist_document(path: &str, contents: String) -> Result<(), Response> {
     fs::write(path, contents).map_err(|err| {
         json_error(
@@ -2160,6 +2236,7 @@ fn persist_document(path: &str, contents: String) -> Result<(), Response> {
     })
 }
 
+#[allow(clippy::result_large_err)]
 fn parse_config_from_str(contents: &str) -> Result<Config, Response> {
     toml::from_str::<Config>(contents)
         .map(|mut cfg| {
@@ -2175,10 +2252,20 @@ fn parse_config_from_str(contents: &str) -> Result<Config, Response> {
 }
 
 fn ensure_table_mut<'doc>(doc: &'doc mut DocumentMut, key: &str) -> &'doc mut Table {
-    if !doc[key].is_table() {
-        doc[key] = Item::Table(Table::new());
+    let needs_init = doc
+        .as_table()
+        .get(key)
+        .map(|item| !item.is_table())
+        .unwrap_or(true);
+
+    if needs_init {
+        doc.insert(key, Item::Table(Table::new()));
     }
-    doc[key].as_table_mut().expect("table")
+
+    doc.as_table_mut()
+        .get_mut(key)
+        .and_then(Item::as_table_mut)
+        .expect("table")
 }
 
 fn parse_lines_to_vec(raw: &str) -> Vec<String> {

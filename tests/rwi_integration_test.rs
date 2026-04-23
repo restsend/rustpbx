@@ -62,8 +62,11 @@ pub struct RwiTestClient {
     ws: tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<TcpStream>>,
 }
 
+/// Type alias for test client results.
+pub type TestResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
+
 impl RwiTestClient {
-    pub async fn connect() -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+    pub async fn connect() -> TestResult<Self> {
         let url = format!("{}?token={}", RWI_URL, TEST_TOKEN);
         let (ws_stream, _) = timeout(Duration::from_secs(10), connect_async(&url)).await??;
 
@@ -73,7 +76,7 @@ impl RwiTestClient {
     pub async fn send_request(
         &mut self,
         request: RwiRequest,
-    ) -> Result<RwiResponse, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> TestResult<RwiResponse> {
         let json = request.to_json();
         self.ws.send(Message::Text(json.into())).await?;
 
@@ -98,7 +101,7 @@ impl RwiTestClient {
     pub async fn subscribe(
         &mut self,
         contexts: Vec<&str>,
-    ) -> Result<RwiResponse, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> TestResult<RwiResponse> {
         let request = RwiRequest::new("session.subscribe")
             .with_params(serde_json::json!({ "contexts": contexts }));
         self.send_request(request).await
@@ -106,7 +109,7 @@ impl RwiTestClient {
 
     pub async fn list_calls(
         &mut self,
-    ) -> Result<RwiResponse, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> TestResult<RwiResponse> {
         let request = RwiRequest::new("session.list_calls");
         self.send_request(request).await
     }
@@ -114,7 +117,7 @@ impl RwiTestClient {
     pub async fn answer_call(
         &mut self,
         call_id: &str,
-    ) -> Result<RwiResponse, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> TestResult<RwiResponse> {
         let request =
             RwiRequest::new("call.answer").with_params(serde_json::json!({ "call_id": call_id }));
         self.send_request(request).await
@@ -124,7 +127,7 @@ impl RwiTestClient {
         &mut self,
         call_id: &str,
         reason: Option<&str>,
-    ) -> Result<RwiResponse, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> TestResult<RwiResponse> {
         let mut params = serde_json::json!({ "call_id": call_id });
         if let Some(r) = reason {
             params["reason"] = serde_json::json!(r);
@@ -137,7 +140,7 @@ impl RwiTestClient {
         &mut self,
         call_id: &str,
         reason: Option<&str>,
-    ) -> Result<RwiResponse, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> TestResult<RwiResponse> {
         let mut params = serde_json::json!({ "call_id": call_id });
         if let Some(r) = reason {
             params["reason"] = serde_json::json!(r);
@@ -149,7 +152,7 @@ impl RwiTestClient {
     pub async fn ring_call(
         &mut self,
         call_id: &str,
-    ) -> Result<RwiResponse, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> TestResult<RwiResponse> {
         let request =
             RwiRequest::new("call.ring").with_params(serde_json::json!({ "call_id": call_id }));
         self.send_request(request).await
@@ -159,7 +162,7 @@ impl RwiTestClient {
         &mut self,
         call_id: &str,
         target: &str,
-    ) -> Result<RwiResponse, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> TestResult<RwiResponse> {
         let request = RwiRequest::new("call.transfer")
             .with_params(serde_json::json!({ "call_id": call_id, "target": target }));
         self.send_request(request).await
@@ -170,7 +173,7 @@ impl RwiTestClient {
         call_id: &str,
         destination: &str,
         caller_id: Option<&str>,
-    ) -> Result<RwiResponse, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> TestResult<RwiResponse> {
         let mut params = serde_json::json!({
             "call_id": call_id,
             "destination": destination,
@@ -186,7 +189,7 @@ impl RwiTestClient {
         &mut self,
         leg_a: &str,
         leg_b: &str,
-    ) -> Result<RwiResponse, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> TestResult<RwiResponse> {
         let request = RwiRequest::new("call.bridge")
             .with_params(serde_json::json!({ "leg_a": leg_a, "leg_b": leg_b }));
         self.send_request(request).await
@@ -197,7 +200,7 @@ impl RwiTestClient {
         call_id: &str,
         source_type: &str,
         uri: &str,
-    ) -> Result<RwiResponse, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> TestResult<RwiResponse> {
         let request = RwiRequest::new("media.play").with_params(serde_json::json!({
             "call_id": call_id,
             "source": {
@@ -213,7 +216,7 @@ impl RwiTestClient {
         call_id: &str,
         queue_id: &str,
         priority: Option<u32>,
-    ) -> Result<RwiResponse, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> TestResult<RwiResponse> {
         let mut params = serde_json::json!({
             "call_id": call_id,
             "queue_id": queue_id,
@@ -228,7 +231,7 @@ impl RwiTestClient {
     pub async fn queue_dequeue(
         &mut self,
         call_id: &str,
-    ) -> Result<RwiResponse, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> TestResult<RwiResponse> {
         let request =
             RwiRequest::new("queue.dequeue").with_params(serde_json::json!({ "call_id": call_id }));
         self.send_request(request).await
@@ -238,7 +241,7 @@ impl RwiTestClient {
         &mut self,
         call_id: &str,
         digits: &str,
-    ) -> Result<RwiResponse, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> TestResult<RwiResponse> {
         let request = RwiRequest::new("call.send_dtmf")
             .with_params(serde_json::json!({ "call_id": call_id, "digits": digits }));
         self.send_request(request).await
@@ -247,7 +250,7 @@ impl RwiTestClient {
     pub async fn conference_create(
         &mut self,
         conf_id: &str,
-    ) -> Result<RwiResponse, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> TestResult<RwiResponse> {
         let request = RwiRequest::new("conference.create")
             .with_params(serde_json::json!({ "conference_id": conf_id }));
         self.send_request(request).await
@@ -257,7 +260,7 @@ impl RwiTestClient {
         &mut self,
         conf_id: &str,
         call_id: &str,
-    ) -> Result<RwiResponse, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> TestResult<RwiResponse> {
         let request = RwiRequest::new("conference.add")
             .with_params(serde_json::json!({ "conference_id": conf_id, "call_id": call_id }));
         self.send_request(request).await
@@ -267,7 +270,7 @@ impl RwiTestClient {
         &mut self,
         conf_id: &str,
         call_id: &str,
-    ) -> Result<RwiResponse, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> TestResult<RwiResponse> {
         let request = RwiRequest::new("conference.remove")
             .with_params(serde_json::json!({ "conference_id": conf_id, "call_id": call_id }));
         self.send_request(request).await
@@ -276,13 +279,13 @@ impl RwiTestClient {
     pub async fn conference_destroy(
         &mut self,
         conf_id: &str,
-    ) -> Result<RwiResponse, Box<dyn std::error::Error + Send + Sync>> {
+    ) -> TestResult<RwiResponse> {
         let request = RwiRequest::new("conference.destroy")
             .with_params(serde_json::json!({ "conference_id": conf_id }));
         self.send_request(request).await
     }
 
-    pub async fn close(mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    pub async fn close(mut self) -> TestResult<()> {
         self.ws.close(None).await?;
         Ok(())
     }

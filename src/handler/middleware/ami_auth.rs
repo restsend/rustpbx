@@ -18,15 +18,15 @@ pub async fn ami_auth_middleware(
     next: Next,
 ) -> Response {
     #[allow(unused_mut)]
-    let mut allowed = state.config().ami.as_ref().map_or(false, |ami| {
+    let mut allowed = state.config().ami.as_ref().is_some_and(|ami| {
         ami.is_allowed(client_ip.ip().to_string().as_str())
     });
 
     #[cfg(feature = "console")]
     if !allowed {
         // Let authenticated console superusers bypass AMI IP checks.
-        if let Some(console_state) = &state.console {
-            if let Some(cookie_value) = extract_session_cookie(request.headers()) {
+        if let Some(console_state) = &state.console
+            && let Some(cookie_value) = extract_session_cookie(request.headers()) {
                 match console_state.current_user(Some(&cookie_value)).await {
                     Ok(Some(user)) => {
                         if user.is_superuser
@@ -43,7 +43,6 @@ pub async fn ami_auth_middleware(
                     }
                 }
             }
-        }
     }
 
     if !allowed {

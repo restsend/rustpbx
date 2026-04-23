@@ -49,8 +49,8 @@ mod tests {
             method: rsipstack::sip::Method::Invite,
             uri: "sip:target@example.com".try_into().unwrap(),
             headers: vec![
-                rsipstack::sip::Header::From("sip:caller@example.com".try_into().unwrap()),
-                rsipstack::sip::Header::To("sip:target@example.com".try_into().unwrap()),
+                rsipstack::sip::Header::From("sip:caller@example.com".into()),
+                rsipstack::sip::Header::To("sip:target@example.com".into()),
                 rsipstack::sip::Header::CallId("test-call-id".into()),
             ]
             .into(),
@@ -104,7 +104,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(dialplan.recording.enabled, true);
+        assert!(dialplan.recording.enabled);
         assert_eq!(dialplan.max_call_duration.unwrap().as_secs(), 30);
 
         let payload = rx.recv().await.unwrap();
@@ -146,8 +146,8 @@ mod tests {
             method: rsipstack::sip::Method::Invite,
             uri: "sip:target@example.com".try_into().unwrap(),
             headers: vec![
-                rsipstack::sip::Header::From("sip:caller@example.com".try_into().unwrap()),
-                rsipstack::sip::Header::To("sip:target@example.com".try_into().unwrap()),
+                rsipstack::sip::Header::From("sip:caller@example.com".into()),
+                rsipstack::sip::Header::To("sip:target@example.com".into()),
                 rsipstack::sip::Header::CallId("test-call-id".into()),
             ]
             .into(),
@@ -249,8 +249,8 @@ mod tests {
             method: rsipstack::sip::Method::Invite,
             uri: "sip:target@example.com".try_into().unwrap(),
             headers: vec![
-                rsipstack::sip::Header::From("sip:caller@example.com".try_into().unwrap()),
-                rsipstack::sip::Header::To("sip:target@example.com".try_into().unwrap()),
+                rsipstack::sip::Header::From("sip:caller@example.com".into()),
+                rsipstack::sip::Header::To("sip:target@example.com".into()),
                 rsipstack::sip::Header::CallId("test-abort-ext".into()),
             ]
             .into(),
@@ -350,8 +350,8 @@ mod tests {
             method: rsipstack::sip::Method::Invite,
             uri: "sip:target@example.com".try_into().unwrap(),
             headers: vec![
-                rsipstack::sip::Header::From("sip:caller@example.com".try_into().unwrap()),
-                rsipstack::sip::Header::To("sip:target@example.com".try_into().unwrap()),
+                rsipstack::sip::Header::From("sip:caller@example.com".into()),
+                rsipstack::sip::Header::To("sip:target@example.com".into()),
                 rsipstack::sip::Header::CallId("test-reject-ext".into()),
             ]
             .into(),
@@ -438,8 +438,8 @@ mod tests {
             method: rsipstack::sip::Method::Invite,
             uri: "sip:target@example.com".try_into().unwrap(),
             headers: vec![
-                rsipstack::sip::Header::From("sip:caller@example.com".try_into().unwrap()),
-                rsipstack::sip::Header::To("sip:target@example.com".try_into().unwrap()),
+                rsipstack::sip::Header::From("sip:caller@example.com".into()),
+                rsipstack::sip::Header::To("sip:target@example.com".into()),
                 rsipstack::sip::Header::CallId("test-abort-noext".into()),
             ]
             .into(),
@@ -532,8 +532,8 @@ mod tests {
             method: rsipstack::sip::Method::Invite,
             uri: "sip:target@example.com".try_into().unwrap(),
             headers: vec![
-                rsipstack::sip::Header::From("sip:caller@example.com".try_into().unwrap()),
-                rsipstack::sip::Header::To("sip:target@example.com".try_into().unwrap()),
+                rsipstack::sip::Header::From("sip:caller@example.com".into()),
+                rsipstack::sip::Header::To("sip:target@example.com".into()),
                 rsipstack::sip::Header::CallId("test-id".into()),
             ]
             .into(),
@@ -570,10 +570,10 @@ mod tests {
             dialplan.media.proxy_mode,
             crate::config::MediaProxyMode::None
         );
-        assert_eq!(dialplan.with_original_headers, true);
+        assert!(dialplan.with_original_headers);
 
         let target = dialplan.first_target().unwrap();
-        let header = target.headers.as_ref().unwrap().get(0).unwrap();
+        let header = target.headers.as_ref().unwrap().first().unwrap();
         assert_eq!(header.to_string(), "X-Custom-Header: test-value");
 
         let exts = dialplan
@@ -625,8 +625,8 @@ mod tests {
             method: rsipstack::sip::Method::Invite,
             uri: "sip:target@example.com".try_into().unwrap(),
             headers: vec![
-                rsipstack::sip::Header::From("sip:caller@example.com".try_into().unwrap()),
-                rsipstack::sip::Header::To("sip:target@example.com".try_into().unwrap()),
+                rsipstack::sip::Header::From("sip:caller@example.com".into()),
+                rsipstack::sip::Header::To("sip:target@example.com".into()),
                 rsipstack::sip::Header::CallId("test-rtp-config".into()),
             ]
             .into(),

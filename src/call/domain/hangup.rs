@@ -8,8 +8,10 @@ use super::LegId;
 /// How hangup cascades to other legs in the session
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum HangupCascade {
     /// Hangup all legs in the session
+    #[default]
     All,
     /// Only hangup the specified leg, leave others intact
     None,
@@ -19,11 +21,6 @@ pub enum HangupCascade {
     Other,
 }
 
-impl Default for HangupCascade {
-    fn default() -> Self {
-        Self::All
-    }
-}
 
 /// Who initiated the hangup
 #[derive(Debug, Clone, Serialize, Deserialize)]

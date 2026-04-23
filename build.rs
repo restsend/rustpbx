@@ -97,7 +97,7 @@ fn get_git_dirty() -> String {
 
     // If .git doesn't exist or failed, try environment variable
     if dirty_from_git == "unknown" || dirty_from_git == "dirty" {
-        env::var("GIT_DIRTY").unwrap_or_else(|_| dirty_from_git)
+        env::var("GIT_DIRTY").unwrap_or(dirty_from_git)
     } else {
         dirty_from_git
     }

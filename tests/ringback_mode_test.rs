@@ -18,8 +18,8 @@ mod ringback_mode_tests {
 
         assert_eq!(config.mode, RingbackMode::Auto);
         assert_eq!(config.audio_file, None);
-        assert_eq!(config.loop_playback, true);
-        assert_eq!(config.wait_for_completion, false);
+        assert!(config.loop_playback);
+        assert!(!config.wait_for_completion);
     }
 
     #[test]
@@ -31,7 +31,7 @@ mod ringback_mode_tests {
 
         assert_eq!(config.mode, RingbackMode::Local);
         assert_eq!(config.audio_file, Some("/sounds/ringback.mp3".to_string()));
-        assert_eq!(config.loop_playback, true);
+        assert!(config.loop_playback);
     }
 
     #[test]
@@ -85,7 +85,7 @@ mod ringback_mode_tests {
 
         assert_eq!(config.mode, RingbackMode::Local);
         assert_eq!(config.audio_file, Some("/sounds/company.mp3".to_string()));
-        assert_eq!(config.loop_playback, true);
+        assert!(config.loop_playback);
     }
 
     #[test]
@@ -132,8 +132,8 @@ mod ringback_mode_tests {
         let config: RingbackConfig = toml::from_str(toml).expect("Failed to deserialize");
 
         assert_eq!(config.mode, RingbackMode::Auto);
-        assert_eq!(config.loop_playback, true);
-        assert_eq!(config.wait_for_completion, false);
+        assert!(config.loop_playback);
+        assert!(!config.wait_for_completion);
     }
 
     #[test]
@@ -214,7 +214,7 @@ mod ringback_mode_tests {
         let config_loop = RingbackConfig::new().with_loop(true);
         let config_no_loop = RingbackConfig::new().with_loop(false);
 
-        assert_eq!(config_loop.loop_playback, true);
-        assert_eq!(config_no_loop.loop_playback, false);
+        assert!(config_loop.loop_playback);
+        assert!(!config_no_loop.loop_playback);
     }
 }

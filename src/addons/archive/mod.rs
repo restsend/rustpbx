@@ -13,6 +13,9 @@ use std::sync::{Arc, RwLock};
 use tokio::time;
 use tracing::{error, info};
 
+pub mod config;
+pub use config::ArchiveConfig;
+
 mod handlers;
 
 #[derive(Debug, Clone)]
@@ -28,12 +31,18 @@ pub struct ManualTaskStatus {
 #[derive(Clone)]
 pub struct ArchiveState {
     pub last_run: Arc<RwLock<Option<DateTime<Utc>>>>,
-    pub config: Arc<RwLock<Option<crate::config::ArchiveConfig>>>,
+    pub config: Arc<RwLock<Option<ArchiveConfig>>>,
     pub manual_tasks: Arc<RwLock<HashMap<String, Arc<RwLock<ManualTaskStatus>>>>>,
 }
 
 pub struct ArchiveAddon {
     state: ArchiveState,
+}
+
+impl Default for ArchiveAddon {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl ArchiveAddon {
@@ -45,6 +54,34 @@ impl ArchiveAddon {
                 manual_tasks: Arc::new(RwLock::new(HashMap::new())),
             },
         }
+    }
+
+    /// Load configuration from addon-specific config file.
+    pub async fn load_config(config_path: &Option<String>) -> Option<ArchiveConfig> {
+        if let Some(path) = config_path {
+            let config_dir = std::path::Path::new(path).parent()?;
+            let addon_config_path = config_dir.join("archive.toml");
+            if addon_config_path.exists() {
+                match tokio::fs::read_to_string(&addon_config_path).await {
+                    Ok(content) => {
+                        match toml::from_str::<ArchiveConfig>(&content) {
+                            Ok(config) => {
+                                tracing::info!("Archive config loaded from {}", addon_config_path.display());
+                                return Some(config);
+                            }
+                            Err(e) => {
+                                tracing::warn!("Failed to parse archive.toml: {}", e);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to read archive.toml: {}", e);
+                    }
+                }
+            }
+        }
+        tracing::info!("Archive using default configuration (no archive.toml found)");
+        None
     }
 
     /// Archive records within a specific date range [start_date, end_date).
@@ -230,7 +267,9 @@ impl ArchiveAddon {
 
             if should_run {
                 info!("Starting scheduled archive job");
-                let archive_dir = state.config().archive_dir();
+                let archive_dir = archive_config.effective_archive_dir(
+                    &state.config().recorder_path()
+                );
                 if let Err(e) =
                     Self::perform_archive(state.db(), &archive_config, &archive_dir).await
                 {
@@ -245,7 +284,7 @@ impl ArchiveAddon {
 
     pub async fn perform_archive(
         db: &sea_orm::DatabaseConnection,
-        config: &crate::config::ArchiveConfig,
+        config: &ArchiveConfig,
         archive_dir: &str,
     ) -> anyhow::Result<()> {
         use crate::models::call_record;
@@ -397,9 +436,10 @@ impl Addon for ArchiveAddon {
         vec![]
     }
     async fn initialize(&self, state: AppState) -> anyhow::Result<()> {
-        // Initialize config from AppState
-        if let Some(c) = &state.config().archive {
-            *self.state.config.write().unwrap() = Some(c.clone());
+        // Load config from addon-specific config file
+        let config = ArchiveAddon::load_config(&state.config_path).await;
+        if let Some(c) = config {
+            *self.state.config.write().unwrap() = Some(c);
         }
 
         let archive_state = self.state.clone();

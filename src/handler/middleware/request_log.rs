@@ -140,9 +140,9 @@ where
             event.record(&mut fields);
             self.timer.format_time(&mut writer)?;
             write!(writer, " ")?;
-            write!(
+            writeln!(
                 writer,
-                "{} {} | {} | {} | {} | {} | {} | {}\n",
+                "{} {} | {} | {} | {} | {} | {} | {}",
                 metadata.level(),
                 metadata.target(),
                 fields.take_client_ip(),

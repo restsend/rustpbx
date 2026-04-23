@@ -346,7 +346,7 @@ impl TestUa {
         if let Some(dialog) = dialog_layer.get_dialog(dialog_id) {
             match dialog {
                 Dialog::ServerInvite(d) => {
-                    let code = status_code.map(|c| StatusCode::from(c));
+                    let code = status_code.map(StatusCode::from);
                     d.reject(code, reason).map_err(|e| e.into_anyhow())?;
                     Ok(())
                 }
@@ -374,7 +374,7 @@ impl TestUa {
                     let contact = rsipstack::sip::typed::Contact {
                         display_name: None,
                         uri: self.contact_uri.clone().unwrap(),
-                        params: vec![].into(),
+                        params: vec![],
                     };
 
                     let mut headers = vec![contact.into()];
@@ -622,7 +622,7 @@ impl TestUa {
                         };
                         events.push(TestUaEvent::CallUpdated(
                             id.clone(),
-                            request.method.clone(),
+                            request.method,
                             sdp,
                         ));
                         // Reply with saved answer SDP if available (for re-INVITE responses)
@@ -694,19 +694,16 @@ impl TestUa {
                     if let Some(mut tx) = tx_opt {
                         debug!(method=%tx.original.method, "TestUa process_incoming_request received request");
                         // Handle existing dialog
-                        match tx.original.to_header()?.tag()?.as_ref() {
-                            Some(_) => {
-                                if let Some(mut d) = dialog_layer.match_dialog(&tx) {
-                                    debug!(method=%tx.original.method, "TestUa matched dialog for request");
-                                    tokio::spawn(async move {
-                                        d.handle(&mut tx).await.ok();
-                                    });
-                                    continue;
-                                } else {
-                                    debug!(method=%tx.original.method, "TestUa no matching dialog found");
-                                }
+                        if tx.original.to_header()?.tag()?.as_ref().is_some() {
+                            if let Some(mut d) = dialog_layer.match_dialog(&tx) {
+                                debug!(method=%tx.original.method, "TestUa matched dialog for request");
+                                tokio::spawn(async move {
+                                    d.handle(&mut tx).await.ok();
+                                });
+                                continue;
+                            } else {
+                                debug!(method=%tx.original.method, "TestUa no matching dialog found");
                             }
-                            None => {}
                         }
 
                         // Handle new dialog
@@ -1359,11 +1356,9 @@ mod tests {
             let _ = tokio::time::timeout(Duration::from_secs(10), callee_fut).await;
 
             if let Ok(join_res) = tokio::time::timeout(Duration::from_secs(5), caller_handle).await
-            {
-                if let Ok(Ok(dialog_id)) = join_res {
+                && let Ok(Ok(dialog_id)) = join_res {
                     alice.hangup(&dialog_id).await.ok();
                 }
-            }
 
             alice.stop();
             bob.stop();
@@ -1424,11 +1419,10 @@ mod tests {
                             _ => {}
                         }
                     }
-                    if i == 10 {
-                        if let Some(id) = &established_id {
+                    if i == 10
+                        && let Some(id) = &established_id {
                             let _ = bob.hangup(id).await; // drive termination
                         }
-                    }
                     if states_observed.contains(&"Terminated".to_string()) {
                         println!("States observed: {:?}", states_observed);
                         assert!(
@@ -1630,14 +1624,12 @@ mod tests {
             }
 
             if let Ok(join_res) = tokio::time::timeout(Duration::from_secs(3), caller_handle).await
-            {
-                if let Ok(Ok(dialog_id)) = join_res {
+                && let Ok(Ok(dialog_id)) = join_res {
                     // Very short call duration simulating network flakiness
                     sleep(Duration::from_millis(20)).await;
                     alice.hangup(&dialog_id).await.ok();
                     println!("Quick call cycle #{} completed", i + 1);
                 }
-            }
 
             sleep(Duration::from_millis(20)).await;
         }
@@ -1711,11 +1703,9 @@ mod tests {
 
                 if let Ok(join_res) =
                     tokio::time::timeout(Duration::from_secs(5), caller_handle).await
-                {
-                    if let Ok(Ok(id)) = join_res {
+                    && let Ok(Ok(id)) = join_res {
                         alice_arc.hangup(&id).await.ok();
                     }
-                }
             }
         }
 
@@ -1779,11 +1769,9 @@ mod tests {
                         // Transfer completed - original call should be replaced
                         if let Ok(join_res) =
                             tokio::time::timeout(Duration::from_secs(5), caller_handle).await
-                        {
-                            if let Ok(Ok(id)) = join_res {
+                            && let Ok(Ok(id)) = join_res {
                                 alice_arc.hangup(&id).await.ok();
                             }
-                        }
                         println!("Blind transfer scenario completed");
                         break;
                     }
@@ -1871,11 +1859,9 @@ mod tests {
                 sleep(Duration::from_millis(100)).await;
                 if let Ok(join_res) =
                     tokio::time::timeout(Duration::from_secs(5), caller_handle).await
-                {
-                    if let Ok(Ok(id)) = join_res {
+                    && let Ok(Ok(id)) = join_res {
                         alice_arc.hangup(&id).await.ok();
                     }
-                }
             }
 
             sleep(Duration::from_millis(50)).await;
@@ -1948,11 +1934,9 @@ mod tests {
                         sleep(Duration::from_millis(300)).await;
                         if let Ok(join_res) =
                             tokio::time::timeout(Duration::from_secs(5), caller_handle).await
-                        {
-                            if let Ok(Ok(id)) = join_res {
+                            && let Ok(Ok(id)) = join_res {
                                 alice_arc.hangup(&id).await.ok();
                             }
-                        }
                         break;
                     }
                 }
@@ -2076,11 +2060,10 @@ a=rtpmap:0 PCMU/8000"#;
         }
 
         sleep(Duration::from_millis(100)).await;
-        if let Ok(join_res) = tokio::time::timeout(Duration::from_secs(5), caller_handle).await {
-            if let Ok(Ok(id)) = join_res {
+        if let Ok(join_res) = tokio::time::timeout(Duration::from_secs(5), caller_handle).await
+            && let Ok(Ok(id)) = join_res {
                 alice_arc.hangup(&id).await.ok();
             }
-        }
 
         // Test dual-stack SDP scenario
         let dual_stack_sdp = r#"v=0
@@ -2115,13 +2098,12 @@ a=candidate:2 1 udp 2130706430 2001:db8::1 54401 typ host"#;
                 }
             }
         }
-        if let Ok(join_res) = tokio::time::timeout(Duration::from_secs(5), caller_handle).await {
-            if let Ok(Ok(id)) = join_res {
+        if let Ok(join_res) = tokio::time::timeout(Duration::from_secs(5), caller_handle).await
+            && let Ok(Ok(id)) = join_res {
                 sleep(Duration::from_millis(100)).await;
                 alice_arc.hangup(&id).await.ok();
                 println!("Dual-stack SDP scenario completed");
             }
-        }
 
         alice.stop();
         bob.stop();
@@ -2176,13 +2158,11 @@ a=candidate:2 1 udp 2130706430 2001:db8::1 54401 typ host"#;
                 }
             }
             if let Ok(join_res) = tokio::time::timeout(Duration::from_secs(3), caller_handle).await
-            {
-                if let Ok(Ok(dialog_id)) = join_res {
+                && let Ok(Ok(dialog_id)) = join_res {
                     // Caller terminates immediately after answer
                     assert!(alice.hangup(&dialog_id).await.is_ok());
                     println!("Caller terminated call immediately after answer");
                 }
-            }
         }
 
         // Scenario 2: Ringing then early termination by caller (still requires established dialog in this simplified UA)
@@ -2213,13 +2193,11 @@ a=candidate:2 1 udp 2130706430 2001:db8::1 54401 typ host"#;
                 }
             }
             if let Ok(join_res) = tokio::time::timeout(Duration::from_secs(3), caller_handle).await
-            {
-                if let Ok(Ok(dialog_id)) = join_res {
+                && let Ok(Ok(dialog_id)) = join_res {
                     // Caller terminates immediately after answer
                     assert!(alice.hangup(&dialog_id).await.is_ok());
                     println!("Caller terminated during/after ringing phase");
                 }
-            }
         }
 
         alice.stop();
@@ -2373,11 +2351,9 @@ a=rtpmap:0 PCMU/8000"#;
                 sleep(Duration::from_millis(200)).await;
                 if let Ok(join_res) =
                     tokio::time::timeout(Duration::from_secs(5), caller_handle).await
-                {
-                    if let Ok(Ok(id)) = join_res {
+                    && let Ok(Ok(id)) = join_res {
                         alice_arc.hangup(&id).await.ok();
                     }
-                }
             }
 
             // Test 2: RTP offer to WebRTC callee (simulated by different SDP patterns)
@@ -2431,11 +2407,9 @@ a=rtpmap:111 opus/48000/2"#;
                 sleep(Duration::from_millis(200)).await;
                 if let Ok(join_res) =
                     tokio::time::timeout(Duration::from_secs(5), caller_handle).await
-                {
-                    if let Ok(Ok(id)) = join_res {
+                    && let Ok(Ok(id)) = join_res {
                         alice_arc.hangup(&id).await.ok();
                     }
-                }
             }
             alice.stop();
             bob.stop();
@@ -2512,11 +2486,10 @@ a=rtpmap:0 PCMU/8000"#;
         }
 
         sleep(Duration::from_millis(200)).await;
-        if let Ok(join_res) = tokio::time::timeout(Duration::from_secs(5), caller_handle).await {
-            if let Ok(Ok(id)) = join_res {
+        if let Ok(join_res) = tokio::time::timeout(Duration::from_secs(5), caller_handle).await
+            && let Ok(Ok(id)) = join_res {
                 alice_arc.hangup(&id).await.ok();
             }
-        }
 
         // Test with public IP (should NOT trigger NAT mode proxy)
         let public_ip_sdp = r#"v=0
@@ -2559,13 +2532,12 @@ a=rtpmap:0 PCMU/8000"#;
                 }
             }
         }
-        if let Ok(join_res) = tokio::time::timeout(Duration::from_secs(5), caller_handle).await {
-            if let Ok(Ok(id)) = join_res {
+        if let Ok(join_res) = tokio::time::timeout(Duration::from_secs(5), caller_handle).await
+            && let Ok(Ok(id)) = join_res {
                 sleep(Duration::from_millis(200)).await;
                 alice_arc.hangup(&id).await.ok();
                 println!("Public IP test completed (should bypass NAT proxy)");
             }
-        }
 
         alice.stop();
         bob.stop();
@@ -2647,12 +2619,11 @@ a=rtpmap:0 PCMU/8000"#;
                 }
             }
         }
-        if let Ok(join_res) = tokio::time::timeout(Duration::from_secs(5), caller_handle).await {
-            if let Ok(Ok(id)) = join_res {
+        if let Ok(join_res) = tokio::time::timeout(Duration::from_secs(5), caller_handle).await
+            && let Ok(Ok(id)) = join_res {
                 alice.hangup(&id).await.ok();
                 println!("Ringtone functionality test - call flow with ringing simulation works");
             }
-        }
 
         alice.stop();
         bob.stop();

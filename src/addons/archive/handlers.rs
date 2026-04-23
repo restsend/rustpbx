@@ -49,10 +49,18 @@ pub async fn ui_index(
     #[cfg(feature = "console")]
     {
         if let Some(console) = &state.console {
-            let archive_dir = state.config().archive_dir();
-            let archives = list_archive_files(&archive_dir).await.unwrap_or_default();
             let config = archive_state.config.read().unwrap().clone();
-            let effective_archive_dir = state.config().archive_dir();
+            let archive_dir = config
+                .as_ref()
+                .map(|c| c.effective_archive_dir(&state.config().recorder_path()))
+                .unwrap_or_else(|| {
+                    format!(
+                        "{}/archive",
+                        state.config().recorder_path().trim_end_matches('/')
+                    )
+                });
+            let archives = list_archive_files(&archive_dir).await.unwrap_or_default();
+            let effective_archive_dir = archive_dir.clone();
             return console.render_with_headers(
                 "archive/archive_index.html",
                 serde_json::json!({
@@ -73,14 +81,27 @@ pub async fn ui_index(
     axum::response::Html("Console feature not enabled".to_string()).into_response()
 }
 
-pub async fn list_archives(State(state): State<AppState>) -> impl IntoResponse {
-    let archive_dir = state.config().archive_dir();
+pub async fn list_archives(
+    State(state): State<AppState>,
+    Extension(archive_state): Extension<ArchiveState>,
+) -> impl IntoResponse {
+    let config = archive_state.config.read().unwrap().clone();
+    let archive_dir = config
+        .as_ref()
+        .map(|c| c.effective_archive_dir(&state.config().recorder_path()))
+        .unwrap_or_else(|| {
+            format!(
+                "{}/archive",
+                state.config().recorder_path().trim_end_matches('/')
+            )
+        });
     let archives = list_archive_files(&archive_dir).await.unwrap_or_default();
     Json(archives)
 }
 
 pub async fn delete_archive(
     State(state): State<AppState>,
+    Extension(archive_state): Extension<ArchiveState>,
     Json(payload): Json<DeleteArchivePayload>,
 ) -> impl IntoResponse {
     // Security check: ensure no path traversal
@@ -91,7 +112,16 @@ pub async fn delete_archive(
         return Json(serde_json::json!({"success": false, "error": "Invalid filename"}));
     }
 
-    let archive_dir = state.config().archive_dir();
+    let config = archive_state.config.read().unwrap().clone();
+    let archive_dir = config
+        .as_ref()
+        .map(|c| c.effective_archive_dir(&state.config().recorder_path()))
+        .unwrap_or_else(|| {
+            format!(
+                "{}/archive",
+                state.config().recorder_path().trim_end_matches('/')
+            )
+        });
     let full_path = format!("{}/{}", archive_dir, payload.filename);
     if let Err(e) = tokio::fs::remove_file(&full_path).await {
         return Json(serde_json::json!({"success": false, "error": e.to_string()}));
@@ -130,25 +160,33 @@ pub async fn update_config(
         let config_content = std::fs::read_to_string(&config_path)?;
         let mut doc = config_content.parse::<DocumentMut>()?;
 
-        if !doc.contains_key("archive") {
-            doc["archive"] = toml_edit::table();
+        let needs_archive_init = doc
+            .as_table()
+            .get("archive")
+            .map(|item| !item.is_table())
+            .unwrap_or(true);
+        if needs_archive_init {
+            doc.insert("archive", toml_edit::table());
         }
 
-        let archive = &mut doc["archive"];
-        archive["enabled"] = value(payload.enabled);
-        archive["archive_time"] = value(payload.archive_time.trim());
-        archive["timezone"] = value(tz_str);
-        archive["retention_days"] = value(payload.retention_days as i64);
-        archive["archive_after_days"] = value(payload.archive_after_days as i64);
+        let archive_table = doc
+            .as_table_mut()
+            .get_mut("archive")
+            .and_then(toml_edit::Item::as_table_mut)
+            .ok_or_else(|| anyhow::anyhow!("[archive] must be a table"))?;
+
+        archive_table["enabled"] = value(payload.enabled);
+        archive_table["archive_time"] = value(payload.archive_time.trim());
+        archive_table["timezone"] = value(tz_str);
+        archive_table["retention_days"] = value(payload.retention_days as i64);
+        archive_table["archive_after_days"] = value(payload.archive_after_days as i64);
         match payload.archive_dir.as_deref() {
             Some(d) if !d.trim().is_empty() => {
-                archive["archive_dir"] = value(d.trim());
+                archive_table["archive_dir"] = value(d.trim());
             }
             _ => {
                 // Remove override → fall back to derived default
-                if let Some(t) = doc["archive"].as_table_mut() {
-                    t.remove("archive_dir");
-                }
+                archive_table.remove("archive_dir");
             }
         }
         std::fs::write(&config_path, doc.to_string())?;
@@ -166,7 +204,7 @@ pub async fn update_config(
                 .as_deref()
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty());
-            *config_guard = Some(crate::config::ArchiveConfig {
+            *config_guard = Some(crate::addons::archive::ArchiveConfig {
                 enabled: payload.enabled,
                 archive_time: payload.archive_time.trim().to_string(),
                 timezone: Some(tz_str.to_string()),
@@ -305,7 +343,7 @@ pub async fn manual_archive(
         let mut tasks = archive_state.manual_tasks.write().unwrap();
         tasks.retain(|_, v| {
             let s = v.read().unwrap();
-            s.completed_at.map_or(true, |t| t.elapsed() < ttl)
+            s.completed_at.is_none_or(|t| t.elapsed() < ttl)
         });
     }
 
@@ -315,7 +353,16 @@ pub async fn manual_archive(
         .unwrap()
         .insert(task_id.clone(), task_status.clone());
 
-    let archive_dir = state.config().archive_dir();
+    let config = archive_state.config.read().unwrap().clone();
+    let archive_dir = config
+        .as_ref()
+        .map(|c| c.effective_archive_dir(&state.config().recorder_path()))
+        .unwrap_or_else(|| {
+            format!(
+                "{}/archive",
+                state.config().recorder_path().trim_end_matches('/')
+            )
+        });
     let db = state.db().clone();
 
     crate::utils::spawn(async move {

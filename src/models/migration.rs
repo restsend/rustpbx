@@ -12,7 +12,6 @@ impl MigratorTrait for Migrator {
             Box::new(super::sip_trunk::Migration),
             Box::new(super::presence::Migration),
             Box::new(super::routing::Migration),
-            Box::new(crate::addons::queue::models::Migration),
             Box::new(super::call_record::Migration),
             Box::new(super::frequency_limit::Migration),
             Box::new(super::call_record_indices::Migration),
@@ -25,7 +24,6 @@ impl MigratorTrait for Migrator {
             Box::new(super::add_user_mfa_columns::Migration),
             Box::new(super::add_sip_trunk_register_columns::Migration),
             Box::new(super::rbac::Migration),
-            Box::new(super::wholesale_agent::Migration),
             Box::new(super::add_sip_trunk_rewrite_hostport::Migration),
             Box::new(super::add_metadata_column::Migration),
         ]

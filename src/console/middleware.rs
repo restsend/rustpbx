@@ -67,8 +67,18 @@ where
 }
 
 async fn resolve_agent_id(state: &ConsoleState, user_id: i64) -> Option<i64> {
-    use crate::models::wholesale_agent::{Column, Entity};
+    #[cfg(feature = "addon-wholesale")]
+    use crate::addons::wholesale::models::wholesale_agent::{Column, Entity};
+    #[cfg(feature = "addon-wholesale")]
     use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
+
+    #[cfg(not(feature = "addon-wholesale"))]
+    {
+        let _ = (state, user_id);
+        None
+    }
+
+    #[cfg(feature = "addon-wholesale")]
     Entity::find()
         .filter(Column::UserId.eq(user_id))
         .one(state.db())
@@ -79,13 +89,11 @@ async fn resolve_agent_id(state: &ConsoleState, user_id: i64) -> Option<i64> {
 }
 
 pub fn extract_session_cookie(headers: &HeaderMap) -> Option<String> {
-    if let Some(auth_header) = headers.get(axum::http::header::AUTHORIZATION) {
-        if let Ok(auth_str) = auth_header.to_str() {
-            if let Some(token) = auth_str.strip_prefix("Bearer ") {
+    if let Some(auth_header) = headers.get(axum::http::header::AUTHORIZATION)
+        && let Ok(auth_str) = auth_header.to_str()
+            && let Some(token) = auth_str.strip_prefix("Bearer ") {
                 return Some(token.trim().to_string());
             }
-        }
-    }
 
     for cookie_header in headers.get_all(COOKIE) {
         if let Ok(s) = cookie_header.to_str() {
@@ -146,16 +154,26 @@ mod tests {
     use super::*;
     use crate::config::ConsoleConfig;
     use crate::models::migration::Migrator;
-    use crate::models::wholesale_agent;
-    use chrono::Utc;
-    use sea_orm::{ActiveValue::Set, Database, EntityTrait};
+    use sea_orm::Database;
     use sea_orm_migration::MigratorTrait;
+
+    #[cfg(feature = "addon-wholesale")]
+    use chrono::Utc;
+    #[cfg(feature = "addon-wholesale")]
+    use crate::addons::wholesale::models::wholesale_agent;
+    #[cfg(feature = "addon-wholesale")]
+    use sea_orm::{ActiveValue::Set, EntityTrait};
 
     async fn setup_state() -> Arc<ConsoleState> {
         let db = Database::connect("sqlite::memory:")
             .await
             .expect("connect sqlite memory");
         Migrator::up(&db, None).await.expect("run migrations");
+        #[cfg(feature = "addon-wholesale")]
+        {
+            use crate::addons::wholesale::migration::Migrator as WholesaleMigrator;
+            WholesaleMigrator::up(&db, None).await.expect("run wholesale migrations");
+        }
         ConsoleState::initialize(
             Arc::new(crate::callrecord::DefaultCallRecordFormatter::default()),
             db,
@@ -173,6 +191,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "addon-wholesale")]
     async fn user_with_agent_record_resolves_agent_id() {
         let state = setup_state().await;
         let now = Utc::now();
@@ -190,6 +209,14 @@ mod tests {
 
         let agent_id = resolve_agent_id(&state, 42).await;
         assert_eq!(agent_id, Some(inserted.id));
+    }
+
+    #[tokio::test]
+    #[cfg(not(feature = "addon-wholesale"))]
+    async fn resolve_agent_id_returns_none_without_wholesale_feature() {
+        let state = setup_state().await;
+        let agent_id = resolve_agent_id(&state, 42).await;
+        assert!(agent_id.is_none());
     }
 
     #[tokio::test]

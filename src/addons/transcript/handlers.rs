@@ -189,8 +189,8 @@ pub async fn trigger_call_record_transcript(
         }
     };
 
-    if record.has_transcript && !force {
-        if let Ok(Some(stored)) = load_stored_transcript(&record, cdr_data.as_ref()).await {
+    if record.has_transcript && !force
+        && let Ok(Some(stored)) = load_stored_transcript(&record, cdr_data.as_ref()).await {
             let payload = build_transcript_payload_value(&record, Some(&stored));
             return Json(json!({
                 "status": record.transcript_status,
@@ -198,7 +198,6 @@ pub async fn trigger_call_record_transcript(
             }))
             .into_response();
         }
-    }
 
     if record.transcript_status.eq_ignore_ascii_case("processing") && !force {
         return (
@@ -270,21 +269,19 @@ pub async fn trigger_call_record_transcript(
 
     let local_transcript_path = PathBuf::from(&transcript_storage_path);
 
-    if let Some(parent) = local_transcript_path.parent() {
-        if let Err(err) = tokio::fs::create_dir_all(parent).await {
+    if let Some(parent) = local_transcript_path.parent()
+        && let Err(err) = tokio::fs::create_dir_all(parent).await {
             warn!(dir = %parent.display(), "failed to ensure transcript directory: {}", err);
         }
-    }
 
-    if tokio::fs::metadata(&local_transcript_path).await.is_ok() {
-        if let Err(err) = tokio::fs::remove_file(&local_transcript_path).await {
+    if tokio::fs::metadata(&local_transcript_path).await.is_ok()
+        && let Err(err) = tokio::fs::remove_file(&local_transcript_path).await {
             warn!(
                 file = %local_transcript_path.display(),
                 "failed to remove existing transcript before transcription: {}",
                 err
             );
         }
-    }
 
     let transcript_output_path = local_transcript_path.to_string_lossy().into_owned();
 
@@ -626,7 +623,7 @@ async fn get_audio_from_sipflow(
     // Collect all call IDs to try: main call_id and any leg call_ids from CDR
     let mut all_call_ids = vec![record.call_id.clone()];
     if let Some(cdr) = cdr_data {
-        for (cid, _) in &cdr.record.sip_leg_roles {
+        for cid in cdr.record.sip_leg_roles.keys() {
             all_call_ids.push(cid.clone());
         }
     }
@@ -708,13 +705,12 @@ async fn read_transcript_file(
     storage: Option<&CdrStorage>,
     path: &str,
 ) -> AnyResult<StoredTranscript> {
-    if let Some(storage_ref) = storage {
-        if let Ok(content) = storage_ref.read_to_string(path).await {
+    if let Some(storage_ref) = storage
+        && let Ok(content) = storage_ref.read_to_string(path).await {
             let transcript: StoredTranscript = serde_json::from_str(&content)
                 .with_context(|| format!("parse transcript file {}", path))?;
             return Ok(transcript);
         }
-    }
 
     let content = tokio::fs::read_to_string(path)
         .await
@@ -789,20 +785,28 @@ pub async fn update_settings(
 ) -> Response {
     let config_path = match get_config_path(&state) {
         Ok(path) => path,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
 
     let mut doc = match load_document(&config_path) {
         Ok(doc) => doc,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
 
-    // Ensure [proxy] table exists
-    if !doc.contains_key("proxy") {
-        doc["proxy"] = Item::Table(Table::new());
+    // Ensure [proxy] is a table
+    let needs_proxy_init = doc
+        .as_table()
+        .get("proxy")
+        .map(|item| !item.is_table())
+        .unwrap_or(true);
+    if needs_proxy_init {
+        doc.insert("proxy", Item::Table(Table::new()));
     }
-    let proxy = &mut doc["proxy"];
-    let proxy_table = match proxy.as_table_mut() {
+    let proxy_table = match doc
+        .as_table_mut()
+        .get_mut("proxy")
+        .and_then(Item::as_table_mut)
+    {
         Some(t) => t,
         None => {
             return (
@@ -813,12 +817,18 @@ pub async fn update_settings(
         }
     };
 
-    // Ensure [proxy.transcript] table exists
-    if !proxy_table.contains_key("transcript") {
+    // Ensure [proxy.transcript] is a table
+    let needs_transcript_init = proxy_table
+        .get("transcript")
+        .map(|item| !item.is_table())
+        .unwrap_or(true);
+    if needs_transcript_init {
         proxy_table["transcript"] = Item::Table(Table::new());
     }
-    let transcript = &mut proxy_table["transcript"];
-    let transcript_table = match transcript.as_table_mut() {
+    let transcript_table = match proxy_table
+        .get_mut("transcript")
+        .and_then(Item::as_table_mut)
+    {
         Some(t) => t,
         None => {
             return (
@@ -846,7 +856,7 @@ pub async fn update_settings(
     }
 
     if let Err(resp) = persist_document(&config_path, doc.to_string()) {
-        return resp;
+        return *resp;
     }
 
     Json(json!({ "message": "Settings saved" })).into_response()
@@ -917,11 +927,10 @@ pub async fn download_model(
     cmd.arg("--download-model");
 
     // Add HF endpoint if provided
-    if let Some(endpoint) = payload.hf_endpoint {
-        if !endpoint.trim().is_empty() {
+    if let Some(endpoint) = payload.hf_endpoint
+        && !endpoint.trim().is_empty() {
             cmd.env("HF_ENDPOINT", endpoint.trim());
         }
-    }
 
     // Set a long timeout for download (10 minutes)
     let download_result = match timeout(StdDuration::from_secs(600), cmd.output()).await {
@@ -971,12 +980,12 @@ pub async fn download_model(
 
 async fn get_merged_config(app_state: &crate::app::AppState) -> TranscriptConfig {
     // Try to read from file first to get latest changes
-    if let Some(path) = &app_state.config_path {
-        if let Ok(content) = tokio::fs::read_to_string(path).await {
-            if let Ok(config) = toml::from_str::<Value>(&content) {
-                if let Some(proxy) = config.get("proxy") {
-                    if let Some(transcript_val) = proxy.get("transcript") {
-                        if let Ok(mut transcript) =
+    if let Some(path) = &app_state.config_path
+        && let Ok(content) = tokio::fs::read_to_string(path).await
+            && let Ok(config) = toml::from_str::<Value>(&content)
+                && let Some(proxy) = config.get("proxy")
+                    && let Some(transcript_val) = proxy.get("transcript")
+                        && let Ok(mut transcript) =
                             serde_json::from_value::<TranscriptConfig>(transcript_val.clone())
                         {
                             if transcript.models_path.is_none() {
@@ -984,11 +993,6 @@ async fn get_merged_config(app_state: &crate::app::AppState) -> TranscriptConfig
                             }
                             return transcript;
                         }
-                    }
-                }
-            }
-        }
-    }
 
     // Fallback to default if not found in config
     let mut cfg = TranscriptConfig::default();
@@ -998,52 +1002,52 @@ async fn get_merged_config(app_state: &crate::app::AppState) -> TranscriptConfig
     cfg
 }
 
-fn get_config_path(state: &ConsoleState) -> Result<String, Response> {
+fn get_config_path(state: &ConsoleState) -> Result<String, Box<Response>> {
     let Some(app_state) = state.app_state() else {
-        return Err((
+        return Err(Box::new((
             StatusCode::SERVICE_UNAVAILABLE,
             Json(json!({"message": "Application state is unavailable."})),
         )
-            .into_response());
+            .into_response()));
     };
     let Some(path) = app_state.config_path.clone() else {
-        return Err((
+        return Err(Box::new((
             StatusCode::BAD_REQUEST,
             Json(json!({"message": "Configuration file path is unknown."})),
         )
-            .into_response());
+            .into_response()));
     };
     Ok(path)
 }
 
-fn load_document(path: &str) -> Result<DocumentMut, Response> {
+fn load_document(path: &str) -> Result<DocumentMut, Box<Response>> {
     let content = match std::fs::read_to_string(path) {
         Ok(c) => c,
         Err(e) => {
-            return Err((
+            return Err(Box::new((
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({"message": format!("Failed to read config file: {}", e)})),
             )
-                .into_response());
+                .into_response()));
         }
     };
     match content.parse::<DocumentMut>() {
         Ok(doc) => Ok(doc),
-        Err(e) => Err((
+        Err(e) => Err(Box::new((
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"message": format!("Failed to parse config file: {}", e)})),
         )
-            .into_response()),
+            .into_response())),
     }
 }
 
-fn persist_document(path: &str, content: String) -> Result<(), Response> {
+fn persist_document(path: &str, content: String) -> Result<(), Box<Response>> {
     match std::fs::write(path, content) {
         Ok(_) => Ok(()),
-        Err(e) => Err((
+        Err(e) => Err(Box::new((
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(json!({"message": format!("Failed to write config file: {}", e)})),
         )
-            .into_response()),
+            .into_response())),
     }
 }

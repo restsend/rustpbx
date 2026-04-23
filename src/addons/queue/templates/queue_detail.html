@@ -201,10 +201,17 @@ endblock %}
                         <div class="flex items-center justify-between">
                             <h3 class="text-sm font-semibold text-slate-800" x-text="tt('queue.dial_targets_title')">
                             </h3>
-                            <button type="button" @click="addStrategyTarget()"
-                                class="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-600 hover:bg-slate-50"
-                                x-text="tt('queue.add_target')">
-                            </button>
+                            <div class="flex items-center gap-2">
+                                <button type="button" @click="addStrategyTarget('sip')"
+                                    class="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-600 hover:bg-slate-50"
+                                    x-text="tt('queue.add_target')">
+                                </button>
+                                <button type="button" @click="addStrategyTarget('skill_group')"
+                                    x-show="skillGroups.length"
+                                    class="inline-flex items-center gap-2 rounded-lg border border-indigo-200 px-3 py-1.5 text-xs font-semibold text-indigo-600 hover:bg-indigo-50"
+                                    x-text="tt('queue.add_skill_group_target')">
+                                </button>
+                            </div>
                         </div>
                         <template x-if="!form.spec.strategy.targets.length">
                             <p class="text-xs text-slate-400" x-text="tt('queue.no_targets')"></p>
@@ -212,14 +219,32 @@ endblock %}
                         <div class="space-y-3">
                             <template x-for="(target, index) in form.spec.strategy.targets" :key="index">
                                 <div
-                                    class="grid gap-3 rounded-lg border border-slate-200 p-3 md:grid-cols-[minmax(0,1.2fr)_minmax(0,1fr)_auto]">
-                                    <label
-                                        class="flex flex-col gap-1 text-xs font-semibold uppercase tracking-wide text-slate-500">
-                                        <span x-text="tt('queue.target_uri')"></span>
-                                        <input type="text" x-model.trim="target.uri"
-                                            class="rounded-lg border border-slate-200 px-3 py-2 text-sm font-normal text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                            :placeholder="tt('queue.target_uri_placeholder')">
-                                    </label>
+                                    class="grid gap-3 rounded-lg border border-slate-200 p-3"
+                                    :class="target.uri && target.uri.startsWith('skill-group:') ? 'md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto]' : 'md:grid-cols-[minmax(0,1.2fr)_minmax(0,1fr)_auto]'">
+                                    <!-- SIP Target -->
+                                    <template x-if="!target.uri || !target.uri.startsWith('skill-group:')">
+                                        <label
+                                            class="flex flex-col gap-1 text-xs font-semibold uppercase tracking-wide text-slate-500">
+                                            <span x-text="tt('queue.target_uri')"></span>
+                                            <input type="text" x-model.trim="target.uri"
+                                                class="rounded-lg border border-slate-200 px-3 py-2 text-sm font-normal text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                                :placeholder="tt('queue.target_uri_placeholder')">
+                                        </label>
+                                    </template>
+                                    <!-- Skill Group Target -->
+                                    <template x-if="target.uri && target.uri.startsWith('skill-group:')">
+                                        <label class="flex flex-col gap-1 text-xs font-semibold uppercase tracking-wide text-slate-500">
+                                            <span x-text="tt('queue.target_skill_group')"></span>
+                                            <select x-model="target.skill_group_id"
+                                                @change="target.uri = 'skill-group:' + target.skill_group_id"
+                                                class="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                                                <option value="" x-text="tt('queue.skill_group_select_placeholder')"></option>
+                                                <template x-for="group in skillGroups" :key="group.skill_group_id">
+                                                    <option :value="group.skill_group_id" x-text="group.display_name || group.skill_group_id"></option>
+                                                </template>
+                                            </select>
+                                        </label>
+                                    </template>
                                     <label
                                         class="flex flex-col gap-1 text-xs font-semibold uppercase tracking-wide text-slate-500">
                                         <span x-text="tt('queue.target_label')"></span>
@@ -262,6 +287,11 @@ endblock %}
                             <input type="radio" name="queue-fallback" value="queue" x-model="fallbackMode"
                                 class="h-4 w-4 text-sky-600 focus:ring-sky-400">
                             <span x-text="tt('queue.fallback_queue_opt')"></span>
+                        </label>
+                        <label class="inline-flex items-center gap-2 text-sm font-medium text-slate-700" x-show="skillGroups.length" x-cloak>
+                            <input type="radio" name="queue-fallback" value="skill_group" x-model="fallbackMode"
+                                class="h-4 w-4 text-sky-600 focus:ring-sky-400">
+                            <span x-text="tt('queue.fallback_skill_group_opt')"></span>
                         </label>
                         <label class="inline-flex items-center gap-2 text-sm font-medium text-slate-700">
                             <input type="radio" name="queue-fallback" value="failure" x-model="fallbackMode"
@@ -309,6 +339,26 @@ endblock %}
                                 x-text="tt('queue.fallback_queue_hint')"></span>
                         </label>
                     </div>
+                    <div class="grid gap-4 md:grid-cols-2" x-show="fallbackMode === 'skill_group'" x-cloak>
+                        <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                            <span x-text="tt('queue.fallback_skill_group_label')"></span>
+                            <template x-if="skillGroups.length">
+                                <select x-model="form.spec.fallback.skill_group_ref"
+                                    class="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                                    <option value="" x-text="tt('queue.fallback_skill_group_placeholder')"></option>
+                                    <template x-for="group in skillGroups" :key="group.skill_group_id">
+                                        <option :value="group.skill_group_id" x-text="group.display_name || group.skill_group_id"></option>
+                                    </template>
+                                </select>
+                            </template>
+                            <template x-if="!skillGroups.length">
+                                <input type="text" x-model.trim="form.spec.fallback.skill_group_ref"
+                                    class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                    :placeholder="tt('queue.fallback_skill_group_placeholder')">
+                            </template>
+                            <span class="text-xs font-normal text-slate-400" x-text="tt('queue.fallback_skill_group_hint')"></span>
+                        </label>
+                    </div>
                 </div>
             </section>
 
@@ -348,6 +398,8 @@ endblock %}
             t: window._queueTranslations,
             pageTitle: options.mode === 'edit' ? (window._queueTranslations?.queue?.detail_subtitle_edit || 'Edit queue') : (window._queueTranslations?.queue?.new_queue || 'New queue'),
             activeTab: 'overview',
+            skillGroups: [],
+            pendingSkillGroup: '',
             form: {
                 name: '',
                 description: '',
@@ -366,11 +418,13 @@ endblock %}
                         failure_reason: '',
                         failure_prompt: '',
                         queue_ref: '',
+                        skill_group_ref: '',
                     },
                     strategy: {
                         mode: 'sequential',
                         wait_timeout_secs: null,
                         targets: [],
+                        skill_groups: [],
                     },
                 },
             },
@@ -381,6 +435,32 @@ endblock %}
             error: null,
             init() {
                 this.applyModel(this.model || {});
+                this.loadSkillGroups();
+            },
+            loadSkillGroups() {
+                // Try to load skill groups from CC addon API
+                const loader = window.__ccSkillGroupsLoader;
+                if (typeof loader === 'function') {
+                    loader()
+                        .then((groups) => {
+                            this.skillGroups = Array.isArray(groups) ? groups : [];
+                        })
+                        .catch(() => {
+                            this.skillGroups = [];
+                        });
+                } else {
+                    // Fallback: try to fetch directly if CC addon is present
+                    const pathParts = window.location.pathname.split('/');
+                    const basePath = pathParts.length > 1 && pathParts[1] ? '/' + pathParts[1] : '/console';
+                    fetch(basePath + '/cc/skill-groups', { credentials: 'same-origin' })
+                        .then(res => res.ok ? res.json() : [])
+                        .then(payload => {
+                            this.skillGroups = Array.isArray(payload) ? payload : [];
+                        })
+                        .catch(() => {
+                            this.skillGroups = [];
+                        });
+                }
             },
             tt(key) {
                 const parts = key.split('.');
@@ -430,6 +510,7 @@ endblock %}
                         failure_reason: raw?.fallback?.failure_reason || '',
                         failure_prompt: raw?.fallback?.failure_prompt || '',
                         queue_ref: raw?.fallback?.queue_ref || '',
+                        skill_group_ref: raw?.fallback?.skill_group_ref || '',
                     },
                     strategy: {
                         mode: raw?.strategy?.mode === 'parallel' ? 'parallel' : 'sequential',
@@ -438,10 +519,20 @@ endblock %}
                             : null,
                         targets: Array.isArray(raw?.strategy?.targets)
                             ? raw.strategy.targets
-                                .map((target) => ({
-                                    uri: (target?.uri || '').trim(),
-                                    label: (target?.label || '').trim(),
-                                }))
+                                .map((target) => {
+                                    const uri = (target?.uri || '').trim();
+                                    if (uri.startsWith('skill-group:')) {
+                                        return {
+                                            uri: uri,
+                                            label: (target?.label || '').trim(),
+                                            skill_group_id: uri.replace(/^skill-group:/, '').trim(),
+                                        };
+                                    }
+                                    return {
+                                        uri: uri,
+                                        label: (target?.label || '').trim(),
+                                    };
+                                })
                                 .filter((target) => target.uri)
                             : [],
                     },
@@ -449,6 +540,9 @@ endblock %}
                 return spec;
             },
             detectFallbackMode(fallback) {
+                if ((fallback?.skill_group_ref || '').trim()) {
+                    return 'skill_group';
+                }
                 if ((fallback?.queue_ref || '').trim()) {
                     return 'queue';
                 }
@@ -476,11 +570,19 @@ endblock %}
                 });
                 return unique;
             },
-            addStrategyTarget() {
+            addStrategyTarget(type) {
                 if (!Array.isArray(this.form.spec.strategy.targets)) {
                     this.form.spec.strategy.targets = [];
                 }
-                this.form.spec.strategy.targets.push({ uri: '', label: '' });
+                if (type === 'skill_group') {
+                    this.form.spec.strategy.targets.push({ 
+                        uri: 'skill-group:', 
+                        label: '',
+                        skill_group_id: ''
+                    });
+                } else {
+                    this.form.spec.strategy.targets.push({ uri: '', label: '' });
+                }
             },
             removeStrategyTarget(index) {
                 if (!Array.isArray(this.form.spec.strategy.targets)) {
@@ -512,6 +614,11 @@ endblock %}
                     if (queueRef) {
                         spec.fallback = { queue_ref: queueRef };
                     }
+                } else if (this.fallbackMode === 'skill_group') {
+                    const skillGroupRef = (this.form.spec.fallback?.skill_group_ref || '').trim();
+                    if (skillGroupRef) {
+                        spec.fallback = { skill_group_ref: skillGroupRef };
+                    }
                 } else if (this.fallbackMode === 'failure') {
                     const code = Number(this.form.spec.fallback?.failure_code);
                     const payload = {
@@ -526,10 +633,25 @@ endblock %}
 
                 const strategyMode = this.form.spec.strategy?.mode === 'parallel' ? 'parallel' : 'sequential';
                 const targets = (this.form.spec.strategy?.targets || [])
-                    .map((target) => ({
-                        uri: (target.uri || '').trim(),
-                        label: (target.label || '').trim() || null,
-                    }))
+                    .map((target) => {
+                        const uri = (target.uri || '').trim();
+                        // Handle skill-group targets
+                        if (uri.startsWith('skill-group:')) {
+                            const skillGroupId = uri.replace(/^skill-group:/, '').trim();
+                            if (skillGroupId) {
+                                return {
+                                    uri: uri,
+                                    label: (target.label || '').trim() || null,
+                                };
+                            }
+                            return null;
+                        }
+                        return {
+                            uri: uri,
+                            label: (target.label || '').trim() || null,
+                        };
+                    })
+                    .filter(Boolean)
                     .filter((target) => target.uri);
                 const waitTimeoutRaw = Number(this.form.spec.strategy?.wait_timeout_secs);
                 const waitTimeout = Number.isFinite(waitTimeoutRaw) && waitTimeoutRaw > 0

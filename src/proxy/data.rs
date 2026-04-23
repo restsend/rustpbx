@@ -118,8 +118,8 @@ impl ProxyDataContext {
         }
 
         // Try to resolve by ID first (db-<id>)
-        if let Some(id_str) = reference.strip_prefix("db-") {
-            if let Ok(_) = id_str.parse::<i64>() {
+        if let Some(id_str) = reference.strip_prefix("db-")
+            && id_str.parse::<i64>().is_ok() {
                 let queues = self.queues.read().unwrap();
                 // We need to store the ID in the map key or value to look it up efficiently.
                 // Currently keys are canonical names or "db-<id>" from queue_entry_key.
@@ -128,7 +128,6 @@ impl ProxyDataContext {
                     return Ok(Some(queue.clone()));
                 }
             }
-        }
 
         // Try to resolve by file path
         if let Some(config) = self.load_queue_file(reference)? {
@@ -141,19 +140,16 @@ impl ProxyDataContext {
 
         let queues = self.queues.read().unwrap();
         for (name, queue) in queues.iter() {
-            if let Some(existing) = queue_utils::canonical_queue_key(name) {
-                if existing == key {
+            if let Some(existing) = queue_utils::canonical_queue_key(name)
+                && existing == key {
                     return Ok(Some(queue.clone()));
                 }
-            }
             // Also check the queue name inside the config, in case the key is an ID
-            if let Some(queue_name) = &queue.name {
-                if let Some(existing) = queue_utils::canonical_queue_key(queue_name) {
-                    if existing == key {
+            if let Some(queue_name) = &queue.name
+                && let Some(existing) = queue_utils::canonical_queue_key(queue_name)
+                    && existing == key {
                         return Ok(Some(queue.clone()));
                     }
-                }
-            }
         }
         Ok(None)
     }
@@ -779,12 +775,11 @@ fn resolve_generated_path(
 }
 
 fn ensure_parent_dir(path: &Path) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() && !parent.exists() {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty() && !parent.exists() {
             fs::create_dir_all(parent)
                 .with_context(|| format!("failed to create directory {}", parent.display()))?;
         }
-    }
     Ok(())
 }
 
@@ -811,11 +806,12 @@ fn backup_existing_file(path: &Path) -> Result<Option<PathBuf>> {
 
 fn write_trunks_file(path: &Path, trunks: &HashMap<String, TrunkConfig>) -> Result<()> {
     ensure_parent_dir(path)?;
-    let mut data = TrunkIncludeFile::default();
-    data.trunks = trunks
-        .iter()
-        .map(|(name, trunk)| (name.clone(), trunk.clone()))
-        .collect();
+    let data = TrunkIncludeFile {
+        trunks: trunks
+            .iter()
+            .map(|(name, trunk)| (name.clone(), trunk.clone()))
+            .collect(),
+    };
     let toml = toml::to_string_pretty(&data)
         .with_context(|| format!("failed to serialize trunks toml for {}", path.display()))?;
     fs::write(path, toml)
@@ -825,8 +821,9 @@ fn write_trunks_file(path: &Path, trunks: &HashMap<String, TrunkConfig>) -> Resu
 
 fn write_routes_file(path: &Path, routes: &[RouteRule]) -> Result<()> {
     ensure_parent_dir(path)?;
-    let mut data = RouteIncludeFile::default();
-    data.routes = routes.to_vec();
+    let data = RouteIncludeFile {
+        routes: routes.to_vec(),
+    };
     let toml = toml::to_string_pretty(&data)
         .with_context(|| format!("failed to serialize routes toml for {}", path.display()))?;
     fs::write(path, toml)
@@ -854,31 +851,20 @@ fn convert_trunk(model: sip_trunk::Model) -> Option<(String, TrunkConfig)> {
     let primary = model.sip_server.clone().or(model.outbound_proxy.clone());
     let dest = primary?;
 
-    let backup_dest = if let Some(outbound) = model.outbound_proxy.clone() {
-        if outbound != dest {
-            Some(outbound)
-        } else {
-            None
-        }
-    } else {
-        None
-    };
+    let backup_dest = model.outbound_proxy.clone().filter(|outbound| *outbound != dest);
 
     let transport = Some(model.sip_transport.as_str().to_string());
 
     let mut inbound_hosts = extract_string_array(model.allowed_ips.clone());
-    if let Some(host) = extract_host_from_uri(&dest) {
-        if host.parse::<IpAddr>().is_ok() {
+    if let Some(host) = extract_host_from_uri(&dest)
+        && host.parse::<IpAddr>().is_ok() {
             push_unique(&mut inbound_hosts, host);
         }
-    }
-    if let Some(backup) = &backup_dest {
-        if let Some(host) = extract_host_from_uri(backup) {
-            if host.parse::<IpAddr>().is_ok() {
+    if let Some(backup) = &backup_dest
+        && let Some(host) = extract_host_from_uri(backup)
+            && host.parse::<IpAddr>().is_ok() {
                 push_unique(&mut inbound_hosts, host);
             }
-        }
-    }
 
     let recording = model
         .metadata
@@ -968,22 +954,19 @@ fn convert_route(
     trunk_lookup: &HashMap<i64, String>,
 ) -> Result<Option<RouteRule>> {
     let mut match_conditions = MatchConditions::default();
-    if let Some(pattern) = model.source_pattern.clone() {
-        if !pattern.is_empty() {
+    if let Some(pattern) = model.source_pattern.clone()
+        && !pattern.is_empty() {
             match_conditions.from_user = Some(pattern);
         }
-    }
-    if let Some(pattern) = model.destination_pattern.clone() {
-        if !pattern.is_empty() {
+    if let Some(pattern) = model.destination_pattern.clone()
+        && !pattern.is_empty() {
             match_conditions.to_user = Some(pattern);
         }
-    }
 
-    if let Some(filters) = model.header_filters.clone() {
-        if let Ok(map) = serde_json::from_value::<HashMap<String, String>>(filters) {
+    if let Some(filters) = model.header_filters.clone()
+        && let Ok(map) = serde_json::from_value::<HashMap<String, String>>(filters) {
             apply_match_filters(&mut match_conditions, map);
         }
-    }
     finalize_match_conditions(&mut match_conditions);
 
     let rewrite_rules = model
@@ -1024,13 +1007,11 @@ fn convert_route(
     action.select = model.selection_strategy.as_str().to_string();
     action.hash_key = model.hash_key.clone();
 
-    if let Some(metadata) = model.metadata.clone() {
-        if let Ok(doc) = serde_json::from_value::<RouteMetadataDocument>(metadata) {
-            if let Some(meta_action) = doc.action {
+    if let Some(metadata) = model.metadata.clone()
+        && let Ok(doc) = serde_json::from_value::<RouteMetadataDocument>(metadata)
+            && let Some(meta_action) = doc.action {
                 apply_route_metadata(&mut action, meta_action);
             }
-        }
-    }
 
     let direction = match model.direction {
         routing::RoutingDirection::Inbound => RouteDirection::Inbound,
@@ -1093,112 +1074,6 @@ fn apply_route_metadata(action: &mut RouteAction, meta: RouteMetadataAction) {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn slugify_queue_name_strips_whitespace() {
-        assert_eq!(
-            queue_utils::slugify_queue_name("  Sales Support  "),
-            "sales-support"
-        );
-        assert_eq!(queue_utils::slugify_queue_name("UPPER_case"), "upper-case");
-        assert_eq!(queue_utils::slugify_queue_name("..special??"), "special");
-    }
-
-    #[test]
-    fn route_metadata_sets_queue_fields() {
-        let mut action = RouteAction::default();
-        let meta = RouteMetadataAction {
-            target_type: Some("queue".to_string()),
-            queue_file: Some("queues/support.toml".to_string()),
-            voicemail_extension: None,
-            ivr_file: None,
-        };
-        apply_route_metadata(&mut action, meta);
-        assert_eq!(action.queue.as_deref(), Some("queues/support.toml"));
-    }
-
-    #[test]
-    fn route_metadata_sets_voicemail_fields() {
-        let mut action = RouteAction::default();
-        let meta = RouteMetadataAction {
-            target_type: Some("voicemail".to_string()),
-            queue_file: None,
-            voicemail_extension: Some("1001".to_string()),
-            ivr_file: None,
-        };
-        apply_route_metadata(&mut action, meta);
-        assert_eq!(action.app.as_deref(), Some("voicemail"));
-        let params = action.app_params.unwrap();
-        assert_eq!(params["extension"], "1001");
-    }
-
-    #[test]
-    fn route_metadata_sets_ivr_fields() {
-        let mut action = RouteAction::default();
-        let meta = RouteMetadataAction {
-            target_type: Some("ivr".to_string()),
-            queue_file: None,
-            voicemail_extension: None,
-            ivr_file: Some("config/ivr/main.toml".to_string()),
-        };
-        apply_route_metadata(&mut action, meta);
-        assert_eq!(action.app.as_deref(), Some("ivr"));
-        let params = action.app_params.unwrap();
-        assert_eq!(params["file"], "config/ivr/main.toml");
-    }
-
-    #[test]
-    fn acl_module_presence_check() {
-        let acl_enabled = |modules: Option<Vec<String>>| -> bool {
-            modules.as_deref().unwrap_or(&[]).iter().any(|m| m == "acl")
-        };
-
-        assert!(!acl_enabled(None), "None modules → acl not enabled");
-        assert!(
-            !acl_enabled(Some(vec!["recording".to_string()])),
-            "modules without acl → not enabled"
-        );
-        assert!(
-            acl_enabled(Some(vec!["acl".to_string(), "recording".to_string()])),
-            "modules with acl → enabled"
-        );
-        assert!(
-            acl_enabled(Some(vec!["acl".to_string()])),
-            "only acl → enabled"
-        );
-    }
-
-    #[test]
-    fn trunk_with_inbound_hosts_detected() {
-        let mut trunks: HashMap<String, TrunkConfig> = HashMap::new();
-        let no_hosts = TrunkConfig {
-            dest: "sip:192.0.2.1".to_string(),
-            inbound_hosts: vec![],
-            ..Default::default()
-        };
-        let with_hosts = TrunkConfig {
-            dest: "sip:192.0.2.2".to_string(),
-            inbound_hosts: vec!["203.0.113.1".to_string()],
-            ..Default::default()
-        };
-
-        trunks.insert("no-hosts".to_string(), no_hosts);
-        assert!(
-            !trunks.values().any(|t| !t.inbound_hosts.is_empty()),
-            "no trunk has inbound_hosts"
-        );
-
-        trunks.insert("with-hosts".to_string(), with_hosts);
-        assert!(
-            trunks.values().any(|t| !t.inbound_hosts.is_empty()),
-            "one trunk has inbound_hosts — warning should fire"
-        );
-    }
-}
-
 fn set_field(target: &mut Option<String>, value: &str) {
     let trimmed = value.trim();
     if trimmed.is_empty() {
@@ -1219,8 +1094,7 @@ fn sanitize_metadata_string(value: Option<String>) -> Option<String> {
 fn canonical_condition_key(raw: &str) -> String {
     raw.trim()
         .to_ascii_lowercase()
-        .replace('_', ".")
-        .replace('-', ".")
+        .replace(['_', '-'], ".")
 }
 
 fn handle_match_key(match_conditions: &mut MatchConditions, key: &str, value: &str) -> bool {
@@ -1396,5 +1270,111 @@ fn extract_host_from_uri(uri: &str) -> Option<String> {
 fn push_unique(list: &mut Vec<String>, value: String) {
     if !list.iter().any(|existing| existing == &value) {
         list.push(value);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn slugify_queue_name_strips_whitespace() {
+        assert_eq!(
+            queue_utils::slugify_queue_name("  Sales Support  "),
+            "sales-support"
+        );
+        assert_eq!(queue_utils::slugify_queue_name("UPPER_case"), "upper-case");
+        assert_eq!(queue_utils::slugify_queue_name("..special??"), "special");
+    }
+
+    #[test]
+    fn route_metadata_sets_queue_fields() {
+        let mut action = RouteAction::default();
+        let meta = RouteMetadataAction {
+            target_type: Some("queue".to_string()),
+            queue_file: Some("queues/support.toml".to_string()),
+            voicemail_extension: None,
+            ivr_file: None,
+        };
+        apply_route_metadata(&mut action, meta);
+        assert_eq!(action.queue.as_deref(), Some("queues/support.toml"));
+    }
+
+    #[test]
+    fn route_metadata_sets_voicemail_fields() {
+        let mut action = RouteAction::default();
+        let meta = RouteMetadataAction {
+            target_type: Some("voicemail".to_string()),
+            queue_file: None,
+            voicemail_extension: Some("1001".to_string()),
+            ivr_file: None,
+        };
+        apply_route_metadata(&mut action, meta);
+        assert_eq!(action.app.as_deref(), Some("voicemail"));
+        let params = action.app_params.unwrap();
+        assert_eq!(params["extension"], "1001");
+    }
+
+    #[test]
+    fn route_metadata_sets_ivr_fields() {
+        let mut action = RouteAction::default();
+        let meta = RouteMetadataAction {
+            target_type: Some("ivr".to_string()),
+            queue_file: None,
+            voicemail_extension: None,
+            ivr_file: Some("config/ivr/main.toml".to_string()),
+        };
+        apply_route_metadata(&mut action, meta);
+        assert_eq!(action.app.as_deref(), Some("ivr"));
+        let params = action.app_params.unwrap();
+        assert_eq!(params["file"], "config/ivr/main.toml");
+    }
+
+    #[test]
+    fn acl_module_presence_check() {
+        let acl_enabled = |modules: Option<Vec<String>>| -> bool {
+            modules.as_deref().unwrap_or(&[]).iter().any(|m| m == "acl")
+        };
+
+        assert!(!acl_enabled(None), "None modules → acl not enabled");
+        assert!(
+            !acl_enabled(Some(vec!["recording".to_string()])),
+            "modules without acl → not enabled"
+        );
+        assert!(
+            acl_enabled(Some(vec!["acl".to_string(), "recording".to_string()])),
+            "modules with acl → enabled"
+        );
+        assert!(
+            acl_enabled(Some(vec!["acl".to_string()])),
+            "only acl → enabled"
+        );
+    }
+
+    #[test]
+    fn trunk_with_inbound_hosts_detected() {
+        let mut trunks: HashMap<String, TrunkConfig> = HashMap::new();
+        let no_hosts = TrunkConfig {
+            dest: "sip:192.0.2.1".to_string(),
+            inbound_hosts: vec![],
+            ..Default::default()
+        };
+        let with_hosts = TrunkConfig {
+            dest: "sip:192.0.2.2".to_string(),
+            inbound_hosts: vec!["203.0.113.1".to_string()],
+            ..Default::default()
+        };
+
+        trunks.insert("no-hosts".to_string(), no_hosts);
+        assert!(
+            !trunks.values().any(|t| !t.inbound_hosts.is_empty()),
+            "no trunk has inbound_hosts"
+        );
+
+        trunks.insert("with-hosts".to_string(), with_hosts);
+        assert!(
+            trunks.values().any(|t| !t.inbound_hosts.is_empty()),
+            "one trunk has inbound_hosts — warning should fire"
+        );
     }
 }

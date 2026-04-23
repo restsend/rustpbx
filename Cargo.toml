@@ -22,6 +22,7 @@ addon-enterprise-auth = ["dep:ldap3", "flate2", "dep:ring"]
 addon-transcript = []
 addon-voicemail = ["dep:url"]
 addon-ivr-editor = []
+addon-cc = []
 addon-observability = ["metrics-exporter-prometheus"]
 addon-telemetry = [
     "addon-observability",
@@ -38,6 +39,16 @@ commerce = [
     "addon-ivr-editor",
     "addon-telemetry",
 ]
+
+contact-center = [
+    "addon-cc",
+    "addon-endpoint-manager",
+    "addon-enterprise-auth",
+    "addon-ivr-editor",
+    "addon-voicemail",
+    "addon-telemetry",
+]
+
 default = [
     "opus",
     "console",
