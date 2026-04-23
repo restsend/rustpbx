@@ -514,13 +514,23 @@
                                                         </div>
                                                     </template>
 
-                                                    <!-- PBX internal messages (same src and dst, no correction) -->
+                                                    <!-- PBX internal messages -->
                                                     <template
-                                                        x-if="entry._renderSrcRole === 'pbx' && entry._renderDstRole === 'pbx' && !entry._correctedDstRole">
+                                                        x-if="entry._renderSrcRole === 'pbx' && entry._renderDstRole === 'pbx'">
                                                         <div class="rounded-lg border px-2 py-1 text-xs shadow-sm transition hover:shadow-md border-dashed"
                                                             :class="getMessageColorClass(entry.raw_message)">
                                                             <div class="font-semibold whitespace-nowrap"
                                                                 x-text="extractSipMethod(entry.raw_message)"></div>
+                                                        </div>
+                                                    </template>
+
+                                                    <template
+                                                        x-if="!entry._renderSrcRole || !entry._renderDstRole">
+                                                        <div class="rounded-lg border border-dashed border-amber-300 bg-amber-50 px-2 py-1 text-xs text-amber-900 shadow-sm transition hover:shadow-md">
+                                                            <div class="font-semibold whitespace-nowrap">
+                                                                <span class="mr-1">?</span>
+                                                                <span x-text="extractSipMethod(entry.raw_message)"></span>
+                                                            </div>
                                                         </div>
                                                     </template>
                                                 </div>
@@ -785,8 +795,7 @@
             selectedSipEntry: null,
             flowStartEpoch: null,
             mediaMetrics: {},
-            roleMap: new Map(),
-            rolePortMap: {},
+            pbxAliases: [],
             rtpStreams: [],
 
             updateUrl: '',
@@ -2173,7 +2182,8 @@
                         this.sipFlowEntries = data.flow.map((entry, index) => ({
                             ...entry,
                             sequence: index,
-                            summary: this.formatSummary(entry.raw_message)
+                            summary: this.formatSummary(entry.raw_message),
+                            _sipMeta: this.parseSipMessage(entry.raw_message),
                         }));
                         if (this.sipFlowEntries.length && Number.isFinite(this.sipFlowEntries[0].timestamp)) {
                             const firstTs = this.parseTimestamp(this.sipFlowEntries[0].timestamp);
@@ -2185,84 +2195,13 @@
                         this.sipMessages = this.sipFlowEntries.filter(e =>
                             e.msg_type === 'Sip' && e.raw_message && e.raw_message.trim()
                         );
-                        this.identifyRoles();
-                        this.fixResponseDestinations();
+                        this.pbxAliases = this.detectPbxAliases();
                         this.applyEntryRoles();
                     }
                 } catch (err) {
                     console.error('Failed to fetch sip flow', err);
                 } finally {
                     this.sipFlowLoading = false;
-                }
-            },
-
-            // Identify roles from SIP flow entries
-            identifyRoles() {
-                this.roleMap.clear();
-
-                if (!this.sipFlowEntries || this.sipFlowEntries.length === 0) {
-                    console.warn('No sipFlowEntries found');
-                    return;
-                }
-
-                // Filter only SIP messages
-                const sipMessages = this.sipFlowEntries.filter(e =>
-                    e.msg_type === 'Sip' && e.raw_message && e.raw_message.trim()
-                );
-
-                if (sipMessages.length === 0) {
-                    console.warn('No SIP messages found after filtering');
-                    return;
-                }
-
-                // Find the first INVITE (from Leg A to PBX)
-                const firstInvite = sipMessages.find(e =>
-                    e.raw_message.startsWith('INVITE')
-                );
-
-                if (firstInvite) {
-                    // Leg A is the source of first INVITE
-                    const legAAddr = this.normalizeAddr(firstInvite.src_addr);
-                    const legAPort = this.extractPort(firstInvite.src_addr);
-                    if (legAAddr) {
-                        this.roleMap.set(legAAddr, 'leg-a');
-                    }
-
-                    // PBX is the destination of first INVITE
-                    const pbxAddr = this.normalizeAddr(firstInvite.dst_addr);
-                    const pbxPort = this.extractPort(firstInvite.dst_addr);
-                    if (pbxAddr) {
-                        this.roleMap.set(pbxAddr, 'pbx');
-                    }
-
-                    // Find PBX's INVITE to Leg B
-                    const pbxInvite = sipMessages.find(e =>
-                        this.normalizeAddr(e.src_addr) === pbxAddr &&
-                        e.raw_message.startsWith('INVITE') &&
-                        this.normalizeAddr(e.dst_addr) !== legAAddr
-                    );
-
-                    if (pbxInvite) {
-                        const legBAddr = this.normalizeAddr(pbxInvite.dst_addr);
-                        const legBPort = this.extractPort(pbxInvite.dst_addr);
-                        if (legBAddr) {
-                            this.roleMap.set(legBAddr, 'leg-b');
-                        }
-
-                        // Store ports for fallback matching
-                        this.rolePortMap = {
-                            'leg-a': legAPort,
-                            'pbx': pbxPort,
-                            'leg-b': legBPort
-                        };
-                    } else {
-                        this.rolePortMap = {
-                            'leg-a': legAPort,
-                            'pbx': pbxPort
-                        };
-                    }
-                } else {
-                    console.warn('No INVITE message found');
                 }
             },
 
@@ -2277,111 +2216,245 @@
             },
 
             resolveEntryRoles(entry) {
-                const role = entry?.role;
-                const hasSrc = Boolean(entry?.src_addr && entry.src_addr.trim());
-                const hasDst = Boolean(entry?.dst_addr && entry.dst_addr.trim());
+                const legRole = this.normalizeLegRole(entry?.role);
+                const direction = this.detectMessageDirection(entry);
 
-                if (role === 'caller') {
-                    if (hasSrc && !hasDst) {
+                if (legRole === 'caller') {
+                    if (direction === 'in') {
                         return { srcRole: 'leg-a', dstRole: 'pbx' };
                     }
-                    if (hasDst && !hasSrc) {
+                    if (direction === 'out') {
                         return { srcRole: 'pbx', dstRole: 'leg-a' };
                     }
                 }
 
-                if (role === 'callee') {
-                    if (hasSrc && !hasDst) {
+                if (legRole === 'callee') {
+                    if (direction === 'in') {
                         return { srcRole: 'leg-b', dstRole: 'pbx' };
                     }
-                    if (hasDst && !hasSrc) {
+                    if (direction === 'out') {
                         return { srcRole: 'pbx', dstRole: 'leg-b' };
                     }
                 }
 
-                return {
-                    srcRole: this.getRole(entry?.src_addr),
-                    dstRole: entry?._correctedDstRole || this.getRole(entry?.dst_addr),
-                };
+                return { srcRole: null, dstRole: null };
             },
 
-            // Fix response destinations that are incorrectly marked as pbx->pbx
-            fixResponseDestinations() {
-                if (!this.sipMessages || this.sipMessages.length === 0) return;
+            normalizeLegRole(role) {
+                if (role === 'caller' || role === 'callee') {
+                    return role;
+                }
+                if (role === 'primary') {
+                    return 'caller';
+                }
+                return null;
+            },
 
-                // Track the last request from each participant
-                const lastRequestFrom = {};
+            detectPbxAliases() {
+                const aliases = new Set(['127.0.0.1', '::1', 'localhost', '0.0.0.0']);
 
-                this.sipMessages.forEach((msg) => {
-                    const srcRole = this.getRole(msg.src_addr);
-                    const dstRole = this.getRole(msg.dst_addr);
-                    const firstLine = msg.raw_message.split('\n')[0].trim();
-
-                    // Check if this is a request (starts with METHOD)
-                    const isRequest = /^[A-Z]+\s+/.test(firstLine);
-
-                    if (isRequest && srcRole && dstRole) {
-                        // Record that srcRole sent a request to dstRole
-                        lastRequestFrom[dstRole] = srcRole;
-                    }
-
-                    // Check if this is a response that goes pbx->pbx
-                    const isResponse = /^SIP\/\d\.\d\s+\d{3}/.test(firstLine);
-                    if (isResponse && srcRole === 'pbx' && dstRole === 'pbx') {
-                        // This is a response from PBX, figure out who should receive it
-                        // It should go back to whoever sent the last request to PBX
-                        const shouldGoTo = lastRequestFrom['pbx'];
-
-                        if (shouldGoTo) {
-                            // Mark this message with corrected destination
-                            msg._correctedDstRole = shouldGoTo;
-                        }
-                    }
+                const callerInvite = this.sipMessages.find((entry) => {
+                    const meta = entry?._sipMeta;
+                    return this.normalizeLegRole(entry?.role) === 'caller'
+                        && meta?.isRequest
+                        && meta?.method === 'INVITE';
                 });
+                if (callerInvite) {
+                    this.collectPbxAlias(aliases, callerInvite?._sipMeta?.requestUriHost);
+                }
+
+                const calleeInvite = this.sipMessages.find((entry) => {
+                    const meta = entry?._sipMeta;
+                    return this.normalizeLegRole(entry?.role) === 'callee'
+                        && meta?.isRequest
+                        && meta?.method === 'INVITE';
+                });
+                if (calleeInvite) {
+                    this.collectPbxAlias(aliases, calleeInvite?._sipMeta?.viaHost);
+                    this.collectPbxAlias(aliases, calleeInvite?._sipMeta?.contactHost);
+                }
+
+                return Array.from(aliases);
             },
 
-            // Extract port from address
-            extractPort(addr) {
-                if (!addr) return null;
-                const parts = addr.split('_').pop().split(':');
-                return parts.length > 1 ? parts[1] : null;
+            collectPbxAlias(aliases, candidate) {
+                const normalized = this.normalizeHost(candidate);
+                if (normalized) {
+                    aliases.add(normalized);
+                }
             },
 
-            // Normalize address for comparison (keep IP:port for local scenarios)
-            normalizeAddr(addr) {
-                if (!addr) return '';
-                // Extract IP:port (handle formats like "A_192.168.1.1:5060" or "192.168.1.1:5060")
-                return addr.split('_').pop();
-            },
+            detectMessageDirection(entry) {
+                const meta = entry?._sipMeta || this.parseSipMessage(entry?.raw_message);
+                const srcHost = this.extractAddrHost(entry?.src_addr);
+                const dstHost = this.extractAddrHost(entry?.dst_addr);
+                const srcIsPbx = this.isPbxAlias(srcHost);
+                const dstIsPbx = this.isPbxAlias(dstHost);
 
-            extractHost(addr) {
-                const normalized = this.normalizeAddr(addr);
-                if (!normalized) return '';
-                const value = normalized.replace(/^\[|\]$/g, '');
-                const colonIndex = value.lastIndexOf(':');
-                if (colonIndex === -1) return value;
-                return value.slice(0, colonIndex);
-            },
+                if (srcHost && dstHost && srcIsPbx !== dstIsPbx) {
+                    return srcIsPbx ? 'out' : 'in';
+                }
 
-            // Get role for an address
-            getRole(addr) {
-                const normalized = this.normalizeAddr(addr);
-                let role = this.roleMap.get(normalized);
-
-                // If not found by full address, try to match by port
-                if (!role && this.rolePortMap) {
-                    const port = this.extractPort(addr);
-                    if (port) {
-                        for (const [roleName, rolePort] of Object.entries(this.rolePortMap)) {
-                            if (port === rolePort) {
-                                role = roleName;
-                                break;
-                            }
-                        }
+                if (meta?.isRequest) {
+                    if (this.isPbxAlias(meta.requestUriHost)) {
+                        return 'in';
+                    }
+                    if (this.isPbxAlias(meta.viaHost)) {
+                        return 'out';
+                    }
+                    if (this.isPbxAlias(meta.contactHost)) {
+                        return 'out';
                     }
                 }
 
-                return role || null;
+                if (meta?.isResponse) {
+                    if (meta.viaHost) {
+                        return this.isPbxAlias(meta.viaHost) ? 'in' : 'out';
+                    }
+                    if (this.isPbxAlias(meta.contactHost)) {
+                        return 'out';
+                    }
+                }
+
+                if (this.isPlaceholderPbxHost(srcHost) && !this.isPlaceholderPbxHost(dstHost)) {
+                    return 'out';
+                }
+                if (this.isPlaceholderPbxHost(dstHost) && !this.isPlaceholderPbxHost(srcHost)) {
+                    return 'in';
+                }
+
+                return null;
+            },
+
+            parseSipMessage(message) {
+                const raw = (message || '').toString();
+                const lines = raw.split(/\r?\n/);
+                const firstLine = (lines[0] || '').trim();
+                const headers = new Map();
+                let currentHeader = null;
+
+                for (let idx = 1; idx < lines.length; idx += 1) {
+                    const line = lines[idx];
+                    if (!line) {
+                        break;
+                    }
+
+                    if (/^[ \t]/.test(line) && currentHeader) {
+                        const values = headers.get(currentHeader) || [];
+                        if (values.length) {
+                            values[values.length - 1] = `${values[values.length - 1]} ${line.trim()}`;
+                            headers.set(currentHeader, values);
+                        }
+                        continue;
+                    }
+
+                    const match = line.match(/^([^:]+):(.*)$/);
+                    if (!match) {
+                        continue;
+                    }
+
+                    currentHeader = match[1].trim().toLowerCase();
+                    const value = match[2].trim();
+                    const values = headers.get(currentHeader) || [];
+                    values.push(value);
+                    headers.set(currentHeader, values);
+                }
+
+                const isResponse = /^SIP\/\d\.\d\b/i.test(firstLine);
+                const requestMatch = isResponse
+                    ? null
+                    : firstLine.match(/^([A-Z]+)\s+(.+?)\s+SIP\/\d\.\d$/i);
+                const method = requestMatch ? requestMatch[1] : null;
+                const requestUri = requestMatch ? requestMatch[2] : '';
+                const responseMatch = isResponse
+                    ? firstLine.match(/^SIP\/\d\.\d\s+(\d{3})/)
+                    : null;
+
+                return {
+                    firstLine,
+                    isRequest: Boolean(requestMatch),
+                    isResponse,
+                    method,
+                    responseCode: responseMatch ? Number.parseInt(responseMatch[1], 10) : null,
+                    requestUriHost: this.extractSipUriHost(requestUri),
+                    viaHost: this.extractViaHost(this.getHeaderValue(headers, 'via', 'v')),
+                    contactHost: this.extractSipUriHost(this.getHeaderValue(headers, 'contact', 'm')),
+                };
+            },
+
+            getHeaderValue(headers, ...names) {
+                for (const name of names) {
+                    const values = headers.get(name);
+                    if (values && values.length) {
+                        return values[0];
+                    }
+                }
+                return '';
+            },
+
+            normalizeAddr(addr) {
+                if (!addr) return '';
+                return addr.split('_').pop().trim();
+            },
+
+            extractAddrHost(addr) {
+                return this.extractHostPort(this.normalizeAddr(addr));
+            },
+
+            normalizeHost(host) {
+                return this.extractHostPort(host);
+            },
+
+            extractHostPort(value) {
+                const raw = (value || '').toString().trim().replace(/;.*$/, '');
+                if (!raw) {
+                    return '';
+                }
+                if (raw.startsWith('[')) {
+                    const end = raw.indexOf(']');
+                    return end > 0 ? raw.slice(1, end).toLowerCase() : raw.toLowerCase();
+                }
+
+                const lastColon = raw.lastIndexOf(':');
+                if (lastColon > -1 && raw.indexOf(':') === lastColon && /^\d+$/.test(raw.slice(lastColon + 1))) {
+                    return raw.slice(0, lastColon).toLowerCase();
+                }
+
+                return raw.toLowerCase();
+            },
+
+            extractSipUriHost(value) {
+                const text = (value || '').toString();
+                const match = text.match(/(?:sips?):(?:[^@<>\s;]+@)?(\[[^\]]+\]|[^;>\s]+)/i);
+                if (!match) {
+                    return '';
+                }
+                return this.extractHostPort(match[1]);
+            },
+
+            extractViaHost(value) {
+                const text = (value || '').toString();
+                const match = text.match(/SIP\/2\.0\/\S+\s+([^;,\s]+)/i);
+                if (!match) {
+                    return '';
+                }
+                return this.extractHostPort(match[1]);
+            },
+
+            isPlaceholderPbxHost(host) {
+                const normalized = this.normalizeHost(host);
+                return normalized === '127.0.0.1'
+                    || normalized === '::1'
+                    || normalized === 'localhost'
+                    || normalized === '0.0.0.0';
+            },
+
+            isPbxAlias(host) {
+                const normalized = this.normalizeHost(host);
+                if (!normalized) {
+                    return false;
+                }
+                return Array.isArray(this.pbxAliases) && this.pbxAliases.includes(normalized);
             },
 
             // Extract SIP method from message
@@ -2410,40 +2483,6 @@
                 }
 
                 return firstLine.substring(0, 50);
-            },
-
-            // Get message color class based on SIP method/status
-            getMessageColorClass(message) {
-                if (!message) return 'border-slate-200 bg-slate-50 text-slate-900';
-
-                const firstLine = message.split('\n')[0].trim();
-
-                // INVITE
-                if (firstLine.startsWith('INVITE')) {
-                    return 'border-sky-200 bg-sky-50 text-sky-900';
-                }
-
-                // BYE/CANCEL
-                if (firstLine.startsWith('BYE') || firstLine.startsWith('CANCEL')) {
-                    return 'border-slate-300 bg-slate-100 text-slate-900';
-                }
-
-                // ACK
-                if (firstLine.startsWith('ACK')) {
-                    return 'border-blue-200 bg-blue-50 text-blue-900';
-                }
-
-                // Response codes
-                const responseMatch = firstLine.match(/^SIP\/\d\.\d\s+(\d{3})/);
-                if (responseMatch) {
-                    const code = parseInt(responseMatch[1]);
-                    if (code < 200) return 'border-amber-200 bg-amber-50 text-amber-900'; // 1xx
-                    if (code < 300) return 'border-emerald-200 bg-emerald-50 text-emerald-900'; // 2xx
-                    if (code < 400) return 'border-blue-200 bg-blue-50 text-blue-900'; // 3xx
-                    return 'border-rose-200 bg-rose-50 text-rose-900'; // 4xx/5xx
-                }
-
-                return 'border-indigo-200 bg-indigo-50 text-indigo-900';
             },
 
             // Get message color class based on SIP method/status
