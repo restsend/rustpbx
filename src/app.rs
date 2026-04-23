@@ -64,6 +64,7 @@ pub struct CoreContext {
 pub struct AppStateInner {
     pub core: Arc<CoreContext>,
     pub sip_server: SipServer,
+    pub skip_migrate: bool,
     pub total_calls: AtomicU64,
     pub total_failed_calls: AtomicU64,
     pub uptime: DateTime<Utc>,
@@ -121,6 +122,10 @@ impl AppStateInner {
 
     pub fn sip_server(&self) -> &SipServer {
         &self.sip_server
+    }
+
+    pub fn skip_migrate(&self) -> bool {
+        self.skip_migrate
     }
 
     pub fn get_dump_events_file(&self, session_id: &str) -> String {
@@ -424,6 +429,7 @@ impl AppStateBuilder {
         let app_state = Arc::new(AppStateInner {
             core: core.clone(),
             sip_server,
+            skip_migrate: self.skip_migrate,
             total_calls: AtomicU64::new(0),
             total_failed_calls: AtomicU64::new(0),
             uptime: chrono::Utc::now(),
