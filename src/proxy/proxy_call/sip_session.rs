@@ -61,6 +61,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 
 use tokio_util::{
     sync::CancellationToken,
@@ -85,6 +86,51 @@ enum UpdateRefreshOutcome {
 enum DialogSide {
     Caller,
     Callee,
+}
+
+struct CallerIngressMonitor {
+    cancel_token: CancellationToken,
+    task: JoinHandle<()>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RtpDtmfEventKey {
+    digit_code: u8,
+    rtp_timestamp: u32,
+}
+
+#[derive(Debug, Default)]
+struct RtpDtmfDetector {
+    last_event: Option<RtpDtmfEventKey>,
+}
+
+impl RtpDtmfDetector {
+    fn observe(&mut self, payload: &[u8], rtp_timestamp: u32) -> Option<char> {
+        if payload.len() < 4 {
+            return None;
+        }
+
+        let digit_code = payload[0];
+        let digit = match digit_code {
+            0..=9 => (b'0' + digit_code) as char,
+            10 => '*',
+            11 => '#',
+            12..=15 => (b'A' + (digit_code - 12)) as char,
+            _ => return None,
+        };
+
+        let event = RtpDtmfEventKey {
+            digit_code,
+            rtp_timestamp,
+        };
+
+        if self.last_event == Some(event) {
+            return None;
+        }
+
+        self.last_event = Some(event);
+        Some(digit)
+    }
 }
 
 pub struct SipSession {
@@ -140,6 +186,7 @@ pub struct SipSession {
     pub reporter: Option<CallReporter>,
     pub recorder: Arc<RwLock<Option<Recorder>>>,
     pub playback_tracks: std::collections::HashMap<String, FileTrack>,
+    caller_ingress_monitor: Option<CallerIngressMonitor>,
 
     pub media_bridge: Option<Arc<crate::media::bridge::BridgePeer>>,
     pub caller_is_webrtc: bool,
@@ -400,6 +447,7 @@ impl SipSession {
             reporter: None,
             recorder: Arc::new(RwLock::new(None)),
             playback_tracks: std::collections::HashMap::new(),
+            caller_ingress_monitor: None,
             media_bridge: None,
             caller_is_webrtc: false,
             callee_is_webrtc: false,
@@ -1121,6 +1169,8 @@ impl SipSession {
                         .await
                     {
                         warn!(error = %e, "Failed to start application");
+                    } else {
+                        self.start_caller_ingress_monitor_if_needed().await;
                     }
                     Ok(())
                 }
@@ -2161,6 +2211,8 @@ impl SipSession {
         caller_answer_sdp: Option<&str>,
         callee_answer_sdp: Option<&str>,
     ) {
+        self.stop_caller_ingress_monitor().await;
+
         use crate::media::recorder::Leg;
 
         let session_id = &self.context.session_id;
@@ -2264,6 +2316,157 @@ impl SipSession {
             }
         }
         None
+    }
+
+    async fn find_audio_receiver_track(
+        pc: &rustrtc::PeerConnection,
+    ) -> Option<Arc<dyn rustrtc::media::MediaStreamTrack>> {
+        for transceiver in pc.get_transceivers() {
+            if transceiver.kind() == rustrtc::MediaKind::Audio
+                && let Some(receiver) = transceiver.receiver()
+            {
+                return Some(receiver.track());
+            }
+        }
+        None
+    }
+
+    async fn start_caller_ingress_monitor_if_needed(&mut self) {
+        if self
+            .caller_ingress_monitor
+            .as_ref()
+            .is_some_and(|monitor| !monitor.task.is_finished())
+        {
+            return;
+        }
+
+        if self.caller_ingress_monitor.is_some() {
+            self.stop_caller_ingress_monitor().await;
+        }
+
+        if self.connected_callee.is_some() {
+            return;
+        }
+
+        let Some(answer_sdp) = self.answer.as_deref() else {
+            return;
+        };
+
+        let caller_profile = MediaNegotiator::extract_leg_profile(answer_sdp);
+        let Some(dtmf_codec) = caller_profile.dtmf else {
+            return;
+        };
+
+        let Some(caller_pc) = Self::get_peer_pc(&self.caller_peer, Self::CALLER_TRACK_ID).await
+        else {
+            return;
+        };
+
+        let session_id = self.context.session_id.clone();
+        let app_runtime = self.app_runtime.clone();
+        let cancel_token = self.cancel_token.child_token();
+        let monitor_cancel = cancel_token.clone();
+        let dtmf_payload_type = dtmf_codec.payload_type;
+
+        let task = tokio::spawn(async move {
+            let track = loop {
+                if let Some(track) = Self::find_audio_receiver_track(&caller_pc).await {
+                    break track;
+                }
+
+                tokio::select! {
+                    _ = monitor_cancel.cancelled() => return,
+                    _ = tokio::time::sleep(Duration::from_millis(100)) => {}
+                }
+            };
+
+            let mut detector = RtpDtmfDetector::default();
+
+            loop {
+                tokio::select! {
+                    _ = monitor_cancel.cancelled() => break,
+                    sample = track.recv() => {
+                        match sample {
+                            Ok(rustrtc::media::MediaSample::Audio(frame)) => {
+                                if frame.payload_type != Some(dtmf_payload_type) {
+                                    continue;
+                                }
+
+                                let Some(digit) = detector.observe(&frame.data, frame.rtp_timestamp) else {
+                                    continue;
+                                };
+
+                                let event = serde_json::json!({
+                                    "type": "dtmf",
+                                    "digit": digit.to_string(),
+                                });
+
+                                if let Err(error) = app_runtime.inject_event(event) {
+                                    debug!(
+                                        session_id = %session_id,
+                                        digit = %digit,
+                                        error = %error,
+                                        "Caller ingress monitor observed RTP DTMF with no active app receiver"
+                                    );
+                                } else {
+                                    debug!(
+                                        session_id = %session_id,
+                                        digit = %digit,
+                                        "Injected RTP DTMF from caller ingress monitor"
+                                    );
+                                }
+                            }
+                            Ok(_) => {}
+                            Err(error) => {
+                                debug!(
+                                    session_id = %session_id,
+                                    error = %error,
+                                    "Caller ingress monitor stopped while reading inbound RTP"
+                                );
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        info!(
+            session_id = %self.context.session_id,
+            payload_type = dtmf_payload_type,
+            "Started caller ingress monitor for RTP DTMF"
+        );
+
+        self.caller_ingress_monitor = Some(CallerIngressMonitor { cancel_token, task });
+    }
+
+    async fn stop_caller_ingress_monitor(&mut self) {
+        let Some(monitor) = self.caller_ingress_monitor.take() else {
+            return;
+        };
+
+        monitor.cancel_token.cancel();
+        let mut task = monitor.task;
+
+        tokio::select! {
+            result = &mut task => {
+                if let Err(error) = result {
+                    warn!(
+                        session_id = %self.context.session_id,
+                        error = %error,
+                        "Caller ingress monitor task ended with join error"
+                    );
+                }
+            }
+            _ = tokio::time::sleep(Duration::from_secs(1)) => {
+                warn!(
+                    session_id = %self.context.session_id,
+                    "Caller ingress monitor did not stop in time; aborting task"
+                );
+                task.abort();
+                let _ = task.await;
+            }
+        }
     }
 
     #[allow(dead_code)]
@@ -2852,6 +3055,8 @@ impl SipSession {
                     }
             }
 
+        self.start_caller_ingress_monitor_if_needed().await;
+
         Ok(())
     }
 
@@ -3208,6 +3413,8 @@ impl SipSession {
 
     async fn cleanup(&mut self) {
         debug!(session_id = %self.context.session_id, "Cleaning up session");
+
+        self.stop_caller_ingress_monitor().await;
 
         if self.recording_state.is_some() {
             let _ = self.stop_recording().await;
@@ -3860,13 +4067,19 @@ impl SipSession {
                     .start_app(&app_name, params, auto_answer)
                     .await
                 {
-                    Ok(()) => CommandResult::success(),
+                    Ok(()) => {
+                        self.start_caller_ingress_monitor_if_needed().await;
+                        CommandResult::success()
+                    }
                     Err(e) => CommandResult::failure(e.to_string()),
                 }
             }
 
             CallCommand::StopApp { reason } => match self.app_runtime.stop_app(reason).await {
-                Ok(()) => CommandResult::success(),
+                Ok(()) => {
+                    self.stop_caller_ingress_monitor().await;
+                    CommandResult::success()
+                }
                 Err(e) => CommandResult::failure(e.to_string()),
             },
 
@@ -4199,6 +4412,7 @@ impl SipSession {
             }
         }
 
+        self.stop_caller_ingress_monitor().await;
         self.cancel_token.cancel();
 
         CommandResult::success()
@@ -4767,6 +4981,9 @@ impl SipSession {
 
         // Determine which peer to use based on leg_id
         let is_callee = leg_id.0.ends_with("-callee") || leg_id.0 == "callee";
+        if !is_callee {
+            self.stop_caller_ingress_monitor().await;
+        }
         let peer = if is_callee {
             self.callee_peer.clone()
         } else {
@@ -6167,6 +6384,25 @@ impl crate::call::runtime::conference_media_bridge::AudioReceiver for PeerConnec
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn test_rtp_dtmf_detector_deduplicates_same_event() {
+        let mut detector = RtpDtmfDetector::default();
+
+        assert_eq!(detector.observe(&[1, 0x00, 0x00, 0xa0], 12_345), Some('1'));
+        assert_eq!(detector.observe(&[1, 0x80, 0x01, 0x40], 12_345), None);
+        assert_eq!(detector.observe(&[1, 0x00, 0x00, 0xa0], 12_505), Some('1'));
+    }
+
+    #[test]
+    fn test_rtp_dtmf_detector_maps_special_digits() {
+        let mut detector = RtpDtmfDetector::default();
+
+        assert_eq!(detector.observe(&[10, 0x00, 0x00, 0xa0], 1), Some('*'));
+        assert_eq!(detector.observe(&[11, 0x00, 0x00, 0xa0], 2), Some('#'));
+        assert_eq!(detector.observe(&[12, 0x00, 0x00, 0xa0], 3), Some('A'));
+        assert_eq!(detector.observe(&[16, 0x00, 0x00, 0xa0], 4), None);
+    }
 
     #[test]
     fn test_session_drop_releases_resources() {
