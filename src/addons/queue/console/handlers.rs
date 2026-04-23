@@ -214,6 +214,7 @@ pub async fn page_queue_create(
     headers: HeaderMap,
     AuthRequired(_): AuthRequired,
 ) -> Response {
+    let script_path = format!("{}/queues/new", state.base_path());
     state.render_with_headers(
         "queue_detail.html",
         json!({
@@ -228,6 +229,7 @@ pub async fn page_queue_create(
             "create_url": state.url_for("/queues"),
             "update_url": Value::Null,
             "list_url": state.url_for("/queues"),
+            "addon_scripts": state.get_injected_scripts(&script_path),
         }),
         &headers,
     )
@@ -253,6 +255,7 @@ pub async fn page_queue_edit(
     let metadata_text = format_metadata_text(&model.metadata);
     let tags = queue_tags(model.metadata.as_ref());
 
+    let script_path = format!("{}/queues/{}", state.base_path(), model.id);
     state.render_with_headers(
         "queue_detail.html",
         json!({
@@ -271,6 +274,7 @@ pub async fn page_queue_edit(
             "create_url": state.url_for("/queues"),
             "update_url": state.url_for(&format!("/queues/{}", model.id)),
             "list_url": state.url_for("/queues"),
+            "addon_scripts": state.get_injected_scripts(&script_path),
         }),
         &headers,
     )
@@ -308,18 +312,20 @@ pub async fn create_queue(
     let tags = normalize_tags_list(payload.tags.clone());
     let metadata = match build_queue_metadata(payload.metadata.clone(), &tags) {
         Ok(value) => value,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
 
     let now = Utc::now();
-    let mut active: QueueActiveModel = Default::default();
-    active.name = Set(name);
-    active.description = Set(normalize_optional_string(&payload.description));
-    active.metadata = Set(metadata);
-    active.spec = Set(json!(spec));
-    active.is_active = Set(payload.is_active.unwrap_or(true));
-    active.created_at = Set(now);
-    active.updated_at = Set(now);
+    let active = QueueActiveModel {
+        name: Set(name),
+        description: Set(normalize_optional_string(&payload.description)),
+        metadata: Set(metadata),
+        spec: Set(json!(spec)),
+        is_active: Set(payload.is_active.unwrap_or(true)),
+        created_at: Set(now),
+        updated_at: Set(now),
+        ..Default::default()
+    };
 
     match active.insert(db).await {
         Ok(model) => {
@@ -370,8 +376,8 @@ pub async fn update_queue(
         .map(|v| v.trim().to_string())
         .filter(|v| !v.is_empty());
 
-    if let Some(name) = &requested_name {
-        if name != &model.name {
+    if let Some(name) = &requested_name
+        && name != &model.name {
             match QueueEntity::find()
                 .filter(QueueColumn::Name.eq(name.clone()))
                 .one(db)
@@ -394,7 +400,6 @@ pub async fn update_queue(
                 }
             }
         }
-    }
 
     let mut active: QueueActiveModel = model.into();
     if let Some(name) = requested_name {
@@ -410,7 +415,7 @@ pub async fn update_queue(
     let tags = normalize_tags_list(payload.tags.clone());
     let metadata = match build_queue_metadata(payload.metadata.clone(), &tags) {
         Ok(value) => value,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
     active.metadata = Set(metadata);
 
@@ -492,7 +497,7 @@ pub async fn export_queue(
 ) -> Response {
     let proxy_cfg = match proxy_config_required(state.as_ref()) {
         Ok(cfg) => cfg,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
 
     let exporter = QueueExporter::new(state.db().clone());
@@ -520,7 +525,7 @@ pub async fn export_all_queues(
 ) -> Response {
     let proxy_cfg = match proxy_config_required(state.as_ref()) {
         Ok(cfg) => cfg,
-        Err(resp) => return resp,
+        Err(resp) => return *resp,
     };
 
     let exporter = QueueExporter::new(state.db().clone());
@@ -592,7 +597,7 @@ fn queue_tags(metadata: Option<&Value>) -> Vec<String> {
 fn build_queue_metadata(
     raw_metadata: Option<String>,
     tags: &[String],
-) -> Result<Option<Value>, Response> {
+) -> Result<Option<Value>, Box<Response>> {
     let mut map = match raw_metadata
         .as_ref()
         .map(|raw| raw.trim())
@@ -605,7 +610,7 @@ fn build_queue_metadata(
                 wrapper.insert("value".to_string(), other);
                 wrapper
             }
-            Err(err) => return Err(bad_request(format!("Metadata must be valid JSON: {}", err))),
+            Err(err) => return Err(Box::new(bad_request(format!("Metadata must be valid JSON: {}", err)))),
         },
         None => JsonMap::new(),
     };
@@ -630,20 +635,19 @@ fn format_metadata_text(metadata: &Option<Value>) -> String {
 
 fn proxy_config_optional(state: &ConsoleState) -> Option<ProxyConfig> {
     state
-        .app_state()
-        .and_then(|app| Some(app.config().proxy.clone()))
+        .app_state().map(|app| app.config().proxy.clone())
 }
 
-fn proxy_config_required(state: &ConsoleState) -> Result<ProxyConfig, Response> {
+fn proxy_config_required(state: &ConsoleState) -> Result<ProxyConfig, Box<Response>> {
     proxy_config_optional(state).ok_or_else(|| {
-        (
+        Box::new((
             StatusCode::FAILED_DEPENDENCY,
             Json(json!({
                 "status": "error",
                 "message": "Proxy configuration is unavailable; configure proxy.generated_dir or proxy.queue_dir first."
             })),
         )
-            .into_response()
+            .into_response())
     })
 }
 

@@ -22,7 +22,6 @@ impl CodecInfo {
             } else {
                 self.channels as u8
             },
-            ..Default::default()
         }
     }
 
@@ -120,10 +119,10 @@ impl MediaNegotiator {
         let mut codec_by_pt = HashMap::new();
 
         for attr in &section.attributes {
-            if attr.key == "rtpmap" {
-                if let Some(ref value) = attr.value {
-                    if let Some((pt_str, codec_str)) = value.split_once(' ') {
-                        if let Ok(pt) = pt_str.parse::<u8>() {
+            if attr.key == "rtpmap"
+                && let Some(ref value) = attr.value
+                    && let Some((pt_str, codec_str)) = value.split_once(' ')
+                        && let Ok(pt) = pt_str.parse::<u8>() {
                             let parts: Vec<&str> = codec_str.split('/').collect();
                             if parts.len() >= 2 {
                                 let codec_name = parts[0];
@@ -150,9 +149,6 @@ impl MediaNegotiator {
                                 );
                             }
                         }
-                    }
-                }
-            }
         }
 
         codec_by_pt
@@ -484,7 +480,7 @@ impl MediaNegotiator {
                 result.push(CodecInfo {
                     payload_type: codec_type.payload_type(),
                     clock_rate: codec_type.clock_rate(),
-                    channels: codec_type.channels() as u16,
+                    channels: codec_type.channels(),
                     codec: *codec_type,
                 });
                 seen_codecs.insert(*codec_type);
@@ -619,15 +615,14 @@ impl MediaNegotiator {
         for section in session.media_sections {
             if section.kind == MediaKind::Audio {
                 for attr in section.attributes {
-                    if attr.key == "ssrc" {
-                        if let Some(value) = attr.value {
+                    if attr.key == "ssrc"
+                        && let Some(value) = attr.value {
                             // value format: "12345 cname:..." or just "12345"
                             let ssrc_str = value.split_whitespace().next()?;
                             if let Ok(ssrc) = ssrc_str.parse::<u32>() {
                                 return Some(ssrc);
                             }
                         }
-                    }
                 }
             }
         }

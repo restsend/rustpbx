@@ -11,6 +11,12 @@ mod tests;
 
 pub struct QueueAddon;
 
+impl Default for QueueAddon {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl QueueAddon {
     pub fn new() -> Self {
         Self
@@ -91,5 +97,9 @@ impl Addon for QueueAddon {
         } else {
             Some(deployed.to_string())
         }
+    }
+
+    fn migrations(&self) -> Vec<Box<dyn sea_orm_migration::MigrationTrait>> {
+        vec![Box::new(models::Migration)]
     }
 }

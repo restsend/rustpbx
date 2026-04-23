@@ -619,7 +619,7 @@ mod tests {
 
         assert_eq!(result.len(), 160);
         // Result should be roughly 1000 (only first frame contributes)
-        assert!(result.iter().all(|&s| s >= 900 && s <= 1100));
+        assert!(result.iter().all(|&s| (900..=1100).contains(&s)));
     }
 
     #[test]
@@ -635,7 +635,7 @@ mod tests {
 
         assert_eq!(result.len(), 160);
         // Result should be roughly 300 (100 + 100 + 100)
-        assert!(result.iter().all(|&s| s >= 250 && s <= 350));
+        assert!(result.iter().all(|&s| (250..=350).contains(&s)));
     }
 
     #[test]

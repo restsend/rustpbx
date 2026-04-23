@@ -108,11 +108,7 @@ impl MixerOutput {
     /// Encode samples and return the encoded data (for testing/debugging)
     pub fn encode(&mut self, samples: &[i16]) -> Option<Vec<u8>> {
         self.ensure_encoder();
-        if let Some(ref mut encoder) = self.encoder {
-            Some(encoder.encode(samples))
-        } else {
-            None
-        }
+        self.encoder.as_mut().map(|encoder| encoder.encode(samples))
     }
 
     /// Get the encoder's sample rate

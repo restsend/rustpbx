@@ -110,25 +110,43 @@ pub async fn verify_license_key(_state: Arc<ConsoleState>, license_key: String) 
         }
     };
 
-    if !doc.contains_key("licenses") || !doc["licenses"].is_table() {
-        doc["licenses"] = Item::Table(Table::new());
+    let needs_licenses_init = doc
+        .as_table()
+        .get("licenses")
+        .map(|item| !item.is_table())
+        .unwrap_or(true);
+    if needs_licenses_init {
+        doc.insert("licenses", Item::Table(Table::new()));
     }
     {
-        let licenses_table = doc["licenses"]
+        let licenses_table = doc
             .as_table_mut()
+            .get_mut("licenses")
+            .and_then(Item::as_table_mut)
             .expect("[licenses] is a table");
-        if !licenses_table.contains_key("addons") || !licenses_table["addons"].is_table() {
+        let needs_addons_init = licenses_table
+            .get("addons")
+            .map(|item| !item.is_table())
+            .unwrap_or(true);
+        if needs_addons_init {
             licenses_table["addons"] = Item::Table(Table::new());
         }
-        if let Some(t) = licenses_table["addons"].as_table_mut() {
+        if let Some(t) = licenses_table
+            .get_mut("addons")
+            .and_then(Item::as_table_mut)
+        {
             for addon_id in &target_addon_ids {
                 t[addon_id.as_str()] = toml_edit::value(key_name.clone());
             }
         }
-        if !licenses_table.contains_key("keys") || !licenses_table["keys"].is_table() {
+        let needs_keys_init = licenses_table
+            .get("keys")
+            .map(|item| !item.is_table())
+            .unwrap_or(true);
+        if needs_keys_init {
             licenses_table["keys"] = Item::Table(Table::new());
         }
-        if let Some(t) = licenses_table["keys"].as_table_mut() {
+        if let Some(t) = licenses_table.get_mut("keys").and_then(Item::as_table_mut) {
             t[key_name.as_str()] = toml_edit::value(license_key.clone());
         }
     }

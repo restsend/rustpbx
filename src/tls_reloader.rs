@@ -12,7 +12,7 @@ use tracing::{info, warn};
 pub trait HttpsReloader: Send + Sync {
     /// Reload HTTPS certificate from PEM files
     fn reload_https(
-        self: &Self,
+        &self,
         cert_path: &str,
         key_path: &str,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send + '_>>;

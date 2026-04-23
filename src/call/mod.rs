@@ -272,18 +272,15 @@ impl std::fmt::Display for DialStrategy {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum RingbackMode {
     Local,
     Passthrough,
+    #[default]
     Auto,
     None,
 }
 
-impl Default for RingbackMode {
-    fn default() -> Self {
-        Self::Auto
-    }
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RingbackConfig {
@@ -365,7 +362,8 @@ pub enum QueueFallbackAction {
     Failure(FailureAction),
     /// Redirect to a specific SIP URI (e.g., external voicemail)
     Redirect { target: rsipstack::sip::Uri },
-    /// Transfer caller to another named queue
+    /// Transfer caller to another named queue or skill group.
+    /// Skill groups are identified by the "skill-group:" prefix in the name.
     Queue { name: String },
 }
 
@@ -423,6 +421,7 @@ impl QueuePlan {
 }
 
 #[derive(Debug, Clone)]
+#[allow(clippy::large_enum_variant)]
 pub enum DialplanFlow {
     Targets(DialStrategy),
     Queue {
@@ -663,12 +662,12 @@ pub enum DialDirection {
     Internal, // 3. User to user call, both sides are internal
 }
 
-impl ToString for DialDirection {
-    fn to_string(&self) -> String {
+impl std::fmt::Display for DialDirection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            DialDirection::Outbound => "outbound".to_string(),
-            DialDirection::Inbound => "inbound".to_string(),
-            DialDirection::Internal => "internal".to_string(),
+            DialDirection::Outbound => write!(f, "outbound"),
+            DialDirection::Inbound => write!(f, "inbound"),
+            DialDirection::Internal => write!(f, "internal"),
         }
     }
 }
@@ -1006,6 +1005,30 @@ impl Default for RoutingState {
     }
 }
 
+impl RoutingState {
+    pub fn new() -> Self {
+        Self {
+            round_robin_counters: Arc::new(Mutex::new(HashMap::new())),
+            policy_guard: None,
+        }
+    }
+
+    /// Get the next trunk index for round-robin selection
+    pub fn next_round_robin_index(&self, destination_key: &str, trunk_count: usize) -> usize {
+        if trunk_count == 0 {
+            return 0;
+        }
+
+        let mut counters = self.round_robin_counters.lock().unwrap();
+        let counter = counters
+            .entry(destination_key.to_string())
+            .or_insert_with(|| 0);
+        let r = *counter % trunk_count;
+        *counter += 1;
+        r
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1253,29 +1276,5 @@ mod tests {
             auto_answer: false,
         };
         assert!(!flow.all_webrtc_target());
-    }
-}
-
-impl RoutingState {
-    pub fn new() -> Self {
-        Self {
-            round_robin_counters: Arc::new(Mutex::new(HashMap::new())),
-            policy_guard: None,
-        }
-    }
-
-    /// Get the next trunk index for round-robin selection
-    pub fn next_round_robin_index(&self, destination_key: &str, trunk_count: usize) -> usize {
-        if trunk_count == 0 {
-            return 0;
-        }
-
-        let mut counters = self.round_robin_counters.lock().unwrap();
-        let counter = counters
-            .entry(destination_key.to_string())
-            .or_insert_with(|| 0);
-        let r = *counter % trunk_count;
-        *counter += 1;
-        return r;
     }
 }

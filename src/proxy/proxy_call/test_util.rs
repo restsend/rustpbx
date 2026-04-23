@@ -8,13 +8,15 @@ pub mod tests {
     use std::sync::{Arc, Mutex};
     use tokio_util::sync::CancellationToken;
 
+    pub type TrackHandle = Arc<tokio::sync::Mutex<Box<dyn Track>>>;
+
     /// Enhanced MockMediaPeer for comprehensive testing
     pub struct MockMediaPeer {
         pub stop_called: Arc<AtomicUsize>,
         pub cancel_token: CancellationToken,
         pub get_tracks_call_count: Arc<AtomicUsize>,
         pub update_track_call_count: Arc<AtomicUsize>,
-        pub tracks: Arc<Mutex<Vec<Arc<tokio::sync::Mutex<Box<dyn Track>>>>>>,
+        pub tracks: Arc<Mutex<Vec<TrackHandle>>>,
     }
 
     impl MockMediaPeer {

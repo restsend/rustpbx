@@ -230,7 +230,7 @@ impl CallRouter for HttpCallRouter {
             HttpRouteAction::Reject | HttpRouteAction::Abort => {
                 let status = result
                     .status
-                    .and_then(|s| rsipstack::sip::StatusCode::try_from(s).ok())
+                    .map(rsipstack::sip::StatusCode::from)
                     .unwrap_or(rsipstack::sip::StatusCode::Forbidden);
                 return Err(RouteError {
                     error: anyhow!(

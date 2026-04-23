@@ -565,6 +565,7 @@ impl BridgePeer {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn run_forward_loop(
         bridge_id: String,
         track: Arc<dyn MediaStreamTrack>,
@@ -603,11 +604,10 @@ impl BridgePeer {
             None
         };
 
-        if track.kind() == MediaKind::Video {
-            if let Err(e) = track.request_key_frame().await {
+        if track.kind() == MediaKind::Video
+            && let Err(e) = track.request_key_frame().await {
                 debug!(bridge_id = %bridge_id, direction = %path, error = %e, "Failed to request initial keyframe");
             }
-        }
 
         let is_video = track.kind() == MediaKind::Video;
         let mut packet_count: u64 = 0;
@@ -757,13 +757,11 @@ impl BridgePeer {
                             // Write audio samples to recorder (non-blocking: skip on lock contention)
                             if let (Some(rec), Some(leg)) = (&recorder, recorder_leg) {
                                 for s in &samples_to_send {
-                                    if matches!(s, MediaSample::Audio(_)) {
-                                        if let Some(mut guard) = rec.try_write() {
-                                            if let Some(r) = guard.as_mut() {
+                                    if matches!(s, MediaSample::Audio(_))
+                                        && let Some(mut guard) = rec.try_write()
+                                            && let Some(r) = guard.as_mut() {
                                                 let _ = r.write_sample(leg, s, None, None, None::<AudioCodecType>);
                                             }
-                                        }
-                                    }
                                 }
                             }
                             for sample in samples_to_send {
@@ -797,6 +795,7 @@ impl BridgePeer {
 
     /// Forward media from a track to a sender channel.
     /// Spawns a sub-task; used by the PC-event-driven start paths.
+    #[allow(clippy::too_many_arguments)]
     async fn forward_track_to_sender(
         bridge_id: String,
         track: Arc<dyn MediaStreamTrack>,

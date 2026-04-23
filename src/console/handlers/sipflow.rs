@@ -202,6 +202,7 @@ async fn update_settings(
 }
 
 // Helper functions from setting.rs
+#[allow(clippy::result_large_err)]
 fn get_config_path(state: &ConsoleState) -> Result<String, Response> {
     let Some(app_state) = state.app_state() else {
         return Err((
@@ -225,6 +226,7 @@ fn get_config_path(state: &ConsoleState) -> Result<String, Response> {
     Ok(path)
 }
 
+#[allow(clippy::result_large_err)]
 fn load_document(path: &str) -> Result<DocumentMut, Response> {
     let contents = match fs::read_to_string(path) {
         Ok(raw) => raw,
@@ -250,6 +252,7 @@ fn load_document(path: &str) -> Result<DocumentMut, Response> {
     })
 }
 
+#[allow(clippy::result_large_err)]
 fn persist_document(path: &str, contents: String) -> Result<(), Response> {
     fs::write(path, contents).map_err(|err| {
         (
@@ -263,12 +266,20 @@ fn persist_document(path: &str, contents: String) -> Result<(), Response> {
 }
 
 fn ensure_table_mut<'doc>(doc: &'doc mut DocumentMut, key: &str) -> &'doc mut Table {
-    if doc.get(key).is_none() {
-        doc[key] = Item::Table(Table::new());
-    } else if !doc[key].is_table() {
-        doc[key] = Item::Table(Table::new());
+    let needs_init = doc
+        .as_table()
+        .get(key)
+        .map(|item| !item.is_table())
+        .unwrap_or(true);
+
+    if needs_init {
+        doc.insert(key, Item::Table(Table::new()));
     }
-    doc[key].as_table_mut().expect("table")
+
+    doc.as_table_mut()
+        .get_mut(key)
+        .and_then(Item::as_table_mut)
+        .expect("table")
 }
 
 async fn query_flow(
@@ -321,8 +332,8 @@ async fn query_flow(
     let mut start_time = params.start.and_then(|s| parse_datetime(&s));
     let mut end_time = params.end.and_then(|s| parse_datetime(&s));
 
-    if start_time.is_none() || end_time.is_none() {
-        if let Ok(Some(record)) = CallRecordEntity::find()
+    if (start_time.is_none() || end_time.is_none())
+        && let Ok(Some(record)) = CallRecordEntity::find()
             .filter(CallRecordColumn::CallId.eq(&call_id))
             .one(state.db())
             .await
@@ -342,10 +353,9 @@ async fn query_flow(
                 );
             }
         }
-    }
 
     let start_time = start_time.unwrap_or_else(|| now - chrono::Duration::hours(1));
-    let end_time = end_time.unwrap_or_else(|| now);
+    let end_time = end_time.unwrap_or(now);
 
     match backend.query_flow(&call_id, start_time, end_time).await {
         Ok(items) => {
@@ -441,8 +451,8 @@ async fn query_media(
     let mut start_time = params.start.and_then(|s| parse_datetime(&s));
     let mut end_time = params.end.and_then(|s| parse_datetime(&s));
 
-    if start_time.is_none() || end_time.is_none() {
-        if let Ok(Some(record)) = CallRecordEntity::find()
+    if (start_time.is_none() || end_time.is_none())
+        && let Ok(Some(record)) = CallRecordEntity::find()
             .filter(CallRecordColumn::CallId.eq(&call_id))
             .one(state.db())
             .await
@@ -462,10 +472,9 @@ async fn query_media(
                 );
             }
         }
-    }
 
     let start_time = start_time.unwrap_or_else(|| now - chrono::Duration::hours(1));
-    let end_time = end_time.unwrap_or_else(|| now);
+    let end_time = end_time.unwrap_or(now);
 
     match backend.query_media(&call_id, start_time, end_time).await {
         Ok(data) => {
@@ -508,11 +517,10 @@ fn parse_datetime(s: &str) -> Option<DateTime<chrono::Local>> {
     }
 
     // Try Unix timestamp
-    if let Ok(ts) = s.parse::<i64>() {
-        if let Some(dt) = chrono::Local.timestamp_opt(ts, 0).single() {
+    if let Ok(ts) = s.parse::<i64>()
+        && let Some(dt) = chrono::Local.timestamp_opt(ts, 0).single() {
             return Some(dt);
         }
-    }
 
     None
 }

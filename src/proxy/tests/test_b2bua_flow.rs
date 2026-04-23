@@ -161,15 +161,12 @@ async fn test_b2bua_full_flow() {
         for _ in 0..50 {
             let events = bob.process_dialog_events().await.unwrap_or_default();
             for event in events {
-                match event {
-                    TestUaEvent::IncomingCall(dialog_id, _) => {
-                        info!("Bob received incoming call: {}", dialog_id);
-                        bob.answer_call(&dialog_id, Some(bob_sdp.clone()))
-                            .await
-                            .unwrap();
-                        return Ok::<_, anyhow::Error>(dialog_id);
-                    }
-                    _ => {}
+                if let TestUaEvent::IncomingCall(dialog_id, _) = event {
+                    info!("Bob received incoming call: {}", dialog_id);
+                    bob.answer_call(&dialog_id, Some(bob_sdp.clone()))
+                        .await
+                        .unwrap();
+                    return Ok::<_, anyhow::Error>(dialog_id);
                 }
             }
             sleep(Duration::from_millis(100)).await;
@@ -493,20 +490,17 @@ async fn test_callee_reject_passthrough_486_busy_here() {
         for _ in 0..50 {
             let events = bob.process_dialog_events().await.unwrap_or_default();
             for event in events {
-                match event {
-                    TestUaEvent::IncomingCall(dialog_id, _) => {
-                        info!("Bob received incoming call: {}", dialog_id);
-                        // Reject with 486 BusyHere
-                        bob.reject_call_with_reason(
-                            &dialog_id,
-                            Some(486),
-                            Some("Busy Here".to_string()),
-                        )
-                        .await
-                        .unwrap();
-                        return Ok::<_, anyhow::Error>(dialog_id);
-                    }
-                    _ => {}
+                if let TestUaEvent::IncomingCall(dialog_id, _) = event {
+                    info!("Bob received incoming call: {}", dialog_id);
+                    // Reject with 486 BusyHere
+                    bob.reject_call_with_reason(
+                        &dialog_id,
+                        Some(486),
+                        Some("Busy Here".to_string()),
+                    )
+                    .await
+                    .unwrap();
+                    return Ok::<_, anyhow::Error>(dialog_id);
                 }
             }
             sleep(Duration::from_millis(100)).await;

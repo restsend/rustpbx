@@ -181,7 +181,7 @@ impl UserBackend for HttpUserBackend {
             .json::<SipUser>()
             .await
             .map_err(|e| AuthError::Other(anyhow!("HTTP response error: {}", e)))
-            .map(|user| Some(user))
+            .map(Some)
     }
 }
 

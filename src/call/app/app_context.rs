@@ -82,9 +82,6 @@ pub struct ApplicationContext {
     /// Session-level variables shared across chained applications.
     pub session_vars: Arc<RwLock<HashMap<String, String>>>,
 
-    /// Global shared state (accessible from any app instance).
-    pub shared_state: Arc<AppSharedState>,
-
     /// Database connection (SeaORM).
     pub db: DatabaseConnection,
 
@@ -96,9 +93,6 @@ pub struct ApplicationContext {
 
     /// System configuration.
     pub config: Arc<Config>,
-
-    /// Storage backend for file operations (recordings, greetings, etc.).
-    pub storage: crate::storage::Storage,
 }
 
 impl ApplicationContext {
@@ -107,16 +101,13 @@ impl ApplicationContext {
         db: DatabaseConnection,
         call_info: CallInfo,
         config: Arc<Config>,
-        storage: crate::storage::Storage,
     ) -> Self {
         Self {
             session_vars: Arc::new(RwLock::new(HashMap::new())),
-            shared_state: Arc::new(AppSharedState::new()),
             db,
             http_client: reqwest::Client::new(),
             call_info,
             config,
-            storage,
         }
     }
 
@@ -173,15 +164,8 @@ mod tests {
     #[tokio::test]
     async fn test_session_vars() {
         let db = sea_orm::Database::connect("sqlite::memory:").await.unwrap();
-        let storage_config = crate::storage::StorageConfig::Local {
-            path: std::env::temp_dir()
-                .join("rustpbx-test-storage")
-                .to_string_lossy()
-                .to_string(),
-        };
-        let storage = crate::storage::Storage::new(&storage_config).unwrap();
         let ctx =
-            ApplicationContext::new(db, make_call_info(), Arc::new(Config::default()), storage);
+            ApplicationContext::new(db, make_call_info(), Arc::new(Config::default()));
 
         // Initially empty
         assert!(ctx.get_var("lang").await.is_none());

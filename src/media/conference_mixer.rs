@@ -270,18 +270,24 @@ impl ConferenceAudioMixer {
                         let mut frames = HashMap::new();
 
                         for (leg_id, participant) in participants_guard.iter_mut() {
-                            // Try to receive a frame from this participant
-                            match participant.input_rx.try_recv() {
-                                Ok(frame) => {
-                                    if !participant.muted {
-                                        frames.insert(leg_id.clone(), frame);
+                            // Collect all available frames from this participant (non-blocking)
+                            // Use try_recv to drain the buffer without waiting
+                            loop {
+                                match participant.input_rx.try_recv() {
+                                    Ok(frame) => {
+                                        if !participant.muted {
+                                            // Keep only the latest frame (overwrite previous)
+                                            frames.insert(leg_id.clone(), frame);
+                                        }
                                     }
-                                }
-                                Err(mpsc::error::TryRecvError::Empty) => {
-                                    // No frame available, use silence
-                                }
-                                Err(mpsc::error::TryRecvError::Disconnected) => {
-                                    // Channel closed, participant left
+                                    Err(mpsc::error::TryRecvError::Empty) => {
+                                        // No more frames available
+                                        break;
+                                    }
+                                    Err(mpsc::error::TryRecvError::Disconnected) => {
+                                        // Channel closed, participant left
+                                        break;
+                                    }
                                 }
                             }
                         }
@@ -332,11 +338,10 @@ impl ConferenceAudioMixer {
                                     participants_guard.get(output_leg).map(|p| p.output_tx.clone())
                                 };
 
-                                if let Some(tx) = output_tx {
-                                    if tx.send(output_frame).await.is_err() {
+                                if let Some(tx) = output_tx
+                                    && tx.send(output_frame).await.is_err() {
                                         // Channel closed
                                     }
-                                }
                             }
                         }
                     }

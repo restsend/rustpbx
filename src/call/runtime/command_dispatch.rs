@@ -66,7 +66,7 @@ pub fn dispatch_rwi_command(
     }
 
     // Step 4: Dispatch to session
-    dispatch_command(registry, &session_id, command)
+    dispatch_command(registry, session_id, command)
 }
 
 /// Dispatch a Console command using the unified path

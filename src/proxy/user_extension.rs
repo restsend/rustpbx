@@ -11,9 +11,11 @@ use std::time::{Duration, Instant};
 
 use super::user::UserBackend;
 
+pub type ExtensionCache = LruCache<(String, Option<String>), (Option<SipUser>, Instant)>;
+
 pub struct ExtensionUserBackend {
     db: DatabaseConnection,
-    cache: Arc<Mutex<LruCache<(String, Option<String>), (Option<SipUser>, Instant)>>>,
+    cache: Arc<Mutex<ExtensionCache>>,
     ttl: Duration,
 }
 
@@ -27,7 +29,7 @@ impl ExtensionUserBackend {
     }
 
     pub async fn connect(database_url: &str, ttl_secs: u64) -> Result<Self> {
-        let db = crate::models::create_db(database_url).await?;
+        let db = crate::models::connect_db(database_url).await?;
         Ok(Self::new(db, ttl_secs))
     }
 
@@ -97,11 +99,10 @@ impl UserBackend for ExtensionUserBackend {
         // Check cache
         if self.ttl.as_secs() > 0 {
             let mut cache = self.cache.lock().unwrap();
-            if let Some((user, timestamp)) = cache.get(&cache_key) {
-                if timestamp.elapsed() < self.ttl {
+            if let Some((user, timestamp)) = cache.get(&cache_key)
+                && timestamp.elapsed() < self.ttl {
                     return Ok(user.clone());
                 }
-            }
         }
 
         let result = self
@@ -271,6 +272,6 @@ mod tests {
             "voicemail_disabled = false means voicemail is enabled"
         );
         // Invariant used by call.rs: dialplan.voicemail_enabled = !callee.voicemail_disabled
-        assert!(!user.voicemail_disabled == true);
+        assert!(!user.voicemail_disabled);
     }
 }

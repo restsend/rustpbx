@@ -22,7 +22,9 @@ pub mod matcher;
 mod tests;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Default)]
 pub enum ConfigOrigin {
+    #[default]
     Embedded,
     File(String),
 }
@@ -37,11 +39,6 @@ impl ConfigOrigin {
     }
 }
 
-impl Default for ConfigOrigin {
-    fn default() -> Self {
-        Self::Embedded
-    }
-}
 
 /// Single trunk configuration
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -136,11 +133,10 @@ impl TrunkConfig {
             return true;
         }
 
-        if let Some(backup) = &self.backup_dest {
-            if candidate_matches(backup, addr).await {
+        if let Some(backup) = &self.backup_dest
+            && candidate_matches(backup, addr).await {
                 return true;
             }
-        }
 
         false
     }
@@ -212,11 +208,10 @@ pub fn build_source_trunk(
     config: &TrunkConfig,
     direction: &DialDirection,
 ) -> Option<SourceTrunk> {
-    if let Some(trunk_direction) = config.direction {
-        if !trunk_direction.allows(direction) {
+    if let Some(trunk_direction) = config.direction
+        && !trunk_direction.allows(direction) {
             return None;
         }
-    }
 
     Some(SourceTrunk {
         name,
@@ -335,17 +330,14 @@ impl Default for RouteRule {
 
 #[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum RouteDirection {
+    #[default]
     Any,
     Inbound,
     Outbound,
 }
 
-impl Default for RouteDirection {
-    fn default() -> Self {
-        RouteDirection::Any
-    }
-}
 
 impl RouteDirection {
     pub fn matches(&self, direction: &DialDirection) -> bool {
@@ -554,7 +546,9 @@ pub struct RouteQueueTargetConfig {
 
 #[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
+#[derive(Default)]
 pub enum QueueDialMode {
+    #[default]
     Sequential,
     Parallel,
 }
@@ -565,11 +559,6 @@ impl QueueDialMode {
     }
 }
 
-impl Default for QueueDialMode {
-    fn default() -> Self {
-        Self::Sequential
-    }
-}
 
 impl RouteQueueHoldConfig {
     fn default_loop() -> bool {
@@ -584,13 +573,17 @@ pub struct RouteQueueFallbackConfig {
     pub failure_reason: Option<String>,
     pub failure_prompt: Option<String>,
     pub queue_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub skill_group_ref: Option<String>,
 }
 
 impl RouteQueueConfig {
     pub fn to_queue_plan(&self) -> Result<crate::call::QueuePlan> {
-        let mut plan = crate::call::QueuePlan::default();
-        plan.accept_immediately = self.accept_immediately;
-        plan.passthrough_ringback = self.passthrough_ringback && self.accept_immediately;
+        let mut plan = crate::call::QueuePlan {
+            accept_immediately: self.accept_immediately,
+            passthrough_ringback: self.passthrough_ringback && self.accept_immediately,
+            ..Default::default()
+        };
         if let Some(hold) = &self.hold {
             let mut cfg = crate::call::QueueHoldConfig::default();
             if let Some(file) = &hold.audio_file {
@@ -605,11 +598,10 @@ impl RouteQueueConfig {
         if let Some(strategy) = self.build_dial_strategy()? {
             plan.dial_strategy = Some(strategy);
         }
-        if let Some(timeout) = self.strategy.wait_timeout_secs {
-            if timeout > 0 {
+        if let Some(timeout) = self.strategy.wait_timeout_secs
+            && timeout > 0 {
                 plan.ring_timeout = Some(Duration::from_secs(timeout as u64));
             }
-        }
         Ok(plan)
     }
 
@@ -624,11 +616,30 @@ impl RouteQueueConfig {
             if uri_text.is_empty() {
                 continue;
             }
+            
+            // Handle skill-group targets (serialized as uri: "skill-group:{id}")
+            if uri_text.starts_with("skill-group:") {
+                let skill_group_id = uri_text.strip_prefix("skill-group:").unwrap_or(uri_text).trim();
+                if !skill_group_id.is_empty() {
+                    // Create a special location for skill group that will be resolved at runtime
+                    let location = Location {
+                        aor: Uri::try_from(format!("skill-group:{}", skill_group_id))
+                            .map_err(|err| anyhow!("invalid skill group uri '{}': {}", uri_text, err))?,
+                        contact_raw: Some(uri_text.to_string()),
+                        ..Default::default()
+                    };
+                    locations.push(location);
+                }
+                continue;
+            }
+            
             let uri = Uri::try_from(uri_text)
                 .map_err(|err| anyhow!("invalid queue target uri '{}': {}", uri_text, err))?;
-            let mut location = Location::default();
-            location.aor = uri.clone();
-            location.contact_raw = Some(uri.to_string());
+            let location = Location {
+                aor: uri.clone(),
+                contact_raw: Some(uri.to_string()),
+                ..Default::default()
+            };
             locations.push(location);
         }
 
@@ -646,6 +657,7 @@ impl RouteQueueConfig {
 
 impl RouteQueueFallbackConfig {
     fn to_action(&self) -> Result<crate::call::QueueFallbackAction> {
+        // Check queue_ref - can be either a queue name or skill-group:{id}
         if let Some(queue) = self
             .queue_ref
             .as_ref()
@@ -654,6 +666,18 @@ impl RouteQueueFallbackConfig {
         {
             return Ok(crate::call::QueueFallbackAction::Queue {
                 name: queue.to_string(),
+            });
+        }
+        
+        // Check direct skill_group_ref field (stored as skill-group:{id} in queue_ref)
+        if let Some(skill_group_id) = self
+            .skill_group_ref
+            .as_ref()
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+        {
+            return Ok(crate::call::QueueFallbackAction::Queue {
+                name: format!("skill-group:{}", skill_group_id),
             });
         }
         if let Some(target) = &self.redirect {
@@ -774,11 +798,10 @@ async fn host_matches(host: &str, addr: &IpAddr) -> bool {
 }
 
 fn split_host_port(input: &str) -> Option<(&str, &str)> {
-    if let Some(end) = input.find(']') {
-        if input.starts_with('[') && input.len() > end + 1 && input[end + 1..].starts_with(':') {
+    if let Some(end) = input.find(']')
+        && input.starts_with('[') && input.len() > end + 1 && input[end + 1..].starts_with(':') {
             return Some((&input[1..end], &input[end + 2..]));
         }
-    }
 
     if let Some(idx) = input.rfind(':') {
         if input[..idx].contains(':') {

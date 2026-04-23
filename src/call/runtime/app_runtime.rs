@@ -75,8 +75,10 @@ pub type AppResult<T> = Result<T, AppRuntimeError>;
 /// Application status
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum AppStatus {
     /// No application is running
+    #[default]
     Idle,
     /// Application is starting up
     Starting,
@@ -90,11 +92,6 @@ pub enum AppStatus {
     Failed,
 }
 
-impl Default for AppStatus {
-    fn default() -> Self {
-        Self::Idle
-    }
-}
 
 impl std::fmt::Display for AppStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

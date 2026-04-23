@@ -105,7 +105,7 @@ impl AuthModule {
                 return Ok(None);
             }
         };
-        let user = SipUser::try_from(tx).map_err(|e| AuthError::Other(e))?;
+        let user = SipUser::try_from(tx).map_err(AuthError::Other)?;
         // Check if user exists and is enabled
         match self
             .server
@@ -118,12 +118,11 @@ impl AuthModule {
                     info!(username = user.username, realm = ?user.realm, "User is disabled");
                     return Ok(None);
                 }
-                if let Some(realm) = user.realm.as_ref() {
-                    if !self.server.is_same_realm(realm).await {
+                if let Some(realm) = user.realm.as_ref()
+                    && !self.server.is_same_realm(realm).await {
                         info!(username = user.username, realm = ?user.realm, "User is not in the same realm");
                         return Ok(None);
                     }
-                }
                 stored_user.merge_with(&user);
                 match self.verify_credentials(
                     &stored_user,
@@ -253,14 +252,14 @@ impl ProxyModule for AuthModule {
                 }
 
                 let to_header = tx.original.to_header()?.uri()?;
-                let callee_user = to_header.user().unwrap_or_else(|| "");
+                let callee_user = to_header.user().unwrap_or("");
                 let callee_realm = to_header.host().to_string();
 
                 if tx.original.method == rsipstack::sip::Method::Invite {
                     match self
                         .server
                         .user_backend
-                        .get_user(&callee_user, Some(&callee_realm), Some(&tx.original))
+                        .get_user(callee_user, Some(&callee_realm), Some(&tx.original))
                         .await
                     {
                         Ok(Some(callee_profile)) if callee_profile.allow_guest_calls => {
@@ -297,7 +296,7 @@ impl ProxyModule for AuthModule {
                         .server
                         .user_backend
                         .get_user(
-                            &from_uri.user().unwrap_or_else(|| ""),
+                            from_uri.user().unwrap_or(""),
                             Some(&realm),
                             Some(&tx.original),
                         )

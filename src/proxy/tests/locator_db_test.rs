@@ -77,10 +77,7 @@ async fn test_db_locator() {
     let result = locator
         .lookup(&"sip:alice@rustpbx.com".try_into().expect("invalid uri"))
         .await;
-    match result {
-        Ok(v) => assert!(v.is_empty(), "Expected no locations after unregister"),
-        Err(_) => {}
-    }
+    if let Ok(v) = result { assert!(v.is_empty(), "Expected no locations after unregister") }
 }
 
 #[tokio::test]
@@ -154,10 +151,7 @@ async fn test_db_locator_with_custom_table() {
     let result = locator
         .lookup(&"sip:bob@rustpbx.com".try_into().expect("invalid uri"))
         .await;
-    match result {
-        Ok(v) => assert!(v.is_empty(), "Expected no locations after unregister"),
-        Err(_) => {}
-    }
+    if let Ok(v) = result { assert!(v.is_empty(), "Expected no locations after unregister") }
 }
 
 #[tokio::test]
@@ -268,13 +262,10 @@ async fn test_db_locator_multiple_lookups() {
     let result1 = locator
         .lookup(&"sip:carol@rustpbx.com".try_into().expect("invalid uri"))
         .await;
-    match result1 {
-        Ok(v) => assert!(
-            v.is_empty(),
-            "Expected no locations after unregister for realm rustpbx.com"
-        ),
-        Err(_) => {}
-    }
+    if let Ok(v) = result1 { assert!(
+        v.is_empty(),
+        "Expected no locations after unregister for realm rustpbx.com"
+    ) }
 
     // Second realm lookup should still work
     let locations2 = locator

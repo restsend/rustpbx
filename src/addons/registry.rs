@@ -6,6 +6,12 @@ pub struct AddonRegistry {
     addons: Vec<Box<dyn Addon>>,
 }
 
+impl Default for AddonRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AddonRegistry {
     pub fn new() -> Self {
         let mut addons: Vec<Box<dyn Addon>> = Vec::new();
@@ -60,13 +66,17 @@ impl AddonRegistry {
         // Queue Addon
         addons.push(Box::new(super::queue::QueueAddon::new()));
 
+        // CC Addon (Contact Center)
+        #[cfg(feature = "addon-cc")]
+        addons.push(Box::new(super::cc::CcAddon::new()));
+
         Self { addons }
     }
 
     pub async fn initialize_all(&self, state: AppState) -> anyhow::Result<()> {
         let config = state.config();
         for addon in &self.addons {
-            if !self.is_enabled(addon.id(), &config) {
+            if !self.is_enabled(addon.id(), config) {
                 tracing::info!("Addon {} is disabled", addon.name());
                 continue;
             }
@@ -82,7 +92,7 @@ impl AddonRegistry {
     pub async fn seed_all_fixtures(&self, state: AppState) -> anyhow::Result<()> {
         let config = state.config();
         for addon in &self.addons {
-            if !self.is_enabled(addon.id(), &config) {
+            if !self.is_enabled(addon.id(), config) {
                 continue;
             }
             if let Err(e) = addon.seed_fixtures(state.clone()).await {
@@ -113,11 +123,10 @@ impl AddonRegistry {
                 continue;
             }
             for injection in addon.inject_scripts() {
-                if let Ok(re) = regex::Regex::new(injection.url_path_regex) {
-                    if re.is_match(path) {
+                if let Ok(re) = regex::Regex::new(injection.url_path_regex)
+                    && re.is_match(path) {
                         scripts.push(injection.script_url);
                     }
-                }
             }
         }
         scripts
@@ -199,7 +208,7 @@ impl AddonRegistry {
     ) -> Vec<Box<dyn crate::callrecord::CallRecordHook>> {
         self.addons
             .iter()
-            .filter(|a| self.is_enabled(a.id(), &config))
+            .filter(|a| self.is_enabled(a.id(), config))
             .filter_map(|a| a.call_record_hook(db))
             .collect()
     }
@@ -239,11 +248,36 @@ impl AddonRegistry {
     ) -> crate::proxy::server::SipServerBuilder {
         let config = &ctx.config;
         for addon in &self.addons {
-            if !self.is_enabled(addon.id(), &config) {
+            if !self.is_enabled(addon.id(), config) {
                 continue;
             }
             builder = addon.proxy_server_hook(builder, ctx.clone());
+            // Register dialplan inspectors from addons
+            if let Some(inspector) = addon.dialplan_inspector() {
+                builder = builder.with_dialplan_inspector(inspector);
+            }
         }
         builder
+    }
+
+    /// Run database migrations for all enabled addons.
+    pub async fn run_migrations(
+        &self,
+        db: &sea_orm::DatabaseConnection,
+    ) -> anyhow::Result<()> {
+        let manager = sea_orm_migration::SchemaManager::new(db);
+        for addon in &self.addons {
+            for migration in addon.migrations() {
+                if let Err(e) = migration.up(&manager).await {
+                    return Err(anyhow::anyhow!(
+                        "Migration '{}' for addon '{}' failed: {}",
+                        migration.name(),
+                        addon.name(),
+                        e
+                    ));
+                }
+            }
+        }
+        Ok(())
     }
 }

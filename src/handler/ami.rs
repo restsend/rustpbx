@@ -118,47 +118,43 @@ async fn list_dialogs(State(state): State<AppState>) -> Response {
 }
 
 async fn hangup_dialog(Path(id): Path<String>, State(state): State<AppState>) -> Response {
-    match state.sip_server.inner.dialog_layer.get_dialog_with(&id) {
-        Some(dlg) => match dlg.hangup().await {
-            Ok(()) => {
-                return Json(serde_json::json!({
-                    "status": "ok",
-                    "message": format!("Dialog with id '{}' hangup initiated", id),
-                }))
+    if let Some(dlg) = state.sip_server.inner.dialog_layer.get_dialog_with(&id) { match dlg.hangup().await {
+        Ok(()) => {
+            return Json(serde_json::json!({
+                "status": "ok",
+                "message": format!("Dialog with id '{}' hangup initiated", id),
+            }))
+            .into_response();
+        }
+        Err(err) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "status": "error",
+                    "message": format!("Failed to hangup dialog with id '{}': {}", id, err),
+                })),
+            )
                 .into_response();
-            }
-            Err(err) => {
-                return (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(serde_json::json!({
-                        "status": "error",
-                        "message": format!("Failed to hangup dialog with id '{}': {}", id, err),
-                    })),
-                )
-                    .into_response();
-            }
-        },
-        None => {}
-    }
-    return (
+        }
+    } }
+    (
         StatusCode::NOT_FOUND,
         Json(serde_json::json!({
             "status": "error",
             "message": format!("Dialog with id '{}' not found", id),
         })),
     )
-        .into_response();
+        .into_response()
 }
 
 async fn list_transactions(State(state): State<AppState>) -> Response {
     let mut result = Vec::new();
-    state
+    if let Some(ids) = state
         .sip_server()
         .inner
         .endpoint
         .inner
-        .get_running_transactions()
-        .map(|ids| result.extend(ids));
+        .get_running_transactions() { result.extend(ids) }
     let result: Vec<String> = result.iter().map(|key| key.to_string()).collect();
     Json(result).into_response()
 }
@@ -293,6 +289,7 @@ async fn reload_acl_handler(State(state): State<AppState>, client_ip: ClientAddr
     }
 }
 
+#[allow(clippy::result_large_err)]
 fn load_proxy_config_override(state: &AppState) -> Result<Option<Arc<ProxyConfig>>, Response> {
     let Some(path) = state.config_path.as_ref() else {
         return Ok(None);
@@ -534,8 +531,8 @@ async fn query_sipflow_flow(
     let mut end_time = params.end.and_then(|s| parse_datetime(&s));
 
     // Try to get time range from call record if not provided
-    if start_time.is_none() || end_time.is_none() {
-        if let Ok(Some(record)) = CallRecordEntity::find()
+    if (start_time.is_none() || end_time.is_none())
+        && let Ok(Some(record)) = CallRecordEntity::find()
             .filter(CallRecordColumn::CallId.eq(&call_id))
             .one(state.db())
             .await
@@ -555,10 +552,9 @@ async fn query_sipflow_flow(
                 );
             }
         }
-    }
 
     let start_time = start_time.unwrap_or_else(|| now - chrono::Duration::hours(1));
-    let end_time = end_time.unwrap_or_else(|| now);
+    let end_time = end_time.unwrap_or(now);
 
     match backend.query_flow(&call_id, start_time, end_time).await {
         Ok(items) => {
@@ -646,8 +642,8 @@ async fn query_sipflow_media(
     let mut end_time = params.end.and_then(|s| parse_datetime(&s));
 
     // Try to get time range from call record if not provided
-    if start_time.is_none() || end_time.is_none() {
-        if let Ok(Some(record)) = CallRecordEntity::find()
+    if (start_time.is_none() || end_time.is_none())
+        && let Ok(Some(record)) = CallRecordEntity::find()
             .filter(CallRecordColumn::CallId.eq(&call_id))
             .one(state.db())
             .await
@@ -667,10 +663,9 @@ async fn query_sipflow_media(
                 );
             }
         }
-    }
 
     let start_time = start_time.unwrap_or_else(|| now - chrono::Duration::hours(1));
-    let end_time = end_time.unwrap_or_else(|| now);
+    let end_time = end_time.unwrap_or(now);
 
     match backend.query_media(&call_id, start_time, end_time).await {
         Ok(data) => {
@@ -713,11 +708,10 @@ fn parse_datetime(s: &str) -> Option<chrono::DateTime<chrono::Local>> {
     }
 
     // Try Unix timestamp
-    if let Ok(ts) = s.parse::<i64>() {
-        if let Some(dt) = chrono::Local.timestamp_opt(ts, 0).single() {
+    if let Ok(ts) = s.parse::<i64>()
+        && let Some(dt) = chrono::Local.timestamp_opt(ts, 0).single() {
             return Some(dt);
         }
-    }
 
     None
 }

@@ -151,7 +151,7 @@ impl QueueConfig {
             }),
             fallback: self.fallback.as_ref().map(|f| f.to_fallback_action()),
             dial_strategy: Some(self.strategy.to_dial_strategy()?),
-            ring_timeout: self.ring_timeout_secs.map(|s| Duration::from_secs(s)),
+            ring_timeout: self.ring_timeout_secs.map(Duration::from_secs),
             label: self.name.clone(),
             retry_codes: None,
             no_trying_timeout: None,
@@ -210,11 +210,10 @@ impl QueueConfig {
         }
 
         // Validate hold music file if configured
-        if let Some(hold) = &self.hold {
-            if hold.audio_file.is_empty() {
+        if let Some(hold) = &self.hold
+            && hold.audio_file.is_empty() {
                 return Err(anyhow!("Hold music audio_file cannot be empty"));
             }
-        }
 
         // Validate fallback
         if let Some(fallback) = &self.fallback {

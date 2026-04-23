@@ -166,7 +166,7 @@ impl FileAudioSource {
         let temp_dir = std::env::temp_dir();
         let file_name = url
             .split('/')
-            .last()
+            .next_back()
             .unwrap_or("audio_file")
             .split('?')
             .next()
@@ -225,12 +225,11 @@ impl AudioSource for FileAudioSource {
             return 0;
         }
 
-        if self.eof_reached {
-            if let Err(e) = self.reset() {
+        if self.eof_reached
+            && let Err(e) = self.reset() {
                 warn!("Failed to reset file source: {}", e);
                 return 0;
             }
-        }
 
         if let Some(ref mut reader) = self.wav_reader {
             let mut samples_read = 0;
@@ -447,10 +446,7 @@ impl AudioSource for ResamplingAudioSource {
             // The old code used `buffer.len()` which is the *target* size — when
             // upsampling (e.g. 8 kHz → 44.1 kHz) that drastically under-reads the
             // source.  Use ceiling division to avoid off-by-one shortfalls.
-            let needed_source = ((buffer.len() as u64 * self.source_sample_rate as u64
-                + self.target_sample_rate as u64
-                - 1)
-                / self.target_sample_rate as u64) as usize;
+            let needed_source = (buffer.len() as u64 * self.source_sample_rate as u64).div_ceil(self.target_sample_rate as u64) as usize;
 
             self.intermediate_buffer.resize(needed_source, 0);
             let read = self.source.read_samples(&mut self.intermediate_buffer);

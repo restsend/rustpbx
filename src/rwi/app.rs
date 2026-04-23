@@ -154,8 +154,8 @@ impl CallApp for RwiApp {
         controller: &mut CallController,
         context: &ApplicationContext,
     ) -> anyhow::Result<AppAction> {
-        if self.interrupt_on_dtmf {
-            if let Some(track_id) = self.current_track_id.take() {
+        if self.interrupt_on_dtmf
+            && let Some(track_id) = self.current_track_id.take() {
                 controller.stop_audio().await.ok();
                 self.interrupt_on_dtmf = false;
                 self.send_event(RwiEvent::MediaPlayFinished {
@@ -165,7 +165,6 @@ impl CallApp for RwiApp {
                 })
                 .await;
             }
-        }
 
         self.send_event(RwiEvent::Dtmf {
             call_id: context.call_info.session_id.clone(),

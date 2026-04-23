@@ -294,7 +294,7 @@ pub fn write_wav_header<W: Write + Seek>(
         Some(CodecType::G722) => {
             let bps = 0; // Often 0 for compressed
             let br = 8000 * channels as u32; // 64kbps per channel
-            let ba = 1 * channels;
+            let ba = channels;
             (bps, br, ba)
         }
         _ => {
@@ -388,10 +388,10 @@ pub(crate) fn generate_wav_from_packets_with_leg_map_ex(
     });
     let has_pcmu = legs_codecs
         .values()
-        .any(|s| s.iter().any(|c| *c == CodecType::PCMU));
+        .any(|s| s.contains(&CodecType::PCMU));
     let has_pcma = legs_codecs
         .values()
-        .any(|s| s.iter().any(|c| *c == CodecType::PCMA));
+        .any(|s| s.contains(&CodecType::PCMA));
 
     // If force_pcm is true, always output PCM format (for ASR compatibility)
     let (target_codec, target_sample_rate) = if force_pcm {
@@ -410,7 +410,7 @@ pub(crate) fn generate_wav_from_packets_with_leg_map_ex(
         target_sample_rate
     );
     let ptime_ms = 20;
-    let step_samples = (target_sample_rate * ptime_ms / 1000) as u32;
+    let step_samples = target_sample_rate * ptime_ms / 1000 ;
     let bytes_per_chunk = match target_codec {
         Some(CodecType::PCMU) | Some(CodecType::PCMA) => step_samples as usize,
         None => (step_samples * 2) as usize,
@@ -456,7 +456,7 @@ pub(crate) fn generate_wav_from_packets_with_leg_map_ex(
 
         let base = *base_timestamps.entry(*leg).or_insert(*ts);
         let rtp_diff = ts.wrapping_sub(base);
-        let target_timestamp = (rtp_diff as u64 * target_sample_rate as u64 / clock_rate) as u32;
+        let target_timestamp = (rtp_diff * target_sample_rate as u64 / clock_rate) as u32;
 
         if codec == CodecType::TelephoneEvent {
             if let Some((digit, duration_ms)) = parse_dtmf_payload(payload, descriptor.clock_rate) {
@@ -488,9 +488,8 @@ pub(crate) fn generate_wav_from_packets_with_leg_map_ex(
         // Decoding logic...
         let decoder_needed = target_codec.is_none();
 
-        let processed_data: Vec<u8>;
         // ... (existing decoding code)
-        if decoder_needed {
+        let processed_data: Vec<u8> = if decoder_needed {
             let decoder = decoders
                 .entry((*leg, pt))
                 .or_insert_with(|| create_decoder(codec));
@@ -507,10 +506,10 @@ pub(crate) fn generate_wav_from_packets_with_leg_map_ex(
             };
 
             // Target is L16 (None)
-            processed_data = audio_codec::samples_to_bytes(&final_samples);
+            audio_codec::samples_to_bytes(&final_samples)
         } else {
-            processed_data = payload.to_vec();
-        }
+            payload.to_vec()
+        };
 
         if *leg == 1 {
             buffer_b.insert(target_timestamp, processed_data);

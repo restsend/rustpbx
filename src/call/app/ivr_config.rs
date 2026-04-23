@@ -448,32 +448,29 @@ impl IvrDefinition {
         menus: &HashMap<String, MenuNode>,
     ) -> Result<(), String> {
         for entry in &menu.entries {
-            if let EntryAction::Menu { menu: ref target } = entry.action {
-                if target != "root" && !menus.contains_key(target) {
+            if let EntryAction::Menu { menu: ref target } = entry.action
+                && target != "root" && !menus.contains_key(target) {
                     return Err(format!(
                         "menu '{}' entry key '{}' references unknown menu '{}'",
                         menu_key, entry.key, target
                     ));
                 }
-            }
         }
         // Also check timeout_action and max_retries_action
-        if let Some(EntryAction::Menu { menu: ref target }) = menu.timeout_action {
-            if target != "root" && !menus.contains_key(target) {
+        if let Some(EntryAction::Menu { menu: ref target }) = menu.timeout_action
+            && target != "root" && !menus.contains_key(target) {
                 return Err(format!(
                     "menu '{}' timeout_action references unknown menu '{}'",
                     menu_key, target
                 ));
             }
-        }
-        if let Some(EntryAction::Menu { menu: ref target }) = menu.max_retries_action {
-            if target != "root" && !menus.contains_key(target) {
+        if let Some(EntryAction::Menu { menu: ref target }) = menu.max_retries_action
+            && target != "root" && !menus.contains_key(target) {
                 return Err(format!(
                     "menu '{}' max_retries_action references unknown menu '{}'",
                     menu_key, target
                 ));
             }
-        }
         Ok(())
     }
 }

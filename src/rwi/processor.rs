@@ -1,6 +1,7 @@
 use crate::call::domain::{CallCommand, LegId};
 
 use crate::call::runtime::ConferenceManager;
+use crate::call::runtime::conference_media_bridge::{AudioReceiver, PcmAudioFrame};
 use crate::media;
 use crate::media::Track as MediaTrackTrait;
 use crate::proxy::active_call_registry::ActiveProxyCallRegistry;
@@ -24,6 +25,21 @@ use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 use tracing::{info, warn};
 use uuid::Uuid;
+
+/// Audio receiver for originated calls to bridge into conference
+struct OriginateAudioReceiver;
+
+impl AudioReceiver for OriginateAudioReceiver {
+    fn recv(
+        &mut self,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<PcmAudioFrame>> + Send + '_>> {
+        Box::pin(async move {
+            // For now, return silence. In a full implementation, we'd decode RTP from the peer
+            // This is a simplified version for supervisor listen mode
+            Some(PcmAudioFrame::new(vec![0i16; 160], 8000))
+        })
+    }
+}
 
 #[derive(Clone, Debug)]
 #[allow(dead_code)]
@@ -54,11 +70,10 @@ impl CommandDeduplicationCache {
 
     async fn is_duplicate(&self, action_id: &str) -> bool {
         let entries = self.entries.read().await;
-        if let Some(entry) = entries.get(action_id) {
-            if entry.received_at.elapsed() < self.ttl {
+        if let Some(entry) = entries.get(action_id)
+            && entry.received_at.elapsed() < self.ttl {
                 return true;
             }
-        }
         false
     }
 
@@ -488,8 +503,8 @@ impl RwiCommandProcessor {
             _ => {}
         }
 
-        if let Some(call_id) = self.extract_call_id(&command) {
-            if let Some(result) = self.dispatch_unified_command(&call_id, command.clone()) {
+        if let Some(call_id) = self.extract_call_id(&command)
+            && let Some(result) = self.dispatch_unified_command(&call_id, command.clone()) {
                 tracing::debug!(
                     call_id = %call_id,
                     "Command handled via unified session runtime"
@@ -516,7 +531,6 @@ impl RwiCommandProcessor {
                 }
                 return result;
             }
-        }
 
         match &command {
             RwiCommandPayload::ListCalls => {
@@ -840,7 +854,7 @@ impl RwiCommandProcessor {
         let mut headers: Vec<rsipstack::sip::Header> =
             vec![rsipstack::sip::headers::MaxForwards::from(70u32).into()];
         for (k, v) in &req.extra_headers {
-            headers.push(rsipstack::sip::Header::Other(k.clone().into(), v.clone()));
+            headers.push(rsipstack::sip::Header::Other(k.clone(), v.clone()));
         }
 
         let external_ip = server
@@ -899,6 +913,7 @@ impl RwiCommandProcessor {
         let callee_display = req.destination.clone();
 
         let cancel_token = tokio_util::sync::CancellationToken::new();
+        let conference_manager = self.conference_manager.clone();
 
         tokio::spawn(async move {
             let (state_tx, mut state_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -939,6 +954,9 @@ impl RwiCommandProcessor {
             };
 
             let cmd_cancel = cancel_token.clone();
+            let cmd_call_id = call_id.clone();
+            let cmd_caller_peer = caller_peer.clone();
+            let cmd_conference_manager = conference_manager.clone();
             let cmd_task = tokio::spawn(async move {
                 loop {
                     tokio::select! {
@@ -948,6 +966,68 @@ impl RwiCommandProcessor {
                         }
                         Some(cmd) = cmd_rx.recv() => {
                             tracing::debug!(?cmd, "RWI originate command received");
+                            match cmd {
+                                CallCommand::JoinMixer { mixer_id } => {
+                                    tracing::info!(%cmd_call_id, %mixer_id, "Joining conference from originate task");
+                                    // Bridge the caller_peer to the conference
+                                    let conf_id_obj = crate::call::runtime::ConferenceId::from(mixer_id.as_str());
+                                    let participant_leg = LegId::new(format!("{}-callee", cmd_call_id));
+                                    
+                                    // Add participant to conference
+                                    if let Err(e) = cmd_conference_manager.add_participant(&conf_id_obj, participant_leg.clone()).await {
+                                        tracing::warn!(%cmd_call_id, %mixer_id, error = %e, "Failed to add participant to conference");
+                                        continue;
+                                    }
+                                    
+                                    // Start conference media bridge
+                                    let bridge = crate::call::runtime::ConferenceMediaBridge::new(cmd_conference_manager.clone());
+                                    
+                                    // Create audio sender
+                                    use rustrtc::media::track::sample_track;
+                                    use rustrtc::media::MediaKind;
+                                    use rustrtc::RtpCodecParameters;
+                                    
+                                    let (audio_sender, track, _feedback_rx) = sample_track(MediaKind::Audio, 100);
+                                    
+                                    // Get peer connection from caller_peer
+                                    let tracks = cmd_caller_peer.get_tracks().await;
+                                    if let Some(first_track) = tracks.first() {
+                                        let guard = first_track.lock().await;
+                                        if let Some(pc) = guard.get_peer_connection().await {
+                                            let params = RtpCodecParameters {
+                                                payload_type: 0, // PCMU
+                                                clock_rate: 8000,
+                                                channels: 1,
+                                            };
+                                            
+                                            if let Err(e) = pc.add_track(track, params) {
+                                                tracing::warn!(%cmd_call_id, error = %e, "Failed to add conference track");
+                                            }
+                                        }
+                                    }
+                                    
+                                    let (tx, mut rx) = tokio::sync::mpsc::channel::<rustrtc::media::MediaSample>(100);
+                                    tokio::spawn(async move {
+                                        while let Some(sample) = rx.recv().await {
+                                            if audio_sender.send(sample).await.is_err() {
+                                                break;
+                                            }
+                                        }
+                                    });
+                                    
+                                    // Create audio receiver from caller_peer
+                                    let audio_receiver = Box::new(OriginateAudioReceiver);
+                                    
+                                    if let Err(e) = bridge.start_bridge_full_duplex(&mixer_id, &participant_leg, tx, audio_receiver).await {
+                                        tracing::warn!(%cmd_call_id, %mixer_id, error = %e, "Failed to start conference bridge");
+                                    } else {
+                                        tracing::info!(%cmd_call_id, %mixer_id, "Successfully joined conference from originate");
+                                    }
+                                }
+                                _ => {
+                                    tracing::debug!(?cmd, "Unhandled command in originate task");
+                                }
+                            }
                         }
                         else => {
 
@@ -1168,9 +1248,8 @@ impl RwiCommandProcessor {
 
         let cancel_token = tokio_util::sync::CancellationToken::new();
 
-        let mut futures: Vec<
-            Pin<Box<dyn Future<Output = Result<(usize, String), (usize, String)>> + Send>>,
-        > = Vec::new();
+        type OriginateFuture = Pin<Box<dyn Future<Output = Result<(usize, String), (usize, String)>> + Send>>;
+        let mut futures: Vec<OriginateFuture> = Vec::new();
 
         for (idx, target) in targets.iter().enumerate() {
             let server = server.clone();
@@ -1368,7 +1447,7 @@ impl RwiCommandProcessor {
         let mut headers: Vec<rsipstack::sip::Header> =
             vec![rsipstack::sip::headers::MaxForwards::from(70u32).into()];
         for (k, v) in extra_headers {
-            headers.push(rsipstack::sip::Header::Other(k.into(), v));
+            headers.push(rsipstack::sip::Header::Other(k, v));
         }
 
         let invite_option = rsipstack::dialog::invitation::InviteOption {
@@ -1426,15 +1505,12 @@ impl RwiCommandProcessor {
                             return res;
                         }
                         state = state_rx.recv() => {
-                            match state {
-                                Some(rsipstack::dialog::dialog::DialogState::Calling(_)) => {
-                                    let gw = gateway.read().await;
-                                    gw.send_event_to_call_owner(
-                                        &call_id,
-                                        &crate::rwi::proto::RwiEvent::CallRinging { call_id: call_id.clone() },
-                                    );
-                                }
-                                _ => {}
+                            if let Some(rsipstack::dialog::dialog::DialogState::Calling(_)) = state {
+                                let gw = gateway.read().await;
+                                gw.send_event_to_call_owner(
+                                    &call_id,
+                                    &crate::rwi::proto::RwiEvent::CallRinging { call_id: call_id.clone() },
+                                );
                             }
                         }
                     }
@@ -2223,13 +2299,12 @@ impl RwiCommandProcessor {
     ) -> Result<CommandResult, CommandError> {
         let conf_id = req.conf_id.clone();
 
-        if req.backend == "external" {
-            if req.mcu_uri.is_none() {
+        if req.backend == "external"
+            && req.mcu_uri.is_none() {
                 return Err(CommandError::CommandFailed(
                     "external backend requires mcu_uri".to_string(),
                 ));
             }
-        }
 
         let manager = self.conference_manager();
         let max_participants = req.max_members.map(|m| m as usize);
@@ -2509,8 +2584,8 @@ impl RwiCommandProcessor {
                 gw.broadcast_event(&joined_event);
                 drop(gw);
 
-                if old_was_member {
-                    if let Ok(handle) = self.get_handle(old_call_id).await {
+                if old_was_member
+                    && let Ok(handle) = self.get_handle(old_call_id).await {
                         let _ = handle.send_command(CallCommand::Hangup(
                             crate::call::domain::HangupCommand::local(
                                 "conference_seat_replace",
@@ -2519,7 +2594,6 @@ impl RwiCommandProcessor {
                             ),
                         ));
                     }
-                }
 
                 let success_event = RwiEvent::ConferenceSeatReplaceSucceeded {
                     conf_id: conf_id.to_string(),
@@ -3046,7 +3120,7 @@ mod tests {
         direction: DialDirection,
     ) -> (
         crate::proxy::proxy_call::sip_session::SipSessionHandle,
-        tokio::sync::mpsc::UnboundedReceiver<crate::call::domain::CallCommand>,
+        crate::call::domain::CallCommandRx,
     ) {
         use crate::call::runtime::SessionId;
         use crate::proxy::proxy_call::sip_session::SipSession;

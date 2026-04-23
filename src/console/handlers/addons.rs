@@ -185,12 +185,11 @@ pub async fn toggle_addon(
         // Add if not exists
         let mut exists = false;
         for i in 0..addons_array.len() {
-            if let Some(s) = addons_array.get(i).and_then(|v| v.as_str()) {
-                if s == payload.id {
+            if let Some(s) = addons_array.get(i).and_then(|v| v.as_str())
+                && s == payload.id {
                     exists = true;
                     break;
                 }
-            }
         }
         if !exists {
             addons_array.push(payload.id);
@@ -199,12 +198,11 @@ pub async fn toggle_addon(
         // Remove if exists
         let mut index_to_remove = None;
         for i in 0..addons_array.len() {
-            if let Some(s) = addons_array.get(i).and_then(|v| v.as_str()) {
-                if s == payload.id {
+            if let Some(s) = addons_array.get(i).and_then(|v| v.as_str())
+                && s == payload.id {
                     index_to_remove = Some(i);
                     break;
                 }
-            }
         }
         if let Some(idx) = index_to_remove {
             addons_array.remove(idx);
@@ -302,6 +300,7 @@ pub async fn detail(
     }
 }
 
+#[allow(clippy::result_large_err)]
 pub(super) fn get_config_path(state: &ConsoleState) -> Result<String, Response> {
     let Some(app_state) = state.app_state() else {
         return Err(json_error(
@@ -318,6 +317,7 @@ pub(super) fn get_config_path(state: &ConsoleState) -> Result<String, Response> 
     Ok(path)
 }
 
+#[allow(clippy::result_large_err)]
 pub(super) fn load_document(path: &str) -> Result<DocumentMut, Response> {
     let contents = match fs::read_to_string(path) {
         Ok(raw) => raw,
@@ -337,6 +337,7 @@ pub(super) fn load_document(path: &str) -> Result<DocumentMut, Response> {
     })
 }
 
+#[allow(clippy::result_large_err)]
 pub(super) fn persist_document(path: &str, contents: String) -> Result<(), Response> {
     fs::write(path, contents).map_err(|err| {
         json_error(
@@ -346,6 +347,7 @@ pub(super) fn persist_document(path: &str, contents: String) -> Result<(), Respo
     })
 }
 
+#[allow(clippy::result_large_err)]
 pub(super) fn parse_config_from_str(contents: &str) -> Result<Config, Response> {
     toml::from_str::<Config>(contents).map_err(|err| {
         json_error(
@@ -356,10 +358,20 @@ pub(super) fn parse_config_from_str(contents: &str) -> Result<Config, Response> 
 }
 
 fn ensure_table_mut<'doc>(doc: &'doc mut DocumentMut, key: &str) -> &'doc mut Table {
-    if !doc[key].is_table() {
-        doc[key] = Item::Table(Table::new());
+    let needs_init = doc
+        .as_table()
+        .get(key)
+        .map(|item| !item.is_table())
+        .unwrap_or(true);
+
+    if needs_init {
+        doc.insert(key, Item::Table(Table::new()));
     }
-    doc[key].as_table_mut().expect("table")
+
+    doc.as_table_mut()
+        .get_mut(key)
+        .and_then(Item::as_table_mut)
+        .expect("table")
 }
 
 pub(super) fn json_error(status: StatusCode, message: impl Into<String>) -> Response {

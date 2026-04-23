@@ -40,28 +40,21 @@ impl DialogStateReceiverGuard {
     }
 
     fn take_dialog(&mut self) -> Option<Dialog> {
-        let id = match self.dialog_id.take() {
-            Some(id) => id,
-            None => return None,
-        };
+        let id = self.dialog_id.take()?;
 
-        match self.dialog_layer.get_dialog(&id) {
-            Some(dialog) => {
-                info!(%id, "dialog removed on  drop");
-                self.dialog_layer.remove_dialog(&id);
-                return Some(dialog);
-            }
-            _ => {}
+        if let Some(dialog) = self.dialog_layer.get_dialog(&id) {
+            info!(%id, "dialog removed on  drop");
+            self.dialog_layer.remove_dialog(&id);
+            return Some(dialog);
         }
         None
     }
 
     pub async fn drop_async(&mut self) {
-        if let Some(dialog) = self.take_dialog() {
-            if let Err(e) = dialog.hangup().await {
+        if let Some(dialog) = self.take_dialog()
+            && let Err(e) = dialog.hangup().await {
                 warn!(id=%dialog.id(), "error hanging up dialog on drop: {}", e);
             }
-        }
     }
 }
 

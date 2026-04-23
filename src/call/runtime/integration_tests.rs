@@ -349,6 +349,5 @@ mod tests {
     #[test]
     fn sip_session_is_default() {
         // SipSession is the default and only session type
-        assert!(true);
     }
 }

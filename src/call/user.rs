@@ -53,12 +53,12 @@ pub struct SipUser {
     pub is_support_webrtc: bool,
 }
 
-impl ToString for SipUser {
-    fn to_string(&self) -> String {
+impl std::fmt::Display for SipUser {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if let Some(realm) = &self.realm {
-            format!("{}@{}", self.username, realm)
+            write!(f, "{}@{}", self.username, realm)
         } else {
-            self.username.clone()
+            write!(f, "{}", self.username)
         }
     }
 }
@@ -318,6 +318,36 @@ impl TryFrom<&Transaction> for SipUser {
     }
 }
 
+pub fn check_authorization_headers(
+    req: &rsipstack::sip::Request,
+) -> Result<Option<(SipUser, Authorization)>> {
+    // First try Authorization header (for backward compatibility with existing tests)
+    if let Some(auth_header) = rsipstack::sip_header_opt!(req.headers.iter(), Header::Authorization)
+    {
+        let challenge = Authorization::parse(auth_header.value())?;
+        let user = SipUser {
+            username: challenge.username.to_string(),
+            realm: Some(challenge.realm.to_string()),
+            ..Default::default()
+        };
+        return Ok(Some((user, challenge)));
+    }
+    // Then try Proxy-Authorization header
+    if let Some(proxy_auth_header) =
+        rsipstack::sip_header_opt!(req.headers.iter(), Header::ProxyAuthorization)
+    {
+        let challenge = Authorization::parse(proxy_auth_header.value())?;
+        let user = SipUser {
+            username: challenge.username.to_string(),
+            realm: Some(challenge.realm.to_string()),
+            ..Default::default()
+        };
+        return Ok(Some((user, challenge)));
+    }
+
+    Ok(None)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -384,34 +414,4 @@ mod tests {
         primary.merge_with(&secondary);
         assert!(!primary.voicemail_disabled);
     }
-}
-
-pub fn check_authorization_headers(
-    req: &rsipstack::sip::Request,
-) -> Result<Option<(SipUser, Authorization)>> {
-    // First try Authorization header (for backward compatibility with existing tests)
-    if let Some(auth_header) = rsipstack::sip_header_opt!(req.headers.iter(), Header::Authorization)
-    {
-        let challenge = Authorization::parse(auth_header.value())?;
-        let user = SipUser {
-            username: challenge.username.to_string(),
-            realm: Some(challenge.realm.to_string()),
-            ..Default::default()
-        };
-        return Ok(Some((user, challenge)));
-    }
-    // Then try Proxy-Authorization header
-    if let Some(proxy_auth_header) =
-        rsipstack::sip_header_opt!(req.headers.iter(), Header::ProxyAuthorization)
-    {
-        let challenge = Authorization::parse(proxy_auth_header.value())?;
-        let user = SipUser {
-            username: challenge.username.to_string(),
-            realm: Some(challenge.realm.to_string()),
-            ..Default::default()
-        };
-        return Ok(Some((user, challenge)));
-    }
-
-    Ok(None)
 }

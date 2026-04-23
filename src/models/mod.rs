@@ -9,6 +9,7 @@ pub mod add_sip_trunk_register_columns;
 pub mod add_sip_trunk_rewrite_hostport;
 pub mod add_user_mfa_columns;
 pub mod call_record;
+
 pub mod call_record_dashboard_index;
 pub mod call_record_from_number_index;
 pub mod call_record_indices;
@@ -25,7 +26,6 @@ pub mod routing;
 pub mod sip_trunk;
 pub mod system_notification;
 pub mod user;
-pub mod wholesale_agent;
 
 pub fn prepare_sqlite_database(database_url: &str) -> Result<()> {
     let Some(path_part) = database_url.strip_prefix("sqlite://") else {
@@ -38,8 +38,8 @@ pub fn prepare_sqlite_database(database_url: &str) -> Result<()> {
     }
 
     let path = std::path::Path::new(path_str);
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent).with_context(|| {
                 format!(
                     "failed to create directory for console database at {}",
@@ -47,11 +47,11 @@ pub fn prepare_sqlite_database(database_url: &str) -> Result<()> {
                 )
             })?;
         }
-    }
 
     if !path.exists() {
         std::fs::OpenOptions::new()
             .create(true)
+            .truncate(true)
             .write(true)
             .open(path)
             .with_context(|| {
@@ -100,10 +100,23 @@ pub async fn create_db(database_url: &str) -> Result<DatabaseConnection> {
             anyhow::anyhow!(msg)
         })?;
 
-    migration::Migrator::up(&db, None).await.map_err(|e| {
-        tracing::error!("failed to run database migrations on {:?}", e);
-        let msg = format!("failed to run database migrations on {database_url}: {e}");
-        anyhow::anyhow!(msg)
-    })?;
+    if let Err(e) = migration::Migrator::up(&db, None).await {
+        let msg = e.to_string();
+        // sea-orm errors when a migration version exists in the tracking table but no
+        // corresponding MigrationTrait is registered (e.g. after moving a migration to
+        // an addon-specific migrator). These rows are already applied and their tables
+        // exist, so it is safe to ignore the error and proceed.
+        if msg.contains("is missing, this migration has been applied but its file is missing") {
+            tracing::warn!(
+                "some previously-applied migrations are no longer registered in the core \
+                 migrator (likely moved to an addon); skipping: {msg}"
+            );
+        } else {
+            tracing::error!("failed to run database migrations on {:?}", e);
+            return Err(anyhow::anyhow!(
+                "failed to run database migrations on {database_url}: {e}"
+            ));
+        }
+    }
     Ok(db)
 }

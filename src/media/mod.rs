@@ -16,6 +16,8 @@ pub use transcoder::Transcoder;
 
 use crate::media::recorder::RecorderOption;
 
+pub type TrackMap = HashMap<String, Arc<AsyncMutex<Box<dyn Track>>>>;
+
 pub mod audio_source;
 pub mod bridge;
 #[cfg(test)]
@@ -30,6 +32,7 @@ pub mod mixer_registry;
 pub mod negotiate;
 pub mod sdp_bridge;
 pub mod transcoder;
+pub mod transcoding_pipeline;
 #[cfg(test)]
 mod unified_pc_tests;
 pub mod wav_writer;
@@ -124,6 +127,12 @@ pub struct MediaStreamBuilder {
     recorder_option: Option<RecorderOption>,
 }
 
+impl Default for MediaStreamBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl MediaStreamBuilder {
     pub fn new() -> Self {
         Self {
@@ -151,7 +160,7 @@ impl MediaStreamBuilder {
     pub fn build(self) -> MediaStream {
         MediaStream {
             id: self.id.unwrap_or_else(|| "media-stream".to_string()),
-            cancel_token: self.cancel_token.unwrap_or_else(CancellationToken::new),
+            cancel_token: self.cancel_token.unwrap_or_default(),
             tracks: Mutex::new(HashMap::new()),
             recorder_option: self.recorder_option,
         }
@@ -161,7 +170,7 @@ impl MediaStreamBuilder {
 pub struct MediaStream {
     pub id: String,
     pub cancel_token: CancellationToken,
-    tracks: Mutex<HashMap<String, Arc<AsyncMutex<Box<dyn Track>>>>>,
+    tracks: Mutex<TrackMap>,
     pub recorder_option: Option<RecorderOption>,
 }
 
@@ -299,13 +308,14 @@ impl RtcTrack {
         let _ = pc.add_track(audio_track, audio_params);
 
         // Add video track for each video capability
-        for (_idx, video_cap) in video_capabilities.iter().enumerate() {
+        for video_cap in video_capabilities.iter() {
             let (_, video_track, _) =
                 rustrtc::media::track::sample_track(rustrtc::media::MediaKind::Video, 100);
-            let mut video_params = RtpCodecParameters::default();
-            video_params.payload_type = video_cap.payload_type;
-            video_params.clock_rate = video_cap.clock_rate;
-            video_params.channels = 0;
+            let video_params = RtpCodecParameters {
+                payload_type: video_cap.payload_type,
+                clock_rate: video_cap.clock_rate,
+                channels: 0,
+            };
             let _ = pc.add_track(video_track, video_params);
         }
 
@@ -324,8 +334,8 @@ impl RtcTrack {
     }
 
     async fn set_local(&self, pc: &PeerConnection, mut desc: SessionDescription) -> Result<String> {
-        if !self.rtp_map.is_empty() {
-            if let Some(section) = desc
+        if !self.rtp_map.is_empty()
+            && let Some(section) = desc
                 .media_sections
                 .iter_mut()
                 .find(|m| m.kind == MediaKind::Audio)
@@ -356,7 +366,6 @@ impl RtcTrack {
                     }
                 }
             }
-        }
         pc.set_local_description(desc)?;
         let desc = pc
             .local_description()
@@ -405,11 +414,10 @@ impl Track for RtcTrack {
             }
             Err(e) => {
                 let err_str = e.to_string();
-                if err_str.contains("HaveLocalOffer") {
-                    if let Some(desc) = self.pc.local_description() {
+                if err_str.contains("HaveLocalOffer")
+                    && let Some(desc) = self.pc.local_description() {
                         return Ok(desc.to_sdp_string());
                     }
-                }
                 Err(anyhow!(e))
             }
         }
@@ -494,7 +502,7 @@ impl RtpTrackBuilder {
             .map(|c| negotiate::CodecInfo {
                 payload_type: c.payload_type(),
                 clock_rate: c.clock_rate(),
-                channels: c.channels() as u16,
+                channels: c.channels(),
                 codec: c,
             })
             .collect(),
@@ -528,7 +536,7 @@ impl RtpTrackBuilder {
             .map(|c| negotiate::CodecInfo {
                 payload_type: c.payload_type(),
                 clock_rate: c.clock_rate(),
-                channels: c.channels() as u16,
+                channels: c.channels(),
                 codec: c,
             })
             .collect();
@@ -585,7 +593,7 @@ impl RtpTrackBuilder {
             negotiate::CodecInfo {
                 payload_type: codec.payload_type(),
                 clock_rate: codec.clock_rate(),
-                channels: codec.channels() as u16,
+                channels: codec.channels(),
                 codec,
             }
             .to_audio_capability()
@@ -817,7 +825,7 @@ impl FileTrack {
                 payload_type: codec.payload_type(),
                 codec,
                 clock_rate: codec.clock_rate(),
-                channels: codec.channels() as u16,
+                channels: codec.channels(),
             }
         });
         let codec = selected.codec;
@@ -868,10 +876,11 @@ impl FileTrack {
         let existing = transceivers.iter().find(|t| t.kind() == MediaKind::Audio);
 
         let ssrc = rand::random::<u32>();
-        let mut params = RtpCodecParameters::default();
-        params.payload_type = payload_type;
-        params.clock_rate = selected.clock_rate;
-        params.channels = selected.channels as u8;
+        let params = RtpCodecParameters {
+            payload_type,
+            clock_rate: selected.clock_rate,
+            channels: selected.channels as u8,
+        };
 
         if let Some(transceiver) = existing {
             let track_arc: Arc<dyn rustrtc::media::MediaStreamTrack> = track_target;
@@ -996,8 +1005,8 @@ impl Track for FileTrack {
 
         let mut offer = self.pc.create_offer().await?;
 
-        if !self.codec_preference.is_empty() {
-            if let Some(section) = offer
+        if !self.codec_preference.is_empty()
+            && let Some(section) = offer
                 .media_sections
                 .iter_mut()
                 .find(|m| m.kind == MediaKind::Audio)
@@ -1028,7 +1037,6 @@ impl Track for FileTrack {
                     }
                 }
             }
-        }
 
         self.pc.set_local_description(offer.clone())?;
         Ok(offer.to_sdp_string())

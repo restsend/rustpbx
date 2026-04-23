@@ -13,8 +13,14 @@
 //! 3. Media commands include capability-aware options
 
 use serde::{Deserialize, Serialize};
+use tokio::sync::mpsc;
 
 use super::{HangupCommand, LegId, MediaSource, RingbackPolicy};
+
+/// Type alias for CallCommand sender.
+pub type CallCommandTx = mpsc::UnboundedSender<CallCommand>;
+/// Type alias for CallCommand receiver.
+pub type CallCommandRx = mpsc::UnboundedReceiver<CallCommand>;
 
 /// Unified command for session control
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -64,6 +70,19 @@ pub enum CallCommand {
         leg_id: LegId,
     },
 
+    /// Bridge two legs from different sessions (cross-session P2P).
+    /// Used when downgrading from a conference to P2P after transfer completion.
+    BridgeCrossSession {
+        /// First session ID
+        session_a: String,
+        /// First leg ID within session_a
+        leg_a: LegId,
+        /// Second session ID
+        session_b: String,
+        /// Second leg ID within session_b
+        leg_b: LegId,
+    },
+
     /// Transfer a leg to a target (blind transfer)
     Transfer {
         /// The leg to transfer
@@ -84,6 +103,18 @@ pub enum CallCommand {
     TransferCancel {
         /// The consultation leg to hangup
         consult_leg: LegId,
+    },
+
+    /// Complete a cross-session attended transfer by migrating a leg into a conference.
+    /// This is used in the BC -> ABC conference flow where leg_c from session2
+    /// needs to be migrated into a conference that also includes legs from session1.
+    TransferCompleteCrossSession {
+        /// The session ID containing the leg to migrate
+        from_session: String,
+        /// The leg ID within from_session to migrate
+        leg_id: LegId,
+        /// The target conference ID to migrate the leg into
+        into_conference: String,
     },
 
     /// Place a leg on hold
@@ -141,34 +172,42 @@ pub enum CallCommand {
 
     /// Supervisor listen mode (monitoring only)
     SupervisorListen {
-        /// Supervisor's leg
+        /// Supervisor's leg (or supervisor session ID for cross-session monitoring)
         supervisor_leg: LegId,
         /// Target leg to monitor
         target_leg: LegId,
+        /// Optional supervisor session ID when monitoring from a different session
+        supervisor_session_id: Option<String>,
     },
 
     /// Supervisor whisper mode (can talk to agent only)
     SupervisorWhisper {
-        /// Supervisor's leg
+        /// Supervisor's leg (or supervisor session ID for cross-session monitoring)
         supervisor_leg: LegId,
         /// Target leg (agent)
         target_leg: LegId,
+        /// Optional supervisor session ID when monitoring from a different session
+        supervisor_session_id: Option<String>,
     },
 
     /// Supervisor barge mode (join conversation)
     SupervisorBarge {
-        /// Supervisor's leg
+        /// Supervisor's leg (or supervisor session ID for cross-session monitoring)
         supervisor_leg: LegId,
         /// Target leg (agent)
         target_leg: LegId,
+        /// Optional supervisor session ID when monitoring from a different session
+        supervisor_session_id: Option<String>,
     },
 
     /// Supervisor takeover mode (replace agent)
     SupervisorTakeover {
-        /// Supervisor's leg
+        /// Supervisor's leg (or supervisor session ID for cross-session monitoring)
         supervisor_leg: LegId,
         /// Target leg (agent to be replaced)
         target_leg: LegId,
+        /// Optional supervisor session ID when monitoring from a different session
+        supervisor_session_id: Option<String>,
     },
 
     /// Stop supervisor mode
@@ -318,8 +357,10 @@ pub enum CallCommand {
 /// Point-to-point bridge mode
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum P2PMode {
     /// Standard audio bridge
+    #[default]
     Audio,
     /// Video bridge
     Video,
@@ -327,11 +368,6 @@ pub enum P2PMode {
     AudioVideo,
 }
 
-impl Default for P2PMode {
-    fn default() -> Self {
-        Self::Audio
-    }
-}
 
 /// Audio playback options
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -4,6 +4,13 @@
 //! transfer notifications (e.g. REFER response/NOTIFY) up to the RWI
 //! transfer controller without introducing circular dependencies.
 
+use tokio::sync::mpsc;
+
+/// Type alias for ReferNotify event sender.
+pub type ReferNotifyTx = mpsc::UnboundedSender<ReferNotifyEvent>;
+/// Type alias for ReferNotify event receiver.
+pub type ReferNotifyRx = mpsc::UnboundedReceiver<ReferNotifyEvent>;
+
 /// Whether this event represents a synchronous REFER response or an
 /// asynchronous REFER subscription NOTIFY.
 #[derive(Debug, Clone)]

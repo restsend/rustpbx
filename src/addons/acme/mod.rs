@@ -1,6 +1,5 @@
 use crate::addons::{Addon, SidebarItem};
 use crate::app::AppState;
-use crate::config::AcmeConfig;
 use async_trait::async_trait;
 use axum::{
     Extension, Router,
@@ -10,6 +9,9 @@ use serde::Serialize;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use tokio::sync::RwLock as TokioRwLock;
+
+pub mod config;
+pub use config::AcmeConfig;
 
 mod handlers;
 
@@ -33,6 +35,12 @@ pub struct AcmeAddon {
     state: AcmeState,
 }
 
+impl Default for AcmeAddon {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl AcmeAddon {
     pub fn new() -> Self {
         Self {
@@ -44,15 +52,41 @@ impl AcmeAddon {
         }
     }
 
-    /// Load auto-renew configuration from AppState config
-    pub async fn load_config(&self, config: &crate::config::Config) {
-        if let Some(ref acme_config) = config.acme {
-            let mut auto_renew = self.state.auto_renew_config.write().await;
-            *auto_renew = acme_config.clone();
-            tracing::info!(
-                "ACME auto-renew config loaded: auto_renew={}",
-                acme_config.auto_renew
-            );
+    /// Load auto-renew configuration from addon-specific config file.
+    /// Tries `<config_dir>/acme.toml` first, falls back to defaults.
+    pub async fn load_config(&self, config_path: &Option<String>) {
+        let mut loaded = false;
+        if let Some(path) = config_path {
+            let config_dir = std::path::Path::new(path).parent();
+            if let Some(dir) = config_dir {
+                let addon_config_path = dir.join("acme.toml");
+                if addon_config_path.exists() {
+                    match tokio::fs::read_to_string(&addon_config_path).await {
+                        Ok(content) => {
+                            match toml::from_str::<AcmeConfig>(&content) {
+                                Ok(acme_config) => {
+                                    let mut auto_renew = self.state.auto_renew_config.write().await;
+                                    *auto_renew = acme_config;
+                                    loaded = true;
+                                    tracing::info!(
+                                        "ACME config loaded from {}",
+                                        addon_config_path.display()
+                                    );
+                                }
+                                Err(e) => {
+                                    tracing::warn!("Failed to parse acme.toml: {}", e);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!("Failed to read acme.toml: {}", e);
+                        }
+                    }
+                }
+            }
+        }
+        if !loaded {
+            tracing::info!("ACME using default configuration (no acme.toml found)");
         }
     }
 }
@@ -76,8 +110,8 @@ impl Addon for AcmeAddon {
         vec!["/static/acme/screenshot.png"]
     }
     async fn initialize(&self, state: AppState) -> anyhow::Result<()> {
-        // Load auto-renew configuration from config.toml
-        self.load_config(state.config()).await;
+        // Load auto-renew configuration from addon-specific config file
+        self.load_config(&state.config_path).await;
 
         // Spawn background task for certificate expiry checking
         let state_clone = self.state.clone();

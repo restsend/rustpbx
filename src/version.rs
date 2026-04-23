@@ -102,7 +102,6 @@ pub fn spawn_update_checker(
         debug!("Skipping update check in debug mode");
         let _ = db;
         let _ = token;
-        return;
     }
 
     #[cfg(not(debug_assertions))]

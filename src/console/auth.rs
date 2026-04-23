@@ -233,8 +233,8 @@ impl ConsoleState {
             None
         };
 
-        if let Some(app_state) = auth_app_state {
-            if let Ok(Some(user)) = app_state
+        if let Some(app_state) = auth_app_state
+            && let Ok(Some(user)) = app_state
                 .addon_registry
                 .authenticate_all(app_state.clone(), identifier, password)
                 .await
@@ -245,7 +245,6 @@ impl ConsoleState {
                 );
                 return Ok(Some(user));
             }
-        }
 
         let trimmed = identifier.trim();
         if trimmed.is_empty() {
@@ -335,18 +334,20 @@ impl ConsoleState {
             .to_string();
 
         let now = Utc::now();
-        let mut model = <UserActiveModel as Default>::default();
-        model.email = Set(email.to_string());
-        model.username = Set(username.to_string());
-        model.password_hash = Set(hashed);
-        model.created_at = Set(now);
-        model.updated_at = Set(now);
-        model.is_active = Set(true);
         let is_first_user = existing_users == 0;
-        model.is_staff = Set(is_first_user);
-        model.is_superuser = Set(is_first_user);
-        model.reset_token = Set(None);
-        model.reset_token_expires = Set(None);
+        let model = UserActiveModel {
+            email: Set(email.to_string()),
+            username: Set(username.to_string()),
+            password_hash: Set(hashed),
+            created_at: Set(now),
+            updated_at: Set(now),
+            is_active: Set(true),
+            is_staff: Set(is_first_user),
+            is_superuser: Set(is_first_user),
+            reset_token: Set(None),
+            reset_token_expires: Set(None),
+            ..Default::default()
+        };
 
         let created = model
             .insert(&tx)

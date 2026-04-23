@@ -47,6 +47,12 @@ pub struct CallRecordStats {
     pub avg: f64,
 }
 
+impl Default for CallRecordStats {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CallRecordStats {
     pub fn new() -> Self {
         Self {
@@ -142,13 +148,13 @@ impl Clone for CallRecord {
     fn clone(&self) -> Self {
         Self {
             call_id: self.call_id.clone(),
-            start_time: self.start_time.clone(),
-            ring_time: self.ring_time.clone(),
-            answer_time: self.answer_time.clone(),
-            end_time: self.end_time.clone(),
+            start_time: self.start_time,
+            ring_time: self.ring_time,
+            answer_time: self.answer_time,
+            end_time: self.end_time,
             caller: self.caller.clone(),
             callee: self.callee.clone(),
-            status_code: self.status_code.clone(),
+            status_code: self.status_code,
             hangup_reason: self.hangup_reason.clone(),
             hangup_messages: self.hangup_messages.clone(),
             recorder: self.recorder.clone(),
@@ -264,10 +270,10 @@ impl std::str::FromStr for CallRecordHangupReason {
             "refer" => Ok(Self::ByRefer),
             "system" => Ok(Self::BySystem),
             "autohangup" => Ok(Self::Autohangup),
-            "noAnswer" => Ok(Self::NoAnswer),
-            "noBalance" => Ok(Self::NoBalance),
-            "answerMachine" => Ok(Self::AnswerMachine),
-            "serverUnavailable" => Ok(Self::ServerUnavailable),
+            "noanswer" => Ok(Self::NoAnswer),
+            "nobalance" => Ok(Self::NoBalance),
+            "answermachine" => Ok(Self::AnswerMachine),
+            "serverunavailable" => Ok(Self::ServerUnavailable),
             "canceled" => Ok(Self::Canceled),
             "rejected" => Ok(Self::Rejected),
             "failed" => Ok(Self::Failed),
@@ -276,22 +282,22 @@ impl std::str::FromStr for CallRecordHangupReason {
     }
 }
 
-impl ToString for CallRecordHangupReason {
-    fn to_string(&self) -> String {
+impl std::fmt::Display for CallRecordHangupReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::ByCaller => "caller".to_string(),
-            Self::ByCallee => "callee".to_string(),
-            Self::ByRefer => "refer".to_string(),
-            Self::BySystem => "system".to_string(),
-            Self::Autohangup => "autohangup".to_string(),
-            Self::NoAnswer => "noAnswer".to_string(),
-            Self::NoBalance => "noBalance".to_string(),
-            Self::AnswerMachine => "answerMachine".to_string(),
-            Self::ServerUnavailable => "serverUnavailable".to_string(),
-            Self::Canceled => "canceled".to_string(),
-            Self::Rejected => "rejected".to_string(),
-            Self::Failed => "failed".to_string(),
-            Self::Other(s) => s.to_string(),
+            Self::ByCaller => write!(f, "caller"),
+            Self::ByCallee => write!(f, "callee"),
+            Self::ByRefer => write!(f, "refer"),
+            Self::BySystem => write!(f, "system"),
+            Self::Autohangup => write!(f, "autohangup"),
+            Self::NoAnswer => write!(f, "noAnswer"),
+            Self::NoBalance => write!(f, "noBalance"),
+            Self::AnswerMachine => write!(f, "answerMachine"),
+            Self::ServerUnavailable => write!(f, "serverUnavailable"),
+            Self::Canceled => write!(f, "canceled"),
+            Self::Rejected => write!(f, "rejected"),
+            Self::Failed => write!(f, "failed"),
+            Self::Other(s) => write!(f, "{}", s),
         }
     }
 }
@@ -345,11 +351,8 @@ pub async fn write_call_record_event<T: Serialize>(
         timestamp: crate::media::get_timestamp(),
         content,
     };
-    match serde_json::to_string(&event) {
-        Ok(line) => {
-            file.write_all(format!("{}\n", line).as_bytes()).await.ok();
-        }
-        Err(_) => {}
+    if let Ok(line) = serde_json::to_string(&event) {
+        file.write_all(format!("{}\n", line).as_bytes()).await.ok();
     }
 }
 
@@ -387,6 +390,7 @@ impl DefaultCallRecordFormatter {
         let root = match config {
             CallRecordConfig::Local { root } => root.clone(),
             CallRecordConfig::S3 { root, .. } => root.clone(),
+            CallRecordConfig::Database { .. } => "./config/cdr".to_string(),
             _ => "./config/cdr".to_string(),
         };
         Self { root }
@@ -462,6 +466,12 @@ pub struct CallRecordManagerBuilder {
     hooks: Vec<Box<dyn CallRecordHook>>,
 }
 
+impl Default for CallRecordManagerBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CallRecordManagerBuilder {
     pub fn new() -> Self {
         Self {
@@ -518,7 +528,7 @@ impl CallRecordManagerBuilder {
         match config.as_ref() {
             CallRecordConfig::Local { root } => {
                 if !Path::new(&root).exists() {
-                    match std::fs::create_dir_all(&root) {
+                    match std::fs::create_dir_all(root) {
                         Ok(_) => {
                             info!("CallRecordManager created directory: {}", root);
                         }
@@ -527,6 +537,9 @@ impl CallRecordManagerBuilder {
                         }
                     }
                 }
+            }
+            CallRecordConfig::Database { .. } => {
+                // Database backend doesn't need directory creation
             }
             _ => {}
         }
@@ -599,6 +612,12 @@ impl CallRecordManager {
                         &record,
                     )
                     .await
+                }
+                CallRecordConfig::Database {
+                    database_url,
+                    table_name,
+                } => {
+                    Self::save_to_database(database_url.clone(), table_name.clone(), &record).await
                 }
             };
             let file_name = match result {
@@ -713,14 +732,15 @@ impl CallRecordManager {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn save_with_s3_like(
         formatter: Arc<dyn CallRecordFormatter>,
         vendor: &S3Vendor,
-        bucket: &String,
-        region: &String,
-        access_key: &String,
-        secret_key: &String,
-        endpoint: &String,
+        bucket: &str,
+        region: &str,
+        access_key: &str,
+        secret_key: &str,
+        endpoint: &str,
         with_media: &Option<bool>,
         keep_media_copy: &Option<bool>,
         record: &CallRecord,
@@ -728,11 +748,11 @@ impl CallRecordManager {
         let start_time = Instant::now();
         let storage_config = crate::storage::StorageConfig::S3 {
             vendor: vendor.clone(),
-            bucket: bucket.clone(),
-            region: region.clone(),
-            access_key: access_key.clone(),
-            secret_key: secret_key.clone(),
-            endpoint: Some(endpoint.clone()),
+            bucket: bucket.to_string(),
+            region: region.to_string(),
+            access_key: access_key.to_string(),
+            secret_key: secret_key.to_string(),
+            endpoint: Some(endpoint.to_string()),
             prefix: None,
         };
         let storage = crate::storage::Storage::new(&storage_config)?;
@@ -809,6 +829,74 @@ impl CallRecordManager {
         ))
     }
 
+    async fn save_to_database(
+        database_url: Option<String>,
+        table_name: String,
+        record: &CallRecord,
+    ) -> Result<String> {
+        let db_url = database_url.unwrap_or_else(|| {
+            // Use global database_url from config
+            // This is a placeholder - in production you'd access the global config
+            "sqlite::memory:".to_string()
+        });
+        
+        let db = crate::models::connect_db(&db_url).await?;
+        
+        // Create table if not exists
+        let create_table_sql = format!(
+            r#"
+            CREATE TABLE IF NOT EXISTS {} (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                call_id TEXT NOT NULL,
+                caller TEXT NOT NULL,
+                callee TEXT NOT NULL,
+                start_time TEXT NOT NULL,
+                end_time TEXT NOT NULL,
+                status_code INTEGER,
+                hangup_reason TEXT,
+                details TEXT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+            "#,
+            table_name
+        );
+        
+        use sea_orm::ConnectionTrait;
+        db.execute(sea_orm::Statement::from_string(
+            db.get_database_backend(),
+            create_table_sql,
+        )).await?;
+        
+        // Insert record
+        let details_json = serde_json::to_string(&record.details)?;
+        let hangup_reason = record.hangup_reason.as_ref().map(|r| r.to_string());
+        
+        let insert_sql = format!(
+            r#"
+            INSERT INTO {} (call_id, caller, callee, start_time, end_time, status_code, hangup_reason, details)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            "#,
+            table_name
+        );
+        
+        db.execute(sea_orm::Statement::from_sql_and_values(
+            db.get_database_backend(),
+            insert_sql,
+            vec![
+                record.call_id.clone().into(),
+                record.caller.clone().into(),
+                record.callee.clone().into(),
+                record.start_time.to_rfc3339().into(),
+                record.end_time.to_rfc3339().into(),
+                (record.status_code as i32).into(),
+                hangup_reason.into(),
+                details_json.into(),
+            ],
+        )).await?;
+        
+        Ok(format!("database:{}/{}", db_url, record.call_id))
+    }
+
     pub async fn serve(&mut self) {
         let token = self.cancel_token.clone();
         info!("CallRecordManager serving");
@@ -824,7 +912,7 @@ impl CallRecordManager {
         loop {
             let limit = self.max_concurrent - futures.len();
             if limit == 0 {
-                if let Some(_) = futures.next().await {}
+                let _ = futures.next().await;
                 continue;
             }
             let mut buffer = Vec::with_capacity(limit);
@@ -857,7 +945,7 @@ impl CallRecordManager {
                     }
                 });
             }
-            while let Some(_) = futures.next().await {}
+            while futures.next().await.is_some() {}
         }
         Ok(())
     }

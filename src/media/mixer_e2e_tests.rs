@@ -42,7 +42,7 @@ mod mixer_e2e_tests {
         // Verify mixed output is reasonable
         assert_eq!(mixed.len(), 160);
         // The mixed samples should be bounded (not overflow)
-        assert!(mixed.iter().all(|&s| s >= i16::MIN && s <= i16::MAX));
+        assert!(mixed.iter().all(|&s| (i16::MIN..=i16::MAX).contains(&s)));
     }
 
     /// Test: Multiple inputs with different gains
@@ -62,7 +62,7 @@ mod mixer_e2e_tests {
         assert_eq!(result.len(), 160);
         // First two sources should contribute: 1000 + 500 = 1500
         // Third source contributes 0
-        assert!(result.iter().all(|&s| s >= 1400 && s <= 1600));
+        assert!(result.iter().all(|&s| (1400..=1600).contains(&s)));
     }
 
     /// Test: Supervisor mode routing - Listen mode
@@ -252,11 +252,11 @@ mod mixer_e2e_tests {
 
         // With 2.0 gain, should be 2000
         let result = mixer.mix_frames(vec![frame.clone()], &[2.0]);
-        assert!(result.iter().all(|&s| s >= 1900 && s <= 2100));
+        assert!(result.iter().all(|&s| (1900..=2100).contains(&s)));
 
         // With 0.5 gain, should be 500
         let result = mixer.mix_frames(vec![frame], &[0.5]);
-        assert!(result.iter().all(|&s| s >= 450 && s <= 550));
+        assert!(result.iter().all(|&s| (450..=550).contains(&s)));
     }
 
     /// Test: MixerInput and MixerOutput codec compatibility

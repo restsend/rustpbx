@@ -94,12 +94,12 @@ pub enum RecordingDirection {
 
 impl RecordingDirection {
     pub fn matches(&self, direction: &DialDirection) -> bool {
-        match (self, direction) {
-            (RecordingDirection::Inbound, DialDirection::Inbound) => true,
-            (RecordingDirection::Outbound, DialDirection::Outbound) => true,
-            (RecordingDirection::Internal, DialDirection::Internal) => true,
-            _ => false,
-        }
+        matches!(
+            (self, direction),
+            (RecordingDirection::Inbound, DialDirection::Inbound)
+                | (RecordingDirection::Outbound, DialDirection::Outbound)
+                | (RecordingDirection::Internal, DialDirection::Internal)
+        )
     }
 }
 
@@ -162,66 +162,6 @@ impl RecordingPolicy {
     }
 }
 
-/// Transfer configuration for RWI call transfer features
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct TransferConfig {
-    /// Enable SIP REFER transfer method
-    #[serde(default = "default_transfer_refer_enabled")]
-    pub refer_enabled: bool,
-    /// Enable attended transfer (consultation transfer)
-    #[serde(default = "default_transfer_attended_enabled")]
-    pub attended_enabled: bool,
-    /// Enable 3PCC fallback when REFER is not supported
-    #[serde(default = "default_transfer_3pcc_fallback_enabled")]
-    pub three_pcc_fallback_enabled: bool,
-    /// REFER timeout in seconds
-    #[serde(default = "default_transfer_refer_timeout_secs")]
-    pub refer_timeout_secs: u64,
-    /// 3PCC timeout in seconds
-    #[serde(default = "default_transfer_3pcc_timeout_secs")]
-    pub three_pcc_timeout_secs: u64,
-    /// Maximum concurrent transfers
-    #[serde(default = "default_transfer_max_concurrent")]
-    pub max_concurrent: usize,
-}
-
-fn default_transfer_refer_enabled() -> bool {
-    true
-}
-
-fn default_transfer_attended_enabled() -> bool {
-    true
-}
-
-fn default_transfer_3pcc_fallback_enabled() -> bool {
-    true
-}
-
-fn default_transfer_refer_timeout_secs() -> u64 {
-    30
-}
-
-fn default_transfer_3pcc_timeout_secs() -> u64 {
-    60
-}
-
-fn default_transfer_max_concurrent() -> usize {
-    1000
-}
-
-impl Default for TransferConfig {
-    fn default() -> Self {
-        Self {
-            refer_enabled: default_transfer_refer_enabled(),
-            attended_enabled: default_transfer_attended_enabled(),
-            three_pcc_fallback_enabled: default_transfer_3pcc_fallback_enabled(),
-            refer_timeout_secs: default_transfer_refer_timeout_secs(),
-            three_pcc_timeout_secs: default_transfer_3pcc_timeout_secs(),
-            max_concurrent: default_transfer_max_concurrent(),
-        }
-    }
-}
-
 #[derive(Debug, Deserialize, Serialize)]
 pub struct Config {
     #[serde(default = "default_config_http_addr")]
@@ -261,95 +201,47 @@ pub struct Config {
     #[serde(default)]
     pub recording: Option<RecordingPolicy>,
     #[serde(default)]
-    pub archive: Option<ArchiveConfig>,
-    #[serde(default)]
     pub demo_mode: bool,
-    #[serde(default)]
-    pub addons: HashMap<String, HashMap<String, String>>,
     #[serde(default)]
     pub storage: Option<StorageConfig>,
     #[serde(default)]
     pub sipflow: Option<SipFlowConfig>,
-    #[serde(default)]
-    pub metrics: Option<MetricsConfig>,
-    #[serde(default)]
-    pub enterprise_auth: Option<EnterpriseAuthConfig>,
-    #[serde(default)]
-    pub otel: Option<OtelConfig>,
     #[cfg(feature = "commerce")]
     #[serde(default)]
     pub licenses: Option<LicenseConfig>,
     #[serde(default)]
     pub rwi: Option<RwiConfig>,
-    /// ACME Let's Encrypt configuration for auto-certificate renewal
-    #[serde(default)]
-    pub acme: Option<AcmeConfig>,
-    /// Transfer configuration for call transfer features
-    #[serde(default)]
-    pub transfer: Option<TransferConfig>,
 }
 
-/// ACME Let's Encrypt configuration
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct AcmeConfig {
-    /// Enable automatic certificate renewal
-    #[serde(default)]
-    pub auto_renew: bool,
-    /// Hours before expiry to trigger renewal (default: 72 hours = 3 days)
-    #[serde(default = "default_acme_renewal_threshold_hours")]
-    pub renewal_threshold_hours: u64,
-    /// Automatically reload HTTPS after renewal
-    #[serde(default)]
-    pub renew_https: bool,
-    /// Automatically reload SIP TLS after renewal
-    #[serde(default)]
-    pub renew_sips: bool,
-    /// Domain to manage (if not set, will be inferred from existing certificates)
-    #[serde(default)]
-    pub domain: Option<String>,
+fn default_locale() -> String {
+    "en".to_string()
 }
 
-fn default_acme_renewal_threshold_hours() -> u64 {
-    72
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct LocaleInfo {
+    pub name: String,
+    pub native_name: String,
 }
 
-impl Default for AcmeConfig {
-    fn default() -> Self {
-        Self {
-            auto_renew: false,
-            renewal_threshold_hours: default_acme_renewal_threshold_hours(),
-            renew_https: true,
-            renew_sips: true,
-            domain: None,
-        }
-    }
+fn default_locales() -> std::collections::HashMap<String, LocaleInfo> {
+    let mut m = std::collections::HashMap::new();
+    m.insert(
+        "en".to_string(),
+        LocaleInfo {
+            name: "English".to_string(),
+            native_name: "English".to_string(),
+        },
+    );
+    m.insert(
+        "zh".to_string(),
+        LocaleInfo {
+            name: "Chinese".to_string(),
+            native_name: "中文".to_string(),
+        },
+    );
+    m
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct ArchiveConfig {
-    pub enabled: bool,
-    pub archive_time: String,
-    pub timezone: Option<String>,
-    pub retention_days: u32,
-    /// Archive records older than this many days. If 0, archives records from the previous day.
-    #[serde(default)]
-    pub archive_after_days: u32,
-    #[serde(default)]
-    pub archive_dir: Option<String>,
-}
-
-impl ArchiveConfig {
-    /// Returns the effective archive directory, deriving from recording path if not set.
-    pub fn effective_archive_dir(&self, recording_path: &str) -> String {
-        self.archive_dir
-            .as_ref()
-            .filter(|s| !s.trim().is_empty())
-            .cloned()
-            .unwrap_or_else(|| format!("{}/archive", recording_path.trim_end_matches('/')))
-    }
-}
-
-/// License configuration for commerce builds.
 #[cfg(feature = "commerce")]
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct LicenseConfig {
@@ -378,86 +270,6 @@ impl LicenseConfig {
     }
 }
 
-/// Enterprise authentication configuration.
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
-pub struct EnterpriseAuthConfig {
-    #[serde(default)]
-    pub ldap_url: String,
-    #[serde(default)]
-    pub ldap_base_dn: String,
-    #[serde(default)]
-    pub ldap_user_dn: String,
-    #[serde(default)]
-    pub ldap_password: String,
-    #[serde(default)]
-    pub ldap_user_filter: String,
-}
-
-fn default_metrics_enabled() -> bool {
-    true
-}
-
-/// Metrics configuration for Prometheus endpoint.
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct MetricsConfig {
-    #[serde(default = "default_metrics_enabled")]
-    pub enabled: bool,
-    #[serde(default = "default_metrics_path")]
-    pub path: String,
-    #[serde(default)]
-    pub token: Option<String>,
-    #[serde(default = "default_healthz_path")]
-    pub healthz_path: String,
-}
-
-impl Default for MetricsConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            path: default_metrics_path(),
-            token: None,
-            healthz_path: default_healthz_path(),
-        }
-    }
-}
-
-fn default_metrics_path() -> String {
-    "/metrics".to_string()
-}
-
-fn default_healthz_path() -> String {
-    "/healthz".to_string()
-}
-
-/// OpenTelemetry configuration.
-#[derive(Debug, Clone, Default, Deserialize, Serialize)]
-pub struct OtelConfig {
-    #[serde(default)]
-    pub enabled: bool,
-    pub endpoint: Option<String>,
-    pub service_name: Option<String>,
-    #[serde(default = "default_sample_ratio")]
-    pub sample_ratio: f64,
-    #[serde(default)]
-    pub export_metrics: bool,
-    #[serde(default)]
-    pub export_logs: bool,
-}
-
-fn default_sample_ratio() -> f64 {
-    0.1
-}
-
-fn default_locale() -> String {
-    "en".to_string()
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone)]
-pub struct LocaleInfo {
-    pub name: String,
-    pub native_name: String,
-}
-
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ConsoleConfig {
     #[serde(default = "default_console_session_secret")]
@@ -482,25 +294,6 @@ pub struct ConsoleConfig {
     /// Supported locales map: code -> LocaleInfo
     #[serde(default = "default_locales")]
     pub locales: std::collections::HashMap<String, LocaleInfo>,
-}
-
-fn default_locales() -> std::collections::HashMap<String, LocaleInfo> {
-    let mut m = std::collections::HashMap::new();
-    m.insert(
-        "en".to_string(),
-        LocaleInfo {
-            name: "English".to_string(),
-            native_name: "English".to_string(),
-        },
-    );
-    m.insert(
-        "zh".to_string(),
-        LocaleInfo {
-            name: "Chinese".to_string(),
-            native_name: "中文".to_string(),
-        },
-    );
-    m
 }
 
 impl Default for ConsoleConfig {
@@ -559,7 +352,9 @@ pub enum UserBackendConfig {
 #[derive(Debug, Deserialize, Clone, Serialize)]
 #[serde(tag = "type")]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum LocatorConfig {
+    #[default]
     Memory,
     Http {
         url: String,
@@ -600,25 +395,33 @@ pub enum CallRecordConfig {
         with_media: Option<bool>,
         keep_media_copy: Option<bool>,
     },
+    Database {
+        /// Database URL for call records. If not set, uses the global database_url.
+        database_url: Option<String>,
+        /// Table name for call records (default: "call_records")
+        #[serde(default = "default_call_record_table")]
+        table_name: String,
+    },
+}
+
+fn default_call_record_table() -> String {
+    "call_records".to_string()
 }
 
 /// Directory structure for sipflow storage
 #[derive(Debug, Deserialize, Clone, Serialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum SipFlowSubdirs {
     /// No subdirectory structure - all files in root
     None,
     /// Daily subdirectories (YYYYMMDD)
+    #[default]
     Daily,
     /// Hourly subdirectories (YYYYMMDD/HH)
     Hourly,
 }
 
-impl Default for SipFlowSubdirs {
-    fn default() -> Self {
-        Self::Daily
-    }
-}
 
 /// Upload configuration for SipFlow recordings
 #[derive(Debug, Deserialize, Clone, Serialize)]
@@ -684,10 +487,12 @@ fn default_sipflow_id_cache_size() -> usize {
 #[derive(Debug, Deserialize, Clone, Copy, Serialize)]
 #[serde(rename_all = "snake_case")]
 #[derive(PartialEq)]
+#[derive(Default)]
 pub enum MediaProxyMode {
     /// All media goes through proxy
     All,
     /// Auto detect if media proxy is needed (webrtc to rtp)
+    #[default]
     Auto,
     /// Only handle NAT (private IP addresses)
     Nat,
@@ -695,11 +500,6 @@ pub enum MediaProxyMode {
     None,
 }
 
-impl Default for MediaProxyMode {
-    fn default() -> Self {
-        Self::Auto
-    }
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionTimerMode {
@@ -849,6 +649,7 @@ impl std::fmt::Debug for DialplanHints {
     }
 }
 
+#[allow(clippy::large_enum_variant)]
 pub enum RouteResult {
     Forward(InviteOption, Option<DialplanHints>),
     Queue {
@@ -867,6 +668,7 @@ pub enum RouteResult {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
+#[derive(Default)]
 pub struct AmiConfig {
     pub allows: Option<Vec<String>>,
 }
@@ -881,11 +683,6 @@ impl AmiConfig {
     }
 }
 
-impl Default for AmiConfig {
-    fn default() -> Self {
-        Self { allows: None }
-    }
-}
 
 impl ProxyConfig {
     pub fn session_timer_mode(&self) -> SessionTimerMode {
@@ -921,11 +718,10 @@ impl ProxyConfig {
             {
                 return existing.clone();
             }
-            if let Some(first) = realms.first() {
-                if !first.is_empty() {
+            if let Some(first) = realms.first()
+                && !first.is_empty() {
                     return first.clone();
                 }
-            }
         }
 
         if requested.is_empty() {
@@ -1047,11 +843,6 @@ impl Default for UserBackendConfig {
     }
 }
 
-impl Default for LocatorConfig {
-    fn default() -> Self {
-        Self::Memory
-    }
-}
 
 impl Default for CallRecordConfig {
     fn default() -> Self {
@@ -1090,18 +881,11 @@ impl Default for Config {
             rwi: None,
             database_url: default_database_url(),
             recording: None,
-            archive: None,
             demo_mode: false,
             storage: None,
-            addons: HashMap::new(),
             sipflow: None,
-            metrics: None,
-            enterprise_auth: None,
-            otel: None,
             #[cfg(feature = "commerce")]
             licenses: None,
-            acme: None,
-            transfer: None,
         }
     }
 }
@@ -1133,10 +917,10 @@ impl Config {
     pub fn rtp_config(&self) -> RtpConfig {
         RtpConfig {
             external_ip: self.external_ip.clone(),
-            start_port: self.rtp_start_port.clone(),
-            end_port: self.rtp_end_port.clone(),
-            webrtc_start_port: self.webrtc_port_start.clone(),
-            webrtc_end_port: self.webrtc_port_end.clone(),
+            start_port: self.rtp_start_port,
+            end_port: self.rtp_end_port,
+            webrtc_start_port: self.webrtc_port_start,
+            webrtc_end_port: self.webrtc_port_end,
             ice_servers: self.ice_servers.clone(),
         }
     }
@@ -1164,16 +948,6 @@ impl Config {
         self.proxy.generated_root_dir()
     }
 
-    /// Returns the effective archive directory.
-    /// Uses archive.archive_dir if set, otherwise derives from recording path.
-    pub fn archive_dir(&self) -> String {
-        if let Some(ref archive) = self.archive {
-            archive.effective_archive_dir(&self.recorder_path())
-        } else {
-            format!("{}/archive", self.recorder_path().trim_end_matches('/'))
-        }
-    }
-
     /// Returns the wholesale bills directory.
     pub fn wholesale_bills_dir(&self) -> String {
         format!(
@@ -1183,92 +957,13 @@ impl Config {
     }
 }
 
+// ===================================================================
+// Tests
+// ===================================================================
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_config_dump() {
-        let mut config = Config::default();
-        let mut prxconfig = ProxyConfig::default();
-        let mut trunks = HashMap::new();
-        let mut routes = Vec::new();
-        let mut ice_servers = Vec::new();
-        ice_servers.push(IceServer {
-            urls: vec!["stun:stun.l.google.com:19302".to_string()],
-            username: Some("user".to_string()),
-            ..Default::default()
-        });
-        ice_servers.push(IceServer {
-            urls: vec![
-                "stun:restsend.com:3478".to_string(),
-                "turn:stun.l.google.com:1112?transport=TCP".to_string(),
-            ],
-            username: Some("user".to_string()),
-            ..Default::default()
-        });
-
-        routes.push(crate::proxy::routing::RouteRule {
-            name: "default".to_string(),
-            description: None,
-            priority: 1,
-            match_conditions: crate::proxy::routing::MatchConditions {
-                to_user: Some("xx".to_string()),
-                ..Default::default()
-            },
-            rewrite: Some(crate::proxy::routing::RewriteRules {
-                to_user: Some("xx".to_string()),
-                ..Default::default()
-            }),
-            action: crate::proxy::routing::RouteAction::default(),
-            disabled: None,
-            ..Default::default()
-        });
-        routes.push(crate::proxy::routing::RouteRule {
-            name: "default3".to_string(),
-            description: None,
-            priority: 1,
-            match_conditions: crate::proxy::routing::MatchConditions {
-                to_user: Some("xx3".to_string()),
-                ..Default::default()
-            },
-            rewrite: Some(crate::proxy::routing::RewriteRules {
-                to_user: Some("xx3".to_string()),
-                ..Default::default()
-            }),
-            action: crate::proxy::routing::RouteAction::default(),
-            disabled: None,
-            ..Default::default()
-        });
-        prxconfig.routes = Some(routes);
-        trunks.insert(
-            "hello".to_string(),
-            crate::proxy::routing::TrunkConfig {
-                dest: "sip:127.0.0.1:5060".to_string(),
-                ..Default::default()
-            },
-        );
-        prxconfig.trunks = trunks;
-        config.proxy = prxconfig;
-        config.ice_servers = Some(ice_servers);
-        let config_str = toml::to_string(&config).unwrap();
-        println!("{}", config_str);
-    }
-
-    #[test]
-    fn test_normalize_realm() {
-        assert_eq!(ProxyConfig::normalize_realm("localhost"), "localhost");
-        assert_eq!(ProxyConfig::normalize_realm("127.0.0.1"), "localhost");
-        assert_eq!(ProxyConfig::normalize_realm("::1"), "localhost");
-        assert_eq!(ProxyConfig::normalize_realm(""), "localhost");
-        assert_eq!(ProxyConfig::normalize_realm("*"), "localhost");
-        assert_eq!(ProxyConfig::normalize_realm("example.com"), "example.com");
-        assert_eq!(
-            ProxyConfig::normalize_realm("example.com:5060"),
-            "example.com"
-        );
-        assert_eq!(ProxyConfig::normalize_realm("127.0.0.1:5060"), "localhost");
-    }
 
     #[test]
     fn test_select_realm() {

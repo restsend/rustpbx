@@ -48,7 +48,7 @@ impl CdrStorage {
 
     pub async fn read_to_string(&self, path: &str) -> Result<String> {
         let bytes = self.read_bytes(path).await?;
-        Ok(String::from_utf8(bytes).with_context(|| format!("decode UTF-8 for {}", path))?)
+        String::from_utf8(bytes).with_context(|| format!("decode UTF-8 for {}", path))
     }
 }
 
@@ -82,6 +82,7 @@ pub fn resolve_storage(config: Option<&CallRecordConfig>) -> Result<Option<CdrSt
             Ok(Some(CdrStorage::new(storage)))
         }
         Some(CallRecordConfig::Http { .. }) => Ok(None),
+        Some(CallRecordConfig::Database { .. }) => Ok(None),
         None => Ok(None),
     }
 }

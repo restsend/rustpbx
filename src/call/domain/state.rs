@@ -5,8 +5,10 @@ use serde::{Deserialize, Serialize};
 /// Overall state of a session
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum SessionState {
     /// Session is being initialized
+    #[default]
     Initializing,
     /// Session is ringing (at least one leg ringing)
     Ringing,
@@ -26,11 +28,6 @@ pub enum SessionState {
     Ended,
 }
 
-impl Default for SessionState {
-    fn default() -> Self {
-        Self::Initializing
-    }
-}
 
 impl From<crate::proxy::proxy_call::state::ProxyCallPhase> for SessionState {
     fn from(phase: crate::proxy::proxy_call::state::ProxyCallPhase) -> Self {
@@ -66,9 +63,11 @@ impl std::fmt::Display for SessionState {
 /// Media path mode - how RTP flows through the system
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum MediaPathMode {
     /// RTP is anchored at PBX/media-proxy; PBX can observe/manipulate media directly.
     /// Required for: recording, DTMF detection, supervisor modes, media injection.
+    #[default]
     Anchored,
     /// Endpoint-to-endpoint RTP bypass; PBX keeps signaling/control only.
     /// PBX cannot record, inject media, or perform supervisor operations.
@@ -77,11 +76,6 @@ pub enum MediaPathMode {
     Adaptive,
 }
 
-impl Default for MediaPathMode {
-    fn default() -> Self {
-        Self::Anchored
-    }
-}
 
 impl std::fmt::Display for MediaPathMode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

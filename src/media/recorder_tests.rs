@@ -402,7 +402,7 @@ mod recorder_advanced_tests {
             let payload = vec![digit, 0x80, 0x03, 0x20];
             recorder
                 .write_dtmf_payload(Leg::A, &payload, 0, 8000)
-                .expect(&format!("Should write DTMF {}", digit));
+                .unwrap_or_else(|_| panic!("Should write DTMF {}", digit));
         }
 
         // Test * (code 10)

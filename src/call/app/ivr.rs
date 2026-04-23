@@ -210,11 +210,10 @@ impl IvrApp {
         text: Option<&str>,
         voice: Option<&str>,
     ) -> Option<String> {
-        if let Some(path) = file {
-            if !path.is_empty() {
+        if let Some(path) = file
+            && !path.is_empty() {
                 return Some(path.to_string());
             }
-        }
         if let (Some(t), Some(service)) = (text, self.tts_service.as_ref()) {
             match service.synthesize(t, voice).await {
                 Ok(path) => return Some(path),

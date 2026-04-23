@@ -40,13 +40,26 @@ use axum::{
 };
 use std::sync::OnceLock;
 
+pub mod config;
+pub use config::MetricsConfig;
+
 static PROMETHEUS_HANDLE: OnceLock<metrics_exporter_prometheus::PrometheusHandle> = OnceLock::new();
 
-pub struct ObservabilityAddon;
+pub struct ObservabilityAddon {
+    config: std::sync::Arc<tokio::sync::RwLock<Option<MetricsConfig>>>,
+}
+
+impl Default for ObservabilityAddon {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl ObservabilityAddon {
     pub fn new() -> Self {
-        Self
+        Self {
+            config: std::sync::Arc::new(tokio::sync::RwLock::new(None)),
+        }
     }
 
     /// Install the global Prometheus recorder.
@@ -74,7 +87,7 @@ impl ObservabilityAddon {
 
         // Try to set the global recorder. If it fails because a recorder is already
         // installed (e.g., another test ran first), treat it as success.
-        if let Err(_) = metrics::set_global_recorder(recorder) {
+        if metrics::set_global_recorder(recorder).is_err() {
             // Another recorder was already installed - this is fine for tests.
             // Just return success without setting our handle.
             return Ok(());
@@ -83,6 +96,62 @@ impl ObservabilityAddon {
         let _ = PROMETHEUS_HANDLE.set(handle);
         tracing::info!("Prometheus metrics recorder installed");
         Ok(())
+    }
+
+    /// Load configuration from addon-specific config file (async).
+    pub async fn load_config(config_path: &Option<String>) -> Option<MetricsConfig> {
+        if let Some(path) = config_path {
+            let config_dir = std::path::Path::new(path).parent()?;
+            let addon_config_path = config_dir.join("observability.toml");
+            if addon_config_path.exists() {
+                match tokio::fs::read_to_string(&addon_config_path).await {
+                    Ok(content) => {
+                        match toml::from_str::<MetricsConfig>(&content) {
+                            Ok(config) => {
+                                tracing::info!("Observability config loaded from {}", addon_config_path.display());
+                                return Some(config);
+                            }
+                            Err(e) => {
+                                tracing::warn!("Failed to parse observability.toml: {}", e);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to read observability.toml: {}", e);
+                    }
+                }
+            }
+        }
+        tracing::info!("Observability using default configuration (no observability.toml found)");
+        None
+    }
+
+    /// Load configuration from addon-specific config file (sync).
+    pub fn load_config_sync(config_path: &Option<String>) -> Option<MetricsConfig> {
+        if let Some(path) = config_path {
+            let config_dir = std::path::Path::new(path).parent()?;
+            let addon_config_path = config_dir.join("observability.toml");
+            if addon_config_path.exists() {
+                match std::fs::read_to_string(&addon_config_path) {
+                    Ok(content) => {
+                        match toml::from_str::<MetricsConfig>(&content) {
+                            Ok(config) => {
+                                tracing::info!("Observability config loaded from {}", addon_config_path.display());
+                                return Some(config);
+                            }
+                            Err(e) => {
+                                tracing::warn!("Failed to parse observability.toml: {}", e);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to read observability.toml: {}", e);
+                    }
+                }
+            }
+        }
+        tracing::info!("Observability using default configuration (no observability.toml found)");
+        None
     }
 }
 
@@ -113,21 +182,32 @@ impl Addon for ObservabilityAddon {
     }
 
     async fn initialize(&self, state: AppState) -> anyhow::Result<()> {
+        // Load config from addon-specific config file
+        let config = Self::load_config(&state.config_path).await;
+        {
+            let mut guard = self.config.write().await;
+            *guard = config;
+        }
+
         // Register built-in static gauges so they appear at scrape-time even
         // before any calls have been processed.
         let ver = crate::version::get_short_version();
         metrics::gauge!("rustpbx_info", "version" => ver).set(1.0);
 
+        let guard = self.config.read().await;
+        let default_cfg = MetricsConfig::default();
+        let cfg = guard.as_ref().unwrap_or(&default_cfg);
         tracing::info!(
-            metrics_path = %state.config().metrics.as_ref().map(|m| m.path.as_str()).unwrap_or("/metrics"),
-            healthz_path = %state.config().metrics.as_ref().map(|m| m.healthz_path.as_str()).unwrap_or("/healthz"),
+            metrics_path = %cfg.path,
+            healthz_path = %cfg.healthz_path,
             "ObservabilityAddon ready"
         );
         Ok(())
     }
 
     fn router(&self, state: AppState) -> Option<Router> {
-        let cfg = state.config().metrics.clone().unwrap_or_default();
+        // Load config synchronously for router setup
+        let cfg = Self::load_config_sync(&state.config_path).unwrap_or_default();
 
         if !cfg.enabled {
             return None;

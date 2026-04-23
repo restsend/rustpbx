@@ -459,7 +459,7 @@ async fn test_caller_hangup_cdr() -> Result<()> {
     // Verify duration (should be ~2 seconds)
     let duration = (record.end_time - record.start_time).num_seconds();
     assert!(
-        duration >= 1 && duration <= 4,
+        (1..=4).contains(&duration),
         "Duration should be ~2 seconds, got {} seconds",
         duration
     );
@@ -1029,8 +1029,8 @@ async fn test_reinvite_hold_resume() -> Result<()> {
         for _ in 0..30 {
             if let Ok(events) = bob_clone.process_dialog_events().await {
                 for event in &events {
-                    if let TestUaEvent::CallUpdated(id, method, Some(sdp)) = event {
-                        if *method == rsipstack::sip::Method::Invite && id == &bob_id_clone {
+                    if let TestUaEvent::CallUpdated(id, method, Some(sdp)) = event
+                        && *method == rsipstack::sip::Method::Invite && id == &bob_id_clone {
                             info!("Bob received re-INVITE (hold) with SDP:\n{}", sdp);
                             // Bob responds with recvonly (being held)
                             let response_sdp = "v=0\r\n\
@@ -1044,7 +1044,6 @@ async fn test_reinvite_hold_resume() -> Result<()> {
                                 .to_string();
                             return Some(response_sdp);
                         }
-                    }
                 }
             }
             sleep(Duration::from_millis(100)).await;
@@ -1084,8 +1083,8 @@ async fn test_reinvite_hold_resume() -> Result<()> {
         for _ in 0..30 {
             if let Ok(events) = bob_clone.process_dialog_events().await {
                 for event in &events {
-                    if let TestUaEvent::CallUpdated(id, method, Some(sdp)) = event {
-                        if *method == rsipstack::sip::Method::Invite && id == &bob_id_clone {
+                    if let TestUaEvent::CallUpdated(id, method, Some(sdp)) = event
+                        && *method == rsipstack::sip::Method::Invite && id == &bob_id_clone {
                             info!("Bob received re-INVITE (resume) with SDP:\n{}", sdp);
                             // Bob responds with sendrecv (resumed)
                             let response_sdp = "v=0\r\n\
@@ -1099,7 +1098,6 @@ async fn test_reinvite_hold_resume() -> Result<()> {
                                 .to_string();
                             return Some(response_sdp);
                         }
-                    }
                 }
             }
             sleep(Duration::from_millis(100)).await;
@@ -1345,8 +1343,8 @@ async fn test_reinvite_codec_change() -> Result<()> {
         for _ in 0..30 {
             if let Ok(events) = bob_clone.process_dialog_events().await {
                 for event in &events {
-                    if let TestUaEvent::CallUpdated(id, method, Some(sdp)) = event {
-                        if *method == rsipstack::sip::Method::Invite && id == &bob_id_clone {
+                    if let TestUaEvent::CallUpdated(id, method, Some(sdp)) = event
+                        && *method == rsipstack::sip::Method::Invite && id == &bob_id_clone {
                             info!("Bob received re-INVITE with codec change:\n{}", sdp);
                             // Check if SDP contains PCMA
                             if sdp.contains("PCMA/8000") || sdp.contains("a=rtpmap:8") {
@@ -1364,7 +1362,6 @@ async fn test_reinvite_codec_change() -> Result<()> {
                                 return Some(("PCMA", response_sdp));
                             }
                         }
-                    }
                 }
             }
             sleep(Duration::from_millis(100)).await;

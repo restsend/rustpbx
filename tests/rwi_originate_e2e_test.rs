@@ -405,7 +405,7 @@ async fn test_originate_and_bridge() {
 
     // Wait for Bob's ringing event first
     let ringing_b = recv_until(&mut ws, 10, |v| {
-        v.get("call_ringing").map_or(false, |r| {
+        v.get("call_ringing").is_some_and(|r| {
             r.get("call_id").and_then(|id| id.as_str()) == Some(&call_b)
         })
     })
@@ -414,7 +414,7 @@ async fn test_originate_and_bridge() {
 
     // Wait for Bob to answer
     let answered_b = recv_until(&mut ws, 10, |v| {
-        v.get("call_answered").map_or(false, |a| {
+        v.get("call_answered").is_some_and(|a| {
             a.get("call_id").and_then(|id| id.as_str()) == Some(&call_b)
         })
     })

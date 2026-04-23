@@ -44,8 +44,10 @@ impl From<LegId> for String {
 /// State of a single leg (participant) in a session
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum LegState {
     /// Leg is being initialized (SDP negotiation, etc.)
+    #[default]
     Initializing,
     /// Leg is ringing (180 Ringing sent/received)
     Ringing,
@@ -61,11 +63,6 @@ pub enum LegState {
     Ended,
 }
 
-impl Default for LegState {
-    fn default() -> Self {
-        Self::Initializing
-    }
-}
 
 impl std::fmt::Display for LegState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

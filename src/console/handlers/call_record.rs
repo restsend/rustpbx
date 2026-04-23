@@ -304,24 +304,19 @@ async fn stream_call_recording(
     };
 
     let cdr_data = load_cdr_data(&state, &record).await;
-    let recording_path = match select_recording_path(&record, cdr_data.as_ref()) {
-        Some(path) => Some(path),
-        None => None,
-    };
+    let recording_path = select_recording_path(&record, cdr_data.as_ref());
 
     // Try to stream from file first
-    if let Some(ref path) = recording_path {
-        if let Ok(meta) = tokio::fs::metadata(path).await {
-            if meta.is_file() && meta.len() > 0 {
+    if let Some(ref path) = recording_path
+        && let Ok(meta) = tokio::fs::metadata(path).await
+            && meta.is_file() && meta.len() > 0 {
                 return stream_file_with_range(path, meta.len(), &headers).await;
             }
-        }
-    }
 
     // Fallback: Try to get recording from sipflow backend
-    if let Some(server) = state.sip_server() {
-        if let Some(sipflow) = &server.sip_flow {
-            if let Some(backend) = sipflow.backend() {
+    if let Some(server) = state.sip_server()
+        && let Some(sipflow) = &server.sip_flow
+            && let Some(backend) = sipflow.backend() {
                 let call_time = record.created_at;
                 let start_time =
                     (call_time - chrono::Duration::hours(1)).with_timezone(&chrono::Local);
@@ -331,8 +326,7 @@ async fn stream_call_recording(
                 if let Ok(audio_data) = backend
                     .query_media(&record.call_id, start_time, end_time)
                     .await
-                {
-                    if !audio_data.is_empty() {
+                    && !audio_data.is_empty() {
                         return Response::builder()
                             .status(StatusCode::OK)
                             .header(http::header::CONTENT_TYPE, "audio/wav")
@@ -344,10 +338,7 @@ async fn stream_call_recording(
                             .body(Body::from(audio_data))
                             .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
                     }
-                }
             }
-        }
-    }
 
     (
         StatusCode::NOT_FOUND,
@@ -392,8 +383,8 @@ async fn stream_file_with_range(
         }
     };
 
-    if start > 0 {
-        if let Err(err) = file.seek(std::io::SeekFrom::Start(start)).await {
+    if start > 0
+        && let Err(err) = file.seek(std::io::SeekFrom::Start(start)).await {
             warn!(path = %recording_path, "failed to seek recording file: {}", err);
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -401,7 +392,6 @@ async fn stream_file_with_range(
             )
                 .into_response();
         }
-    }
 
     let bytes_to_send = end.saturating_sub(start) + 1;
     let stream = ReaderStream::new(file.take(bytes_to_send));
@@ -553,8 +543,7 @@ async fn download_call_record_metadata(
         .as_ref()
         .map(|value| value.trim())
         .filter(|value| !value.is_empty())
-    {
-        if requested != cdr_data.cdr_path {
+        && requested != cdr_data.cdr_path {
             warn!(
                 id = pk,
                 requested_path = requested,
@@ -567,7 +556,6 @@ async fn download_call_record_metadata(
             )
                 .into_response();
         }
-    }
 
     let filename = safe_download_filename(&cdr_data.cdr_path, &format!("call-record-{}.json", pk));
 
@@ -767,7 +755,7 @@ async fn page_call_record_detail(
         }
     };
 
-    let related = match load_related_context(db, &[model.clone()]).await {
+    let related = match load_related_context(db, std::slice::from_ref(&model)).await {
         Ok(related) => related,
         Err(err) => {
             warn!(
@@ -1330,8 +1318,8 @@ fn strip_storage_root(state: &ConsoleState, path: &str) -> String {
                         stripped.to_string_lossy().to_string()
                     } else {
                         let root_str = root.trim_end_matches('/');
-                        if path.starts_with(root_str) {
-                            path[root_str.len()..].trim_start_matches('/').to_string()
+                        if let Some(stripped) = path.strip_prefix(root_str) {
+                            stripped.trim_start_matches('/').to_string()
                         } else {
                             path.to_string()
                         }
@@ -1339,8 +1327,8 @@ fn strip_storage_root(state: &ConsoleState, path: &str) -> String {
                 }
                 crate::config::CallRecordConfig::S3 { root, .. } => {
                     let root_str = root.trim_end_matches('/');
-                    if path.starts_with(root_str) {
-                        path[root_str.len()..].trim_start_matches('/').to_string()
+                    if let Some(stripped) = path.strip_prefix(root_str) {
+                        stripped.trim_start_matches('/').to_string()
                     } else {
                         path.to_string()
                     }

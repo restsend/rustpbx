@@ -131,7 +131,7 @@ mod audio_feature_tests {
         std::fs::remove_file(audio2_path).ok();
     }
 
-    fn create_dummy_wav(path: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
+    fn create_dummy_wav(path: &std::path::Path) -> anyhow::Result<()> {
         let spec = hound::WavSpec {
             channels: 1,
             sample_rate: 8000,

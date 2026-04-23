@@ -617,7 +617,7 @@ impl TransferController {
 
             tx.set_sip_status(sip_status);
 
-            let gw_event = if sip_status >= 200 && sip_status < 300 {
+            let gw_event = if (200..300).contains(&sip_status) {
                 if tx.status == TransferStatus::Accepted {
                     GatewayEvent::None
                 } else {
@@ -686,7 +686,7 @@ impl TransferController {
         // We need to handle the case where we must drop the write lock before
         // acquiring the gateway read lock to avoid deadlock.
         enum PostAction {
-            TransferFailed(TransferTransaction, TransferFailureReason),
+            TransferFailed(Box<TransferTransaction>, TransferFailureReason),
             None,
         }
 
@@ -742,7 +742,7 @@ impl TransferController {
                     } else {
                         let reason = TransferFailureReason::ReferRejected;
                         tx.update_status(TransferStatus::Failed(reason.clone()));
-                        PostAction::TransferFailed(tx.clone(), reason)
+                        PostAction::TransferFailed(Box::new(tx.clone()), reason)
                     }
                 }
                 _ => PostAction::None,
@@ -753,6 +753,7 @@ impl TransferController {
 
         match post_action {
             PostAction::TransferFailed(failed_tx, reason) => {
+                let failed_tx = *failed_tx;
                 let gw = self.gateway.read().await;
                 let event = RwiEvent::CallTransferFailed {
                     call_id: failed_tx.call_id.clone(),
@@ -1365,7 +1366,7 @@ mod tests {
     fn register_talking_call(
         registry: &ActiveProxyCallRegistry,
         call_id: &str,
-    ) -> tokio::sync::mpsc::UnboundedReceiver<CallCommand> {
+    ) -> crate::call::domain::CallCommandRx {
         let id = crate::call::runtime::SessionId(call_id.to_string());
         let (handle, cmd_rx) = SipSession::with_handle(id);
         let entry = ActiveProxyCallEntry {

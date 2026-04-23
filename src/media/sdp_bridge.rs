@@ -118,7 +118,7 @@ impl SdpBridge {
         let mut rtp_sdp = String::new();
 
         // Add session header
-        rtp_sdp.push_str(&format!("v=0\r\n"));
+        rtp_sdp.push_str("v=0\r\n");
         rtp_sdp.push_str(&format!(
             "o=- {} {} IN IP4 {}\r\n",
             parsed.session.origin.session_id,
@@ -173,11 +173,10 @@ impl SdpBridge {
                     }
                 } else if attr.key == "fmtp" {
                     // Keep fmtp for telephone-event
-                    if let Some(ref value) = attr.value {
-                        if value.contains("101") || value.contains("telephone-event") {
+                    if let Some(ref value) = attr.value
+                        && (value.contains("101") || value.contains("telephone-event")) {
                             rtp_attrs.push(format!("a=fmtp:{}\r\n", value));
                         }
-                    }
                 } else if attr.key == "sendrecv"
                     || attr.key == "sendonly"
                     || attr.key == "recvonly"

@@ -164,20 +164,17 @@ impl I18n {
         let cache = self.translations.read().unwrap_or_else(|e| e.into_inner());
 
         // 1. Requested locale
-        if let Some(flat) = cache.get(locale) {
-            if let Some(v) = flat.get(key) {
+        if let Some(flat) = cache.get(locale)
+            && let Some(v) = flat.get(key) {
                 return v.clone();
             }
-        }
 
         // 2. Default locale fallback
-        if locale != self.config.default {
-            if let Some(flat) = cache.get(&self.config.default) {
-                if let Some(v) = flat.get(key) {
+        if locale != self.config.default
+            && let Some(flat) = cache.get(&self.config.default)
+                && let Some(v) = flat.get(key) {
                     return v.clone();
                 }
-            }
-        }
 
         // 3. Return the key itself so templates always render something
         key.to_string()
@@ -286,8 +283,8 @@ pub fn detect_locale(
     }
 
     // 2. Accept-Language header
-    if let Some(accept) = headers.get(axum::http::header::ACCEPT_LANGUAGE) {
-        if let Ok(s) = accept.to_str() {
+    if let Some(accept) = headers.get(axum::http::header::ACCEPT_LANGUAGE)
+        && let Ok(s) = accept.to_str() {
             // Parse "zh-CN,zh;q=0.9,en;q=0.8" style values
             let mut candidates: Vec<(&str, f32)> = s
                 .split(',')
@@ -314,7 +311,6 @@ pub fn detect_locale(
                 }
             }
         }
-    }
 
     // 3. Default
     default.to_string()

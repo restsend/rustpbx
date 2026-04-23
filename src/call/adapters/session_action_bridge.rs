@@ -63,10 +63,10 @@ pub fn call_command_to_session_action(cmd: CallCommand) -> Result<SessionAction>
             Ok(SessionAction::Hangup {
                 reason: reason
                     .as_deref()
-                    .and_then(|r| match r.to_lowercase().as_str() {
-                        "busy" => Some(CallRecordHangupReason::Failed),
-                        "declined" | "rejected" => Some(CallRecordHangupReason::Rejected),
-                        _ => Some(CallRecordHangupReason::BySystem),
+                    .map(|r| match r.to_lowercase().as_str() {
+                        "busy" => CallRecordHangupReason::Failed,
+                        "declined" | "rejected" => CallRecordHangupReason::Rejected,
+                        _ => CallRecordHangupReason::BySystem,
                     }),
                 code: Some(603), // Decline
                 initiator: Some("reject".to_string()),
@@ -126,7 +126,9 @@ pub fn call_command_to_session_action(cmd: CallCommand) -> Result<SessionAction>
         } => Ok(SessionAction::TransferTarget(target)),
 
         CallCommand::TransferComplete { consult_leg: _ }
-        | CallCommand::TransferCancel { consult_leg: _ } => {
+        | CallCommand::TransferCancel { consult_leg: _ }
+        | CallCommand::TransferCompleteCrossSession { .. }
+        | CallCommand::BridgeCrossSession { .. } => {
             // These require complex multi-leg coordination
             // Not directly mappable to single SessionAction
             Err(AdapterError::NotSupported(
@@ -352,22 +354,26 @@ pub fn session_action_to_call_command(action: SessionAction) -> Result<CallComma
             Ok(CallCommand::SupervisorListen {
                 supervisor_leg: LegId::new("supervisor"),
                 target_leg: target_session_id.into(),
+                supervisor_session_id: None,
             })
         }
         SessionAction::SupervisorWhisper { target_session_id } => {
             Ok(CallCommand::SupervisorWhisper {
                 supervisor_leg: LegId::new("supervisor"),
                 target_leg: target_session_id.into(),
+                supervisor_session_id: None,
             })
         }
         SessionAction::SupervisorBarge { target_session_id } => Ok(CallCommand::SupervisorBarge {
             supervisor_leg: LegId::new("supervisor"),
             target_leg: target_session_id.into(),
+            supervisor_session_id: None,
         }),
         SessionAction::SupervisorTakeover { target_session_id } => {
             Ok(CallCommand::SupervisorTakeover {
                 supervisor_leg: LegId::new("supervisor"),
                 target_leg: target_session_id.into(),
+                supervisor_session_id: None,
             })
         }
         SessionAction::SupervisorStop => Ok(CallCommand::SupervisorStop {

@@ -20,9 +20,14 @@ use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
 use rustpbx::{
+    call::app::agent_registry::AgentRegistry,
     config::ProxyConfig,
     proxy::{
         active_call_registry::ActiveProxyCallRegistry,
+        auth::AuthModule,
+        call::CallModule,
+        routing::{RouteQueueConfig, RouteRule},
+        registrar::RegistrarModule,
         server::{SipServerBuilder, SipServerRef},
     },
     rwi::{
@@ -33,6 +38,19 @@ use rustpbx::{
 };
 
 pub const TEST_TOKEN: &str = "e2e-test-token";
+
+/// Optional injections for TestPbx startup.
+#[derive(Default)]
+pub struct TestPbxInject {
+    /// Override the full proxy config (port/address will still be normalized for tests).
+    pub proxy_config: Option<ProxyConfig>,
+    /// Inject embedded routes into proxy config.
+    pub routes: Option<Vec<RouteRule>>,
+    /// Inject embedded queues into proxy config.
+    pub queues: Option<HashMap<String, RouteQueueConfig>>,
+    /// Inject custom AgentRegistry (e.g. skill-group resolver).
+    pub agent_registry: Option<Arc<dyn AgentRegistry>>,
+}
 
 /// A running in-process PBX with a real SIP stack and an RWI WebSocket endpoint.
 pub struct TestPbx {
@@ -59,18 +77,46 @@ impl TestPbx {
     ///
     /// Use `portpicker::pick_unused_port().unwrap()` to choose ports.
     pub async fn start(sip_port: u16) -> Self {
+        Self::start_with_inject(sip_port, TestPbxInject::default()).await
+    }
+
+    /// Start TestPbx with injectable config components (routes/queues/agent-registry).
+    pub async fn start_with_inject(sip_port: u16, inject: TestPbxInject) -> Self {
         let cancel_token = CancellationToken::new();
 
         // ── Build SipServer ──────────────────────────────────────────────────
-        let proxy_config = Arc::new(ProxyConfig {
+        let mut cfg = inject.proxy_config.unwrap_or_else(|| ProxyConfig {
             addr: "127.0.0.1".to_string(),
             udp_port: Some(sip_port),
             enable_latching: true,
             ..Default::default()
         });
+        cfg.addr = "127.0.0.1".to_string();
+        cfg.udp_port = Some(sip_port);
+        if let Some(routes) = inject.routes {
+            cfg.routes = Some(routes);
+        }
+        if let Some(queues) = inject.queues {
+            cfg.queues = queues;
+        }
 
-        let sip_server = SipServerBuilder::new(proxy_config.clone())
-            .with_cancel_token(cancel_token.child_token())
+        let proxy_config = Arc::new(cfg);
+
+        let mut builder = SipServerBuilder::new(proxy_config.clone())
+            .with_cancel_token(cancel_token.child_token());
+        builder = builder
+            .register_module("registrar", |inner, config| {
+                Ok(Box::new(RegistrarModule::new(inner, config)))
+            })
+            .register_module("auth", |inner, _config| Ok(Box::new(AuthModule::new(inner))))
+            .register_module("call", |inner, config| {
+                Ok(Box::new(CallModule::new(config, inner)))
+            });
+        if let Some(agent_registry) = inject.agent_registry {
+            builder = builder.with_agent_registry(agent_registry);
+        }
+
+        let sip_server = builder
             .build()
             .await
             .expect("SipServer build failed");

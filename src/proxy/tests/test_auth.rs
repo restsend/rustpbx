@@ -122,7 +122,7 @@ async fn test_auth_module_invite_success() {
         ));
         let call_id = rsipstack::sip::headers::CallId::new(random_text(16));
         let cseq = rsipstack::sip::headers::typed::CSeq {
-            seq: 1u32.into(),
+            seq: 1u32,
             method: rsipstack::sip::Method::Invite,
         };
         let contact_uri = rsipstack::sip::Uri {
@@ -162,7 +162,7 @@ async fn test_auth_module_invite_success() {
         let auth_header = rsipstack::sip::headers::Authorization::new(format!(
             "Digest username=\"alice\", realm=\"rustpbx.com\", nonce=\"{}\", uri=\"{}\", response=\"{}\", algorithm=MD5",
             nonce,
-            uri.to_string(),
+            uri,
             digest.compute()
         ));
         headers.push(auth_header.into());
@@ -281,7 +281,7 @@ async fn test_auth_module_register_success() {
         ));
         let call_id = rsipstack::sip::headers::CallId::new(random_text(16));
         let cseq = rsipstack::sip::headers::typed::CSeq {
-            seq: 1u32.into(),
+            seq: 1u32,
             method: rsipstack::sip::Method::Register,
         };
         let contact_uri = rsipstack::sip::Uri {
@@ -320,7 +320,7 @@ async fn test_auth_module_register_success() {
         let auth_header = rsipstack::sip::headers::Authorization::new(format!(
             "Digest username=\"alice\", realm=\"rustpbx.com\", nonce=\"{}\", uri=\"{}\", response=\"{}\", algorithm=MD5",
             nonce,
-            uri.to_string(),
+            uri,
             digest.compute()
         ));
         headers.push(auth_header.into());
@@ -505,6 +505,7 @@ async fn test_guest_call_allowed_extension() {
         tls_listener: None,
         queue_manager: Arc::new(crate::call::runtime::QueueManager::new()),
         conference_manager: Arc::new(crate::call::runtime::ConferenceManager::new()),
+        agent_registry: None,
         transfer_notify_subscribers: Arc::new(tokio::sync::Mutex::new(Vec::new())),
     });
 
@@ -574,7 +575,7 @@ async fn test_guest_call_allowed_extension() {
             via.into(),
             rsipstack::sip::headers::CallId::new(random_text(16)).into(),
             rsipstack::sip::headers::typed::CSeq {
-                seq: 1u32.into(),
+                seq: 1u32,
                 method: rsipstack::sip::Method::Invite,
             }
             .into(),
@@ -646,8 +647,8 @@ fn create_sip_request(
 
     let call_id = rsipstack::sip::headers::CallId::new("test-call-id");
     let cseq = rsipstack::sip::headers::typed::CSeq {
-        seq: 1u32.into(),
-        method: method.clone(),
+        seq: 1u32,
+        method,
     };
 
     let mut request = rsipstack::sip::Request {
@@ -679,12 +680,14 @@ fn create_sip_request(
 }
 
 async fn create_issue_146_server() -> Arc<SipServerInner> {
-    let mut config = ProxyConfig::default();
-    config.realms = Some(vec![
-        "pbx.e36".to_string(),
-        "pbx.e36:5060".to_string(),
-        "pbx.e36:5061".to_string(),
-    ]);
+    let config = ProxyConfig {
+        realms: Some(vec![
+            "pbx.e36".to_string(),
+            "pbx.e36:5060".to_string(),
+            "pbx.e36:5061".to_string(),
+        ]),
+        ..Default::default()
+    };
 
     let (server, _) = create_test_server_with_config(config).await;
     server
@@ -732,7 +735,7 @@ fn create_issue_146_register_request(
         .into(),
         rsipstack::sip::headers::CallId::new("fd9623914bbc79b9").into(),
         rsipstack::sip::headers::typed::CSeq {
-            seq: 873199510u32.into(),
+            seq: 873199510u32,
             method: rsipstack::sip::Method::Register,
         }
         .into(),
