@@ -6579,4 +6579,150 @@ mod tests {
 
         drop(handle);
     }
+
+    // ============================================================================
+    // Call forwarding -> queue/ivr tests
+    // ============================================================================
+
+    #[tokio::test]
+    async fn test_handle_blind_transfer_queue_prefix() {
+        use crate::call::{DialDirection, Dialplan, TransactionCookie};
+        use crate::config::ProxyConfig;
+        use crate::proxy::proxy_call::test_util::tests::MockMediaPeer;
+        use crate::proxy::routing::RouteQueueConfig;
+        use crate::proxy::tests::common::{
+            create_test_request, create_test_server_with_config, create_transaction,
+        };
+
+        let mut config = ProxyConfig::default();
+        config.queues.insert(
+            "test-queue".to_string(),
+            RouteQueueConfig {
+                name: Some("test-queue".to_string()),
+                ..Default::default()
+            },
+        );
+
+        let (server, _) = create_test_server_with_config(config).await;
+        let request = create_test_request(
+            rsipstack::sip::Method::Invite,
+            "alice",
+            None,
+            "rustpbx.com",
+            None,
+        );
+        let original_request = request.clone();
+        let (tx, _) = create_transaction(request).await;
+        let (state_tx, _state_rx) = mpsc::unbounded_channel();
+        let server_dialog = server
+            .dialog_layer
+            .get_or_create_server_invite(&tx, state_tx, None, None)
+            .expect("failed to create server dialog");
+
+        let context = CallContext {
+            session_id: "test-session".to_string(),
+            dialplan: Arc::new(Dialplan::new(
+                "test-session".to_string(),
+                original_request,
+                DialDirection::Inbound,
+            )),
+            cookie: TransactionCookie::default(),
+            start_time: Instant::now(),
+            original_caller: "sip:alice@rustpbx.com".to_string(),
+            original_callee: "sip:bob@rustpbx.com".to_string(),
+            max_forwards: 70,
+            dtmf_digits: Vec::new(),
+        };
+
+        let caller_peer = Arc::new(MockMediaPeer::new());
+        let callee_peer = Arc::new(MockMediaPeer::new());
+        let (mut session, _handle, _cmd_rx) = SipSession::new(
+            server.clone(),
+            CancellationToken::new(),
+            None,
+            context,
+            server_dialog,
+            false,
+            caller_peer,
+            callee_peer,
+        );
+
+        let result = session
+            .handle_blind_transfer(LegId::from("caller"), "queue:test-queue".to_string())
+            .await;
+
+        assert!(
+            result.is_ok(),
+            "handle_blind_transfer with queue: prefix should succeed, got: {:?}",
+            result
+        );
+    }
+
+    #[tokio::test]
+    async fn test_handle_blind_transfer_queue_not_found() {
+        use crate::call::{DialDirection, Dialplan, TransactionCookie};
+        use crate::proxy::proxy_call::test_util::tests::MockMediaPeer;
+        use crate::proxy::tests::common::{
+            create_test_request, create_test_server, create_transaction,
+        };
+
+        let (server, _) = create_test_server().await;
+        let request = create_test_request(
+            rsipstack::sip::Method::Invite,
+            "alice",
+            None,
+            "rustpbx.com",
+            None,
+        );
+        let original_request = request.clone();
+        let (tx, _) = create_transaction(request).await;
+        let (state_tx, _state_rx) = mpsc::unbounded_channel();
+        let server_dialog = server
+            .dialog_layer
+            .get_or_create_server_invite(&tx, state_tx, None, None)
+            .expect("failed to create server dialog");
+
+        let context = CallContext {
+            session_id: "test-session".to_string(),
+            dialplan: Arc::new(Dialplan::new(
+                "test-session".to_string(),
+                original_request,
+                DialDirection::Inbound,
+            )),
+            cookie: TransactionCookie::default(),
+            start_time: Instant::now(),
+            original_caller: "sip:alice@rustpbx.com".to_string(),
+            original_callee: "sip:bob@rustpbx.com".to_string(),
+            max_forwards: 70,
+            dtmf_digits: Vec::new(),
+        };
+
+        let caller_peer = Arc::new(MockMediaPeer::new());
+        let callee_peer = Arc::new(MockMediaPeer::new());
+        let (mut session, _handle, _cmd_rx) = SipSession::new(
+            server.clone(),
+            CancellationToken::new(),
+            None,
+            context,
+            server_dialog,
+            false,
+            caller_peer,
+            callee_peer,
+        );
+
+        let result = session
+            .handle_blind_transfer(LegId::from("caller"), "queue:nonexistent".to_string())
+            .await;
+
+        assert!(
+            result.is_err(),
+            "handle_blind_transfer with non-existent queue should fail"
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("Queue 'nonexistent' not found"),
+            "Error should indicate queue not found, got: {}",
+            err
+        );
+    }
 }

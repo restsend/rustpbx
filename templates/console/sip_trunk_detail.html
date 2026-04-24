@@ -577,7 +577,8 @@ default('RustPBX') }}{% endblock %}
             },
             async loadRegStatus() {
                 try {
-                    const resp = await fetch(`/ami/v1/trunk_registrations`);
+                    const amiPath = (this.amiEndpoint || '/ami/v1').replace(/\/+$/, '');
+                    const resp = await fetch(`${amiPath}/trunk_registrations`);
                     if (resp.ok) {
                         const data = await resp.json();
                         const regs = data.registrations || {};

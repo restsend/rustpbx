@@ -169,14 +169,15 @@ impl ConsoleState {
                 map.entry("site_footer").or_insert_with(|| {
                     serde_json::Value::String("© 2025 RustPBX. All rights reserved.".to_string())
                 });
+                let static_path = self.config().static_path();
                 map.entry("site_logo").or_insert_with(|| {
-                    serde_json::Value::String("/static/images/logo.png".to_string())
+                    serde_json::Value::String(format!("{}/images/logo.png", static_path))
                 });
                 map.entry("site_logo_mini").or_insert_with(|| {
-                    serde_json::Value::String("/static/images/logo-mini.png".to_string())
+                    serde_json::Value::String(format!("{}/images/logo-mini.png", static_path))
                 });
                 map.entry("favicon_url").or_insert_with(|| {
-                    serde_json::Value::String("/static/images/favicon.png".to_string())
+                    serde_json::Value::String(format!("{}/images/favicon.png", static_path))
                 });
                 map.entry("demo_mode")
                     .or_insert_with(|| serde_json::Value::Bool(self.config().demo_mode));

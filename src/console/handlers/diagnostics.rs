@@ -248,6 +248,22 @@ async fn diagnostics_bootstrap(state: &Arc<ConsoleState>) -> JsonValue {
         });
     }
 
+    let (ws_handler, ice_servers_path) = if let Some(app) = state.app_state() {
+        let proxy_cfg = &app.config().proxy;
+        (
+            proxy_cfg.ws_handler.clone().unwrap_or_else(|| "/ws".to_string()),
+            proxy_cfg.ice_servers_path.clone().unwrap_or_else(|| "/iceservers".to_string()),
+        )
+    } else if let Some(server) = state.sip_server() {
+        let proxy_cfg = &server.proxy_config;
+        (
+            proxy_cfg.ws_handler.clone().unwrap_or_else(|| "/ws".to_string()),
+            proxy_cfg.ice_servers_path.clone().unwrap_or_else(|| "/iceservers".to_string()),
+        )
+    } else {
+        ("/ws".to_string(), "/iceservers".to_string())
+    };
+
     json!({
         "last_audit": last_audit,
         "trunks": trunks,
@@ -259,6 +275,8 @@ async fn diagnostics_bootstrap(state: &Arc<ConsoleState>) -> JsonValue {
             "trunk_options": trunk_options,
         },
         "connection": connection,
+        "ws_handler": ws_handler,
+        "ice_servers_path": ice_servers_path,
     })
 }
 
@@ -269,6 +287,7 @@ fn diagnostics_connection_profile(state: &Arc<ConsoleState>) -> JsonValue {
     let mut accounts: Vec<JsonValue> = Vec::new();
     let mut notes: Vec<String> = Vec::new();
     let mut expires: Option<u32> = None;
+    let mut locator_type = "memory".to_string();
 
     if let Some(app) = state.app_state() {
         let config = app.config().clone();
@@ -280,6 +299,11 @@ fn diagnostics_connection_profile(state: &Arc<ConsoleState>) -> JsonValue {
         let (account_entries, backend_notes) = collect_account_entries(&realm, proxy_cfg);
         accounts = account_entries;
         notes.extend(backend_notes);
+        locator_type = match proxy_cfg.locator {
+            crate::config::LocatorConfig::Memory => "memory".to_string(),
+            crate::config::LocatorConfig::Http { .. } => "http".to_string(),
+            crate::config::LocatorConfig::Database { .. } => "db".to_string(),
+        };
     } else if let Some(server) = state.sip_server() {
         let proxy_cfg = &server.proxy_config;
         realm = resolve_default_realm(proxy_cfg);
@@ -290,6 +314,11 @@ fn diagnostics_connection_profile(state: &Arc<ConsoleState>) -> JsonValue {
         accounts = account_entries;
         notes.extend(backend_notes);
         notes.push("Rendered from live proxy configuration.".to_string());
+        locator_type = match proxy_cfg.locator {
+            crate::config::LocatorConfig::Memory => "memory".to_string(),
+            crate::config::LocatorConfig::Http { .. } => "http".to_string(),
+            crate::config::LocatorConfig::Database { .. } => "db".to_string(),
+        };
     } else {
         notes.push("SIP server is not currently running; showing defaults.".to_string());
     }
@@ -308,6 +337,7 @@ fn diagnostics_connection_profile(state: &Arc<ConsoleState>) -> JsonValue {
         "accounts": accounts,
         "notes": notes,
         "expires": expires,
+        "locator": locator_type,
     })
 }
 

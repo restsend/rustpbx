@@ -19,6 +19,12 @@ use tokio::time::{Duration, sleep};
 use tracing::{info, warn};
 
 pub fn ami_router(app_state: AppState) -> Router<AppState> {
+    let ami_path = app_state
+        .config()
+        .proxy
+        .ami_path
+        .clone()
+        .unwrap_or_else(|| "/ami/v1".to_string());
     let r = Router::new()
         .route("/health", get(health_handler))
         .route("/dialogs", get(list_dialogs))
@@ -40,7 +46,7 @@ pub fn ami_router(app_state: AppState) -> Router<AppState> {
             app_state.clone(),
             crate::handler::middleware::ami_auth::ami_auth_middleware,
         ));
-    Router::new().nest("/ami/v1", r).with_state(app_state)
+    Router::new().nest(&ami_path, r).with_state(app_state)
 }
 
 pub(super) async fn health_handler(State(state): State<AppState>) -> Response {

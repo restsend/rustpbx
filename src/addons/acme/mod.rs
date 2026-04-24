@@ -129,11 +129,12 @@ impl Addon for AcmeAddon {
             return None;
         }
 
-        let static_path = if std::path::Path::new("src/addons/acme/static").exists() {
+        let static_fs_path = if std::path::Path::new("src/addons/acme/static").exists() {
             "src/addons/acme/static"
         } else {
             "static/acme"
         };
+        let static_url_prefix = state.config().static_path();
 
         // Get base_path and api_prefix from console config if available
         let (base_path, api_prefix) = state
@@ -144,8 +145,8 @@ impl Addon for AcmeAddon {
 
         let mut protected = Router::new()
             .nest_service(
-                "/static/acme",
-                tower_http::services::ServeDir::new(static_path),
+                &format!("{}/acme", static_url_prefix),
+                tower_http::services::ServeDir::new(static_fs_path),
             )
             .route(&format!("{base_path}/acme"), get(handlers::ui_index))
             .route(

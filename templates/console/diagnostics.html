@@ -49,6 +49,11 @@
                             <span
                                 x-text="connection.expires ? connection.expires + ' s' : '{{ 'diagnostics.label_expires_default' | t }}'"></span>
                         </span>
+                        <span
+                            class="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2.5 py-1 font-semibold text-slate-600">
+                            {{ "diagnostics.label_locator" | t }}
+                            <span class="font-mono text-slate-700" x-text="connection.locator || '—'"></span>
+                        </span>
                     </div>
                 </div>
                 <div class="mt-4 grid gap-4 md:grid-cols-3">
@@ -1588,7 +1593,8 @@
                                 const origin = window.location.origin || '';
                                 if (origin) {
                                     const base = origin.replace(/^http/i, 'ws');
-                                    this.sipForm.wsServer = `${base.replace(/\/$/, '')}/ws`;
+                                    const wsPath = (this.testData && this.testData.ws_handler) ? this.testData.ws_handler : '/ws';
+                                    this.sipForm.wsServer = `${base.replace(/\/$/, '')}${wsPath}`;
                                 }
                             }
                         }
@@ -1759,9 +1765,10 @@
                         this.sipIceServersLoading = true;
                         let servers = [];
                         try {
-                            let url = '/iceservers';
+                            let icePath = (this.testData && this.testData.ice_servers_path) ? this.testData.ice_servers_path : '/iceservers';
+                            let url = icePath;
                             if (typeof window !== 'undefined' && window.location) {
-                                url = new URL('/iceservers', window.location.origin).toString();
+                                url = new URL(icePath, window.location.origin).toString();
                             }
                             const response = await fetch(url, {
                                 credentials: 'same-origin',

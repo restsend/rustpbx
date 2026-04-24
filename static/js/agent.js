@@ -708,7 +708,8 @@ function mainApp() {
             }
 
             try {
-                iceServers = await fetch('/iceservers').then(res => res.json())
+                const icePath = (window._phoneConfig && window._phoneConfig.iceServersPath) ? window._phoneConfig.iceServersPath : '/iceservers';
+                iceServers = await fetch(icePath).then(res => res.json())
             } catch { }
 
             const configuration = {

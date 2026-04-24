@@ -1580,6 +1580,7 @@ tab_sip_state = "SIP 状态"
 # 连接面板内联标签
 label_realm = "域"
 label_expires = "过期"
+label_locator = "定位器"
 label_expires_default = "默认 60 秒"
 label_password = "密码"
 label_example = "示例"

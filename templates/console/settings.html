@@ -2335,7 +2335,7 @@
         Alpine.data('settingsConsole', (options = {}) => ({
             basePath: options?.basePath || '/console',
             rawSettings: options?.settings || {},
-            amiEndpoint: options?.amiEndpoint || '/ami/v1',
+            amiEndpoint: options?.amiEndpoint || (options?.ami_path || '/ami/v1'),
             currentUser: options?.currentUser || null,
             t: options?.t || {},
             tabs: (() => {
@@ -2550,7 +2550,7 @@
                 if (!this.canManageUsers() && this.activeTab === 'users') {
                     this.activeTab = 'platform';
                 }
-                this.amiEndpoint = options?.amiEndpoint || data.ami_endpoint || '/ami/v1';
+                this.amiEndpoint = options?.amiEndpoint || data.ami_endpoint || (data.proxy?.ami_path) || '/ami/v1';
                 this.platform = data.platform || {};
                 this.proxyConfig = data.proxy || {};
                 if (!Array.isArray(this.proxyConfig.realms)) {

@@ -677,6 +677,18 @@ async fn iceservers_handler(State(state): State<AppState>) -> impl IntoResponse 
     Json(ice_servers).into_response()
 }
 
+// Phone config handler (exposes proxy paths for static HTML clients)
+async fn phone_config_handler(State(state): State<AppState>) -> impl IntoResponse {
+    let proxy_cfg = &state.config().proxy;
+    let config = serde_json::json!({
+        "wsPath": proxy_cfg.ws_handler.clone().unwrap_or_else(|| "/ws".to_string()),
+        "iceServersPath": proxy_cfg.ice_servers_path.clone().unwrap_or_else(|| "/iceservers".to_string()),
+        "amiPath": proxy_cfg.ami_path.clone().unwrap_or_else(|| "/ami/v1".to_string()),
+        "staticPath": state.config().static_path(),
+    });
+    Json(config).into_response()
+}
+
 pub fn create_router(state: AppState) -> Router {
     let mut router = Router::new();
 
@@ -713,16 +725,22 @@ pub fn create_router(state: AppState) -> Router {
             axum::http::header::ORIGIN,
         ]);
 
+    // Read paths from proxy config (fallback to hardcoded defaults)
+    let proxy_cfg = &state.config().proxy;
+    let ice_servers_path = proxy_cfg.ice_servers_path.clone().unwrap_or_else(|| "/iceservers".to_string());
+    let static_path = state.config().static_path();
+
     // Merge call and WebSocket handlers with static file serving
     let call_routes = crate::handler::ami_router(state.clone()).with_state(state.clone());
     #[allow(unused_mut)]
     let mut router = router
+        .route("/api/config/phone", get(phone_config_handler).with_state(state.clone()))
         .route(
-            "/iceservers",
+            &ice_servers_path,
             get(iceservers_handler).with_state(state.clone()),
         )
         .merge(state.addon_registry.get_routers(state.clone()))
-        .nest_service("/static", static_files_service)
+        .nest_service(&static_path, static_files_service)
         .merge(call_routes)
         .layer(cors);
 
