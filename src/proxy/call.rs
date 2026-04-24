@@ -420,43 +420,52 @@ impl CallModule {
 
         let is_from_trunk = cookie.get_extension::<TrunkContext>().is_some();
 
-        let direction = match (caller_is_same_realm, callee_is_same_realm) {
-            (true, true) if !is_from_trunk => {
-                match self
-                    .inner
-                    .server
-                    .user_backend
-                    .get_user(
-                        callee_uri.user().unwrap_or_default(),
-                        Some(&callee_realm),
-                        Some(original),
-                    )
-                    .await
-                {
-                    Ok(None) => DialDirection::Outbound,
-                    res => {
-                        if let Some(display_name) = res.ok()
-                            .flatten()
-                            .and_then(|user| user.display_name) { cookie.insert_extension(CalleeDisplayName(display_name)) }
-                        DialDirection::Internal
+        let direction = if caller_is_same_realm && callee_is_same_realm && !is_from_trunk {
+            match self
+                .inner
+                .server
+                .user_backend
+                .get_user(
+                    callee_uri.user().unwrap_or_default(),
+                    Some(&callee_realm),
+                    Some(original),
+                )
+                .await
+            {
+                Ok(None) => {
+                    // User not found locally — check if callee is registered on a cluster peer
+                    match self.inner.server.locator.lookup(&callee_uri).await {
+                        Ok(locs) if !locs.is_empty() => {
+                            info!(dialog_id, callee = %callee_uri, "Callee not in local user backend but found in shared locator; treating as internal cluster call");
+                            DialDirection::Internal
+                        }
+                        _ => DialDirection::Outbound,
                     }
                 }
-            }
-            (true, true) => DialDirection::Outbound,
-            (true, false) => DialDirection::Outbound,
-            (false, true) => DialDirection::Inbound,
-            (false, false) => {
-                if is_from_trunk {
-                    // If the call comes from a trunk, we can allow it to reach an internal destination even if the callee realm doesn't match, as long as the caller realm also doesn't match (to prevent external-to-external calls).
-                    // This allows for more flexible routing from trusted trunks.
-                    DialDirection::Inbound
-                } else {
-                    warn!(dialog_id, caller_realm = ?caller.realm, callee_realm, "Both caller and callee are external realm, reject");
-                    return Err(RouteError::from((
-                        anyhow::anyhow!("Both caller and callee are external realm"),
-                        Some(rsipstack::sip::StatusCode::Forbidden),
-                    )));
+                res => {
+                    if let Some(display_name) = res.ok()
+                        .flatten()
+                        .and_then(|user| user.display_name) { cookie.insert_extension(CalleeDisplayName(display_name)) }
+                    DialDirection::Internal
                 }
+            }
+        } else if caller_is_same_realm && callee_is_same_realm {
+            DialDirection::Outbound
+        } else if caller_is_same_realm && !callee_is_same_realm {
+            DialDirection::Outbound
+        } else if !caller_is_same_realm && callee_is_same_realm {
+            DialDirection::Inbound
+        } else {
+            if is_from_trunk {
+                // If the call comes from a trunk, we can allow it to reach an internal destination even if the callee realm doesn't match, as long as the caller realm also doesn't match (to prevent external-to-external calls).
+                // This allows for more flexible routing from trusted trunks.
+                DialDirection::Inbound
+            } else {
+                warn!(dialog_id, caller_realm = ?caller.realm, callee_realm, "Both caller and callee are external realm, reject");
+                return Err(RouteError::from((
+                    anyhow::anyhow!("Both caller and callee are external realm"),
+                    Some(rsipstack::sip::StatusCode::Forbidden),
+                )));
             }
         };
 

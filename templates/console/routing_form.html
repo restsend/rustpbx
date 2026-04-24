@@ -1589,12 +1589,10 @@
                         if (!response.ok) {
                             throw new Error(data?.message || this.translations.err_failed_save);
                         }
-                        if (this.mode === 'create' && data?.id) {
-                            window.location.href = `${this.listUrl}/${data.id}`;
-                            return;
-                        }
-                        this.mode = 'edit';
                         this.success = this.translations.saved_successfully;
+                        setTimeout(() => {
+                            window.location.href = this.listUrl;
+                        }, 600);
                     } catch (err) {
                         console.error(err);
                         this.error = err?.message || this.translations.err_failed_save;

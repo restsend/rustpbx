@@ -108,7 +108,7 @@ impl TestPbx {
             .register_module("registrar", |inner, config| {
                 Ok(Box::new(RegistrarModule::new(inner, config)))
             })
-            .register_module("auth", |inner, _config| Ok(Box::new(AuthModule::new(inner))))
+            .register_module("auth", |inner, _config| Ok(Box::new(AuthModule::new(inner.clone(), inner.proxy_config.clone()))))
             .register_module("call", |inner, config| {
                 Ok(Box::new(CallModule::new(config, inner)))
             });

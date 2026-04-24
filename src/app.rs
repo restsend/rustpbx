@@ -394,6 +394,7 @@ impl AppStateBuilder {
                     .with_sipflow_config(config.sipflow.clone())
                     .with_sipflow_backend(sipflow_backend_arc.clone())
                     .with_no_bind(self.skip_sip_bind)
+                    .with_skip_migrate(self.skip_migrate)
                     .with_addon_registry(Some(addon_registry.clone()))
                     .register_module("acl", AclModule::create)
                     .register_module("auth", AuthModule::create)

@@ -79,7 +79,7 @@ impl TestProxyServer {
                 Ok(Box::new(RegistrarModule::new(inner, config)))
             })
             .register_module("auth", |inner, _config| {
-                Ok(Box::new(AuthModule::new(inner)))
+                Ok(Box::new(AuthModule::new(inner.clone(), inner.proxy_config.clone())))
             })
             .register_module("call", |inner, config| {
                 Ok(Box::new(CallModule::new(config, inner)))
@@ -529,7 +529,7 @@ async fn test_rtp_to_webrtc_sdp_bridge() -> Result<()> {
             )))
         })
         .register_module("auth", |inner, _config| {
-            Ok(Box::new(crate::proxy::auth::AuthModule::new(inner)))
+            Ok(Box::new(crate::proxy::auth::AuthModule::new(inner.clone(), inner.proxy_config.clone())))
         })
         .register_module("call", |inner, config| {
             Ok(Box::new(crate::proxy::call::CallModule::new(config, inner)))

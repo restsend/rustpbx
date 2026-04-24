@@ -118,7 +118,7 @@ impl TestQueueServer {
                 Ok(Box::new(RegistrarModule::new(inner, config)))
             })
             .register_module("auth", |inner, _config| {
-                Ok(Box::new(AuthModule::new(inner)))
+                Ok(Box::new(AuthModule::new(inner.clone(), inner.proxy_config.clone())))
             })
             .register_module("call", |inner, config| {
                 Ok(Box::new(CallModule::new(config, inner)))

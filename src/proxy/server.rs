@@ -1,7 +1,7 @@
 use super::{
     FnCreateProxyModule, ProxyAction, ProxyModule,
     data::ProxyDataContext,
-    locator::{Locator, create_locator},
+    locator::{Locator, create_locator_with_migrate},
     user::{UserBackend, build_user_backend},
 };
 use crate::{
@@ -125,6 +125,7 @@ pub struct SipServerBuilder {
     rwi_gateway: Option<Arc<tokio::sync::RwLock<crate::rwi::gateway::RwiGateway>>>,
     /// AgentRegistry for agent management and presence state.
     agent_registry: Option<Arc<dyn crate::call::app::agent_registry::AgentRegistry>>,
+    skip_migrate: bool,
 }
 
 impl SipServerBuilder {
@@ -155,6 +156,7 @@ impl SipServerBuilder {
             addon_registry: None,
             rwi_gateway: None,
             agent_registry: None,
+            skip_migrate: false,
         }
     }
 
@@ -296,6 +298,11 @@ impl SipServerBuilder {
         self
     }
 
+    pub fn with_skip_migrate(mut self, skip: bool) -> Self {
+        self.skip_migrate = skip;
+        self
+    }
+
     pub async fn build(mut self) -> Result<SipServer> {
         let user_backend = if let Some(backend) = self.user_backend {
             backend
@@ -315,7 +322,7 @@ impl SipServerBuilder {
         let locator = if let Some(locator) = self.locator {
             locator
         } else {
-            match create_locator(&self.config.locator).await {
+            match create_locator_with_migrate(&self.config.locator, !self.skip_migrate).await {
                 Ok(locator) => locator,
                 Err(e) => {
                     warn!("failed to create locator: {} {:?}", e, self.config.locator);

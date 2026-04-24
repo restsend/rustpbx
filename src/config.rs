@@ -620,11 +620,63 @@ pub struct ProxyConfig {
     pub sip_flow_max_items: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub addons: Option<Vec<String>>,
+    /// Cluster peer addresses (IP:port) for automatic inter-node SIP trunking.
+    /// When configured, rustpbx will auto-generate bidirectional trunks to each peer
+    /// and a fallback route rule for cross-node internal calls.
+    /// Requires a shared locator (e.g. Database) to work correctly.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cluster_peers: Vec<String>,
     /// Whether to passthrough callee's failure status code to caller.
     /// When true, the caller receives the same SIP error code (e.g., 486, 603) that the callee returned.
     /// When false, a generic error code is sent instead.
     #[serde(default = "default_passthrough_failure")]
     pub passthrough_failure: bool,
+    /// Cache authenticated dialog information to skip authentication for in-dialog requests.
+    /// When enabled, successfully authenticated dialogs are cached with source address (IP:port),
+    /// and subsequent in-dialog requests from the same address are not re-authenticated.
+    /// This improves performance for re-INVITE and BYE requests.
+    /// Default: enabled with 10000 cache size and 3600s TTL.
+    #[serde(default = "default_dialog_auth_cache")]
+    pub dialog_auth_cache: Option<AuthCacheConfig>,
+}
+
+fn default_auth_cache_size() -> usize {
+    10000
+}
+
+fn default_auth_cache_ttl_seconds() -> u64 {
+    3600 // 1 hour
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct AuthCacheConfig {
+    /// Whether to enable in-dialog authentication caching. Default: true.
+    #[serde(default = "default_auth_cache_enabled")]
+    pub enabled: bool,
+    /// Maximum number of cached authenticated dialogs (LRU cache size). Default: 10000.
+    #[serde(default = "default_auth_cache_size")]
+    pub cache_size: usize,
+    /// TTL (time-to-live) in seconds for cached entries. Default: 3600.
+    #[serde(default = "default_auth_cache_ttl_seconds")]
+    pub ttl_seconds: u64,
+}
+
+fn default_auth_cache_enabled() -> bool {
+    true
+}
+
+fn default_dialog_auth_cache() -> Option<AuthCacheConfig> {
+    Some(AuthCacheConfig::default())
+}
+
+impl Default for AuthCacheConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_auth_cache_enabled(),
+            cache_size: default_auth_cache_size(),
+            ttl_seconds: default_auth_cache_ttl_seconds(),
+        }
+    }
 }
 
 fn default_passthrough_failure() -> bool {
@@ -839,7 +891,9 @@ impl Default for ProxyConfig {
             nat_fix: true,
             sip_flow_max_items: None,
             addons: None,
+            cluster_peers: Vec::new(),
             passthrough_failure: true,
+            dialog_auth_cache: default_dialog_auth_cache(),
         }
     }
 }

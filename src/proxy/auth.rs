@@ -1,21 +1,23 @@
-use super::{ProxyAction, ProxyModule, server::SipServerRef};
+use super::{
+    ProxyAction, ProxyModule,
+    dialog_auth_cache::{AuthCacheKey, DialogAuthCache},
+    server::SipServerRef,
+};
 use crate::call::cookie::SpamResult;
 use crate::call::user::SipUser;
 use crate::call::{CalleeDisplayName, TransactionCookie, TrunkContext};
 use crate::config::ProxyConfig;
 use anyhow::{Error, Result};
 use async_trait::async_trait;
-use rsipstack::dialog::DialogId;
 use rsipstack::dialog::authenticate::verify_digest;
 use rsipstack::sip::Header;
 use rsipstack::sip::headers::{ProxyAuthenticate, WwwAuthenticate};
-use rsipstack::sip::prelude::HeadersExt;
+use rsipstack::sip::prelude::{HeadersExt, ToTypedHeader};
 use rsipstack::sip::typed::Authorization;
-use rsipstack::transaction::key::TransactionRole;
 use rsipstack::transaction::transaction::Transaction;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info};
+use tracing::{debug, info, trace};
 
 #[derive(Debug)]
 pub enum AuthError {
@@ -67,16 +69,28 @@ pub trait AuthBackend: Send + Sync {
 #[derive(Clone)]
 pub struct AuthModule {
     server: SipServerRef,
+    dialog_auth_cache: Option<DialogAuthCache>,
 }
 
 impl AuthModule {
-    pub fn create(server: SipServerRef, _config: Arc<ProxyConfig>) -> Result<Box<dyn ProxyModule>> {
-        let module = AuthModule::new(server);
+    pub fn create(server: SipServerRef, config: Arc<ProxyConfig>) -> Result<Box<dyn ProxyModule>> {
+        let module = AuthModule::new(server, config);
         Ok(Box::new(module))
     }
 
-    pub fn new(server: SipServerRef) -> Self {
-        Self { server }
+    pub fn new(server: SipServerRef, config: Arc<ProxyConfig>) -> Self {
+        let dialog_auth_cache = config.dialog_auth_cache.as_ref().and_then(|cache_config| {
+            if cache_config.enabled {
+                Some(DialogAuthCache::new(cache_config))
+            } else {
+                None
+            }
+        });
+
+        Self {
+            server,
+            dialog_auth_cache,
+        }
     }
 
     pub async fn authenticate_request(
@@ -121,10 +135,11 @@ impl AuthModule {
                     return Ok(None);
                 }
                 if let Some(realm) = user.realm.as_ref()
-                    && !self.server.is_same_realm(realm).await {
-                        info!(username = user.username, realm = ?user.realm, "User is not in the same realm");
-                        return Ok(None);
-                    }
+                    && !self.server.is_same_realm(realm).await
+                {
+                    info!(username = user.username, realm = ?user.realm, "User is not in the same realm");
+                    return Ok(None);
+                }
                 stored_user.merge_with(&user);
                 match self.verify_credentials(
                     &stored_user,
@@ -154,6 +169,41 @@ impl AuthModule {
         let password = user.password.as_ref().unwrap_or(&empty_string);
 
         verify_digest(auth, password, method, raw_auth_header)
+    }
+
+    /// Check if a request is an in-dialog request (has To tag)
+    fn is_in_dialog_request(&self, tx: &Transaction) -> bool {
+        if let Ok(to_header) = tx.original.to_header() {
+            if let Ok(typed_to) = to_header.typed() {
+                // In-dialog requests have a tag parameter in the To header
+                return typed_to
+                    .params
+                    .iter()
+                    .any(|p| matches!(p, rsipstack::sip::Param::Tag(_)));
+            }
+        }
+        false
+    }
+
+    /// Get the source address from the transaction
+    fn get_source_addr(&self, tx: &Transaction) -> Option<rsipstack::transport::SipAddr> {
+        tx.connection.as_ref().map(|conn| conn.get_addr().clone())
+    }
+
+    /// Extract cache key (call_id, from_tag) from a transaction.
+    /// Uses from_tag because it is stable throughout the dialog lifetime,
+    /// unlike to_tag which is absent in the initial INVITE.
+    fn extract_auth_cache_key(&self, tx: &Transaction) -> Option<AuthCacheKey> {
+        let call_id = tx.original.call_id_header().ok()?.value().to_string();
+        let from_tag = tx
+            .original
+            .from_header()
+            .ok()?
+            .tag()
+            .ok()??
+            .value()
+            .to_string();
+        Some((call_id, from_tag))
     }
 
     pub fn create_proxy_auth_challenge(&self, realm: &str) -> Result<ProxyAuthenticate> {
@@ -187,6 +237,15 @@ impl ProxyModule for AuthModule {
             rsipstack::sip::Method::Register,
             rsipstack::sip::Method::Bye,
             rsipstack::sip::Method::Options,
+            rsipstack::sip::Method::Ack,
+            rsipstack::sip::Method::Cancel,
+            rsipstack::sip::Method::Update,
+            rsipstack::sip::Method::Refer,
+            rsipstack::sip::Method::Notify,
+            rsipstack::sip::Method::Message,
+            rsipstack::sip::Method::Info,
+            rsipstack::sip::Method::Subscribe,
+            rsipstack::sip::Method::Publish,
         ]
     }
 
@@ -206,22 +265,6 @@ impl ProxyModule for AuthModule {
         tx: &mut Transaction,
         cookie: TransactionCookie,
     ) -> Result<ProxyAction> {
-        // Only authenticate INVITE and REGISTER requests
-        if tx.original.method != rsipstack::sip::Method::Invite
-            && tx.original.method != rsipstack::sip::Method::Register
-        {
-            return Ok(ProxyAction::Continue);
-        }
-
-        if tx.original.method == rsipstack::sip::Method::Invite
-            && let Ok(dialog_id) =
-                DialogId::try_from((&tx.original, TransactionRole::Server))
-            && !dialog_id.local_tag.is_empty()
-        {
-            debug!(%dialog_id, "Bypassing authentication for in-dialog re-INVITE");
-            return Ok(ProxyAction::Continue);
-        }
-
         let tx_user = SipUser::try_from(&*tx)?;
         let source = tx_user
             .destination
@@ -229,11 +272,57 @@ impl ProxyModule for AuthModule {
             .map(|d| d.to_string())
             .unwrap_or_else(|| "unknown".to_string());
 
+        // Check if this is an in-dialog request and if we can skip authentication via cache
+        if let Some(ref cache) = self.dialog_auth_cache {
+            if self.is_in_dialog_request(tx) {
+                if let (Some(cache_key), Some(source_addr)) =
+                    (self.extract_auth_cache_key(tx), self.get_source_addr(tx))
+                {
+                    trace!(
+                        call_id = %cache_key.0,
+                        from_tag = %cache_key.1,
+                        method = %tx.original.method,
+                        %source,
+                        "Checking in-dialog request against auth cache"
+                    );
+
+                    if cache.is_authenticated(&cache_key, &source_addr).await {
+                        debug!(
+                            call_id = %cache_key.0,
+                            from_tag = %cache_key.1,
+                            method = %tx.original.method,
+                            %source,
+                            "In-dialog request authenticated via cache, skipping auth"
+                        );
+                        cookie.set_user(tx_user.clone());
+                        return Ok(ProxyAction::Continue);
+                    }
+                }
+            }
+        }
+
+        // Only authenticate INVITE and REGISTER requests (out-of-dialog)
+        if tx.original.method != rsipstack::sip::Method::Invite
+            && tx.original.method != rsipstack::sip::Method::Register
+        {
+            return Ok(ProxyAction::Continue);
+        }
+
         for backend in self.server.auth_backend.iter() {
             match backend.authenticate(&tx.original, &cookie).await {
                 Ok(Some(mut user)) => {
                     user.merge_with(&tx_user);
                     cookie.set_user(user);
+
+                    // Cache the authenticated dialog for in-dialog requests
+                    if let (Some(ref cache), Some(source_addr)) =
+                        (self.dialog_auth_cache.as_ref(), self.get_source_addr(tx))
+                    {
+                        if let Some(cache_key) = self.extract_auth_cache_key(tx) {
+                            cache.put(cache_key, source_addr).await;
+                        }
+                    }
+
                     return Ok(ProxyAction::Continue);
                 }
                 Err(e) => {
@@ -259,6 +348,16 @@ impl ProxyModule for AuthModule {
             Ok(authenticated) => {
                 if let Some(user) = authenticated {
                     cookie.set_user(user);
+
+                    // Cache the authenticated dialog for in-dialog requests
+                    if let (Some(ref cache), Some(source_addr)) =
+                        (self.dialog_auth_cache.as_ref(), self.get_source_addr(tx))
+                    {
+                        if let Some(cache_key) = self.extract_auth_cache_key(tx) {
+                            cache.put(cache_key, source_addr).await;
+                        }
+                    }
+
                     return Ok(ProxyAction::Continue);
                 }
 

@@ -759,11 +759,10 @@ default('RustPBX') }}{% endblock %}
                     if (!response.ok) {
                         throw new Error(data?.message || td.save_failed || 'Failed to save SIP trunk');
                     }
-                    if (this.mode === 'create' && data?.id) {
-                        window.location.href = `${this.basePath}/sip-trunk/${data.id}`;
-                        return;
-                    }
                     this.success = td.save_success || 'Changes saved successfully.';
+                    setTimeout(() => {
+                        window.location.href = this.listUrl;
+                    }, 600);
                 } catch (err) {
                     console.error(err);
                     this.error = err?.message || td.save_failed || 'Failed to save SIP trunk';
