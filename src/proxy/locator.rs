@@ -470,12 +470,19 @@ pub(crate) fn sort_locations_by_recency(mut locations: Vec<Location>) -> Vec<Loc
 }
 
 pub async fn create_locator(config: &LocatorConfig) -> Result<Box<dyn Locator>> {
+    create_locator_with_migrate(config, true).await
+}
+
+pub async fn create_locator_with_migrate(
+    config: &LocatorConfig,
+    migrate: bool,
+) -> Result<Box<dyn Locator>> {
     match config {
         LocatorConfig::Memory | LocatorConfig::Http { .. } => {
             Ok(Box::new(MemoryLocator::new()) as Box<dyn Locator>)
         }
         LocatorConfig::Database { url } => {
-            let db_locator = DbLocator::new(url.clone()).await?;
+            let db_locator = DbLocator::new_with_migrate(url.clone(), migrate).await?;
             Ok(Box::new(db_locator) as Box<dyn Locator>)
         }
     }

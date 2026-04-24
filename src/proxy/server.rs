@@ -1,7 +1,7 @@
 use super::{
     FnCreateProxyModule, ProxyAction, ProxyModule,
     data::ProxyDataContext,
-    locator::{Locator, create_locator},
+    locator::{Locator, create_locator_with_migrate},
     user::{UserBackend, build_user_backend},
 };
 use crate::{
@@ -119,6 +119,7 @@ pub struct SipServerBuilder {
     /// Pre-built SipFlow backend (takes precedence over sipflow_config).
     sipflow_backend: Option<Arc<dyn SipFlowBackend>>,
     no_bind: bool,
+    skip_migrate: bool,
     /// Addon registry for accessing call applications (voicemail, ivr, etc.)
     addon_registry: Option<Arc<crate::addons::registry::AddonRegistry>>,
     /// RWI gateway to wire into the server for call-app factory use.
@@ -152,6 +153,7 @@ impl SipServerBuilder {
             sipflow_config: None,
             sipflow_backend: None,
             no_bind: false,
+            skip_migrate: false,
             addon_registry: None,
             rwi_gateway: None,
             agent_registry: None,
@@ -173,6 +175,11 @@ impl SipServerBuilder {
 
     pub fn with_no_bind(mut self, no_bind: bool) -> Self {
         self.no_bind = no_bind;
+        self
+    }
+
+    pub fn with_skip_migrate(mut self, skip_migrate: bool) -> Self {
+        self.skip_migrate = skip_migrate;
         self
     }
 
@@ -315,7 +322,7 @@ impl SipServerBuilder {
         let locator = if let Some(locator) = self.locator {
             locator
         } else {
-            match create_locator(&self.config.locator).await {
+            match create_locator_with_migrate(&self.config.locator, !self.skip_migrate).await {
                 Ok(locator) => locator,
                 Err(e) => {
                     warn!("failed to create locator: {} {:?}", e, self.config.locator);
