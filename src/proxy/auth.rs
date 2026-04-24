@@ -5,11 +5,13 @@ use crate::call::{CalleeDisplayName, TransactionCookie, TrunkContext};
 use crate::config::ProxyConfig;
 use anyhow::{Error, Result};
 use async_trait::async_trait;
+use rsipstack::dialog::DialogId;
 use rsipstack::dialog::authenticate::verify_digest;
 use rsipstack::sip::Header;
 use rsipstack::sip::headers::{ProxyAuthenticate, WwwAuthenticate};
 use rsipstack::sip::prelude::HeadersExt;
 use rsipstack::sip::typed::Authorization;
+use rsipstack::transaction::key::TransactionRole;
 use rsipstack::transaction::transaction::Transaction;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
@@ -208,6 +210,15 @@ impl ProxyModule for AuthModule {
         if tx.original.method != rsipstack::sip::Method::Invite
             && tx.original.method != rsipstack::sip::Method::Register
         {
+            return Ok(ProxyAction::Continue);
+        }
+
+        if tx.original.method == rsipstack::sip::Method::Invite
+            && let Ok(dialog_id) =
+                DialogId::try_from((&tx.original, TransactionRole::Server))
+            && !dialog_id.local_tag.is_empty()
+        {
+            debug!(%dialog_id, "Bypassing authentication for in-dialog re-INVITE");
             return Ok(ProxyAction::Continue);
         }
 
