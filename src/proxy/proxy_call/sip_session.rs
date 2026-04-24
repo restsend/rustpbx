@@ -963,6 +963,16 @@ impl SipSession {
                         for tx in subscribers.iter() {
                             let _ = tx.send(event.clone());
                         }
+                        if (200..300).contains(&sip_status) {
+                            self.hangup_reason
+                                .get_or_insert(CallRecordHangupReason::ByRefer);
+                            self.pending_hangup.insert(self.server_dialog.id());
+                            info!(
+                                session_id = %self.context.session_id,
+                                sip_status = %sip_status,
+                                "REFER completed successfully, hanging up original dialog"
+                            );
+                        }
                     }
                 }
             }
@@ -2910,6 +2920,15 @@ impl SipSession {
         changed_leg_sdp: &str,
     ) -> Result<()> {
         if self.media_profile.path != MediaPathMode::Anchored || self.media_bridge.is_some() {
+            return Ok(());
+        }
+
+        let has_remote_callee = self.connected_callee.is_some() || !self.callee_dialogs.is_empty();
+        if side == DialogSide::Caller && !has_remote_callee {
+            debug!(
+                session_id = %self.context.session_id,
+                "Skipping callee forwarding update for app-only caller dialog"
+            );
             return Ok(());
         }
 
