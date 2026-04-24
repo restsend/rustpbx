@@ -131,3 +131,24 @@ passthrough_failure = true
 # Maximum items for SIP flow storage (per dialog)
 sip_flow_max_items = 1000
 ```
+
+## In-Dialog Authentication Cache
+
+When enabled, successfully authenticated dialogs are cached along with their source address. Subsequent in-dialog requests (e.g., re-INVITE, BYE) from the same source address within the TTL window skip re-authentication, reducing latency and load.
+
+```toml
+[proxy]
+# Enabled by default. Set to false to disable.
+dialog_auth_cache = { enabled = true, cache_size = 10000, ttl_seconds = 3600 }
+```
+
+- **`enabled`**: Whether to skip authentication for cached in-dialog requests. Default: `true`.
+- **`cache_size`**: Maximum number of dialogs to cache (LRU eviction). Default: `10000`.
+- **`ttl_seconds`**: Time-to-live for cache entries. Default: `3600` (1 hour).
+
+To disable explicitly:
+
+```toml
+[proxy]
+dialog_auth_cache = { enabled = false }
+```

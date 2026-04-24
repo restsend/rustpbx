@@ -287,6 +287,12 @@ impl TestUa {
         sdps.get(dialog_id).cloned()
     }
 
+    /// Set answer SDP for a dialog, used for re-INVITE responses.
+    pub async fn set_answer_sdp(&self, dialog_id: &DialogId, sdp: &str) {
+        let mut sdps = self.answer_sdps.lock().await;
+        sdps.insert(dialog_id.clone(), sdp.to_string());
+    }
+
     /// Answer an incoming call with optional SDP
     pub async fn answer_call(
         &self,
@@ -897,7 +903,7 @@ mod tests {
                     Ok(Box::new(RegistrarModule::new(inner, config)))
                 })
                 .register_module("auth", |inner, _config| {
-                    Ok(Box::new(AuthModule::new(inner)))
+                    Ok(Box::new(AuthModule::new(inner.clone(), inner.proxy_config.clone())))
                 })
                 .register_module("call", |inner, config| {
                     Ok(Box::new(CallModule::new(config, inner)))

@@ -61,25 +61,38 @@ impl MigrationTrait for Migration {
                     .col(string(Column::Destination).char_len(255).not_null())
                     .col(string(Column::Transport).char_len(32).not_null())
                     .col(integer(Column::LastModified).not_null())
-                    .col(timestamp(Column::CreatedAt).not_null())
-                    .col(timestamp(Column::UpdatedAt).not_null())
+                    .col(
+                        timestamp(Column::CreatedAt)
+                            .not_null()
+                            .default(Expr::current_timestamp()),
+                    )
+                    .col(
+                        timestamp(Column::UpdatedAt)
+                            .not_null()
+                            .default(Expr::current_timestamp()),
+                    )
                     .col(boolean(Column::SupportsWebrtc).not_null().default(false))
                     .col(string_null(Column::UserAgent).char_len(255))
                     .to_owned(),
             )
             .await?;
 
-        // Add index on username+realm
-        manager
-            .create_index(
-                Index::create()
-                    .table(Entity)
-                    .name("idx_locations_realm_username")
-                    .col(Column::Realm)
-                    .col(Column::Username)
-                    .to_owned(),
-            )
-            .await
+        if !manager
+            .has_index("rustpbx_locations", "idx_locations_realm_username")
+            .await?
+        {
+            manager
+                .create_index(
+                    Index::create()
+                        .table(Entity)
+                        .name("idx_locations_realm_username")
+                        .col(Column::Realm)
+                        .col(Column::Username)
+                        .to_owned(),
+                )
+                .await?;
+        }
+        Ok(())
     }
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
@@ -110,7 +123,10 @@ impl MigratorTrait for Migrator {
 impl DbLocator {
     /// Create a new DbLocator with a database connection
     pub async fn new(url: String) -> Result<Self> {
-        // Connect to the database
+        Self::new_with_migrate(url, true).await
+    }
+
+    pub async fn new_with_migrate(url: String, migrate: bool) -> Result<Self> {
         let db = Database::connect(&url)
             .await
             .map_err(|e| anyhow::anyhow!("Database connection error: {}", e))?;
@@ -118,18 +134,25 @@ impl DbLocator {
             db,
             realm_checker: Mutex::new(None),
         };
-        info!("Creating DbLocator");
-        match db_locator.migrate().await {
-            Ok(_) => Ok(db_locator),
-            Err(e) => {
-                warn!("migrate locator fail {}", e);
-                Err(e)
+        if migrate {
+            info!("Creating DbLocator with migration");
+            match db_locator.migrate().await {
+                Ok(_) => Ok(db_locator),
+                Err(e) => {
+                    warn!("migrate locator fail {}", e);
+                    Err(e)
+                }
             }
+        } else {
+            info!("Creating DbLocator without migration");
+            Ok(db_locator)
         }
     }
 
     pub async fn migrate(&self) -> Result<()> {
-        Migrator::up(&self.db, None)
+        let manager = SchemaManager::new(&self.db);
+        Migration
+            .up(&manager)
             .await
             .map_err(|e| anyhow::anyhow!("Migration error: {}", e))?;
         Ok(())

@@ -13,6 +13,7 @@ pub mod auth;
 pub mod capability_headers;
 pub mod call;
 pub mod data;
+pub mod dialog_auth_cache;
 pub mod locator;
 pub mod locator_db;
 pub mod locator_webhook;

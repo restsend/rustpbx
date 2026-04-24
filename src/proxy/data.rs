@@ -8,11 +8,11 @@ use std::{
     collections::HashMap,
     fs,
     io::ErrorKind,
-    net::IpAddr,
+    net::{IpAddr, SocketAddr},
     path::{Path, PathBuf},
     sync::{Arc, RwLock},
 };
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::{
     addons::queue::services::utils as queue_utils,
@@ -119,15 +119,16 @@ impl ProxyDataContext {
 
         // Try to resolve by ID first (db-<id>)
         if let Some(id_str) = reference.strip_prefix("db-")
-            && id_str.parse::<i64>().is_ok() {
-                let queues = self.queues.read().unwrap();
-                // We need to store the ID in the map key or value to look it up efficiently.
-                // Currently keys are canonical names or "db-<id>" from queue_entry_key.
-                // Let's check if the key exists directly.
-                if let Some(queue) = queues.get(reference) {
-                    return Ok(Some(queue.clone()));
-                }
+            && id_str.parse::<i64>().is_ok()
+        {
+            let queues = self.queues.read().unwrap();
+            // We need to store the ID in the map key or value to look it up efficiently.
+            // Currently keys are canonical names or "db-<id>" from queue_entry_key.
+            // Let's check if the key exists directly.
+            if let Some(queue) = queues.get(reference) {
+                return Ok(Some(queue.clone()));
             }
+        }
 
         // Try to resolve by file path
         if let Some(config) = self.load_queue_file(reference)? {
@@ -141,15 +142,17 @@ impl ProxyDataContext {
         let queues = self.queues.read().unwrap();
         for (name, queue) in queues.iter() {
             if let Some(existing) = queue_utils::canonical_queue_key(name)
-                && existing == key {
-                    return Ok(Some(queue.clone()));
-                }
+                && existing == key
+            {
+                return Ok(Some(queue.clone()));
+            }
             // Also check the queue name inside the config, in case the key is an ID
             if let Some(queue_name) = &queue.name
                 && let Some(existing) = queue_utils::canonical_queue_key(queue_name)
-                    && existing == key {
-                        return Ok(Some(queue.clone()));
-                    }
+                && existing == key
+            {
+                return Ok(Some(queue.clone()));
+            }
         }
         Ok(None)
     }
@@ -258,6 +261,14 @@ impl ProxyDataContext {
             let generated_pattern = vec![info.path.clone()];
             let (generated_trunks, _) = load_trunks_from_files(&generated_pattern)?;
             trunks.extend(generated_trunks);
+        }
+
+        let cluster_trunks = Self::generate_cluster_trunks(&config);
+        for (name, trunk) in cluster_trunks {
+            if !trunks.contains_key(&name) {
+                info!("auto-generated cluster trunk '{}' -> {}", name, trunk.dest);
+                trunks.insert(name, trunk);
+            }
         }
 
         let len = trunks.len();
@@ -447,6 +458,15 @@ impl ProxyDataContext {
             }
         }
 
+        // Auto-generate cluster fallback route if cluster peers are configured
+        let cluster_route = Self::generate_cluster_route(&config);
+        if let Some(route) = cluster_route {
+            if !routes.iter().any(|r| r.name == route.name) {
+                info!("auto-generated cluster fallback route '{}'", route.name);
+                routes.push(route);
+            }
+        }
+
         routes.sort_by_key(|r| r.priority);
         let len = routes.len();
         *self.routes.write().unwrap() = routes;
@@ -552,6 +572,172 @@ impl ProxyDataContext {
         let total = rules.len();
         *self.acl_rules.write().unwrap() = rules;
         info!(total = total, "acl rules snapshot updated at runtime");
+    }
+
+    /// Generate auto-trunks for configured cluster peers.
+    fn generate_cluster_trunks(config: &ProxyConfig) -> HashMap<String, TrunkConfig> {
+        let mut result = HashMap::new();
+        if config.cluster_peers.is_empty() {
+            return result;
+        }
+
+        // Build list of local addresses to exclude self
+        let local_addr = match config.addr.parse::<IpAddr>() {
+            Ok(ip) => ip,
+            Err(_) => {
+                warn!(
+                    "invalid proxy.addr '{}', skipping cluster peer generation",
+                    config.addr
+                );
+                return result;
+            }
+        };
+        let local_ports: Vec<u16> = [
+            config.udp_port,
+            config.tcp_port,
+            config.tls_port,
+            config.ws_port,
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+
+        for peer in &config.cluster_peers {
+            let peer = peer.trim();
+            if peer.is_empty() {
+                continue;
+            }
+
+            let peer_addr = match peer.parse::<SocketAddr>() {
+                Ok(addr) => addr,
+                Err(e) => {
+                    warn!("invalid cluster peer '{}': {}", peer, e);
+                    continue;
+                }
+            };
+
+            // Skip self (same IP and any local port)
+            if peer_addr.ip() == local_addr && local_ports.contains(&peer_addr.port()) {
+                debug!("skipping self cluster peer {}", peer);
+                continue;
+            }
+
+            let name = format!("cluster-{}-{}", peer_addr.ip(), peer_addr.port());
+            let dest = format!("sip:{}:{}", peer_addr.ip(), peer_addr.port());
+
+            // Infer transport from port
+            let transport = match peer_addr.port() {
+                5061 => Some("tls".to_string()),
+                5060 => Some("udp".to_string()),
+                _ => None,
+            };
+
+            let trunk = TrunkConfig {
+                dest: dest.clone(),
+                backup_dest: None,
+                username: None,
+                password: None,
+                codec: Vec::new(),
+                disabled: None,
+                max_calls: None,
+                max_cps: None,
+                weight: None,
+                transport,
+                id: None,
+                direction: Some(crate::proxy::routing::TrunkDirection::Bidirectional),
+                inbound_hosts: vec![peer_addr.ip().to_string()],
+                recording: None,
+                incoming_from_user_prefix: None,
+                incoming_to_user_prefix: None,
+                country: None,
+                policy: None,
+                register_enabled: None,
+                register_expires: None,
+                register_extra_headers: None,
+                rewrite_hostport: false,
+                origin: ConfigOrigin::embedded(),
+            };
+
+            result.insert(name, trunk);
+        }
+
+        result
+    }
+
+    /// Generate a low-priority fallback route for cluster-internal calls.
+    /// This route matches calls to the local realm and forwards them via
+    /// auto-generated cluster trunks when the callee is not found locally.
+    fn generate_cluster_route(config: &ProxyConfig) -> Option<RouteRule> {
+        if config.cluster_peers.is_empty() {
+            return None;
+        }
+
+        // Build list of cluster trunk names (excluding self)
+        let cluster_trunks = Self::generate_cluster_trunks(config);
+        if cluster_trunks.is_empty() {
+            return None;
+        }
+
+        let trunk_names: Vec<String> = cluster_trunks.keys().cloned().collect();
+
+        // Build match condition for local realm(s)
+        let mut match_conditions = MatchConditions::default();
+
+        // If realms are configured, match any of them
+        if let Some(ref realms) = config.realms {
+            if !realms.is_empty() {
+                // Use the first realm as the primary match, or match all if multiple
+                let realm_patterns = realms
+                    .iter()
+                    .filter(|r| !r.is_empty())
+                    .cloned()
+                    .collect::<Vec<_>>();
+                if !realm_patterns.is_empty() {
+                    // Join multiple realms with | for regex matching
+                    match_conditions.to_host = Some(realm_patterns.join("|"));
+                }
+            }
+        }
+
+        // Fallback: if no realms configured, try to match proxy addr
+        if match_conditions.to_host.is_none() {
+            match_conditions.to_host = Some(config.addr.clone());
+        }
+
+        let dest = if trunk_names.len() == 1 {
+            DestConfig::Single(trunk_names[0].clone())
+        } else {
+            DestConfig::Multiple(trunk_names)
+        };
+
+        let route = RouteRule {
+            name: "cluster-internal-fallback".to_string(),
+            description: Some("Auto-generated fallback route for cluster peers".to_string()),
+            priority: -100, // Low priority so user rules take precedence
+            direction: RouteDirection::Any,
+            source_trunks: Vec::new(),
+            source_trunk_ids: Vec::new(),
+            match_conditions,
+            rewrite: None,
+            action: RouteAction {
+                action: None,
+                dest: Some(dest),
+                select: "rr".to_string(),
+                hash_key: None,
+                reject: None,
+                queue: None,
+                app: None,
+                app_params: None,
+                auto_answer: true,
+            },
+            codecs: Vec::new(),
+            disable_ice_servers: None,
+            disabled: None,
+            policy: None,
+            origin: ConfigOrigin::embedded(),
+        };
+
+        Some(route)
     }
 
     async fn export_trunks_to_toml(
@@ -776,10 +962,12 @@ fn resolve_generated_path(
 
 fn ensure_parent_dir(path: &Path) -> Result<()> {
     if let Some(parent) = path.parent()
-        && !parent.as_os_str().is_empty() && !parent.exists() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("failed to create directory {}", parent.display()))?;
-        }
+        && !parent.as_os_str().is_empty()
+        && !parent.exists()
+    {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create directory {}", parent.display()))?;
+    }
     Ok(())
 }
 
@@ -851,20 +1039,25 @@ fn convert_trunk(model: sip_trunk::Model) -> Option<(String, TrunkConfig)> {
     let primary = model.sip_server.clone().or(model.outbound_proxy.clone());
     let dest = primary?;
 
-    let backup_dest = model.outbound_proxy.clone().filter(|outbound| *outbound != dest);
+    let backup_dest = model
+        .outbound_proxy
+        .clone()
+        .filter(|outbound| *outbound != dest);
 
     let transport = Some(model.sip_transport.as_str().to_string());
 
     let mut inbound_hosts = extract_string_array(model.allowed_ips.clone());
     if let Some(host) = extract_host_from_uri(&dest)
-        && host.parse::<IpAddr>().is_ok() {
-            push_unique(&mut inbound_hosts, host);
-        }
+        && host.parse::<IpAddr>().is_ok()
+    {
+        push_unique(&mut inbound_hosts, host);
+    }
     if let Some(backup) = &backup_dest
         && let Some(host) = extract_host_from_uri(backup)
-            && host.parse::<IpAddr>().is_ok() {
-                push_unique(&mut inbound_hosts, host);
-            }
+        && host.parse::<IpAddr>().is_ok()
+    {
+        push_unique(&mut inbound_hosts, host);
+    }
 
     let recording = model
         .metadata
@@ -955,18 +1148,21 @@ fn convert_route(
 ) -> Result<Option<RouteRule>> {
     let mut match_conditions = MatchConditions::default();
     if let Some(pattern) = model.source_pattern.clone()
-        && !pattern.is_empty() {
-            match_conditions.from_user = Some(pattern);
-        }
+        && !pattern.is_empty()
+    {
+        match_conditions.from_user = Some(pattern);
+    }
     if let Some(pattern) = model.destination_pattern.clone()
-        && !pattern.is_empty() {
-            match_conditions.to_user = Some(pattern);
-        }
+        && !pattern.is_empty()
+    {
+        match_conditions.to_user = Some(pattern);
+    }
 
     if let Some(filters) = model.header_filters.clone()
-        && let Ok(map) = serde_json::from_value::<HashMap<String, String>>(filters) {
-            apply_match_filters(&mut match_conditions, map);
-        }
+        && let Ok(map) = serde_json::from_value::<HashMap<String, String>>(filters)
+    {
+        apply_match_filters(&mut match_conditions, map);
+    }
     finalize_match_conditions(&mut match_conditions);
 
     let rewrite_rules = model
@@ -1009,9 +1205,10 @@ fn convert_route(
 
     if let Some(metadata) = model.metadata.clone()
         && let Ok(doc) = serde_json::from_value::<RouteMetadataDocument>(metadata)
-            && let Some(meta_action) = doc.action {
-                apply_route_metadata(&mut action, meta_action);
-            }
+        && let Some(meta_action) = doc.action
+    {
+        apply_route_metadata(&mut action, meta_action);
+    }
 
     let direction = match model.direction {
         routing::RoutingDirection::Inbound => RouteDirection::Inbound,
@@ -1092,9 +1289,7 @@ fn sanitize_metadata_string(value: Option<String>) -> Option<String> {
 }
 
 fn canonical_condition_key(raw: &str) -> String {
-    raw.trim()
-        .to_ascii_lowercase()
-        .replace(['_', '-'], ".")
+    raw.trim().to_ascii_lowercase().replace(['_', '-'], ".")
 }
 
 fn handle_match_key(match_conditions: &mut MatchConditions, key: &str, value: &str) -> bool {
