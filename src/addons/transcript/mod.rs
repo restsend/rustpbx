@@ -56,15 +56,16 @@ impl Addon for TranscriptAddon {
         if let Some(console) = &state.console {
             let base = console.base_path();
             let api_prefix = console.api_prefix();
-            let static_path = if std::path::Path::new("src/addons/transcript/static").exists() {
+            let static_fs_path = if std::path::Path::new("src/addons/transcript/static").exists() {
                 "src/addons/transcript/static"
             } else {
                 "static/transcript"
             };
+            let static_url_prefix = state.config().static_path();
 
             let router = Router::new().nest_service(
-                "/static/transcript",
-                tower_http::services::ServeDir::new(static_path),
+                &format!("{}/transcript", static_url_prefix),
+                tower_http::services::ServeDir::new(static_fs_path),
             );
 
             let router = router

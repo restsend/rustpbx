@@ -797,7 +797,7 @@
             basePath: '',
             listEndpoint: '',
             createUrl: '',
-            amiEndpoint: options.amiEndpoint || '/ami/v1',
+            amiEndpoint: options.amiEndpoint || options.ami_path || '/ami/v1',
             filtersRaw: {},
             routes: [],
             summary: { total_routes: 0, active_routes: 0, last_deploy: null },

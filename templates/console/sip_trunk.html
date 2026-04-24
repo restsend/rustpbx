@@ -450,7 +450,7 @@
             basePath: options.basePath || '/console',
             listEndpoint: `${options.basePath || '/console'}/sip-trunk`,
             createUrl: options.createUrl || `${options.basePath || '/console'}/sip-trunk/new`,
-            amiEndpoint: options.amiEndpoint || '/ami/v1',
+            amiEndpoint: options.amiEndpoint || options.ami_path || '/ami/v1',
             filtersRaw: options.filters || {},
             keyword: '',
             statusFilter: 'all',

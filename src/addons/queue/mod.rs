@@ -51,15 +51,16 @@ impl Addon for QueueAddon {
         let base_path = console_state.base_path().to_string();
         let router = console::handlers::urls().with_state(console_state);
 
-        let static_path = if std::path::Path::new("src/addons/queue/static").exists() {
+        let static_fs_path = if std::path::Path::new("src/addons/queue/static").exists() {
             "src/addons/queue/static"
         } else {
             "static/queue"
         };
+        let static_url_prefix = state.config().static_path();
 
         Some(
             Router::new()
-                .nest_service("/static/queue", ServeDir::new(static_path))
+                .nest_service(&format!("{}/queue", static_url_prefix), ServeDir::new(static_fs_path))
                 .nest(&base_path, router),
         )
     }

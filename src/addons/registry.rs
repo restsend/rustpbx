@@ -2,6 +2,16 @@ use crate::addons::Addon;
 use crate::app::AppState;
 use std::sync::Arc;
 
+/// Replace `/static` prefix in a URL with the configured static_path.
+fn normalize_static_url(url: &str, config: &crate::config::Config) -> String {
+    let prefix = config.static_path();
+    if url.starts_with("/static/") && prefix != "/static" {
+        format!("{}{}", prefix, &url["/static".len()..])
+    } else {
+        url.to_string()
+    }
+}
+
 pub struct AddonRegistry {
     addons: Vec<Box<dyn Addon>>,
 }
@@ -125,7 +135,7 @@ impl AddonRegistry {
             for injection in addon.inject_scripts() {
                 if let Ok(re) = regex::Regex::new(injection.url_path_regex)
                     && re.is_match(path) {
-                        scripts.push(injection.script_url);
+                        scripts.push(normalize_static_url(&injection.script_url, config));
                     }
             }
         }
@@ -165,6 +175,7 @@ impl AddonRegistry {
     }
 
     pub fn list_addons(&self, state: AppState) -> Vec<super::AddonInfo> {
+        let config = state.config().clone();
         self.addons
             .iter()
             .map(|a| {
@@ -181,7 +192,7 @@ impl AddonRegistry {
                     developer: a.developer().to_string(),
                     website: a.website().to_string(),
                     cost: a.cost().to_string(),
-                    screenshots: a.screenshots().iter().map(|s| s.to_string()).collect(),
+                    screenshots: a.screenshots().iter().map(|s| normalize_static_url(s, &config)).collect(),
                     restart_required: false, // Caller should set this
                     #[cfg(feature = "commerce")]
                     license_status: None,

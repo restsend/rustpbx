@@ -305,10 +305,23 @@
             });
         }
 
+        let _phoneConfig = { wsPath: '/ws', iceServersPath: '/iceservers', amiPath: '/ami/v1', staticPath: '/static' };
+        async function detectServerConfig() {
+            try {
+                const response = await fetch('/api/config/phone');
+                if (response.ok) {
+                    const cfg = await response.json();
+                    _phoneConfig = cfg;
+                    return cfg;
+                }
+            } catch (e) {}
+            return _phoneConfig;
+        }
+
         const defaultServerUrl = (() => {
             const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
             const host = window.location.host || 'localhost:8080';
-            const pathRaw = (serverInput && serverInput.dataset && serverInput.dataset.defaultPath) || '/ws';
+            const pathRaw = (serverInput && serverInput.dataset && serverInput.dataset.defaultPath) || _phoneConfig.wsPath;
             const path = pathRaw.startsWith('/') ? pathRaw : `/${pathRaw}`;
             return `${protocol}//${host}${path}`;
         })();
@@ -350,7 +363,8 @@
                 return;
             }
             try {
-                const response = await fetch('/iceservers', { cache: 'no-store' });
+                const icePath = _phoneConfig.iceServersPath || '/iceservers';
+                const response = await fetch(icePath, { cache: 'no-store' });
                 if (!response.ok) {
                     throw new Error(`status ${response.status}`);
                 }
@@ -372,9 +386,10 @@
                 if (iceEnable) {
                     iceEnable.checked = true;
                 }
-                log('Loaded ICE servers from /iceservers');
+                log(`Loaded ICE servers from ${icePath}`);
             } catch (error) {
-                log(`Failed to load /iceservers: ${error.message}`);
+                const icePath = _phoneConfig.iceServersPath || '/iceservers';
+                log(`Failed to load ${icePath}: ${error.message}`);
             }
         }
 

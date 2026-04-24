@@ -294,6 +294,8 @@ pub struct ConsoleConfig {
     /// Supported locales map: code -> LocaleInfo
     #[serde(default = "default_locales")]
     pub locales: std::collections::HashMap<String, LocaleInfo>,
+    /// Static files HTTP path prefix (default: "/static")
+    pub static_path: Option<String>,
 }
 
 impl Default for ConsoleConfig {
@@ -310,6 +312,7 @@ impl Default for ConsoleConfig {
             jssip_js: None,
             locale_default: default_locale(),
             locales: default_locales(),
+            static_path: None,
         }
     }
 }
@@ -583,6 +586,8 @@ pub struct ProxyConfig {
     #[serde(default)]
     pub realms: Option<Vec<String>>,
     pub ws_handler: Option<String>,
+    pub ami_path: Option<String>,
+    pub ice_servers_path: Option<String>,
     pub http_router: Option<HttpRouterConfig>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub routes_files: Vec<String>,
@@ -815,6 +820,8 @@ impl Default for ProxyConfig {
             frequency_limiter: None,
             realms: Some(vec![]),
             ws_handler: None,
+            ami_path: None,
+            ice_servers_path: None,
             http_router: None,
             routes_files: Vec::new(),
             acl_files: Vec::new(),
@@ -946,6 +953,15 @@ impl Config {
 
     pub fn config_dir(&self) -> std::path::PathBuf {
         self.proxy.generated_root_dir()
+    }
+
+    /// Returns the configured static files HTTP path prefix.
+    /// Defaults to "/static" when not configured.
+    pub fn static_path(&self) -> String {
+        self.console
+            .as_ref()
+            .and_then(|c| c.static_path.clone())
+            .unwrap_or_else(|| "/static".to_string())
     }
 
     /// Returns the wholesale bills directory.

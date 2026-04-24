@@ -48,6 +48,8 @@ api_prefix = "/api"
 allow_registration = false
 # set to true to force Secure cookie attribute, otherwise it is auto-detected based on request
 secure_cookie = false
+# Static files HTTP path prefix (default: "/static")
+static_path = "/static"
 
 [proxy]
 modules = ["acl", "auth", "presence", "registrar", "call"]
@@ -55,6 +57,8 @@ addr = "0.0.0.0"
 udp_port = 15060
 registrar_expires = 60
 ws_handler= "/ws"
+ami_path = "/ami/v1"
+ice_servers_path = "/iceservers"
 media_proxy = "auto"
 # session_timer = true
 # session_timer_always = false # Keep refreshing even if peer does not negotiate session timer

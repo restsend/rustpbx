@@ -1595,6 +1595,7 @@ tab_sip_state = "SIP State"
 # Connection panel inline labels
 label_realm = "Realm"
 label_expires = "Expires"
+label_locator = "Locator"
 label_expires_default = "Default 60 s"
 label_password = "Password"
 label_example = "Example"

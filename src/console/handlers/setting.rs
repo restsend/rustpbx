@@ -224,7 +224,7 @@ pub async fn page_settings(
 async fn build_settings_payload(state: &ConsoleState) -> JsonValue {
     let mut data = serde_json::Map::new();
     let now = Utc::now();
-    let ami_endpoint = "/ami/v1";
+    let mut ami_endpoint = "/ami/v1".to_string();
 
     let mut platform = json!({});
     let mut proxy = json!({});
@@ -243,6 +243,7 @@ async fn build_settings_payload(state: &ConsoleState) -> JsonValue {
 
     if let Some(app_state) = state.app_state() {
         let config_arc = app_state.config().clone();
+        ami_endpoint = config_arc.proxy.ami_path.clone().unwrap_or_else(|| "/ami/v1".to_string());
         let mut loaded_config: Option<Config> = None;
 
         if let Some(path) = app_state.config_path.as_ref() {
