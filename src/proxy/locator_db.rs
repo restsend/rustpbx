@@ -175,6 +175,7 @@ fn encode_sip_addr(addr: &SipAddr) -> String {
 }
 
 const HOME_PROXY_MARKER: &str = "|hp=";
+const REGISTERED_AOR_MARKER: &str = "|ra=";
 
 fn decode_sip_addr(value: &str) -> Option<SipAddr> {
     let trimmed = value.trim();
@@ -203,41 +204,111 @@ fn decode_sip_addr(value: &str) -> Option<SipAddr> {
         .map(SipAddr::from)
 }
 
-fn encode_user_agent_with_home_proxy(
-    user_agent: Option<&str>,
-    home_proxy: Option<&SipAddr>,
-) -> Option<String> {
-    let ua = user_agent.unwrap_or("");
-    if let Some(home_proxy) = home_proxy {
-        let hp = encode_sip_addr(home_proxy);
-        return Some(format!("{}{}{}", ua, HOME_PROXY_MARKER, hp));
+fn fallback_registered_aor(
+    username: &str,
+    realm: &str,
+    fallback: &rsipstack::sip::Uri,
+) -> rsipstack::sip::Uri {
+    let user = username.trim();
+    let host = realm.trim();
+    if user.is_empty() || host.is_empty() {
+        return fallback.clone();
     }
-    if ua.is_empty() {
-        None
-    } else {
-        Some(ua.to_string())
+
+    let candidate = format!("sip:{}@{}", user, host);
+    rsipstack::sip::Uri::try_from(candidate.as_str()).unwrap_or_else(|_| fallback.clone())
+}
+
+fn choose_registered_aor(
+    username: &str,
+    realm: &str,
+    contact_aor: &rsipstack::sip::Uri,
+    decoded_registered_aor: Option<rsipstack::sip::Uri>,
+) -> rsipstack::sip::Uri {
+    let fallback = fallback_registered_aor(username, realm, contact_aor);
+    let strict_equals = |a: &rsipstack::sip::Uri, b: &rsipstack::sip::Uri| {
+        a.to_string().eq_ignore_ascii_case(&b.to_string())
+    };
+
+    match decoded_registered_aor {
+        Some(registered)
+            if strict_equals(&registered, contact_aor)
+                && !strict_equals(&fallback, contact_aor) => {
+            fallback
+        }
+        Some(registered) => registered,
+        None => fallback,
     }
 }
 
-fn decode_user_agent_with_home_proxy(value: Option<&str>) -> (Option<String>, Option<SipAddr>) {
-    let Some(raw) = value else {
-        return (None, None);
-    };
+fn encode_location_metadata(
+    user_agent: Option<&str>,
+    home_proxy: Option<&SipAddr>,
+    registered_aor: Option<&rsipstack::sip::Uri>,
+) -> Option<String> {
+    let mut value = user_agent.unwrap_or("").to_string();
 
-    if let Some(idx) = raw.rfind(HOME_PROXY_MARKER) {
-        let (ua_part, hp_part_with_marker) = raw.split_at(idx);
-        let hp_part = &hp_part_with_marker[HOME_PROXY_MARKER.len()..];
-        if let Some(home_proxy) = decode_sip_addr(hp_part) {
-            let ua = if ua_part.is_empty() {
-                None
-            } else {
-                Some(ua_part.to_string())
-            };
-            return (ua, Some(home_proxy));
-        }
+    if let Some(home_proxy) = home_proxy {
+        value.push_str(HOME_PROXY_MARKER);
+        value.push_str(encode_sip_addr(home_proxy).as_str());
     }
 
-    (Some(raw.to_string()), None)
+    if let Some(registered_aor) = registered_aor {
+        value.push_str(REGISTERED_AOR_MARKER);
+        value.push_str(registered_aor.to_string().as_str());
+    }
+
+    if value.is_empty() {
+        None
+    } else {
+        Some(value)
+    }
+}
+
+fn decode_location_metadata(
+    value: Option<&str>,
+) -> (Option<String>, Option<SipAddr>, Option<rsipstack::sip::Uri>) {
+    let Some(raw) = value else {
+        return (None, None, None);
+    };
+
+    let mut rest = raw;
+    let mut home_proxy: Option<SipAddr> = None;
+    let mut registered_aor: Option<rsipstack::sip::Uri> = None;
+
+    loop {
+        let Some((prefix, tail)) = rest.rsplit_once('|') else {
+            break;
+        };
+
+        if home_proxy.is_none()
+            && let Some(value) = tail.strip_prefix("hp=")
+            && let Some(parsed) = decode_sip_addr(value)
+        {
+            home_proxy = Some(parsed);
+            rest = prefix;
+            continue;
+        }
+
+        if registered_aor.is_none()
+            && let Some(value) = tail.strip_prefix("ra=")
+            && let Ok(parsed) = rsipstack::sip::Uri::try_from(value)
+        {
+            registered_aor = Some(parsed);
+            rest = prefix;
+            continue;
+        }
+
+        break;
+    }
+
+    let user_agent = if rest.is_empty() {
+        None
+    } else {
+        Some(rest.to_string())
+    };
+
+    (user_agent, home_proxy, registered_aor)
 }
 
 #[async_trait]
@@ -338,9 +409,10 @@ impl Locator for DbLocator {
                 active_model.last_modified = Set(now);
                 active_model.updated_at = Set(chrono::Utc::now());
                 active_model.supports_webrtc = Set(location.supports_webrtc);
-                active_model.user_agent = Set(encode_user_agent_with_home_proxy(
+                active_model.user_agent = Set(encode_location_metadata(
                     location.user_agent.as_deref(),
                     location.home_proxy.as_ref(),
+                    location.registered_aor.as_ref(),
                 ));
 
                 active_model
@@ -364,9 +436,10 @@ impl Locator for DbLocator {
                 active_model.created_at = Set(now_dt);
                 active_model.updated_at = Set(now_dt);
                 active_model.supports_webrtc = Set(location.supports_webrtc);
-                active_model.user_agent = Set(encode_user_agent_with_home_proxy(
+                active_model.user_agent = Set(encode_location_metadata(
                     location.user_agent.as_deref(),
                     location.home_proxy.as_ref(),
+                    location.registered_aor.as_ref(),
                 ));
 
                 // Insert without specifying id
@@ -408,7 +481,6 @@ impl Locator for DbLocator {
         for loc in removed_locations {
             let aor = rsipstack::sip::Uri::try_from(loc.aor.as_str())
                 .map_err(|e| anyhow::anyhow!("Error parsing aor: {}", e))?;
-            let registered_aor = aor.clone();
             // Parse transport from string
             let transport = match loc.transport.to_uppercase().as_str() {
                 "UDP" => rsipstack::sip::transport::Transport::Udp,
@@ -428,7 +500,14 @@ impl Locator for DbLocator {
                 addr,
             };
 
-            let (user_agent, home_proxy) = decode_user_agent_with_home_proxy(loc.user_agent.as_deref());
+            let (user_agent, home_proxy, decoded_registered_aor) =
+                decode_location_metadata(loc.user_agent.as_deref());
+            let registered_aor = choose_registered_aor(
+                loc.username.as_str(),
+                loc.realm.as_str(),
+                &aor,
+                decoded_registered_aor,
+            );
 
             locations.push(Location {
                 aor,
@@ -545,11 +624,19 @@ impl Locator for DbLocator {
             let aor = rsipstack::sip::Uri::try_from(model.aor.as_str())
                 .map_err(|e| anyhow::anyhow!("Error parsing aor: {}", e))?;
 
-            if !uri_matches(&aor, uri) {
+            let (user_agent, home_proxy, decoded_registered_aor) =
+                decode_location_metadata(model.user_agent.as_deref());
+            let registered_aor = choose_registered_aor(
+                model.username.as_str(),
+                model.realm.as_str(),
+                &aor,
+                decoded_registered_aor,
+            );
+
+            if !uri_matches(&aor, uri) && !uri_matches(&registered_aor, uri) {
                 continue;
             }
 
-            let registered_aor = aor.clone();
             // Parse transport from string
             let transport = match model.transport.to_uppercase().as_str() {
                 "UDP" => rsipstack::sip::transport::Transport::Udp,
@@ -577,9 +664,6 @@ impl Locator for DbLocator {
             let age_duration = Duration::from_secs(age_secs);
             let last_modified_instant =
                 now_instant.checked_sub(age_duration).unwrap_or(now_instant);
-
-            let (user_agent, home_proxy) =
-                decode_user_agent_with_home_proxy(model.user_agent.as_deref());
 
             locations.push(Location {
                 aor,
