@@ -682,4 +682,109 @@ mod tests {
         let locations = locator.lookup(&lookup_uri_no_transport).await.unwrap();
         assert_eq!(locations.len(), 1);
     }
+
+    #[tokio::test]
+    async fn dialog_target_locator_uses_destination() {
+        let locator = MemoryLocator::new();
+        let uri: rsipstack::sip::Uri = "sip:alice@rustpbx.com".try_into().unwrap();
+
+        let destination = SipAddr {
+            r#type: Some(Transport::Udp),
+            addr: HostWithPort::try_from("192.168.1.10:5060").unwrap(),
+        };
+
+        let home_proxy = SipAddr {
+            r#type: Some(Transport::Tcp),
+            addr: HostWithPort::try_from("10.0.0.1:5060").unwrap(),
+        };
+
+        locator
+            .register(
+                "alice",
+                Some("rustpbx.com"),
+                Location {
+                    aor: uri.clone(),
+                    expires: 3600,
+                    destination: Some(destination.clone()),
+                    home_proxy: Some(home_proxy.clone()),
+                    last_modified: Some(Instant::now()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let target_locator = DialogTargetLocator::new(Arc::new(Box::new(locator)));
+        let result = target_locator.locate(&uri).await.unwrap();
+        assert_eq!(result, destination, "DialogTargetLocator should use destination");
+    }
+
+    #[test]
+    fn sort_locations_prefers_home_proxy_binding() {
+        let now = Instant::now();
+        let aor: rsipstack::sip::Uri = "sip:alice@rustpbx.com".try_into().unwrap();
+
+        let destination = SipAddr {
+            r#type: Some(Transport::Udp),
+            addr: HostWithPort::try_from("192.168.1.10:5060").unwrap(),
+        };
+
+        let home_proxy = SipAddr {
+            r#type: Some(Transport::Tcp),
+            addr: HostWithPort::try_from("10.0.0.1:5060").unwrap(),
+        };
+
+        let with_home_proxy = Location {
+            aor: aor.clone(),
+            destination: Some(destination.clone()),
+            home_proxy: Some(home_proxy),
+            last_modified: Some(now),
+            ..Default::default()
+        };
+
+        let without_home_proxy = Location {
+            aor,
+            destination: Some(destination),
+            last_modified: Some(now - Duration::from_secs(1)),
+            ..Default::default()
+        };
+
+        let sorted = sort_locations_by_recency(vec![without_home_proxy, with_home_proxy.clone()]);
+        assert_eq!(sorted.len(), 1);
+        assert!(
+            sorted[0].home_proxy.is_some(),
+            "location variant with home_proxy should be retained during dedupe"
+        );
+    }
+
+    #[tokio::test]
+    async fn dialog_target_locator_fallback_to_destination() {
+        let locator = MemoryLocator::new();
+        let uri: rsipstack::sip::Uri = "sip:bob@rustpbx.com".try_into().unwrap();
+
+        let destination = SipAddr {
+            r#type: Some(Transport::Udp),
+            addr: HostWithPort::try_from("192.168.1.20:5060").unwrap(),
+        };
+
+        locator
+            .register(
+                "bob",
+                Some("rustpbx.com"),
+                Location {
+                    aor: uri.clone(),
+                    expires: 3600,
+                    destination: Some(destination.clone()),
+                    home_proxy: None,
+                    last_modified: Some(Instant::now()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let target_locator = DialogTargetLocator::new(Arc::new(Box::new(locator)));
+        let result = target_locator.locate(&uri).await.unwrap();
+        assert_eq!(result, destination, "DialogTargetLocator should fallback to destination when home_proxy is absent");
+    }
 }

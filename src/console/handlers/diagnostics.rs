@@ -1488,6 +1488,7 @@ struct LocatorRecordView {
     contact_params: Option<std::collections::HashMap<String, String>>,
     age_seconds: Option<u64>,
     user_agent: Option<String>,
+    home_proxy: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -2459,6 +2460,7 @@ fn location_to_view(location: Location) -> LocatorRecordView {
             .last_modified
             .map(|instant| instant.elapsed().as_secs()),
         user_agent: location.user_agent,
+        home_proxy: location.home_proxy.map(|h| h.to_string()),
     }
 }
 

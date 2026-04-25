@@ -1,4 +1,5 @@
 use crate::call::app::{ApplicationContext, CallInfo};
+use crate::call::Location;
 use crate::call::domain::{
     CallCommand, HangupCascade, HangupCommand, LegId, LegState, MediaPathMode, MediaRuntimeProfile,
     RingbackPolicy,
@@ -57,6 +58,7 @@ use rsipstack::dialog::{
     dialog::TransactionHandle, server_dialog::ServerInviteDialog,
 };
 use rsipstack::sip::StatusCode;
+use rsipstack::transport::SipAddr;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -577,6 +579,27 @@ impl SipSession {
             return true;
         }
         matches!(mode, MediaProxyMode::All)
+    }
+
+    fn is_local_home_proxy(local_addrs: &[SipAddr], home_proxy: &SipAddr) -> bool {
+        local_addrs
+            .iter()
+            .any(|addr| addr.addr.to_string() == home_proxy.addr.to_string())
+    }
+
+    fn resolve_outbound_destination(
+        target: &Location,
+        local_addrs: &[SipAddr],
+    ) -> (Option<SipAddr>, bool) {
+        if let Some(home_proxy) = target.home_proxy.as_ref() {
+            if Self::is_local_home_proxy(local_addrs, home_proxy) {
+                (target.destination.clone(), false)
+            } else {
+                (Some(home_proxy.clone()), true)
+            }
+        } else {
+            (target.destination.clone(), false)
+        }
     }
 
     fn bypasses_local_media(&self) -> bool {
@@ -1582,8 +1605,25 @@ impl SipSession {
 
         let callee_uri = target.aor.clone();
 
+        let local_addrs = self.server.endpoint.get_addrs();
+        let (destination, route_via_home_proxy) =
+            Self::resolve_outbound_destination(target, &local_addrs);
+
         let mut headers: Vec<rsipstack::sip::Header> =
             vec![rsipstack::sip::headers::MaxForwards::from(self.context.max_forwards).into()];
+
+        // When routing to another PBX node via home_proxy, anchor dialog route-set.
+        if route_via_home_proxy {
+            if let Ok(record_route) = self.server.endpoint.inner.get_record_route() {
+                headers.push(rsipstack::sip::Header::RecordRoute(record_route.into()));
+            } else {
+                warn!(
+                    session_id = %self.context.session_id,
+                    "failed to build Record-Route while routing via home_proxy"
+                );
+            }
+        }
+
         let default_expires = self
             .server
             .proxy_config
@@ -1638,7 +1678,19 @@ impl SipSession {
         });
         self.callee_call_ids.insert(callee_call_id.clone());
 
-        info!(session_id = %self.context.session_id, %caller, %callee_uri, callee_call_id, "Sending INVITE to callee");
+        if route_via_home_proxy {
+            if let Some(home_proxy) = target.home_proxy.as_ref() {
+                info!(
+                    session_id = %self.context.session_id,
+                    %caller,
+                    %callee_uri,
+                    %home_proxy,
+                    "Routing INVITE to home proxy node"
+                );
+            }
+        }
+
+        info!(session_id = %self.context.session_id, %caller, %callee_uri, callee_call_id, ?destination, "Sending INVITE to callee");
 
         let mut invite_option = InviteOption {
             caller_display_name: self.context.dialplan.caller_display_name.clone(),
@@ -1646,7 +1698,7 @@ impl SipSession {
             caller: caller.clone(),
             content_type,
             offer,
-            destination: target.destination.clone(),
+            destination,
             contact: contact_uri,
             credential: target.credential.clone(),
             headers: Some(headers),
@@ -5012,14 +5064,20 @@ impl SipSession {
         // Create a sample track pair (sender -> track) for output
         let (audio_sender, track, _feedback_rx) = sample_track(MediaKind::Audio, 100);
 
-        // Get the existing peer connection from the appropriate peer's first track
-        let tracks = peer.get_tracks().await;
-        let pc = if let Some(first_track) = tracks.first() {
-            let guard = first_track.lock().await;
-            guard.get_peer_connection().await
-        } else {
-            None
-        };
+        // Get the existing peer connection from the appropriate peer's first track.
+        // During REFER/transfer transitions the track may not be ready yet, so retry briefly.
+        let mut pc = None;
+        for _ in 0..100 {
+            let tracks = peer.get_tracks().await;
+            if let Some(first_track) = tracks.first() {
+                let guard = first_track.lock().await;
+                if let Some(found_pc) = guard.get_peer_connection().await {
+                    pc = Some(found_pc);
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
 
         if let Some(pc) = pc {
             // Add the sample track to the existing peer connection with PCMU params
@@ -5070,7 +5128,8 @@ impl SipSession {
             self.create_audio_receiver_from_peer(&peer).await
         } else {
             self.create_audio_receiver().await
-        }.map_err(|e| anyhow!("Failed to create audio receiver: {}", e))?;
+        }
+        .map_err(|e| anyhow!("Failed to create audio receiver: {}", e))?;
 
         // Start full-duplex media bridge
         let bridge = crate::call::runtime::ConferenceMediaBridge::new(
@@ -5367,8 +5426,11 @@ impl SipSession {
                 .map_err(|e| anyhow!("Failed to create supervisor conference: {}", e))?;
         }
 
-        // Add target leg to conference (full-duplex participant)
-        let target_participant_leg = LegId::new(format!("{}-{}", self.id.0, target_leg));
+        // Add target leg to conference (full-duplex participant).
+        // For cross-session supervisor monitoring, use callee-side media as the
+        // primary source: caller-side media may disappear quickly during REFER
+        // workflows, causing flaky/no-audio listen sessions.
+        let target_participant_leg = LegId::new(format!("{}-callee", self.id.0));
         info!(
             conf_id = %conf_id,
             participant_leg = %target_participant_leg,
@@ -6364,35 +6426,42 @@ impl crate::call::runtime::conference_media_bridge::AudioReceiver for PeerConnec
         &mut self,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<crate::call::runtime::conference_media_bridge::PcmAudioFrame>> + Send + '_>> {
         Box::pin(async move {
-            // Capture audio track if not already captured
-            if self.audio_track.is_none() {
-                self.audio_track = self.capture_audio_track().await;
-            }
+            loop {
+                // Capture audio track if not already captured.
+                // Track availability can be racy during re-INVITE / transfer windows,
+                // so keep retrying until cancellation closes the bridge.
+                if self.audio_track.is_none() {
+                    self.audio_track = self.capture_audio_track().await;
+                    if self.audio_track.is_none() {
+                        tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+                        continue;
+                    }
+                }
 
-            let track = match &self.audio_track {
-                Some(t) => t,
-                None => return None,
-            };
+                let track = self.audio_track.as_ref().unwrap().clone();
 
-            // Read audio sample from track
-            match track.recv().await {
-                Ok(sample) => {
-                    if let rustrtc::media::MediaSample::Audio(audio_frame) = sample {
+                match track.recv().await {
+                    Ok(rustrtc::media::MediaSample::Audio(audio_frame)) => {
                         // Decode RTP payload to PCM
                         let pcm = self.decoder.decode(&audio_frame.data);
 
-                        Some(crate::call::runtime::conference_media_bridge::PcmAudioFrame::new(
-                            pcm,
-                            self.decoder.sample_rate(),
-                        ))
-                    } else {
-                        // Skip non-audio samples
-                        None
+                        return Some(
+                            crate::call::runtime::conference_media_bridge::PcmAudioFrame::new(
+                                pcm,
+                                self.decoder.sample_rate(),
+                            ),
+                        );
                     }
-                }
-                Err(e) => {
-                    tracing::debug!("Track recv ended: {}", e);
-                    None
+                    Ok(_) => {
+                        // Ignore non-audio samples and keep waiting for PCM payload.
+                        continue;
+                    }
+                    Err(e) => {
+                        tracing::debug!("Track recv failed, re-capturing audio track: {}", e);
+                        self.audio_track = None;
+                        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+                        continue;
+                    }
                 }
             }
         })
@@ -6461,6 +6530,64 @@ mod tests {
         assert!(!SipSession::should_fallback_to_reinvite(
             StatusCode::ServerInternalError
         ));
+    }
+
+    #[test]
+    fn test_resolve_outbound_destination_prefers_remote_home_proxy() {
+        let destination = SipAddr {
+            r#type: Some(rsipstack::sip::Transport::Udp),
+            addr: rsipstack::sip::HostWithPort::try_from("192.168.1.10:5060").unwrap(),
+        };
+        let home_proxy = SipAddr {
+            r#type: Some(rsipstack::sip::Transport::Tcp),
+            addr: rsipstack::sip::HostWithPort::try_from("10.0.0.2:5070").unwrap(),
+        };
+
+        let target = Location {
+            destination: Some(destination),
+            home_proxy: Some(home_proxy.clone()),
+            ..Default::default()
+        };
+
+        let local_addrs = vec![SipAddr {
+            r#type: Some(rsipstack::sip::Transport::Udp),
+            addr: rsipstack::sip::HostWithPort::try_from("10.0.0.1:5060").unwrap(),
+        }];
+
+        let (resolved, via_home_proxy) =
+            SipSession::resolve_outbound_destination(&target, &local_addrs);
+
+        assert!(via_home_proxy);
+        assert_eq!(resolved, Some(home_proxy));
+    }
+
+    #[test]
+    fn test_resolve_outbound_destination_uses_destination_for_local_home_proxy() {
+        let destination = SipAddr {
+            r#type: Some(rsipstack::sip::Transport::Udp),
+            addr: rsipstack::sip::HostWithPort::try_from("192.168.1.10:5060").unwrap(),
+        };
+        let home_proxy = SipAddr {
+            r#type: Some(rsipstack::sip::Transport::Tcp),
+            addr: rsipstack::sip::HostWithPort::try_from("10.0.0.1:5060").unwrap(),
+        };
+
+        let target = Location {
+            destination: Some(destination.clone()),
+            home_proxy: Some(home_proxy),
+            ..Default::default()
+        };
+
+        let local_addrs = vec![SipAddr {
+            r#type: Some(rsipstack::sip::Transport::Udp),
+            addr: rsipstack::sip::HostWithPort::try_from("10.0.0.1:5060").unwrap(),
+        }];
+
+        let (resolved, via_home_proxy) =
+            SipSession::resolve_outbound_destination(&target, &local_addrs);
+
+        assert!(!via_home_proxy);
+        assert_eq!(resolved, Some(destination));
     }
 
     #[tokio::test]

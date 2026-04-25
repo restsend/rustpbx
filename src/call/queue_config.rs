@@ -275,6 +275,7 @@ impl AgentConfig {
             reg_id: None,
             transport: None,
             user_agent: None,
+            home_proxy: None,
         })
     }
 }
