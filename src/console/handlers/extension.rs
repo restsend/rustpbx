@@ -513,7 +513,6 @@ async fn create_extension(
                 .into_response();
         }
 
-    state.mark_pending_reload();
     Json(json!({"status": "ok", "id": model.id})).into_response()
 }
 
@@ -772,7 +771,6 @@ async fn update_extension(
             )
                 .into_response();
         }
-    state.mark_pending_reload();
     Json(json!({"status": "ok"})).into_response()
 }
 
@@ -789,10 +787,7 @@ async fn delete_extension(
             .into_response();
     }
     match ExtensionEntity::delete_by_id(id).exec(state.db()).await {
-        Ok(r) => {
-            state.mark_pending_reload();
-            Json(json!({"status": r.rows_affected})).into_response()
-        }
+        Ok(r) => Json(json!({"status": r.rows_affected})).into_response(),
         Err(err) => {
             warn!("failed to delete extension {}: {}", id, err);
             (
