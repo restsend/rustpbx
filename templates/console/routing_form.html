@@ -720,8 +720,7 @@
                                         <div>
                                             <div class="text-sm font-semibold text-slate-800" x-text="option.name">
                                             </div>
-                                            <div class="text-[11px] text-slate-500" x-text="option.description || '{{ "
-                                                routing_form.no_description" | t }}'">
+                                            <div class="text-[11px] text-slate-500" x-text="option.description || '{{ "routing_form.no_description" | t }}'">
                                             </div>
                                         </div>
                                         <div class="inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-[11px] font-semibold"
@@ -738,8 +737,7 @@
                                                     {{ "routing_form.use_path" | t }}
                                                 </button>
                                                 <template x-if="option.published_at">
-                                                    <span class="text-slate-400" x-text="'{{ "
-                                                        routing_form.published_at" | t }}'.replace('{time}',
+                                                    <span class="text-slate-400" x-text="'{{ "routing_form.published_at" | t }}'.replace('{time}',
                                                         formatTimestamp(option.published_at))"></span>
                                                 </template>
                                                 <template x-if="!option.published_at">

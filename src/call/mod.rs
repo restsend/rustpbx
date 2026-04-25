@@ -89,6 +89,7 @@ pub struct Location {
     pub reg_id: Option<String>,
     pub transport: Option<Transport>,
     pub user_agent: Option<String>,
+    pub home_proxy: Option<SipAddr>,
 }
 
 impl std::fmt::Display for Location {
@@ -96,9 +97,10 @@ impl std::fmt::Display for Location {
         let is_webrtc = if self.supports_webrtc { ",webrtc" } else { "" };
         let fallback = self.aor.to_string();
         let contact = self.contact_raw.as_deref().unwrap_or(fallback.as_str());
+        let home = self.home_proxy.as_ref().map(|h| format!("[home={}]", h)).unwrap_or_default();
         match &self.destination {
-            Some(d) => write!(f, "({} -> {} {})", contact, d, is_webrtc),
-            None => write!(f, "({} -> ? {})", contact, is_webrtc),
+            Some(d) => write!(f, "({} -> {} {}{})", contact, d, is_webrtc, home),
+            None => write!(f, "({} -> ? {}{})", contact, is_webrtc, home),
         }
     }
 }
@@ -123,6 +125,7 @@ impl std::fmt::Debug for Location {
             .field("reg_id", &self.reg_id)
             .field("transport", &self.transport)
             .field("user_agent", &self.user_agent)
+            .field("home_proxy", &self.home_proxy)
             .field(
                 "credential",
                 &self.credential.as_ref().map(|_| "<redacted>"),

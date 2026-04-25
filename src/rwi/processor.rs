@@ -26,7 +26,11 @@ use tokio::sync::RwLock;
 use tracing::{info, warn};
 use uuid::Uuid;
 
-/// Audio receiver for originated calls to bridge into conference
+/// Audio receiver for originated calls to bridge into conference.
+///
+/// For now this provides paced silence (20 ms frames). The pacing is important:
+/// an unpaced source can flood the conference input channel and starve the mixer
+/// loop that drains participant inputs.
 struct OriginateAudioReceiver;
 
 impl AudioReceiver for OriginateAudioReceiver {
@@ -34,8 +38,9 @@ impl AudioReceiver for OriginateAudioReceiver {
         &mut self,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<PcmAudioFrame>> + Send + '_>> {
         Box::pin(async move {
-            // For now, return silence. In a full implementation, we'd decode RTP from the peer
-            // This is a simplified version for supervisor listen mode
+            // For now, return paced silence. In a full implementation, we'd decode
+            // RTP from the originated peer for whisper/barge capable monitoring.
+            tokio::time::sleep(Duration::from_millis(20)).await;
             Some(PcmAudioFrame::new(vec![0i16; 160], 8000))
         })
     }
@@ -1000,8 +1005,35 @@ impl RwiCommandProcessor {
                                                 channels: 1,
                                             };
                                             
-                                            if let Err(e) = pc.add_track(track, params) {
-                                                tracing::warn!(%cmd_call_id, error = %e, "Failed to add conference track");
+                                            let mut track_opt = Some(track);
+                                            let transceivers = pc.get_transceivers();
+                                            if let Some(transceiver) = transceivers
+                                                .iter()
+                                                .find(|t| t.kind() == rustrtc::MediaKind::Audio)
+                                            {
+                                                let track_arc: std::sync::Arc<dyn rustrtc::media::MediaStreamTrack> =
+                                                    track_opt
+                                                        .take()
+                                                        .expect("conference track must exist");
+                                                let sender = rustrtc::RtpSender::builder(
+                                                    track_arc,
+                                                    rand::random::<u32>(),
+                                                )
+                                                .params(params)
+                                                .build();
+                                                transceiver.set_sender(Some(sender));
+                                                tracing::info!(
+                                                    %cmd_call_id,
+                                                    "Attached conference track to existing audio transceiver"
+                                                );
+                                            } else if let Some(track_to_add) = track_opt.take()
+                                                && let Err(e) = pc.add_track(track_to_add, params)
+                                            {
+                                                tracing::warn!(
+                                                    %cmd_call_id,
+                                                    error = %e,
+                                                    "Failed to add conference track"
+                                                );
                                             }
                                         }
                                     }

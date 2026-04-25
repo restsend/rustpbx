@@ -1005,7 +1005,7 @@ async fn test_reinvite_hold_resume() -> Result<()> {
     assert!(bob_dialog_id.is_some(), "Bob should have dialog");
 
     let alice_id = alice_dialog_id.unwrap();
-    let bob_id = bob_dialog_id.unwrap();
+    let _bob_id = bob_dialog_id.unwrap();
 
     // Let call run briefly
     sleep(Duration::from_millis(300)).await;
@@ -1264,7 +1264,7 @@ async fn test_reinvite_codec_change() -> Result<()> {
 
     assert!(alice_dialog_id.is_some(), "Call should be established");
     let alice_id = alice_dialog_id.unwrap();
-    let bob_id = bob_dialog_id.unwrap();
+    let _bob_id = bob_dialog_id.unwrap();
 
     sleep(Duration::from_millis(300)).await;
 

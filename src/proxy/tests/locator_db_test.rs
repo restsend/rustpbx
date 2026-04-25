@@ -323,3 +323,92 @@ async fn test_db_locator_localhost_alias() {
     assert_eq!(locations.len(), 1);
     assert_eq!(locations[0].aor.to_string(), aor.to_string());
 }
+
+#[tokio::test]
+async fn test_db_locator_home_proxy_crud() {
+    let locator = DbLocator::new("sqlite::memory:".to_string()).await.unwrap();
+
+    let aor = rsipstack::sip::Uri {
+        scheme: Some(Scheme::Sip),
+        auth: Some(rsipstack::sip::Auth {
+            user: "alice".to_string(),
+            password: None,
+        }),
+        host_with_port: HostWithPort::try_from("rustpbx.com").unwrap(),
+        params: vec![],
+        headers: vec![],
+    };
+
+    let destination = SipAddr {
+        r#type: Some(rsipstack::sip::transport::Transport::Udp),
+        addr: HostWithPort::try_from("192.168.1.10:5060").unwrap(),
+    };
+
+    let home_proxy = SipAddr {
+        r#type: Some(rsipstack::sip::transport::Transport::Tcp),
+        addr: HostWithPort::try_from("10.0.0.1:5060").unwrap(),
+    };
+
+    // Register with home_proxy
+    locator
+        .register(
+            "alice",
+            Some("rustpbx.com"),
+            Location {
+                aor: aor.clone(),
+                expires: 3600,
+                destination: Some(destination.clone()),
+                home_proxy: Some(home_proxy.clone()),
+                last_modified: Some(Instant::now()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    // Lookup should preserve home_proxy
+    let locations = locator
+        .lookup(&"sip:alice@rustpbx.com".try_into().expect("invalid uri"))
+        .await
+        .unwrap();
+    assert_eq!(locations.len(), 1);
+    assert_eq!(locations[0].destination, Some(destination.clone()));
+    assert_eq!(locations[0].home_proxy, Some(home_proxy));
+
+    // Update: change home_proxy
+    let new_home_proxy = SipAddr {
+        r#type: Some(rsipstack::sip::transport::Transport::Udp),
+        addr: HostWithPort::try_from("10.0.0.2:5060").unwrap(),
+    };
+    locator
+        .register(
+            "alice",
+            Some("rustpbx.com"),
+            Location {
+                aor: aor.clone(),
+                expires: 3600,
+                destination: Some(destination.clone()),
+                home_proxy: Some(new_home_proxy.clone()),
+                last_modified: Some(Instant::now()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    let locations = locator
+        .lookup(&"sip:alice@rustpbx.com".try_into().expect("invalid uri"))
+        .await
+        .unwrap();
+    assert_eq!(locations.len(), 1);
+    assert_eq!(locations[0].home_proxy, Some(new_home_proxy));
+
+    // Unregister and verify cleanup
+    locator.unregister("alice", Some("rustpbx.com")).await.unwrap();
+    let result = locator
+        .lookup(&"sip:alice@rustpbx.com".try_into().expect("invalid uri"))
+        .await;
+    if let Ok(v) = result {
+        assert!(v.is_empty(), "Expected no locations after unregister");
+    }
+}

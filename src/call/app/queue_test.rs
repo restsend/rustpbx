@@ -38,6 +38,7 @@ mod tests {
             reg_id: None,
             transport: None,
             user_agent: None,
+            home_proxy: None,
         };
 
         QueueConfig {
@@ -90,6 +91,7 @@ mod tests {
             reg_id: None,
             transport: None,
             user_agent: None,
+            home_proxy: None,
         })
         .collect();
 
@@ -140,6 +142,7 @@ mod tests {
                 reg_id: None,
                 transport: None,
                 user_agent: None,
+                home_proxy: None,
             })
             .collect();
 
@@ -568,6 +571,7 @@ mod tests {
                 reg_id: None,
                 transport: None,
                 user_agent: None,
+                home_proxy: None,
             }],
             strategy: DialStrategy::Sequential(vec![]),
             ring_timeout: Some(Duration::from_secs(60)),

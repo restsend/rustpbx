@@ -386,6 +386,7 @@
                                         <tr>
                                             <th scope="col" class="px-3 py-2">{{ "extension_detail.contact" | t }}</th>
                                             <th scope="col" class="px-3 py-2">{{ "extension_detail.destination" | t }}</th>
+                                            <th scope="col" class="px-3 py-2">{{ "extension_detail.home_proxy" | t }}</th>
                                             <th scope="col" class="px-3 py-2">{{ "extension_detail.transport" | t }}</th>
                                             <th scope="col" class="px-3 py-2">{{ "extension_detail.ttl" | t }}</th>
                                             <th scope="col" class="px-3 py-2">{{ "extension_detail.updated" | t }}</th>
@@ -407,6 +408,9 @@
                                                 </td>
                                                 <td class="px-3 py-2 align-top">
                                                     <span x-text="record.destination || '—'"></span>
+                                                </td>
+                                                <td class="px-3 py-2 align-top">
+                                                    <span x-text="record.home_proxy || '—'"></span>
                                                 </td>
                                                 <td class="px-3 py-2 align-top">
                                                     <div class="flex flex-col gap-1">
@@ -625,6 +629,7 @@
 
             return {
                 basePath: options.basePath || '/console',
+                apiPrefix: options.apiPrefix || options.basePath || '/console',
                 mode: options.mode || 'create',
                 model: options.model || {},
                 availableDepartmentsRaw: options.departments || [],

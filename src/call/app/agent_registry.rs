@@ -271,6 +271,12 @@ pub trait AgentRegistry: Send + Sync {
     /// Returns empty Vec if the URI is not recognized or cannot be resolved.
     async fn resolve_target(&self, target_uri: &str) -> Vec<String>;
 
+    /// Get agents available for ACD routing with full snapshots.
+    /// Returns all agents that can receive calls with their current state.
+    async fn get_acd_snapshots(&self) -> Vec<AgentRecord> {
+        self.find_available_agents(&[]).await
+    }
+
     /// Check if state transition is valid
     fn is_valid_transition(from: &PresenceState, to: &PresenceState) -> bool where Self: Sized {
         match (from, to) {

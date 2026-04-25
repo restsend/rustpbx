@@ -92,6 +92,7 @@ struct ExtensionLocatorRecord {
     contact_params: Option<HashMap<String, String>>,
     age_seconds: Option<u64>,
     user_agent: Option<String>,
+    home_proxy: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Default)]
@@ -218,6 +219,7 @@ fn location_to_record(location: Location) -> ExtensionLocatorRecord {
     let age_seconds = location
         .last_modified
         .map(|instant| instant.elapsed().as_secs());
+    let home_proxy = location.home_proxy.map(|h| h.to_string());
 
     ExtensionLocatorRecord {
         binding_key,
@@ -236,6 +238,7 @@ fn location_to_record(location: Location) -> ExtensionLocatorRecord {
         contact_params,
         age_seconds,
         user_agent,
+        home_proxy,
     }
 }
 

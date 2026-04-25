@@ -889,6 +889,13 @@
                                                             <span x-text="record.destination"></span>
                                                         </div>
                                                     </template>
+                                                    <template x-if="record.home_proxy">
+                                                        <div class="text-xs text-slate-500">
+                                                            <span class="font-semibold text-slate-700">{{
+                                                                "diagnostics.label_home_proxy" | t }}</span>
+                                                            <span x-text="record.home_proxy"></span>
+                                                        </div>
+                                                    </template>
                                                     <template x-if="record.contact">
                                                         <div class="text-xs text-slate-500">
                                                             <span class="font-semibold text-slate-700">{{

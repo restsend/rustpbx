@@ -159,6 +159,87 @@ impl DbLocator {
     }
 }
 
+fn parse_transport_token(value: &str) -> Option<rsipstack::sip::transport::Transport> {
+    match value.trim().to_ascii_uppercase().as_str() {
+        "UDP" => Some(rsipstack::sip::transport::Transport::Udp),
+        "TCP" => Some(rsipstack::sip::transport::Transport::Tcp),
+        "TLS" => Some(rsipstack::sip::transport::Transport::Tls),
+        "WS" => Some(rsipstack::sip::transport::Transport::Ws),
+        "WSS" => Some(rsipstack::sip::transport::Transport::Wss),
+        _ => None,
+    }
+}
+
+fn encode_sip_addr(addr: &SipAddr) -> String {
+    addr.to_string()
+}
+
+const HOME_PROXY_MARKER: &str = "|hp=";
+
+fn decode_sip_addr(value: &str) -> Option<SipAddr> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if let Some((transport_raw, addr_raw)) = trimmed.split_once(' ')
+        && let Some(transport) = parse_transport_token(transport_raw)
+        && let Ok(addr) = rsipstack::sip::HostWithPort::try_from(addr_raw.trim())
+    {
+        return Some(SipAddr {
+            r#type: Some(transport),
+            addr,
+        });
+    }
+
+    if let Ok(uri) = rsipstack::sip::Uri::try_from(trimmed)
+        && let Ok(addr) = SipAddr::try_from(uri)
+    {
+        return Some(addr);
+    }
+
+    rsipstack::sip::HostWithPort::try_from(trimmed)
+        .ok()
+        .map(SipAddr::from)
+}
+
+fn encode_user_agent_with_home_proxy(
+    user_agent: Option<&str>,
+    home_proxy: Option<&SipAddr>,
+) -> Option<String> {
+    let ua = user_agent.unwrap_or("");
+    if let Some(home_proxy) = home_proxy {
+        let hp = encode_sip_addr(home_proxy);
+        return Some(format!("{}{}{}", ua, HOME_PROXY_MARKER, hp));
+    }
+    if ua.is_empty() {
+        None
+    } else {
+        Some(ua.to_string())
+    }
+}
+
+fn decode_user_agent_with_home_proxy(value: Option<&str>) -> (Option<String>, Option<SipAddr>) {
+    let Some(raw) = value else {
+        return (None, None);
+    };
+
+    if let Some(idx) = raw.rfind(HOME_PROXY_MARKER) {
+        let (ua_part, hp_part_with_marker) = raw.split_at(idx);
+        let hp_part = &hp_part_with_marker[HOME_PROXY_MARKER.len()..];
+        if let Some(home_proxy) = decode_sip_addr(hp_part) {
+            let ua = if ua_part.is_empty() {
+                None
+            } else {
+                Some(ua_part.to_string())
+            };
+            return (ua, Some(home_proxy));
+        }
+    }
+
+    (Some(raw.to_string()), None)
+}
+
 #[async_trait]
 impl Locator for DbLocator {
     async fn is_local_realm(&self, realm: &str) -> bool {
@@ -257,7 +338,10 @@ impl Locator for DbLocator {
                 active_model.last_modified = Set(now);
                 active_model.updated_at = Set(chrono::Utc::now());
                 active_model.supports_webrtc = Set(location.supports_webrtc);
-                active_model.user_agent = Set(location.user_agent.clone());
+                active_model.user_agent = Set(encode_user_agent_with_home_proxy(
+                    location.user_agent.as_deref(),
+                    location.home_proxy.as_ref(),
+                ));
 
                 active_model
                     .update(&self.db)
@@ -280,7 +364,10 @@ impl Locator for DbLocator {
                 active_model.created_at = Set(now_dt);
                 active_model.updated_at = Set(now_dt);
                 active_model.supports_webrtc = Set(location.supports_webrtc);
-                active_model.user_agent = Set(location.user_agent.clone());
+                active_model.user_agent = Set(encode_user_agent_with_home_proxy(
+                    location.user_agent.as_deref(),
+                    location.home_proxy.as_ref(),
+                ));
 
                 // Insert without specifying id
                 active_model
@@ -341,6 +428,8 @@ impl Locator for DbLocator {
                 addr,
             };
 
+            let (user_agent, home_proxy) = decode_user_agent_with_home_proxy(loc.user_agent.as_deref());
+
             locations.push(Location {
                 aor,
                 expires: loc.expires as u32,
@@ -348,7 +437,8 @@ impl Locator for DbLocator {
                 supports_webrtc: loc.supports_webrtc,
                 transport: Some(transport),
                 registered_aor: Some(registered_aor),
-                user_agent: loc.user_agent.clone(),
+                user_agent,
+                home_proxy,
                 ..Default::default()
             });
         }
@@ -488,6 +578,9 @@ impl Locator for DbLocator {
             let last_modified_instant =
                 now_instant.checked_sub(age_duration).unwrap_or(now_instant);
 
+            let (user_agent, home_proxy) =
+                decode_user_agent_with_home_proxy(model.user_agent.as_deref());
+
             locations.push(Location {
                 aor,
                 expires: model.expires as u32,
@@ -496,7 +589,8 @@ impl Locator for DbLocator {
                 supports_webrtc: model.supports_webrtc,
                 transport: Some(transport),
                 registered_aor: Some(registered_aor),
-                user_agent: model.user_agent.clone(),
+                user_agent,
+                home_proxy,
                 ..Default::default()
             });
         }

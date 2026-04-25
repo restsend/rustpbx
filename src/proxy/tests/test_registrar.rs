@@ -55,6 +55,10 @@ async fn test_registrar_register_success() {
             .unwrap()
             .contains("expires=60")
     );
+    assert!(
+        location.home_proxy.is_some(),
+        "registrar should stamp home_proxy for clustered routing"
+    );
 }
 
 #[tokio::test]
