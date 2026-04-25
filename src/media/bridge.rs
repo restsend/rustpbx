@@ -906,6 +906,7 @@ pub struct BridgePeerBuilder {
     rtp_port_range: (u16, u16),
     enable_latching: bool,
     external_ip: Option<String>,
+    bind_ip: Option<String>,
     webrtc_audio_capabilities: Option<Vec<rustrtc::config::AudioCapability>>,
     rtp_audio_capabilities: Option<Vec<rustrtc::config::AudioCapability>>,
     webrtc_video_capabilities: Option<Vec<rustrtc::config::VideoCapability>>,
@@ -926,6 +927,7 @@ impl BridgePeerBuilder {
             rtp_port_range: (20000, 30000),
             enable_latching: false,
             external_ip: None,
+            bind_ip: None,
             webrtc_audio_capabilities: None,
             rtp_audio_capabilities: None,
             webrtc_video_capabilities: None,
@@ -960,6 +962,11 @@ impl BridgePeerBuilder {
 
     pub fn with_external_ip(mut self, ip: String) -> Self {
         self.external_ip = Some(ip);
+        self
+    }
+
+    pub fn with_bind_ip(mut self, ip: String) -> Self {
+        self.bind_ip = Some(ip);
         self
     }
 
@@ -1078,6 +1085,7 @@ impl BridgePeerBuilder {
                 rtp_end_port: Some(self.rtp_port_range.1),
                 enable_latching: self.enable_latching,
                 external_ip: self.external_ip,
+                bind_ip: self.bind_ip,
                 media_capabilities: rtp_media_caps,
                 ssrc_start: rand::random::<u32>(),
                 sdp_compatibility: self.rtp_sdp_compatibility,
