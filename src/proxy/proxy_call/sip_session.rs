@@ -157,6 +157,7 @@ pub struct SipSession {
     pub cancel_token: CancellationToken,
     pub pending_hangup: HashSet<DialogId>,
     pub connected_callee: Option<String>,
+    pub connected_callee_dialog_id: Option<DialogId>,
     pub callee_call_ids: HashSet<String>,
     pub ring_time: Option<Instant>,
     pub answer_time: Option<Instant>,
@@ -422,6 +423,7 @@ impl SipSession {
             call_record_sender,
             cancel_token,
             connected_callee: None,
+            connected_callee_dialog_id: None,
             callee_call_ids: HashSet::new(),
             ring_time: None,
             answer_time: None,
@@ -1069,7 +1071,6 @@ impl SipSession {
                     .await?;
             }
             DialogState::Terminated(terminated_dialog_id, reason) => {
-                self.update_leg_state(&LegId::from("callee"), LegState::Ended);
                 self.pending_hangup.remove(&terminated_dialog_id);
                 self.callee_dialogs.remove(&terminated_dialog_id);
                 self.unschedule_timer(&terminated_dialog_id);
@@ -1077,6 +1078,20 @@ impl SipSession {
                 self.update_refresh_disabled.remove(&terminated_dialog_id);
                 self.callee_guards
                     .retain(|guard| guard.id() != &terminated_dialog_id);
+
+                let connected_callee_terminated =
+                    self.connected_callee_dialog_id.as_ref() == Some(&terminated_dialog_id);
+                if self.connected_callee_dialog_id.is_some() && !connected_callee_terminated {
+                    debug!(
+                        dialog_id = %terminated_dialog_id,
+                        connected_dialog_id = ?self.connected_callee_dialog_id,
+                        ?reason,
+                        "Ignoring terminated non-connected callee dialog"
+                    );
+                    return Ok(());
+                }
+
+                self.update_leg_state(&LegId::from("callee"), LegState::Ended);
 
                 match &reason {
                     TerminatedReason::UasBye => {
@@ -1092,7 +1107,11 @@ impl SipSession {
                     }
                 }
 
-                if self.connected_callee.is_none() {
+                if connected_callee_terminated {
+                    self.connected_callee = None;
+                    self.connected_callee_dialog_id = None;
+                    self.pending_hangup.insert(self.server_dialog.id());
+                } else {
                     let (code, reason_str) = match reason {
                         TerminatedReason::UasBusy => {
                             (Some(StatusCode::BusyHere), Some("Busy Here".to_string()))
@@ -1130,8 +1149,6 @@ impl SipSession {
                             warn!(error = %e, "Failed to send rejection response to caller");
                         }
                     }
-                } else {
-                    self.pending_hangup.insert(self.server_dialog.id());
                 }
             }
             _ => {}
@@ -1161,11 +1178,13 @@ impl SipSession {
                     self.run_targets(strategy, callee_state_rx).await
                 }
                 DialplanFlow::Queue { plan, next } => {
-                    if let Err((code, reason)) = self.execute_queue(plan, callee_state_rx).await {
-                        warn!(?code, ?reason, "Queue execution failed, trying next flow");
+                    match self.execute_queue(plan, callee_state_rx).await {
+                        Ok(()) => Ok(()),
+                        Err((code, reason)) => {
+                            warn!(?code, ?reason, "Queue execution failed, trying next flow");
+                            self.execute_flow(next, callee_state_rx).await
+                        }
                     }
-
-                    self.execute_flow(next, callee_state_rx).await
                 }
                 DialplanFlow::Application {
                     app_name,
@@ -1841,6 +1860,7 @@ impl SipSession {
         .await
         .map_err(|e| (StatusCode::ServerInternalError, Some(e.to_string())))?;
 
+        self.connected_callee_dialog_id = Some(dialog_id.clone());
         self.callee_dialogs.insert(dialog_id.clone(), ());
         if self.server.proxy_config.session_timer_mode().is_enabled() {
             if let Some(ref response) = response {
@@ -3484,6 +3504,7 @@ impl SipSession {
         }
 
         self.callee_dialogs.clear();
+        self.connected_callee_dialog_id = None;
         self.timers.clear();
         self.update_refresh_disabled.clear();
         self.timer_queue.clear();
@@ -6297,6 +6318,7 @@ impl Drop for SipSession {
         self.callee_event_tx = None;
 
         self.callee_dialogs.clear();
+        self.connected_callee_dialog_id = None;
         self.timers.clear();
         self.timer_queue.clear();
         self.timer_keys.clear();
