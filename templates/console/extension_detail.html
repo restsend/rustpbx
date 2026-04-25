@@ -379,82 +379,91 @@
                         </template>
 
                         <template x-if="locator.available && locator.records.length">
-                            <div class="overflow-x-auto">
-                                <table class="min-w-full divide-y divide-slate-200 text-left text-xs">
-                                    <thead
-                                        class="bg-slate-50 text-[11px] font-semibold uppercase tracking-wide text-slate-500">
-                                        <tr>
-                                            <th scope="col" class="px-3 py-2">{{ "extension_detail.contact" | t }}</th>
-                                            <th scope="col" class="px-3 py-2">{{ "extension_detail.destination" | t }}</th>
-                                            <th scope="col" class="px-3 py-2">{{ "extension_detail.home_proxy" | t }}</th>
-                                            <th scope="col" class="px-3 py-2">{{ "extension_detail.transport" | t }}</th>
-                                            <th scope="col" class="px-3 py-2">{{ "extension_detail.ttl" | t }}</th>
-                                            <th scope="col" class="px-3 py-2">{{ "extension_detail.updated" | t }}</th>
-                                            <th scope="col" class="px-3 py-2">{{ "extension_detail.flags" | t }}</th>
-                                            <th scope="col" class="px-3 py-2">{{ "extension_detail.user_agent" | t }}</th>
-                                        </tr>
-                                    </thead>
-                                    <tbody class="divide-y divide-slate-100 text-slate-600">
-                                        <template x-for="record in locator.records" :key="record.binding_key">
-                                            <tr>
-                                                <td class="px-3 py-2 align-top">
-                                                    <div class="font-medium text-slate-900"
-                                                        x-text="record.contact || record.registered_aor || record.aor">
-                                                    </div>
-                                                    <template x-if="record.binding_key">
-                                                        <div class="text-[11px] text-slate-400"
-                                                            x-text="record.binding_key"></div>
+                            <div class="space-y-3">
+                                <template x-for="(record, index) in locator.records"
+                                    :key="record.binding_key || `${record.contact || record.registered_aor || record.aor || 'record'}-${index}`">
+                                    <div class="rounded-xl border border-slate-200 bg-slate-50/40 p-4 sm:p-5">
+                                        <div class="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+                                            <div class="min-w-0 space-y-1">
+                                                <div class="break-all text-sm font-semibold text-slate-900"
+                                                    x-text="record.contact || record.registered_aor || record.aor || '—'"></div>
+                                                <template x-if="record.binding_key">
+                                                    <div class="break-all text-[11px] text-slate-400"
+                                                        x-text="record.binding_key"></div>
+                                                </template>
+                                            </div>
+                                            <span
+                                                class="inline-flex w-max items-center rounded-full bg-emerald-50 px-2 py-0.5 text-[11px] font-medium text-emerald-600 ring-1 ring-emerald-100">
+                                                {{ "extension_detail.active" | t }}
+                                            </span>
+                                        </div>
+
+                                        <div class="mt-4 grid gap-3 text-xs text-slate-600 sm:grid-cols-2 lg:grid-cols-3">
+                                            <div class="space-y-1">
+                                                <div class="text-[11px] font-semibold uppercase tracking-wide text-slate-400">
+                                                    {{ "extension_detail.destination" | t }}</div>
+                                                <div class="break-all text-slate-700" x-text="record.destination || '—'"></div>
+                                            </div>
+                                            <div class="space-y-1">
+                                                <div class="text-[11px] font-semibold uppercase tracking-wide text-slate-400">
+                                                    {{ "extension_detail.home_proxy" | t }}</div>
+                                                <div class="break-all text-slate-700" x-text="record.home_proxy || '—'"></div>
+                                            </div>
+                                            <div class="space-y-1">
+                                                <div class="text-[11px] font-semibold uppercase tracking-wide text-slate-400">
+                                                    {{ "extension_detail.transport" | t }}</div>
+                                                <div class="flex flex-wrap items-center gap-1">
+                                                    <span class="text-slate-700" x-text="record.transport || '—'"></span>
+                                                    <template x-if="record.supports_webrtc">
+                                                        <span
+                                                            class="inline-flex w-max items-center rounded-full bg-emerald-50 px-2 py-0.5 text-[11px] font-medium text-emerald-600 ring-1 ring-emerald-100">
+                                                            WebRTC
+                                                        </span>
                                                     </template>
-                                                </td>
-                                                <td class="px-3 py-2 align-top">
-                                                    <span x-text="record.destination || '—'"></span>
-                                                </td>
-                                                <td class="px-3 py-2 align-top">
-                                                    <span x-text="record.home_proxy || '—'"></span>
-                                                </td>
-                                                <td class="px-3 py-2 align-top">
-                                                    <div class="flex flex-col gap-1">
-                                                        <span x-text="record.transport || '—'"></span>
-                                                        <template x-if="record.supports_webrtc">
-                                                            <span
-                                                                class="inline-flex w-max items-center rounded-full bg-emerald-50 px-2 py-0.5 text-[11px] font-medium text-emerald-600 ring-1 ring-emerald-100">
-                                                                WebRTC
-                                                            </span>
-                                                        </template>
-                                                    </div>
-                                                </td>
-                                                <td class="px-3 py-2 align-top">
-                                                    <div class="font-semibold text-slate-900"
-                                                        x-text="formatDuration(remainingTtl(record))"></div>
-                                                    <div class="text-[11px] text-slate-400">{{ "extension_detail.ttl_max" | t }}
-                                                        <span x-text="formatDuration(record.expires)"></span>
-                                                    </div>
-                                                </td>
-                                                <td class="px-3 py-2 align-top">
-                                                    <div class="text-sm font-semibold text-slate-700"
-                                                        x-text="formatRelativeSeconds(record.age_seconds)"></div>
-                                                </td>
-                                                <td class="px-3 py-2 align-top">
-                                                    <div class="flex flex-wrap gap-1">
-                                                        <template x-for="flag in recordFlags(record)" :key="flag">
-                                                            <span
-                                                                class="inline-flex items-center rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-medium text-slate-600 ring-1 ring-slate-200"
-                                                                x-text="flag"></span>
-                                                        </template>
-                                                        <template x-if="!recordFlags(record).length">
-                                                            <span class="text-[11px] text-slate-400">—</span>
-                                                        </template>
-                                                    </div>
-                                                </td>
-                                                <td class="px-3 py-2 align-top">
-                                                    <span class="block max-w-xs truncate text-xs"
-                                                        :title="record.user_agent || undefined"
-                                                        x-text="record.user_agent || '—'"></span>
-                                                </td>
-                                            </tr>
-                                        </template>
-                                    </tbody>
-                                </table>
+                                                </div>
+                                            </div>
+                                        </div>
+
+                                        <div class="mt-4 grid gap-3 text-xs text-slate-600 sm:grid-cols-2 lg:grid-cols-3">
+                                            <div class="space-y-1">
+                                                <div class="text-[11px] font-semibold uppercase tracking-wide text-slate-400">
+                                                    {{ "extension_detail.ttl" | t }}</div>
+                                                <div class="text-sm font-semibold text-slate-900"
+                                                    x-text="formatDuration(remainingTtl(record))"></div>
+                                                <div class="text-[11px] text-slate-400">{{ "extension_detail.ttl_max" | t }}
+                                                    <span x-text="formatDuration(record.expires)"></span>
+                                                </div>
+                                            </div>
+                                            <div class="space-y-1">
+                                                <div class="text-[11px] font-semibold uppercase tracking-wide text-slate-400">
+                                                    {{ "extension_detail.updated" | t }}</div>
+                                                <div class="text-sm font-semibold text-slate-700"
+                                                    x-text="formatRelativeSeconds(record.age_seconds)"></div>
+                                            </div>
+                                            <div class="space-y-1">
+                                                <div class="text-[11px] font-semibold uppercase tracking-wide text-slate-400">
+                                                    {{ "extension_detail.flags" | t }}</div>
+                                                <div class="flex flex-wrap gap-1">
+                                                    <template x-for="flag in recordFlags(record)" :key="flag">
+                                                        <span
+                                                            class="inline-flex items-center rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-medium text-slate-600 ring-1 ring-slate-200"
+                                                            x-text="flag"></span>
+                                                    </template>
+                                                    <template x-if="!recordFlags(record).length">
+                                                        <span class="text-[11px] text-slate-400">—</span>
+                                                    </template>
+                                                </div>
+                                            </div>
+                                        </div>
+
+                                        <div class="mt-4 border-t border-slate-200 pt-3">
+                                            <div class="text-[11px] font-semibold uppercase tracking-wide text-slate-400">
+                                                {{ "extension_detail.user_agent" | t }}</div>
+                                            <div class="mt-1 break-all text-xs text-slate-700"
+                                                x-text="record.user_agent || '—'"></div>
+                                        </div>
+                                    </div>
+                                </template>
                             </div>
                         </template>
 
