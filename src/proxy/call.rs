@@ -469,19 +469,22 @@ impl CallModule {
             }
         };
 
-        let mut loc = Location {
+        let mut locs = vec![Location {
             aor: callee_uri.clone(),
             ..Default::default()
-        };
+        }];
         let mut internal_lookup_empty = false;
 
         if callee_is_same_realm
             && let Ok(results) = self.inner.server.locator.lookup(&callee_uri).await {
                 internal_lookup_empty = results.is_empty();
-                loc.supports_webrtc |= results.iter().any(|item| item.supports_webrtc);
+                if !results.is_empty() {
+                    // Keep locator-provided target metadata (destination/home_proxy/path/etc.)
+                    // so SipSession can route cross-node calls via remote home_proxy.
+                    locs = results;
+                }
             }
 
-        let locs = vec![loc];
         let caller_uri = match caller.from.as_ref() {
             Some(uri) => uri.clone(),
             None => original

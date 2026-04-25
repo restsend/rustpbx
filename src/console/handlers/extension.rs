@@ -153,36 +153,59 @@ async fn fetch_extension_locator_summary(
     };
     summary.query_uri = Some(query_uri.clone());
 
-    let uri = match Uri::try_from(query_uri.as_str()) {
-        Ok(uri) => uri,
-        Err(err) => {
-            summary.error = Some(format!("Invalid SIP URI: {}", err));
-            return summary;
-        }
-    };
-
     let Some(server) = server else {
         summary.error = Some("SIP server unavailable".to_string());
         return summary;
     };
 
-    match server.locator.lookup(&uri).await {
-        Ok(locations) => {
-            let records = locations
-                .into_iter()
-                .map(location_to_record)
-                .collect::<Vec<_>>();
-            summary.total = records.len();
-            summary.records = records;
-            summary.available = true;
+    let mut lookup_uris = vec![query_uri.clone()];
+    let localhost_query_uri = format!("sip:{}@localhost", trimmed_ext);
+    if !query_uri.eq_ignore_ascii_case(&localhost_query_uri) {
+        lookup_uris.push(localhost_query_uri);
+    }
+
+    let mut had_success = false;
+    let mut last_error = None;
+
+    for candidate in lookup_uris {
+        let uri = match Uri::try_from(candidate.as_str()) {
+            Ok(uri) => uri,
+            Err(err) => {
+                last_error = Some(format!("Invalid SIP URI: {}", err));
+                continue;
+            }
+        };
+
+        match server.locator.lookup(&uri).await {
+            Ok(locations) => {
+                had_success = true;
+                if locations.is_empty() {
+                    continue;
+                }
+
+                let records = locations
+                    .into_iter()
+                    .map(location_to_record)
+                    .collect::<Vec<_>>();
+                summary.total = records.len();
+                summary.records = records;
+                summary.available = true;
+                summary.query_uri = Some(candidate);
+                return summary;
+            }
+            Err(err) => {
+                warn!(
+                    "locator lookup failed for extension {} ({}): {}",
+                    trimmed_ext, candidate, err
+                );
+                last_error = Some(format!("Locator lookup failed: {}", err));
+            }
         }
-        Err(err) => {
-            warn!(
-                "locator lookup failed for extension {} ({}): {}",
-                trimmed_ext, query_uri, err
-            );
-            summary.error = Some(format!("Locator lookup failed: {}", err));
-        }
+    }
+
+    summary.available = true;
+    if !had_success {
+        summary.error = last_error;
     }
 
     summary
