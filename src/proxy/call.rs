@@ -310,6 +310,23 @@ fn extract_to_user(origin: &rsipstack::sip::Request) -> Option<String> {
         .and_then(|uri| uri.user().map(|u| u.to_string()))
 }
 
+fn resolve_callee_uri(origin: &rsipstack::sip::Request) -> Result<rsipstack::sip::Uri> {
+    if origin
+        .uri
+        .user()
+        .map(|user| !user.trim().is_empty())
+        .unwrap_or(false)
+    {
+        return Ok(origin.uri.clone());
+    }
+
+    origin
+        .to_header()
+        .map_err(anyhow::Error::from)?
+        .uri()
+        .map_err(anyhow::Error::from)
+}
+
 #[derive(Clone)]
 pub struct CallModuleInner {
     config: Arc<ProxyConfig>,
@@ -389,11 +406,8 @@ impl CallModule {
         caller: &SipUser,
         cookie: &TransactionCookie,
     ) -> Result<Dialplan, RouteError> {
-        let callee_uri = original
-            .to_header()
-            .map_err(|e| RouteError::from((anyhow::anyhow!(e), None)))?
-            .uri()
-            .map_err(|e| RouteError::from((anyhow::anyhow!(e), None)))?;
+        let callee_uri =
+            resolve_callee_uri(original).map_err(|e| RouteError::from((e, None)))?;
         let callee_realm = callee_uri.host().to_string();
 
         let dialog_id = original
@@ -714,7 +728,7 @@ impl CallModule {
         &self,
         request: &rsipstack::sip::Request,
     ) -> Result<Option<SipUser>> {
-        let callee_uri = request.to_header()?.uri()?;
+        let callee_uri = resolve_callee_uri(request)?;
         let callee_realm = callee_uri.host().to_string();
         if !self.inner.server.is_same_realm(&callee_realm).await {
             return Ok(None);
@@ -2000,6 +2014,11 @@ impl ProxyModule for CallModule {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::call::{DialDirection, RouteInvite, SipUser, TransactionCookie};
+    use crate::config::RouteResult;
+    use crate::proxy::tests::common::create_test_server;
+    use async_trait::async_trait;
+    use rsipstack::dialog::invitation::InviteOption;
     use crate::call::Location;
 
     fn make_loc() -> Vec<Location> {
@@ -2019,6 +2038,35 @@ mod tests {
             },
             ..Default::default()
         }]
+    }
+
+    struct NotHandledRouteInvite;
+
+    #[async_trait]
+    impl RouteInvite for NotHandledRouteInvite {
+        async fn route_invite(
+            &self,
+            option: InviteOption,
+            _origin: &rsipstack::sip::Request,
+            _direction: &DialDirection,
+            _cookie: &TransactionCookie,
+        ) -> Result<RouteResult> {
+            Ok(RouteResult::NotHandled(option, None))
+        }
+    }
+
+    fn replace_to_header(request: &mut rsipstack::sip::Request, to_uri: rsipstack::sip::Uri) {
+        request
+            .headers
+            .retain(|header| !matches!(header, rsipstack::sip::Header::To(_)));
+        request.headers.push(
+            rsipstack::sip::typed::To {
+                display_name: None,
+                uri: to_uri,
+                params: vec![],
+            }
+            .into(),
+        );
     }
 
     #[test]
@@ -2107,5 +2155,129 @@ mod tests {
         let (base, replaces) = CallModule::parse_refer_to(refer_to);
         assert_eq!(base, "sip:charlie@example.com");
         assert_eq!(replaces, None);
+    }
+
+    #[tokio::test]
+    async fn default_resolve_uses_request_uri_for_same_realm_detection() {
+        let (server, config) = create_test_server().await;
+        let module = CallModule::new(config, server);
+
+        let mut request = crate::proxy::tests::common::create_test_request(
+            rsipstack::sip::Method::Invite,
+            "bp",
+            None,
+            "rustpbx.com",
+            None,
+        );
+        request.uri = rsipstack::sip::Uri::try_from("sip:lp@rustpbx.com").unwrap();
+        replace_to_header(
+            &mut request,
+            rsipstack::sip::Uri::try_from("sip:lp@172.25.52.29:63647;transport=UDP").unwrap(),
+        );
+
+        let caller = SipUser {
+            username: "bp".to_string(),
+            realm: Some("rustpbx.com".to_string()),
+            ..Default::default()
+        };
+
+        let err = module
+            .default_resolve(
+                &request,
+                Box::new(NotHandledRouteInvite),
+                &caller,
+                &TransactionCookie::default(),
+            )
+            .await
+            .expect_err("offline internal user should reject with 480");
+
+        assert_eq!(err.status, Some(rsipstack::sip::StatusCode::TemporarilyUnavailable));
+        assert!(err.error.to_string().contains("offline"));
+    }
+
+    #[tokio::test]
+    async fn default_resolve_uses_request_uri_for_external_detection() {
+        let (server, config) = create_test_server().await;
+        let module = CallModule::new(config, server);
+
+        let mut request = crate::proxy::tests::common::create_test_request(
+            rsipstack::sip::Method::Invite,
+            "bp",
+            None,
+            "rustpbx.com",
+            None,
+        );
+        request.uri =
+            rsipstack::sip::Uri::try_from("sip:lp@172.25.52.29:63647;transport=UDP").unwrap();
+        replace_to_header(
+            &mut request,
+            rsipstack::sip::Uri::try_from("sip:lp@rustpbx.com").unwrap(),
+        );
+
+        let caller = SipUser {
+            username: "bp".to_string(),
+            realm: Some("rustpbx.com".to_string()),
+            ..Default::default()
+        };
+
+        let err = module
+            .default_resolve(
+                &request,
+                Box::new(NotHandledRouteInvite),
+                &caller,
+                &TransactionCookie::default(),
+            )
+            .await
+            .expect_err("external destination should reject with 404");
+
+        assert_eq!(err.status, Some(rsipstack::sip::StatusCode::NotFound));
+        assert!(err.error.to_string().contains("no route"));
+    }
+
+    #[test]
+    fn resolve_callee_uri_prefers_request_uri() {
+        let request_uri = rsipstack::sip::Uri::try_from("sip:lp@rustpbx.com").unwrap();
+        let to_uri = rsipstack::sip::Uri::try_from("sip:lp@172.25.52.29:63647;transport=UDP")
+            .unwrap();
+
+        let request = rsipstack::sip::Request {
+            method: rsipstack::sip::Method::Invite,
+            uri: request_uri.clone(),
+            version: rsipstack::sip::Version::V2,
+            headers: vec![rsipstack::sip::typed::To {
+                display_name: None,
+                uri: to_uri,
+                params: vec![],
+            }
+            .into()]
+            .into(),
+            body: vec![],
+        };
+
+        let resolved = resolve_callee_uri(&request).expect("expected callee uri");
+        assert_eq!(resolved, request_uri);
+    }
+
+    #[test]
+    fn resolve_callee_uri_falls_back_to_to_header() {
+        let request_uri = rsipstack::sip::Uri::try_from("sip:rustpbx.com").unwrap();
+        let to_uri = rsipstack::sip::Uri::try_from("sip:lp@rustpbx.com").unwrap();
+
+        let request = rsipstack::sip::Request {
+            method: rsipstack::sip::Method::Invite,
+            uri: request_uri,
+            version: rsipstack::sip::Version::V2,
+            headers: vec![rsipstack::sip::typed::To {
+                display_name: None,
+                uri: to_uri.clone(),
+                params: vec![],
+            }
+            .into()]
+            .into(),
+            body: vec![],
+        };
+
+        let resolved = resolve_callee_uri(&request).expect("expected callee uri");
+        assert_eq!(resolved, to_uri);
     }
 }

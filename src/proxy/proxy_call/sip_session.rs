@@ -602,6 +602,15 @@ impl SipSession {
         }
     }
 
+    fn resolve_outbound_callee_uri(target: &Location, route_via_home_proxy: bool) -> rsipstack::sip::Uri {
+        if route_via_home_proxy
+            && let Some(registered_aor) = target.registered_aor.as_ref() {
+                return registered_aor.clone();
+            }
+
+        target.aor.clone()
+    }
+
     fn bypasses_local_media(&self) -> bool {
         self.media_profile.path == MediaPathMode::Bypass && self.media_bridge.is_none()
     }
@@ -1603,11 +1612,10 @@ impl SipSession {
             )
         })?;
 
-        let callee_uri = target.aor.clone();
-
         let local_addrs = self.server.endpoint.get_addrs();
         let (destination, route_via_home_proxy) =
             Self::resolve_outbound_destination(target, &local_addrs);
+        let callee_uri = Self::resolve_outbound_callee_uri(target, route_via_home_proxy);
 
         let mut headers: Vec<rsipstack::sip::Header> =
             vec![rsipstack::sip::headers::MaxForwards::from(self.context.max_forwards).into()];
@@ -6588,6 +6596,52 @@ mod tests {
 
         assert!(!via_home_proxy);
         assert_eq!(resolved, Some(destination));
+    }
+
+    #[test]
+    fn test_resolve_outbound_callee_uri_prefers_registered_aor_via_home_proxy() {
+        let contact_uri = rsipstack::sip::Uri::try_from("sip:lp@172.25.52.29:63647;transport=UDP")
+            .unwrap();
+        let registered_aor = rsipstack::sip::Uri::try_from("sip:lp@rustpbx.com").unwrap();
+
+        let target = Location {
+            aor: contact_uri,
+            registered_aor: Some(registered_aor.clone()),
+            ..Default::default()
+        };
+
+        let resolved = SipSession::resolve_outbound_callee_uri(&target, true);
+        assert_eq!(resolved, registered_aor);
+    }
+
+    #[test]
+    fn test_resolve_outbound_callee_uri_falls_back_to_contact_when_no_registered_aor() {
+        let contact_uri = rsipstack::sip::Uri::try_from("sip:lp@172.25.52.29:63647;transport=UDP")
+            .unwrap();
+
+        let target = Location {
+            aor: contact_uri.clone(),
+            ..Default::default()
+        };
+
+        let resolved = SipSession::resolve_outbound_callee_uri(&target, true);
+        assert_eq!(resolved, contact_uri);
+    }
+
+    #[test]
+    fn test_resolve_outbound_callee_uri_uses_contact_when_not_via_home_proxy() {
+        let contact_uri = rsipstack::sip::Uri::try_from("sip:lp@172.25.52.29:63647;transport=UDP")
+            .unwrap();
+        let registered_aor = rsipstack::sip::Uri::try_from("sip:lp@rustpbx.com").unwrap();
+
+        let target = Location {
+            aor: contact_uri.clone(),
+            registered_aor: Some(registered_aor),
+            ..Default::default()
+        };
+
+        let resolved = SipSession::resolve_outbound_callee_uri(&target, false);
+        assert_eq!(resolved, contact_uri);
     }
 
     #[tokio::test]
