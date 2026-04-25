@@ -4770,6 +4770,20 @@ impl SipSession {
                     ?reason,
                     "Queue transfer failed"
                 );
+                if self.server_dialog.state().is_confirmed() {
+                    self.last_error = Some((code.clone(), reason.clone()));
+                    self.hangup_reason
+                        .get_or_insert(CallRecordHangupReason::Failed);
+                    self.pending_hangup.insert(self.server_dialog.id());
+                    self.cancel_token.cancel();
+                    info!(
+                        queue = %queue_name,
+                        ?code,
+                        ?reason,
+                        "Queue transfer failed after caller was answered; hanging up caller dialog"
+                    );
+                    return Ok(());
+                }
                 Err(anyhow!(
                     "Queue transfer failed: {:?} - {:?}",
                     code,
