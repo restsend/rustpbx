@@ -412,3 +412,47 @@ async fn test_db_locator_home_proxy_crud() {
         assert!(v.is_empty(), "Expected no locations after unregister");
     }
 }
+
+#[tokio::test]
+async fn test_db_locator_rewrites_legacy_registered_aor_contact_to_canonical_aor() {
+    let locator = DbLocator::new("sqlite::memory:".to_string()).await.unwrap();
+
+    let contact_uri: rsipstack::sip::Uri = "sip:lp@172.25.52.29:51003;transport=UDP"
+        .try_into()
+        .unwrap();
+    let destination = SipAddr {
+        r#type: Some(rsipstack::sip::transport::Transport::Udp),
+        addr: HostWithPort::try_from("172.25.52.29:51003").unwrap(),
+    };
+    let home_proxy = SipAddr {
+        r#type: Some(rsipstack::sip::transport::Transport::Udp),
+        addr: HostWithPort::try_from("10.145.213.70:8060").unwrap(),
+    };
+
+    // Simulate legacy record where registered_aor is incorrectly equal to contact AoR
+    locator
+        .register(
+            "lp",
+            Some("localhost"),
+            Location {
+                aor: contact_uri.clone(),
+                registered_aor: Some(contact_uri),
+                destination: Some(destination),
+                home_proxy: Some(home_proxy),
+                expires: 3600,
+                last_modified: Some(Instant::now()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    let results = locator
+        .lookup(&"sip:lp@localhost".try_into().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(results.len(), 1);
+
+    let canonical = results[0].registered_aor.as_ref().unwrap().to_string();
+    assert_eq!(canonical, "sip:lp@localhost");
+}
