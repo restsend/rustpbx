@@ -469,6 +469,7 @@ pub struct RtpTrackBuilder {
     track_id: String,
     cancel_token: Option<CancellationToken>,
     external_ip: Option<String>,
+    bind_ip: Option<String>,
     rtp_start_port: Option<u16>,
     rtp_end_port: Option<u16>,
     mode: TransportMode,
@@ -484,6 +485,7 @@ impl RtpTrackBuilder {
             track_id,
             cancel_token: None,
             external_ip: None,
+            bind_ip: None,
             rtp_start_port: None,
             rtp_end_port: None,
             mode: TransportMode::Rtp,
@@ -527,6 +529,11 @@ impl RtpTrackBuilder {
 
     pub fn with_external_ip(mut self, addr: String) -> Self {
         self.external_ip = Some(addr);
+        self
+    }
+
+    pub fn with_bind_ip(mut self, addr: String) -> Self {
+        self.bind_ip = Some(addr);
         self
     }
 
@@ -600,6 +607,12 @@ impl RtpTrackBuilder {
         })
         .collect();
 
+        let bind_ip = if matches!(self.mode, TransportMode::Rtp | TransportMode::Srtp) {
+            self.bind_ip
+        } else {
+            None
+        };
+
         let config = RtcConfiguration {
             ice_servers: self.ice_servers,
             ice_transport_policy: if self.mode == TransportMode::WebRtc && has_turn_server {
@@ -611,6 +624,7 @@ impl RtpTrackBuilder {
             rtp_start_port: self.rtp_start_port,
             rtp_end_port: self.rtp_end_port,
             external_ip: self.external_ip,
+            bind_ip,
             enable_latching: self.enable_latching,
             media_capabilities: Some(rustrtc::config::MediaCapabilities {
                 audio: audio_capabilities,
@@ -646,6 +660,7 @@ pub struct FileTrack {
     rtp_start_port: Option<u16>,
     rtp_end_port: Option<u16>,
     external_ip: Option<String>,
+    bind_ip: Option<String>,
     audio_source_manager: Option<Arc<audio_source::AudioSourceManager>>,
     muted: std::sync::atomic::AtomicBool,
 }
@@ -665,6 +680,7 @@ impl Clone for FileTrack {
             rtp_start_port: self.rtp_start_port,
             rtp_end_port: self.rtp_end_port,
             external_ip: self.external_ip.clone(),
+            bind_ip: self.bind_ip.clone(),
             audio_source_manager: self.audio_source_manager.clone(),
             muted: std::sync::atomic::AtomicBool::new(
                 self.muted.load(std::sync::atomic::Ordering::Relaxed),
@@ -696,6 +712,7 @@ impl FileTrack {
             rtp_start_port: None,
             rtp_end_port: None,
             external_ip: None,
+            bind_ip: None,
             audio_source_manager: None,
             muted: std::sync::atomic::AtomicBool::new(false),
         }
@@ -745,12 +762,25 @@ impl FileTrack {
         self
     }
 
+    pub fn with_bind_ip(mut self, ip: String) -> Self {
+        self.bind_ip = Some(ip);
+        self.recreate_pc();
+        self
+    }
+
     fn recreate_pc(&mut self) {
+        let bind_ip = if matches!(self.mode, TransportMode::Rtp | TransportMode::Srtp) {
+            self.bind_ip.clone()
+        } else {
+            None
+        };
+
         let config = RtcConfiguration {
             transport_mode: self.mode.clone(),
             rtp_start_port: self.rtp_start_port,
             rtp_end_port: self.rtp_end_port,
             external_ip: self.external_ip.clone(),
+            bind_ip,
             ssrc_start: rand::random::<u32>(),
             ..Default::default()
         };

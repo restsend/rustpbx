@@ -1602,8 +1602,13 @@ impl CallModule {
         let media_track =
             crate::media::RtpTrackBuilder::new(format!("inbound-refer-{}", new_call_id))
                 .with_cancel_token(tokio_util::sync::CancellationToken::new())
-                .with_external_ip(external_ip)
-                .build();
+                .with_external_ip(external_ip);
+        let media_track = if let Some(bind_ip) = server.rtp_config.bind_ip.clone() {
+            media_track.with_bind_ip(bind_ip)
+        } else {
+            media_track
+        }
+        .build();
 
         let sdp_offer = media_track
             .local_description()

@@ -871,8 +871,13 @@ impl RwiCommandProcessor {
         let media_track =
             crate::media::RtpTrackBuilder::new(format!("rwi-originate-{}", req.call_id))
                 .with_cancel_token(tokio_util::sync::CancellationToken::new())
-                .with_external_ip(external_ip.clone())
-                .build();
+                .with_external_ip(external_ip.clone());
+        let media_track = if let Some(bind_ip) = server.rtp_config.bind_ip.clone() {
+            media_track.with_bind_ip(bind_ip)
+        } else {
+            media_track
+        }
+        .build();
 
         tracing::info!(call_id = %req.call_id, external_ip = %external_ip, "Created media track for originate");
 
@@ -1459,8 +1464,13 @@ impl RwiCommandProcessor {
         let media_track =
             crate::media::RtpTrackBuilder::new(format!("parallel-{}-{}", operation_id, call_id))
                 .with_cancel_token(tokio_util::sync::CancellationToken::new())
-                .with_external_ip(external_ip.clone())
-                .build();
+                .with_external_ip(external_ip.clone());
+        let media_track = if let Some(bind_ip) = server.rtp_config.bind_ip.clone() {
+            media_track.with_bind_ip(bind_ip)
+        } else {
+            media_track
+        }
+        .build();
 
         let sdp_offer = match media_track.local_description().await {
             Ok(sdp) => {
