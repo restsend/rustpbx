@@ -524,6 +524,7 @@ impl SessionTimerMode {
 #[derive(Clone, Debug, Deserialize, Serialize, Default)]
 pub struct RtpConfig {
     pub external_ip: Option<String>,
+    pub bind_ip: Option<String>,
     pub start_port: Option<u16>,
     pub end_port: Option<u16>,
     pub webrtc_start_port: Option<u16>,
@@ -978,6 +979,7 @@ impl Config {
     pub fn rtp_config(&self) -> RtpConfig {
         RtpConfig {
             external_ip: self.external_ip.clone(),
+            bind_ip: Some(self.proxy.addr.clone()),
             start_port: self.rtp_start_port,
             end_port: self.rtp_end_port,
             webrtc_start_port: self.webrtc_port_start,
@@ -1084,5 +1086,17 @@ mod tests {
 
         config.session_timer = false;
         assert_eq!(config.session_timer_mode(), SessionTimerMode::Off);
+    }
+
+    #[test]
+    fn test_rtp_config_uses_proxy_addr_for_bind_ip() {
+        let mut config = Config::default();
+        config.proxy.addr = "120.228.209.243".to_string();
+        config.external_ip = Some("203.0.113.10".to_string());
+
+        let rtp_config = config.rtp_config();
+
+        assert_eq!(rtp_config.bind_ip.as_deref(), Some("120.228.209.243"));
+        assert_eq!(rtp_config.external_ip.as_deref(), Some("203.0.113.10"));
     }
 }

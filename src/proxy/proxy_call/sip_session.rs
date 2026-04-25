@@ -2207,6 +2207,9 @@ impl SipSession {
                 if let Some(ref external_ip) = self.server.rtp_config.external_ip {
                     track_builder = track_builder.with_external_ip(external_ip.clone());
                 }
+                if let Some(ref bind_ip) = self.server.rtp_config.bind_ip {
+                    track_builder = track_builder.with_bind_ip(bind_ip.clone());
+                }
 
                 let (start_port, end_port) = if caller_is_webrtc {
                     (
@@ -2697,6 +2700,9 @@ impl SipSession {
             if let Some(ref external_ip) = self.server.rtp_config.external_ip {
                 bridge_builder = bridge_builder.with_external_ip(external_ip.clone());
             }
+            if let Some(ref bind_ip) = self.server.rtp_config.bind_ip {
+                bridge_builder = bridge_builder.with_bind_ip(bind_ip.clone());
+            }
 
             if let Some(ref ice_servers) = self.context.dialplan.media.ice_servers {
                 bridge_builder = bridge_builder.with_ice_servers(ice_servers.clone());
@@ -2872,6 +2878,9 @@ impl SipSession {
             if let Some(ref external_ip) = self.server.rtp_config.external_ip {
                 track_builder = track_builder.with_external_ip(external_ip.clone());
             }
+            if let Some(ref bind_ip) = self.server.rtp_config.bind_ip {
+                track_builder = track_builder.with_bind_ip(bind_ip.clone());
+            }
 
             let (start_port, end_port) = if callee_is_webrtc {
                 (
@@ -2966,6 +2975,9 @@ impl SipSession {
 
         if let Some(ref external_ip) = self.server.rtp_config.external_ip {
             track_builder = track_builder.with_external_ip(external_ip.clone());
+        }
+        if let Some(ref bind_ip) = self.server.rtp_config.bind_ip {
+            track_builder = track_builder.with_bind_ip(bind_ip.clone());
         }
 
         let (start_port, end_port) = if caller_is_webrtc {
