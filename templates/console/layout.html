@@ -27,6 +27,12 @@
     {% for js in js_files %}
     <script src="{{ js }}" defer></script>
     {% endfor %}
+    {% if addon_scripts %}
+    {% for script in addon_scripts %}
+    <script src="{{ script|safe }}" defer>
+    </script>
+    {% endfor %}
+    {% endif %}
     <script defer
         src="{{alpine_js|default('https://cdnjs.cloudflare.com/ajax/libs/alpinejs/3.15.0/cdn.min.js')|safe}}"></script>
     <script
@@ -38,11 +44,6 @@
             window.RustPBX.plugins.push(plugin);
         };
     </script>
-    {% if addon_scripts %}
-    {% for script in addon_scripts %}
-    <script src="{{ script }}"></script>
-    {% endfor %}
-    {% endif %}
     <script>
         document.addEventListener('alpine:init', () => {
             const STORAGE_KEYS = {

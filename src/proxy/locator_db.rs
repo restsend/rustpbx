@@ -1,6 +1,4 @@
-use super::locator::{
-    Locator, RealmChecker, is_local_realm, sort_locations_by_recency,
-};
+use super::locator::{Locator, RealmChecker, is_local_realm, sort_locations_by_recency};
 use crate::call::Location;
 use anyhow::Result;
 use async_trait::async_trait;
@@ -233,7 +231,8 @@ fn choose_registered_aor(
     match decoded_registered_aor {
         Some(registered)
             if strict_equals(&registered, contact_aor)
-                && !strict_equals(&fallback, contact_aor) => {
+                && !strict_equals(&fallback, contact_aor) =>
+        {
             fallback
         }
         Some(registered) => registered,
@@ -258,11 +257,7 @@ fn encode_location_metadata(
         value.push_str(registered_aor.to_string().as_str());
     }
 
-    if value.is_empty() {
-        None
-    } else {
-        Some(value)
-    }
+    if value.is_empty() { None } else { Some(value) }
 }
 
 fn decode_location_metadata(
@@ -363,11 +358,11 @@ impl Locator for DbLocator {
                 ));
             }
         };
-        // Extract SipAddr components
+        // Persist the actual network transport used by the destination address.
+        // For WebSocket clients this preserves WSS even if Contact uses transport=ws.
         let SipAddr { r#type, addr } = destination;
-        let transport = location
-            .transport
-            .or(*r#type)
+        let transport = r#type
+            .or(location.transport)
             .unwrap_or(rsipstack::sip::transport::Transport::Udp);
         let host = addr.to_string();
 
@@ -676,5 +671,54 @@ impl Locator for DbLocator {
         }
 
         Ok(sort_locations_by_recency(locations))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rsipstack::sip::transport::Transport;
+    use rsipstack::transport::SipAddr;
+
+    #[tokio::test]
+    async fn register_prefers_destination_transport_for_websocket_connections() {
+        let locator = DbLocator::new_with_migrate("sqlite::memory:".to_string(), true)
+            .await
+            .expect("create db locator");
+
+        let aor: rsipstack::sip::Uri = "sip:hvd34mgb@tvuug6sjfcbi.invalid;transport=ws"
+            .try_into()
+            .expect("valid aor");
+
+        let destination = SipAddr {
+            r#type: Some(Transport::Wss),
+            addr: "122.235.198.105:24534"
+                .try_into()
+                .expect("valid destination"),
+        };
+
+        let location = Location {
+            aor: aor.clone(),
+            expires: 600,
+            destination: Some(destination),
+            // Contact transport remains ws, but destination is WSS.
+            transport: Some(Transport::Ws),
+            ..Default::default()
+        };
+
+        locator
+            .register("bob", Some("kefutest.xiaojukeji.com"), location)
+            .await
+            .expect("register location");
+
+        let locations = locator.lookup(&aor).await.expect("lookup location");
+        assert_eq!(locations.len(), 1);
+
+        let stored = &locations[0];
+        assert_eq!(stored.transport, Some(Transport::Wss));
+        assert_eq!(
+            stored.destination.as_ref().and_then(|d| d.r#type),
+            Some(Transport::Wss)
+        );
     }
 }

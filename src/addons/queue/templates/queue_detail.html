@@ -486,9 +486,10 @@ endblock %}
                         });
                 } else {
                     fetch(this.apiPrefix + '/cc/skill-groups', { credentials: 'same-origin' })
-                        .then(res => res.ok ? res.json() : [])
+                        .then(res => res.ok ? res.json() : null)
                         .then(payload => {
-                            this.skillGroups = Array.isArray(payload) ? payload : [];
+                            const arr = Array.isArray(payload) ? payload : (payload && Array.isArray(payload.data) ? payload.data : []);
+                            this.skillGroups = arr;
                         })
                         .catch(() => {
                             this.skillGroups = [];
