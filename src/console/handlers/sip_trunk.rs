@@ -197,7 +197,7 @@ async fn page_sip_trunk_detail(
             warn!("failed to load sip trunk {}: {}", id, err);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"message": "Failed to load SIP trunk"})),
+                Json(json!({"message": format!("Failed to load SIP trunk: {}", err)})),
             )
                 .into_response()
         }
@@ -249,7 +249,7 @@ async fn create_sip_trunk(
             warn!("failed to create sip trunk: {}", err);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"message": "Failed to create SIP trunk"})),
+                Json(json!({"message": format!("Failed to create SIP trunk: {}", err)})),
             )
                 .into_response()
         }
@@ -283,7 +283,7 @@ async fn update_sip_trunk(
             warn!("failed to load sip trunk {} for update: {}", id, err);
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"message": "Failed to update SIP trunk"})),
+                Json(json!({"message": format!("Failed to update SIP trunk: {}", err)})),
             )
                 .into_response();
         }
@@ -318,7 +318,7 @@ async fn update_sip_trunk(
             warn!("failed to update sip trunk {}: {}", id, err);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"message": "Failed to update SIP trunk"})),
+                Json(json!({"message": format!("Failed to update SIP trunk: {}", err)})),
             )
                 .into_response()
         }
@@ -351,7 +351,7 @@ async fn delete_sip_trunk(
             warn!("failed to load sip trunk {} for delete: {}", id, err);
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"message": "Failed to delete SIP trunk"})),
+                Json(json!({"message": format!("Failed to delete SIP trunk: {}", err)})),
             )
                 .into_response();
         }
@@ -367,7 +367,7 @@ async fn delete_sip_trunk(
             warn!("failed to delete sip trunk {}: {}", id, err);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"message": "Failed to delete SIP trunk"})),
+                Json(json!({"message": format!("Failed to delete SIP trunk: {}", err)})),
             )
                 .into_response()
         }
@@ -459,7 +459,7 @@ async fn query_sip_trunks(
             warn!("failed to paginate sip trunks: {}", err);
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"message": "Failed to query SIP trunks"})),
+                Json(json!({"message": format!("Failed to query SIP trunks: {}", err)})),
             )
                 .into_response();
         }

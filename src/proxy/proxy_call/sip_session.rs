@@ -1322,7 +1322,9 @@ impl SipSession {
         }
 
         // Resolve custom targets (e.g., skill-group:) to actual agent locations
-        let resolved_agents = self.resolve_custom_targets(agents).await;
+        let resolved_agents = self
+            .resolve_custom_targets(agents, plan.acd_policy.as_deref())
+            .await;
 
         if resolved_agents.is_empty() {
             warn!("No agents available after resolving skill groups");
@@ -1384,6 +1386,7 @@ impl SipSession {
     async fn resolve_custom_targets(
         &self,
         locations: Vec<crate::call::Location>,
+        acd_policy: Option<&str>,
     ) -> Vec<crate::call::Location> {
         let mut resolved = Vec::new();
         let agent_registry = self.server.agent_registry.clone();
@@ -1403,7 +1406,9 @@ impl SipSession {
                     if let Some(registry) = &agent_registry {
                         // Use the registry's resolve_target hook
                         // CC addon implements this to resolve skill-group: URIs
-                        let agent_uris = registry.resolve_target(&uri_str).await;
+                        let agent_uris = registry
+                            .resolve_target_with_policy(&uri_str, acd_policy)
+                            .await;
                         
                         if agent_uris.is_empty() {
                             warn!(target = %uri_str, "No agents resolved for custom target");
@@ -5110,61 +5115,91 @@ impl SipSession {
         if !is_callee {
             self.stop_caller_ingress_monitor().await;
         }
-        let peer = if is_callee {
-            self.callee_peer.clone()
+        let (peer, track_id) = if is_callee {
+            (self.callee_peer.clone(), Self::CALLEE_TRACK_ID)
         } else {
-            self.caller_peer.clone()
+            (self.caller_peer.clone(), Self::CALLER_TRACK_ID)
         };
 
         // Create a sample track pair (sender -> track) for output
         let (audio_sender, track, _feedback_rx) = sample_track(MediaKind::Audio, 100);
 
-        // Get the existing peer connection from the appropriate peer's first track.
-        // During REFER/transfer transitions the track may not be ready yet, so retry briefly.
+        // Get the existing peer connection from the named RTP track.
+        // We search by track_id to avoid picking up ForwardingTrackHandle entries
+        // (which return None from get_peer_connection).  During REFER/transfer
+        // transitions the track may not be ready yet, so retry briefly.
         let mut pc = None;
-        for _ in 0..100 {
+        for attempt in 0..150 {
             let tracks = peer.get_tracks().await;
-            if let Some(first_track) = tracks.first() {
-                let guard = first_track.lock().await;
+            // First try: look for the named RTP track
+            for t in &tracks {
+                let guard = t.lock().await;
+                if guard.id() == track_id {
+                    if let Some(found_pc) = guard.get_peer_connection().await {
+                        pc = Some(found_pc);
+                        break;
+                    }
+                }
+            }
+            if pc.is_some() {
+                break;
+            }
+            // Fallback: accept any track that has a peer connection (e.g. after re-INVITE)
+            for t in &tracks {
+                let guard = t.lock().await;
                 if let Some(found_pc) = guard.get_peer_connection().await {
                     pc = Some(found_pc);
                     break;
                 }
             }
+            if pc.is_some() {
+                break;
+            }
+            if attempt % 25 == 0 {
+                let track_ids: Vec<_> = {
+                    let mut ids = Vec::new();
+                    for t in &tracks {
+                        ids.push(t.lock().await.id().to_string());
+                    }
+                    ids
+                };
+                tracing::debug!(
+                    session_id = %self.id,
+                    leg_id = %leg_id,
+                    wanted_track_id = %track_id,
+                    available_tracks = ?track_ids,
+                    attempt = attempt,
+                    "Waiting for peer connection on conference media bridge"
+                );
+            }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
 
-        if let Some(pc) = pc {
-            // Add the sample track to the existing peer connection with PCMU params
-            let params = RtpCodecParameters {
-                payload_type: 0, // PCMU
-                clock_rate: 8000,
-                channels: 1,
-            };
+        let pc = pc.ok_or_else(|| {
+            anyhow!(
+                "No peer connection found for conference audio injection (leg={}, track={}, session={})",
+                leg_id,
+                track_id,
+                self.id
+            )
+        })?;
 
-            match pc.add_track(track, params) {
-                Ok(_) => {
-                    info!(
-                        session_id = %self.id,
-                        conf_id = %conf_id,
-                        leg_id = %leg_id,
-                        "Conference sample track added to existing peer connection"
-                    );
-                }
-                Err(e) => {
-                    warn!(
-                        session_id = %self.id,
-                        error = %e,
-                        "Failed to add conference track to peer connection"
-                    );
-                }
-            }
-        } else {
-            warn!(
-                session_id = %self.id,
-                "No peer connection found for conference audio injection"
-            );
-        }
+        // Add the sample track to the existing peer connection with PCMU params
+        let params = RtpCodecParameters {
+            payload_type: 0, // PCMU
+            clock_rate: 8000,
+            channels: 1,
+        };
+
+        pc.add_track(track, params)
+            .map_err(|e| anyhow!("Failed to add conference track to peer connection: {}", e))?;
+
+        info!(
+            session_id = %self.id,
+            conf_id = %conf_id,
+            leg_id = %leg_id,
+            "Conference sample track added to existing peer connection"
+        );
 
         // Create a channel to bridge between ConferenceMediaBridge and audio_sender
         let (tx, mut rx) = tokio::sync::mpsc::channel::<MediaSample>(100);
@@ -5201,9 +5236,17 @@ impl SipSession {
     async fn create_audio_receiver(
         &self,
     ) -> Result<Box<dyn crate::call::runtime::conference_media_bridge::AudioReceiver>> {
-        // Get the caller's peer connection
-        let pc = self.get_caller_peer_connection().await
-            .ok_or_else(|| anyhow!("No peer connection found for conference input"))?;
+        // Get the caller's peer connection with a short retry loop for transfer transitions.
+        let mut pc = None;
+        for _ in 0..100 {
+            if let Some(found_pc) = self.get_caller_peer_connection().await {
+                pc = Some(found_pc);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+
+        let pc = pc.ok_or_else(|| anyhow!("No peer connection found for conference input"))?;
 
         // Create decoder based on negotiated codec
         let decoder = self.create_audio_decoder()
@@ -5217,14 +5260,24 @@ impl SipSession {
         &self,
         peer: &Arc<dyn MediaPeer>,
     ) -> Result<Box<dyn crate::call::runtime::conference_media_bridge::AudioReceiver>> {
-        // Get peer connection from the given peer
-        let tracks = peer.get_tracks().await;
-        let pc = if let Some(first_track) = tracks.first() {
-            let guard = first_track.lock().await;
-            guard.get_peer_connection().await
-        } else {
-            None
-        };
+        // Get peer connection from the given peer with retries during session setup.
+        // Iterate all tracks (not just first) to skip ForwardingTrackHandle entries
+        // which always return None from get_peer_connection().
+        let mut pc = None;
+        for _ in 0..150 {
+            let tracks = peer.get_tracks().await;
+            for t in &tracks {
+                let guard = t.lock().await;
+                if let Some(found_pc) = guard.get_peer_connection().await {
+                    pc = Some(found_pc);
+                    break;
+                }
+            }
+            if pc.is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
 
         let pc = pc.ok_or_else(|| anyhow!("No peer connection found for conference input"))?;
 
@@ -5334,20 +5387,9 @@ impl SipSession {
                 .map_err(|e| anyhow!("Failed to create P2P conference: {}", e))?;
         }
 
-        // Add this session's leg to the conference
+        // Start conference media bridge for this leg.
+        // The bridge runtime adds the participant to the conference.
         let participant_leg = LegId::new(format!("{}-{}", my_session, my_leg));
-        info!(
-            conf_id = %conf_id,
-            participant_leg = %participant_leg,
-            "Adding participant to P2P conference"
-        );
-        
-        self.server.conference_manager.add_participant(
-            &conf_id_obj,
-            participant_leg.clone(),
-        ).await.map_err(|e| anyhow!("Failed to add participant to P2P conference: {}", e))?;
-
-        // Start conference media bridge for this leg
         match self.start_conference_media_bridge(&conf_id, &participant_leg).await {
             Ok(handle) => {
                 info!(
@@ -5405,9 +5447,25 @@ impl SipSession {
         if !self.legs.contains_key(&supervisor_leg) {
             return Err(anyhow!("Supervisor leg not found: {}", supervisor_leg));
         }
-        if !self.legs.contains_key(&target_leg) {
+        let resolved_target_leg = if self.legs.contains_key(&target_leg) {
+            target_leg.clone()
+        } else if self.legs.contains_key(&LegId::new("callee")) {
+            warn!(
+                session_id = %self.id,
+                requested_leg = %target_leg,
+                "Supervisor listen target leg not found, falling back to callee"
+            );
+            LegId::new("callee")
+        } else if self.legs.contains_key(&LegId::new("caller")) {
+            warn!(
+                session_id = %self.id,
+                requested_leg = %target_leg,
+                "Supervisor listen target leg not found, falling back to caller"
+            );
+            LegId::new("caller")
+        } else {
             return Err(anyhow!("Target leg not found: {}", target_leg));
-        }
+        };
 
         let mixer = if let Some(ref mixer) = self.supervisor_mixer {
             mixer.clone()
@@ -5421,14 +5479,14 @@ impl SipSession {
         use crate::media::mixer::SupervisorMixerMode;
         mixer.set_mode(SupervisorMixerMode::Listen);
 
-        let target_peer = if target_leg == LegId::new("caller") {
+        let target_peer = if resolved_target_leg == LegId::new("caller") {
             self.caller_peer.clone()
         } else {
             self.callee_peer.clone()
         };
 
         let target_input = crate::media::mixer_input::MixerInput::new(
-            format!("{}-input", target_leg),
+            format!("{}-input", resolved_target_leg),
             target_peer,
             CodecType::PCMU,
         );
@@ -5444,7 +5502,7 @@ impl SipSession {
 
         mixer.set_output_routing(
             &format!("{}-output", supervisor_leg),
-            vec![format!("{}-input", target_leg)],
+            vec![format!("{}-input", resolved_target_leg)],
         );
 
         mixer.start();
@@ -5453,7 +5511,7 @@ impl SipSession {
         info!(
             session_id = %self.id,
             supervisor = %supervisor_leg,
-            target = %target_leg,
+            target = %resolved_target_leg,
             "Supervisor listen mode activated with MediaMixer"
         );
         Ok(())
@@ -5466,9 +5524,25 @@ impl SipSession {
         supervisor_session_id: &str,
         target_leg: LegId,
     ) -> Result<()> {
-        if !self.legs.contains_key(&target_leg) {
+        let resolved_target_leg = if self.legs.contains_key(&target_leg) {
+            target_leg
+        } else if self.legs.contains_key(&LegId::new("callee")) {
+            warn!(
+                session_id = %self.id,
+                requested_leg = %target_leg,
+                "Cross-session supervisor listen target leg not found, falling back to callee"
+            );
+            LegId::new("callee")
+        } else if self.legs.contains_key(&LegId::new("caller")) {
+            warn!(
+                session_id = %self.id,
+                requested_leg = %target_leg,
+                "Cross-session supervisor listen target leg not found, falling back to caller"
+            );
+            LegId::new("caller")
+        } else {
             return Err(anyhow!("Target leg not found: {}", target_leg));
-        }
+        };
 
         // Generate a deterministic conference ID for supervisor monitoring
         let conf_id = format!("supervisor-{}-{}", self.id.0, supervisor_session_id);
@@ -5481,40 +5555,24 @@ impl SipSession {
                 .map_err(|e| anyhow!("Failed to create supervisor conference: {}", e))?;
         }
 
-        // Add target leg to conference (full-duplex participant).
-        // For cross-session supervisor monitoring, use callee-side media as the
-        // primary source: caller-side media may disappear quickly during REFER
-        // workflows, causing flaky/no-audio listen sessions.
-        let target_participant_leg = LegId::new(format!("{}-callee", self.id.0));
-        info!(
-            conf_id = %conf_id,
-            participant_leg = %target_participant_leg,
-            "Adding target to supervisor conference"
-        );
-        
-        self.server.conference_manager.add_participant(
-            &conf_id_obj,
-            target_participant_leg.clone(),
-        ).await.map_err(|e| anyhow!("Failed to add target to supervisor conference: {}", e))?;
-
-        // Start conference media bridge for target session
+        // Start conference media bridge for target session on the resolved target leg.
+        let target_participant_leg = LegId::new(format!("{}-{}", self.id.0, resolved_target_leg));
         match self.start_conference_media_bridge(&conf_id, &target_participant_leg).await {
             Ok(handle) => {
                 info!(
                     session_id = %self.id,
-                    leg_id = %target_leg,
+                    leg_id = %resolved_target_leg,
                     "Supervisor conference media bridge started for target"
                 );
                 self.conference_bridge.bridge_handle = Some(handle);
                 self.conference_bridge.conf_id = Some(conf_id.clone());
             }
             Err(e) => {
-                warn!(
-                    session_id = %self.id,
-                    leg_id = %target_leg,
-                    error = %e,
-                    "Failed to start supervisor conference media bridge for target"
-                );
+                return Err(anyhow!(
+                    "Failed to start supervisor conference media bridge for target {}: {}",
+                    resolved_target_leg,
+                    e
+                ));
             }
         }
 
@@ -5920,21 +5978,9 @@ impl SipSession {
             return Err(anyhow!("Conference {} not found", mixer_id));
         }
 
-        // Add this session's callee leg to the conference (supervisor is typically callee)
+        // Start conference media bridge for supervisor session.
+        // The bridge runtime adds the participant to the conference.
         let participant_leg = LegId::new(format!("{}-callee", self.id.0));
-        info!(
-            conf_id = %mixer_id,
-            participant_leg = %participant_leg,
-            "Adding supervisor session to conference"
-        );
-
-        self.server
-            .conference_manager
-            .add_participant(&conf_id_obj, participant_leg.clone())
-            .await
-            .map_err(|e| anyhow!("Failed to add participant to conference: {}", e))?;
-
-        // Start conference media bridge for supervisor session
         match self.start_conference_media_bridge(&mixer_id, &participant_leg).await {
             Ok(handle) => {
                 info!(

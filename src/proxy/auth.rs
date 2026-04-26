@@ -15,6 +15,8 @@ use rsipstack::sip::headers::{ProxyAuthenticate, WwwAuthenticate};
 use rsipstack::sip::prelude::{HeadersExt, ToTypedHeader};
 use rsipstack::sip::typed::Authorization;
 use rsipstack::transaction::transaction::Transaction;
+use std::net::IpAddr;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, trace};
@@ -223,6 +225,39 @@ impl AuthModule {
         ));
         Ok(www_auth)
     }
+
+    fn is_cluster_peer_source(&self, tx: &Transaction) -> bool {
+        let Some(source) = self.get_source_addr(tx) else {
+            return false;
+        };
+        let source_ip: IpAddr = source.addr.host.clone().try_into().ok().unwrap_or_else(|| {
+            // Host isn't an IP (domain/invalid) — treat as non-cluster source.
+            IpAddr::from([0, 0, 0, 0])
+        });
+        if source_ip == IpAddr::from([0, 0, 0, 0]) {
+            return false;
+        }
+
+        self.server
+            .proxy_config
+            .cluster_peers
+            .iter()
+            .any(|peer| cluster_peer_matches_ip(peer, &source_ip))
+    }
+}
+
+fn cluster_peer_matches_ip(peer: &str, source_ip: &IpAddr) -> bool {
+    let trimmed = peer.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    if let Ok(socket) = trimmed.parse::<SocketAddr>() {
+        return socket.ip() == *source_ip;
+    }
+    if let Ok(ip) = trimmed.parse::<IpAddr>() {
+        return ip == *source_ip;
+    }
+    false
 }
 
 #[async_trait]
@@ -339,9 +374,18 @@ impl ProxyModule for AuthModule {
             return Ok(ProxyAction::Abort);
         }
 
-        if cookie.get_extension::<TrunkContext>().is_some() {
+        let is_from_trunk = cookie.get_extension::<TrunkContext>().is_some();
+        if is_from_trunk {
             cookie.set_user(tx_user.clone());
             return Ok(ProxyAction::Continue);
+        }
+
+        if self.is_cluster_peer_source(tx) {
+            let request_host = tx.original.uri().host().to_string();
+            if self.server.is_same_realm(&request_host).await {
+                cookie.set_user(tx_user.clone());
+                return Ok(ProxyAction::Continue);
+            }
         }
 
         match self.authenticate_request(tx).await {

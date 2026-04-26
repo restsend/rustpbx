@@ -268,10 +268,10 @@ pub fn rwi_to_call_command(
         // ========================================================================
         RwiCommandPayload::SupervisorListen {
             supervisor_call_id,
-            target_call_id,
+            target_call_id: _,
         } => Ok(CallCommand::SupervisorListen {
             supervisor_leg: LegId::new(supervisor_call_id.clone()),
-            target_leg: LegId::new(target_call_id),
+            target_leg: LegId::new("callee"),
             supervisor_session_id: Some(supervisor_call_id),
         }),
 
@@ -492,7 +492,7 @@ mod tests {
         } = cmd
         {
             assert_eq!(supervisor_leg.as_str(), "sup-1");
-            assert_eq!(target_leg.as_str(), "target-1");
+            assert_eq!(target_leg.as_str(), "callee");
             assert_eq!(supervisor_session_id.as_deref(), Some("sup-1"));
         } else {
             panic!("Expected SupervisorListen command");

@@ -220,7 +220,7 @@
                     <button type="button" class="flex-1 rounded-md px-4 py-2 text-left transition sm:flex-none"
                         :class="activeTab === tab.id ? 'bg-white text-sky-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'"
                         :aria-selected="activeTab === tab.id" :aria-controls="`settings-tab-${tab.id}`"
-                        @click="activeTab = tab.id">
+                        @click="setActiveTab(tab.id)">
                         <div class="flex flex-col">
                             <span class="text-sm" x-text="tab.label"></span>
                             <template x-if="tab.description">
@@ -422,6 +422,85 @@
                 </div>
             </div>
 
+        </section>
+
+        <section x-show="activeTab === 'logs'" x-cloak x-transition.opacity class="space-y-6" id="settings-tab-logs"
+            role="tabpanel" tabindex="0">
+            <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+                <div class="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+                    <div>
+                        <h2 class="text-base font-semibold text-slate-900"
+                            x-text="tt('settings_page.logs_viewer') || 'Log viewer'"></h2>
+                        <p class="text-xs text-slate-500"
+                            x-text="tt('settings_page.logs_viewer_desc') || 'Read recent server logs and follow new output in real time.'"></p>
+                    </div>
+                    <div class="flex flex-wrap items-center gap-2 text-xs">
+                        <span class="rounded-full bg-slate-100 px-2.5 py-1 font-semibold text-slate-600"
+                            x-text="logViewer.following ? (tt('settings_page.logs_following') || 'Following') : (tt('settings_page.logs_paused') || 'Paused')"></span>
+                        <span class="rounded-full bg-slate-100 px-2.5 py-1 font-mono text-[11px] text-slate-600"
+                            x-text="logViewer.path || '—'"></span>
+                    </div>
+                </div>
+
+                <div class="mt-4 flex flex-wrap items-center gap-2 border-y border-slate-100 py-3">
+                    <label class="inline-flex items-center gap-2 text-xs font-semibold text-slate-600">
+                        <span x-text="tt('settings_page.logs_recent_count') || 'Recent lines'"></span>
+                        <select x-model.number="logViewer.limit" @change="applyLogLimit()"
+                            class="rounded-md border border-slate-200 px-2 py-1 text-xs text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                            <option :value="100">100</option>
+                            <option :value="200">200</option>
+                            <option :value="500">500</option>
+                            <option :value="1000">1000</option>
+                            <option :value="2000">2000</option>
+                        </select>
+                    </label>
+                    <button type="button" @click="refreshLogs()" :disabled="logViewer.loading"
+                        class="inline-flex items-center justify-center rounded-md border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-600 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-60"
+                        x-text="tt('settings_page.logs_refresh') || 'Refresh'"></button>
+                    <button type="button" @click="toggleLogFollow()" :disabled="logViewer.loading"
+                        class="inline-flex items-center justify-center rounded-md px-3 py-1.5 text-xs font-semibold shadow-sm transition disabled:cursor-not-allowed disabled:opacity-60"
+                        :class="logViewer.following ? 'border border-amber-200 bg-amber-50 text-amber-700 hover:bg-amber-100' : 'border border-sky-200 bg-sky-50 text-sky-700 hover:bg-sky-100'"
+                        x-text="logViewer.following ? (tt('settings_page.logs_stop_follow') || 'Stop follow') : (tt('settings_page.logs_start_follow') || 'Start follow')"></button>
+                    <button type="button" @click="clearLogLines()"
+                        class="inline-flex items-center justify-center rounded-md border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-600 transition hover:bg-slate-50"
+                        x-text="tt('settings_page.logs_clear') || 'Clear'"></button>
+                </div>
+
+                <template x-if="logViewer.error">
+                    <div class="mt-3 rounded-lg border border-rose-200 bg-rose-50 px-4 py-3 text-xs text-rose-700"
+                        x-text="logViewer.error"></div>
+                </template>
+                <template x-if="!logViewer.error && logViewer.message">
+                    <div class="mt-3 rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-xs text-slate-600"
+                        x-text="logViewer.message"></div>
+                </template>
+
+                <div class="mt-4 overflow-hidden rounded-xl border border-slate-200 bg-slate-950">
+                    <div
+                        class="flex items-center justify-between border-b border-slate-800 px-3 py-2 text-[11px] font-semibold uppercase tracking-wide text-slate-300">
+                        <span x-text="tt('settings_page.logs_output') || 'Log output'"></span>
+                        <span class="font-mono normal-case" x-text="`${(logViewer.lines || []).length} lines`"></span>
+                    </div>
+                    <div class="max-h-[28rem] overflow-auto p-3 font-mono text-[11px] leading-5 text-slate-100"
+                        x-ref="logOutput">
+                        <template x-if="logViewer.loading && !(logViewer.lines || []).length">
+                            <p class="text-slate-400" x-text="tt('common.loading') || 'Loading...'"></p>
+                        </template>
+                        <template x-if="!(logViewer.lines || []).length && !logViewer.loading">
+                            <p class="text-slate-500"
+                                x-text="tt('settings_page.logs_empty') || 'No logs available yet.'"></p>
+                        </template>
+                        <template x-for="(line, idx) in logViewer.lines" :key="`log-${idx}`">
+                            <div class="whitespace-pre-wrap break-words" x-text="line"></div>
+                        </template>
+                    </div>
+                </div>
+
+                <template x-if="logViewer.truncated">
+                    <p class="mt-3 text-xs text-amber-700"
+                        x-text="tt('settings_page.logs_truncated') || 'Only part of the output is shown. Increase recent lines to see more.'"></p>
+                </template>
+            </div>
         </section>
 
         <section x-show="activeTab === 'proxy'" x-cloak x-transition.opacity class="space-y-6" id="settings-tab-proxy"
@@ -2353,6 +2432,7 @@
                     { id: 'storage', label: tget(tt, 'settings_page.storage_destinations') || 'Storage' },
                     { id: 'recording', label: tget(tt, 'settings_page.recording_policy') || 'Recording policy' },
                     { id: 'security', label: tget(tt, 'settings_page.security_posture') || 'Security posture' },
+                    { id: 'logs', label: tget(tt, 'settings_page.logs_viewer') || 'Logs', requiresSuperuser: true },
                     { id: 'rwi', label: tget(tt, 'settings_page.rwi_settings') || 'RWI' },
                     { id: 'departments', label: tget(tt, 'settings_page.departments') || 'Departments' },
                     { id: 'users', label: tget(tt, 'settings_page.users_title') || 'Users', requiresPermission: 'users:manage' },
@@ -2460,6 +2540,18 @@
                 contexts: [],
             },
             rwiProcessing: false,
+            logViewer: {
+                lines: [],
+                limit: 200,
+                loading: false,
+                following: false,
+                followTimer: null,
+                error: null,
+                message: '',
+                path: '',
+                nextPosition: 0,
+                truncated: false,
+            },
             directory: { departments: [], users: [], pending_invites: [] },
             selectedStorageProfile: '',
             selectedDepartmentId: '',
@@ -2654,9 +2746,39 @@
                 this.resetAclReloadModal();
                 this.resetReloadModal();
                 window.addEventListener('roles:create', () => this.openRoleCreate());
+                window.addEventListener('beforeunload', () => this.stopLogFollow());
             },
             get visibleTabs() {
-                return this.tabs.filter((tab) => !tab.requiresPermission || window.can(tab.requiresPermission));
+                return this.tabs.filter((tab) => {
+                    if (tab.requiresPermission && !window.can(tab.requiresPermission)) {
+                        return false;
+                    }
+                    if (tab.requiresSuperuser && !this.currentUser?.is_superuser) {
+                        return false;
+                    }
+                    return true;
+                });
+            },
+            setActiveTab(tabId) {
+                if (this.activeTab === tabId) {
+                    return;
+                }
+                if (tabId === 'logs') {
+                    if (!this.currentUser?.is_superuser) {
+                        this.$dispatch('toast', {
+                            title: this.tt('settings_page.logs_superuser_only') || 'Restricted',
+                            message: this.tt('settings_page.logs_superuser_only_desc') || 'Only superusers can view runtime logs.',
+                        });
+                        return;
+                    }
+                    this.activeTab = tabId;
+                    this.initLogsTab();
+                    return;
+                }
+                if (this.activeTab === 'logs') {
+                    this.stopLogFollow();
+                }
+                this.activeTab = tabId;
             },
             get storageProfiles() {
                 return Array.isArray(this.server.storage_profiles) ? this.server.storage_profiles : [];
@@ -4154,6 +4276,148 @@
                     return `${seconds.toFixed(1)}s`;
                 }
                 return `${Math.round(value)}ms`;
+            },
+            logsRecentEndpoint() {
+                return `${this.basePath}/settings/logs/recent`;
+            },
+            logsFollowEndpoint() {
+                return `${this.basePath}/settings/logs/follow`;
+            },
+            ensureLogVisibleTail() {
+                this.$nextTick(() => {
+                    const el = this.$refs.logOutput;
+                    if (!el) {
+                        return;
+                    }
+                    el.scrollTop = el.scrollHeight;
+                });
+            },
+            clearLogLines() {
+                this.logViewer.lines = [];
+                this.logViewer.error = null;
+                this.logViewer.message = '';
+                this.logViewer.truncated = false;
+            },
+            async initLogsTab() {
+                if (!this.currentUser?.is_superuser) {
+                    return;
+                }
+                this.stopLogFollow();
+                this.logViewer.error = null;
+                await this.loadRecentLogs();
+                this.startLogFollow();
+            },
+            applyLogLimit() {
+                const parsed = Number(this.logViewer.limit);
+                if (!Number.isFinite(parsed) || parsed <= 0) {
+                    this.logViewer.limit = 200;
+                } else {
+                    this.logViewer.limit = Math.min(Math.max(Math.floor(parsed), 1), 2000);
+                }
+                this.refreshLogs();
+            },
+            async refreshLogs() {
+                this.stopLogFollow();
+                await this.loadRecentLogs();
+            },
+            toggleLogFollow() {
+                if (this.logViewer.following) {
+                    this.stopLogFollow();
+                    return;
+                }
+                this.startLogFollow();
+            },
+            startLogFollow() {
+                if (!this.currentUser?.is_superuser || this.logViewer.following) {
+                    return;
+                }
+                this.logViewer.following = true;
+                this.logViewer.followTimer = window.setInterval(() => {
+                    this.pollLogFollow();
+                }, 1500);
+                this.pollLogFollow();
+            },
+            stopLogFollow() {
+                if (this.logViewer.followTimer) {
+                    window.clearInterval(this.logViewer.followTimer);
+                    this.logViewer.followTimer = null;
+                }
+                this.logViewer.following = false;
+            },
+            async loadRecentLogs() {
+                if (!this.currentUser?.is_superuser) {
+                    return;
+                }
+                this.logViewer.loading = true;
+                this.logViewer.error = null;
+                this.logViewer.message = '';
+                try {
+                    const url = new URL(this.logsRecentEndpoint(), window.location.origin);
+                    url.searchParams.set('limit', String(this.logViewer.limit || 200));
+                    const response = await fetch(url.toString(), {
+                        method: 'GET',
+                        headers: { Accept: 'application/json' },
+                    });
+                    const data = await response.json().catch(() => ({}));
+                    if (!response.ok) {
+                        throw new Error(data?.message || 'Failed to fetch logs');
+                    }
+                    this.logViewer.path = data?.path || '';
+                    this.logViewer.lines = Array.isArray(data?.lines) ? data.lines : [];
+                    this.logViewer.nextPosition = Number(data?.next_position || 0);
+                    this.logViewer.truncated = !!data?.truncated;
+                    this.logViewer.message = data?.message || '';
+                    this.ensureLogVisibleTail();
+                } catch (err) {
+                    console.error(err);
+                    this.logViewer.error = err?.message || 'Failed to fetch logs';
+                } finally {
+                    this.logViewer.loading = false;
+                }
+            },
+            async pollLogFollow() {
+                if (!this.currentUser?.is_superuser || !this.logViewer.following || this.logViewer.loading) {
+                    return;
+                }
+                this.logViewer.loading = true;
+                this.logViewer.error = null;
+                try {
+                    const url = new URL(this.logsFollowEndpoint(), window.location.origin);
+                    url.searchParams.set('position', String(this.logViewer.nextPosition || 0));
+                    url.searchParams.set('limit', String(this.logViewer.limit || 200));
+                    const response = await fetch(url.toString(), {
+                        method: 'GET',
+                        headers: { Accept: 'application/json' },
+                    });
+                    const data = await response.json().catch(() => ({}));
+                    if (!response.ok) {
+                        throw new Error(data?.message || 'Failed to follow logs');
+                    }
+                    this.logViewer.path = data?.path || this.logViewer.path;
+                    this.logViewer.nextPosition = Number(data?.next_position || 0);
+                    this.logViewer.truncated = !!data?.truncated;
+                    this.logViewer.message = data?.message || '';
+
+                    const incoming = Array.isArray(data?.lines) ? data.lines : [];
+                    if (data?.reset) {
+                        this.logViewer.lines = incoming;
+                    } else if (incoming.length) {
+                        this.logViewer.lines = [...(this.logViewer.lines || []), ...incoming];
+                        const maxLines = Math.min(Math.max(Number(this.logViewer.limit) || 200, 1), 2000);
+                        if (this.logViewer.lines.length > maxLines) {
+                            this.logViewer.lines = this.logViewer.lines.slice(-maxLines);
+                        }
+                    }
+                    if (incoming.length || data?.reset) {
+                        this.ensureLogVisibleTail();
+                    }
+                } catch (err) {
+                    console.error(err);
+                    this.logViewer.error = err?.message || 'Failed to follow logs';
+                    this.stopLogFollow();
+                } finally {
+                    this.logViewer.loading = false;
+                }
             },
             initPlatformDraft() {
                 const rtp = this.proxyConfig?.rtp || {};

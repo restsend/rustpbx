@@ -19,7 +19,7 @@ use crate::rwi::auth::RwiConfig;
 use argon2::Argon2;
 use argon2::password_hash::rand_core::OsRng;
 use argon2::password_hash::{PasswordHasher, SaltString};
-use axum::extract::{Path as AxumPath, State};
+use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, patch, post};
@@ -32,6 +32,9 @@ use sea_orm::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value as JsonValue, json};
+use std::collections::VecDeque;
+use std::fs::File;
+use std::io::{self, BufRead, BufReader, Seek, SeekFrom};
 use std::{fs, sync::Arc};
 use toml_edit::{Array, DocumentMut, Item, Table, Value, value};
 use tracing::warn;
@@ -45,6 +48,17 @@ struct QueryDepartmentFilters {
 struct QueryUserFilters {
     pub q: Option<String>,
     pub active: Option<bool>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+struct LogRecentQuery {
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+struct LogFollowQuery {
+    pub position: Option<u64>,
+    pub limit: Option<usize>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -151,6 +165,8 @@ impl From<UserModel> for UserView {
 pub fn urls() -> Router<Arc<ConsoleState>> {
     Router::new()
         .route("/settings", get(page_settings))
+        .route("/settings/logs/recent", get(fetch_recent_logs))
+        .route("/settings/logs/follow", get(follow_logs))
         .route("/settings/config/platform", patch(update_platform_settings))
         .route("/settings/config/proxy", patch(update_proxy_settings))
         .route("/settings/config/storage", patch(update_storage_settings))
@@ -2189,6 +2205,218 @@ pub(crate) async fn update_rwi_settings(
     .into_response()
 }
 
+const LOG_DEFAULT_LIMIT: usize = 200;
+const LOG_MAX_LIMIT: usize = 2000;
+
+struct FollowReadResult {
+    lines: Vec<String>,
+    next_position: u64,
+    reset: bool,
+    truncated: bool,
+}
+
+async fn fetch_recent_logs(
+    State(state): State<Arc<ConsoleState>>,
+    AuthRequired(user): AuthRequired,
+    Query(query): Query<LogRecentQuery>,
+) -> Response {
+    if !user.is_superuser {
+        return json_error(StatusCode::FORBIDDEN, "Permission denied. Superuser required.");
+    }
+
+    let Some(path) = resolve_log_file_path(&state) else {
+        return Json(json!({
+            "status": "ok",
+            "available": false,
+            "exists": false,
+            "path": JsonValue::Null,
+            "lines": [],
+            "next_position": 0u64,
+            "reset": false,
+            "truncated": false,
+            "message": "Log file is not configured. Set settings -> platform -> log_file first.",
+        }))
+        .into_response();
+    };
+
+    let limit = normalize_log_limit(query.limit);
+    match read_recent_log_lines(&path, limit) {
+        Ok((lines, next_position, truncated)) => Json(json!({
+            "status": "ok",
+            "available": true,
+            "exists": true,
+            "path": path,
+            "lines": lines,
+            "next_position": next_position,
+            "reset": false,
+            "truncated": truncated,
+            "message": JsonValue::Null,
+        }))
+        .into_response(),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Json(json!({
+            "status": "ok",
+            "available": true,
+            "exists": false,
+            "path": path,
+            "lines": [],
+            "next_position": 0u64,
+            "reset": false,
+            "truncated": false,
+            "message": "Log file does not exist yet.",
+        }))
+        .into_response(),
+        Err(err) => json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to read log file: {err}"),
+        ),
+    }
+}
+
+async fn follow_logs(
+    State(state): State<Arc<ConsoleState>>,
+    AuthRequired(user): AuthRequired,
+    Query(query): Query<LogFollowQuery>,
+) -> Response {
+    if !user.is_superuser {
+        return json_error(StatusCode::FORBIDDEN, "Permission denied. Superuser required.");
+    }
+
+    let Some(path) = resolve_log_file_path(&state) else {
+        return Json(json!({
+            "status": "ok",
+            "available": false,
+            "exists": false,
+            "path": JsonValue::Null,
+            "lines": [],
+            "next_position": 0u64,
+            "reset": false,
+            "truncated": false,
+            "message": "Log file is not configured. Set settings -> platform -> log_file first.",
+        }))
+        .into_response();
+    };
+
+    let position = query.position.unwrap_or(0);
+    let limit = normalize_log_limit(query.limit);
+
+    match read_follow_log_lines(&path, position, limit) {
+        Ok(result) => Json(json!({
+            "status": "ok",
+            "available": true,
+            "exists": true,
+            "path": path,
+            "lines": result.lines,
+            "next_position": result.next_position,
+            "reset": result.reset,
+            "truncated": result.truncated,
+            "message": JsonValue::Null,
+        }))
+        .into_response(),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Json(json!({
+            "status": "ok",
+            "available": true,
+            "exists": false,
+            "path": path,
+            "lines": [],
+            "next_position": 0u64,
+            "reset": position > 0,
+            "truncated": false,
+            "message": "Log file does not exist yet.",
+        }))
+        .into_response(),
+        Err(err) => json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to follow log file: {err}"),
+        ),
+    }
+}
+
+fn normalize_log_limit(limit: Option<usize>) -> usize {
+    match limit {
+        Some(value) => value.clamp(1, LOG_MAX_LIMIT),
+        None => LOG_DEFAULT_LIMIT,
+    }
+}
+
+fn resolve_log_file_path(state: &ConsoleState) -> Option<String> {
+    state.app_state().and_then(|app| {
+        app.config()
+            .log_file
+            .as_ref()
+            .map(|v| v.trim().to_string())
+            .filter(|v| !v.is_empty())
+    })
+}
+
+fn read_recent_log_lines(path: &str, limit: usize) -> io::Result<(Vec<String>, u64, bool)> {
+    let file = File::open(path)?;
+    let next_position = file.metadata()?.len();
+    let reader = BufReader::new(file);
+    let mut lines = VecDeque::new();
+    let mut truncated = false;
+
+    for line in reader.lines() {
+        let line = line?;
+        if lines.len() == limit {
+            lines.pop_front();
+            truncated = true;
+        }
+        lines.push_back(line);
+    }
+
+    Ok((lines.into_iter().collect(), next_position, truncated))
+}
+
+fn read_follow_log_lines(path: &str, position: u64, limit: usize) -> io::Result<FollowReadResult> {
+    let file = File::open(path)?;
+    let file_len = file.metadata()?.len();
+
+    if position > file_len {
+        let (lines, next_position, truncated) = read_recent_log_lines(path, limit)?;
+        return Ok(FollowReadResult {
+            lines,
+            next_position,
+            reset: true,
+            truncated,
+        });
+    }
+
+    let mut reader = BufReader::new(file);
+    reader.seek(SeekFrom::Start(position))?;
+
+    let mut lines = Vec::new();
+    let mut raw = String::new();
+    let mut truncated = false;
+
+    while lines.len() < limit {
+        raw.clear();
+        let read = reader.read_line(&mut raw)?;
+        if read == 0 {
+            break;
+        }
+        lines.push(raw.trim_end_matches(&['\n', '\r'][..]).to_string());
+    }
+
+    if lines.len() == limit {
+        let mut extra = String::new();
+        let extra_read = reader.read_line(&mut extra)?;
+        if extra_read > 0 {
+            truncated = true;
+            let rewind = i64::try_from(extra_read).unwrap_or(i64::MAX);
+            reader.seek(SeekFrom::Current(-rewind))?;
+        }
+    }
+
+    let next_position = reader.stream_position()?;
+
+    Ok(FollowReadResult {
+        lines,
+        next_position,
+        reset: false,
+        truncated,
+    })
+}
+
 #[allow(clippy::result_large_err)]
 fn get_config_path(state: &ConsoleState) -> Result<String, Response> {
     let Some(app_state) = state.app_state() else {
@@ -2767,6 +2995,8 @@ mod tests {
     use crate::models::rbac;
     use sea_orm::Database;
     use sea_orm_migration::MigratorTrait;
+    use std::io::Write;
+    use tempfile::NamedTempFile;
 
     fn superuser() -> UserModel {
         let now = Utc::now();
@@ -2893,5 +3123,52 @@ mod tests {
         let items = parsed["items"].as_array().expect("items");
         assert_eq!(items.len(), 1);
         assert_eq!(items[0]["name"], "viewer");
+    }
+
+    #[test]
+    fn read_recent_log_lines_limits_tail() {
+        let mut file = NamedTempFile::new().expect("tempfile");
+        writeln!(file, "line-1").expect("write line 1");
+        writeln!(file, "line-2").expect("write line 2");
+        writeln!(file, "line-3").expect("write line 3");
+
+        let path = file.path().to_string_lossy().to_string();
+        let (lines, next_position, truncated) =
+            read_recent_log_lines(&path, 2).expect("read recent logs");
+
+        assert_eq!(lines, vec!["line-2".to_string(), "line-3".to_string()]);
+        assert!(next_position > 0);
+        assert!(truncated);
+    }
+
+    #[test]
+    fn follow_logs_resets_on_rotation() {
+        let mut file = NamedTempFile::new().expect("tempfile");
+        writeln!(file, "new-1").expect("write new-1");
+        writeln!(file, "new-2").expect("write new-2");
+
+        let path = file.path().to_string_lossy().to_string();
+        let result = read_follow_log_lines(&path, 10_000, 200).expect("follow logs");
+
+        assert!(result.reset);
+        assert_eq!(result.lines, vec!["new-1".to_string(), "new-2".to_string()]);
+        assert!(result.next_position > 0);
+    }
+
+    #[test]
+    fn follow_logs_keeps_position_when_truncated() {
+        let mut file = NamedTempFile::new().expect("tempfile");
+        writeln!(file, "l1").expect("write l1");
+        writeln!(file, "l2").expect("write l2");
+        writeln!(file, "l3").expect("write l3");
+
+        let path = file.path().to_string_lossy().to_string();
+        let first = read_follow_log_lines(&path, 0, 2).expect("first follow");
+        assert_eq!(first.lines, vec!["l1".to_string(), "l2".to_string()]);
+        assert!(first.truncated);
+
+        let second = read_follow_log_lines(&path, first.next_position, 2).expect("second follow");
+        assert_eq!(second.lines, vec!["l3".to_string()]);
+        assert!(!second.reset);
     }
 }

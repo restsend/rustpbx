@@ -98,7 +98,7 @@ pub async fn get_call_record_transcript(
             warn!(call_id = %record.call_id, "failed to load stored transcript: {}", err);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "message": "Failed to load transcript" })),
+                Json(json!({ "message": format!("Failed to load transcript: {}", err) })),
             )
                 .into_response()
         }
@@ -298,7 +298,7 @@ pub async fn trigger_call_record_transcript(
         warn!(call_id = %record.call_id, "failed to update transcript status: {}", err);
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({ "message": "Failed to update call record" })),
+            Json(json!({ "message": format!("Failed to update call record: {}", err) })),
         )
             .into_response();
     }
@@ -456,7 +456,7 @@ pub async fn trigger_call_record_transcript(
             .await;
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "message": "Failed to parse transcript data" })),
+                Json(json!({ "message": format!("Failed to parse transcript data: {}", err) })),
             )
                 .into_response();
         }
@@ -750,7 +750,11 @@ pub async fn get_settings(
     let app_state = match state.app_state() {
         Some(s) => s,
         None => {
-            return (StatusCode::INTERNAL_SERVER_ERROR, "App state not available").into_response();
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "App state not available: application runtime state is not initialized",
+            )
+                .into_response();
         }
     };
 

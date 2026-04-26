@@ -898,7 +898,7 @@ pub(crate) async fn query_routing(
             warn!("failed to load trunks for routing query: {}", err);
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"message": "Failed to load routing data"})),
+                Json(json!({"message": format!("Failed to load routing data: {}", err)})),
             )
                 .into_response();
         }
@@ -912,7 +912,7 @@ pub(crate) async fn query_routing(
             warn!("failed to load routes for summary: {}", err);
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"message": "Failed to load routing data"})),
+                Json(json!({"message": format!("Failed to load routing data: {}", err)})),
             )
                 .into_response();
         }
@@ -926,7 +926,7 @@ pub(crate) async fn query_routing(
             warn!("failed to paginate routing list: {}", err);
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"message": "Failed to load routing data"})),
+                Json(json!({"message": format!("Failed to load routing data: {}", err)})),
             )
                 .into_response();
         }
@@ -1011,7 +1011,7 @@ pub async fn page_routing_create(
             warn!("failed to load trunks for route create page: {}", err);
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to load routing form",
+                format!("Failed to load routing form: {}", err),
             )
                 .into_response();
         }
@@ -1022,7 +1022,7 @@ pub async fn page_routing_create(
             warn!("failed to load queues for route create page: {}", err);
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to load routing form",
+                format!("Failed to load routing form: {}", err),
             )
                 .into_response();
         }
@@ -1060,7 +1060,7 @@ pub async fn page_routing_edit(
             warn!("failed to load route {} for edit: {}", id, err);
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to load routing rule",
+                format!("Failed to load routing rule: {}", err),
             )
                 .into_response();
         }
@@ -1072,7 +1072,7 @@ pub async fn page_routing_edit(
             warn!("failed to load trunks for route edit page: {}", err);
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to load routing form",
+                format!("Failed to load routing form: {}", err),
             )
                 .into_response();
         }
@@ -1090,7 +1090,7 @@ pub async fn page_routing_edit(
             warn!("failed to load queues for route edit page: {}", err);
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to load routing form",
+                format!("Failed to load routing form: {}", err),
             )
                 .into_response();
         }
@@ -1135,7 +1135,7 @@ pub async fn route_detail_data(
             warn!("failed to load route {} detail data: {}", id, err);
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"message": "Failed to load routing data"})),
+                Json(json!({"message": format!("Failed to load routing data: {}", err)})),
             )
                 .into_response();
         }
@@ -1147,7 +1147,7 @@ pub async fn route_detail_data(
             warn!("failed to load trunks for route detail {}: {}", id, err);
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"message": "Failed to load routing data"})),
+                Json(json!({"message": format!("Failed to load routing data: {}", err)})),
             )
                 .into_response();
         }
@@ -1159,7 +1159,7 @@ pub async fn route_detail_data(
             warn!("failed to load queues for route detail {}: {}", id, err);
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"message": "Failed to load routing data"})),
+                Json(json!({"message": format!("Failed to load routing data: {}", err)})),
             )
                 .into_response();
         }
@@ -1210,7 +1210,7 @@ pub async fn clone_routing(
             warn!("failed to load route {} for clone: {}", id, err);
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"message": "Failed to clone routing rule"})),
+                Json(json!({"message": format!("Failed to clone routing rule: {}", err)})),
             )
                 .into_response();
         }
@@ -1225,7 +1225,7 @@ pub async fn clone_routing(
             warn!("failed to generate clone name for route {}: {}", id, err);
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"message": "Failed to clone routing rule"})),
+                Json(json!({"message": format!("Failed to clone routing rule: {}", err)})),
             )
                 .into_response();
         }
@@ -1243,7 +1243,7 @@ pub async fn clone_routing(
             warn!("failed to load trunks for route clone {}: {}", id, err);
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"message": "Failed to clone routing rule"})),
+                Json(json!({"message": format!("Failed to clone routing rule: {}", err)})),
             )
                 .into_response();
         }
@@ -1254,7 +1254,7 @@ pub async fn clone_routing(
         warn!("failed to load queues for route clone {}: {}", id, err);
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"message": "Failed to clone routing rule"})),
+            Json(json!({"message": format!("Failed to clone routing rule: {}", err)})),
         )
             .into_response();
     }
@@ -1274,7 +1274,7 @@ pub async fn clone_routing(
             );
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"message": "Failed to clone routing rule"})),
+                Json(json!({"message": format!("Failed to clone routing rule: {}", err)})),
             )
                 .into_response();
         }
@@ -1294,7 +1294,7 @@ pub async fn clone_routing(
             let _ = tx.rollback().await;
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"message": "Failed to clone routing rule"})),
+                Json(json!({"message": format!("Failed to clone routing rule: {}", err)})),
             )
                 .into_response();
         }
@@ -1304,7 +1304,7 @@ pub async fn clone_routing(
         warn!("failed to commit cloned routing rule from {}: {}", id, err);
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"message": "Failed to clone routing rule"})),
+            Json(json!({"message": format!("Failed to clone routing rule: {}", err)})),
         )
             .into_response();
     }
@@ -1331,7 +1331,7 @@ pub async fn toggle_routing(
             warn!("failed to load route {} for toggle: {}", id, err);
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"message": "Failed to toggle routing rule"})),
+                Json(json!({"message": format!("Failed to toggle routing rule: {}", err)})),
             )
                 .into_response();
         }
@@ -1367,7 +1367,7 @@ pub async fn toggle_routing(
             warn!("failed to toggle routing rule {}: {}", id, err);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"message": "Failed to toggle routing rule"})),
+                Json(json!({"message": format!("Failed to toggle routing rule: {}", err)})),
             )
                 .into_response()
         }
@@ -1400,7 +1400,7 @@ pub(crate) async fn create_routing(
             warn!("failed to load trunks for route create: {}", err);
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"message": "Failed to create routing rule"})),
+                Json(json!({"message": format!("Failed to create routing rule: {}", err)})),
             )
                 .into_response();
         }
@@ -1419,7 +1419,7 @@ pub(crate) async fn create_routing(
             warn!("failed to start transaction for route create: {}", err);
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"message": "Failed to create routing rule"})),
+                Json(json!({"message": format!("Failed to create routing rule: {}", err)})),
             )
                 .into_response();
         }
@@ -1440,7 +1440,7 @@ pub(crate) async fn create_routing(
             let _ = tx.rollback().await;
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"message": "Failed to create routing rule"})),
+                Json(json!({"message": format!("Failed to create routing rule: {}", err)})),
             )
                 .into_response();
         }
@@ -1460,7 +1460,7 @@ pub(crate) async fn create_routing(
             let _ = tx.rollback().await;
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"message": "Failed to create routing rule"})),
+                Json(json!({"message": format!("Failed to create routing rule: {}", err)})),
             )
                 .into_response();
         }
@@ -1470,7 +1470,7 @@ pub(crate) async fn create_routing(
         warn!("failed to commit routing rule create {}: {}", doc.name, err);
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"message": "Failed to create routing rule"})),
+            Json(json!({"message": format!("Failed to create routing rule: {}", err)})),
         )
             .into_response();
     }
@@ -1507,7 +1507,7 @@ pub(crate) async fn update_routing(
             warn!("failed to load route {} for update: {}", id, err);
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"message": "Failed to update routing rule"})),
+                Json(json!({"message": format!("Failed to update routing rule: {}", err)})),
             )
                 .into_response();
         }
@@ -1519,7 +1519,7 @@ pub(crate) async fn update_routing(
             warn!("failed to load trunks for route update: {}", err);
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"message": "Failed to update routing rule"})),
+                Json(json!({"message": format!("Failed to update routing rule: {}", err)})),
             )
                 .into_response();
         }
@@ -1549,7 +1549,7 @@ pub(crate) async fn update_routing(
             );
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"message": "Failed to update routing rule"})),
+                Json(json!({"message": format!("Failed to update routing rule: {}", err)})),
             )
                 .into_response();
         }
@@ -1573,7 +1573,7 @@ pub(crate) async fn update_routing(
             let _ = tx.rollback().await;
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"message": "Failed to update routing rule"})),
+                Json(json!({"message": format!("Failed to update routing rule: {}", err)})),
             )
                 .into_response();
         }
@@ -1588,7 +1588,7 @@ pub(crate) async fn update_routing(
         let _ = tx.rollback().await;
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"message": "Failed to update routing rule"})),
+            Json(json!({"message": format!("Failed to update routing rule: {}", err)})),
         )
             .into_response();
     }
@@ -1597,7 +1597,7 @@ pub(crate) async fn update_routing(
         warn!("failed to commit routing rule update {}: {}", id, err);
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"message": "Failed to update routing rule"})),
+            Json(json!({"message": format!("Failed to update routing rule: {}", err)})),
         )
             .into_response();
     }
@@ -1637,7 +1637,7 @@ pub async fn delete_routing(
             warn!("failed to delete routing rule {}: {}", id, err);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"message": "Failed to delete routing rule"})),
+                Json(json!({"message": format!("Failed to delete routing rule: {}", err)})),
             )
                 .into_response()
         }

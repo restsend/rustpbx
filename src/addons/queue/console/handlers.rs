@@ -118,7 +118,7 @@ pub async fn query_queues(
             warn!("failed to load queue summary: {}", err);
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"message": "Failed to load queues"})),
+                Json(json!({"message": format!("Failed to load queues: {}", err)})),
             )
                 .into_response();
         }
@@ -139,7 +139,7 @@ pub async fn query_queues(
             warn!("failed to paginate queues: {}", err);
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"message": "Failed to load queues"})),
+                Json(json!({"message": format!("Failed to load queues: {}", err)})),
             )
                 .into_response();
         }
@@ -247,7 +247,11 @@ pub async fn page_queue_edit(
         Ok(None) => return (StatusCode::NOT_FOUND, "Queue not found").into_response(),
         Err(err) => {
             warn!("failed to load queue {} for edit: {}", id, err);
-            return (StatusCode::INTERNAL_SERVER_ERROR, "Failed to load queue").into_response();
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to load queue: {}", err),
+            )
+                .into_response();
         }
     };
 
@@ -302,7 +306,7 @@ pub async fn create_queue(
             warn!("failed to enforce queue uniqueness: {}", err);
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"message": "Failed to create queue"})),
+                Json(json!({"message": format!("Failed to create queue: {}", err)})),
             )
                 .into_response();
         }
@@ -337,7 +341,7 @@ pub async fn create_queue(
             warn!("failed to insert queue: {}", err);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"message": "Failed to create queue"})),
+                Json(json!({"message": format!("Failed to create queue: {}", err)})),
             )
                 .into_response()
         }
@@ -364,7 +368,7 @@ pub async fn update_queue(
             warn!("failed to load queue {} for update: {}", id, err);
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"message": "Failed to update queue"})),
+                Json(json!({"message": format!("Failed to update queue: {}", err)})),
             )
                 .into_response();
         }
@@ -394,7 +398,7 @@ pub async fn update_queue(
                     );
                     return (
                         StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(json!({"message": "Failed to update queue"})),
+                        Json(json!({"message": format!("Failed to update queue: {}", err)})),
                     )
                         .into_response();
                 }
@@ -429,7 +433,7 @@ pub async fn update_queue(
             warn!("failed to update queue {}: {}", id, err);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"message": "Failed to update queue"})),
+                Json(json!({"message": format!("Failed to update queue: {}", err)})),
             )
                 .into_response()
         }
@@ -455,7 +459,7 @@ pub async fn delete_queue(
             warn!("failed to load queue {} for delete: {}", id, err);
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"message": "Failed to delete queue"})),
+                Json(json!({"message": format!("Failed to delete queue: {}", err)})),
             )
                 .into_response();
         }
@@ -483,7 +487,7 @@ pub async fn delete_queue(
             warn!("failed to delete queue {}: {}", id, err);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"message": "Failed to delete queue"})),
+                Json(json!({"message": format!("Failed to delete queue: {}", err)})),
             )
                 .into_response()
         }
@@ -512,7 +516,7 @@ pub async fn export_queue(
             warn!("failed to export queue {}: {}", id, err);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"status": "error", "message": "Failed to export queue"})),
+                Json(json!({"status": "error", "message": format!("Failed to export queue: {}", err)})),
             )
                 .into_response()
         }
@@ -535,7 +539,7 @@ pub async fn export_all_queues(
             warn!("failed to export queues: {}", err);
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"status": "error", "message": "Failed to export queues"})),
+                Json(json!({"status": "error", "message": format!("Failed to export queues: {}", err)})),
             )
                 .into_response()
         }
