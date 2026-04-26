@@ -88,6 +88,10 @@ impl LegMedia {
         )
     }
 
+    pub async fn audio_egress(&self) -> Option<Arc<AudioEgressTrack>> {
+        self.audio_egress.lock().await.clone()
+    }
+
     pub async fn clear_peer_connection(&self) {
         *self.peer_connection.lock().await = None;
     }

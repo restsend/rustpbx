@@ -1,5 +1,6 @@
 use crate::media::audio_source::{AudioSource, FileAudioSource, ResamplingAudioSource};
 use crate::media::negotiate::{NegotiatedCodec, NegotiatedLegProfile};
+use crate::media::recorder::Leg as RecorderLeg;
 use crate::media::transcoder::{Transcoder, rewrite_dtmf_duration};
 use anyhow::Result;
 use audio_codec::{CodecType, Encoder, create_encoder};
@@ -9,13 +10,134 @@ use rustrtc::media::frame::{AudioFrame, MediaKind, MediaSample};
 use rustrtc::media::track::{MediaStreamTrack, TrackState};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{Notify, oneshot};
+use tokio::sync::{Notify, mpsc, oneshot};
 
 const FRAME_MS: u32 = 20;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PlaybackCompletion {
     pub interrupted: bool,
+}
+
+#[derive(Clone)]
+pub struct RecorderTap {
+    tx: mpsc::Sender<RecordedAudioSample>,
+    leg: RecorderLeg,
+    audio_payload_type: Option<u8>,
+    codec_hint: Option<CodecType>,
+}
+
+pub struct RecordedAudioSample {
+    pub leg: RecorderLeg,
+    pub sample: MediaSample,
+    pub codec_hint: Option<CodecType>,
+}
+
+impl RecorderTap {
+    pub fn new(
+        tx: mpsc::Sender<RecordedAudioSample>,
+        leg: RecorderLeg,
+        profile: NegotiatedLegProfile,
+    ) -> Self {
+        let audio = profile.audio;
+        Self {
+            tx,
+            leg,
+            audio_payload_type: audio.as_ref().map(|codec| codec.payload_type),
+            codec_hint: audio.as_ref().map(|codec| codec.codec),
+        }
+    }
+
+    fn record(&self, sample: MediaSample) {
+        let MediaSample::Audio(frame) = &sample else {
+            return;
+        };
+
+        if let Some(payload_type) = self.audio_payload_type
+            && frame.payload_type != Some(payload_type) {
+                return;
+            }
+
+        let _ = self.tx.try_send(RecordedAudioSample {
+            leg: self.leg,
+            sample,
+            codec_hint: self.codec_hint,
+        });
+    }
+}
+
+type DtmfObserver = Arc<dyn Fn(char) + Send + Sync>;
+
+#[derive(Clone, Default)]
+pub struct AudioInputTap {
+    recorder: Option<RecorderTap>,
+    dtmf_observer: Option<DtmfObserver>,
+}
+
+impl AudioInputTap {
+    pub fn with_recorder(mut self, recorder: RecorderTap) -> Self {
+        self.recorder = Some(recorder);
+        self
+    }
+
+    pub fn with_dtmf_observer<F>(mut self, observer: F) -> Self
+    where
+        F: Fn(char) + Send + Sync + 'static,
+    {
+        self.dtmf_observer = Some(Arc::new(observer));
+        self
+    }
+
+    pub fn with_dtmf_observer_arc(mut self, observer: Arc<dyn Fn(char) + Send + Sync>) -> Self {
+        self.dtmf_observer = Some(observer);
+        self
+    }
+}
+
+struct LocalInputTap {
+    track: Arc<dyn MediaStreamTrack>,
+    dtmf_payload_type: Option<u8>,
+    recorder: Option<RecorderTap>,
+    dtmf_observer: Option<DtmfObserver>,
+    dtmf_detector: RtpDtmfDetector,
+}
+
+impl LocalInputTap {
+    fn new(
+        track: Arc<dyn MediaStreamTrack>,
+        ingress_profile: NegotiatedLegProfile,
+        tap: AudioInputTap,
+    ) -> Self {
+        Self {
+            track,
+            dtmf_payload_type: ingress_profile.dtmf.as_ref().map(|codec| codec.payload_type),
+            recorder: tap.recorder,
+            dtmf_observer: tap.dtmf_observer,
+            dtmf_detector: RtpDtmfDetector::default(),
+        }
+    }
+
+    async fn recv_once(&mut self) -> MediaResult<()> {
+        let sample = self.track.recv().await?;
+        let MediaSample::Audio(frame) = sample else {
+            return Ok(());
+        };
+
+        if let Some(recorder) = &self.recorder {
+            recorder.record(MediaSample::Audio(frame.clone()));
+        }
+
+        if self.dtmf_payload_type == frame.payload_type {
+            let digit = self
+                .dtmf_detector
+                .observe(&frame.data, frame.rtp_timestamp);
+            if let (Some(observer), Some(digit)) = (&self.dtmf_observer, digit) {
+                observer(digit);
+            }
+        }
+
+        Ok(())
+    }
 }
 
 struct PlaybackCompletionTx {
@@ -48,6 +170,46 @@ struct DtmfMapping {
     target_pt: Option<u8>,
     source_clock_rate: u32,
     target_clock_rate: Option<u32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RtpDtmfEventKey {
+    digit_code: u8,
+    rtp_timestamp: u32,
+}
+
+#[derive(Debug, Default)]
+pub struct RtpDtmfDetector {
+    last_event: Option<RtpDtmfEventKey>,
+}
+
+impl RtpDtmfDetector {
+    pub fn observe(&mut self, payload: &[u8], rtp_timestamp: u32) -> Option<char> {
+        if payload.len() < 4 {
+            return None;
+        }
+
+        let digit_code = payload[0];
+        let digit = match digit_code {
+            0..=9 => (b'0' + digit_code) as char,
+            10 => '*',
+            11 => '#',
+            12..=15 => (b'A' + (digit_code - 12)) as char,
+            _ => return None,
+        };
+
+        let event = RtpDtmfEventKey {
+            digit_code,
+            rtp_timestamp,
+        };
+
+        if self.last_event == Some(event) {
+            return None;
+        }
+
+        self.last_event = Some(event);
+        Some(digit)
+    }
 }
 
 struct EgressClock {
@@ -198,6 +360,9 @@ struct PeerSource {
     transcoder: Option<Transcoder>,
     last_source_timestamp: Option<u32>,
     fallback_duration_ticks: u32,
+    recorder: Option<RecorderTap>,
+    dtmf_observer: Option<DtmfObserver>,
+    dtmf_detector: RtpDtmfDetector,
 }
 
 impl PeerSource {
@@ -205,6 +370,7 @@ impl PeerSource {
         track: Arc<dyn MediaStreamTrack>,
         ingress_profile: NegotiatedLegProfile,
         egress_profile: NegotiatedLegProfile,
+        tap: AudioInputTap,
     ) -> Self {
         let audio_mapping = match (&ingress_profile.audio, &egress_profile.audio) {
             (Some(source_audio), Some(target_audio)) => Some(AudioMapping {
@@ -252,6 +418,9 @@ impl PeerSource {
             transcoder,
             last_source_timestamp: None,
             fallback_duration_ticks: duration_ticks(target_clock_rate),
+            recorder: tap.recorder,
+            dtmf_observer: tap.dtmf_observer,
+            dtmf_detector: RtpDtmfDetector::default(),
         }
     }
 
@@ -261,6 +430,9 @@ impl PeerSource {
             let MediaSample::Audio(frame) = sample else {
                 continue;
             };
+            if let Some(recorder) = &self.recorder {
+                recorder.record(MediaSample::Audio(frame.clone()));
+            }
 
             let matched_dtmf = self
                 .dtmf_mapping
@@ -282,6 +454,7 @@ impl PeerSource {
                 let Some(mapping) = self.dtmf_mapping.as_ref().cloned() else {
                     continue;
                 };
+                self.observe_dtmf(&frame);
                 let Some(target_pt) = mapping.target_pt else {
                     continue;
                 };
@@ -347,6 +520,15 @@ impl PeerSource {
         }
     }
 
+    fn observe_dtmf(&mut self, frame: &AudioFrame) {
+        let digit = self
+            .dtmf_detector
+            .observe(&frame.data, frame.rtp_timestamp);
+        if let (Some(observer), Some(digit)) = (&self.dtmf_observer, digit) {
+            observer(digit);
+        }
+    }
+
     fn frame_duration_ticks(
         &mut self,
         source_timestamp: u32,
@@ -402,6 +584,9 @@ pub struct AudioEgressTrack {
     current_source: tokio::sync::Mutex<ActiveSource>,
     pending_source: Mutex<Option<ActiveSource>>,
     source_changed: Notify,
+    input_tap: tokio::sync::Mutex<Option<LocalInputTap>>,
+    pending_input_tap: Mutex<Option<Option<LocalInputTap>>>,
+    input_tap_changed: Notify,
     clock: Mutex<EgressClock>,
 }
 
@@ -412,6 +597,9 @@ impl AudioEgressTrack {
             current_source: tokio::sync::Mutex::new(ActiveSource::silence(egress_profile)),
             pending_source: Mutex::new(None),
             source_changed: Notify::new(),
+            input_tap: tokio::sync::Mutex::new(None),
+            pending_input_tap: Mutex::new(None),
+            input_tap_changed: Notify::new(),
             clock: Mutex::new(EgressClock::default()),
         }
     }
@@ -438,11 +626,41 @@ impl AudioEgressTrack {
         ingress_profile: NegotiatedLegProfile,
         egress_profile: NegotiatedLegProfile,
     ) {
+        self.stage_peer_with_tap(track, ingress_profile, egress_profile, AudioInputTap::default());
+    }
+
+    pub fn stage_peer_with_tap(
+        &self,
+        track: Arc<dyn MediaStreamTrack>,
+        ingress_profile: NegotiatedLegProfile,
+        egress_profile: NegotiatedLegProfile,
+        tap: AudioInputTap,
+    ) {
         self.set_pending_source(ActiveSource::Peer(PeerSource::new(
             track,
             ingress_profile,
             egress_profile,
+            tap,
         )));
+    }
+
+    pub fn stage_input_tap(
+        &self,
+        track: Arc<dyn MediaStreamTrack>,
+        ingress_profile: NegotiatedLegProfile,
+        tap: AudioInputTap,
+    ) {
+        *self.pending_input_tap.lock() = Some(Some(LocalInputTap::new(
+            track,
+            ingress_profile,
+            tap,
+        )));
+        self.input_tap_changed.notify_one();
+    }
+
+    pub fn clear_input_tap(&self) {
+        *self.pending_input_tap.lock() = Some(None);
+        self.input_tap_changed.notify_one();
     }
 
     fn set_pending_source(&self, source: ActiveSource) {
@@ -456,11 +674,27 @@ impl AudioEgressTrack {
         self.pending_source.lock().take()
     }
 
+    fn take_pending_input_tap(&self) -> Option<Option<LocalInputTap>> {
+        self.pending_input_tap.lock().take()
+    }
+
     async fn apply_pending_source(&self, source: ActiveSource) {
         let mut current = self.current_source.lock().await;
         current.interrupt();
         *current = source;
         self.clock.lock().mark_source_switch();
+    }
+
+    async fn apply_pending_input_tap(&self, input_tap: Option<LocalInputTap>) {
+        *self.input_tap.lock().await = input_tap;
+    }
+
+    async fn recv_input_tap(&self) -> MediaResult<()> {
+        let mut guard = self.input_tap.lock().await;
+        match guard.as_mut() {
+            Some(input_tap) => input_tap.recv_once().await,
+            None => std::future::pending().await,
+        }
     }
 }
 
@@ -484,17 +718,35 @@ impl MediaStreamTrack for AudioEgressTrack {
                 self.apply_pending_source(source).await;
                 continue;
             }
+            if let Some(input_tap) = self.take_pending_input_tap() {
+                self.apply_pending_input_tap(input_tap).await;
+                continue;
+            }
 
             let mut current = self.current_source.lock().await;
             let source_changed = self.source_changed.notified();
+            let input_tap_changed = self.input_tap_changed.notified();
             tokio::pin!(source_changed);
+            tokio::pin!(input_tap_changed);
 
             let read = tokio::select! {
+                biased;
                 _ = &mut source_changed => {
                     drop(current);
                     continue;
                 }
+                _ = &mut input_tap_changed => {
+                    drop(current);
+                    continue;
+                }
                 read = current.next_frame() => read,
+                input = self.recv_input_tap() => {
+                    drop(current);
+                    if input.is_err() {
+                        self.clear_input_tap();
+                    }
+                    continue;
+                }
             };
             drop(current);
 
@@ -615,12 +867,35 @@ mod tests {
         }
     }
 
+    fn pcmu_dtmf_profile() -> NegotiatedLegProfile {
+        NegotiatedLegProfile {
+            audio: Some(default_audio_codec()),
+            dtmf: Some(NegotiatedCodec {
+                codec: CodecType::TelephoneEvent,
+                payload_type: 101,
+                clock_rate: 8000,
+                channels: 1,
+            }),
+        }
+    }
+
     fn audio_sample(ts: u32) -> MediaSample {
         MediaSample::Audio(AudioFrame {
             rtp_timestamp: ts,
             clock_rate: 8000,
             data: Bytes::from(vec![0u8; 160]),
             payload_type: Some(0),
+            sequence_number: Some(1),
+            ..Default::default()
+        })
+    }
+
+    fn dtmf_sample(digit: u8, ts: u32) -> MediaSample {
+        MediaSample::Audio(AudioFrame {
+            rtp_timestamp: ts,
+            clock_rate: 8000,
+            data: Bytes::from(vec![digit, 0x00, 0x00, 0xa0]),
+            payload_type: Some(101),
             sequence_number: Some(1),
             ..Default::default()
         })
@@ -759,5 +1034,105 @@ mod tests {
         );
         assert_eq!(first_frame.payload_type, Some(0));
         assert_eq!(second_frame.payload_type, Some(0));
+    }
+
+    #[tokio::test]
+    async fn peer_source_taps_recorder_from_single_pull_path() {
+        let source = Arc::new(QueuedTrack {
+            samples: tokio::sync::Mutex::new(VecDeque::from([audio_sample(1234)])),
+        });
+        let (tx, mut rx) = mpsc::channel(4);
+        let tap = AudioInputTap::default().with_recorder(RecorderTap::new(
+            tx,
+            RecorderLeg::A,
+            pcmu_profile(),
+        ));
+        let track = AudioEgressTrack::new("recorded-peer".to_string(), pcmu_profile());
+        track.stage_peer_with_tap(source, pcmu_profile(), pcmu_profile(), tap);
+
+        let output = tokio::time::timeout(Duration::from_millis(100), track.recv())
+            .await
+            .expect("peer frame should arrive")
+            .expect("peer recv should succeed");
+        let recorded = rx.try_recv().expect("recorder tap should receive sample");
+
+        assert_eq!(recorded.leg, RecorderLeg::A);
+        assert_eq!(recorded.codec_hint, Some(CodecType::PCMU));
+        let MediaSample::Audio(output_frame) = output else {
+            panic!("expected audio");
+        };
+        let MediaSample::Audio(recorded_frame) = recorded.sample else {
+            panic!("expected recorded audio");
+        };
+        assert_ne!(output_frame.rtp_timestamp, 1234);
+        assert_eq!(recorded_frame.rtp_timestamp, 1234);
+    }
+
+    #[tokio::test]
+    async fn recorder_tap_skips_non_audio_payloads_from_profile() {
+        let source = Arc::new(QueuedTrack {
+            samples: tokio::sync::Mutex::new(VecDeque::from([dtmf_sample(1, 4321)])),
+        });
+        let (tx, mut rx) = mpsc::channel(4);
+        let tap = AudioInputTap::default().with_recorder(RecorderTap::new(
+            tx,
+            RecorderLeg::A,
+            pcmu_dtmf_profile(),
+        ));
+        let track = AudioEgressTrack::new("recorded-dtmf".to_string(), pcmu_dtmf_profile());
+        track.stage_peer_with_tap(source, pcmu_dtmf_profile(), pcmu_dtmf_profile(), tap);
+
+        let _ = tokio::time::timeout(Duration::from_millis(100), track.recv())
+            .await
+            .expect("dtmf frame should arrive")
+            .expect("dtmf recv should succeed");
+
+        assert!(rx.try_recv().is_err(), "DTMF should not be recorded as audio");
+    }
+
+    #[tokio::test]
+    async fn peer_source_observes_dtmf_from_single_pull_path() {
+        let source = Arc::new(QueuedTrack {
+            samples: tokio::sync::Mutex::new(VecDeque::from([dtmf_sample(1, 4321)])),
+        });
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let tap = AudioInputTap::default().with_dtmf_observer(move |digit| {
+            let _ = tx.send(digit);
+        });
+        let track = AudioEgressTrack::new("dtmf-peer".to_string(), pcmu_dtmf_profile());
+        track.stage_peer_with_tap(source, pcmu_dtmf_profile(), pcmu_dtmf_profile(), tap);
+
+        let _ = tokio::time::timeout(Duration::from_millis(100), track.recv())
+            .await
+            .expect("dtmf frame should arrive")
+            .expect("dtmf recv should succeed");
+
+        assert_eq!(rx.try_recv().expect("DTMF observer should receive digit"), '1');
+    }
+
+    #[tokio::test]
+    async fn local_input_tap_observes_dtmf_from_egress_pull_path() {
+        let source = Arc::new(QueuedTrack {
+            samples: tokio::sync::Mutex::new(VecDeque::from([dtmf_sample(1, 4321)])),
+        });
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let tap = AudioInputTap::default().with_dtmf_observer(move |digit| {
+            let _ = tx.send(digit);
+        });
+        let track = AudioEgressTrack::new("local-input".to_string(), pcmu_dtmf_profile());
+        track.stage_input_tap(source, pcmu_dtmf_profile(), tap);
+
+        for _ in 0..3 {
+            let _ = tokio::time::timeout(Duration::from_millis(100), track.recv())
+                .await
+                .expect("egress recv should complete")
+                .expect("egress recv should succeed");
+            if let Ok(digit) = rx.try_recv() {
+                assert_eq!(digit, '1');
+                return;
+            }
+        }
+
+        panic!("DTMF observer should receive digit");
     }
 }
