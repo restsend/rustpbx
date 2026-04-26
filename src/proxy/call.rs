@@ -492,7 +492,14 @@ impl CallModule {
         if callee_is_same_realm
             && let Ok(results) = self.inner.server.locator.lookup(&callee_uri).await {
                 internal_lookup_empty = results.is_empty();
-                if !results.is_empty() {
+                if internal_lookup_empty {
+                    warn!(
+                        callee_uri = %callee_uri,
+                        callee_realm = %callee_realm,
+                        caller_realm = ?caller.realm,
+                        "locator lookup returned empty results for same-realm callee"
+                    );
+                } else if !results.is_empty() {
                     // Keep locator-provided target metadata (destination/home_proxy/path/etc.)
                     // so SipSession can route cross-node calls via remote home_proxy.
                     locs = results;

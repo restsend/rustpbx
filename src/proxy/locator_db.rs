@@ -1,5 +1,5 @@
 use super::locator::{
-    Locator, RealmChecker, is_local_realm, sort_locations_by_recency, uri_matches,
+    Locator, RealmChecker, is_local_realm, sort_locations_by_recency,
 };
 use crate::call::Location;
 use anyhow::Result;
@@ -632,10 +632,6 @@ impl Locator for DbLocator {
                 &aor,
                 decoded_registered_aor,
             );
-
-            if !uri_matches(&aor, uri) && !uri_matches(&registered_aor, uri) {
-                continue;
-            }
 
             // Parse transport from string
             let transport = match model.transport.to_uppercase().as_str() {
