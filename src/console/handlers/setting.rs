@@ -21,10 +21,12 @@ use argon2::password_hash::rand_core::OsRng;
 use argon2::password_hash::{PasswordHasher, SaltString};
 use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::{HeaderMap, StatusCode};
+use axum::response::sse::{KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, patch, post};
 use axum::{Json, Router};
 use chrono::{DateTime, Duration, Utc};
+use futures::stream;
 use sea_orm::sea_query::Condition;
 use sea_orm::{
     ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter,
@@ -32,10 +34,13 @@ use sea_orm::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value as JsonValue, json};
+use std::convert::Infallible;
 use std::collections::VecDeque;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Seek, SeekFrom};
+use std::time::Duration as StdDuration;
 use std::{fs, sync::Arc};
+use tokio::time;
 use toml_edit::{Array, DocumentMut, Item, Table, Value, value};
 use tracing::warn;
 
@@ -57,6 +62,12 @@ struct LogRecentQuery {
 
 #[derive(Debug, Clone, Deserialize, Default)]
 struct LogFollowQuery {
+    pub position: Option<u64>,
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+struct LogStreamQuery {
     pub position: Option<u64>,
     pub limit: Option<usize>,
 }
@@ -167,6 +178,7 @@ pub fn urls() -> Router<Arc<ConsoleState>> {
         .route("/settings", get(page_settings))
         .route("/settings/logs/recent", get(fetch_recent_logs))
         .route("/settings/logs/follow", get(follow_logs))
+        .route("/settings/logs/stream", get(stream_logs))
         .route("/settings/config/platform", patch(update_platform_settings))
         .route("/settings/config/proxy", patch(update_proxy_settings))
         .route("/settings/config/storage", patch(update_storage_settings))
@@ -2329,6 +2341,84 @@ async fn follow_logs(
             format!("Failed to follow log file: {err}"),
         ),
     }
+}
+
+async fn stream_logs(
+    State(state): State<Arc<ConsoleState>>,
+    AuthRequired(user): AuthRequired,
+    Query(query): Query<LogStreamQuery>,
+) -> Response {
+    if !user.is_superuser {
+        return json_error(StatusCode::FORBIDDEN, "Permission denied. Superuser required.");
+    }
+
+    let Some(path) = resolve_log_file_path(&state) else {
+        return Json(json!({
+            "status": "ok",
+            "available": false,
+            "exists": false,
+            "path": JsonValue::Null,
+            "lines": [],
+            "next_position": 0u64,
+            "reset": false,
+            "truncated": false,
+            "message": "Log file is not configured. Set settings -> platform -> log_file first.",
+        }))
+        .into_response();
+    };
+
+    let start_position = query.position.unwrap_or(0);
+    let limit = normalize_log_limit(query.limit);
+    let path_for_stream = path.clone();
+
+    let stream = stream::unfold(start_position, move |mut cursor| {
+        let path = path_for_stream.clone();
+        async move {
+            time::sleep(StdDuration::from_millis(1000)).await;
+
+            let payload = match read_follow_log_lines(&path, cursor, limit) {
+                Ok(result) => {
+                    cursor = result.next_position;
+                    json!({
+                        "status": "ok",
+                        "path": path,
+                        "lines": result.lines,
+                        "next_position": result.next_position,
+                        "reset": result.reset,
+                        "truncated": result.truncated,
+                    })
+                }
+                Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                    cursor = 0;
+                    json!({
+                        "status": "ok",
+                        "path": path,
+                        "lines": [],
+                        "next_position": 0u64,
+                        "reset": true,
+                        "truncated": false,
+                        "exists": false,
+                        "message": "Log file does not exist yet.",
+                    })
+                }
+                Err(err) => json!({
+                    "status": "error",
+                    "message": format!("Failed to follow log file: {err}"),
+                }),
+            };
+
+            let event = axum::response::sse::Event::default().event("logs").data(payload.to_string());
+            Some((Ok::<_, Infallible>(event), cursor))
+        }
+    });
+
+    Sse::new(stream)
+        .keep_alive(
+            KeepAlive::new()
+                .interval(StdDuration::from_secs(15))
+                .text("keep-alive"),
+        )
+        .into_response()
 }
 
 fn normalize_log_limit(limit: Option<usize>) -> usize {

@@ -2545,7 +2545,7 @@
                 limit: 200,
                 loading: false,
                 following: false,
-                followTimer: null,
+                eventSource: null,
                 error: null,
                 message: '',
                 path: '',
@@ -4280,8 +4280,8 @@
             logsRecentEndpoint() {
                 return `${this.basePath}/settings/logs/recent`;
             },
-            logsFollowEndpoint() {
-                return `${this.basePath}/settings/logs/follow`;
+            logsStreamEndpoint() {
+                return `${this.basePath}/settings/logs/stream`;
             },
             ensureLogVisibleTail() {
                 this.$nextTick(() => {
@@ -4332,15 +4332,29 @@
                     return;
                 }
                 this.logViewer.following = true;
-                this.logViewer.followTimer = window.setInterval(() => {
-                    this.pollLogFollow();
-                }, 1500);
-                this.pollLogFollow();
+                this.logViewer.error = null;
+                const url = new URL(this.logsStreamEndpoint(), window.location.origin);
+                url.searchParams.set('position', String(this.logViewer.nextPosition || 0));
+                url.searchParams.set('limit', String(this.logViewer.limit || 200));
+
+                const source = new EventSource(url.toString(), { withCredentials: true });
+                source.onmessage = (event) => {
+                    this.handleLogStreamEvent(event);
+                };
+                source.addEventListener('logs', (event) => {
+                    this.handleLogStreamEvent(event);
+                });
+                source.onerror = () => {
+                    this.logViewer.error = this.tt('settings_page.logs_stream_lost') || 'Log stream disconnected.';
+                    this.stopLogFollow();
+                };
+
+                this.logViewer.eventSource = source;
             },
             stopLogFollow() {
-                if (this.logViewer.followTimer) {
-                    window.clearInterval(this.logViewer.followTimer);
-                    this.logViewer.followTimer = null;
+                if (this.logViewer.eventSource) {
+                    this.logViewer.eventSource.close();
+                    this.logViewer.eventSource = null;
                 }
                 this.logViewer.following = false;
             },
@@ -4375,22 +4389,10 @@
                     this.logViewer.loading = false;
                 }
             },
-            async pollLogFollow() {
-                if (!this.currentUser?.is_superuser || !this.logViewer.following || this.logViewer.loading) {
-                    return;
-                }
-                this.logViewer.loading = true;
-                this.logViewer.error = null;
+            handleLogStreamEvent(event) {
                 try {
-                    const url = new URL(this.logsFollowEndpoint(), window.location.origin);
-                    url.searchParams.set('position', String(this.logViewer.nextPosition || 0));
-                    url.searchParams.set('limit', String(this.logViewer.limit || 200));
-                    const response = await fetch(url.toString(), {
-                        method: 'GET',
-                        headers: { Accept: 'application/json' },
-                    });
-                    const data = await response.json().catch(() => ({}));
-                    if (!response.ok) {
+                    const data = JSON.parse(event?.data || '{}');
+                    if (data?.status === 'error') {
                         throw new Error(data?.message || 'Failed to follow logs');
                     }
                     this.logViewer.path = data?.path || this.logViewer.path;
@@ -4415,8 +4417,6 @@
                     console.error(err);
                     this.logViewer.error = err?.message || 'Failed to follow logs';
                     this.stopLogFollow();
-                } finally {
-                    this.logViewer.loading = false;
                 }
             },
             initPlatformDraft() {
