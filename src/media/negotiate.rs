@@ -606,6 +606,21 @@ impl MediaNegotiator {
         }
     }
 
+    /// Build codec lists for mixed WebRTC/RTP legs.
+    pub fn build_mixed_transport_codec_lists(
+        caller_sdp: &str,
+        caller_is_webrtc: bool,
+        callee_is_webrtc: bool,
+        allow_codecs: &[CodecType],
+    ) -> BridgeCodecLists {
+        Self::build_bridge_codec_lists(
+            caller_sdp,
+            caller_is_webrtc,
+            callee_is_webrtc,
+            allow_codecs,
+        )
+    }
+
     pub fn extract_ssrc(sdp: &str) -> Option<u32> {
         // Try parsing as Answer first, then Offer if it fails (though usually it's Answer)
         let session = SessionDescription::parse(SdpType::Answer, sdp)

@@ -19,6 +19,7 @@ use crate::media::recorder::RecorderOption;
 pub type TrackMap = HashMap<String, Arc<AsyncMutex<Box<dyn Track>>>>;
 
 pub mod audio_source;
+pub mod audio_route;
 pub mod bridge;
 #[cfg(test)]
 mod file_track_tests;

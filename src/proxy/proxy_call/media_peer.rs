@@ -1,4 +1,6 @@
+use crate::media::audio_route::{self, AudioEgressSlot};
 use crate::media::audio_egress_track::AudioEgressTrack;
+use crate::media::audio_egress_track::AudioInputTap;
 use crate::media::negotiate::NegotiatedLegProfile;
 use crate::media::{MediaStream, Track};
 use anyhow::Result;
@@ -6,9 +8,6 @@ use async_trait::async_trait;
 use std::sync::Arc;
 use tokio::sync::Mutex as AsyncMutex;
 use tokio_util::sync::CancellationToken;
-use tracing::debug;
-
-const AUDIO_EGRESS_TRACK_ID: &str = "audio-egress";
 
 #[async_trait]
 pub trait MediaPeer: Send + Sync {
@@ -32,7 +31,7 @@ pub trait MediaPeer: Send + Sync {
 pub struct LegMedia {
     cancel_token: CancellationToken,
     peer_connection: AsyncMutex<Option<rustrtc::PeerConnection>>,
-    audio_egress: AsyncMutex<Option<Arc<AudioEgressTrack>>>,
+    audio_egress: AudioEgressSlot,
 }
 
 impl LegMedia {
@@ -58,14 +57,7 @@ impl LegMedia {
 
     pub async fn input_audio_track(&self) -> Option<Arc<dyn rustrtc::media::MediaStreamTrack>> {
         let pc = self.peer_connection().await?;
-        for transceiver in pc.get_transceivers() {
-            if transceiver.kind() == rustrtc::MediaKind::Audio
-                && let Some(receiver) = transceiver.receiver()
-            {
-                return Some(receiver.track());
-            }
-        }
-        None
+        audio_route::input_audio_track(&pc)
     }
 
     pub async fn ensure_audio_egress(
@@ -78,18 +70,44 @@ impl LegMedia {
             .peer_connection()
             .await
             .ok_or_else(|| anyhow::anyhow!("{}: no PeerConnection", direction))?;
-        let mut guard = self.audio_egress.lock().await;
-        install_audio_egress_track(
-            &mut guard,
+        audio_route::ensure_audio_egress(
+            &self.audio_egress,
             &target_pc,
             egress_profile,
             session_id,
             direction,
         )
+        .await
     }
 
     pub async fn audio_egress(&self) -> Option<Arc<AudioEgressTrack>> {
         self.audio_egress.lock().await.clone()
+    }
+
+    pub async fn stage_peer_source(
+        &self,
+        source_pc: &rustrtc::PeerConnection,
+        ingress_profile: NegotiatedLegProfile,
+        egress_profile: NegotiatedLegProfile,
+        tap: AudioInputTap,
+        session_id: &str,
+        direction: &str,
+    ) -> Result<()> {
+        let target_pc = self
+            .peer_connection()
+            .await
+            .ok_or_else(|| anyhow::anyhow!("{}: no PeerConnection", direction))?;
+        audio_route::stage_peer_audio_route(
+            source_pc,
+            &self.audio_egress,
+            &target_pc,
+            ingress_profile,
+            egress_profile,
+            tap,
+            session_id,
+            direction,
+        )
+        .await
     }
 
     pub async fn clear_peer_connection(&self) {
@@ -115,58 +133,6 @@ impl VoiceEnginePeer {
     pub fn with_leg_media(stream: Arc<MediaStream>, leg_media: Arc<LegMedia>) -> Self {
         Self { stream, leg_media }
     }
-}
-
-fn install_audio_egress_track(
-    slot: &mut Option<Arc<AudioEgressTrack>>,
-    target_pc: &rustrtc::PeerConnection,
-    egress_profile: NegotiatedLegProfile,
-    session_id: &str,
-    direction: &str,
-) -> Result<Arc<AudioEgressTrack>> {
-    let target_transceiver = target_pc
-        .get_transceivers()
-        .into_iter()
-        .find(|t| t.kind() == rustrtc::MediaKind::Audio)
-        .ok_or_else(|| anyhow::anyhow!("{}: no audio transceiver on target PC", direction))?;
-
-    let existing_sender = target_transceiver
-        .sender()
-        .ok_or_else(|| anyhow::anyhow!("{}: no sender on target audio transceiver", direction))?;
-
-    let created_output = slot.is_none();
-    let output = match slot {
-        Some(track) => track.clone(),
-        None => {
-            let track = Arc::new(AudioEgressTrack::new(
-                AUDIO_EGRESS_TRACK_ID.to_string(),
-                egress_profile.clone(),
-            ));
-            *slot = Some(track.clone());
-            track
-        }
-    };
-
-    if created_output || existing_sender.track_id() != AUDIO_EGRESS_TRACK_ID {
-        let sender = rustrtc::RtpSender::builder(
-            output.clone() as Arc<dyn rustrtc::media::MediaStreamTrack>,
-            existing_sender.ssrc(),
-        )
-        .stream_id(existing_sender.stream_id().to_string())
-        .params(existing_sender.params())
-        .build();
-
-        target_transceiver.set_sender(Some(sender));
-
-        debug!(
-            session_id = %session_id,
-            direction = %direction,
-            track_id = %AUDIO_EGRESS_TRACK_ID,
-            "Installed audio egress track on target sender"
-        );
-    }
-
-    Ok(output)
 }
 
 #[async_trait]
@@ -229,15 +195,16 @@ mod tests {
             channels: 1,
         };
         let original_sender = pc.add_track(track, params).expect("sender should be added");
-        let mut output_slot = None;
+        let output_slot = AudioEgressSlot::new(None);
 
-        let output = install_audio_egress_track(
-            &mut output_slot,
+        let output = audio_route::ensure_audio_egress(
+            &output_slot,
             &pc,
             NegotiatedLegProfile::default(),
             "test-session",
             "callee→caller",
         )
+        .await
         .expect("audio egress track should install");
 
         let sender = pc
@@ -246,16 +213,17 @@ mod tests {
             .find(|t| t.kind() == rustrtc::MediaKind::Audio)
             .and_then(|t| t.sender())
             .expect("audio sender should exist");
-        assert_eq!(sender.track_id(), AUDIO_EGRESS_TRACK_ID);
+        assert_eq!(sender.track_id(), "audio-egress");
         assert_eq!(sender.ssrc(), original_sender.ssrc());
 
-        let output_again = install_audio_egress_track(
-            &mut output_slot,
+        let output_again = audio_route::ensure_audio_egress(
+            &output_slot,
             &pc,
             NegotiatedLegProfile::default(),
             "test-session",
             "callee→caller",
         )
+        .await
         .expect("existing audio egress track should be reused");
 
         assert!(Arc::ptr_eq(&output, &output_again));
