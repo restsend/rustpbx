@@ -13,6 +13,7 @@
     {% block js_head %}
     <script>
         window.__currentUser = JSON.parse(document.getElementById('__currentUser').textContent || 'null');
+        window.__consoleApiPrefix = {{ api_prefix | tojson }};
         window.hasPermission = function (perm) {
             // If current_user is missing but user reached this authenticated page,
             // default to showing items (backend has already authenticated)

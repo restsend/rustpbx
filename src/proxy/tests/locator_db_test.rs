@@ -4,6 +4,7 @@ use crate::{
 };
 use rsipstack::sip::{HostWithPort, Scheme};
 use rsipstack::transport::SipAddr;
+use std::sync::Arc;
 use std::time::Instant;
 
 #[tokio::test]
@@ -455,4 +456,64 @@ async fn test_db_locator_rewrites_legacy_registered_aor_contact_to_canonical_aor
 
     let canonical = results[0].registered_aor.as_ref().unwrap().to_string();
     assert_eq!(canonical, "sip:lp@localhost");
+}
+
+/// Regression test: when a user registers with a private IP (realm gets normalized to
+/// localhost by the DB locator) and is later looked up by a configured domain name,
+/// the record must still be returned.  Previously a `uri_matches` guard at the end of
+/// `DbLocator::lookup` rejected the result because the AoR host (IP) did not match the
+/// lookup host (domain).
+#[tokio::test]
+async fn test_db_locator_lookup_by_domain_when_registered_with_ip() {
+    let locator = DbLocator::new("sqlite::memory:".to_string()).await.unwrap();
+
+    // Simulate the realm_checker that SipServer installs — it recognises the
+    // configured domain as a local realm so lookups get normalised to "localhost".
+    locator.set_realm_checker(Arc::new(|realm: &str| {
+        let realm = realm.to_string();
+        Box::pin(async move {
+            realm == "kefutest.xiaojukeji.com" || crate::proxy::locator::is_local_realm(&realm)
+        })
+    }));
+
+    let contact_aor: rsipstack::sip::Uri = "sip:bp@172.28.47.170:57491".try_into().unwrap();
+    let destination = SipAddr {
+        r#type: Some(rsipstack::sip::transport::Transport::Udp),
+        addr: HostWithPort::try_from("172.28.47.170:57491").unwrap(),
+    };
+
+    // Register with a private-IP realm — the DB locator normalises this to "localhost".
+    locator
+        .register(
+            "bp",
+            Some("172.28.47.170"),
+            Location {
+                aor: contact_aor.clone(),
+                destination: Some(destination),
+                expires: 3600,
+                last_modified: Some(Instant::now()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+    // Lookup by the configured domain name must return the record.
+    let results = locator
+        .lookup(&"sip:bp@kefutest.xiaojukeji.com".try_into().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(
+        results.len(),
+        1,
+        "Should find record when querying by domain after registering with IP"
+    );
+    assert_eq!(results[0].aor.to_string(), contact_aor.to_string());
+
+    // Sanity: looking up a different user on the same domain returns nothing.
+    let empty = locator
+        .lookup(&"sip:wp@kefutest.xiaojukeji.com".try_into().unwrap())
+        .await
+        .unwrap();
+    assert!(empty.is_empty(), "Different user should not match");
 }
