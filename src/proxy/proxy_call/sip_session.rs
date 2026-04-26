@@ -1310,13 +1310,12 @@ impl SipSession {
             return Ok(());
         }
 
-        // Resolve custom targets (e.g., skill-group:) to actual agent locations
         let resolved_agents = self
             .resolve_custom_targets(agents, plan.acd_policy.as_deref())
             .await;
 
         if resolved_agents.is_empty() {
-            warn!("No agents available after resolving skill groups");
+            warn!("No agents available after resolving queue targets");
             return self.execute_queue_fallback(plan).await;
         }
 
@@ -1369,7 +1368,11 @@ impl SipSession {
         }
     }
 
-    /// Resolve custom targets (e.g., skill-group:) to actual agent locations.
+    /// Resolve queue targets to the concrete locations used for dialing.
+    ///
+    /// Custom targets (e.g. skill-group:) are expanded through the AgentRegistry.
+    /// Same-realm SIP targets are then looked up in the registrar locator so
+    /// registered contact metadata such as transport and WebRTC support is used.
     /// Uses the AgentRegistry trait's resolve_target hook, which allows addons
     /// to implement custom routing logic without queue knowing the details.
     async fn resolve_custom_targets(
@@ -1377,7 +1380,7 @@ impl SipSession {
         locations: Vec<crate::call::Location>,
         acd_policy: Option<&str>,
     ) -> Vec<crate::call::Location> {
-        let mut resolved = Vec::new();
+        let mut expanded = Vec::new();
         let agent_registry = self.server.agent_registry.clone();
 
         for location in locations {
@@ -1412,7 +1415,7 @@ impl SipSession {
                                         contact_raw: Some(agent_uri),
                                         ..Default::default()
                                     };
-                                    resolved.push(agent_location);
+                                    expanded.push(agent_location);
                                 }
                             }
                         }
@@ -1424,7 +1427,36 @@ impl SipSession {
             }
             
             // Standard target, pass through as-is
-            resolved.push(location);
+            expanded.push(location);
+        }
+
+        let mut resolved = Vec::new();
+        for location in expanded {
+            let target_realm = location.aor.host().to_string();
+            if !self.server.is_same_realm(&target_realm).await {
+                resolved.push(location);
+                continue;
+            }
+
+            match self.server.locator.lookup(&location.aor).await {
+                Ok(locations) if !locations.is_empty() => {
+                    info!(
+                        target = %location.aor,
+                        resolved_count = locations.len(),
+                        "Resolved queue target through locator"
+                    );
+                    resolved.extend(locations);
+                }
+                Ok(_) => resolved.push(location),
+                Err(error) => {
+                    warn!(
+                        target = %location.aor,
+                        error = %error,
+                        "Failed to resolve queue target through locator"
+                    );
+                    resolved.push(location);
+                }
+            }
         }
 
         resolved
