@@ -240,8 +240,6 @@ impl AppFactory for BuiltinAppFactory {
 impl SipSession {
     pub const CALLER_TRACK_ID: &'static str = "caller-track";
     pub const CALLEE_TRACK_ID: &'static str = "callee-track";
-    pub const CALLER_FORWARDING_TRACK_ID: &'static str = "caller-forwarding-track";
-    pub const CALLEE_FORWARDING_TRACK_ID: &'static str = "callee-forwarding-track";
     const SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_secs(3);
 
     pub fn with_handle(id: SessionId) -> (SipSessionHandle, mpsc::UnboundedReceiver<CallCommand>) {
@@ -2329,11 +2327,10 @@ impl SipSession {
         match self
             .callee_media
             .ensure_audio_egress(
-            Self::CALLER_FORWARDING_TRACK_ID,
-            callee_profile.clone(),
-            &session_id,
-            "caller→callee",
-        )
+                callee_profile.clone(),
+                &session_id,
+                "caller→callee",
+            )
             .await
         {
             Ok(output) => match self.caller_media.input_audio_track().await {
@@ -2372,11 +2369,10 @@ impl SipSession {
         match self
             .caller_media
             .ensure_audio_egress(
-            Self::CALLEE_FORWARDING_TRACK_ID,
-            caller_profile.clone(),
-            &session_id,
-            "callee→caller",
-        )
+                caller_profile.clone(),
+                &session_id,
+                "callee→caller",
+            )
             .await
         {
             Ok(output) => match self.callee_media.input_audio_track().await {
@@ -2508,139 +2504,6 @@ impl SipSession {
         });
 
         RecorderTap::new(tx, leg, profile)
-    }
-
-    #[allow(dead_code)]
-    async fn get_forwarding_track(
-        peer: &Arc<dyn MediaPeer>,
-        track_id: &str,
-    ) -> Option<Arc<crate::media::forwarding_track::ForwardingTrack>> {
-        let tracks = peer.get_tracks().await;
-        for t in &tracks {
-            let mut guard = t.lock().await;
-            if guard.id() != track_id {
-                continue;
-            }
-
-            let handle = guard
-                .as_any_mut()
-                .downcast_mut::<crate::media::forwarding_track::ForwardingTrackHandle>()?;
-            return Some(handle.forwarding());
-        }
-        None
-    }
-
-    #[allow(dead_code)]
-    #[allow(clippy::too_many_arguments)]
-    fn wire_with_forwarding_track(
-        track_id: &str,
-        source_pc: &rustrtc::PeerConnection,
-        target_pc: &rustrtc::PeerConnection,
-        ingress_profile: crate::media::negotiate::NegotiatedLegProfile,
-        egress_profile: crate::media::negotiate::NegotiatedLegProfile,
-        recorder: Arc<RwLock<Option<crate::media::recorder::Recorder>>>,
-        leg: crate::media::recorder::Leg,
-        session_id: &str,
-        direction: &str,
-    ) -> Result<Arc<crate::media::forwarding_track::ForwardingTrack>> {
-        use crate::media::forwarding_track::ForwardingTrack;
-
-        let source_transceiver = source_pc
-            .get_transceivers()
-            .into_iter()
-            .find(|t| t.kind() == rustrtc::MediaKind::Audio)
-            .ok_or_else(|| anyhow!("{}: no audio transceiver on source PC", direction))?;
-
-        let receiver = source_transceiver
-            .receiver()
-            .ok_or_else(|| anyhow!("{}: no receiver on source audio transceiver", direction))?;
-
-        let receiver_track = receiver.track();
-
-        let target_transceiver = target_pc
-            .get_transceivers()
-            .into_iter()
-            .find(|t| t.kind() == rustrtc::MediaKind::Audio)
-            .ok_or_else(|| anyhow!("{}: no audio transceiver on target PC", direction))?;
-
-        let existing_sender = target_transceiver
-            .sender()
-            .ok_or_else(|| anyhow!("{}: no sender on target audio transceiver", direction))?;
-        {
-            let mut guard = recorder.write();
-            if let Some(recorder) = guard.as_mut() {
-                recorder.set_leg_profile(leg, ingress_profile.clone());
-            }
-        }
-
-        // Issue #171: spin up a dedicated recorder drain task so that
-        // write_sample (codec decode + disk I/O) never blocks the RTP recv loop.
-        // The task borrows the shared recorder lock and calls write_sample
-        // asynchronously; the ForwardingTrack just does a non-blocking
-        // try_send per sample — if the channel is full the sample is dropped
-        // rather than allowing unbounded memory growth under disk pressure.
-        let recorder_tx = {
-            use tokio::sync::mpsc;
-            // 256 slots ≈ 5 seconds of 20 ms packets at 8 kHz — enough to
-            // absorb transient disk stalls without unbounded heap growth.
-            const RECORDER_CHANNEL_CAPACITY: usize = 256;
-            let audio_payload_type = ingress_profile
-                .audio
-                .as_ref()
-                .map(|codec| codec.payload_type);
-            let codec_hint = ingress_profile.audio.as_ref().map(|codec| codec.codec);
-            let (tx, mut rx) = mpsc::channel::<(
-                crate::media::recorder::Leg,
-                rustrtc::media::frame::MediaSample,
-            )>(RECORDER_CHANNEL_CAPACITY);
-            let recorder_arc = recorder.clone();
-            tokio::spawn(async move {
-                while let Some((sample_leg, sample)) = rx.recv().await {
-                    let rustrtc::media::MediaSample::Audio(frame) = &sample else {
-                        continue;
-                    };
-                    if let Some(payload_type) = audio_payload_type
-                        && frame.payload_type != Some(payload_type) {
-                            continue;
-                        }
-                    let mut guard = recorder_arc.write();
-                    if let Some(rec) = guard.as_mut()
-                        && let Err(err) =
-                            rec.write_sample(sample_leg, &sample, None, None, codec_hint)
-                    {
-                            tracing::warn!("recorder write_sample failed: {err}");
-                        }
-                }
-            });
-            tx
-        };
-
-        let forwarding = Arc::new(ForwardingTrack::new(
-            track_id.to_string(),
-            receiver_track,
-            Some(recorder_tx),
-            leg,
-            ingress_profile,
-            egress_profile,
-        ));
-
-        let sender = rustrtc::RtpSender::builder(
-            forwarding.clone() as Arc<dyn rustrtc::media::MediaStreamTrack>,
-            existing_sender.ssrc(),
-        )
-        .stream_id(existing_sender.stream_id().to_string())
-        .params(existing_sender.params())
-        .build();
-
-        target_transceiver.set_sender(Some(sender));
-
-        debug!(
-            session_id = %session_id,
-            direction = %direction,
-            "Wired ForwardingTrack (async recorder task, zero-blocking forwarding)"
-        );
-
-        Ok(forwarding)
     }
 
     pub async fn create_callee_track(&mut self, callee_is_webrtc: bool) -> Result<String> {
@@ -3368,7 +3231,6 @@ impl SipSession {
         self
             .caller_media
             .ensure_audio_egress(
-                Self::CALLEE_FORWARDING_TRACK_ID,
                 egress_profile,
                 &self.context.session_id,
                 "file→caller",
@@ -3452,23 +3314,11 @@ impl SipSession {
         beep: bool,
     ) -> Result<()> {
         let mut recorder = Recorder::new(path, CodecType::PCMU)?;
-        if let Some(forwarding) =
-            Self::get_forwarding_track(&self.caller_peer, Self::CALLER_FORWARDING_TRACK_ID).await
-        {
-            if let Some(profile) = forwarding.ingress_profile() {
-                recorder.set_leg_profile(crate::media::recorder::Leg::A, profile);
-            }
-        } else if let Some(answer_sdp) = self.answer.as_deref() {
+        if let Some(answer_sdp) = self.answer.as_deref() {
             let caller_profile = MediaNegotiator::extract_leg_profile(answer_sdp);
             recorder.set_leg_profile(crate::media::recorder::Leg::A, caller_profile);
         }
-        if let Some(forwarding) =
-            Self::get_forwarding_track(&self.callee_peer, Self::CALLEE_FORWARDING_TRACK_ID).await
-        {
-            if let Some(profile) = forwarding.ingress_profile() {
-                recorder.set_leg_profile(crate::media::recorder::Leg::B, profile);
-            }
-        } else if let Some(callee_answer_sdp) = self.callee_answer_sdp.as_deref() {
+        if let Some(callee_answer_sdp) = self.callee_answer_sdp.as_deref() {
             let callee_profile = MediaNegotiator::extract_leg_profile(callee_answer_sdp);
             recorder.set_leg_profile(crate::media::recorder::Leg::B, callee_profile);
         }

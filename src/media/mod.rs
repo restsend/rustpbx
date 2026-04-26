@@ -22,7 +22,6 @@ pub mod audio_source;
 pub mod bridge;
 #[cfg(test)]
 mod file_track_tests;
-pub mod forwarding_track;
 pub mod mixer;
 #[cfg(test)]
 mod mixer_e2e_tests;

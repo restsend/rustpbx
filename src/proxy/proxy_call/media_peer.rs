@@ -8,6 +8,8 @@ use tokio::sync::Mutex as AsyncMutex;
 use tokio_util::sync::CancellationToken;
 use tracing::debug;
 
+const AUDIO_EGRESS_TRACK_ID: &str = "audio-egress";
+
 #[async_trait]
 pub trait MediaPeer: Send + Sync {
     fn cancel_token(&self) -> CancellationToken;
@@ -68,7 +70,6 @@ impl LegMedia {
 
     pub async fn ensure_audio_egress(
         &self,
-        egress_track_id: &str,
         egress_profile: NegotiatedLegProfile,
         session_id: &str,
         direction: &str,
@@ -81,7 +82,6 @@ impl LegMedia {
         install_audio_egress_track(
             &mut guard,
             &target_pc,
-            egress_track_id,
             egress_profile,
             session_id,
             direction,
@@ -120,7 +120,6 @@ impl VoiceEnginePeer {
 fn install_audio_egress_track(
     slot: &mut Option<Arc<AudioEgressTrack>>,
     target_pc: &rustrtc::PeerConnection,
-    track_id: &str,
     egress_profile: NegotiatedLegProfile,
     session_id: &str,
     direction: &str,
@@ -140,7 +139,7 @@ fn install_audio_egress_track(
         Some(track) => track.clone(),
         None => {
             let track = Arc::new(AudioEgressTrack::new(
-                track_id.to_string(),
+                AUDIO_EGRESS_TRACK_ID.to_string(),
                 egress_profile.clone(),
             ));
             *slot = Some(track.clone());
@@ -148,7 +147,7 @@ fn install_audio_egress_track(
         }
     };
 
-    if created_output || existing_sender.track_id() != track_id {
+    if created_output || existing_sender.track_id() != AUDIO_EGRESS_TRACK_ID {
         let sender = rustrtc::RtpSender::builder(
             output.clone() as Arc<dyn rustrtc::media::MediaStreamTrack>,
             existing_sender.ssrc(),
@@ -162,7 +161,7 @@ fn install_audio_egress_track(
         debug!(
             session_id = %session_id,
             direction = %direction,
-            track_id = %track_id,
+            track_id = %AUDIO_EGRESS_TRACK_ID,
             "Installed audio egress track on target sender"
         );
     }
@@ -235,7 +234,6 @@ mod tests {
         let output = install_audio_egress_track(
             &mut output_slot,
             &pc,
-            "callee-audio-egress",
             NegotiatedLegProfile::default(),
             "test-session",
             "callee→caller",
@@ -248,13 +246,12 @@ mod tests {
             .find(|t| t.kind() == rustrtc::MediaKind::Audio)
             .and_then(|t| t.sender())
             .expect("audio sender should exist");
-        assert_eq!(sender.track_id(), "callee-audio-egress");
+        assert_eq!(sender.track_id(), AUDIO_EGRESS_TRACK_ID);
         assert_eq!(sender.ssrc(), original_sender.ssrc());
 
         let output_again = install_audio_egress_track(
             &mut output_slot,
             &pc,
-            "callee-audio-egress",
             NegotiatedLegProfile::default(),
             "test-session",
             "callee→caller",
