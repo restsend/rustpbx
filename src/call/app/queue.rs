@@ -19,8 +19,8 @@
 //!           └─ HoldMusic ◄───┘ (while waiting)
 //! ```
 
-use super::{AppAction, ApplicationContext, CallApp, CallAppType, CallController, PlaybackHandle};
 use super::agent_registry::{AgentRegistry, PresenceState, RoutingStrategy};
+use super::{AppAction, ApplicationContext, CallApp, CallAppType, CallController, PlaybackHandle};
 use crate::call::{
     DialStrategy, FailureAction, Location, QueueFallbackAction, QueueHoldConfig, QueuePlan,
 };
@@ -83,8 +83,7 @@ impl QueueStats {
 // ===================================================================
 
 /// No-answer action for CC queues.
-#[derive(Debug, Clone, PartialEq)]
-#[derive(Default)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub enum NoAnswerAction {
     /// Transfer to voicemail.
     #[default]
@@ -98,7 +97,6 @@ pub enum NoAnswerAction {
     /// Go back to IVR.
     BackToIvr,
 }
-
 
 /// Extended queue configuration with CC features.
 #[derive(Debug, Clone)]
@@ -302,14 +300,14 @@ impl QueueApp {
     }
 
     /// Update queue statistics.
-    async fn update_stats(
-        &self, queue_id: &str, f: impl FnOnce(&mut QueueStats)
-    ) {
+    async fn update_stats(&self, queue_id: &str, f: impl FnOnce(&mut QueueStats)) {
         let mut stats = self.stats.write().await;
-        let stat = stats.entry(queue_id.to_string()).or_insert_with(|| QueueStats {
-            queue_id: queue_id.to_string(),
-            ..Default::default()
-        });
+        let stat = stats
+            .entry(queue_id.to_string())
+            .or_insert_with(|| QueueStats {
+                queue_id: queue_id.to_string(),
+                ..Default::default()
+            });
         f(stat);
     }
 
@@ -336,12 +334,10 @@ impl QueueApp {
                     AppAction::Transfer(format!("queue:{}", name))
                 }
             }
-            None => {
-                AppAction::Hangup {
-                    reason: Some(CallRecordHangupReason::ServerUnavailable),
-                    code: Some(480),
-                }
-            }
+            None => AppAction::Hangup {
+                reason: Some(CallRecordHangupReason::ServerUnavailable),
+                code: Some(480),
+            },
         };
         Ok(action)
     }
@@ -379,6 +375,9 @@ impl QueueApp {
                     crate::call::TransferEndpoint::Queue(queue_name) => {
                         AppAction::Transfer(format!("queue:{}", queue_name))
                     }
+                    crate::call::TransferEndpoint::Ivr(ivr_name) => {
+                        AppAction::Transfer(format!("ivr:{}", ivr_name))
+                    }
                 }
             }
         }
@@ -387,10 +386,11 @@ impl QueueApp {
     /// Start or restart hold music.
     async fn start_hold_music(&mut self, ctrl: &mut CallController) -> anyhow::Result<()> {
         if let Some(ref hold) = self.plan.hold
-            && let Some(ref audio_file) = hold.audio_file {
-                debug!(file = %audio_file, "Queue: starting hold music");
-                self.hold_playback = Some(ctrl.play_audio(audio_file, true).await?);
-            }
+            && let Some(ref audio_file) = hold.audio_file
+        {
+            debug!(file = %audio_file, "Queue: starting hold music");
+            self.hold_playback = Some(ctrl.play_audio(audio_file, true).await?);
+        }
         Ok(())
     }
 
@@ -423,7 +423,7 @@ impl QueueApp {
         if let Some(ref registry) = self.agent_registry {
             let queue_id = self.config.name.as_str();
             let skills = &self.config.required_skills;
-            
+
             let agents = registry.find_available_agents(skills).await;
             if !agents.is_empty() {
                 let locations: Vec<Location> = agents
@@ -434,7 +434,7 @@ impl QueueApp {
                         ..Default::default()
                     })
                     .collect();
-                
+
                 info!(
                     "Queue: resolved {} dynamic agents for queue '{}'",
                     locations.len(),
@@ -446,10 +446,7 @@ impl QueueApp {
     }
 
     /// Announce queue position.
-    async fn announce_position(
-        &self,
-        _ctrl: &mut CallController,
-    ) -> anyhow::Result<()> {
+    async fn announce_position(&self, _ctrl: &mut CallController) -> anyhow::Result<()> {
         // TODO: Implement position announcement using TTS
         // For now, just log
         debug!("Queue: position announcement (not implemented)");
@@ -457,10 +454,7 @@ impl QueueApp {
     }
 
     /// Announce estimated wait time.
-    async fn announce_wait_time(
-        &self,
-        _ctrl: &mut CallController,
-    ) -> anyhow::Result<()> {
+    async fn announce_wait_time(&self, _ctrl: &mut CallController) -> anyhow::Result<()> {
         // TODO: Implement wait time announcement using TTS
         // For now, just log
         debug!("Queue: wait time announcement (not implemented)");
@@ -490,18 +484,15 @@ impl QueueApp {
     }
 
     /// Execute fallback and record abandoned call.
-    async fn handle_fallback_with_abandoned(
-        &mut self,
-    ) -> anyhow::Result<AppAction> {
+    async fn handle_fallback_with_abandoned(&mut self) -> anyhow::Result<AppAction> {
         let queue_id = self.config.name.clone();
-        let wait_secs = self.enqueued_at
-            .map(|t| t.elapsed().as_secs())
-            .unwrap_or(0);
+        let wait_secs = self.enqueued_at.map(|t| t.elapsed().as_secs()).unwrap_or(0);
 
         // Record call abandoned
         self.update_stats(&queue_id, |stats| {
             stats.calls_abandoned += 1;
-        }).await;
+        })
+        .await;
 
         info!(
             queue = %queue_id,
@@ -537,7 +528,8 @@ impl CallApp for QueueApp {
         self.update_stats(&queue_id, |stats| {
             stats.calls_offered += 1;
             stats.current_waiting += 1;
-        }).await;
+        })
+        .await;
 
         // Resolve agents dynamically if skill routing is enabled
         if self.config.skill_routing_enabled {
@@ -573,43 +565,52 @@ impl CallApp for QueueApp {
 
         // Start dialing agents if autonomous routing is enabled
         if self.config.autonomous_routing
-            && let Some(ref registry) = self.agent_registry {
-                let skills = &self.config.required_skills;
-                let strategy = self.config.routing_strategy;
+            && let Some(ref registry) = self.agent_registry
+        {
+            let skills = &self.config.required_skills;
+            let strategy = self.config.routing_strategy;
 
-                if let Some(agent) = registry
-                    .select_agent_with_policy(skills, strategy, self.config.acd_policy.as_deref())
-                    .await
-                {
-                    info!(agent_id = %agent.agent_id, uri = %agent.uri, "Queue: auto-selecting agent");
-                    
-                    // Update agent presence to ringing
-                    let _ = registry.update_presence(&agent.agent_id, PresenceState::Ringing).await;
-                    
-                    // Originate call to agent
-                    let _call_id = ctrl.originate_call(&agent.uri, Some(self.call_id.clone())).await?;
-                    
-                    // Notify external systems
-                    ctrl.notify_event("queue.agent_ringing", serde_json::json!({
+            if let Some(agent) = registry
+                .select_agent_with_policy(skills, strategy, self.config.acd_policy.as_deref())
+                .await
+            {
+                info!(agent_id = %agent.agent_id, uri = %agent.uri, "Queue: auto-selecting agent");
+
+                // Update agent presence to ringing
+                let _ = registry
+                    .update_presence(&agent.agent_id, PresenceState::Ringing)
+                    .await;
+
+                // Originate call to agent
+                let _call_id = ctrl
+                    .originate_call(&agent.uri, Some(self.call_id.clone()))
+                    .await?;
+
+                // Notify external systems
+                ctrl.notify_event(
+                    "queue.agent_ringing",
+                    serde_json::json!({
                         "call_id": self.call_id,
                         "agent_id": agent.agent_id,
                         "agent_uri": agent.uri,
                         "queue_id": queue_id,
-                    })).await?;
-                    
-                    self.state = QueueState::DialingAgents { attempt: 1 };
-                    self.dial_attempts = 1;
-                    
-                    // Set timeout for agent answer
-                    let ring_timeout = self.config.ring_timeout.unwrap_or(Duration::from_secs(20));
-                    ctrl.set_timeout("agent_ring_timeout", ring_timeout);
-                    
-                    return Ok(AppAction::Continue);
-                } else {
-                    warn!("Queue: no available agents for skill routing");
-                    return self.handle_fallback_with_abandoned().await;
-                }
+                    }),
+                )
+                .await?;
+
+                self.state = QueueState::DialingAgents { attempt: 1 };
+                self.dial_attempts = 1;
+
+                // Set timeout for agent answer
+                let ring_timeout = self.config.ring_timeout.unwrap_or(Duration::from_secs(20));
+                ctrl.set_timeout("agent_ring_timeout", ring_timeout);
+
+                return Ok(AppAction::Continue);
+            } else {
+                warn!("Queue: no available agents for skill routing");
+                return self.handle_fallback_with_abandoned().await;
             }
+        }
 
         // Transition to dialing state (for static agent configuration)
         self.state = QueueState::DialingAgents { attempt: 1 };
@@ -641,7 +642,7 @@ impl CallApp for QueueApp {
         _ctx: &ApplicationContext,
     ) -> anyhow::Result<AppAction> {
         let queue_id = self.config.name.clone();
-        
+
         match event {
             super::AppEvent::Custom { name, data } => match name.as_str() {
                 "agent_connected" => {
@@ -653,16 +654,16 @@ impl CallApp for QueueApp {
                         };
 
                         // Calculate wait time
-                        let wait_secs = self.enqueued_at
-                            .map(|t| t.elapsed().as_secs())
-                            .unwrap_or(0);
+                        let wait_secs =
+                            self.enqueued_at.map(|t| t.elapsed().as_secs()).unwrap_or(0);
 
                         // Update statistics
                         self.update_stats(&queue_id, |stats| {
                             stats.calls_answered += 1;
                             stats.total_wait_secs += wait_secs;
                             stats.current_waiting = stats.current_waiting.saturating_sub(1);
-                        }).await;
+                        })
+                        .await;
 
                         // Update agent state if registry is available
                         if let Some(ref registry) = self.agent_registry {
@@ -688,10 +689,12 @@ impl CallApp for QueueApp {
                 "agent_ringing" => {
                     if let Some(agent_id) = data.get("agent_id").and_then(|v| v.as_str()) {
                         info!(agent = %agent_id, "Queue: agent ringing");
-                        
+
                         // Update agent state if registry is available
                         if let Some(ref registry) = self.agent_registry {
-                            let _ = registry.update_presence(agent_id, PresenceState::Ringing).await;
+                            let _ = registry
+                                .update_presence(agent_id, PresenceState::Ringing)
+                                .await;
                         }
                     }
                     Ok(AppAction::Continue)
@@ -699,17 +702,23 @@ impl CallApp for QueueApp {
                 "agent_busy" => {
                     info!("Queue: agent busy");
                     if let Some(agent_id) = data.get("agent_id").and_then(|v| v.as_str())
-                        && let Some(ref registry) = self.agent_registry {
-                            let _ = registry.update_presence(agent_id, PresenceState::Busy).await;
-                        }
+                        && let Some(ref registry) = self.agent_registry
+                    {
+                        let _ = registry
+                            .update_presence(agent_id, PresenceState::Busy)
+                            .await;
+                    }
                     self.handle_agent_unavailable().await
                 }
                 "agent_no_answer" => {
                     info!("Queue: agent no answer");
                     if let Some(agent_id) = data.get("agent_id").and_then(|v| v.as_str())
-                        && let Some(ref registry) = self.agent_registry {
-                            let _ = registry.update_presence(agent_id, PresenceState::Available).await;
-                        }
+                        && let Some(ref registry) = self.agent_registry
+                    {
+                        let _ = registry
+                            .update_presence(agent_id, PresenceState::Available)
+                            .await;
+                    }
                     self.handle_agent_unavailable().await
                 }
                 "all_agents_busy" => {
@@ -731,60 +740,68 @@ impl CallApp for QueueApp {
         match id.as_str() {
             "agent_ring_timeout" => {
                 info!("Queue: agent ring timeout, handling no-answer");
-                
+
                 // Notify that agent didn't answer
                 if let Some(ref registry) = self.agent_registry {
                     // Find the agent that was ringing and set back to available
                     let agents = registry.list_agents().await;
                     for agent in agents {
                         if matches!(agent.presence, PresenceState::Ringing) {
-                            let _ = registry.update_presence(&agent.agent_id, PresenceState::Available).await;
-                            
+                            let _ = registry
+                                .update_presence(&agent.agent_id, PresenceState::Available)
+                                .await;
+
                             // Notify external systems
-                            ctrl.notify_event("queue.agent_no_answer", serde_json::json!({
-                                "call_id": self.call_id,
-                                "agent_id": agent.agent_id,
-                                "queue_id": self.config.name,
-                            })).await?;
-                            
+                            ctrl.notify_event(
+                                "queue.agent_no_answer",
+                                serde_json::json!({
+                                    "call_id": self.call_id,
+                                    "agent_id": agent.agent_id,
+                                    "queue_id": self.config.name,
+                                }),
+                            )
+                            .await?;
+
                             break;
                         }
                     }
                 }
-                
+
                 self.handle_agent_unavailable().await
             }
             "max_wait_timeout" => {
                 info!("Queue: max wait timeout, executing fallback");
-                
+
                 // Notify queue timeout
-                ctrl.notify_event("queue.timeout", serde_json::json!({
-                    "call_id": self.call_id,
-                    "queue_id": self.config.name,
-                    "wait_secs": self.enqueued_at.map(|t| t.elapsed().as_secs()).unwrap_or(0),
-                })).await?;
-                
+                ctrl.notify_event(
+                    "queue.timeout",
+                    serde_json::json!({
+                        "call_id": self.call_id,
+                        "queue_id": self.config.name,
+                        "wait_secs": self.enqueued_at.map(|t| t.elapsed().as_secs()).unwrap_or(0),
+                    }),
+                )
+                .await?;
+
                 self.handle_fallback_with_abandoned().await
             }
             _ => Ok(AppAction::Continue),
         }
     }
 
-    async fn on_exit(
-        &mut self, reason: super::ExitReason
-    ) -> anyhow::Result<()> {
+    async fn on_exit(&mut self, reason: super::ExitReason) -> anyhow::Result<()> {
         info!(?reason, "Queue: exiting queue application");
-        
+
         // Update statistics if call was not connected (abandoned)
         if !matches!(self.state, QueueState::Connected { .. }) {
             let queue_id = self.config.name.clone();
-            
-            self.update_stats(
-&queue_id, |stats| {
+
+            self.update_stats(&queue_id, |stats| {
                 stats.current_waiting = stats.current_waiting.saturating_sub(1);
-            }).await;
+            })
+            .await;
         }
-        
+
         self.state = QueueState::Done;
         Ok(())
     }

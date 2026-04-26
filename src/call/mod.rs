@@ -97,7 +97,11 @@ impl std::fmt::Display for Location {
         let is_webrtc = if self.supports_webrtc { ",webrtc" } else { "" };
         let fallback = self.aor.to_string();
         let contact = self.contact_raw.as_deref().unwrap_or(fallback.as_str());
-        let home = self.home_proxy.as_ref().map(|h| format!("[home={}]", h)).unwrap_or_default();
+        let home = self
+            .home_proxy
+            .as_ref()
+            .map(|h| format!("[home={}]", h))
+            .unwrap_or_default();
         match &self.destination {
             Some(d) => write!(f, "({} -> {} {}{})", contact, d, is_webrtc, home),
             None => write!(f, "({} -> ? {}{})", contact, is_webrtc, home),
@@ -167,6 +171,8 @@ pub enum DialStrategy {
 pub enum TransferEndpoint {
     Uri(String),
     Queue(String),
+    /// Forward to an IVR project by name (config/ivr/<name>.toml).
+    Ivr(String),
 }
 
 impl TransferEndpoint {
@@ -177,6 +183,7 @@ impl TransferEndpoint {
         }
 
         const QUEUE_PREFIX: &str = "queue:";
+        const IVR_PREFIX: &str = "ivr:";
 
         if trimmed.len() >= QUEUE_PREFIX.len()
             && trimmed[..QUEUE_PREFIX.len()].eq_ignore_ascii_case(QUEUE_PREFIX)
@@ -188,6 +195,17 @@ impl TransferEndpoint {
             // If name is numeric, it's likely an ID, but we store it as string in TransferEndpoint::Queue
             return Some(TransferEndpoint::Queue(name.to_string()));
         }
+
+        if trimmed.len() >= IVR_PREFIX.len()
+            && trimmed[..IVR_PREFIX.len()].eq_ignore_ascii_case(IVR_PREFIX)
+        {
+            let name = trimmed[IVR_PREFIX.len()..].trim();
+            if name.is_empty() {
+                return None;
+            }
+            return Some(TransferEndpoint::Ivr(name.to_string()));
+        }
+
         Some(TransferEndpoint::Uri(trimmed.to_string()))
     }
 }
@@ -197,6 +215,7 @@ impl std::fmt::Display for TransferEndpoint {
         match self {
             TransferEndpoint::Uri(uri) => write!(f, "{}", uri),
             TransferEndpoint::Queue(name) => write!(f, "queue:{}", name),
+            TransferEndpoint::Ivr(name) => write!(f, "ivr:{}", name),
         }
     }
 }
@@ -283,7 +302,6 @@ pub enum RingbackMode {
     Auto,
     None,
 }
-
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RingbackConfig {

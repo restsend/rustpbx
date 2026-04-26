@@ -58,12 +58,23 @@ struct QueryExtensionsFilters {
 #[derive(Debug, Clone, Serialize)]
 struct ForwardingCatalog {
     queues: Vec<ForwardingQueue>,
+    ivr_projects: Vec<ForwardingIvr>,
 }
 
 impl ForwardingCatalog {
     fn empty() -> Self {
-        Self { queues: Vec::new() }
+        Self {
+            queues: Vec::new(),
+            ivr_projects: Vec::new(),
+        }
     }
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ForwardingIvr {
+    /// IVR project name (used as file stem and forwarding reference).
+    name: String,
+    description: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -355,6 +366,35 @@ async fn build_forwarding_catalog(state: Arc<ConsoleState>) -> ForwardingCatalog
             }
         })
         .collect();
+
+    // Load IVR projects if ivr_editor addon is present
+    #[cfg(feature = "addon-ivr-editor")]
+    {
+        use crate::addons::ivr_editor::models::{Column as IvrColumn, Entity as IvrEntity};
+        match IvrEntity::find()
+            .filter(IvrColumn::Status.eq("active"))
+            .order_by_asc(IvrColumn::Name)
+            .all(state.db())
+            .await
+        {
+            Ok(ivr_models) => {
+                catalog.ivr_projects = ivr_models
+                    .into_iter()
+                    .map(|m| ForwardingIvr {
+                        name: m.name,
+                        description: m.description,
+                    })
+                    .collect();
+            }
+            Err(err) => {
+                warn!(
+                    "failed to load IVR projects for forwarding catalog: {}",
+                    err
+                );
+            }
+        }
+    }
+
     catalog
 }
 
@@ -501,17 +541,18 @@ async fn create_extension(
     };
 
     if let Some(ref dept_ids) = payload.department_ids
-        && let Err(err) = ExtensionEntity::replace_departments(db, model.id, dept_ids).await {
-            warn!(
-                "failed to set departments for extension {}: {}",
-                model.id, err
-            );
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"message": err.to_string()})),
-            )
-                .into_response();
-        }
+        && let Err(err) = ExtensionEntity::replace_departments(db, model.id, dept_ids).await
+    {
+        warn!(
+            "failed to set departments for extension {}: {}",
+            model.id, err
+        );
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"message": err.to_string()})),
+        )
+            .into_response();
+    }
 
     Json(json!({"status": "ok", "id": model.id})).into_response()
 }
@@ -587,24 +628,28 @@ async fn query_extensions(
         }
 
         if let Some(ref from_raw) = filters.created_at_from
-            && let Some(from) = parse_datetime_filter(from_raw) {
-                selector = selector.filter(ExtensionColumn::CreatedAt.gte(from));
-            }
+            && let Some(from) = parse_datetime_filter(from_raw)
+        {
+            selector = selector.filter(ExtensionColumn::CreatedAt.gte(from));
+        }
 
         if let Some(ref to_raw) = filters.created_at_to
-            && let Some(to) = parse_datetime_filter(to_raw) {
-                selector = selector.filter(ExtensionColumn::CreatedAt.lte(to));
-            }
+            && let Some(to) = parse_datetime_filter(to_raw)
+        {
+            selector = selector.filter(ExtensionColumn::CreatedAt.lte(to));
+        }
 
         if let Some(ref from_raw) = filters.registered_at_from
-            && let Some(from) = parse_datetime_filter(from_raw) {
-                selector = selector.filter(ExtensionColumn::RegisteredAt.gte(from));
-            }
+            && let Some(from) = parse_datetime_filter(from_raw)
+        {
+            selector = selector.filter(ExtensionColumn::RegisteredAt.gte(from));
+        }
 
         if let Some(ref to_raw) = filters.registered_at_to
-            && let Some(to) = parse_datetime_filter(to_raw) {
-                selector = selector.filter(ExtensionColumn::RegisteredAt.lte(to));
-            }
+            && let Some(to) = parse_datetime_filter(to_raw)
+        {
+            selector = selector.filter(ExtensionColumn::RegisteredAt.lte(to));
+        }
     }
     let sort_key = payload.sort.as_deref().unwrap_or("created_at_desc");
     match sort_key {
@@ -763,14 +808,15 @@ async fn update_extension(
             .into_response();
     }
     if let Some(ref dept_ids) = payload.department_ids
-        && let Err(err) = ExtensionEntity::replace_departments(db, id, dept_ids).await {
-            warn!("failed to update departments for extension {}: {}", id, err);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"message": err.to_string()})),
-            )
-                .into_response();
-        }
+        && let Err(err) = ExtensionEntity::replace_departments(db, id, dept_ids).await
+    {
+        warn!("failed to update departments for extension {}: {}", id, err);
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({"message": err.to_string()})),
+        )
+            .into_response();
+    }
     Json(json!({"status": "ok"})).into_response()
 }
 

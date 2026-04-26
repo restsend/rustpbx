@@ -35,17 +35,6 @@
                     </template>
                     {{ "queue.export_all" | t }}
                 </button>
-                <button type="button"
-                    class="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-600 transition hover:border-sky-300 hover:text-sky-700 focus:outline-none focus:ring-2 focus:ring-sky-200 focus:ring-offset-2"
-                    :class="loading ? 'cursor-wait border-slate-200 text-slate-400 hover:border-slate-200 hover:text-slate-400' : ''"
-                    :disabled="loading" @click="refresh()">
-                    <svg class="h-4 w-4" :class="loading ? 'animate-spin text-slate-400' : ''" viewBox="0 0 24 24"
-                        fill="none" stroke="currentColor" stroke-width="1.8">
-                        <path stroke-linecap="round" stroke-linejoin="round"
-                            d="M3 12a9 9 0 0 1 15.364-6.364L21 8.27M21 12a9 9 0 0 1-15.364 6.364L3 15.73" />
-                    </svg>
-                    {{ "queue.refresh_list" | t }}
-                </button>
                 <a :href="createUrl"
                     class="inline-flex items-center gap-2 rounded-lg bg-sky-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-offset-2">
                     <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8">
@@ -624,6 +613,7 @@
                     } else {
                         this.flash = this.tt('queue.queues_exported');
                     }
+                    await this.refresh();
                 } catch (err) {
                     console.error(err);
                     this.error = err?.message || this.tt('queue.export_all_error');
@@ -653,6 +643,7 @@
                     this.flash = path
                         ? this.tt('queue.queue_exported_to').replace('{path}', path)
                         : this.tt('queue.queue_exported');
+                    await this.refresh();
                 } catch (err) {
                     console.error(err);
                     this.error = err?.message || this.tt('queue.export_error');

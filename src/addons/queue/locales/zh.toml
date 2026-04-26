@@ -9,7 +9,6 @@ subtitle_desc = "创建语音队列，管理保持音乐，配置回落行为。
 
 # 列表页操作
 export_all = "全部导出"
-refresh_list = "刷新列表"
 new_queue = "新建队列"
 
 # 统计卡片

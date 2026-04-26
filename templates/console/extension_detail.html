@@ -277,6 +277,14 @@
                                                 @change="setForwardingTargetType('queue')">
                                             <span>{{ "extension_detail.queue" | t }}</span>
                                         </label>
+                                        <label x-show="ivrTargets.length > 0"
+                                            class="inline-flex items-center gap-2 rounded-lg border px-3 py-1.5 text-slate-600 transition"
+                                            :class="forwardingTargetType === 'ivr' ? 'border-sky-200 bg-sky-50 text-sky-700 shadow-sm' : 'border-slate-200 hover:border-slate-300'">
+                                            <input type="radio" class="h-4 w-4 border-slate-300 text-sky-600"
+                                                :checked="forwardingTargetType === 'ivr'"
+                                                @change="setForwardingTargetType('ivr')">
+                                            <span>{{ "extension_detail.ivr" | t }}</span>
+                                        </label>
                                         <label x-show="voicemailAddonEnabled"
                                             class="inline-flex items-center gap-2 rounded-lg border px-3 py-1.5 text-slate-600 transition"
                                             :class="forwardingTargetType === 'voicemail' ? 'border-sky-200 bg-sky-50 text-sky-700 shadow-sm' : 'border-slate-200 hover:border-slate-300'">
@@ -321,6 +329,22 @@
                                             class="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-500">
                                             {{ "extension_detail.no_queues" | t }}
                                         </div>
+                                    </template>
+                                </div>
+                                <div x-show="forwardingTargetType === 'ivr'" x-cloak class="space-y-3">
+                                    <template x-if="ivrTargets.length">
+                                        <label class="flex flex-col gap-1 text-sm font-medium text-slate-700">
+                                            {{ "extension_detail.select_ivr_label" | t }}
+                                            <select
+                                                class="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                                :disabled="form.call_forwarding_mode === 'none'"
+                                                x-model="forwardingTargetValue" @change="syncForwardingDestination()">
+                                                <option value="">{{ "extension_detail.select_ivr" | t }}</option>
+                                                <template x-for="ivr in ivrTargets" :key="ivr.name">
+                                                    <option :value="ivr.name" x-text="ivr.name"></option>
+                                                </template>
+                                            </select>
+                                        </label>
                                     </template>
                                 </div>
                                 <div x-show="forwardingTargetType === 'voicemail'" x-cloak class="space-y-2">
@@ -613,13 +637,14 @@
             const normalizeForwardingCatalog = (raw) => {
                 const catalog = {
                     queues: [],
+                    ivr_projects: [],
                 };
                 if (raw && Array.isArray(raw.queues)) {
                     catalog.queues = raw.queues
                         .map((queue) => {
                             const reference = typeof queue.reference === 'string'
                                 ? queue.reference.trim()
-                                : '';
+                                : String(queue.id || '');
                             return {
                                 id: queue.id,
                                 name: queue.name || '{{ "extension_detail.unnamed_queue" | t }}',
@@ -628,6 +653,14 @@
                             };
                         })
                         .filter((queue) => queue.reference.length);
+                }
+                if (raw && Array.isArray(raw.ivr_projects)) {
+                    catalog.ivr_projects = raw.ivr_projects
+                        .filter((ivr) => ivr && ivr.name)
+                        .map((ivr) => ({
+                            name: ivr.name,
+                            description: ivr.description || null,
+                        }));
                 }
                 return catalog;
             };
@@ -735,6 +768,9 @@
                 ],
                 get queueTargets() {
                     return this.forwardingCatalog.queues;
+                },
+                get ivrTargets() {
+                    return this.forwardingCatalog.ivr_projects || [];
                 },
                 setActiveTab(tabId) {
                     const fallback = this.tabs[0]?.id || 'profile';
@@ -1090,7 +1126,15 @@
                     const lower = destination.toLowerCase();
                     if (lower.startsWith('queue:')) {
                         this.forwardingTargetType = 'queue';
-                        this.forwardingTargetValue = destination.slice(6);
+                        // Use $nextTick so x-if + x-for options render before x-model syncs
+                        this.$nextTick(() => {
+                            this.forwardingTargetValue = destination.slice(6);
+                        });
+                    } else if (lower.startsWith('ivr:')) {
+                        this.forwardingTargetType = 'ivr';
+                        this.$nextTick(() => {
+                            this.forwardingTargetValue = destination.slice(4);
+                        });
                     } else if (lower.startsWith('voicemail:')) {
                         this.forwardingTargetType = 'voicemail';
                         this.forwardingTargetValue = destination.slice(10);
@@ -1100,7 +1144,7 @@
                     }
                 },
                 setForwardingTargetType(type) {
-                    const allowed = ['uri', 'queue', 'voicemail'];
+                    const allowed = ['uri', 'queue', 'ivr', 'voicemail'];
                     const normalized = allowed.includes(type) ? type : 'uri';
                     if (this.forwardingTargetType === normalized) {
                         return;
@@ -1112,9 +1156,11 @@
                         this.forwardingTargetValue = '';
                     } else if (normalized === 'queue' && lower.startsWith('queue:')) {
                         this.forwardingTargetValue = dest.slice(6);
+                    } else if (normalized === 'ivr' && lower.startsWith('ivr:')) {
+                        this.forwardingTargetValue = dest.slice(4);
                     } else if (normalized === 'voicemail' && lower.startsWith('voicemail:')) {
                         this.forwardingTargetValue = dest.slice(10);
-                    } else if (normalized === 'uri' && !lower.startsWith('queue:') && !lower.startsWith('voicemail:')) {
+                    } else if (normalized === 'uri' && !lower.startsWith('queue:') && !lower.startsWith('ivr:') && !lower.startsWith('voicemail:')) {
                         this.forwardingTargetValue = dest;
                     } else {
                         this.forwardingTargetValue = '';
@@ -1125,6 +1171,8 @@
                     const value = this.forwardingTargetValue.trim();
                     if (this.forwardingTargetType === 'queue') {
                         this.form.call_forwarding_destination = value ? `queue:${value}` : '';
+                    } else if (this.forwardingTargetType === 'ivr') {
+                        this.form.call_forwarding_destination = value ? `ivr:${value}` : '';
                     } else if (this.forwardingTargetType === 'voicemail') {
                         // Default to own extension's mailbox when the field is left empty
                         const ext = value || this.form.extension || '';
