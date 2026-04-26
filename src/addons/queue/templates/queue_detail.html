@@ -258,6 +258,9 @@ endblock %}
                                                 @change="target.uri = 'skill-group:' + target.skill_group_id"
                                                 class="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
                                                 <option value="" x-text="tt('queue.skill_group_select_placeholder')"></option>
+                                                <template x-if="target.skill_group_id && !hasSkillGroupOption(target.skill_group_id)">
+                                                    <option :value="target.skill_group_id" x-text="target.skill_group_id"></option>
+                                                </template>
                                                 <template x-for="group in skillGroups" :key="group.skill_group_id">
                                                     <option :value="group.skill_group_id" x-text="group.display_name || group.skill_group_id"></option>
                                                 </template>
@@ -365,6 +368,9 @@ endblock %}
                                 <select x-model="form.spec.fallback.skill_group_ref"
                                     class="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
                                     <option value="" x-text="tt('queue.fallback_skill_group_placeholder')"></option>
+                                    <template x-if="form.spec.fallback.skill_group_ref && !hasSkillGroupOption(form.spec.fallback.skill_group_ref)">
+                                        <option :value="form.spec.fallback.skill_group_ref" x-text="form.spec.fallback.skill_group_ref"></option>
+                                    </template>
                                     <template x-for="group in skillGroups" :key="group.skill_group_id">
                                         <option :value="group.skill_group_id" x-text="group.display_name || group.skill_group_id"></option>
                                     </template>
@@ -473,6 +479,52 @@ endblock %}
                 this.loadSkillGroups();
                 this.loadAcdPolicies();
             },
+            extractSkillGroupId(value) {
+                const raw = String(value || '').trim();
+                if (!raw) {
+                    return '';
+                }
+                const match = raw.match(/^skill(?:-|_)?group:(.+)$/i);
+                if (match && match[1]) {
+                    return match[1].trim();
+                }
+                return raw;
+            },
+            toSkillGroupUri(value) {
+                const id = this.extractSkillGroupId(value);
+                return id ? `skill-group:${id}` : '';
+            },
+            reconcileSkillGroupTargets() {
+                const targets = this.form?.spec?.strategy?.targets;
+                if (!Array.isArray(targets)) {
+                    return;
+                }
+                targets.forEach((target) => {
+                    if (!target || typeof target !== 'object') {
+                        return;
+                    }
+                    const groupId = this.extractSkillGroupId(target.skill_group_id || target.uri);
+                    if (!groupId) {
+                        return;
+                    }
+                    target.skill_group_id = groupId;
+                    target.uri = this.toSkillGroupUri(groupId);
+                });
+                const fallbackRef = this.extractSkillGroupId(this.form?.spec?.fallback?.skill_group_ref);
+                if (fallbackRef && this.form?.spec?.fallback) {
+                    this.form.spec.fallback.skill_group_ref = fallbackRef;
+                }
+            },
+            hasSkillGroupOption(value) {
+                const target = this.extractSkillGroupId(value);
+                if (!target) {
+                    return false;
+                }
+                return (this.skillGroups || []).some((group) => {
+                    const id = this.extractSkillGroupId(group?.skill_group_id);
+                    return id === target;
+                });
+            },
             loadSkillGroups() {
                 // Try to load skill groups from CC addon API
                 const loader = window.__ccSkillGroupsLoader;
@@ -480,6 +532,7 @@ endblock %}
                     loader()
                         .then((groups) => {
                             this.skillGroups = Array.isArray(groups) ? groups : [];
+                            this.reconcileSkillGroupTargets();
                         })
                         .catch(() => {
                             this.skillGroups = [];
@@ -490,6 +543,7 @@ endblock %}
                         .then(payload => {
                             const arr = Array.isArray(payload) ? payload : (payload && Array.isArray(payload.data) ? payload.data : []);
                             this.skillGroups = arr;
+                            this.reconcileSkillGroupTargets();
                         })
                         .catch(() => {
                             this.skillGroups = [];
@@ -565,31 +619,58 @@ endblock %}
                         failure_reason: raw?.fallback?.failure_reason || '',
                         failure_prompt: raw?.fallback?.failure_prompt || '',
                         queue_ref: raw?.fallback?.queue_ref || '',
-                        skill_group_ref: raw?.fallback?.skill_group_ref || '',
+                        skill_group_ref: this.extractSkillGroupId(raw?.fallback?.skill_group_ref || ''),
                     },
                     strategy: {
                         mode: raw?.strategy?.mode === 'parallel' ? 'parallel' : 'sequential',
                         wait_timeout_secs: Number.isFinite(Number(raw?.strategy?.wait_timeout_secs))
                             ? Number(raw.strategy.wait_timeout_secs)
                             : null,
-                        targets: Array.isArray(raw?.strategy?.targets)
-                            ? raw.strategy.targets
-                                .map((target) => {
-                                    const uri = (target?.uri || '').trim();
-                                    if (uri.startsWith('skill-group:')) {
-                                        return {
-                                            uri: uri,
+                        targets: (() => {
+                            const list = [];
+                            if (Array.isArray(raw?.strategy?.targets)) {
+                                raw.strategy.targets.forEach((target) => {
+                                    const uriText = (target?.uri || '').trim();
+                                    const legacySkillId = this.extractSkillGroupId(target?.skill_group_id || uriText);
+                                    if (legacySkillId && (/^skill(?:-|_)?group:/i.test(uriText) || target?.skill_group_id)) {
+                                        list.push({
+                                            uri: this.toSkillGroupUri(legacySkillId),
                                             label: (target?.label || '').trim(),
-                                            skill_group_id: uri.replace(/^skill-group:/, '').trim(),
-                                        };
+                                            skill_group_id: legacySkillId,
+                                        });
+                                        return;
                                     }
-                                    return {
-                                        uri: uri,
-                                        label: (target?.label || '').trim(),
-                                    };
-                                })
-                                .filter((target) => target.uri)
-                            : [],
+                                    if (uriText) {
+                                        list.push({
+                                            uri: uriText,
+                                            label: (target?.label || '').trim(),
+                                        });
+                                    }
+                                });
+                            }
+                            if (Array.isArray(raw?.strategy?.skill_groups)) {
+                                raw.strategy.skill_groups.forEach((entry) => {
+                                    const skillId = this.extractSkillGroupId(entry);
+                                    if (!skillId) {
+                                        return;
+                                    }
+                                    list.push({
+                                        uri: this.toSkillGroupUri(skillId),
+                                        label: '',
+                                        skill_group_id: skillId,
+                                    });
+                                });
+                            }
+                            const seen = new Set();
+                            return list.filter((target) => {
+                                const key = `${target.uri}|${target.label || ''}`;
+                                if (!target.uri || seen.has(key)) {
+                                    return false;
+                                }
+                                seen.add(key);
+                                return true;
+                            });
+                        })(),
                     },
                     acd_policy: raw?.acd_policy || '',
                 };
@@ -597,6 +678,14 @@ endblock %}
             },
             detectFallbackMode(fallback) {
                 if ((fallback?.skill_group_ref || '').trim()) {
+                    return 'skill_group';
+                }
+                if ((fallback?.queue_ref || '').trim().toLowerCase().startsWith('skill-group:')) {
+                    const ref = this.extractSkillGroupId(fallback.queue_ref);
+                    if (this.form?.spec?.fallback) {
+                        this.form.spec.fallback.skill_group_ref = ref;
+                        this.form.spec.fallback.queue_ref = '';
+                    }
                     return 'skill_group';
                 }
                 if ((fallback?.queue_ref || '').trim()) {
@@ -692,11 +781,11 @@ endblock %}
                     .map((target) => {
                         const uri = (target.uri || '').trim();
                         // Handle skill-group targets
-                        if (uri.startsWith('skill-group:')) {
-                            const skillGroupId = uri.replace(/^skill-group:/, '').trim();
+                        if (/^skill(?:-|_)?group:/i.test(uri) || target?.skill_group_id) {
+                            const skillGroupId = this.extractSkillGroupId(target.skill_group_id || uri);
                             if (skillGroupId) {
                                 return {
-                                    uri: uri,
+                                    uri: this.toSkillGroupUri(skillGroupId),
                                     label: (target.label || '').trim() || null,
                                 };
                             }

@@ -334,7 +334,6 @@ pub async fn create_queue(
     match active.insert(db).await {
         Ok(model) => {
             export_queue_async(state.as_ref(), model.id).await;
-            state.mark_pending_reload();
             Json(json!({"status": "ok", "id": model.id})).into_response()
         }
         Err(err) => {
@@ -381,29 +380,30 @@ pub async fn update_queue(
         .filter(|v| !v.is_empty());
 
     if let Some(name) = &requested_name
-        && name != &model.name {
-            match QueueEntity::find()
-                .filter(QueueColumn::Name.eq(name.clone()))
-                .one(db)
-                .await
-            {
-                Ok(Some(other)) if other.id != id => {
-                    return bad_request("Queue name already exists");
-                }
-                Ok(_) => {}
-                Err(err) => {
-                    warn!(
-                        "failed to enforce queue uniqueness on update {}: {}",
-                        id, err
-                    );
-                    return (
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                        Json(json!({"message": format!("Failed to update queue: {}", err)})),
-                    )
-                        .into_response();
-                }
+        && name != &model.name
+    {
+        match QueueEntity::find()
+            .filter(QueueColumn::Name.eq(name.clone()))
+            .one(db)
+            .await
+        {
+            Ok(Some(other)) if other.id != id => {
+                return bad_request("Queue name already exists");
+            }
+            Ok(_) => {}
+            Err(err) => {
+                warn!(
+                    "failed to enforce queue uniqueness on update {}: {}",
+                    id, err
+                );
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({"message": format!("Failed to update queue: {}", err)})),
+                )
+                    .into_response();
             }
         }
+    }
 
     let mut active: QueueActiveModel = model.into();
     if let Some(name) = requested_name {
@@ -426,7 +426,6 @@ pub async fn update_queue(
     match active.update(db).await {
         Ok(updated) => {
             export_queue_async(state.as_ref(), updated.id).await;
-            state.mark_pending_reload();
             Json(json!({"status": "ok", "id": updated.id})).into_response()
         }
         Err(err) => {
@@ -479,7 +478,6 @@ pub async fn delete_queue(
                 if let Some(entry) = export_entry {
                     remove_queue_export(state.as_ref(), entry).await;
                 }
-                state.mark_pending_reload();
                 Json(json!({"status": "ok", "rows_affected": result.rows_affected})).into_response()
             }
         }
@@ -614,7 +612,12 @@ fn build_queue_metadata(
                 wrapper.insert("value".to_string(), other);
                 wrapper
             }
-            Err(err) => return Err(Box::new(bad_request(format!("Metadata must be valid JSON: {}", err)))),
+            Err(err) => {
+                return Err(Box::new(bad_request(format!(
+                    "Metadata must be valid JSON: {}",
+                    err
+                ))));
+            }
         },
         None => JsonMap::new(),
     };
@@ -638,8 +641,7 @@ fn format_metadata_text(metadata: &Option<Value>) -> String {
 }
 
 fn proxy_config_optional(state: &ConsoleState) -> Option<ProxyConfig> {
-    state
-        .app_state().map(|app| app.config().proxy.clone())
+    state.app_state().map(|app| app.config().proxy.clone())
 }
 
 fn proxy_config_required(state: &ConsoleState) -> Result<ProxyConfig, Box<Response>> {

@@ -149,54 +149,52 @@ impl RouteInvite for DefaultRouteInvite {
             self.build_context(origin, direction).await;
         if matches!(direction, DialDirection::Inbound)
             && let Some(source) = source_trunk.as_ref()
-                && let Some(trunk_cfg) = trunks_snapshot.get(&source.name) {
-                    let from_user = extract_from_user(origin);
-                    let to_user = extract_to_user(origin);
-                    match trunk_cfg
-                        .matches_incoming_user_prefixes(from_user.as_deref(), to_user.as_deref())
-                    {
-                        Ok(true) => {}
-                        Ok(false) => {
-                            let detail = format!(
-                                "caller='{}', callee='{}' rejected by prefix policy",
-                                from_user.as_deref().unwrap_or(""),
-                                to_user.as_deref().unwrap_or("")
-                            );
-                            let reason = q850_reason_value(
-                                &rsipstack::sip::StatusCode::Forbidden,
-                                Some(&detail),
-                            );
-                            warn!(
-                                trunk = %source.name,
-                                from = from_user.as_deref().unwrap_or(""),
-                                to = to_user.as_deref().unwrap_or(""),
-                                reason = %reason,
-                                "dropping inbound INVITE due to SIP trunk user prefix mismatch",
-                            );
-                            return Ok(RouteResult::Abort(
-                                rsipstack::sip::StatusCode::Forbidden,
-                                Some(reason),
-                            ));
-                        }
-                        Err(mismatch) => {
-                            let reason = q850_reason_value(
-                                &rsipstack::sip::StatusCode::Forbidden,
-                                Some(&mismatch.to_string()),
-                            );
-                            warn!(
-                                trunk = %source.name,
-                                from = from_user.as_deref().unwrap_or(""),
-                                to = to_user.as_deref().unwrap_or(""),
-                                reason = %reason,
-                                "dropping inbound INVITE due to SIP trunk user prefix mismatch",
-                            );
-                            return Ok(RouteResult::Abort(
-                                rsipstack::sip::StatusCode::Forbidden,
-                                Some(reason),
-                            ));
-                        }
-                    }
+            && let Some(trunk_cfg) = trunks_snapshot.get(&source.name)
+        {
+            let from_user = extract_from_user(origin);
+            let to_user = extract_to_user(origin);
+            match trunk_cfg.matches_incoming_user_prefixes(from_user.as_deref(), to_user.as_deref())
+            {
+                Ok(true) => {}
+                Ok(false) => {
+                    let detail = format!(
+                        "caller='{}', callee='{}' rejected by prefix policy",
+                        from_user.as_deref().unwrap_or(""),
+                        to_user.as_deref().unwrap_or("")
+                    );
+                    let reason =
+                        q850_reason_value(&rsipstack::sip::StatusCode::Forbidden, Some(&detail));
+                    warn!(
+                        trunk = %source.name,
+                        from = from_user.as_deref().unwrap_or(""),
+                        to = to_user.as_deref().unwrap_or(""),
+                        reason = %reason,
+                        "dropping inbound INVITE due to SIP trunk user prefix mismatch",
+                    );
+                    return Ok(RouteResult::Abort(
+                        rsipstack::sip::StatusCode::Forbidden,
+                        Some(reason),
+                    ));
                 }
+                Err(mismatch) => {
+                    let reason = q850_reason_value(
+                        &rsipstack::sip::StatusCode::Forbidden,
+                        Some(&mismatch.to_string()),
+                    );
+                    warn!(
+                        trunk = %source.name,
+                        from = from_user.as_deref().unwrap_or(""),
+                        to = to_user.as_deref().unwrap_or(""),
+                        reason = %reason,
+                        "dropping inbound INVITE due to SIP trunk user prefix mismatch",
+                    );
+                    return Ok(RouteResult::Abort(
+                        rsipstack::sip::StatusCode::Forbidden,
+                        Some(reason),
+                    ));
+                }
+            }
+        }
         let resource_lookup = self.data_context.as_ref() as &dyn RouteResourceLookup;
         match_invite(
             if trunks_snapshot.is_empty() {
@@ -281,9 +279,10 @@ impl DefaultRouteInvite {
         }
 
         if let Some(name) = self.source_trunk_hint.as_ref()
-            && let Some(config) = trunks.get(name) {
-                return build_source_trunk(name.clone(), config, direction);
-            }
+            && let Some(config) = trunks.get(name)
+        {
+            return build_source_trunk(name.clone(), config, direction);
+        }
 
         let via = origin.via_header().ok()?;
         let (_, target) = SipConnection::parse_target_from_via(via).ok()?;
@@ -406,8 +405,7 @@ impl CallModule {
         caller: &SipUser,
         cookie: &TransactionCookie,
     ) -> Result<Dialplan, RouteError> {
-        let callee_uri =
-            resolve_callee_uri(original).map_err(|e| RouteError::from((e, None)))?;
+        let callee_uri = resolve_callee_uri(original).map_err(|e| RouteError::from((e, None)))?;
         let callee_realm = callee_uri.host().to_string();
 
         let dialog_id = original
@@ -457,9 +455,11 @@ impl CallModule {
                     }
                 }
                 res => {
-                    if let Some(display_name) = res.ok()
-                        .flatten()
-                        .and_then(|user| user.display_name) { cookie.insert_extension(CalleeDisplayName(display_name)) }
+                    if let Some(display_name) =
+                        res.ok().flatten().and_then(|user| user.display_name)
+                    {
+                        cookie.insert_extension(CalleeDisplayName(display_name))
+                    }
                     DialDirection::Internal
                 }
             }
@@ -489,22 +489,125 @@ impl CallModule {
         }];
         let mut internal_lookup_empty = false;
 
-        if callee_is_same_realm
-            && let Ok(results) = self.inner.server.locator.lookup(&callee_uri).await {
-                internal_lookup_empty = results.is_empty();
-                if internal_lookup_empty {
-                    warn!(
-                        callee_uri = %callee_uri,
-                        callee_realm = %callee_realm,
-                        caller_realm = ?caller.realm,
-                        "locator lookup returned empty results for same-realm callee"
-                    );
-                } else if !results.is_empty() {
-                    // Keep locator-provided target metadata (destination/home_proxy/path/etc.)
-                    // so SipSession can route cross-node calls via remote home_proxy.
-                    locs = results;
+        let callee_forwarding = self
+            .resolve_callee_user(original)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|callee| callee.forwarding_config());
+
+        let always_forwarding = matches!(
+            callee_forwarding.as_ref().map(|cfg| &cfg.mode),
+            Some(crate::call::CallForwardingMode::Always)
+        );
+
+        let mut forced_preview_forward: Option<InviteOption> = None;
+        let mut forced_pending_queue: Option<crate::call::QueuePlan> = None;
+        let mut forced_pending_app: Option<(String, Option<serde_json::Value>, bool)> = None;
+
+        if let Some(config) = callee_forwarding.as_ref()
+            && matches!(config.mode, crate::call::CallForwardingMode::Always)
+        {
+            match &config.endpoint {
+                crate::call::TransferEndpoint::Uri(uri) => {
+                    let forwarded_uri =
+                        rsipstack::sip::Uri::try_from(uri.as_str()).map_err(|e| {
+                            RouteError::from((
+                                anyhow!("invalid always-forwarding target '{}': {}", uri, e),
+                                Some(rsipstack::sip::StatusCode::ServerInternalError),
+                            ))
+                        })?;
+                    forced_preview_forward = Some(InviteOption {
+                        callee: forwarded_uri,
+                        ..Default::default()
+                    });
+                }
+                crate::call::TransferEndpoint::Queue(queue_ref) => {
+                    let reference = queue_ref.trim();
+                    if reference.is_empty() {
+                        return Err(RouteError::from((
+                            anyhow!("always-forwarding queue reference is empty"),
+                            Some(rsipstack::sip::StatusCode::ServerInternalError),
+                        )));
+                    }
+                    let lookup_ref = if reference.chars().all(|c| c.is_ascii_digit()) {
+                        format!("db-{}", reference)
+                    } else {
+                        reference.to_string()
+                    };
+                    let queue_cfg = self
+                        .inner
+                        .server
+                        .data_context
+                        .resolve_queue_config(lookup_ref.as_str())
+                        .map_err(|e| {
+                            RouteError::from((
+                                anyhow!(
+                                    "failed to resolve always-forwarding queue '{}': {}",
+                                    reference,
+                                    e
+                                ),
+                                Some(rsipstack::sip::StatusCode::ServerInternalError),
+                            ))
+                        })?
+                        .ok_or_else(|| {
+                            RouteError::from((
+                                anyhow!("always-forwarding queue '{}' not found", reference),
+                                Some(rsipstack::sip::StatusCode::TemporarilyUnavailable),
+                            ))
+                        })?;
+
+                    let mut queue_plan = queue_cfg.to_queue_plan().map_err(|e| {
+                        RouteError::from((
+                            anyhow!(
+                                "failed to build always-forwarding queue plan '{}': {}",
+                                reference,
+                                e
+                            ),
+                            Some(rsipstack::sip::StatusCode::ServerInternalError),
+                        ))
+                    })?;
+                    if queue_plan.label.is_none() {
+                        queue_plan.label = Some(reference.to_string());
+                    }
+                    forced_pending_queue = Some(queue_plan);
+                }
+                crate::call::TransferEndpoint::Ivr(ivr_name) => {
+                    let name = ivr_name.trim();
+                    if name.is_empty() {
+                        return Err(RouteError::from((
+                            anyhow!("always-forwarding IVR name is empty"),
+                            Some(rsipstack::sip::StatusCode::ServerInternalError),
+                        )));
+                    }
+                    let ivr_file = format!("config/ivr/{}.toml", name);
+                    forced_pending_app = Some((
+                        "ivr".to_string(),
+                        Some(serde_json::json!({ "file": ivr_file })),
+                        true,
+                    ));
                 }
             }
+        }
+
+        if callee_is_same_realm
+            && !always_forwarding
+            && let Ok(results) = self.inner.server.locator.lookup(&callee_uri).await
+        {
+            internal_lookup_empty = results.is_empty();
+            if internal_lookup_empty {
+                warn!(
+                    callee_uri = %callee_uri,
+                    callee_realm = %callee_realm,
+                    caller_realm = ?caller.realm,
+                    "locator lookup returned empty results for same-realm callee"
+                );
+            } else if !results.is_empty() {
+                // Keep locator-provided target metadata (destination/home_proxy/path/etc.)
+                // so SipSession can route cross-node calls via remote home_proxy.
+                locs = results;
+            }
+        }
 
         let caller_uri = match caller.from.as_ref() {
             Some(uri) => uri.clone(),
@@ -522,33 +625,42 @@ impl CallModule {
             ..Default::default()
         };
 
-        let preview_outcome = route_invite
-            .preview_route(preview_option, original, &direction, cookie)
-            .await
-            .map_err(|e| {
-                RouteError::from((
-                    anyhow::anyhow!(e),
-                    Some(rsipstack::sip::StatusCode::ServerInternalError),
-                ))
-            })?;
+        let (preview_forward, pending_queue, pending_app, dialplan_hints) = if always_forwarding {
+            (
+                forced_preview_forward,
+                forced_pending_queue,
+                forced_pending_app,
+                None,
+            )
+        } else {
+            let preview_outcome = route_invite
+                .preview_route(preview_option, original, &direction, cookie)
+                .await
+                .map_err(|e| {
+                    RouteError::from((
+                        anyhow::anyhow!(e),
+                        Some(rsipstack::sip::StatusCode::ServerInternalError),
+                    ))
+                })?;
 
-        let (preview_forward, pending_queue, pending_app, dialplan_hints) = match preview_outcome {
-            RouteResult::Queue { queue, hints, .. } => (None, Some(queue), None, hints),
-            RouteResult::Forward(option, hints) => (Some(option), None, None, hints),
-            RouteResult::NotHandled(_, hints) => (None, None, None, hints),
-            RouteResult::Abort(code, reason) => {
-                let err = anyhow::anyhow!(
-                    reason.unwrap_or_else(|| "route aborted during preview".to_string())
-                );
-                return Err(RouteError::from((err, Some(code))));
+            match preview_outcome {
+                RouteResult::Queue { queue, hints, .. } => (None, Some(queue), None, hints),
+                RouteResult::Forward(option, hints) => (Some(option), None, None, hints),
+                RouteResult::NotHandled(_, hints) => (None, None, None, hints),
+                RouteResult::Abort(code, reason) => {
+                    let err = anyhow::anyhow!(
+                        reason.unwrap_or_else(|| "route aborted during preview".to_string())
+                    );
+                    return Err(RouteError::from((err, Some(code))));
+                }
+                RouteResult::Application {
+                    option: _,
+                    app_name,
+                    app_params,
+                    auto_answer,
+                    ..
+                } => (None, None, Some((app_name, app_params, auto_answer)), None),
             }
-            RouteResult::Application {
-                option: _,
-                app_name,
-                app_params,
-                auto_answer,
-                ..
-            } => (None, None, Some((app_name, app_params, auto_answer)), None),
         };
 
         let queue_targets = pending_queue
@@ -599,9 +711,10 @@ impl CallModule {
                 dialplan.recording.enabled = enabled;
             }
             if let Some(bypass) = hints.bypass_media
-                && bypass {
-                    dialplan.media.proxy_mode = crate::config::MediaProxyMode::None;
-                }
+                && bypass
+            {
+                dialplan.media.proxy_mode = crate::config::MediaProxyMode::None;
+            }
             if let Some(max_duration) = hints.max_duration {
                 dialplan.max_call_duration = Some(max_duration);
             }
@@ -918,14 +1031,15 @@ impl CallModule {
 
         let mut dialplan = dialplan;
         if dialplan.caller_contact.is_none()
-            && let Some(contact_uri) = self.inner.server.default_contact_uri() {
-                let contact = rsipstack::sip::typed::Contact {
-                    display_name: None,
-                    uri: contact_uri,
-                    params: vec![],
-                };
-                dialplan = dialplan.with_caller_contact(contact);
-            }
+            && let Some(contact_uri) = self.inner.server.default_contact_uri()
+        {
+            let contact = rsipstack::sip::typed::Contact {
+                display_name: None,
+                uri: contact_uri,
+                params: vec![],
+            };
+            dialplan = dialplan.with_caller_contact(contact);
+        }
         for inspector in &self.inner.server.dialplan_inspectors {
             dialplan = inspector
                 .inspect_dialplan(dialplan, &cookie, &tx.original)
@@ -943,9 +1057,10 @@ impl CallModule {
                 Ok(Some(callee)) => {
                     // Apply call-forwarding only when no custom resolver already set it.
                     if dialplan.call_forwarding.is_none()
-                        && let Some(config) = callee.forwarding_config() {
-                            dialplan = dialplan.with_call_forwarding(Some(config));
-                        }
+                        && let Some(config) = callee.forwarding_config()
+                    {
+                        dialplan = dialplan.with_call_forwarding(Some(config));
+                    }
                     // Propagate voicemail eligibility into the dialplan so that
                     // the call session can decide whether to chain to voicemail
                     // on no-answer / busy without having to re-query the DB.
@@ -1495,13 +1610,14 @@ impl CallModule {
 
             // Emit transfer event to RWI if applicable
             if let Some(_user) = user
-                && let Some(ref gw) = server.rwi_gateway {
-                    let event = crate::rwi::proto::RwiEvent::CallTransferred {
-                        call_id: original_session_id.clone(),
-                    };
-                    let g = gw.read().await;
-                    g.send_event_to_call_owner(&original_session_id, &event);
-                }
+                && let Some(ref gw) = server.rwi_gateway
+            {
+                let event = crate::rwi::proto::RwiEvent::CallTransferred {
+                    call_id: original_session_id.clone(),
+                };
+                let g = gw.read().await;
+                g.send_event_to_call_owner(&original_session_id, &event);
+            }
         });
 
         Ok(())
@@ -1795,7 +1911,9 @@ impl CallModule {
         let body = String::from_utf8_lossy(tx.original.body());
         let content_type = tx.original.headers.iter().find_map(|h| match h {
             rsipstack::sip::Header::ContentType(ct) => Some(ct.value().to_string()),
-            rsipstack::sip::Header::Other(name, value) if name.eq_ignore_ascii_case("Content-Type") => {
+            rsipstack::sip::Header::Other(name, value)
+                if name.eq_ignore_ascii_case("Content-Type") =>
+            {
                 Some(value.to_string())
             }
             _ => None,
@@ -1805,93 +1923,93 @@ impl CallModule {
 
         // Parse JSON body
         if content_type.as_deref() == Some("application/json")
-            && let Ok(cmd) = serde_json::from_str::<serde_json::Value>(&body) {
-                let cmd_type = cmd.get("cmd").and_then(|v| v.as_str()).unwrap_or_default();
-                let call_id = cmd.get("call_id").and_then(|v| v.as_str()).unwrap_or_default();
-                let agent_id = cmd.get("agent_id").and_then(|v| v.as_str()).unwrap_or_default();
-                let target = cmd.get("target").and_then(|v| v.as_str()).unwrap_or_default();
-                let transfer_id = cmd.get("transfer_id").and_then(|v| v.as_str())
-                    .map(|s| s.to_string())
-                    .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+            && let Ok(cmd) = serde_json::from_str::<serde_json::Value>(&body)
+        {
+            let cmd_type = cmd.get("cmd").and_then(|v| v.as_str()).unwrap_or_default();
+            let call_id = cmd
+                .get("call_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            let agent_id = cmd
+                .get("agent_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            let target = cmd
+                .get("target")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            let transfer_id = cmd
+                .get("transfer_id")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
-                match cmd_type {
-                    "consult.initiate" => {
-                        info!(call_id = %call_id, agent_id = %agent_id, target = %target, "SIP MESSAGE: consult.initiate");
-                        
-                        // Hold the original call (A)
-                        let registry = self.inner.server.active_call_registry.clone();
-                        if let Some(handle) = registry.get_handle(call_id) {
-                            let _ = handle.send_command(crate::call::domain::CallCommand::Hold {
-                                leg_id: crate::call::domain::LegId::new(call_id),
-                                music: None,
-                            });
-                        }
+            match cmd_type {
+                "consult.initiate" => {
+                    info!(call_id = %call_id, agent_id = %agent_id, target = %target, "SIP MESSAGE: consult.initiate");
 
-                        // Send 200 OK with transfer_id
-                        let response_body = serde_json::json!({
-                            "status": "ok",
-                            "transfer_id": transfer_id,
-                            "cmd": "consult.initiate"
-                        }).to_string();
-                        tx.reply_with(
-                            rsipstack::sip::StatusCode::OK,
-                            vec![
-                                rsipstack::sip::Header::ContentType(
-                                    rsipstack::sip::headers::untyped::ContentType::new("application/json")
-                                ),
-                            ],
-                            Some(response_body.into_bytes()),
-                        ).await?;
-                        return Ok(());
+                    // Hold the original call (A)
+                    let registry = self.inner.server.active_call_registry.clone();
+                    if let Some(handle) = registry.get_handle(call_id) {
+                        let _ = handle.send_command(crate::call::domain::CallCommand::Hold {
+                            leg_id: crate::call::domain::LegId::new(call_id),
+                            music: None,
+                        });
                     }
-                    "consult.merge" => {
-                        info!(transfer_id = %transfer_id, "SIP MESSAGE: consult.merge");
-                        
-                        tx.reply_with(
-                            rsipstack::sip::StatusCode::OK,
-                            vec![],
-                            None,
-                        ).await?;
-                        return Ok(());
-                    }
-                    "consult.complete" => {
-                        info!(transfer_id = %transfer_id, "SIP MESSAGE: consult.complete");
-                        
-                        tx.reply_with(
-                            rsipstack::sip::StatusCode::OK,
-                            vec![],
-                            None,
-                        ).await?;
-                        return Ok(());
-                    }
-                    "consult.cancel" => {
-                        info!(transfer_id = %transfer_id, "SIP MESSAGE: consult.cancel");
-                        
-                        // Unhold the original call
-                        let registry = self.inner.server.active_call_registry.clone();
-                        if let Some(handle) = registry.get_handle(call_id) {
-                            let _ = handle.send_command(crate::call::domain::CallCommand::Unhold {
-                                leg_id: crate::call::domain::LegId::new(call_id),
-                            });
-                        }
 
-                        tx.reply_with(
-                            rsipstack::sip::StatusCode::OK,
-                            vec![],
-                            None,
-                        ).await?;
-                        return Ok(());
-                    }
-                    _ => {}
+                    // Send 200 OK with transfer_id
+                    let response_body = serde_json::json!({
+                        "status": "ok",
+                        "transfer_id": transfer_id,
+                        "cmd": "consult.initiate"
+                    })
+                    .to_string();
+                    tx.reply_with(
+                        rsipstack::sip::StatusCode::OK,
+                        vec![rsipstack::sip::Header::ContentType(
+                            rsipstack::sip::headers::untyped::ContentType::new("application/json"),
+                        )],
+                        Some(response_body.into_bytes()),
+                    )
+                    .await?;
+                    return Ok(());
                 }
+                "consult.merge" => {
+                    info!(transfer_id = %transfer_id, "SIP MESSAGE: consult.merge");
+
+                    tx.reply_with(rsipstack::sip::StatusCode::OK, vec![], None)
+                        .await?;
+                    return Ok(());
+                }
+                "consult.complete" => {
+                    info!(transfer_id = %transfer_id, "SIP MESSAGE: consult.complete");
+
+                    tx.reply_with(rsipstack::sip::StatusCode::OK, vec![], None)
+                        .await?;
+                    return Ok(());
+                }
+                "consult.cancel" => {
+                    info!(transfer_id = %transfer_id, "SIP MESSAGE: consult.cancel");
+
+                    // Unhold the original call
+                    let registry = self.inner.server.active_call_registry.clone();
+                    if let Some(handle) = registry.get_handle(call_id) {
+                        let _ = handle.send_command(crate::call::domain::CallCommand::Unhold {
+                            leg_id: crate::call::domain::LegId::new(call_id),
+                        });
+                    }
+
+                    tx.reply_with(rsipstack::sip::StatusCode::OK, vec![], None)
+                        .await?;
+                    return Ok(());
+                }
+                _ => {}
             }
+        }
 
         // Default: accept but do nothing
-        tx.reply_with(
-            rsipstack::sip::StatusCode::OK,
-            vec![],
-            None,
-        ).await?;
+        tx.reply_with(rsipstack::sip::StatusCode::OK, vec![], None)
+            .await?;
         Ok(())
     }
 }
@@ -1959,20 +2077,21 @@ impl ProxyModule for CallModule {
                 }
 
                 if let Err(e) = self.handle_invite(token, tx, cookie).await
-                    && tx.last_response.is_none() {
-                        let code = rsipstack::sip::StatusCode::ServerInternalError;
-                        let reason_text = e.to_string();
-                        tx.reply_with(
-                            code.clone(),
-                            vec![rsipstack::sip::Header::Other(
-                                "Reason".into(),
-                                q850_reason_value(&code, Some(reason_text.as_str())),
-                            )],
-                            None,
-                        )
-                        .await
-                        .map_err(|e| anyhow!(e))?;
-                    }
+                    && tx.last_response.is_none()
+                {
+                    let code = rsipstack::sip::StatusCode::ServerInternalError;
+                    let reason_text = e.to_string();
+                    tx.reply_with(
+                        code.clone(),
+                        vec![rsipstack::sip::Header::Other(
+                            "Reason".into(),
+                            q850_reason_value(&code, Some(reason_text.as_str())),
+                        )],
+                        None,
+                    )
+                    .await
+                    .map_err(|e| anyhow!(e))?;
+                }
                 Ok(ProxyAction::Abort)
             }
             rsipstack::sip::Method::Options
@@ -2006,11 +2125,13 @@ impl ProxyModule for CallModule {
             rsipstack::sip::Method::Message => {
                 if let Err(e) = self.handle_message(tx, &cookie).await {
                     warn!(%dialog_id, "Failed to handle MESSAGE: {}", e);
-                    let _ = tx.reply_with(
-                        rsipstack::sip::StatusCode::ServerInternalError,
-                        vec![],
-                        None,
-                    ).await;
+                    let _ = tx
+                        .reply_with(
+                            rsipstack::sip::StatusCode::ServerInternalError,
+                            vec![],
+                            None,
+                        )
+                        .await;
                 }
                 Ok(ProxyAction::Abort)
             }
@@ -2026,12 +2147,12 @@ impl ProxyModule for CallModule {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::call::Location;
     use crate::call::{DialDirection, RouteInvite, SipUser, TransactionCookie};
     use crate::config::RouteResult;
     use crate::proxy::tests::common::create_test_server;
     use async_trait::async_trait;
     use rsipstack::dialog::invitation::InviteOption;
-    use crate::call::Location;
 
     fn make_loc() -> Vec<Location> {
         vec![Location {
@@ -2203,7 +2324,10 @@ mod tests {
             .await
             .expect_err("offline internal user should reject with 480");
 
-        assert_eq!(err.status, Some(rsipstack::sip::StatusCode::TemporarilyUnavailable));
+        assert_eq!(
+            err.status,
+            Some(rsipstack::sip::StatusCode::TemporarilyUnavailable)
+        );
         assert!(err.error.to_string().contains("offline"));
     }
 
@@ -2246,22 +2370,133 @@ mod tests {
         assert!(err.error.to_string().contains("no route"));
     }
 
+    #[tokio::test]
+    async fn default_resolve_always_forwarding_uri_bypasses_offline_locator() {
+        let (server, config) = create_test_server().await;
+        server
+            .user_backend
+            .create_user(SipUser {
+                id: 99,
+                username: "cfwd".to_string(),
+                enabled: true,
+                realm: Some("rustpbx.com".to_string()),
+                call_forwarding_mode: Some("always".to_string()),
+                call_forwarding_destination: Some("sip:alice@rustpbx.com".to_string()),
+                ..Default::default()
+            })
+            .await
+            .expect("create forwarding user");
+        let module = CallModule::new(config, server);
+
+        let mut request = crate::proxy::tests::common::create_test_request(
+            rsipstack::sip::Method::Invite,
+            "bp",
+            None,
+            "rustpbx.com",
+            None,
+        );
+        request.uri = rsipstack::sip::Uri::try_from("sip:cfwd@rustpbx.com").unwrap();
+        replace_to_header(
+            &mut request,
+            rsipstack::sip::Uri::try_from("sip:cfwd@rustpbx.com").unwrap(),
+        );
+
+        let caller = SipUser {
+            username: "bp".to_string(),
+            realm: Some("rustpbx.com".to_string()),
+            ..Default::default()
+        };
+
+        let dialplan = module
+            .default_resolve(
+                &request,
+                Box::new(NotHandledRouteInvite),
+                &caller,
+                &TransactionCookie::default(),
+            )
+            .await
+            .expect("always forwarding should bypass offline locator check");
+
+        let target = dialplan
+            .first_target()
+            .expect("forwarding target should be present")
+            .aor
+            .to_string();
+        assert_eq!(target, "sip:alice@rustpbx.com");
+    }
+
+    #[tokio::test]
+    async fn default_resolve_always_forwarding_queue_missing_returns_480() {
+        let (server, config) = create_test_server().await;
+        server
+            .user_backend
+            .create_user(SipUser {
+                id: 100,
+                username: "cfwdq".to_string(),
+                enabled: true,
+                realm: Some("rustpbx.com".to_string()),
+                call_forwarding_mode: Some("always".to_string()),
+                call_forwarding_destination: Some("queue:99999".to_string()),
+                ..Default::default()
+            })
+            .await
+            .expect("create queue forwarding user");
+        let module = CallModule::new(config, server);
+
+        let mut request = crate::proxy::tests::common::create_test_request(
+            rsipstack::sip::Method::Invite,
+            "bp",
+            None,
+            "rustpbx.com",
+            None,
+        );
+        request.uri = rsipstack::sip::Uri::try_from("sip:cfwdq@rustpbx.com").unwrap();
+        replace_to_header(
+            &mut request,
+            rsipstack::sip::Uri::try_from("sip:cfwdq@rustpbx.com").unwrap(),
+        );
+
+        let caller = SipUser {
+            username: "bp".to_string(),
+            realm: Some("rustpbx.com".to_string()),
+            ..Default::default()
+        };
+
+        let err = module
+            .default_resolve(
+                &request,
+                Box::new(NotHandledRouteInvite),
+                &caller,
+                &TransactionCookie::default(),
+            )
+            .await
+            .expect_err("missing always-forwarding queue should fail");
+
+        assert_eq!(
+            err.status,
+            Some(rsipstack::sip::StatusCode::TemporarilyUnavailable)
+        );
+        assert!(err.error.to_string().contains("queue '99999' not found"));
+    }
+
     #[test]
     fn resolve_callee_uri_prefers_request_uri() {
         let request_uri = rsipstack::sip::Uri::try_from("sip:lp@rustpbx.com").unwrap();
-        let to_uri = rsipstack::sip::Uri::try_from("sip:lp@172.25.52.29:63647;transport=UDP")
-            .unwrap();
+        let to_uri =
+            rsipstack::sip::Uri::try_from("sip:lp@172.25.52.29:63647;transport=UDP").unwrap();
 
         let request = rsipstack::sip::Request {
             method: rsipstack::sip::Method::Invite,
             uri: request_uri.clone(),
             version: rsipstack::sip::Version::V2,
-            headers: vec![rsipstack::sip::typed::To {
-                display_name: None,
-                uri: to_uri,
-                params: vec![],
-            }
-            .into()]
+            headers: vec![
+                rsipstack::sip::typed::To {
+                    display_name: None,
+                    uri: to_uri,
+                    params: vec![],
+                }
+                .into(),
+            ]
             .into(),
             body: vec![],
         };
@@ -2279,12 +2514,14 @@ mod tests {
             method: rsipstack::sip::Method::Invite,
             uri: request_uri,
             version: rsipstack::sip::Version::V2,
-            headers: vec![rsipstack::sip::typed::To {
-                display_name: None,
-                uri: to_uri.clone(),
-                params: vec![],
-            }
-            .into()]
+            headers: vec![
+                rsipstack::sip::typed::To {
+                    display_name: None,
+                    uri: to_uri.clone(),
+                    params: vec![],
+                }
+                .into(),
+            ]
             .into(),
             body: vec![],
         };

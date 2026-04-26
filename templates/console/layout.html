@@ -485,8 +485,7 @@
                 <div x-data="{
                     show: false,
                     dismissed: false,
-                    check() {
-                        if (this.dismissed) return;
+                    init() {
                         fetch('{{ api_prefix | safe }}/pending-reloads')
                             .then(function(r) { return r.ok ? r.json() : null; })
                             .then(function(d) {
@@ -494,10 +493,6 @@
                                 this.show = !!d.pending;
                             }.bind(this))
                             .catch(function() {});
-                    },
-                    init() {
-                        this.check();
-                        setInterval(this.check.bind(this), 30000);
                     }
                 }" x-init="init()" x-show="show" x-cloak x-transition
                     class="mx-4 mt-4 flex items-start justify-between gap-3 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800 shadow-sm">

@@ -9,7 +9,6 @@ subtitle_desc = "Create voice queues, manage hold music, and configure fallback 
 
 # List page actions
 export_all = "Export all"
-refresh_list = "Refresh list"
 new_queue = "New queue"
 
 # Stats cards
