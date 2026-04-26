@@ -31,6 +31,7 @@ pub mod mixer_output;
 pub mod mixer_registry;
 pub mod negotiate;
 pub mod sdp_bridge;
+pub mod audio_egress_track;
 pub mod transcoder;
 pub mod transcoding_pipeline;
 #[cfg(test)]

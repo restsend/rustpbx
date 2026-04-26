@@ -31,11 +31,12 @@ use crate::callrecord::{CallRecordHangupMessage, CallRecordHangupReason, CallRec
 use crate::config::MediaProxyMode;
 use crate::media::bridge::BridgePeerBuilder;
 use crate::media::mixer::MediaMixer;
-use crate::media::negotiate::MediaNegotiator;
+use crate::media::negotiate::{MediaNegotiator, NegotiatedLegProfile};
 use crate::media::recorder::Recorder;
-use crate::media::{FileTrack, RtpTrackBuilder, Track};
+use crate::media::audio_egress_track::{AudioEgressTrack, PlaybackCompletion};
+use crate::media::{RtpTrackBuilder, Track};
 use crate::proxy::proxy_call::{
-    media_peer::{MediaPeer, VoiceEnginePeer},
+    media_peer::{LegMedia, MediaPeer, VoiceEnginePeer},
     reporter::CallReporter,
     session_timer::{
         DEFAULT_SESSION_EXPIRES, HEADER_MIN_SE, HEADER_SESSION_EXPIRES, HEADER_SUPPORTED, MIN_MIN_SE,
@@ -151,6 +152,8 @@ pub struct SipSession {
     pub callee_dialogs: Arc<DashMap<DialogId, ()>>,
     pub caller_peer: Arc<dyn MediaPeer>,
     pub callee_peer: Arc<dyn MediaPeer>,
+    pub caller_media: Arc<LegMedia>,
+    pub callee_media: Arc<LegMedia>,
     pub supervisor_mixer: Option<Arc<MediaMixer>>,
 
     pub context: CallContext,
@@ -188,7 +191,7 @@ pub struct SipSession {
 
     pub reporter: Option<CallReporter>,
     pub recorder: Arc<RwLock<Option<Recorder>>>,
-    pub playback_tracks: std::collections::HashMap<String, FileTrack>,
+    pub active_playback_ids: HashSet<String>,
     caller_ingress_monitor: Option<CallerIngressMonitor>,
 
     pub media_bridge: Option<Arc<crate::media::bridge::BridgePeer>>,
@@ -310,6 +313,8 @@ impl SipSession {
         use_media_proxy: bool,
         caller_peer: Arc<dyn MediaPeer>,
         callee_peer: Arc<dyn MediaPeer>,
+        caller_media: Arc<LegMedia>,
+        callee_media: Arc<LegMedia>,
     ) -> (Self, SipSessionHandle, mpsc::UnboundedReceiver<CallCommand>) {
         let session_id = SessionId::from(context.session_id.clone());
 
@@ -420,6 +425,8 @@ impl SipSession {
             pending_hangup: HashSet::new(),
             caller_peer,
             callee_peer,
+            caller_media,
+            callee_media,
             supervisor_mixer: None,
             context,
             call_record_sender,
@@ -450,7 +457,7 @@ impl SipSession {
             callee_guards: Vec::new(),
             reporter: None,
             recorder: Arc::new(RwLock::new(None)),
-            playback_tracks: std::collections::HashMap::new(),
+            active_playback_ids: HashSet::new(),
             caller_ingress_monitor: None,
             media_bridge: None,
             caller_is_webrtc: false,
@@ -487,15 +494,27 @@ impl SipSession {
 
         let use_media_proxy = Self::check_media_proxy(&context, &context.dialplan.media.proxy_mode);
 
+        let caller_media_token = cancel_token.child_token();
+        let caller_media = Arc::new(LegMedia::new(caller_media_token.clone()));
         let caller_media_builder = crate::media::MediaStreamBuilder::new()
             .with_id(format!("{}-caller", session_id))
-            .with_cancel_token(cancel_token.child_token());
-        let caller_peer = Arc::new(VoiceEnginePeer::new(Arc::new(caller_media_builder.build())));
+            .with_cancel_token(caller_media_token);
+        let caller_peer = Arc::new(VoiceEnginePeer::with_leg_media(
+            Arc::new(caller_media_builder.build()),
+            caller_media.clone(),
+        ));
+        let caller_peer: Arc<dyn MediaPeer> = caller_peer;
 
+        let callee_media_token = cancel_token.child_token();
+        let callee_media = Arc::new(LegMedia::new(callee_media_token.clone()));
         let callee_media_builder = crate::media::MediaStreamBuilder::new()
             .with_id(format!("{}-callee", session_id))
-            .with_cancel_token(cancel_token.child_token());
-        let callee_peer = Arc::new(VoiceEnginePeer::new(Arc::new(callee_media_builder.build())));
+            .with_cancel_token(callee_media_token);
+        let callee_peer = Arc::new(VoiceEnginePeer::with_leg_media(
+            Arc::new(callee_media_builder.build()),
+            callee_media.clone(),
+        ));
+        let callee_peer: Arc<dyn MediaPeer> = callee_peer;
 
         let (mut session, handle, cmd_rx) = SipSession::new(
             server.clone(),
@@ -506,6 +525,8 @@ impl SipSession {
             use_media_proxy,
             caller_peer,
             callee_peer,
+            caller_media,
+            callee_media,
         );
 
         session.reporter = Some(CallReporter {
@@ -2311,20 +2332,26 @@ impl SipSession {
     ) {
         self.stop_caller_ingress_monitor().await;
 
-        use crate::media::recorder::Leg;
+        let session_id = self.context.session_id.clone();
 
-        let session_id = &self.context.session_id;
+        let caller_has_pc = self
+            .caller_media
+            .peer_connection()
+            .await
+            .is_some();
+        let callee_has_pc = self
+            .callee_media
+            .peer_connection()
+            .await
+            .is_some();
 
-        let caller_pc = Self::get_peer_pc(&self.caller_peer, Self::CALLER_TRACK_ID).await;
-        let callee_pc = Self::get_peer_pc(&self.callee_peer, Self::CALLEE_TRACK_ID).await;
-
-        let (Some(caller_pc), Some(callee_pc)) = (caller_pc, callee_pc) else {
+        if !caller_has_pc || !callee_has_pc {
             warn!(
                 session_id = %session_id,
                 "Cannot start anchored forwarding: missing PeerConnection on caller or callee track"
             );
             return;
-        };
+        }
 
         let caller_profile = caller_answer_sdp
             .map(MediaNegotiator::extract_leg_profile)
@@ -2345,75 +2372,71 @@ impl SipSession {
             );
         }
 
-        let shared_recorder = self.recorder.clone();
-
-        match Self::wire_with_forwarding_track(
+        match self
+            .callee_media
+            .ensure_audio_egress(
             Self::CALLER_FORWARDING_TRACK_ID,
-            &caller_pc,
-            &callee_pc,
-            caller_profile.clone(),
             callee_profile.clone(),
-            shared_recorder.clone(),
-            Leg::A,
-            session_id,
+            &session_id,
             "caller→callee",
-        ) {
-            Ok(forwarding) => {
-                self.caller_peer
-                    .update_track(
-                        Box::new(crate::media::forwarding_track::ForwardingTrackHandle::new(
-                            Self::CALLER_FORWARDING_TRACK_ID.to_string(),
-                            forwarding,
-                        )),
-                        None,
-                    )
-                    .await;
-            }
-            Err(e) => {
-                warn!(session_id = %session_id, error = %e, "Failed to wire caller→callee");
+        )
+            .await
+        {
+            Ok(output) => match self.caller_media.input_audio_track().await {
+                Some(source_track) => {
+                    output.stage_peer(source_track, caller_profile.clone(), callee_profile.clone());
+                    debug!(
+                        session_id = %session_id,
+                        direction = "caller→callee",
+                        "Staged peer source on audio egress track"
+                    );
+                }
+                None => {
+                    warn!(
+                        session_id = %session_id,
+                        "Cannot stage caller→callee source: caller PC has no audio receiver"
+                    );
+                }
+            },
+            Err(error) => {
+                warn!(session_id = %session_id, error = %error, "Failed to wire caller→callee");
             }
         }
 
-        match Self::wire_with_forwarding_track(
+        match self
+            .caller_media
+            .ensure_audio_egress(
             Self::CALLEE_FORWARDING_TRACK_ID,
-            &callee_pc,
-            &caller_pc,
-            callee_profile,
-            caller_profile,
-            shared_recorder,
-            Leg::B,
-            session_id,
+            caller_profile.clone(),
+            &session_id,
             "callee→caller",
-        ) {
-            Ok(forwarding) => {
-                self.callee_peer
-                    .update_track(
-                        Box::new(crate::media::forwarding_track::ForwardingTrackHandle::new(
-                            Self::CALLEE_FORWARDING_TRACK_ID.to_string(),
-                            forwarding,
-                        )),
-                        None,
-                    )
-                    .await;
-            }
-            Err(e) => {
-                warn!(session_id = %session_id, error = %e, "Failed to wire callee→caller");
+        )
+            .await
+        {
+            Ok(output) => match self.callee_media.input_audio_track().await {
+                Some(source_track) => {
+                    output.stage_peer(source_track, callee_profile, caller_profile);
+                    debug!(
+                        session_id = %session_id,
+                        direction = "callee→caller",
+                        "Staged peer source on audio egress track"
+                    );
+                }
+                None => {
+                    warn!(
+                        session_id = %session_id,
+                        "Cannot stage callee→caller source: callee PC has no audio receiver"
+                    );
+                }
+            },
+            Err(error) => {
+                warn!(session_id = %session_id, error = %error, "Failed to wire callee→caller");
             }
         }
     }
 
-    async fn get_peer_pc(
-        peer: &Arc<dyn MediaPeer>,
-        track_id: &str,
-    ) -> Option<rustrtc::PeerConnection> {
-        let tracks = peer.get_tracks().await;
-        for t in &tracks {
-            let guard = t.lock().await;
-            if guard.id() == track_id {
-                return guard.get_peer_connection().await;
-            }
-        }
-        None
+    async fn get_peer_pc(media: &Arc<LegMedia>) -> Option<rustrtc::PeerConnection> {
+        media.peer_connection().await
     }
 
     async fn find_audio_receiver_track(
@@ -2455,8 +2478,7 @@ impl SipSession {
             return;
         };
 
-        let Some(caller_pc) = Self::get_peer_pc(&self.caller_peer, Self::CALLER_TRACK_ID).await
-        else {
+        let Some(caller_pc) = Self::get_peer_pc(&self.caller_media).await else {
             return;
         };
 
@@ -2587,6 +2609,7 @@ impl SipSession {
         None
     }
 
+    #[allow(dead_code)]
     #[allow(clippy::too_many_arguments)]
     fn wire_with_forwarding_track(
         track_id: &str,
@@ -3185,12 +3208,12 @@ impl SipSession {
             });
         }
 
-        let (peer, track_id) = match side {
-            DialogSide::Caller => (&self.caller_peer, Self::CALLER_TRACK_ID),
-            DialogSide::Callee => (&self.callee_peer, Self::CALLEE_TRACK_ID),
+        let media = match side {
+            DialogSide::Caller => &self.caller_media,
+            DialogSide::Callee => &self.callee_media,
         };
 
-        Self::get_peer_pc(peer, track_id).await
+        Self::get_peer_pc(media).await
     }
 
     async fn build_local_answer_from_pc(
@@ -3217,9 +3240,9 @@ impl SipSession {
     }
 
     async fn update_anchored_forwarding_from_sdp(
-        &self,
+        &mut self,
         side: DialogSide,
-        changed_leg_sdp: &str,
+        _changed_leg_sdp: &str,
     ) -> Result<()> {
         if self.media_profile.path != MediaPathMode::Anchored || self.media_bridge.is_some() {
             return Ok(());
@@ -3234,30 +3257,10 @@ impl SipSession {
             return Ok(());
         }
 
-        let changed_profile = MediaNegotiator::extract_leg_profile(changed_leg_sdp);
-        let caller_to_callee_forwarding =
-            Self::get_forwarding_track(&self.caller_peer, Self::CALLER_FORWARDING_TRACK_ID)
-                .await
-                .ok_or_else(|| anyhow!("Missing caller forwarding track"))?;
-        let callee_to_caller_forwarding =
-            Self::get_forwarding_track(&self.callee_peer, Self::CALLEE_FORWARDING_TRACK_ID)
-                .await
-                .ok_or_else(|| anyhow!("Missing callee forwarding track"))?;
-
-        match side {
-            DialogSide::Caller => {
-                // caller->callee track reads caller RTP, so caller-side re-INVITE updates ingress.
-                caller_to_callee_forwarding.stage_ingress_profile(changed_profile.clone());
-                // callee->caller track sends toward caller, so caller-side re-INVITE updates egress.
-                callee_to_caller_forwarding.stage_egress_profile(changed_profile.clone());
-            }
-            DialogSide::Callee => {
-                // caller->callee track sends toward callee, so callee-side re-INVITE updates egress.
-                caller_to_callee_forwarding.stage_egress_profile(changed_profile.clone());
-                // callee->caller track reads callee RTP, so callee-side re-INVITE updates ingress.
-                callee_to_caller_forwarding.stage_ingress_profile(changed_profile.clone());
-            }
-        }
+        let caller_answer = self.answer.clone();
+        let callee_answer = self.callee_answer_sdp.clone();
+        self.start_anchored_media_forwarding(caller_answer.as_deref(), callee_answer.as_deref())
+            .await;
 
         Ok(())
     }
@@ -3402,43 +3405,105 @@ impl SipSession {
         Ok(final_answer)
     }
 
+    fn caller_output_profile(&self) -> NegotiatedLegProfile {
+        self.answer
+            .as_deref()
+            .map(MediaNegotiator::extract_leg_profile)
+            .or_else(|| {
+                self.caller_offer
+                    .as_deref()
+                    .map(MediaNegotiator::extract_leg_profile)
+            })
+            .unwrap_or_default()
+    }
+
+    async fn ensure_caller_audio_egress(
+        &mut self,
+        egress_profile: NegotiatedLegProfile,
+    ) -> Result<Arc<AudioEgressTrack>> {
+        if self
+            .caller_media
+            .peer_connection()
+            .await
+            .is_none()
+        {
+            let _ = self.ensure_caller_answer_sdp().await;
+        }
+
+        self
+            .caller_media
+            .ensure_audio_egress(
+                Self::CALLEE_FORWARDING_TRACK_ID,
+                egress_profile,
+                &self.context.session_id,
+                "file→caller",
+            )
+            .await
+    }
+
+    async fn stage_caller_file(
+        &mut self,
+        audio_file: &str,
+        track_id: &str,
+        loop_playback: bool,
+        completion_tx: Option<tokio::sync::oneshot::Sender<PlaybackCompletion>>,
+    ) -> Result<()> {
+        let _ = self.ensure_caller_answer_sdp().await;
+        let caller_profile = self.caller_output_profile();
+        let output = self.ensure_caller_audio_egress(caller_profile.clone()).await?;
+
+        output.stage_file(
+            audio_file.to_string(),
+            loop_playback,
+            caller_profile,
+            completion_tx,
+        )?;
+
+        self.active_playback_ids.clear();
+        self.active_playback_ids.insert(track_id.to_string());
+        Ok(())
+    }
+
+    async fn stage_caller_silence(&mut self) -> Result<()> {
+        let caller_profile = self.caller_output_profile();
+        let output = self
+            .ensure_caller_audio_egress(caller_profile.clone())
+            .await?;
+        output.stage_silence(caller_profile);
+        Ok(())
+    }
+
     pub async fn play_audio_file(
         &mut self,
         audio_file: &str,
-        _await_completion: bool,
+        await_completion: bool,
         track_id: &str,
         loop_playback: bool,
     ) -> Result<()> {
         info!(audio_file = %audio_file, track_id = %track_id, "Playing audio file");
 
-        let caller_codec = self
-            .caller_offer
-            .as_ref()
-            .map(|offer| MediaNegotiator::extract_codec_params(offer).audio)
-            .and_then(|codecs| codecs.first().map(|c| c.codec))
-            .unwrap_or(CodecType::PCMU);
-
-        let hold_ssrc = rand::random::<u32>();
-        let track = FileTrack::new(track_id.to_string())
-            .with_path(audio_file.to_string())
-            .with_loop(loop_playback)
-            .with_ssrc(hold_ssrc)
-            .with_codec_preference(vec![caller_codec]);
-
-        let caller_pc = {
-            let tracks = self.caller_peer.get_tracks().await;
-            if let Some(t) = tracks.first() {
-                t.lock().await.get_peer_connection().await
-            } else {
-                None
-            }
+        let completion_rx = if await_completion {
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            self.stage_caller_file(audio_file, track_id, loop_playback, Some(tx))
+                .await?;
+            Some(rx)
+        } else {
+            self.stage_caller_file(audio_file, track_id, loop_playback, None)
+                .await?;
+            None
         };
 
-        if let Err(e) = track.start_playback_on(caller_pc).await {
-            warn!(error = %e, "Failed to start playback");
+        if let Some(rx) = completion_rx {
+            let completion = rx
+                .await
+                .map_err(|_| anyhow!("Audio playback completion channel closed"))?;
+            self.active_playback_ids.remove(track_id);
+            debug!(
+                track_id = %track_id,
+                interrupted = completion.interrupted,
+                "Audio playback completed"
+            );
         }
-
-        self.caller_peer.update_track(Box::new(track), None).await;
 
         Ok(())
     }
@@ -5115,59 +5180,27 @@ impl SipSession {
         if !is_callee {
             self.stop_caller_ingress_monitor().await;
         }
-        let (peer, track_id) = if is_callee {
-            (self.callee_peer.clone(), Self::CALLEE_TRACK_ID)
+        let (media, track_id) = if is_callee {
+            (self.callee_media.clone(), Self::CALLEE_TRACK_ID)
         } else {
-            (self.caller_peer.clone(), Self::CALLER_TRACK_ID)
+            (self.caller_media.clone(), Self::CALLER_TRACK_ID)
         };
 
         // Create a sample track pair (sender -> track) for output
         let (audio_sender, track, _feedback_rx) = sample_track(MediaKind::Audio, 100);
 
-        // Get the existing peer connection from the named RTP track.
-        // We search by track_id to avoid picking up ForwardingTrackHandle entries
-        // (which return None from get_peer_connection).  During REFER/transfer
-        // transitions the track may not be ready yet, so retry briefly.
+        // Get the existing peer connection from the media peer runtime store.
         let mut pc = None;
         for attempt in 0..150 {
-            let tracks = peer.get_tracks().await;
-            // First try: look for the named RTP track
-            for t in &tracks {
-                let guard = t.lock().await;
-                if guard.id() == track_id {
-                    if let Some(found_pc) = guard.get_peer_connection().await {
-                        pc = Some(found_pc);
-                        break;
-                    }
-                }
-            }
-            if pc.is_some() {
-                break;
-            }
-            // Fallback: accept any track that has a peer connection (e.g. after re-INVITE)
-            for t in &tracks {
-                let guard = t.lock().await;
-                if let Some(found_pc) = guard.get_peer_connection().await {
-                    pc = Some(found_pc);
-                    break;
-                }
-            }
-            if pc.is_some() {
+            if let Some(found_pc) = media.peer_connection().await {
+                pc = Some(found_pc);
                 break;
             }
             if attempt % 25 == 0 {
-                let track_ids: Vec<_> = {
-                    let mut ids = Vec::new();
-                    for t in &tracks {
-                        ids.push(t.lock().await.id().to_string());
-                    }
-                    ids
-                };
                 tracing::debug!(
                     session_id = %self.id,
                     leg_id = %leg_id,
                     wanted_track_id = %track_id,
-                    available_tracks = ?track_ids,
                     attempt = attempt,
                     "Waiting for peer connection on conference media bridge"
                 );
@@ -5215,7 +5248,7 @@ impl SipSession {
 
         // Create audio receiver for input from SIP track
         let audio_receiver = if is_callee {
-            self.create_audio_receiver_from_peer(&peer).await
+            self.create_audio_receiver_from_peer(&media).await
         } else {
             self.create_audio_receiver().await
         }
@@ -5258,22 +5291,12 @@ impl SipSession {
     /// Create an audio receiver from a specific peer.
     async fn create_audio_receiver_from_peer(
         &self,
-        peer: &Arc<dyn MediaPeer>,
+        media: &Arc<LegMedia>,
     ) -> Result<Box<dyn crate::call::runtime::conference_media_bridge::AudioReceiver>> {
-        // Get peer connection from the given peer with retries during session setup.
-        // Iterate all tracks (not just first) to skip ForwardingTrackHandle entries
-        // which always return None from get_peer_connection().
         let mut pc = None;
         for _ in 0..150 {
-            let tracks = peer.get_tracks().await;
-            for t in &tracks {
-                let guard = t.lock().await;
-                if let Some(found_pc) = guard.get_peer_connection().await {
-                    pc = Some(found_pc);
-                    break;
-                }
-            }
-            if pc.is_some() {
+            if let Some(found_pc) = media.peer_connection().await {
+                pc = Some(found_pc);
                 break;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
@@ -5290,15 +5313,7 @@ impl SipSession {
 
     /// Get the caller's peer connection
     async fn get_caller_peer_connection(&self) -> Option<rustrtc::PeerConnection> {
-        // Try to get PC from caller_peer's first track
-        let tracks = self.caller_peer.get_tracks().await;
-        for t in tracks.iter() {
-            let guard = t.lock().await;
-            if let Some(pc) = guard.get_peer_connection().await {
-                return Some(pc);
-            }
-        }
-        None
+        self.caller_media.peer_connection().await
     }
 
     /// Create audio decoder based on negotiated codec from answer SDP.
@@ -5846,37 +5861,55 @@ impl SipSession {
             crate::call::domain::MediaSource::File { path } => path,
             _ => return Err(anyhow!("Only file playback supported")),
         };
+        let options = options.unwrap_or_default();
 
-        let caller_codec = self
-            .caller_offer
-            .as_ref()
-            .map(|offer| MediaNegotiator::extract_codec_params(offer).audio)
-            .and_then(|codecs| codecs.first().map(|c| c.codec))
-            .unwrap_or(CodecType::PCMU);
+        let (completion_tx, completion_rx) = tokio::sync::oneshot::channel();
+        self.stage_caller_file(
+            &file_path,
+            &track_id,
+            options.loop_playback,
+            Some(completion_tx),
+        )
+        .await?;
 
-        let track = FileTrack::new(track_id.clone())
-            .with_path(file_path.clone())
-            .with_codec_preference(vec![caller_codec]);
+        let app_runtime = self.app_runtime.clone();
+        let session_id = self.context.session_id.clone();
+        let track_id_for_event = track_id.clone();
+        tokio::spawn(async move {
+            let Ok(completion) = completion_rx.await else {
+                return;
+            };
 
-        let caller_pc = {
-            let tracks = self.caller_peer.get_tracks().await;
-            if let Some(t) = tracks.first() {
-                t.lock().await.get_peer_connection().await
-            } else {
-                None
+            if completion.interrupted {
+                debug!(
+                    session_id = %session_id,
+                    track_id = %track_id_for_event,
+                    "Audio playback interrupted; suppressing AudioComplete event"
+                );
+                return;
             }
-        };
 
-        if let Err(e) = track.start_playback_on(caller_pc).await {
-            warn!(error = %e, "Failed to start playback");
-        }
+            let event = serde_json::json!({
+                "type": "audio_complete",
+                "track_id": track_id_for_event,
+                "interrupted": completion.interrupted,
+            });
 
-        self.caller_peer
-            .update_track(Box::new(track.clone()), None)
-            .await;
-        self.playback_tracks.insert(track_id.clone(), track);
+            if let Err(error) = app_runtime.inject_event(event) {
+                debug!(
+                    session_id = %session_id,
+                    error = %error,
+                    "Audio playback completed with no active app receiver"
+                );
+            }
+        });
 
-        info!(track_id = %track_id, file = %file_path, "Playback started");
+        info!(
+            track_id = %track_id,
+            file = %file_path,
+            await_completion = options.await_completion,
+            "Playback started"
+        );
         Ok(())
     }
 
@@ -5886,8 +5919,16 @@ impl SipSession {
             .map(|l| l.to_string())
             .unwrap_or_else(|| "playback".to_string());
 
-        if self.playback_tracks.remove(&track_id).is_some() {
-            self.caller_peer.remove_track(&track_id, true).await;
+        let stopped = if leg_id.is_some() {
+            self.active_playback_ids.remove(&track_id)
+        } else {
+            let had_playback = !self.active_playback_ids.is_empty();
+            self.active_playback_ids.clear();
+            had_playback
+        };
+
+        if stopped {
+            self.stage_caller_silence().await?;
             info!(track_id = %track_id, "Playback stopped");
         }
         Ok(())
@@ -6374,7 +6415,9 @@ impl SipSession {
 
         self.update_leg_state(&leg_id, LegState::Connected);
 
-        self.playback_tracks.remove("hold-music");
+        if self.active_playback_ids.remove("hold-music") {
+            self.stage_caller_silence().await?;
+        }
 
         let unhold_sdp = self.generate_unhold_sdp().await?;
 
@@ -6779,6 +6822,8 @@ mod tests {
 
         let caller_peer = Arc::new(MockMediaPeer::new());
         let callee_peer = Arc::new(MockMediaPeer::new());
+        let caller_media = Arc::new(LegMedia::new(CancellationToken::new()));
+        let callee_media = Arc::new(LegMedia::new(CancellationToken::new()));
         let (mut session, _handle, _cmd_rx) = SipSession::new(
             server.clone(),
             CancellationToken::new(),
@@ -6788,6 +6833,8 @@ mod tests {
             false,
             caller_peer,
             callee_peer,
+            caller_media,
+            callee_media,
         );
 
         let dialog_id = DialogId {
@@ -6862,6 +6909,8 @@ mod tests {
 
         let caller_peer = Arc::new(MockMediaPeer::new());
         let callee_peer = Arc::new(MockMediaPeer::new());
+        let caller_media = Arc::new(LegMedia::new(CancellationToken::new()));
+        let callee_media = Arc::new(LegMedia::new(CancellationToken::new()));
         let (mut session, _handle, _cmd_rx) = SipSession::new(
             server.clone(),
             CancellationToken::new(),
@@ -6871,6 +6920,8 @@ mod tests {
             false,
             caller_peer.clone(),
             callee_peer.clone(),
+            caller_media,
+            callee_media,
         );
 
         session.media_bridge = Some(BridgePeerBuilder::new("test-bridge".to_string()).build());
@@ -7166,6 +7217,8 @@ mod tests {
 
         let caller_peer = Arc::new(MockMediaPeer::new());
         let callee_peer = Arc::new(MockMediaPeer::new());
+        let caller_media = Arc::new(LegMedia::new(CancellationToken::new()));
+        let callee_media = Arc::new(LegMedia::new(CancellationToken::new()));
         let (mut session, _handle, _cmd_rx) = SipSession::new(
             server.clone(),
             CancellationToken::new(),
@@ -7175,6 +7228,8 @@ mod tests {
             false,
             caller_peer,
             callee_peer,
+            caller_media,
+            callee_media,
         );
 
         let result = session
@@ -7229,6 +7284,8 @@ mod tests {
 
         let caller_peer = Arc::new(MockMediaPeer::new());
         let callee_peer = Arc::new(MockMediaPeer::new());
+        let caller_media = Arc::new(LegMedia::new(CancellationToken::new()));
+        let callee_media = Arc::new(LegMedia::new(CancellationToken::new()));
         let (mut session, _handle, _cmd_rx) = SipSession::new(
             server.clone(),
             CancellationToken::new(),
@@ -7238,6 +7295,8 @@ mod tests {
             false,
             caller_peer,
             callee_peer,
+            caller_media,
+            callee_media,
         );
 
         let result = session
