@@ -31,6 +31,10 @@ pub struct QueueConfig {
     #[serde(default)]
     pub ring_timeout_secs: Option<u64>,
 
+    /// Optional ACD policy name to use for agent selection.
+    #[serde(default)]
+    pub acd_policy: Option<String>,
+
     /// Fallback action when all agents fail
     #[serde(default)]
     pub fallback: Option<FallbackConfig>,
@@ -152,6 +156,11 @@ impl QueueConfig {
             fallback: self.fallback.as_ref().map(|f| f.to_fallback_action()),
             dial_strategy: Some(self.strategy.to_dial_strategy()?),
             ring_timeout: self.ring_timeout_secs.map(Duration::from_secs),
+            acd_policy: self
+                .acd_policy
+                .as_ref()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty()),
             label: self.name.clone(),
             retry_codes: None,
             no_trying_timeout: None,
@@ -456,6 +465,7 @@ uri = "sip:test@example.com"
         assert!(plan.accept_immediately);
         assert_eq!(plan.ring_timeout, Some(Duration::from_secs(20)));
         assert_eq!(plan.label, Some("test-queue".to_string()));
+        assert!(plan.acd_policy.is_none());
     }
 
     #[test]
@@ -539,6 +549,7 @@ uri = "://invalid"
                 }],
             },
             ring_timeout_secs: Some(15),
+            acd_policy: Some("support-default".to_string()),
             fallback: None,
         };
 
@@ -547,5 +558,6 @@ uri = "://invalid"
 
         assert_eq!(parsed.name, original.name);
         assert_eq!(parsed.accept_immediately, original.accept_immediately);
+        assert_eq!(parsed.acd_policy, original.acd_policy);
     }
 }

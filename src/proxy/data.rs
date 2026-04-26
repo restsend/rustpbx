@@ -8,11 +8,11 @@ use std::{
     collections::HashMap,
     fs,
     io::ErrorKind,
-    net::{IpAddr, SocketAddr},
+    net::IpAddr,
     path::{Path, PathBuf},
     sync::{Arc, RwLock},
 };
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 use crate::{
     addons::queue::services::utils as queue_utils,
@@ -263,14 +263,6 @@ impl ProxyDataContext {
             trunks.extend(generated_trunks);
         }
 
-        let cluster_trunks = Self::generate_cluster_trunks(&config);
-        for (name, trunk) in cluster_trunks {
-            if !trunks.contains_key(&name) {
-                info!("auto-generated cluster trunk '{}' -> {}", name, trunk.dest);
-                trunks.insert(name, trunk);
-            }
-        }
-
         let len = trunks.len();
         *self.trunks.write().unwrap() = trunks.clone();
 
@@ -458,15 +450,6 @@ impl ProxyDataContext {
             }
         }
 
-        // Auto-generate cluster fallback route if cluster peers are configured
-        let cluster_route = Self::generate_cluster_route(&config);
-        if let Some(route) = cluster_route {
-            if !routes.iter().any(|r| r.name == route.name) {
-                info!("auto-generated cluster fallback route '{}'", route.name);
-                routes.push(route);
-            }
-        }
-
         routes.sort_by_key(|r| r.priority);
         let len = routes.len();
         *self.routes.write().unwrap() = routes;
@@ -572,172 +555,6 @@ impl ProxyDataContext {
         let total = rules.len();
         *self.acl_rules.write().unwrap() = rules;
         info!(total = total, "acl rules snapshot updated at runtime");
-    }
-
-    /// Generate auto-trunks for configured cluster peers.
-    fn generate_cluster_trunks(config: &ProxyConfig) -> HashMap<String, TrunkConfig> {
-        let mut result = HashMap::new();
-        if config.cluster_peers.is_empty() {
-            return result;
-        }
-
-        // Build list of local addresses to exclude self
-        let local_addr = match config.addr.parse::<IpAddr>() {
-            Ok(ip) => ip,
-            Err(_) => {
-                warn!(
-                    "invalid proxy.addr '{}', skipping cluster peer generation",
-                    config.addr
-                );
-                return result;
-            }
-        };
-        let local_ports: Vec<u16> = [
-            config.udp_port,
-            config.tcp_port,
-            config.tls_port,
-            config.ws_port,
-        ]
-        .into_iter()
-        .flatten()
-        .collect();
-
-        for peer in &config.cluster_peers {
-            let peer = peer.trim();
-            if peer.is_empty() {
-                continue;
-            }
-
-            let peer_addr = match peer.parse::<SocketAddr>() {
-                Ok(addr) => addr,
-                Err(e) => {
-                    warn!("invalid cluster peer '{}': {}", peer, e);
-                    continue;
-                }
-            };
-
-            // Skip self (same IP and any local port)
-            if peer_addr.ip() == local_addr && local_ports.contains(&peer_addr.port()) {
-                debug!("skipping self cluster peer {}", peer);
-                continue;
-            }
-
-            let name = format!("cluster-{}-{}", peer_addr.ip(), peer_addr.port());
-            let dest = format!("sip:{}:{}", peer_addr.ip(), peer_addr.port());
-
-            // Infer transport from port
-            let transport = match peer_addr.port() {
-                5061 => Some("tls".to_string()),
-                5060 => Some("udp".to_string()),
-                _ => None,
-            };
-
-            let trunk = TrunkConfig {
-                dest: dest.clone(),
-                backup_dest: None,
-                username: None,
-                password: None,
-                codec: Vec::new(),
-                disabled: None,
-                max_calls: None,
-                max_cps: None,
-                weight: None,
-                transport,
-                id: None,
-                direction: Some(crate::proxy::routing::TrunkDirection::Bidirectional),
-                inbound_hosts: vec![peer_addr.ip().to_string()],
-                recording: None,
-                incoming_from_user_prefix: None,
-                incoming_to_user_prefix: None,
-                country: None,
-                policy: None,
-                register_enabled: None,
-                register_expires: None,
-                register_extra_headers: None,
-                rewrite_hostport: false,
-                origin: ConfigOrigin::embedded(),
-            };
-
-            result.insert(name, trunk);
-        }
-
-        result
-    }
-
-    /// Generate a low-priority fallback route for cluster-internal calls.
-    /// This route matches calls to the local realm and forwards them via
-    /// auto-generated cluster trunks when the callee is not found locally.
-    fn generate_cluster_route(config: &ProxyConfig) -> Option<RouteRule> {
-        if config.cluster_peers.is_empty() {
-            return None;
-        }
-
-        // Build list of cluster trunk names (excluding self)
-        let cluster_trunks = Self::generate_cluster_trunks(config);
-        if cluster_trunks.is_empty() {
-            return None;
-        }
-
-        let trunk_names: Vec<String> = cluster_trunks.keys().cloned().collect();
-
-        // Build match condition for local realm(s)
-        let mut match_conditions = MatchConditions::default();
-
-        // If realms are configured, match any of them
-        if let Some(ref realms) = config.realms {
-            if !realms.is_empty() {
-                // Use the first realm as the primary match, or match all if multiple
-                let realm_patterns = realms
-                    .iter()
-                    .filter(|r| !r.is_empty())
-                    .cloned()
-                    .collect::<Vec<_>>();
-                if !realm_patterns.is_empty() {
-                    // Join multiple realms with | for regex matching
-                    match_conditions.to_host = Some(realm_patterns.join("|"));
-                }
-            }
-        }
-
-        // Fallback: if no realms configured, try to match proxy addr
-        if match_conditions.to_host.is_none() {
-            match_conditions.to_host = Some(config.addr.clone());
-        }
-
-        let dest = if trunk_names.len() == 1 {
-            DestConfig::Single(trunk_names[0].clone())
-        } else {
-            DestConfig::Multiple(trunk_names)
-        };
-
-        let route = RouteRule {
-            name: "cluster-internal-fallback".to_string(),
-            description: Some("Auto-generated fallback route for cluster peers".to_string()),
-            priority: -100, // Low priority so user rules take precedence
-            direction: RouteDirection::Any,
-            source_trunks: Vec::new(),
-            source_trunk_ids: Vec::new(),
-            match_conditions,
-            rewrite: None,
-            action: RouteAction {
-                action: None,
-                dest: Some(dest),
-                select: "rr".to_string(),
-                hash_key: None,
-                reject: None,
-                queue: None,
-                app: None,
-                app_params: None,
-                auto_answer: true,
-            },
-            codecs: Vec::new(),
-            disable_ice_servers: None,
-            disabled: None,
-            policy: None,
-            origin: ConfigOrigin::embedded(),
-        };
-
-        Some(route)
     }
 
     async fn export_trunks_to_toml(

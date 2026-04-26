@@ -137,6 +137,8 @@ pub struct QueueConfig {
     pub autonomous_routing: bool,
     /// Routing strategy for agent selection.
     pub routing_strategy: RoutingStrategy,
+    /// Optional ACD policy name.
+    pub acd_policy: Option<String>,
     /// No-answer action.
     pub no_answer_action: NoAnswerAction,
     /// Fallback skill group.
@@ -171,6 +173,7 @@ impl Default for QueueConfig {
             max_retries: 2,
             autonomous_routing: false,
             routing_strategy: RoutingStrategy::LongestIdle,
+            acd_policy: None,
             no_answer_action: NoAnswerAction::Voicemail,
             fallback_skill_group: None,
             sla_monitoring: false,
@@ -191,6 +194,7 @@ impl QueueConfig {
             fallback: self.fallback.clone(),
             dial_strategy: Some(self.strategy.clone()),
             ring_timeout: self.ring_timeout,
+            acd_policy: self.acd_policy.clone(),
             label: Some(self.name.clone()),
             retry_codes: None,
             no_trying_timeout: None,
@@ -572,8 +576,11 @@ impl CallApp for QueueApp {
             && let Some(ref registry) = self.agent_registry {
                 let skills = &self.config.required_skills;
                 let strategy = self.config.routing_strategy;
-                
-                if let Some(agent) = registry.select_agent(skills, strategy).await {
+
+                if let Some(agent) = registry
+                    .select_agent_with_policy(skills, strategy, self.config.acd_policy.as_deref())
+                    .await
+                {
                     info!(agent_id = %agent.agent_id, uri = %agent.uri, "Queue: auto-selecting agent");
                     
                     // Update agent presence to ringing

@@ -111,7 +111,7 @@ async fn resolve_call_record_by_id_or_call_id(
                 warn!(id = id, "failed to load call record: {}", err);
                 return Err((
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(json!({ "message": "Failed to load call record" })),
+                    Json(json!({ "message": format!("Failed to load call record: {}", err) })),
                 )
                     .into_response());
             }
@@ -137,7 +137,7 @@ async fn resolve_call_record_by_id_or_call_id(
             warn!(call_id = %identifier, "failed to load call record by call_id: {}", err);
             Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "message": "Failed to load call record" })),
+                Json(json!({ "message": format!("Failed to load call record: {}", err) })),
             )
                 .into_response())
         }
@@ -297,7 +297,7 @@ async fn stream_call_recording(
             warn!(id = pk, "failed to load call record for playback: {}", err);
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "message": "Failed to load call record" })),
+                Json(json!({ "message": format!("Failed to load call record: {}", err) })),
             )
                 .into_response();
         }
@@ -377,7 +377,7 @@ async fn stream_file_with_range(
             warn!(path = %recording_path, "failed to open recording file: {}", err);
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "message": "Failed to open recording file" })),
+                Json(json!({ "message": format!("Failed to open recording file: {}", err) })),
             )
                 .into_response();
         }
@@ -388,7 +388,7 @@ async fn stream_file_with_range(
             warn!(path = %recording_path, "failed to seek recording file: {}", err);
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "message": "Failed to read recording file" })),
+                Json(json!({ "message": format!("Failed to read recording file: {}", err) })),
             )
                 .into_response();
         }
@@ -521,7 +521,7 @@ async fn download_call_record_metadata(
             warn!(id = pk, "failed to load call record metadata: {}", err);
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "message": "Failed to load call record" })),
+                Json(json!({ "message": format!("Failed to load call record: {}", err) })),
             )
                 .into_response();
         }
@@ -594,7 +594,7 @@ async fn page_call_records(
             warn!("failed to load call record filters: {}", err);
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "message": "Failed to load call records" })),
+                Json(json!({ "message": format!("Failed to load call records: {}", err) })),
             )
                 .into_response();
         }
@@ -820,7 +820,7 @@ async fn update_call_record(
             );
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "message": "Failed to load call record" })),
+                Json(json!({ "message": format!("Failed to load call record: {}", err) })),
             )
                 .into_response();
         }
@@ -871,7 +871,7 @@ async fn update_call_record(
             warn!(call_record_id = pk, "failed to update call record: {}", err);
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "message": "Failed to update call record" })),
+                Json(json!({ "message": format!("Failed to update call record: {}", err) })),
             )
                 .into_response();
         }

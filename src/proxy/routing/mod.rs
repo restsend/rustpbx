@@ -508,6 +508,8 @@ pub enum ActionType {
 pub struct RouteQueueConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acd_policy: Option<String>,
     pub accept_immediately: bool,
     #[serde(default)]
     pub passthrough_ringback: bool,
@@ -582,6 +584,11 @@ impl RouteQueueConfig {
         let mut plan = crate::call::QueuePlan {
             accept_immediately: self.accept_immediately,
             passthrough_ringback: self.passthrough_ringback && self.accept_immediately,
+            acd_policy: self
+                .acd_policy
+                .as_ref()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty()),
             ..Default::default()
         };
         if let Some(hold) = &self.hold {

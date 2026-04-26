@@ -8,6 +8,7 @@ endblock %}
 {% set base_url = base_path | safe %}
 <div class="p-6" x-data='queueDetailPage({
         basePath: {{ base_url | tojson }},
+        apiPrefix: {{ api_prefix | default('/api') | tojson }},
         mode: {{ page_mode | tojson }},
         model: {{ model_data | tojson }},
         createUrl: {{ create_url | tojson }},
@@ -195,6 +196,24 @@ endblock %}
                                 :placeholder="tt('queue.field_ring_timeout_placeholder')">
                             <span class="text-xs font-normal text-slate-400"
                                 x-text="tt('queue.field_ring_timeout_hint')"></span>
+                        </label>
+                        <label class="md:col-span-2 flex flex-col gap-2 text-sm font-medium text-slate-700">
+                            <span x-text="tt('queue.field_acd_policy')"></span>
+                            <template x-if="acdPolicies.length">
+                                <select x-model="form.spec.acd_policy"
+                                    class="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                                    <option value="" x-text="tt('queue.field_acd_policy_placeholder')"></option>
+                                    <template x-for="policy in acdPolicies" :key="policy.name">
+                                        <option :value="policy.name" x-text="policy.name"></option>
+                                    </template>
+                                </select>
+                            </template>
+                            <template x-if="!acdPolicies.length">
+                                <input type="text" x-model.trim="form.spec.acd_policy"
+                                    class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                    :placeholder="tt('queue.field_acd_policy_placeholder')">
+                            </template>
+                            <span class="text-xs font-normal text-slate-400" x-text="tt('queue.field_acd_policy_hint')"></span>
                         </label>
                     </div>
                     <div class="space-y-3">
@@ -386,10 +405,12 @@ endblock %}
 </div>
 
 <script>
+    window.__consoleApiPrefix = {{ api_prefix | default('/api') | tojson }};
     window._queueTranslations = {{ t | json | safe }};
     document.addEventListener('alpine:init', () => {
         Alpine.data('queueDetailPage', (options) => ({
             basePath: options.basePath || '/console',
+            apiPrefix: options.apiPrefix || '/api',
             mode: options.mode || 'create',
             model: options.model || null,
             createUrl: options.createUrl || `${options.basePath || '/console'}/queues`,
@@ -399,6 +420,7 @@ endblock %}
             pageTitle: options.mode === 'edit' ? (window._queueTranslations?.queue?.detail_subtitle_edit || 'Edit queue') : (window._queueTranslations?.queue?.new_queue || 'New queue'),
             activeTab: 'overview',
             skillGroups: [],
+            acdPolicies: [],
             pendingSkillGroup: '',
             form: {
                 name: '',
@@ -426,6 +448,7 @@ endblock %}
                         targets: [],
                         skill_groups: [],
                     },
+                    acd_policy: '',
                 },
             },
             holdEnabled: false,
@@ -433,9 +456,22 @@ endblock %}
             saving: false,
             success: null,
             error: null,
+            normalizeApiPrefix(value) {
+                const raw = String(value || '/api').trim();
+                if (!raw) {
+                    return '/api';
+                }
+                const normalized = raw.replace(/\/+$/, '');
+                if (/\/api(?:\/|$)/.test(normalized)) {
+                    return normalized;
+                }
+                return `${normalized}/api`;
+            },
             init() {
+                this.apiPrefix = this.normalizeApiPrefix(this.apiPrefix || window.__consoleApiPrefix || '/api');
                 this.applyModel(this.model || {});
                 this.loadSkillGroups();
+                this.loadAcdPolicies();
             },
             loadSkillGroups() {
                 // Try to load skill groups from CC addon API
@@ -449,10 +485,7 @@ endblock %}
                             this.skillGroups = [];
                         });
                 } else {
-                    // Fallback: try to fetch directly if CC addon is present
-                    const pathParts = window.location.pathname.split('/');
-                    const basePath = pathParts.length > 1 && pathParts[1] ? '/' + pathParts[1] : '/console';
-                    fetch(basePath + '/cc/skill-groups', { credentials: 'same-origin' })
+                    fetch(this.apiPrefix + '/cc/skill-groups', { credentials: 'same-origin' })
                         .then(res => res.ok ? res.json() : [])
                         .then(payload => {
                             this.skillGroups = Array.isArray(payload) ? payload : [];
@@ -461,6 +494,27 @@ endblock %}
                             this.skillGroups = [];
                         });
                 }
+            },
+            loadAcdPolicies() {
+                const loader = window.__ccAcdPoliciesLoader;
+                if (typeof loader === 'function') {
+                    loader()
+                        .then((policies) => {
+                            this.acdPolicies = Array.isArray(policies) ? policies : [];
+                        })
+                        .catch(() => {
+                            this.acdPolicies = [];
+                        });
+                    return;
+                }
+                fetch(this.apiPrefix + '/cc/acd/policies', { credentials: 'same-origin' })
+                    .then(res => res.ok ? res.json() : { data: [] })
+                    .then(payload => {
+                        this.acdPolicies = Array.isArray(payload?.data) ? payload.data : [];
+                    })
+                    .catch(() => {
+                        this.acdPolicies = [];
+                    });
             },
             tt(key) {
                 const parts = key.split('.');
@@ -536,6 +590,7 @@ endblock %}
                                 .filter((target) => target.uri)
                             : [],
                     },
+                    acd_policy: raw?.acd_policy || '',
                 };
                 return spec;
             },
@@ -663,6 +718,10 @@ endblock %}
                         wait_timeout_secs: waitTimeout,
                         targets,
                     };
+                }
+                const acdPolicy = (this.form.spec.acd_policy || '').trim();
+                if (acdPolicy) {
+                    spec.acd_policy = acdPolicy;
                 }
                 return spec;
             },

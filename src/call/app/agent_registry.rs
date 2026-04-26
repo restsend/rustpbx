@@ -263,6 +263,18 @@ pub trait AgentRegistry: Send + Sync {
         strategy: RoutingStrategy,
     ) -> Option<AgentRecord>;
 
+    /// Select best agent with an optional ACD policy hint.
+    ///
+    /// Default implementation ignores policy and calls `select_agent`.
+    async fn select_agent_with_policy(
+        &self,
+        required_skills: &[String],
+        strategy: RoutingStrategy,
+        _policy: Option<&str>,
+    ) -> Option<AgentRecord> {
+        self.select_agent(required_skills, strategy).await
+    }
+
     /// Resolve a target URI to a list of agent URIs.
     /// This is a hook for addons (like CC) to implement custom routing logic.
     /// For example, a skill-group addon can resolve "skill-group:sales" to
@@ -270,6 +282,17 @@ pub trait AgentRegistry: Send + Sync {
     /// 
     /// Returns empty Vec if the URI is not recognized or cannot be resolved.
     async fn resolve_target(&self, target_uri: &str) -> Vec<String>;
+
+    /// Resolve target URI with an optional ACD policy hint.
+    ///
+    /// Default implementation ignores policy and calls `resolve_target`.
+    async fn resolve_target_with_policy(
+        &self,
+        target_uri: &str,
+        _policy: Option<&str>,
+    ) -> Vec<String> {
+        self.resolve_target(target_uri).await
+    }
 
     /// Get agents available for ACD routing with full snapshots.
     /// Returns all agents that can receive calls with their current state.
