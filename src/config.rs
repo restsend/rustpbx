@@ -425,7 +425,6 @@ pub enum SipFlowSubdirs {
     Hourly,
 }
 
-
 /// Upload configuration for SipFlow recordings
 #[derive(Debug, Deserialize, Clone, Serialize)]
 #[serde(tag = "type")]
@@ -489,8 +488,7 @@ fn default_sipflow_id_cache_size() -> usize {
 
 #[derive(Debug, Deserialize, Clone, Copy, Serialize)]
 #[serde(rename_all = "snake_case")]
-#[derive(PartialEq)]
-#[derive(Default)]
+#[derive(PartialEq, Default)]
 pub enum MediaProxyMode {
     /// All media goes through proxy
     All,
@@ -502,7 +500,6 @@ pub enum MediaProxyMode {
     /// Do not handle media proxy
     None,
 }
-
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionTimerMode {
@@ -621,24 +618,14 @@ pub struct ProxyConfig {
     pub sip_flow_max_items: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub addons: Option<Vec<String>>,
-    /// Cluster peer addresses (IP:port) for automatic inter-node SIP trunking.
-    /// When configured, rustpbx will auto-generate bidirectional trunks to each peer
-    /// and a fallback route rule for cross-node internal calls.
-    /// Requires a shared locator (e.g. Database) to work correctly.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cluster_peers: Vec<String>,
-    /// Whether to passthrough callee's failure status code to caller.
-    /// When true, the caller receives the same SIP error code (e.g., 486, 603) that the callee returned.
-    /// When false, a generic error code is sent instead.
     #[serde(default = "default_passthrough_failure")]
     pub passthrough_failure: bool,
-    /// Cache authenticated dialog information to skip authentication for in-dialog requests.
-    /// When enabled, successfully authenticated dialogs are cached with source address (IP:port),
-    /// and subsequent in-dialog requests from the same address are not re-authenticated.
-    /// This improves performance for re-INVITE and BYE requests.
-    /// Default: enabled with 10000 cache size and 3600s TTL.
     #[serde(default = "default_dialog_auth_cache")]
     pub dialog_auth_cache: Option<AuthCacheConfig>,
+    #[serde(default)]
+    pub blind_transfer_use_refer: bool,
 }
 
 fn default_auth_cache_size() -> usize {
@@ -725,8 +712,7 @@ pub enum RouteResult {
     Abort(StatusCode, Option<String>),
 }
 
-#[derive(Debug, Deserialize, Serialize)]
-#[derive(Default)]
+#[derive(Debug, Deserialize, Serialize, Default)]
 pub struct AmiConfig {
     pub allows: Option<Vec<String>>,
 }
@@ -740,7 +726,6 @@ impl AmiConfig {
         }
     }
 }
-
 
 impl ProxyConfig {
     pub fn session_timer_mode(&self) -> SessionTimerMode {
@@ -777,9 +762,10 @@ impl ProxyConfig {
                 return existing.clone();
             }
             if let Some(first) = realms.first()
-                && !first.is_empty() {
-                    return first.clone();
-                }
+                && !first.is_empty()
+            {
+                return first.clone();
+            }
         }
 
         if requested.is_empty() {
@@ -895,6 +881,7 @@ impl Default for ProxyConfig {
             cluster_peers: Vec::new(),
             passthrough_failure: true,
             dialog_auth_cache: default_dialog_auth_cache(),
+            blind_transfer_use_refer: false,
         }
     }
 }
@@ -904,7 +891,6 @@ impl Default for UserBackendConfig {
         Self::Memory { users: None }
     }
 }
-
 
 impl Default for CallRecordConfig {
     fn default() -> Self {

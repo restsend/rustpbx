@@ -507,6 +507,7 @@ async fn test_guest_call_allowed_extension() {
         conference_manager: Arc::new(crate::call::runtime::ConferenceManager::new()),
         agent_registry: None,
         transfer_notify_subscribers: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+        cluster_event_hub: None,
     });
 
     let module = AuthModule::new(server_inner.clone(), server_inner.proxy_config.clone());
@@ -646,10 +647,7 @@ fn create_sip_request(
     ));
 
     let call_id = rsipstack::sip::headers::CallId::new("test-call-id");
-    let cseq = rsipstack::sip::headers::typed::CSeq {
-        seq: 1u32,
-        method,
-    };
+    let cseq = rsipstack::sip::headers::typed::CSeq { seq: 1u32, method };
 
     let mut request = rsipstack::sip::Request {
         method,
@@ -1292,7 +1290,10 @@ async fn test_dialog_auth_cache_skips_in_dialog_reinvite() {
         )
         .await
         .unwrap();
-    assert!(matches!(result2, ProxyAction::Continue), "Initial authenticated INVITE should succeed");
+    assert!(
+        matches!(result2, ProxyAction::Continue),
+        "Initial authenticated INVITE should succeed"
+    );
 
     // Step 3: Send re-INVITE without auth headers (same dialog, should use cache)
     let reinvite_request = {

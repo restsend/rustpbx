@@ -60,7 +60,11 @@ pub fn rwi_to_call_command(
         | RwiCommandPayload::ConsultInitiate { .. }
         | RwiCommandPayload::ConsultMerge { .. }
         | RwiCommandPayload::ConsultComplete { .. }
-        | RwiCommandPayload::ConsultCancel { .. } => {
+        | RwiCommandPayload::ConsultCancel { .. }
+        | RwiCommandPayload::LegAdd { .. }
+        | RwiCommandPayload::LegRemove { .. }
+        | RwiCommandPayload::AppStart { .. }
+        | RwiCommandPayload::AppStop { .. } => {
             Err(AdapterError::NotSupported("session management command".to_string()).into())
         }
 

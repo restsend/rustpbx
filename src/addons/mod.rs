@@ -188,6 +188,8 @@ pub mod transcript;
 pub mod wholesale;
 
 pub mod queue;
+#[cfg(feature = "addon-jsonrpc-router")]
+pub mod jsonrpc_router;
 #[cfg(feature = "addon-cc")]
 pub mod cc;
 

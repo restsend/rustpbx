@@ -3,6 +3,7 @@ use crate::call::Location;
 use crate::call::TransactionCookie;
 use crate::config::ProxyConfig;
 use crate::models::presence;
+use crate::proxy::cluster_event::EventSource;
 use crate::proxy::locator::LocatorEvent;
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
@@ -83,7 +84,6 @@ impl std::fmt::Display for PresenceStatus {
         }
     }
 }
-
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PresenceState {
@@ -194,38 +194,41 @@ impl PresenceManager {
         map.get(identity).cloned().unwrap_or_default()
     }
 
-    pub async fn update_state(&self, identity: &str, state: PresenceState) {
+    pub async fn update_state(&self, identity: &str, state: PresenceState, source: &EventSource) {
         {
             let mut map = self.states.write().unwrap();
             map.insert(identity.to_string(), state.clone());
         }
 
-        if let Some(db) = &self.database {
-            let active: presence::ActiveModel = presence::ActiveModel {
-                identity: Set(identity.to_string()),
-                status: Set(state.status.to_string()),
-                note: Set(state.note),
-                activity: Set(state.activity),
-                last_updated: Set(state.last_updated),
-            };
+        // Only persist to DB for local events
+        if source.is_local() {
+            if let Some(db) = &self.database {
+                let active: presence::ActiveModel = presence::ActiveModel {
+                    identity: Set(identity.to_string()),
+                    status: Set(state.status.to_string()),
+                    note: Set(state.note),
+                    activity: Set(state.activity),
+                    last_updated: Set(state.last_updated),
+                };
 
-            if let Err(e) = presence::Entity::insert(active)
-                .on_conflict(
-                    sea_orm::sea_query::OnConflict::column(presence::Column::Identity)
-                        .update_columns([
-                            presence::Column::Status,
-                            presence::Column::Note,
-                            presence::Column::Activity,
-                            presence::Column::LastUpdated,
-                        ])
-                        .to_owned(),
-                )
-                .exec(db)
-                .await
-            {
-                tracing::error!("failed to persist presence state for {}: {}", identity, e);
+                if let Err(e) = presence::Entity::insert(active)
+                    .on_conflict(
+                        sea_orm::sea_query::OnConflict::column(presence::Column::Identity)
+                            .update_columns([
+                                presence::Column::Status,
+                                presence::Column::Note,
+                                presence::Column::Activity,
+                                presence::Column::LastUpdated,
+                            ])
+                            .to_owned(),
+                    )
+                    .exec(db)
+                    .await
+                {
+                    tracing::error!("failed to persist presence state for {}: {}", identity, e);
+                }
             }
-        }
+        } // end source.is_local()
 
         let tx = {
             let lock = self.notify_tx.read().unwrap();
@@ -317,7 +320,7 @@ impl PresenceManager {
     }
 
     // Process locator events
-    pub async fn handle_locator_event(&self, event: LocatorEvent) {
+    pub async fn handle_locator_event(&self, event: LocatorEvent, source: &EventSource) {
         match event {
             LocatorEvent::Registered(loc) => {
                 if let Some(user) = Self::get_user(&loc) {
@@ -331,6 +334,7 @@ impl PresenceManager {
                                 last_updated: chrono::Utc::now().timestamp(),
                                 ..current
                             },
+                            source,
                         )
                         .await;
                     }
@@ -345,6 +349,7 @@ impl PresenceManager {
                             last_updated: chrono::Utc::now().timestamp(),
                             ..Default::default()
                         },
+                        source,
                     )
                     .await;
                 }
@@ -359,6 +364,7 @@ impl PresenceManager {
                                 last_updated: chrono::Utc::now().timestamp(),
                                 ..Default::default()
                             },
+                            source,
                         )
                         .await;
                     }
@@ -426,8 +432,9 @@ impl ProxyModule for PresenceModule {
         let manager = self.manager.clone();
         if let Some(mut rx) = self.server.locator_events.as_ref().map(|tx| tx.subscribe()) {
             crate::utils::spawn(async move {
+                let source = EventSource::Local;
                 while let Ok(event) = rx.recv().await {
-                    manager.handle_locator_event(event).await;
+                    manager.handle_locator_event(event, &source).await;
                 }
             });
         }
@@ -616,7 +623,15 @@ impl PresenceModule {
             }
         }
 
-        self.manager.update_state(&identity, current).await;
+        self.manager
+            .update_state(&identity, current.clone(), &EventSource::Local)
+            .await;
+
+        // Forward presence change to cluster peers and addon handlers
+        if let Some(hub) = &self.server.cluster_event_hub {
+            hub.emit_presence_change(&identity, &current).await;
+        }
+
         tx.reply(rsipstack::sip::StatusCode::OK).await.ok();
 
         Ok(())
@@ -854,7 +869,7 @@ mod tests {
         let mut state = manager.get_state(ext);
         state.status = PresenceStatus::Available;
         state.note = Some("On line".to_string());
-        manager.update_state(ext, state).await;
+        manager.update_state(ext, state, &EventSource::Local).await;
 
         let updated = manager.get_state(ext);
         assert_eq!(updated.status, PresenceStatus::Available);
@@ -874,13 +889,13 @@ mod tests {
 
         // Test registration
         manager
-            .handle_locator_event(LocatorEvent::Registered(loc.clone()))
+            .handle_locator_event(LocatorEvent::Registered(loc.clone()), &EventSource::Local)
             .await;
         assert_eq!(manager.get_state(ext).status, PresenceStatus::Available);
 
         // Test unregistration
         manager
-            .handle_locator_event(LocatorEvent::Unregistered(loc))
+            .handle_locator_event(LocatorEvent::Unregistered(loc), &EventSource::Local)
             .await;
         assert_eq!(manager.get_state(ext).status, PresenceStatus::Offline);
     }

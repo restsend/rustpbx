@@ -196,6 +196,17 @@ pub struct SipSession {
     pub caller_is_webrtc: bool,
     pub callee_is_webrtc: bool,
     pub conference_bridge: crate::call::runtime::SessionConferenceBridge,
+
+    /// Per-leg media peers (for dynamic leg management)
+    #[allow(dead_code)]
+    pub leg_peers: std::collections::HashMap<LegId, Arc<dyn MediaPeer>>,
+
+    /// Command sender for internal async tasks (e.g., leg dial completion)
+    #[allow(dead_code)]
+    pub cmd_tx: Option<mpsc::UnboundedSender<CallCommand>>,
+
+    /// Per-leg spawned task handles (for cleanup when leg is removed)
+    pub leg_tasks: std::collections::HashMap<LegId, Vec<tokio::task::JoinHandle<()>>>,
 }
 
 #[derive(Clone)]
@@ -328,7 +339,7 @@ impl SipSession {
 
         let sip_handle = SipSessionHandle {
             session_id: session_id.clone(),
-            cmd_tx,
+            cmd_tx: cmd_tx.clone(),
             snapshot_cache: snapshot_cache.clone(),
             app_event_bridge: app_event_bridge.clone(),
         };
@@ -455,6 +466,9 @@ impl SipSession {
             caller_is_webrtc: false,
             callee_is_webrtc: false,
             conference_bridge: crate::call::runtime::SessionConferenceBridge::new(),
+            leg_peers: std::collections::HashMap::new(),
+            cmd_tx: Some(cmd_tx.clone()),
+            leg_tasks: std::collections::HashMap::new(),
         };
 
         (session, sip_handle, cmd_rx)
@@ -4582,6 +4596,33 @@ impl SipSession {
                 Err(e) => CommandResult::failure(e.to_string()),
             },
 
+            CallCommand::LegAdd { target, leg_id } => {
+                match self.handle_add_leg(target, leg_id).await {
+                    Ok(new_leg_id) => CommandResult::success_with_leg(new_leg_id),
+                    Err(e) => CommandResult::failure(e.to_string()),
+                }
+            }
+
+            CallCommand::LegRemove { leg_id } => match self.handle_remove_leg(leg_id).await {
+                Ok(_) => CommandResult::success(),
+                Err(e) => CommandResult::failure(e.to_string()),
+            },
+
+            CallCommand::LegConnected { leg_id } => {
+                info!(%leg_id, "Leg connected async notification");
+                self.update_leg_state(&leg_id, LegState::Connected);
+                self.update_media_path().await;
+                CommandResult::success()
+            }
+
+            CallCommand::LegFailed { leg_id, reason } => {
+                warn!(%leg_id, %reason, "Leg failed async notification");
+                self.update_leg_state(&leg_id, LegState::Ended);
+                self.legs.remove(&leg_id);
+                self.update_media_path().await;
+                CommandResult::failure(reason)
+            }
+
             _ => CommandResult::not_supported("Command not yet implemented"),
         }
     }
@@ -4628,6 +4669,492 @@ impl SipSession {
         }
         self.state = Self::derive_state(&self.legs);
         true
+    }
+
+    /// Add a new leg to the session dynamically.
+    async fn handle_add_leg(&mut self, target: String, leg_id: Option<LegId>) -> Result<LegId> {
+        let new_leg_id =
+            leg_id.unwrap_or_else(|| LegId::new(format!("leg-{}", uuid::Uuid::new_v4())));
+
+        info!(%new_leg_id, %target, "Adding new SIP leg to session");
+
+        // Parse target as SIP URI
+        let uri = rsipstack::sip::Uri::try_from(target.as_str())
+            .map_err(|e| anyhow!("Invalid SIP URI '{}': {}", target, e))?;
+
+        // Create leg
+        let leg = crate::call::domain::Leg::new(new_leg_id.clone()).with_endpoint(target.clone());
+        self.legs.insert(new_leg_id.clone(), leg);
+        self.update_leg_state(&new_leg_id, LegState::Initializing);
+
+        // Create peer and initiate INVITE in background
+        if let Err(e) = self.initiate_sip_leg(&new_leg_id, uri).await {
+            warn!(error = %e, "Failed to initiate SIP leg, cleaning up");
+            self.legs.remove(&new_leg_id);
+            return Err(e);
+        }
+
+        self.update_media_path().await;
+
+        info!(%new_leg_id, "SIP leg added successfully");
+        Ok(new_leg_id)
+    }
+
+    /// Remove a leg from the session.
+    async fn handle_remove_leg(&mut self, leg_id: LegId) -> Result<()> {
+        info!(%leg_id, "Removing leg from session");
+
+        if let Some(leg) = self.legs.remove(&leg_id) {
+            // Send BYE to SIP dialog if exists
+            let dialog_id = format!("{}-{}", self.id.0, leg_id);
+            if leg.dialog_id.is_some() {
+                if let Some(dlg) = self.server.dialog_layer.get_dialog_with(&dialog_id) {
+                    if let Err(e) = dlg.hangup().await {
+                        warn!(%leg_id, %dialog_id, error = %e, "Failed to hangup SIP dialog");
+                    } else {
+                        info!(%leg_id, %dialog_id, "SIP dialog hangup sent");
+                    }
+                }
+            }
+            info!(%leg_id, "Leg removed");
+        }
+
+        // Abort any spawned tasks for this leg
+        if let Some(handles) = self.leg_tasks.remove(&leg_id) {
+            let count = handles.len();
+            for handle in handles {
+                handle.abort();
+            }
+            info!(%leg_id, "Aborted {} tasks for removed leg", count);
+        }
+
+        // Remove peer for this leg
+        self.leg_peers.remove(&leg_id);
+
+        self.update_media_path().await;
+        Ok(())
+    }
+
+    /// Create a media peer for a dynamic leg.
+    async fn create_leg_peer(
+        &self,
+        leg_id: &LegId,
+    ) -> Result<(Arc<dyn MediaPeer>, Box<dyn crate::media::Track>, String)> {
+        let track_id = format!("leg-{}-{}", self.id.0, leg_id);
+
+        // Create media stream
+        let media_stream_builder = crate::media::MediaStreamBuilder::new()
+            .with_id(track_id.clone())
+            .with_cancel_token(self.cancel_token.child_token());
+        let media_stream = media_stream_builder.build();
+
+        // Create peer (using VoiceEnginePeer for now - can be extended for WebRTC)
+        let peer: Arc<dyn MediaPeer> = Arc::new(VoiceEnginePeer::new(Arc::new(media_stream)));
+
+        // Create RTP track
+        let mut track_builder = crate::media::RtpTrackBuilder::new(track_id.clone())
+            .with_cancel_token(self.cancel_token.child_token());
+
+        if let Some(ref external_ip) = self.server.rtp_config.external_ip {
+            track_builder = track_builder.with_external_ip(external_ip.clone());
+        }
+        if let Some(ref bind_ip) = self.server.rtp_config.bind_ip {
+            track_builder = track_builder.with_bind_ip(bind_ip.clone());
+        }
+
+        let track = track_builder.build();
+
+        // Get SDP offer from track BEFORE moving it into peer
+        let sdp = track
+            .local_description()
+            .await
+            .map_err(|e| anyhow!("Failed to get local description: {}", e))?;
+
+        // Add track to peer (moves track)
+        peer.update_track(Box::new(track), None).await;
+
+        // Re-create a placeholder track for the return value (the real one is inside peer now)
+        let placeholder_track = crate::media::RtpTrackBuilder::new(track_id)
+            .with_cancel_token(self.cancel_token.child_token())
+            .build();
+
+        Ok((peer, Box::new(placeholder_track), sdp))
+    }
+
+    /// Initiate a SIP INVITE for a dynamic leg.
+    async fn initiate_sip_leg(
+        &mut self,
+        leg_id: &LegId,
+        callee_uri: rsipstack::sip::Uri,
+    ) -> Result<()> {
+        // Create peer for this leg
+        let (peer, _track, sdp_offer) = self.create_leg_peer(leg_id).await?;
+        self.leg_peers.insert(leg_id.clone(), peer.clone());
+
+        info!(%leg_id, %callee_uri, sdp_len = %sdp_offer.len(), "Initiating SIP leg");
+
+        // Build INVITE option
+        let caller = self
+            .context
+            .dialplan
+            .caller
+            .clone()
+            .unwrap_or_else(|| callee_uri.clone());
+        let contact = self
+            .context
+            .dialplan
+            .caller_contact
+            .as_ref()
+            .map(|c| c.uri.clone())
+            .unwrap_or_else(|| caller.clone());
+
+        let invite_option = rsipstack::dialog::invitation::InviteOption {
+            callee: callee_uri.clone(),
+            caller: caller.clone(),
+            contact: contact.clone(),
+            content_type: Some("application/sdp".to_string()),
+            offer: Some(sdp_offer.into_bytes()),
+            destination: None,
+            credential: None,
+            headers: None,
+            call_id: Some(format!("{}-{}", self.id.0, leg_id)),
+            ..Default::default()
+        };
+
+        let dialog_layer = self.server.dialog_layer.clone();
+        let leg_id_for_spawn = leg_id.clone();
+        let cmd_tx = self
+            .cmd_tx
+            .clone()
+            .ok_or_else(|| anyhow!("No command sender available"))?;
+        let track_id = format!("leg-{}-{}", self.id.0, leg_id);
+        let cancel_token = self.cancel_token.child_token();
+
+        // Spawn background task to handle INVITE response
+        let invite_handle = tokio::spawn(async move {
+            let leg_id = leg_id_for_spawn;
+            let (state_tx, mut state_rx) = tokio::sync::mpsc::unbounded_channel();
+            let invitation = dialog_layer.do_invite(invite_option, state_tx).boxed();
+
+            let result = match invitation.await {
+                Ok((dialog, response)) => {
+                    if let Some(ref resp) = response {
+                        let status_code = resp.status_code.code();
+                        if (200..300).contains(&status_code) {
+                            info!(%leg_id, status = %status_code, "SIP leg answered successfully");
+
+                            // Extract SDP answer from response body
+                            if !resp.body().is_empty() {
+                                let answer_sdp = String::from_utf8_lossy(resp.body()).to_string();
+
+                                // Set remote description on the peer
+                                if let Err(e) =
+                                    peer.update_remote_description(&track_id, &answer_sdp).await
+                                {
+                                    warn!(%leg_id, error = %e, "Failed to set remote description on leg peer");
+                                } else {
+                                    info!(%leg_id, "Remote description set successfully");
+                                }
+                            }
+
+                            // Send LegConnected with SDP answer
+                            let _ = cmd_tx.send(CallCommand::LegConnected {
+                                leg_id: leg_id.clone(),
+                            });
+
+                            // Return dialog for further processing
+                            Ok(dialog)
+                        } else {
+                            warn!(%leg_id, status = %status_code, "SIP leg rejected");
+                            let _ = cmd_tx.send(CallCommand::LegFailed {
+                                leg_id: leg_id.clone(),
+                                reason: format!("Rejected with {}", status_code),
+                            });
+                            Err(format!("Rejected with {}", status_code))
+                        }
+                    } else {
+                        warn!(%leg_id, "SIP leg timeout (no response)");
+                        let _ = cmd_tx.send(CallCommand::LegFailed {
+                            leg_id: leg_id.clone(),
+                            reason: "Timeout".to_string(),
+                        });
+                        Err("Timeout".to_string())
+                    }
+                }
+                Err(e) => {
+                    warn!(%leg_id, error = %e, "SIP leg failed");
+                    let _ = cmd_tx.send(CallCommand::LegFailed {
+                        leg_id: leg_id.clone(),
+                        reason: e.to_string(),
+                    });
+                    Err(e.to_string())
+                }
+            };
+
+            // Process dialog state changes (e.g., BYE from remote)
+            if let Ok(dialog) = result {
+                let dialog_cancel = cancel_token.child_token();
+                tokio::spawn(async move {
+                    loop {
+                        tokio::select! {
+                            biased;
+                            _ = dialog_cancel.cancelled() => {
+                                info!(%leg_id, "Dialog monitor cancelled");
+                                break;
+                            }
+                            state = state_rx.recv() => {
+                                match state {
+                                    Some(rsipstack::dialog::dialog::DialogState::Terminated(..)) => {
+                                        info!(%leg_id, "SIP leg dialog terminated");
+                                        let _ = cmd_tx.send(CallCommand::LegFailed {
+                                            leg_id: leg_id.clone(),
+                                            reason: "Remote hung up".to_string(),
+                                        });
+                                        break;
+                                    }
+                                    Some(_) => {}
+                                    None => break,
+                                }
+                            }
+                        }
+                    }
+                    // Keep dialog alive
+                    let _ = dialog;
+                });
+            }
+        });
+
+        self.leg_tasks
+            .entry(leg_id.clone())
+            .or_default()
+            .push(invite_handle);
+
+        Ok(())
+    }
+
+    /// Update media path based on number of active legs.
+    async fn update_media_path(&mut self) {
+        let active_count = self.legs.values().filter(|l| l.is_active()).count();
+
+        info!(session_id = %self.id, active_legs = active_count, "Updating media path");
+
+        match active_count {
+            2 => {
+                // Direct bridge: caller ↔ callee (or caller ↔ target)
+                info!("Switching to direct bridge mode");
+                // Clean up conference bridges if any
+                self.stop_conference_bridges().await;
+                // Setup direct bridge between the two active legs
+                let active_legs: Vec<LegId> = self
+                    .legs
+                    .iter()
+                    .filter(|(_, leg)| leg.is_active())
+                    .map(|(id, _)| id.clone())
+                    .collect();
+                if active_legs.len() == 2 {
+                    self.setup_bridge(active_legs[0].clone(), active_legs[1].clone())
+                        .await;
+                    info!(leg_a = %active_legs[0], leg_b = %active_legs[1], "Direct bridge configured");
+                }
+            }
+            n if n >= 3 => {
+                // Conference mixer: all legs mixed together
+                info!("Switching to conference mixer mode ({} legs)", n);
+                // Clean up direct bridge if any
+                self.stop_direct_bridge().await;
+                // Setup conference mixer
+                self.setup_conference_mixer().await;
+            }
+            _ => {
+                // Single leg or none - no bridging needed
+                info!("No bridging needed");
+                self.stop_all_bridges().await;
+            }
+        }
+    }
+
+    /// Stop all conference bridges for this session.
+    async fn stop_conference_bridges(&mut self) {
+        if self.conference_bridge.is_active() {
+            info!("Stopping conference bridges");
+            self.conference_bridge.stop_bridge();
+        }
+    }
+
+    /// Stop direct bridge if active.
+    async fn stop_direct_bridge(&mut self) {
+        if self.bridge.active {
+            info!("Stopping direct bridge");
+            self.bridge.clear();
+        }
+    }
+
+    /// Stop all bridges (both direct and conference).
+    async fn stop_all_bridges(&mut self) {
+        self.stop_conference_bridges().await;
+        self.stop_direct_bridge().await;
+        // Abort all leg-specific spawned tasks
+        for (leg_id, handles) in self.leg_tasks.drain() {
+            for handle in handles {
+                handle.abort();
+            }
+            info!(%leg_id, "Aborted tasks for leg");
+        }
+        info!("All bridges stopped");
+    }
+
+    /// Setup conference mixer for all active legs.
+    async fn setup_conference_mixer(&mut self) {
+        let conf_id_str = format!("conf-{}", self.id.0);
+        let conf_id = crate::call::runtime::ConferenceId::from(conf_id_str.as_str());
+
+        // Create conference if not exists
+        if self
+            .server
+            .conference_manager
+            .get_conference(&conf_id)
+            .await
+            .is_none()
+        {
+            if let Err(e) = self
+                .server
+                .conference_manager
+                .create_conference(conf_id.clone(), None)
+                .await
+            {
+                warn!("Failed to create conference: {}", e);
+                return;
+            }
+            info!(conf_id = %conf_id_str, "Conference created");
+        }
+
+        // Collect active leg IDs first to avoid borrow issues
+        let active_legs: Vec<(LegId, Option<Arc<dyn MediaPeer>>)> = self
+            .legs
+            .iter()
+            .filter(|(_, leg)| leg.is_active())
+            .map(|(id, _)| {
+                let peer = self.leg_peers.get(id).cloned();
+                (id.clone(), peer)
+            })
+            .collect();
+
+        // Add all active legs as participants
+        for (leg_id, peer) in active_legs {
+            let participant_leg = LegId::new(format!("{}-{}", self.id.0, leg_id));
+
+            if let Err(e) = self
+                .server
+                .conference_manager
+                .add_participant(&conf_id, participant_leg.clone())
+                .await
+            {
+                warn!(%leg_id, "Failed to add participant: {}", e);
+                continue;
+            }
+
+            info!(%leg_id, "Added participant to conference");
+
+            // Start media bridge for this leg using its own peer if available
+            if let Some(peer) = peer {
+                if let Err(e) = self
+                    .start_conference_media_bridge_for_peer(&conf_id_str, &leg_id, &peer)
+                    .await
+                {
+                    warn!(%leg_id, "Failed to start conference media bridge for dynamic leg: {}", e);
+                }
+            } else {
+                // Fallback to legacy caller/callee peer for existing legs
+                if let Err(e) = self
+                    .start_conference_media_bridge(&conf_id_str, &leg_id)
+                    .await
+                {
+                    warn!(%leg_id, "Failed to start conference media bridge: {}", e);
+                }
+            }
+        }
+    }
+
+    /// Start conference media bridge for a specific peer (dynamic leg).
+    async fn start_conference_media_bridge_for_peer(
+        &mut self,
+        conf_id: &str,
+        leg_id: &LegId,
+        peer: &Arc<dyn MediaPeer>,
+    ) -> Result<crate::call::runtime::ConferenceBridgeHandle> {
+        use rustrtc::media::MediaSample;
+
+        // Get the first track from the peer and check if it has a sender
+        let tracks = peer.get_tracks().await;
+        let mut audio_sender = None;
+        for t in &tracks {
+            let guard = t.lock().await;
+            if let Some(sender) = guard.get_sender() {
+                audio_sender = Some(sender);
+                break;
+            }
+        }
+
+        // Create a channel to bridge between ConferenceMediaBridge and audio_sender
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<MediaSample>(100);
+
+        if let Some(sender) = audio_sender {
+            info!(
+                session_id = %self.id,
+                conf_id = %conf_id,
+                leg_id = %leg_id,
+                "Using existing track sender for conference media bridge"
+            );
+
+            // Spawn a forwarder task with cancellation support
+            let cancel_token = self.cancel_token.child_token();
+            let forwarder_handle = tokio::spawn(async move {
+                loop {
+                    tokio::select! {
+                        biased;
+                        _ = cancel_token.cancelled() => {
+                            break;
+                        }
+                        sample = rx.recv() => {
+                            match sample {
+                                Some(s) => {
+                                    if sender.send(s).await.is_err() {
+                                        break;
+                                    }
+                                }
+                                None => break,
+                            }
+                        }
+                    }
+                }
+            });
+            self.leg_tasks
+                .entry(leg_id.clone())
+                .or_default()
+                .push(forwarder_handle);
+        } else {
+            warn!(
+                session_id = %self.id,
+                conf_id = %conf_id,
+                leg_id = %leg_id,
+                "No track sender found, conference audio will not be sent to this leg"
+            );
+        }
+
+        // Create audio receiver for input from peer
+        let audio_receiver = self
+            .create_audio_receiver_from_peer(peer)
+            .await
+            .map_err(|e| anyhow!("Failed to create audio receiver for dynamic leg: {}", e))?;
+
+        // Start full-duplex media bridge
+        let bridge = crate::call::runtime::ConferenceMediaBridge::new(
+            self.server.conference_manager.clone(),
+        );
+        bridge
+            .start_bridge_full_duplex(conf_id, leg_id, tx, audio_receiver)
+            .await
+            .map_err(|e| anyhow!("Failed to start conference media bridge: {}", e))
     }
 
     async fn setup_bridge(&mut self, leg_a: LegId, leg_b: LegId) -> bool {
@@ -4749,6 +5276,26 @@ impl SipSession {
         };
         let refer_to_uri = rsipstack::sip::Uri::try_from(refer_to_str.as_str())
             .map_err(|e| anyhow!("Invalid transfer target URI: {}", e))?;
+
+        // When blind_transfer_use_refer is false (default), originate B-leg INVITE directly (B2BUA).
+        if !self.server.proxy_config.blind_transfer_use_refer {
+            info!(%leg_id, target = %refer_to_str, "Blind transfer via B-leg INVITE (B2BUA)");
+            let location = crate::call::Location {
+                aor: refer_to_uri,
+                ..Default::default()
+            };
+            let (_tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            return self
+                .try_single_target(&location, &mut rx)
+                .await
+                .map_err(|(code, reason)| {
+                    anyhow!(
+                        "B-leg transfer failed: {:?} - {}",
+                        code,
+                        reason.unwrap_or_default()
+                    )
+                });
+        }
 
         let referred_by = self
             .context
@@ -5292,14 +5839,32 @@ impl SipSession {
         // Create a channel to bridge between ConferenceMediaBridge and audio_sender
         let (tx, mut rx) = tokio::sync::mpsc::channel::<MediaSample>(100);
 
-        // Spawn a forwarder task
-        tokio::spawn(async move {
-            while let Some(sample) = rx.recv().await {
-                if audio_sender.send(sample).await.is_err() {
-                    break;
+        // Spawn a forwarder task with cancellation support
+        let cancel_token = self.cancel_token.child_token();
+        let forwarder_handle = tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = cancel_token.cancelled() => {
+                        break;
+                    }
+                    sample = rx.recv() => {
+                        match sample {
+                            Some(s) => {
+                                if audio_sender.send(s).await.is_err() {
+                                    break;
+                                }
+                            }
+                            None => break,
+                        }
+                    }
                 }
             }
         });
+        self.leg_tasks
+            .entry(leg_id.clone())
+            .or_default()
+            .push(forwarder_handle);
 
         // Create audio receiver for input from SIP track
         let audio_receiver = if is_callee {
@@ -6623,14 +7188,14 @@ impl Drop for SipSession {
 
 /// Audio receiver that reads from a PeerConnection and decodes to PCM.
 /// Uses the same pattern as BridgePeer: listens for Track events, reads MediaSample, decodes to PCM.
-struct PeerConnectionAudioReceiver {
+pub(crate) struct PeerConnectionAudioReceiver {
     pc: rustrtc::PeerConnection,
     decoder: Box<dyn audio_codec::Decoder>,
     audio_track: Option<Arc<dyn rustrtc::media::MediaStreamTrack>>,
 }
 
 impl PeerConnectionAudioReceiver {
-    fn new(pc: rustrtc::PeerConnection, decoder: Box<dyn audio_codec::Decoder>) -> Self {
+    pub(crate) fn new(pc: rustrtc::PeerConnection, decoder: Box<dyn audio_codec::Decoder>) -> Self {
         Self {
             pc,
             decoder,

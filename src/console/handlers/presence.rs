@@ -61,7 +61,11 @@ pub async fn set_presence(
         };
         sip_server
             .presence_manager
-            .update_state(&extension, new_state.clone())
+            .update_state(
+                &extension,
+                new_state.clone(),
+                &crate::proxy::cluster_event::EventSource::Local,
+            )
             .await;
         Json(PresenceResponse {
             success: true,

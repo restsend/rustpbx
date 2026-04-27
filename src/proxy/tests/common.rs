@@ -105,6 +105,7 @@ pub async fn create_test_server_with_config(
         conference_manager: Arc::new(crate::call::runtime::ConferenceManager::new()),
         agent_registry: None,
         transfer_notify_subscribers: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+        cluster_event_hub: None,
     });
 
     // Add test users
@@ -224,10 +225,7 @@ pub fn create_test_request(
     ));
 
     let call_id = rsipstack::sip::headers::CallId::new(random_text(16));
-    let cseq = rsipstack::sip::headers::typed::CSeq {
-        seq: 1u32,
-        method,
-    };
+    let cseq = rsipstack::sip::headers::typed::CSeq { seq: 1u32, method };
 
     // Create contact with the same user and host
     let contact_uri = rsipstack::sip::Uri {
@@ -371,10 +369,7 @@ pub fn create_proxy_auth_request_with_nonce(
     ));
 
     let call_id = rsipstack::sip::headers::CallId::new(random_text(16));
-    let cseq = rsipstack::sip::headers::typed::CSeq {
-        seq: 1u32,
-        method,
-    };
+    let cseq = rsipstack::sip::headers::typed::CSeq { seq: 1u32, method };
 
     // Create contact with the same user and host
     let contact_uri = rsipstack::sip::Uri {

@@ -196,6 +196,24 @@ pub enum RwiCommandPayload {
     SipOptionsPing {
         call_id: String,
     },
+    LegAdd {
+        call_id: String,
+        target: String,
+        leg_id: Option<String>,
+    },
+    LegRemove {
+        call_id: String,
+        leg_id: String,
+    },
+    AppStart {
+        call_id: String,
+        app_name: String,
+        params: Option<serde_json::Value>,
+    },
+    AppStop {
+        call_id: String,
+        reason: Option<String>,
+    },
     ConferenceCreate(ConferenceCreateRequest),
     ConferenceAdd {
         conf_id: String,
@@ -660,6 +678,28 @@ pub enum RwiRequestPayload {
     },
     #[serde(rename = "sip.options_ping")]
     SipOptionsPing { call_id: Option<String> },
+    #[serde(rename = "call.leg_add")]
+    LegAdd {
+        call_id: Option<String>,
+        target: Option<String>,
+        leg_id: Option<String>,
+    },
+    #[serde(rename = "call.leg_remove")]
+    LegRemove {
+        call_id: Option<String>,
+        leg_id: Option<String>,
+    },
+    #[serde(rename = "call.app_start")]
+    AppStart {
+        call_id: Option<String>,
+        app_name: Option<String>,
+        params: Option<serde_json::Value>,
+    },
+    #[serde(rename = "call.app_stop")]
+    AppStop {
+        call_id: Option<String>,
+        reason: Option<String>,
+    },
     #[serde(rename = "conference.create")]
     ConferenceCreate(ConferenceCreateRequest),
     #[serde(rename = "conference.add")]
@@ -928,6 +968,28 @@ impl From<RwiRequest> for RwiCommandPayload {
             },
             RwiRequestPayload::SipOptionsPing { call_id } => RwiCommandPayload::SipOptionsPing {
                 call_id: call_id.unwrap_or_default(),
+            },
+            RwiRequestPayload::LegAdd { call_id, target, leg_id } => {
+                RwiCommandPayload::LegAdd {
+                    call_id: call_id.unwrap_or_default(),
+                    target: target.unwrap_or_default(),
+                    leg_id,
+                }
+            }
+            RwiRequestPayload::LegRemove { call_id, leg_id } => RwiCommandPayload::LegRemove {
+                call_id: call_id.unwrap_or_default(),
+                leg_id: leg_id.unwrap_or_default(),
+            },
+            RwiRequestPayload::AppStart { call_id, app_name, params } => {
+                RwiCommandPayload::AppStart {
+                    call_id: call_id.unwrap_or_default(),
+                    app_name: app_name.unwrap_or_default(),
+                    params,
+                }
+            }
+            RwiRequestPayload::AppStop { call_id, reason } => RwiCommandPayload::AppStop {
+                call_id: call_id.unwrap_or_default(),
+                reason,
             },
             RwiRequestPayload::ConferenceCreate(mut r) => {
                 if r.conf_id.is_empty() {

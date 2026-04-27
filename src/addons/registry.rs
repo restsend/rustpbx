@@ -73,6 +73,10 @@ impl AddonRegistry {
         #[cfg(feature = "addon-ivr-editor")]
         addons.push(Box::new(super::ivr_editor::IvrEditorAddon::new()));
 
+        // JSON-RPC Router Addon (commercial)
+        #[cfg(feature = "addon-jsonrpc-router")]
+        addons.push(Box::new(super::jsonrpc_router::JsonRpcRouterAddon::new()));
+
         // Queue Addon
         addons.push(Box::new(super::queue::QueueAddon::new()));
 
