@@ -103,6 +103,9 @@ pub struct BridgeCodecLists {
     pub caller_side: Vec<CodecInfo>,
     /// Codecs for the callee-facing side of the bridge
     pub callee_side: Vec<CodecInfo>,
+    /// Codecs that are supported by BOTH sides (intersection of caller_side and callee_side).
+    /// This preserves caller payload types for common codecs.
+    pub common: Vec<CodecInfo>,
 }
 
 impl MediaNegotiator {
@@ -562,6 +565,7 @@ impl MediaNegotiator {
     /// 2. Filter caller side by caller transport support and optional `allow_codecs`
     /// 3. Filter callee side by callee transport support and optional `allow_codecs`
     /// 4. Preserve caller payload types and DTMF clock rates on both sides
+    /// 5. Compute the intersection (common) for codec-aligned bridging without transcoding
     pub fn build_bridge_codec_lists(
         caller_sdp: &str,
         caller_is_webrtc: bool,
@@ -600,9 +604,30 @@ impl MediaNegotiator {
             .cloned()
             .collect();
 
+        // Compute intersection: only codecs present in BOTH sides, preserving
+        // caller-side ordering and payload types. Without this, a mixed-transport
+        // bridge (RTP ↔ WebRTC) will select different sender codecs on each side
+        // (e.g. RTP side gets G729, WebRTC side gets PCMU) and the passthrough
+        // forwarder delivers garbage since the bridge has no internal transcoder.
+        //
+        // By narrowing both sides to common codecs, the SBC is forced to fall back
+        // to a mutually-supported codec (PCMU/PCMA). If the intersection is empty
+        // (unlikely in practice), the caller_side list is used as a fallback,
+        // but transcoding would be required for actual interoperability.
+        let common: Vec<CodecInfo> = caller_side
+            .iter()
+            .filter(|c| {
+                callee_side
+                    .iter()
+                    .any(|cc| cc.codec == c.codec)
+            })
+            .cloned()
+            .collect();
+
         BridgeCodecLists {
             caller_side,
             callee_side,
+            common,
         }
     }
 
@@ -1400,5 +1425,151 @@ a=fmtp:101 0-16\r\n";
                 ci.codec
             );
         }
+    }
+
+    /// RTP caller offers G729+PCMU, WebRTC callee.
+    /// common must exclude G729 because WebRTC does not support it.
+    #[test]
+    fn test_bridge_codecs_common_excludes_transport_unsupported() {
+        let caller_sdp = "v=0\r\n\
+o=- 1 1 IN IP4 127.0.0.1\r\n\
+s=-\r\n\
+t=0 0\r\n\
+m=audio 10000 RTP/AVP 18 0 101\r\n\
+a=rtpmap:18 G729/8000\r\n\
+a=rtpmap:0 PCMU/8000\r\n\
+a=rtpmap:101 telephone-event/8000\r\n";
+
+        let lists = MediaNegotiator::build_bridge_codec_lists(
+            caller_sdp,
+            false, // caller is RTP
+            true,  // callee is WebRTC
+            &[],
+        );
+
+        // common: only PCMU (both sides support it) + telephone-event
+        assert!(
+            !lists.common.iter().any(|c| c.codec == CodecType::G729),
+            "G729 must NOT be in common (WebRTC does not support it)"
+        );
+        assert!(
+            lists.common.iter().any(|c| c.codec == CodecType::PCMU),
+            "PCMU must be in common (both sides support it)"
+        );
+        assert!(
+            lists.common.iter().any(|c| c.codec == CodecType::TelephoneEvent),
+            "TelephoneEvent must be in common"
+        );
+
+        let first_audio = lists.common.iter().find(|c| !c.is_dtmf());
+        assert!(first_audio.is_some(), "Common must have at least one audio codec");
+        assert_eq!(
+            first_audio.unwrap().codec,
+            CodecType::PCMU,
+            "First common audio codec should be PCMU (G729 excluded)"
+        );
+    }
+
+    /// RTP caller offers G729+PCMA+PCMU, WebRTC callee.
+    /// common should preserve caller's ordering: G729 excluded, PCMA first.
+    #[test]
+    fn test_bridge_codecs_common_preserves_caller_ordering() {
+        let caller_sdp = "v=0\r\n\
+o=- 1 1 IN IP4 127.0.0.1\r\n\
+s=-\r\n\
+t=0 0\r\n\
+m=audio 10000 RTP/AVP 18 8 0 101\r\n\
+a=rtpmap:18 G729/8000\r\n\
+a=rtpmap:8 PCMA/8000\r\n\
+a=rtpmap:0 PCMU/8000\r\n\
+a=rtpmap:101 telephone-event/8000\r\n";
+
+        let lists = MediaNegotiator::build_bridge_codec_lists(
+            caller_sdp,
+            false, // caller is RTP
+            true,  // callee is WebRTC
+            &[],
+        );
+
+        let common_audio: Vec<_> = lists.common.iter().filter(|c| !c.is_dtmf()).collect();
+        assert_eq!(common_audio.len(), 2, "2 common audio codecs: PCMA + PCMU");
+        assert_eq!(
+            common_audio[0].codec,
+            CodecType::PCMA,
+            "PCMA must be first in common (caller ordered PCMA before PCMU)"
+        );
+        assert_eq!(
+            common_audio[1].codec,
+            CodecType::PCMU,
+            "PCMU must be second in common"
+        );
+        assert!(
+            !lists.common.iter().any(|c| c.codec == CodecType::G729),
+            "G729 excluded from common"
+        );
+    }
+
+    /// When both sides are the same transport type (e.g. both WebRTC),
+    /// common == caller_side == callee_side (no codecs dropped).
+    #[test]
+    fn test_bridge_codecs_common_identical_when_same_transport() {
+        let caller_sdp = "v=0\r\n\
+o=- 1 1 IN IP4 127.0.0.1\r\n\
+s=-\r\n\
+t=0 0\r\n\
+m=audio 9 UDP/TLS/RTP/SAVPF 111 0 101\r\n\
+a=rtpmap:111 opus/48000/2\r\n\
+a=rtpmap:0 PCMU/8000\r\n\
+a=rtpmap:101 telephone-event/8000\r\n";
+
+        let lists = MediaNegotiator::build_bridge_codec_lists(
+            caller_sdp,
+            true, // caller is WebRTC
+            true, // callee is WebRTC
+            &[],
+        );
+
+        let common_audio: Vec<_> = lists.common.iter().filter(|c| !c.is_dtmf()).collect();
+        let caller_audio: Vec<_> = lists.caller_side.iter().filter(|c| !c.is_dtmf()).collect();
+        let callee_audio: Vec<_> = lists.callee_side.iter().filter(|c| !c.is_dtmf()).collect();
+
+        assert_eq!(common_audio.len(), caller_audio.len());
+        assert_eq!(common_audio.len(), callee_audio.len());
+        for (c, a) in common_audio.iter().zip(caller_audio.iter()) {
+            assert_eq!(c.codec, a.codec, "common and caller_side must match");
+        }
+    }
+
+    /// When allow_codecs explicitly filters to a subset, common should
+    /// also reflect that filtering.
+    #[test]
+    fn test_bridge_codecs_common_respects_allow_codecs() {
+        let caller_sdp = "v=0\r\n\
+o=- 1 1 IN IP4 127.0.0.1\r\n\
+s=-\r\n\
+t=0 0\r\n\
+m=audio 10000 RTP/AVP 18 8 0 101\r\n\
+a=rtpmap:18 G729/8000\r\n\
+a=rtpmap:8 PCMA/8000\r\n\
+a=rtpmap:0 PCMU/8000\r\n\
+a=rtpmap:101 telephone-event/8000\r\n";
+
+        // Only allow PCMU + telephone-event
+        let lists = MediaNegotiator::build_bridge_codec_lists(
+            caller_sdp,
+            false, // caller is RTP
+            true,  // callee is WebRTC
+            &[CodecType::PCMU, CodecType::TelephoneEvent],
+        );
+
+        let common_audio: Vec<_> = lists.common.iter().filter(|c| !c.is_dtmf()).collect();
+        assert_eq!(
+            common_audio.len(),
+            1,
+            "Only PCMU allowed, so only PCMU in common"
+        );
+        assert_eq!(common_audio[0].codec, CodecType::PCMU);
+        assert!(!lists.common.iter().any(|c| c.codec == CodecType::G729));
+        assert!(!lists.common.iter().any(|c| c.codec == CodecType::PCMA));
     }
 }

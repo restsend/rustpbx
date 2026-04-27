@@ -241,6 +241,40 @@ mod tests {
             .await;
     }
 
+    // ── 3b. Queue with no agents and no fallback config - should return 486 busy ──
+
+    #[tokio::test]
+    async fn test_queue_no_agents_no_fallback_returns_busy() {
+        let mut plan = build_simple_queue();
+        plan.dial_strategy = Some(DialStrategy::Sequential(vec![]));
+        plan.fallback = None; // No fallback configured
+
+        let config = QueueConfig {
+            name: "test-queue".to_string(),
+            accept_immediately: true,
+            hold: None,
+            fallback: None,
+            agents: vec![],
+            strategy: DialStrategy::Sequential(vec![]),
+            ..Default::default()
+        };
+
+        let mut stack = MockCallStack::run(Box::new(QueueApp::new(plan, config)), "caller", "1000");
+
+        // Queue should detect no agents and return 486 Busy Here
+        stack
+            .assert_cmd(200, "Hangup", |c| {
+                matches!(
+                    c,
+                    SessionAction::Hangup {
+                        code: Some(486),
+                        ..
+                    }
+                )
+            })
+            .await;
+    }
+
     // ── 4. Queue fallback with play then hangup ──
 
     #[tokio::test]

@@ -135,6 +135,11 @@ impl ProxyDataContext {
             return Ok(Some(config));
         }
 
+        if reference.chars().all(|c| c.is_ascii_digit()) && !reference.is_empty() {
+            let db_key = format!("db-{}", reference);
+            return self.resolve_queue_config(&db_key);
+        }
+
         let Some(key) = queue_utils::canonical_queue_key(reference) else {
             return Ok(None);
         };
