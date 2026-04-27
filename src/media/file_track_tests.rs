@@ -1,4 +1,5 @@
 use super::*;
+use rustrtc::{MediaKind, PeerConnection, RtcConfiguration, TransceiverDirection};
 use rustrtc::TransportMode;
 use rustrtc::media::MediaStreamTrack as _;
 use tokio::fs;
@@ -91,6 +92,36 @@ async fn test_file_track_opus_codec_sdp() {
         sdp.contains("a=fmtp:111 minptime=10;useinbandfec=1"),
         "SDP should contain Opus fmtp parameters"
     );
+}
+
+#[tokio::test]
+async fn test_file_track_start_playback_uses_codec_info_payload_type() {
+    let path = "/tmp/rustpbx-file-track-dynamic-pt.wav";
+    create_test_wav_file_with_samples(path, 160).await.unwrap();
+
+    let pc = PeerConnection::new(RtcConfiguration::default());
+    pc.add_transceiver(MediaKind::Audio, TransceiverDirection::SendOnly);
+
+    let track = FileTrack::new("test-dynamic-pt".to_string())
+        .with_path(path.to_string())
+        .with_codec_info(negotiate::CodecInfo {
+            payload_type: 96,
+            codec: CodecType::PCMU,
+            clock_rate: 8000,
+            channels: 1,
+        });
+
+    track.start_playback_on(Some(pc.clone())).await.unwrap();
+
+    let sender = pc
+        .get_transceivers()
+        .into_iter()
+        .find(|t| t.kind() == MediaKind::Audio)
+        .and_then(|t| t.sender())
+        .expect("audio sender should be installed");
+    assert_eq!(sender.params().payload_type, 96);
+
+    let _ = fs::remove_file(path).await;
 }
 
 #[test]
