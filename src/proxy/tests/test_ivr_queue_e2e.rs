@@ -30,6 +30,8 @@ fn create_ivr_queue_proxy_config(port: u16, ivr_toml_path: &str) -> ProxyConfig 
             "registrar".to_string(),
             "call".to_string(),
         ]),
+        // This test verifies the REFER-based transfer flow explicitly.
+        blind_transfer_use_refer: true,
         ..Default::default()
     };
 
@@ -134,7 +136,10 @@ impl TestIvrQueueServer {
                 Ok(Box::new(RegistrarModule::new(inner, config)))
             })
             .register_module("auth", |inner, _config| {
-                Ok(Box::new(AuthModule::new(inner.clone(), inner.proxy_config.clone())))
+                Ok(Box::new(AuthModule::new(
+                    inner.clone(),
+                    inner.proxy_config.clone(),
+                )))
             })
             .register_module("call", |inner, config| {
                 Ok(Box::new(CallModule::new(config, inner)))
@@ -297,13 +302,14 @@ action = {{ type = "transfer", target = "support" }}
         let registry = &server.server.active_call_registry;
         let sessions = registry.list_recent(1);
         if let Some(entry) = sessions.first()
-            && let Some(handle) = registry.get_handle(&entry.session_id) {
-                let _ = handle.send_app_event(crate::call::app::ControllerEvent::AudioComplete {
-                    track_id: "greeting".to_string(),
-                    interrupted: false,
-                });
-                info!("Injected AudioComplete for session {}", entry.session_id);
-            }
+            && let Some(handle) = registry.get_handle(&entry.session_id)
+        {
+            let _ = handle.send_app_event(crate::call::app::ControllerEvent::AudioComplete {
+                track_id: "greeting".to_string(),
+                interrupted: false,
+            });
+            info!("Injected AudioComplete for session {}", entry.session_id);
+        }
 
         sleep(Duration::from_millis(200)).await;
 
@@ -330,9 +336,10 @@ action = {{ type = "transfer", target = "support" }}
                     info!("Caller re-invited to {}", target_user);
                 }
                 if let TestUaEvent::CallEstablished(ref id) = event
-                    && Some(id) == new_dialog.as_ref() {
-                        info!("Caller established queue call");
-                    }
+                    && Some(id) == new_dialog.as_ref()
+                {
+                    info!("Caller established queue call");
+                }
             }
             if new_dialog.is_some() {
                 break;

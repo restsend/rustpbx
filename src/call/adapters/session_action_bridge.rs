@@ -263,6 +263,13 @@ pub fn call_command_to_session_action(cmd: CallCommand) -> Result<SessionAction>
         | CallCommand::InjectAppEvent { .. } => {
             Err(AdapterError::NotSupported(format!("{:?}", cmd)).into())
         }
+
+        CallCommand::LegAdd { .. }
+        | CallCommand::LegRemove { .. }
+        | CallCommand::LegConnected { .. }
+        | CallCommand::LegFailed { .. } => {
+            Err(AdapterError::NotSupported("dynamic leg commands".to_string()).into())
+        }
     }
 }
 

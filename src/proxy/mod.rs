@@ -12,6 +12,7 @@ pub mod active_call_registry;
 pub mod auth;
 pub mod capability_headers;
 pub mod call;
+pub mod cluster_event;
 pub mod data;
 pub mod dialog_auth_cache;
 pub mod locator;

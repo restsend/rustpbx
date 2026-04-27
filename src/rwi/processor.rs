@@ -1,12 +1,14 @@
 use crate::call::domain::{CallCommand, LegId};
 
 use crate::call::runtime::ConferenceManager;
-use crate::call::runtime::conference_media_bridge::{AudioReceiver, PcmAudioFrame};
+use crate::call::runtime::conference_media_bridge::{
+    AudioReceiver, ConferenceBridgeHandle, PcmAudioFrame,
+};
 use crate::media;
 use crate::media::Track as MediaTrackTrait;
 use crate::proxy::active_call_registry::ActiveProxyCallRegistry;
 use crate::proxy::proxy_call::media_peer::VoiceEnginePeer;
-use crate::proxy::proxy_call::sip_session::SipSessionHandle;
+use crate::proxy::proxy_call::sip_session::{PeerConnectionAudioReceiver, SipSessionHandle};
 use crate::proxy::server::SipServerRef;
 use crate::rwi::gateway::RwiGateway;
 use crate::rwi::proto::RwiEvent;
@@ -36,13 +38,131 @@ struct OriginateAudioReceiver;
 impl AudioReceiver for OriginateAudioReceiver {
     fn recv(
         &mut self,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<PcmAudioFrame>> + Send + '_>> {
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<PcmAudioFrame>> + Send + '_>>
+    {
         Box::pin(async move {
             // For now, return paced silence. In a full implementation, we'd decode
             // RTP from the originated peer for whisper/barge capable monitoring.
             tokio::time::sleep(Duration::from_millis(20)).await;
             Some(PcmAudioFrame::new(vec![0i16; 160], 8000))
         })
+    }
+}
+
+/// Start a full-duplex conference media bridge for a peer.
+///
+/// Gets the PeerConnection from the peer, adds a sample_track for output (conference → peer),
+/// creates a `PeerConnectionAudioReceiver` for input (peer → conference), and starts the bridge.
+///
+/// Returns the `ConferenceBridgeHandle` on success, or `None` on failure.
+async fn start_peer_conference_bridge(
+    conf_manager: &Arc<ConferenceManager>,
+    conf_id: &str,
+    leg_id: &LegId,
+    peer: &Arc<dyn crate::proxy::proxy_call::media_peer::MediaPeer>,
+    cancel_token: tokio_util::sync::CancellationToken,
+) -> Option<ConferenceBridgeHandle> {
+    use rustrtc::RtpCodecParameters;
+    use rustrtc::media::track::sample_track;
+
+    // Wait for a PeerConnection to become available (SDP exchange may be in progress)
+    let mut pc = None;
+    for _ in 0..150 {
+        let tracks = peer.get_tracks().await;
+        for t in &tracks {
+            let guard = t.lock().await;
+            if let Some(found_pc) = guard.get_peer_connection().await {
+                pc = Some(found_pc);
+                break;
+            }
+        }
+        if pc.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    let pc = match pc {
+        Some(pc) => pc,
+        None => {
+            tracing::warn!(%leg_id, "auto-bridge: no PeerConnection found for peer, skipping");
+            return None;
+        }
+    };
+
+    // Wire conference output → peer RTP sender using the EXISTING negotiated transceiver.
+    // We must NOT call pc.add_track() on an already-negotiated PC: that would create a second
+    // transceiver with no remote-address binding, causing start_playback_on() to pick it up
+    // (finding it first in the list) and send RTP into a void.  Instead we do exactly what
+    // FileTrack::start_playback_on does: find the existing audio transceiver and replace its
+    // sender with a new one backed by our sample_track.
+    let (audio_sender, sample_track_arc, _) = sample_track(rustrtc::media::MediaKind::Audio, 100);
+    let params = RtpCodecParameters {
+        payload_type: 0, // PCMU
+        clock_rate: 8000,
+        channels: 1,
+    };
+    let ssrc = rand::random::<u32>();
+
+    let transceivers = pc.get_transceivers();
+    let existing = transceivers
+        .iter()
+        .find(|t| t.kind() == rustrtc::MediaKind::Audio);
+
+    if let Some(transceiver) = existing {
+        let track_arc: std::sync::Arc<dyn rustrtc::media::MediaStreamTrack> = sample_track_arc;
+        let new_sender = rustrtc::RtpSender::builder(track_arc, ssrc)
+            .params(params)
+            .build();
+        transceiver.set_sender(Some(new_sender));
+        tracing::debug!(%leg_id, "auto-bridge: set_sender on existing transceiver");
+    } else {
+        // No existing transceiver yet (pre-negotiation race) — fall back to add_track.
+        if let Err(e) = pc.add_track(sample_track_arc, params) {
+            tracing::warn!(%leg_id, error = %e, "auto-bridge: add_track failed, skipping");
+            return None;
+        }
+        tracing::debug!(%leg_id, "auto-bridge: added new track via add_track");
+    }
+
+    // Channel: conference forward loop → audio_sender (→ sample_track → peer PC sender)
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<rustrtc::media::MediaSample>(100);
+    let cancel = cancel_token.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                biased;
+                _ = cancel.cancelled() => break,
+                sample = rx.recv() => match sample {
+                    Some(s) => {
+                        if audio_sender.send(s).await.is_err() {
+                            break;
+                        }
+                    }
+                    None => break,
+                }
+            }
+        }
+    });
+
+    // PeerConnectionAudioReceiver reads incoming RTP from the peer and decodes to PCM
+    let decoder = audio_codec::create_decoder(audio_codec::CodecType::PCMU);
+    let audio_receiver = Box::new(PeerConnectionAudioReceiver::new(pc, decoder));
+
+    // Start the full-duplex bridge
+    let bridge = crate::call::runtime::ConferenceMediaBridge::new(conf_manager.clone());
+    match bridge
+        .start_bridge_full_duplex(conf_id, leg_id, tx, audio_receiver)
+        .await
+    {
+        Ok(handle) => {
+            tracing::info!(%conf_id, %leg_id, "auto-bridge: conference media bridge started");
+            Some(handle)
+        }
+        Err(e) => {
+            tracing::warn!(%conf_id, %leg_id, error = %e, "auto-bridge: start_bridge_full_duplex failed");
+            None
+        }
     }
 }
 
@@ -76,9 +196,10 @@ impl CommandDeduplicationCache {
     async fn is_duplicate(&self, action_id: &str) -> bool {
         let entries = self.entries.read().await;
         if let Some(entry) = entries.get(action_id)
-            && entry.received_at.elapsed() < self.ttl {
-                return true;
-            }
+            && entry.received_at.elapsed() < self.ttl
+        {
+            return true;
+        }
         false
     }
 
@@ -509,33 +630,34 @@ impl RwiCommandProcessor {
         }
 
         if let Some(call_id) = self.extract_call_id(&command)
-            && let Some(result) = self.dispatch_unified_command(&call_id, command.clone()) {
-                tracing::debug!(
-                    call_id = %call_id,
-                    "Command handled via unified session runtime"
-                );
+            && let Some(result) = self.dispatch_unified_command(&call_id, command.clone())
+        {
+            tracing::debug!(
+                call_id = %call_id,
+                "Command handled via unified session runtime"
+            );
 
-                match &command {
-                    RwiCommandPayload::Bridge { leg_a, leg_b } => {
-                        let gw = self.gateway.read().await;
-                        let event = RwiEvent::CallBridged {
-                            leg_a: leg_a.clone(),
-                            leg_b: leg_b.clone(),
-                        };
-                        gw.send_event_to_call_owner(leg_a, &event);
-                        gw.send_event_to_call_owner(leg_b, &event);
-                    }
-                    RwiCommandPayload::Unbridge { call_id } => {
-                        let gw = self.gateway.read().await;
-                        let event = RwiEvent::CallUnbridged {
-                            call_id: call_id.clone(),
-                        };
-                        gw.send_event_to_call_owner(call_id, &event);
-                    }
-                    _ => {}
+            match &command {
+                RwiCommandPayload::Bridge { leg_a, leg_b } => {
+                    let gw = self.gateway.read().await;
+                    let event = RwiEvent::CallBridged {
+                        leg_a: leg_a.clone(),
+                        leg_b: leg_b.clone(),
+                    };
+                    gw.send_event_to_call_owner(leg_a, &event);
+                    gw.send_event_to_call_owner(leg_b, &event);
                 }
-                return result;
+                RwiCommandPayload::Unbridge { call_id } => {
+                    let gw = self.gateway.read().await;
+                    let event = RwiEvent::CallUnbridged {
+                        call_id: call_id.clone(),
+                    };
+                    gw.send_event_to_call_owner(call_id, &event);
+                }
+                _ => {}
             }
+            return result;
+        }
 
         match &command {
             RwiCommandPayload::ListCalls => {
@@ -617,10 +739,37 @@ impl RwiCommandProcessor {
             } => {
                 return self.sip_notify(call_id, event, content_type, body).await;
             }
+            RwiCommandPayload::LegAdd {
+                call_id,
+                target,
+                leg_id,
+            } => {
+                return self.leg_add(call_id, target, leg_id.as_deref()).await;
+            }
+            RwiCommandPayload::LegRemove { call_id, leg_id } => {
+                return self.leg_remove(call_id, leg_id).await;
+            }
+            RwiCommandPayload::AppStart {
+                call_id,
+                app_name,
+                params,
+            } => {
+                return self.app_start(call_id, app_name, params.clone()).await;
+            }
+            RwiCommandPayload::AppStop { call_id, reason } => {
+                return self.app_stop(call_id, reason.clone()).await;
+            }
             RwiCommandPayload::SipOptionsPing { call_id } => {
                 return self.sip_options_ping(call_id).await;
             }
-
+            RwiCommandPayload::MediaPlay(req) => {
+                return self
+                    .media_play(&req.call_id, req.source.clone(), req.interrupt_on_dtmf)
+                    .await;
+            }
+            RwiCommandPayload::MediaStop { call_id } => {
+                return self.media_stop(call_id).await;
+            }
             RwiCommandPayload::MediaStreamStart(req) => {
                 return self
                     .media_stream_start(&req.call_id, &req.call_id, &req.direction)
@@ -820,6 +969,8 @@ impl RwiCommandProcessor {
             RwiCommandPayload::SipMessage { call_id, .. } => Some(call_id.clone()),
             RwiCommandPayload::SipNotify { call_id, .. } => Some(call_id.clone()),
             RwiCommandPayload::SipOptionsPing { call_id } => Some(call_id.clone()),
+            RwiCommandPayload::LegAdd { call_id, .. } => Some(call_id.clone()),
+            RwiCommandPayload::LegRemove { call_id, .. } => Some(call_id.clone()),
 
             RwiCommandPayload::ConferenceCreate(_) => None,
             RwiCommandPayload::ConferenceDestroy { .. } => None,
@@ -963,16 +1114,97 @@ impl RwiCommandProcessor {
                 (handle, cmd_rx)
             };
 
+            // Snapshot the queue configs (hold music paths) for use in cmd_task.
+            let cmd_queue_configs: Arc<HashMap<String, crate::proxy::routing::RouteQueueConfig>> = {
+                let snapshot = server.proxy_config.queues.clone();
+                Arc::new(snapshot)
+            };
+
             let cmd_cancel = cancel_token.clone();
             let cmd_call_id = call_id.clone();
             let cmd_caller_peer = caller_peer.clone();
             let cmd_conference_manager = conference_manager.clone();
+            let cmd_dialog_layer = dialog_layer.clone();
             let cmd_task = tokio::spawn(async move {
+                use crate::media::FileTrack;
+                use audio_codec::CodecType;
+                use std::collections::HashMap;
+                let mut leg_peers: HashMap<
+                    LegId,
+                    Arc<dyn crate::proxy::proxy_call::media_peer::MediaPeer>,
+                > = HashMap::new();
+                let mut leg_tasks: HashMap<LegId, Vec<tokio::task::JoinHandle<()>>> =
+                    HashMap::new();
+                let mut playback_tracks: HashMap<String, FileTrack> = HashMap::new();
+                let mut app_cancel: Option<tokio_util::sync::CancellationToken> = None;
+                // Channel for leg-connected notifications from spawned INVITE tasks
+                let (leg_connected_tx, mut leg_connected_rx) =
+                    tokio::sync::mpsc::unbounded_channel::<LegId>();
+                // Per-leg conference bridge handles (auto-bridge caller ↔ agent)
+                let mut leg_bridge_handles: HashMap<LegId, Vec<ConferenceBridgeHandle>> =
+                    HashMap::new();
+
                 loop {
                     tokio::select! {
                         _ = cmd_cancel.cancelled() => {
                             tracing::debug!("Command task cancelled, exiting");
                             break;
+                        }
+                        // Auto-bridge: after agent answers, set up bidirectional conference bridge
+                        Some(leg_id) = leg_connected_rx.recv() => {
+                            tracing::info!(%cmd_call_id, %leg_id, "Auto-bridging caller ↔ agent via conference");
+                            let conf_id = format!("call-bridge-{}", cmd_call_id);
+                            let conf_id_obj = crate::call::runtime::ConferenceId::from(conf_id.as_str());
+
+                            if let Err(e) = cmd_conference_manager
+                                .create_conference(conf_id_obj.clone(), None)
+                                .await
+                            {
+                                tracing::warn!(%cmd_call_id, %leg_id, error = %e, "Auto-bridge: failed to create conference");
+                            } else {
+                                let mut handles = Vec::new();
+
+                                // Bridge the caller peer into the conference
+                                let caller_leg = LegId::new(format!("{}-caller", cmd_call_id));
+                                let _ = cmd_conference_manager
+                                    .add_participant(&conf_id_obj, caller_leg.clone())
+                                    .await;
+                                if let Some(h) = start_peer_conference_bridge(
+                                    &cmd_conference_manager,
+                                    &conf_id,
+                                    &caller_leg,
+                                    &cmd_caller_peer,
+                                    cmd_cancel.child_token(),
+                                )
+                                .await
+                                {
+                                    handles.push(h);
+                                }
+
+                                // Bridge the agent peer into the conference
+                                if let Some(agent_peer) = leg_peers.get(&leg_id) {
+                                    let agent_leg = leg_id.clone();
+                                    let _ = cmd_conference_manager
+                                        .add_participant(&conf_id_obj, agent_leg.clone())
+                                        .await;
+                                    if let Some(h) = start_peer_conference_bridge(
+                                        &cmd_conference_manager,
+                                        &conf_id,
+                                        &agent_leg,
+                                        agent_peer,
+                                        cmd_cancel.child_token(),
+                                    )
+                                    .await
+                                    {
+                                        handles.push(h);
+                                    }
+                                }
+
+                                if !handles.is_empty() {
+                                    leg_bridge_handles.insert(leg_id, handles);
+                                    tracing::info!(%cmd_call_id, conf_id = %conf_id, "Caller ↔ agent conference bridge active");
+                                }
+                            }
                         }
                         Some(cmd) = cmd_rx.recv() => {
                             tracing::debug!(?cmd, "RWI originate command received");
@@ -982,84 +1214,315 @@ impl RwiCommandProcessor {
                                     // Bridge the caller_peer to the conference
                                     let conf_id_obj = crate::call::runtime::ConferenceId::from(mixer_id.as_str());
                                     let participant_leg = LegId::new(format!("{}-callee", cmd_call_id));
-                                    
+
                                     // Add participant to conference
                                     if let Err(e) = cmd_conference_manager.add_participant(&conf_id_obj, participant_leg.clone()).await {
                                         tracing::warn!(%cmd_call_id, %mixer_id, error = %e, "Failed to add participant to conference");
                                         continue;
                                     }
-                                    
+
                                     // Start conference media bridge
                                     let bridge = crate::call::runtime::ConferenceMediaBridge::new(cmd_conference_manager.clone());
-                                    
-                                    // Create audio sender
-                                    use rustrtc::media::track::sample_track;
-                                    use rustrtc::media::MediaKind;
-                                    use rustrtc::RtpCodecParameters;
-                                    
-                                    let (audio_sender, track, _feedback_rx) = sample_track(MediaKind::Audio, 100);
-                                    
-                                    // Get peer connection from caller_peer
+
+                                    // Get audio sender from caller_peer's existing track
+                                    let mut audio_sender = None;
                                     let tracks = cmd_caller_peer.get_tracks().await;
-                                    if let Some(first_track) = tracks.first() {
-                                        let guard = first_track.lock().await;
-                                        if let Some(pc) = guard.get_peer_connection().await {
-                                            let params = RtpCodecParameters {
-                                                payload_type: 0, // PCMU
-                                                clock_rate: 8000,
-                                                channels: 1,
-                                            };
-                                            
-                                            let mut track_opt = Some(track);
-                                            let transceivers = pc.get_transceivers();
-                                            if let Some(transceiver) = transceivers
-                                                .iter()
-                                                .find(|t| t.kind() == rustrtc::MediaKind::Audio)
-                                            {
-                                                let track_arc: std::sync::Arc<dyn rustrtc::media::MediaStreamTrack> =
-                                                    track_opt
-                                                        .take()
-                                                        .expect("conference track must exist");
-                                                let sender = rustrtc::RtpSender::builder(
-                                                    track_arc,
-                                                    rand::random::<u32>(),
-                                                )
-                                                .params(params)
-                                                .build();
-                                                transceiver.set_sender(Some(sender));
-                                                tracing::info!(
-                                                    %cmd_call_id,
-                                                    "Attached conference track to existing audio transceiver"
-                                                );
-                                            } else if let Some(track_to_add) = track_opt.take()
-                                                && let Err(e) = pc.add_track(track_to_add, params)
-                                            {
-                                                tracing::warn!(
-                                                    %cmd_call_id,
-                                                    error = %e,
-                                                    "Failed to add conference track"
-                                                );
-                                            }
+                                    for t in &tracks {
+                                        let guard = t.lock().await;
+                                        if let Some(sender) = guard.get_sender() {
+                                            audio_sender = Some(sender);
+                                            break;
                                         }
                                     }
-                                    
+
                                     let (tx, mut rx) = tokio::sync::mpsc::channel::<rustrtc::media::MediaSample>(100);
-                                    tokio::spawn(async move {
-                                        while let Some(sample) = rx.recv().await {
-                                            if audio_sender.send(sample).await.is_err() {
-                                                break;
+
+                                    if let Some(sender) = audio_sender {
+                                        tokio::spawn(async move {
+                                            while let Some(sample) = rx.recv().await {
+                                                if sender.send(sample).await.is_err() {
+                                                    break;
+                                                }
                                             }
-                                        }
-                                    });
-                                    
+                                        });
+                                        tracing::info!(%cmd_call_id, %mixer_id, "Using existing track sender for conference bridge");
+                                    } else {
+                                        tracing::warn!(%cmd_call_id, %mixer_id, "No track sender found, conference audio will not be sent");
+                                    }
+
                                     // Create audio receiver from caller_peer
                                     let audio_receiver = Box::new(OriginateAudioReceiver);
-                                    
+
                                     if let Err(e) = bridge.start_bridge_full_duplex(&mixer_id, &participant_leg, tx, audio_receiver).await {
                                         tracing::warn!(%cmd_call_id, %mixer_id, error = %e, "Failed to start conference bridge");
                                     } else {
                                         tracing::info!(%cmd_call_id, %mixer_id, "Successfully joined conference from originate");
                                     }
+                                }
+                                CallCommand::LegAdd { target, leg_id } => {
+                                    let leg_id = leg_id.unwrap_or_else(|| LegId::new(format!("leg-{}", uuid::Uuid::new_v4())));
+                                    let callee_uri = match rsipstack::sip::Uri::try_from(target.as_str()) {
+                                                Ok(uri) => uri,
+                                                Err(e) => {
+                                                    tracing::warn!(%cmd_call_id, error = %e, "Invalid SIP URI for leg add");
+                                                    continue;
+                                                }
+                                            };
+
+                                            // Create peer for this leg
+                                            let track_id = format!("orig-{}-{}", cmd_call_id, leg_id);
+                                            let media_stream_builder = crate::media::MediaStreamBuilder::new()
+                                                .with_id(track_id.clone())
+                                                .with_cancel_token(cmd_cancel.child_token());
+                                            let media_stream = media_stream_builder.build();
+                                            let peer: Arc<dyn crate::proxy::proxy_call::media_peer::MediaPeer> = Arc::new(
+                                                VoiceEnginePeer::new(Arc::new(media_stream))
+                                            );
+
+                                            // Create RTP track
+                                            let track_builder = crate::media::RtpTrackBuilder::new(track_id.clone())
+                                                .with_cancel_token(cmd_cancel.child_token());
+                                            let track = track_builder.build();
+
+                                            // Get SDP offer
+                                            let sdp_offer = match track.local_description().await {
+                                                Ok(sdp) => sdp,
+                                                Err(e) => {
+                                                    tracing::warn!(%cmd_call_id, error = %e, "Failed to get local description for leg");
+                                                    continue;
+                                                }
+                                            };
+
+                                            peer.update_track(Box::new(track), None).await;
+                                            leg_peers.insert(leg_id.clone(), peer.clone());
+
+                                            // Build INVITE option
+                                            let invite_option = rsipstack::dialog::invitation::InviteOption {
+                                                callee: callee_uri.clone(),
+                                                caller: callee_uri.clone(),
+                                                contact: callee_uri.clone(),
+                                                content_type: Some("application/sdp".to_string()),
+                                                offer: Some(sdp_offer.into_bytes()),
+                                                destination: None,
+                                                credential: None,
+                                                headers: None,
+                                                call_id: Some(format!("{}-{}", cmd_call_id, leg_id)),
+                                                ..Default::default()
+                                            };
+
+                                            let leg_id_clone = leg_id.clone();
+                                            let peer_clone = peer.clone();
+                                            let dialog_layer_clone = cmd_dialog_layer.clone();
+                                            let cancel_token_clone = cmd_cancel.child_token();
+                                            let call_id_for_spawn = cmd_call_id.clone();
+                                            // Notifier: signals the main loop after agent answers
+                                            let connected_notifier = leg_connected_tx.clone();
+
+                                            let handle = tokio::spawn(async move {
+                                                let (state_tx, mut state_rx) = tokio::sync::mpsc::unbounded_channel();
+                                                let invitation = dialog_layer_clone.do_invite(invite_option, state_tx).boxed();
+
+                                                match invitation.await {
+                                                    Ok((dialog, response)) => {
+                                                        if let Some(ref resp) = response {
+                                                            let status_code = resp.status_code.code();
+                                                            if (200..300).contains(&status_code) {
+                                                                tracing::info!(%call_id_for_spawn, %leg_id_clone, status = %status_code, "SIP leg answered successfully in originate task");
+                                                                if !resp.body().is_empty() {
+                                                                    let answer_sdp = String::from_utf8_lossy(resp.body()).to_string();
+                                                                    if let Err(e) = peer_clone.update_remote_description(&format!("orig-{}-{}", call_id_for_spawn, leg_id_clone), &answer_sdp).await {
+                                                                        tracing::warn!(%call_id_for_spawn, %leg_id_clone, error = %e, "Failed to set remote description on leg peer");
+                                                                    } else {
+                                                                        // Notify main loop: agent answered, trigger auto-bridge
+                                                                        let _ = connected_notifier.send(leg_id_clone.clone());
+                                                                    }
+                                                                }
+                                                            } else {
+                                                                tracing::warn!(%call_id_for_spawn, %leg_id_clone, status = %status_code, "SIP leg rejected in originate task");
+                                                            }
+                                                        } else {
+                                                            tracing::warn!(%call_id_for_spawn, %leg_id_clone, "SIP leg timeout in originate task");
+                                                        }
+
+                                                        // Monitor dialog state
+                                                        let dialog_cancel = cancel_token_clone.child_token();
+                                                        tokio::spawn(async move {
+                                                            loop {
+                                                                tokio::select! {
+                                                                    biased;
+                                                                    _ = dialog_cancel.cancelled() => break,
+                                                                    state = state_rx.recv() => {
+                                                                        match state {
+                                                                            Some(rsipstack::dialog::dialog::DialogState::Terminated(..)) => break,
+                                                                            Some(_) => {},
+                                                                            None => break,
+                                                                        }
+                                                                    }
+                                                                }
+                                                            }
+                                                            let _ = dialog;
+                                                        });
+                                                    }
+                                                    Err(e) => {
+                                                        tracing::warn!(%call_id_for_spawn, %leg_id_clone, error = %e, "SIP leg failed in originate task");
+                                                    }
+                                                }
+                                            });
+
+                                            leg_tasks.entry(leg_id).or_default().push(handle);
+                                            tracing::info!(%cmd_call_id, "SIP leg added in originate task");
+                                }
+                                CallCommand::LegRemove { leg_id } => {
+                                    if let Some(handles) = leg_tasks.remove(&leg_id) {
+                                        for handle in handles {
+                                            handle.abort();
+                                        }
+                                    }
+                                    // Stop auto-bridge handles for this leg
+                                    if let Some(bridge_handles) = leg_bridge_handles.remove(&leg_id) {
+                                        for h in bridge_handles {
+                                            h.stop();
+                                        }
+                                    }
+                                    leg_peers.remove(&leg_id);
+                                    tracing::info!(%cmd_call_id, %leg_id, "Leg removed in originate task");
+                                }
+                                CallCommand::Play { leg_id, source, options } => {
+                                    let file_path = match source {
+                                        crate::call::domain::MediaSource::File { path } => path,
+                                        _ => {
+                                            tracing::warn!(%cmd_call_id, "Only file playback supported in originate task");
+                                            continue;
+                                        }
+                                    };
+                                    let track_id = options
+                                        .as_ref()
+                                        .and_then(|o| o.track_id.clone())
+                                        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+                                    let loop_pb = options
+                                        .as_ref()
+                                        .map(|o| o.loop_playback)
+                                        .unwrap_or(false);
+
+                                    // Resolve target peer: leg_id → leg_peers, None → caller_peer
+                                    let target_peer: Arc<dyn crate::proxy::proxy_call::media_peer::MediaPeer> =
+                                        if let Some(ref lid) = leg_id {
+                                            match leg_peers.get(lid) {
+                                                Some(p) => p.clone(),
+                                                None => {
+                                                    tracing::warn!(%cmd_call_id, %lid, "Play: leg not found, using caller");
+                                                    cmd_caller_peer.clone()
+                                                }
+                                            }
+                                        } else {
+                                            cmd_caller_peer.clone()
+                                        };
+
+                                    // Wait up to 2 s for the PC to be ready (set_remote_description may lag)
+                                    let mut target_pc = None;
+                                    for _ in 0..40 {
+                                        let tracks = target_peer.get_tracks().await;
+                                        for t in &tracks {
+                                            let g = t.lock().await;
+                                            if let Some(pc) = g.get_peer_connection().await {
+                                                target_pc = Some(pc);
+                                                break;
+                                            }
+                                        }
+                                        if target_pc.is_some() {
+                                            break;
+                                        }
+                                        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                                    }
+
+                                    let track = FileTrack::new(track_id.clone())
+                                        .with_path(file_path.clone())
+                                        .with_codec_preference(vec![CodecType::PCMU])
+                                        .with_loop(loop_pb);
+
+                                    if let Err(e) = track.start_playback_on(target_pc).await {
+                                        tracing::warn!(%cmd_call_id, error = %e, "Originate play failed");
+                                    }
+                                    target_peer.update_track(Box::new(track.clone()), None).await;
+                                    playback_tracks.insert(track_id.clone(), track);
+                                    tracing::info!(%cmd_call_id, track_id, file = %file_path, "Playback started in originate task");
+                                }
+                                CallCommand::StopPlayback { leg_id } => {
+                                    let track_id = leg_id
+                                        .as_ref()
+                                        .map(|l| l.to_string())
+                                        .unwrap_or_else(|| "playback".to_string());
+                                    if playback_tracks.remove(&track_id).is_some() {
+                                        cmd_caller_peer.remove_track(&track_id, true).await;
+                                        tracing::info!(%cmd_call_id, %track_id, "Playback stopped in originate task");
+                                    }
+                                }
+                                CallCommand::StartApp { app_name, params, .. } => {
+                                    // Cancel any previously running app and clear playback.
+                                    if let Some(tok) = app_cancel.take() {
+                                        tok.cancel();
+                                    }
+                                    for (id, _) in playback_tracks.drain() {
+                                        cmd_caller_peer.remove_track(&id, true).await;
+                                    }
+                                    let app_tok = tokio_util::sync::CancellationToken::new();
+                                    app_cancel = Some(app_tok);
+                                    tracing::info!(%cmd_call_id, app = ?app_name, "StartApp acknowledged in originate task");
+
+                                    // For "queue" app: look up hold music from route config and start playback.
+                                    if app_name == "queue" {
+                                        let queue_name = params
+                                            .as_ref()
+                                            .and_then(|p| p.get("name"))
+                                            .and_then(|v| v.as_str())
+                                            .unwrap_or("")
+                                            .to_string();
+                                        if let Some(qcfg) = cmd_queue_configs.get(&queue_name) {
+                                            if let Some(hold) = &qcfg.hold {
+                                                if let Some(audio_file) = &hold.audio_file {
+                                                    let track_id = format!("queue-hold-{}", uuid::Uuid::new_v4());
+                                                    let loop_pb = hold.loop_playback;
+                                                    let file_path = audio_file.clone();
+                                                    let target_peer = cmd_caller_peer.clone();
+
+                                                    let mut target_pc = None;
+                                                    for _ in 0..40 {
+                                                        let tracks = target_peer.get_tracks().await;
+                                                        for t in &tracks {
+                                                            let g = t.lock().await;
+                                                            if let Some(pc) = g.get_peer_connection().await {
+                                                                target_pc = Some(pc);
+                                                                break;
+                                                            }
+                                                        }
+                                                        if target_pc.is_some() { break; }
+                                                        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                                                    }
+
+                                                    let track = FileTrack::new(track_id.clone())
+                                                        .with_path(file_path.clone())
+                                                        .with_codec_preference(vec![CodecType::PCMU])
+                                                        .with_loop(loop_pb);
+                                                    if let Err(e) = track.start_playback_on(target_pc).await {
+                                                        tracing::warn!(%cmd_call_id, error = %e, "Queue hold music playback failed");
+                                                    } else {
+                                                        target_peer.update_track(Box::new(track.clone()), None).await;
+                                                        playback_tracks.insert(track_id.clone(), track);
+                                                        tracing::info!(%cmd_call_id, queue = %queue_name, track_id, file = %file_path, "Queue hold music started");
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                CallCommand::StopApp { .. } => {
+                                    if let Some(tok) = app_cancel.take() {
+                                        tok.cancel();
+                                    }
+                                    for (id, _) in playback_tracks.drain() {
+                                        cmd_caller_peer.remove_track(&id, true).await;
+                                    }
+                                    tracing::info!(%cmd_call_id, "App stopped in originate task");
                                 }
                                 _ => {
                                     tracing::debug!(?cmd, "Unhandled command in originate task");
@@ -1285,7 +1748,8 @@ impl RwiCommandProcessor {
 
         let cancel_token = tokio_util::sync::CancellationToken::new();
 
-        type OriginateFuture = Pin<Box<dyn Future<Output = Result<(usize, String), (usize, String)>> + Send>>;
+        type OriginateFuture =
+            Pin<Box<dyn Future<Output = Result<(usize, String), (usize, String)>> + Send>>;
         let mut futures: Vec<OriginateFuture> = Vec::new();
 
         for (idx, target) in targets.iter().enumerate() {
@@ -1634,6 +2098,115 @@ impl RwiCommandProcessor {
         self.call_registry
             .get_handle(call_id)
             .ok_or_else(|| CommandError::CallNotFound(call_id.to_string()))
+    }
+
+    async fn leg_add(
+        &self,
+        call_id: &str,
+        target: &str,
+        leg_id: Option<&str>,
+    ) -> Result<CommandResult, CommandError> {
+        let handle = self.get_handle(call_id).await?;
+
+        let leg_id_opt = leg_id.map(|id| crate::call::domain::LegId::new(id));
+
+        handle
+            .send_command(CallCommand::LegAdd {
+                target: target.to_string(),
+                leg_id: leg_id_opt,
+            })
+            .map_err(|e| CommandError::CommandFailed(e.to_string()))?;
+
+        Ok(CommandResult::Success)
+    }
+
+    async fn leg_remove(&self, call_id: &str, leg_id: &str) -> Result<CommandResult, CommandError> {
+        let handle = self.get_handle(call_id).await?;
+
+        handle
+            .send_command(CallCommand::LegRemove {
+                leg_id: crate::call::domain::LegId::new(leg_id),
+            })
+            .map_err(|e| CommandError::CommandFailed(e.to_string()))?;
+
+        Ok(CommandResult::Success)
+    }
+
+    async fn app_start(
+        &self,
+        call_id: &str,
+        app_name: &str,
+        params: Option<serde_json::Value>,
+    ) -> Result<CommandResult, CommandError> {
+        let handle = self.get_handle(call_id).await?;
+
+        handle
+            .send_command(CallCommand::StartApp {
+                app_name: app_name.to_string(),
+                params,
+                auto_answer: false,
+            })
+            .map_err(|e| CommandError::CommandFailed(e.to_string()))?;
+
+        Ok(CommandResult::Success)
+    }
+
+    async fn app_stop(
+        &self,
+        call_id: &str,
+        reason: Option<String>,
+    ) -> Result<CommandResult, CommandError> {
+        let handle = self.get_handle(call_id).await?;
+
+        handle
+            .send_command(CallCommand::StopApp { reason })
+            .map_err(|e| CommandError::CommandFailed(e.to_string()))?;
+
+        Ok(CommandResult::Success)
+    }
+
+    async fn media_play(
+        &self,
+        call_id: &str,
+        source: crate::rwi::session::MediaSource,
+        _interrupt_on_dtmf: bool,
+    ) -> Result<CommandResult, CommandError> {
+        use crate::call::domain::{MediaSource as DomainMediaSource, PlayOptions};
+
+        let handle = self.get_handle(call_id).await?;
+
+        let domain_source = if source.source_type == "file" {
+            DomainMediaSource::File {
+                path: source.uri.unwrap_or_default(),
+            }
+        } else {
+            DomainMediaSource::Silence
+        };
+
+        let track_id = uuid::Uuid::new_v4().to_string();
+        handle
+            .send_command(CallCommand::Play {
+                leg_id: None,
+                source: domain_source,
+                options: Some(PlayOptions {
+                    loop_playback: false,
+                    await_completion: false,
+                    interrupt_on_dtmf: _interrupt_on_dtmf,
+                    track_id: Some(track_id.clone()),
+                    send_progress: false,
+                }),
+            })
+            .map_err(|e| CommandError::CommandFailed(e.to_string()))?;
+
+        Ok(CommandResult::MediaPlay { track_id })
+    }
+
+    async fn media_stop(&self, call_id: &str) -> Result<CommandResult, CommandError> {
+        let handle = self.get_handle(call_id).await?;
+        handle
+            .send_command(CallCommand::StopPlayback { leg_id: None })
+            .map_err(|e| CommandError::CommandFailed(e.to_string()))?;
+        Ok(CommandResult::Success)
     }
 
     async fn bridge_calls(&self, leg_a: &str, leg_b: &str) -> Result<CommandResult, CommandError> {
@@ -2341,12 +2914,11 @@ impl RwiCommandProcessor {
     ) -> Result<CommandResult, CommandError> {
         let conf_id = req.conf_id.clone();
 
-        if req.backend == "external"
-            && req.mcu_uri.is_none() {
-                return Err(CommandError::CommandFailed(
-                    "external backend requires mcu_uri".to_string(),
-                ));
-            }
+        if req.backend == "external" && req.mcu_uri.is_none() {
+            return Err(CommandError::CommandFailed(
+                "external backend requires mcu_uri".to_string(),
+            ));
+        }
 
         let manager = self.conference_manager();
         let max_participants = req.max_members.map(|m| m as usize);
@@ -2626,16 +3198,15 @@ impl RwiCommandProcessor {
                 gw.broadcast_event(&joined_event);
                 drop(gw);
 
-                if old_was_member
-                    && let Ok(handle) = self.get_handle(old_call_id).await {
-                        let _ = handle.send_command(CallCommand::Hangup(
-                            crate::call::domain::HangupCommand::local(
-                                "conference_seat_replace",
-                                Some(crate::callrecord::CallRecordHangupReason::BySystem),
-                                Some(200),
-                            ),
-                        ));
-                    }
+                if old_was_member && let Ok(handle) = self.get_handle(old_call_id).await {
+                    let _ = handle.send_command(CallCommand::Hangup(
+                        crate::call::domain::HangupCommand::local(
+                            "conference_seat_replace",
+                            Some(crate::callrecord::CallRecordHangupReason::BySystem),
+                            Some(200),
+                        ),
+                    ));
+                }
 
                 let success_event = RwiEvent::ConferenceSeatReplaceSucceeded {
                     conf_id: conf_id.to_string(),

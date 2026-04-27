@@ -352,6 +352,34 @@ pub enum CallCommand {
 
     /// Send a SIP OPTIONS ping
     SendSipOptionsPing,
+
+    /// Add a new SIP leg to the session
+    LegAdd {
+        /// SIP URI target
+        target: String,
+        /// Optional leg ID (auto-generated if not provided)
+        leg_id: Option<LegId>,
+    },
+
+    /// Remove a leg from the session
+    LegRemove {
+        /// Leg ID to remove
+        leg_id: LegId,
+    },
+
+    /// Leg dial completed successfully (async notification)
+    LegConnected {
+        /// Leg ID that connected
+        leg_id: LegId,
+    },
+
+    /// Leg dial failed (async notification)
+    LegFailed {
+        /// Leg ID that failed
+        leg_id: LegId,
+        /// Failure reason
+        reason: String,
+    },
 }
 
 /// Point-to-point bridge mode
@@ -367,7 +395,6 @@ pub enum P2PMode {
     /// Audio and video
     AudioVideo,
 }
-
 
 /// Audio playback options
 #[derive(Debug, Clone, Serialize, Deserialize)]

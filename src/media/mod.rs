@@ -4,6 +4,7 @@ use audio_codec::CodecType;
 use rustrtc::{
     Attribute, IceServer, IceTransportPolicy, MediaKind, PeerConnection, RtcConfiguration,
     RtpCodecParameters, SdpType, SessionDescription, TransceiverDirection, TransportMode,
+    media::SampleStreamSource,
 };
 use std::{
     collections::{HashMap, HashSet},
@@ -118,6 +119,12 @@ pub trait Track: Send + Sync {
     fn is_muted(&self) -> bool {
         // Default implementation returns false
         false
+    }
+
+    /// Get the media sample sender for this track, if available.
+    /// This allows external code to inject audio into the track's PeerConnection.
+    fn get_sender(&self) -> Option<SampleStreamSource> {
+        None
     }
 }
 
@@ -258,6 +265,8 @@ pub struct RtcTrack {
     pub recorder_option: Option<RecorderOption>,
     rtp_map: Vec<negotiate::CodecInfo>,
     muted: std::sync::atomic::AtomicBool,
+    /// Sender for injecting audio samples into the PeerConnection
+    sender: Option<SampleStreamSource>,
 }
 
 impl RtcTrack {
@@ -268,8 +277,8 @@ impl RtcTrack {
     ) -> Self {
         let pc = PeerConnection::new(config);
 
-        // Add a dummy track to ensure a sender is created and SSRC is signaled in SDP
-        let (_, track, _) =
+        // Add a sample track to ensure a sender is created and SSRC is signaled in SDP
+        let (tx, track, _) =
             rustrtc::media::track::sample_track(rustrtc::media::MediaKind::Audio, 100);
         let mut params = RtpCodecParameters::default();
         if let Some(info) = rtp_map.first() {
@@ -285,6 +294,7 @@ impl RtcTrack {
             recorder_option: None,
             rtp_map,
             muted: std::sync::atomic::AtomicBool::new(false),
+            sender: Some(tx),
         }
     }
 
@@ -297,7 +307,7 @@ impl RtcTrack {
         let pc = PeerConnection::new(config);
 
         // Add audio track
-        let (_, audio_track, _) =
+        let (tx, audio_track, _) =
             rustrtc::media::track::sample_track(rustrtc::media::MediaKind::Audio, 100);
         let mut audio_params = RtpCodecParameters::default();
         if let Some(info) = rtp_map.first() {
@@ -325,6 +335,7 @@ impl RtcTrack {
             recorder_option: None,
             rtp_map,
             muted: std::sync::atomic::AtomicBool::new(false),
+            sender: Some(tx),
         }
     }
 
@@ -450,6 +461,10 @@ impl Track for RtcTrack {
 
     fn is_muted(&self) -> bool {
         self.muted.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    fn get_sender(&self) -> Option<SampleStreamSource> {
+        self.sender.clone()
     }
 }
 

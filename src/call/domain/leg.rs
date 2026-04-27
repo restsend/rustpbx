@@ -2,6 +2,9 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Audio frame for mixer input (PCM 16bit, 8kHz)
+pub type PcmAudioFrame = Vec<i16>;
+
 /// Unique identifier for a call leg (participant in a session)
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -62,7 +65,6 @@ pub enum LegState {
     /// Leg has been terminated
     Ended,
 }
-
 
 impl std::fmt::Display for LegState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
