@@ -336,7 +336,7 @@ impl QueueApp {
             }
             None => AppAction::Hangup {
                 reason: Some(CallRecordHangupReason::ServerUnavailable),
-                code: Some(480),
+                code: Some(486),
             },
         };
         Ok(action)

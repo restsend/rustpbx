@@ -271,6 +271,67 @@
             .stats-grid { grid-template-columns: 1fr; }
             .cc-controls { grid-template-columns: 1fr; }
         }
+
+        /* DTMF Keypad */
+        .dtmf-section {
+            margin-top: 14px;
+            padding-top: 12px;
+            border-top: 1px solid #e9ecef;
+        }
+        .dtmf-section h4 {
+            margin: 0 0 8px 0;
+            font-size: 13px;
+            color: #495057;
+            font-weight: 600;
+        }
+        .dtmf-display {
+            font-family: 'Consolas', 'Monaco', monospace;
+            background: #f8f9fa;
+            border: 1px solid #dee2e6;
+            border-radius: 4px;
+            padding: 6px 10px;
+            min-height: 32px;
+            margin-bottom: 8px;
+            font-size: 15px;
+            letter-spacing: 3px;
+            color: #212529;
+        }
+        .dtmf-keypad {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 6px;
+        }
+        .dtmf-btn {
+            background: #f8f9fa;
+            color: #212529;
+            border: 1px solid #dee2e6;
+            border-radius: 6px;
+            padding: 10px 4px;
+            font-size: 16px;
+            font-weight: 600;
+            cursor: pointer;
+            margin: 0;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            line-height: 1.2;
+            transition: background 0.1s, transform 0.05s;
+            width: 100%;
+        }
+        .dtmf-btn:hover { background: #e2e6ea; border-color: #adb5bd; }
+        .dtmf-btn:active { background: #adb5bd; transform: scale(0.95); }
+        .dtmf-btn small {
+            font-size: 9px;
+            font-weight: normal;
+            color: #6c757d;
+            letter-spacing: 0.5px;
+        }
+        .dtmf-actions {
+            display: flex;
+            gap: 6px;
+            margin-top: 6px;
+        }
     </style>
 </head>
 <body>
@@ -406,6 +467,29 @@
                         <button id="holdBtn">Hold</button>
                         <button id="transferBtn" class="warning">Transfer</button>
                         <button id="consultBtn" class="success">Consult (BC)</button>
+
+                        <!-- DTMF Keypad (shown after call is established) -->
+                        <div class="dtmf-section" id="dtmfSection" style="display:none;">
+                            <h4>DTMF Keypad</h4>
+                            <div class="dtmf-display" id="dtmfDisplay">&nbsp;</div>
+                            <div class="dtmf-keypad">
+                                <button type="button" class="dtmf-btn" data-key="1">1</button>
+                                <button type="button" class="dtmf-btn" data-key="2">2<small>ABC</small></button>
+                                <button type="button" class="dtmf-btn" data-key="3">3<small>DEF</small></button>
+                                <button type="button" class="dtmf-btn" data-key="4">4<small>GHI</small></button>
+                                <button type="button" class="dtmf-btn" data-key="5">5<small>JKL</small></button>
+                                <button type="button" class="dtmf-btn" data-key="6">6<small>MNO</small></button>
+                                <button type="button" class="dtmf-btn" data-key="7">7<small>PQRS</small></button>
+                                <button type="button" class="dtmf-btn" data-key="8">8<small>TUV</small></button>
+                                <button type="button" class="dtmf-btn" data-key="9">9<small>WXYZ</small></button>
+                                <button type="button" class="dtmf-btn" data-key="*">*</button>
+                                <button type="button" class="dtmf-btn" data-key="0">0<small>+</small></button>
+                                <button type="button" class="dtmf-btn" data-key="#">#</button>
+                            </div>
+                            <div class="dtmf-actions">
+                                <button type="button" id="dtmfClearBtn" class="secondary" style="width:auto;padding:6px 14px;font-size:12px;margin-top:0;">Clear</button>
+                            </div>
+                        </div>
                     </div>
                 </div>
 
@@ -521,6 +605,7 @@
         // ========== Global State ==========
         let ua = null;
         let currentSession = null;
+        let dtmfHistory = '';
         let consultSession = null;  // For consultative transfer (BC)
         let isMuted = false;
         let isOnHold = false;
@@ -629,6 +714,16 @@
         consultBtn.addEventListener('click', startConsultation);
         answerBtn.addEventListener('click', answerCall);
         rejectBtn.addEventListener('click', rejectCall);
+
+        // DTMF
+        document.querySelectorAll('.dtmf-btn').forEach(btn => {
+            btn.addEventListener('click', () => sendDtmf(btn.dataset.key));
+        });
+        document.getElementById('dtmfClearBtn').addEventListener('click', () => {
+            dtmfHistory = '';
+            const dtmfDisplay = document.getElementById('dtmfDisplay');
+            if (dtmfDisplay) dtmfDisplay.innerHTML = '&nbsp;';
+        });
 
         // CC Controls
         ccHoldBtn.addEventListener('click', () => ccHold(true));
@@ -774,6 +869,20 @@
                 serverInput.value = defaultServerUrl;
             }
         }
+
+        // Auto-fill form fields from URL parameters: ?caller=xxx&callee=xxx
+        (function applyUrlParams() {
+            const params = new URLSearchParams(window.location.search);
+            const caller = params.get('caller');
+            const callee = params.get('callee');
+            if (caller) {
+                if (usernameInput) usernameInput.value = caller;
+                if (displayNameInput) displayNameInput.value = caller;
+            }
+            if (callee) {
+                if (callTargetInput) callTargetInput.value = callee;
+            }
+        })();
 
         // Set default CC WS URL
         if (ccWsUrlInput) {
@@ -1705,6 +1814,12 @@
                 updateCcStatus('Call connected', 'success');
                 updateCcControls();
                 startStatsMonitoring();
+                // Show DTMF keypad
+                dtmfHistory = '';
+                const dtmfSection = document.getElementById('dtmfSection');
+                const dtmfDisplay = document.getElementById('dtmfDisplay');
+                if (dtmfSection) dtmfSection.style.display = '';
+                if (dtmfDisplay) dtmfDisplay.innerHTML = '&nbsp;';
             });
             session.on('confirmed', () => {
                 try {
@@ -1777,10 +1892,29 @@
             });
         }
 
+        function sendDtmf(tone) {
+            if (!currentSession) { log('No active call for DTMF'); return; }
+            try {
+                currentSession.sendDTMF(tone, { duration: 160, interToneGap: 50 });
+                dtmfHistory += tone;
+                const dtmfDisplay = document.getElementById('dtmfDisplay');
+                if (dtmfDisplay) dtmfDisplay.textContent = dtmfHistory || '\u00a0';
+                log(`DTMF sent: ${tone}`);
+            } catch (error) {
+                log(`DTMF error: ${error.message}`);
+            }
+        }
+
         function endCall() {
             clearIceTrackerTimers(currentSession && currentSession._iceTracker);
             clearIceTrackerTimers(consultSession && consultSession._iceTracker);
             callControls.classList.remove('active');
+            // Hide DTMF keypad
+            dtmfHistory = '';
+            const dtmfSection = document.getElementById('dtmfSection');
+            const dtmfDisplay = document.getElementById('dtmfDisplay');
+            if (dtmfSection) dtmfSection.style.display = 'none';
+            if (dtmfDisplay) dtmfDisplay.innerHTML = '&nbsp;';
             incomingCallDiv.classList.remove('active');
             callInfo.textContent = '';
             videoContainer.classList.remove('active');

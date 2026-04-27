@@ -1458,8 +1458,18 @@ impl SipSession {
                                         // supports_webrtc, destination, transport, etc.)
                                         expanded.push(reg_loc);
                                     } else {
-                                        // Agent not currently registered; push a bare
-                                        // location so downstream dialing can fail cleanly.
+                                        // Agent not currently registered.
+                                        let host = uri.host().to_string();
+                                        if self.server.is_same_realm(&host).await {
+                                            // Local realm agent not registered → offline; skip.
+                                            warn!(
+                                                agent = %agent_uri,
+                                                "Agent offline (not registered in local realm), skipping"
+                                            );
+                                            continue;
+                                        }
+                                        // External realm address not in locator; pass
+                                        // through as a bare location for external delivery.
                                         let agent_location = crate::call::Location {
                                             aor: uri,
                                             contact_raw: Some(agent_uri),
@@ -1697,9 +1707,9 @@ impl SipSession {
                 }
             }
             None => {
-                info!("Queue fallback - default hangup");
+                info!("Queue fallback - default hangup with busy tone");
                 Err((
-                    StatusCode::TemporarilyUnavailable,
+                    StatusCode::BusyHere,
                     Some("All agents unavailable".to_string()),
                 ))
             }
@@ -1729,16 +1739,19 @@ impl SipSession {
         let mut headers: Vec<rsipstack::sip::Header> =
             vec![rsipstack::sip::headers::MaxForwards::from(self.context.max_forwards).into()];
 
-        // When routing to another PBX node via home_proxy, anchor dialog route-set.
+        // When routing to another PBX node via home_proxy, we intentionally do NOT
+        // add a Record-Route on the outbound INVITE. The Contact header already
+        // provides the correct return path for the callee's responses and in-dialog
+        // requests to reach this proxy. Adding a self-referencing Record-Route would
+        // pollute the dialog route-set with the local address, causing all subsequent
+        // in-dialog requests (BYE, ACK) to loopback to this node instead of reaching
+        // the remote agent node.
         if route_via_home_proxy {
-            if let Ok(record_route) = self.server.endpoint.inner.get_record_route() {
-                headers.push(rsipstack::sip::Header::RecordRoute(record_route.into()));
-            } else {
-                warn!(
-                    session_id = %self.context.session_id,
-                    "failed to build Record-Route while routing via home_proxy"
-                );
-            }
+            debug!(
+                session_id = %self.context.session_id,
+                destination = ?destination,
+                "Routing via home_proxy without self-referencing Record-Route"
+            );
         }
 
         let default_expires = self
@@ -2833,43 +2846,45 @@ impl SipSession {
                     allow_codecs,
                 );
 
-                let webrtc_side = if caller_is_webrtc {
-                    &codec_lists.caller_side
-                } else {
-                    &codec_lists.callee_side
-                };
-                let rtp_side = if callee_is_webrtc {
-                    &codec_lists.caller_side
-                } else {
-                    &codec_lists.callee_side
-                };
-
-                let webrtc_caps: Vec<_> = webrtc_side
+                // Use the COMMON codec set (intersection of both sides) for
+                // both WebRTC and RTP audio capabilities. Without this, a
+                // mixed-transport bridge (RTP ↔ WebRTC) can end up with
+                // mismatched sender codecs (e.g. RTP=G729, WebRTC=PCMU),
+                // and the passthrough forwarder delivers garbage audio
+                // because the bridge has no internal transcoder.
+                let webrtc_caps: Vec<_> = codec_lists
+                    .common
                     .iter()
                     .filter_map(|c| c.to_audio_capability())
                     .collect();
-                let rtp_caps: Vec<_> = rtp_side
+                let rtp_caps: Vec<_> = codec_lists
+                    .common
                     .iter()
                     .filter_map(|c| c.to_audio_capability())
                     .collect();
 
                 bridge_builder = bridge_builder
-                    .with_webrtc_audio_capabilities(webrtc_caps)
+                    .with_webrtc_audio_capabilities(webrtc_caps.clone())
                     .with_rtp_audio_capabilities(rtp_caps);
 
-                // Sender codecs: first non-DTMF codec for each side
-                let webrtc_sender = webrtc_side
-                    .iter()
-                    .find(|c| !c.is_dtmf())
-                    .map(|c| c.to_params());
-                let rtp_sender = rtp_side
+                // Sender codecs: use the first common non-DTMF codec for BOTH sides.
+                // When the codec lists are aligned (via intersection), both sender
+                // codecs will be the same codec type, enabling direct passthrough.
+                let common_sender = codec_lists
+                    .common
                     .iter()
                     .find(|c| !c.is_dtmf())
                     .map(|c| c.to_params());
 
-                if let (Some(w), Some(r)) = (webrtc_sender, rtp_sender) {
-                    bridge_builder = bridge_builder.with_sender_codecs(w, r);
+                if let Some(sender) = common_sender {
+                    bridge_builder = bridge_builder.with_sender_codecs(sender.clone(), sender);
                 }
+
+                debug!(
+                    session_id = %self.context.session_id,
+                    common_codecs = ?codec_lists.common.iter().filter(|c| !c.is_dtmf()).map(|c| format!("{:?}", c.codec)).collect::<Vec<_>>(),
+                    "Bridge codecs configured from common intersection"
+                );
 
                 // Extract video capabilities from caller SDP
                 match rustrtc::SessionDescription::parse(rustrtc::SdpType::Offer, caller_sdp) {
@@ -2937,9 +2952,18 @@ impl SipSession {
 
                 debug!(
                     session_id = %self.id,
-                    webrtc_codecs = ?webrtc_side.iter().map(|c| format!("{:?}", c.codec)).collect::<Vec<_>>(),
-                    rtp_codecs = ?rtp_side.iter().map(|c| format!("{:?}", c.codec)).collect::<Vec<_>>(),
-                    "Bridge codecs configured from allow_codecs"
+                    common_codecs = ?codec_lists.common.iter().filter(|c| !c.is_dtmf()).map(|c| format!("{:?}", c.codec)).collect::<Vec<_>>(),
+                    webrtc_codecs = ?codec_lists
+                        .common
+                        .iter()
+                        .map(|c| format!("{:?}", c.codec))
+                        .collect::<Vec<_>>(),
+                    rtp_codecs = ?codec_lists
+                        .common
+                        .iter()
+                        .map(|c| format!("{:?}", c.codec))
+                        .collect::<Vec<_>>(),
+                    "Bridge codecs configured from common intersection"
                 );
             }
 
@@ -3527,27 +3551,35 @@ impl SipSession {
                 }
             });
 
-        let hold_ssrc = rand::random::<u32>();
         let track = FileTrack::new(track_id.to_string())
             .with_path(resolved_audio_file)
             .with_loop(loop_playback)
-            .with_ssrc(hold_ssrc)
             .with_codec_info(caller_codec);
 
-        let caller_pc = {
-            let mut pc = None;
+        // Use the RtcTrack's existing SampleStreamSource to inject audio frames
+        // without creating a new RTP sender (which would change SSRC and break
+        // audio in WebRTC/SRTP mode).
+        let sender = {
+            let mut sender = None;
             for _ in 0..100 {
-                if let Some(found_pc) = self.get_caller_peer_connection().await {
-                    pc = Some(found_pc);
+                if let Some(found_sender) = self.get_caller_playback_sender().await {
+                    sender = Some(found_sender);
                     break;
                 }
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
-            pc
+            sender
         };
 
-        if let Err(e) = track.start_playback_on(caller_pc).await {
-            warn!(error = %e, "Failed to start playback");
+        if let Some(sender) = sender {
+            if let Err(e) = track.start_playback_on_sender(sender).await {
+                warn!(error = %e, "Failed to start playback");
+            }
+        } else {
+            // Fallback: use FileTrack's own un-negotiated PC (no audio to caller)
+            if let Err(e) = track.start_playback_on(None).await {
+                warn!(error = %e, "Failed to start playback");
+            }
         }
 
         let wait_track = if await_completion && !loop_playback {
@@ -5998,6 +6030,20 @@ impl SipSession {
         None
     }
 
+    /// Get the SampleStreamSource from the caller's RtcTrack for injecting
+    /// playback audio without creating a new RTP sender (which would change
+    /// SSRC and break audio in WebRTC/SRTP mode).
+    async fn get_caller_playback_sender(&self) -> Option<rustrtc::media::SampleStreamSource> {
+        let tracks = self.caller_peer.get_tracks().await;
+        for t in tracks.iter() {
+            let guard = t.lock().await;
+            if guard.id() == Self::CALLER_TRACK_ID {
+                return guard.get_sender();
+            }
+        }
+        None
+    }
+
     /// Create audio decoder based on negotiated codec from answer SDP.
     ///
     /// Extracts the codec from the caller's answer SDP and creates the appropriate decoder.
@@ -6580,6 +6626,11 @@ impl SipSession {
         source: crate::call::domain::MediaSource,
         options: Option<crate::call::domain::PlayOptions>,
     ) -> Result<()> {
+        let await_completion = options
+            .as_ref()
+            .map(|o| o.await_completion)
+            .unwrap_or(false);
+        let loop_playback = options.as_ref().map(|o| o.loop_playback).unwrap_or(false);
         let track_id = options
             .as_ref()
             .and_then(|o| o.track_id.clone())
@@ -6609,28 +6660,51 @@ impl SipSession {
             .with_path(file_path.clone())
             .with_codec_info(caller_codec);
 
-        let caller_pc = {
-            let mut pc = None;
+        let sender = {
+            let mut sender = None;
             for _ in 0..100 {
-                if let Some(found_pc) = self.get_caller_peer_connection().await {
-                    pc = Some(found_pc);
+                if let Some(found_sender) = self.get_caller_playback_sender().await {
+                    sender = Some(found_sender);
                     break;
                 }
                 tokio::time::sleep(Duration::from_millis(20)).await;
             }
-            pc
+            sender
         };
 
-        if let Err(e) = track.start_playback_on(caller_pc).await {
-            warn!(error = %e, "Failed to start playback");
+        if let Some(sender) = sender {
+            if let Err(e) = track.start_playback_on_sender(sender).await {
+                warn!(error = %e, "Failed to start playback");
+            }
+        } else {
+            if let Err(e) = track.start_playback_on(None).await {
+                warn!(error = %e, "Failed to start playback");
+            }
         }
 
         self.caller_peer
             .update_track(Box::new(track.clone()), None)
             .await;
-        self.playback_tracks.insert(track_id.clone(), track);
+        self.playback_tracks.insert(track_id.clone(), track.clone());
 
         info!(track_id = %track_id, file = %file_path, "Playback started");
+
+        // Spawn a completion watcher so the IVR/app receives AudioComplete when
+        // the file finishes playing.  Only watch non-looping tracks; a looping
+        // track never self-terminates so AudioComplete is not meaningful.
+        if await_completion && !loop_playback {
+            let app_runtime = self.app_runtime.clone();
+            let track_id_clone = track_id.clone();
+            tokio::spawn(async move {
+                track.wait_for_completion().await;
+                let _ = app_runtime.inject_event(serde_json::json!({
+                    "type": "audio_complete",
+                    "track_id": track_id_clone,
+                    "interrupted": false
+                }));
+            });
+        }
+
         Ok(())
     }
 
@@ -8161,6 +8235,226 @@ mod tests {
             err.contains("Queue 'nonexistent' not found"),
             "Error should indicate queue not found, got: {}",
             err
+        );
+    }
+
+    // ─── is_local_home_proxy unit tests ────────────────────────────────
+
+    #[test]
+    fn test_is_local_home_proxy_detects_matching_address() {
+        let local_addrs = vec![SipAddr {
+            r#type: Some(rsipstack::sip::Transport::Udp),
+            addr: rsipstack::sip::HostWithPort::try_from("10.172.148.121:8060").unwrap(),
+        }];
+        let home_proxy = SipAddr {
+            r#type: None,
+            addr: rsipstack::sip::HostWithPort::try_from("10.172.148.121:8060").unwrap(),
+        };
+        assert!(SipSession::is_local_home_proxy(&local_addrs, &home_proxy));
+    }
+
+    #[test]
+    fn test_is_local_home_proxy_detects_non_matching_address() {
+        let local_addrs = vec![SipAddr {
+            r#type: Some(rsipstack::sip::Transport::Udp),
+            addr: rsipstack::sip::HostWithPort::try_from("10.172.148.121:8060").unwrap(),
+        }];
+        let home_proxy = SipAddr {
+            r#type: None,
+            addr: rsipstack::sip::HostWithPort::try_from("10.172.149.126:8060").unwrap(),
+        };
+        assert!(!SipSession::is_local_home_proxy(&local_addrs, &home_proxy));
+    }
+
+    #[test]
+    fn test_is_local_home_proxy_matches_any_local_address() {
+        let local_addrs = vec![
+            SipAddr {
+                r#type: Some(rsipstack::sip::Transport::Udp),
+                addr: rsipstack::sip::HostWithPort::try_from("127.0.0.1:5060").unwrap(),
+            },
+            SipAddr {
+                r#type: Some(rsipstack::sip::Transport::Tcp),
+                addr: rsipstack::sip::HostWithPort::try_from("10.172.148.121:8060").unwrap(),
+            },
+            SipAddr {
+                r#type: Some(rsipstack::sip::Transport::Ws),
+                addr: rsipstack::sip::HostWithPort::try_from("10.172.148.121:8443").unwrap(),
+            },
+        ];
+        let home_proxy = SipAddr {
+            r#type: None,
+            addr: rsipstack::sip::HostWithPort::try_from("10.172.148.121:8060").unwrap(),
+        };
+        assert!(SipSession::is_local_home_proxy(&local_addrs, &home_proxy));
+    }
+
+    #[test]
+    fn test_is_local_home_proxy_rejects_port_mismatch() {
+        let local_addrs = vec![SipAddr {
+            r#type: Some(rsipstack::sip::Transport::Udp),
+            addr: rsipstack::sip::HostWithPort::try_from("10.172.148.121:8060").unwrap(),
+        }];
+        let home_proxy = SipAddr {
+            r#type: None,
+            addr: rsipstack::sip::HostWithPort::try_from("10.172.148.121:5070").unwrap(),
+        };
+        assert!(!SipSession::is_local_home_proxy(&local_addrs, &home_proxy));
+    }
+
+    #[test]
+    fn test_is_local_home_proxy_compares_addr_string_not_transport() {
+        // Transport type should NOT affect address matching — only host:port matters.
+        let local_addrs = vec![SipAddr {
+            r#type: Some(rsipstack::sip::Transport::Wss),
+            addr: rsipstack::sip::HostWithPort::try_from("10.172.148.121:8060").unwrap(),
+        }];
+        let home_proxy = SipAddr {
+            r#type: Some(rsipstack::sip::Transport::Udp),
+            addr: rsipstack::sip::HostWithPort::try_from("10.172.148.121:8060").unwrap(),
+        };
+        assert!(SipSession::is_local_home_proxy(&local_addrs, &home_proxy));
+    }
+
+    // ─── resolve_outbound_destination: route_via_home_proxy flag ───────
+
+    #[test]
+    fn test_resolve_outbound_destination_no_home_proxy_returns_destination() {
+        let destination = SipAddr {
+            r#type: Some(rsipstack::sip::Transport::Udp),
+            addr: rsipstack::sip::HostWithPort::try_from("192.168.1.10:5060").unwrap(),
+        };
+        let target = Location {
+            destination: Some(destination.clone()),
+            home_proxy: None,
+            ..Default::default()
+        };
+        let local_addrs = vec![SipAddr {
+            r#type: Some(rsipstack::sip::Transport::Udp),
+            addr: rsipstack::sip::HostWithPort::try_from("10.0.0.1:5060").unwrap(),
+        }];
+        let (resolved, via_home_proxy) =
+            SipSession::resolve_outbound_destination(&target, &local_addrs);
+        assert!(!via_home_proxy);
+        assert_eq!(resolved, Some(destination));
+    }
+
+    #[test]
+    fn test_resolve_outbound_destination_remote_home_proxy_sets_via_flag() {
+        // home_proxy != local → route_via_home_proxy stays true (FIXED behavior)
+        let destination = SipAddr {
+            r#type: Some(rsipstack::sip::Transport::Udp),
+            addr: rsipstack::sip::HostWithPort::try_from("10.172.149.126:8060").unwrap(),
+        };
+        let home_proxy = SipAddr {
+            r#type: None,
+            addr: rsipstack::sip::HostWithPort::try_from("10.172.149.126:8060").unwrap(),
+        };
+        let target = Location {
+            destination: Some(destination),
+            home_proxy: Some(home_proxy.clone()),
+            ..Default::default()
+        };
+        let local_addrs = vec![SipAddr {
+            r#type: Some(rsipstack::sip::Transport::Udp),
+            addr: rsipstack::sip::HostWithPort::try_from("10.172.148.121:8060").unwrap(),
+        }];
+        let (resolved, via_home_proxy) =
+            SipSession::resolve_outbound_destination(&target, &local_addrs);
+        assert!(
+            via_home_proxy,
+            "route_via_home_proxy must be true for remote home_proxy"
+        );
+        assert_eq!(resolved, Some(home_proxy));
+    }
+
+    #[test]
+    fn test_resolve_outbound_destination_local_home_proxy_no_via_flag() {
+        let destination = SipAddr {
+            r#type: Some(rsipstack::sip::Transport::Udp),
+            addr: rsipstack::sip::HostWithPort::try_from("10.172.148.121:8060").unwrap(),
+        };
+        let home_proxy = SipAddr {
+            r#type: None,
+            addr: rsipstack::sip::HostWithPort::try_from("10.172.148.121:8060").unwrap(),
+        };
+        let target = Location {
+            destination: Some(destination.clone()),
+            home_proxy: Some(home_proxy),
+            ..Default::default()
+        };
+        let local_addrs = vec![SipAddr {
+            r#type: Some(rsipstack::sip::Transport::Udp),
+            addr: rsipstack::sip::HostWithPort::try_from("10.172.148.121:8060").unwrap(),
+        }];
+        let (resolved, via_home_proxy) =
+            SipSession::resolve_outbound_destination(&target, &local_addrs);
+        assert!(
+            !via_home_proxy,
+            "route_via_home_proxy must be false when home_proxy is local"
+        );
+        assert_eq!(resolved, Some(destination));
+    }
+
+    // ─── Verify no self-referencing Record-Route in INVITE headers ────
+
+    #[test]
+    fn test_route_via_home_proxy_does_not_add_self_referencing_record_route() {
+        // This test validates the architectural fix:
+        // When routing via a remote home_proxy, the INVITE MUST NOT include
+        // a Record-Route header pointing to the local node. Including one
+        // would cause the dialog route_set to contain a self-referencing
+        // Route entry, which makes all subsequent in-dialog requests
+        // (BYE, ACK) loopback to the local node instead of reaching the
+        // remote agent.
+        //
+        // The Contact header in the INVITE already provides the correct
+        // return path for the callee's responses and requests.
+        //
+        // This test exercises is_local_home_proxy and
+        // resolve_outbound_destination to ensure the routing logic is
+        // correct. The actual INVITE header construction is exercised
+        // by the cluster home_proxy e2e test.
+        //
+        // Verify: home_proxy is recognized as remote → via_home_proxy=true
+        let destination = SipAddr {
+            r#type: Some(rsipstack::sip::Transport::Udp),
+            addr: rsipstack::sip::HostWithPort::try_from("10.172.149.126:8060").unwrap(),
+        };
+        let home_proxy = SipAddr {
+            r#type: None,
+            addr: rsipstack::sip::HostWithPort::try_from("10.172.149.126:8060").unwrap(),
+        };
+        let target = Location {
+            destination: Some(destination),
+            home_proxy: Some(home_proxy.clone()),
+            ..Default::default()
+        };
+        let local_addrs = vec![SipAddr {
+            r#type: Some(rsipstack::sip::Transport::Udp),
+            addr: rsipstack::sip::HostWithPort::try_from("10.172.148.121:8060").unwrap(),
+        }];
+        let (_resolved, via_home_proxy) =
+            SipSession::resolve_outbound_destination(&target, &local_addrs);
+        assert!(
+            via_home_proxy,
+            "route_via_home_proxy must be true for cross-node routing"
+        );
+
+        // Verify that BOTH local and remote addresses are correctly
+        // distinguished. A local address match → false, remote → true.
+        assert!(
+            !SipSession::is_local_home_proxy(&local_addrs, &home_proxy),
+            "home_proxy at 10.172.149.126 must NOT match local 10.172.148.121"
+        );
+
+        let local_home_proxy = SipAddr {
+            r#type: None,
+            addr: rsipstack::sip::HostWithPort::try_from("10.172.148.121:8060").unwrap(),
+        };
+        assert!(
+            SipSession::is_local_home_proxy(&local_addrs, &local_home_proxy),
+            "home_proxy at 10.172.148.121 must match local 10.172.148.121"
         );
     }
 }
