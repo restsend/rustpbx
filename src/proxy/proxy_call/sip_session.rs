@@ -31,7 +31,7 @@ use crate::callrecord::{CallRecordHangupMessage, CallRecordHangupReason, CallRec
 use crate::config::MediaProxyMode;
 use crate::media::bridge::BridgePeerBuilder;
 use crate::media::mixer::MediaMixer;
-use crate::media::negotiate::MediaNegotiator;
+use crate::media::negotiate::{CodecInfo, MediaNegotiator};
 use crate::media::recorder::Recorder;
 use crate::media::{FileTrack, RtpTrackBuilder, Track};
 use crate::proxy::proxy_call::{
@@ -1338,13 +1338,12 @@ impl SipSession {
             return Ok(());
         }
 
-        // Resolve custom targets (e.g., skill-group:) to actual agent locations
         let resolved_agents = self
             .resolve_custom_targets(agents, plan.acd_policy.as_deref())
             .await;
 
         if resolved_agents.is_empty() {
-            warn!("No agents available after resolving skill groups");
+            warn!("No agents available after resolving queue targets");
             return self.execute_queue_fallback(plan).await;
         }
 
@@ -1397,7 +1396,11 @@ impl SipSession {
         }
     }
 
-    /// Resolve custom targets (e.g., skill-group:) to actual agent locations.
+    /// Resolve queue targets to the concrete locations used for dialing.
+    ///
+    /// Custom targets (e.g. skill-group:) are expanded through the AgentRegistry.
+    /// Same-realm SIP targets are then looked up in the registrar locator so
+    /// registered contact metadata such as transport and WebRTC support is used.
     /// Uses the AgentRegistry trait's resolve_target hook, which allows addons
     /// to implement custom routing logic without queue knowing the details.
     async fn resolve_custom_targets(
@@ -1405,7 +1408,7 @@ impl SipSession {
         locations: Vec<crate::call::Location>,
         acd_policy: Option<&str>,
     ) -> Vec<crate::call::Location> {
-        let mut resolved = Vec::new();
+        let mut expanded = Vec::new();
         let agent_registry = self.server.agent_registry.clone();
 
         for location in locations {
@@ -1453,7 +1456,7 @@ impl SipSession {
                                     if let Some(reg_loc) = registered_locations.into_iter().next() {
                                         // Use the full registered location (preserves
                                         // supports_webrtc, destination, transport, etc.)
-                                        resolved.push(reg_loc);
+                                        expanded.push(reg_loc);
                                     } else {
                                         // Agent not currently registered; push a bare
                                         // location so downstream dialing can fail cleanly.
@@ -1462,7 +1465,7 @@ impl SipSession {
                                             contact_raw: Some(agent_uri),
                                             ..Default::default()
                                         };
-                                        resolved.push(agent_location);
+                                        expanded.push(agent_location);
                                     }
                                     parsed_count += 1;
                                 }
@@ -1482,7 +1485,36 @@ impl SipSession {
             }
 
             // Standard target, pass through as-is
-            resolved.push(location);
+            expanded.push(location);
+        }
+
+        let mut resolved = Vec::new();
+        for location in expanded {
+            let target_realm = location.aor.host().to_string();
+            if !self.server.is_same_realm(&target_realm).await {
+                resolved.push(location);
+                continue;
+            }
+
+            match self.server.locator.lookup(&location.aor).await {
+                Ok(locations) if !locations.is_empty() => {
+                    info!(
+                        target = %location.aor,
+                        resolved_count = locations.len(),
+                        "Resolved queue target through locator"
+                    );
+                    resolved.extend(locations);
+                }
+                Ok(_) => resolved.push(location),
+                Err(error) => {
+                    warn!(
+                        target = %location.aor,
+                        error = %error,
+                        "Failed to resolve queue target through locator"
+                    );
+                    resolved.push(location);
+                }
+            }
         }
 
         resolved
@@ -3484,15 +3516,23 @@ impl SipSession {
             .caller_offer
             .as_ref()
             .map(|offer| MediaNegotiator::extract_codec_params(offer).audio)
-            .and_then(|codecs| codecs.first().map(|c| c.codec))
-            .unwrap_or(CodecType::PCMU);
+            .and_then(|codecs| codecs.first().cloned())
+            .unwrap_or_else(|| {
+                let codec = CodecType::PCMU;
+                CodecInfo {
+                    payload_type: codec.payload_type(),
+                    codec,
+                    clock_rate: codec.clock_rate(),
+                    channels: codec.channels(),
+                }
+            });
 
         let hold_ssrc = rand::random::<u32>();
         let track = FileTrack::new(track_id.to_string())
             .with_path(resolved_audio_file)
             .with_loop(loop_playback)
             .with_ssrc(hold_ssrc)
-            .with_codec_preference(vec![caller_codec]);
+            .with_codec_info(caller_codec);
 
         let caller_pc = {
             let mut pc = None;
@@ -6554,12 +6594,20 @@ impl SipSession {
             .caller_offer
             .as_ref()
             .map(|offer| MediaNegotiator::extract_codec_params(offer).audio)
-            .and_then(|codecs| codecs.first().map(|c| c.codec))
-            .unwrap_or(CodecType::PCMU);
+            .and_then(|codecs| codecs.first().cloned())
+            .unwrap_or_else(|| {
+                let codec = CodecType::PCMU;
+                CodecInfo {
+                    payload_type: codec.payload_type(),
+                    codec,
+                    clock_rate: codec.clock_rate(),
+                    channels: codec.channels(),
+                }
+            });
 
         let track = FileTrack::new(track_id.clone())
             .with_path(file_path.clone())
-            .with_codec_preference(vec![caller_codec]);
+            .with_codec_info(caller_codec);
 
         let caller_pc = {
             let mut pc = None;
@@ -6587,6 +6635,17 @@ impl SipSession {
     }
 
     async fn handle_stop_playback(&mut self, leg_id: Option<LegId>) -> Result<()> {
+        if leg_id.is_none() {
+            let track_ids: Vec<String> = self.playback_tracks.keys().cloned().collect();
+            for track_id in track_ids {
+                if self.playback_tracks.remove(&track_id).is_some() {
+                    self.caller_peer.remove_track(&track_id, true).await;
+                    info!(track_id = %track_id, "Playback stopped");
+                }
+            }
+            return Ok(());
+        }
+
         let track_id = leg_id
             .as_ref()
             .map(|l| l.to_string())
