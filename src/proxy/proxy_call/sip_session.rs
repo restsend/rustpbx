@@ -31,7 +31,7 @@ use crate::callrecord::{CallRecordHangupMessage, CallRecordHangupReason, CallRec
 use crate::config::MediaProxyMode;
 use crate::media::bridge::BridgePeerBuilder;
 use crate::media::mixer::MediaMixer;
-use crate::media::negotiate::MediaNegotiator;
+use crate::media::negotiate::{CodecInfo, MediaNegotiator};
 use crate::media::recorder::Recorder;
 use crate::media::{FileTrack, RtpTrackBuilder, Track};
 use crate::proxy::proxy_call::{
@@ -3484,15 +3484,23 @@ impl SipSession {
             .caller_offer
             .as_ref()
             .map(|offer| MediaNegotiator::extract_codec_params(offer).audio)
-            .and_then(|codecs| codecs.first().map(|c| c.codec))
-            .unwrap_or(CodecType::PCMU);
+            .and_then(|codecs| codecs.first().cloned())
+            .unwrap_or_else(|| {
+                let codec = CodecType::PCMU;
+                CodecInfo {
+                    payload_type: codec.payload_type(),
+                    codec,
+                    clock_rate: codec.clock_rate(),
+                    channels: codec.channels(),
+                }
+            });
 
         let hold_ssrc = rand::random::<u32>();
         let track = FileTrack::new(track_id.to_string())
             .with_path(resolved_audio_file)
             .with_loop(loop_playback)
             .with_ssrc(hold_ssrc)
-            .with_codec_preference(vec![caller_codec]);
+            .with_codec_info(caller_codec);
 
         let caller_pc = {
             let mut pc = None;
@@ -6554,12 +6562,20 @@ impl SipSession {
             .caller_offer
             .as_ref()
             .map(|offer| MediaNegotiator::extract_codec_params(offer).audio)
-            .and_then(|codecs| codecs.first().map(|c| c.codec))
-            .unwrap_or(CodecType::PCMU);
+            .and_then(|codecs| codecs.first().cloned())
+            .unwrap_or_else(|| {
+                let codec = CodecType::PCMU;
+                CodecInfo {
+                    payload_type: codec.payload_type(),
+                    codec,
+                    clock_rate: codec.clock_rate(),
+                    channels: codec.channels(),
+                }
+            });
 
         let track = FileTrack::new(track_id.clone())
             .with_path(file_path.clone())
-            .with_codec_preference(vec![caller_codec]);
+            .with_codec_info(caller_codec);
 
         let caller_pc = {
             let mut pc = None;
