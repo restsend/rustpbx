@@ -6603,6 +6603,17 @@ impl SipSession {
     }
 
     async fn handle_stop_playback(&mut self, leg_id: Option<LegId>) -> Result<()> {
+        if leg_id.is_none() {
+            let track_ids: Vec<String> = self.playback_tracks.keys().cloned().collect();
+            for track_id in track_ids {
+                if self.playback_tracks.remove(&track_id).is_some() {
+                    self.caller_peer.remove_track(&track_id, true).await;
+                    info!(track_id = %track_id, "Playback stopped");
+                }
+            }
+            return Ok(());
+        }
+
         let track_id = leg_id
             .as_ref()
             .map(|l| l.to_string())
