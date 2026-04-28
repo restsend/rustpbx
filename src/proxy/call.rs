@@ -97,12 +97,6 @@ fn resolve_unhandled_targets(
             Some(rsipstack::sip::StatusCode::TemporarilyUnavailable),
         )));
     }
-    if !callee_is_same_realm {
-        return Err(RouteError::from((
-            anyhow!("no route found for external destination"),
-            Some(rsipstack::sip::StatusCode::NotFound),
-        )));
-    }
     Ok(DialStrategy::Sequential(locs))
 }
 
@@ -2221,21 +2215,32 @@ mod tests {
     }
 
     #[test]
-    fn loop_guard_external_callee_returns_404() {
+    fn loop_guard_external_callee_falls_through_to_locs() {
+        // external callee with NotHandled should fall through to locs so that
+        // dialplan inspectors (e.g. zhongan inviter) can rewrite the target.
         let result = resolve_unhandled_targets(false, false, make_loc());
-        let err = result.expect_err("external callee with NotHandled should be rejected");
-        let code = err.status.unwrap();
-        assert_eq!(u16::from(code), 404);
-        assert!(err.error.to_string().contains("no route"));
+        assert!(
+            result.is_ok(),
+            "external callee should fall through to Sequential(locs)"
+        );
+        let strategy = result.unwrap();
+        match strategy {
+            DialStrategy::Sequential(locs) => {
+                assert!(!locs.is_empty(), "locs should contain the callee URI");
+            }
+            _ => panic!("expected Sequential strategy"),
+        }
     }
 
     #[test]
-    fn loop_guard_external_callee_offline_also_404() {
-        // external callee — internal_lookup_empty is irrelevant but test the combination
+    fn loop_guard_external_callee_falls_through_offline_flag_ignored() {
+        // external callee — internal_lookup_empty is set but irrelevant;
+        // should still fall through because the offline check only applies to same-realm.
         let result = resolve_unhandled_targets(false, true, make_loc());
-        let err = result.expect_err("external callee should be rejected");
-        let code = err.status.unwrap();
-        assert_eq!(u16::from(code), 404);
+        assert!(
+            result.is_ok(),
+            "external callee should fall through, offline flag is ignored"
+        );
     }
 
     #[test]
@@ -2332,7 +2337,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn default_resolve_uses_request_uri_for_external_detection() {
+    async fn default_resolve_falls_through_external_callee_to_locs() {
         let (server, config) = create_test_server().await;
         let module = CallModule::new(config, server);
 
@@ -2356,7 +2361,7 @@ mod tests {
             ..Default::default()
         };
 
-        let err = module
+        let dialplan = module
             .default_resolve(
                 &request,
                 Box::new(NotHandledRouteInvite),
@@ -2364,10 +2369,17 @@ mod tests {
                 &TransactionCookie::default(),
             )
             .await
-            .expect_err("external destination should reject with 404");
+            .expect("external destination should fall through to locs");
 
-        assert_eq!(err.status, Some(rsipstack::sip::StatusCode::NotFound));
-        assert!(err.error.to_string().contains("no route"));
+        use crate::call::{DialStrategy, DialplanFlow};
+        match &dialplan.flow {
+            DialplanFlow::Targets(strategy) => match strategy {
+                DialStrategy::Sequential(locs) | DialStrategy::Parallel(locs) => {
+                    assert!(!locs.is_empty(), "external callee should be in targets");
+                }
+            },
+            _ => panic!("expected Targets flow for external callee"),
+        }
     }
 
     #[tokio::test]
