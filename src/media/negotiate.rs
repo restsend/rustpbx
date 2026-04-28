@@ -118,8 +118,11 @@ impl MediaNegotiator {
             .find(|m| m.kind == MediaKind::Audio)
     }
 
-    fn parse_rtpmap_attributes(section: &rustrtc::MediaSection) -> HashMap<u8, CodecInfo> {
+    fn parse_rtpmap_attributes(
+        section: &rustrtc::MediaSection,
+    ) -> (HashMap<u8, CodecInfo>, HashSet<u8>) {
         let mut codec_by_pt = HashMap::new();
+        let mut unrecognized_pts = HashSet::new();
 
         for attr in &section.attributes {
             if attr.key == "rtpmap"
@@ -138,7 +141,10 @@ impl MediaNegotiator {
 
                                 let codec_type = match CodecType::try_from(codec_name) {
                                     Ok(c) => c,
-                                    Err(_) => continue,
+                                    Err(_) => {
+                                        unrecognized_pts.insert(pt);
+                                        continue;
+                                    }
                                 };
 
                                 codec_by_pt.insert(
@@ -151,10 +157,10 @@ impl MediaNegotiator {
                                     },
                                 );
                             }
-                        }
+                    }
         }
 
-        codec_by_pt
+        (codec_by_pt, unrecognized_pts)
     }
 
     fn static_codec_for_payload(section: &rustrtc::MediaSection, pt: u8) -> Option<CodecInfo> {
@@ -186,7 +192,7 @@ impl MediaNegotiator {
     }
 
     fn extract_ordered_codecs_from_section(section: &rustrtc::MediaSection) -> Vec<CodecInfo> {
-        let mut codec_by_pt = Self::parse_rtpmap_attributes(section);
+        let (mut codec_by_pt, unrecognized_pts) = Self::parse_rtpmap_attributes(section);
         let mut ordered_codecs = Vec::new();
         let mut seen_pts = HashSet::new();
 
@@ -195,6 +201,10 @@ impl MediaNegotiator {
                 continue;
             };
             if !seen_pts.insert(pt) {
+                continue;
+            }
+
+            if unrecognized_pts.contains(&pt) {
                 continue;
             }
 
@@ -1571,5 +1581,87 @@ a=rtpmap:101 telephone-event/8000\r\n";
         assert_eq!(common_audio[0].codec, CodecType::PCMU);
         assert!(!lists.common.iter().any(|c| c.codec == CodecType::G729));
         assert!(!lists.common.iter().any(|c| c.codec == CodecType::PCMA));
+    }
+
+    /// PSTN caller offers AMR/EVS codecs at dynamic PTs 96/111.
+    /// These PTs already have rtpmap entries with unrecognized codec names.
+    /// The codec parser must NOT fall back to mapping PT 96/111 to Opus,
+    /// because the PTs were already assigned by the caller.
+    #[test]
+    fn test_bridge_codecs_ignores_unrecognized_rtpmap_entries() {
+        let caller_sdp = "v=0\r\n\
+o=- 1777370486 1777370486 IN IP4 58.246.19.74\r\n\
+s=-\r\n\
+c=IN IP4 58.246.19.74\r\n\
+t=0 0\r\n\
+m=audio 16844 RTP/AVP 98 96 111 106 18 8 0 100\r\n\
+a=rtpmap:98 AMR-WB/16000/1\r\n\
+a=rtpmap:96 AMR/8000/1\r\n\
+a=rtpmap:111 EVS/16000\r\n\
+a=rtpmap:106 EVS/16000\r\n\
+a=rtpmap:18 G729/8000\r\n\
+a=rtpmap:8 PCMA/8000\r\n\
+a=rtpmap:0 PCMU/8000\r\n\
+a=rtpmap:100 telephone-event/8000\r\n";
+
+        let lists = MediaNegotiator::build_bridge_codec_lists(
+            caller_sdp,
+            false, // caller is RTP (PSTN)
+            true,  // callee is WebRTC
+            &[],
+        );
+
+        assert!(
+            !lists.caller_side.iter().any(|c| c.payload_type == 96),
+            "PT 96 must NOT appear (it was AMR, not Opus)"
+        );
+        assert!(
+            !lists.caller_side.iter().any(|c| c.payload_type == 111),
+            "PT 111 must NOT appear (it was EVS, not Opus)"
+        );
+        assert!(
+            !lists.caller_side.iter().any(|c| c.payload_type == 98),
+            "PT 98 must NOT appear (it was AMR-WB)"
+        );
+        assert!(
+            !lists.caller_side.iter().any(|c| c.payload_type == 106),
+            "PT 106 must NOT appear (it was EVS)"
+        );
+        assert!(
+            !lists.common.iter().any(|c| c.payload_type == 96),
+            "Common must NOT include PT 96"
+        );
+        assert!(
+            !lists.common.iter().any(|c| c.payload_type == 111),
+            "Common must NOT include PT 111"
+        );
+
+        // Supported codecs must appear with correct caller PTs
+        let has_g729 = lists.caller_side.iter().any(|c| c.codec == CodecType::G729 && c.payload_type == 18);
+        assert!(has_g729, "G729 at PT 18 must appear in caller_side");
+        let has_pcma = lists.caller_side.iter().any(|c| c.codec == CodecType::PCMA && c.payload_type == 8);
+        assert!(has_pcma, "PCMA at PT 8 must appear in caller_side");
+        let has_pcmu = lists.caller_side.iter().any(|c| c.codec == CodecType::PCMU && c.payload_type == 0);
+        assert!(has_pcmu, "PCMU at PT 0 must appear in caller_side");
+
+        // common excludes G729 (WebRTC doesn't support it)
+        let common_g729 = lists.common.iter().any(|c| c.codec == CodecType::G729);
+        assert!(!common_g729, "G729 must NOT be in common (WebRTC callee)");
+        let common_pcma = lists.common.iter().any(|c| c.codec == CodecType::PCMA);
+        assert!(common_pcma, "PCMA must be in common");
+        let common_pcmu = lists.common.iter().any(|c| c.codec == CodecType::PCMU);
+        assert!(common_pcmu, "PCMU must be in common");
+        let common_dtmf = lists.common.iter().any(|c| c.codec == CodecType::TelephoneEvent);
+        assert!(common_dtmf, "TelephoneEvent must be in common");
+
+        // Verify no Opus codecs are created from PT 96/111
+        assert!(
+            !lists.caller_side.iter().any(|c| c.codec == CodecType::Opus),
+            "Opus must NOT appear in caller_side (PSTN didn't offer Opus)"
+        );
+        assert!(
+            !lists.common.iter().any(|c| c.codec == CodecType::Opus),
+            "Opus must NOT appear in common (PSTN didn't offer Opus)"
+        );
     }
 }
