@@ -33,7 +33,6 @@ addon-telemetry = [
     "tracing-opentelemetry",
 ]
 commerce = [
-    "addon-wholesale",
     "addon-endpoint-manager",
     "addon-enterprise-auth",
     "addon-voicemail",
@@ -41,7 +40,7 @@ commerce = [
     "addon-telemetry",
     "addon-jsonrpc-router",
 ]
-
+wholesale = ["addon-wholesale"]
 contact-center = [
     "addon-cc",
     "addon-endpoint-manager",
@@ -104,7 +103,7 @@ rsipstack = "0.5.8"
 #rsipstack = { path = "../rsipstack" }
 audio-codec = { version = "=0.3.30", default-features = false }
 #rustrtc = { path = "../rustrtc" }
-rustrtc = "0.3.51"
+rustrtc = "0.3.52"
 reqwest = { version = "0.13", features = [
     "json",
     "stream",
