@@ -1469,6 +1469,7 @@ impl SipSession {
             Ok(answer) => {
                 self.answer = Some(answer.clone());
                 self.caller_answer_uses_media_bridge = true;
+                self.replace_caller_bridge_output_with_silence().await;
                 Some(answer)
             }
             Err(error) => {
@@ -1482,6 +1483,160 @@ impl SipSession {
                 self.ensure_caller_answer_sdp().await
             }
         }
+    }
+
+    async fn prepare_app_caller_media_bridge(&mut self) -> Option<String> {
+        if let Some(ref answer) = self.answer {
+            return Some(answer.clone());
+        }
+
+        let caller_offer = self.caller_offer.clone()?;
+        let caller_is_webrtc = self.is_caller_webrtc();
+        self.caller_is_webrtc = caller_is_webrtc;
+        self.callee_offer_uses_media_bridge = false;
+
+        let created_bridge = self.media_bridge.is_none();
+        if self.media_bridge.is_none()
+            && let Err(error) = self
+                .create_app_caller_media_bridge(&caller_offer, caller_is_webrtc)
+                .await
+        {
+            warn!(
+                session_id = %self.context.session_id,
+                error = %error,
+                "Application answer: failed to prepare media bridge, falling back to caller media"
+            );
+            self.caller_answer_uses_media_bridge = false;
+            return None;
+        }
+
+        match self.prepare_bridge_caller_answer().await {
+            Ok(answer) => {
+                self.answer = Some(answer.clone());
+                self.caller_answer_uses_media_bridge = true;
+                self.replace_caller_bridge_output_with_silence().await;
+                Some(answer)
+            }
+            Err(error) => {
+                if created_bridge
+                    && let Some(bridge) = self.media_bridge.take()
+                {
+                    bridge.stop().await;
+                }
+                warn!(
+                    session_id = %self.context.session_id,
+                    error = %error,
+                    "Application answer: failed to answer from media bridge, falling back to caller media"
+                );
+                self.caller_answer_uses_media_bridge = false;
+                None
+            }
+        }
+    }
+
+    async fn create_app_caller_media_bridge(
+        &mut self,
+        caller_offer: &str,
+        caller_is_webrtc: bool,
+    ) -> Result<()> {
+        let mut bridge_builder = BridgePeerBuilder::new(format!("{}-app-bridge", self.id))
+            .with_enable_latching(self.server.proxy_config.enable_latching);
+
+        if let (Some(start), Some(end)) = (
+            self.server.rtp_config.start_port,
+            self.server.rtp_config.end_port,
+        ) {
+            bridge_builder = bridge_builder.with_rtp_port_range(start, end);
+        }
+
+        if !caller_is_webrtc && caller_offer.contains("a=group:BUNDLE") {
+            bridge_builder = bridge_builder
+                .with_rtp_sdp_compatibility(rustrtc::config::SdpCompatibilityMode::Standard)
+                .with_enable_latching(true);
+            info!(session_id = %self.id, "RTP caller offered BUNDLE, using Standard SDP mode + latching for app media bridge");
+        }
+
+        if let Some(ref external_ip) = self.server.rtp_config.external_ip {
+            bridge_builder = bridge_builder.with_external_ip(external_ip.clone());
+        }
+        if let Some(ref bind_ip) = self.server.rtp_config.bind_ip {
+            bridge_builder = bridge_builder.with_bind_ip(bind_ip.clone());
+        }
+        if let Some(ref ice_servers) = self.context.dialplan.media.ice_servers {
+            bridge_builder = bridge_builder.with_ice_servers(ice_servers.clone());
+        }
+
+        let caller_codecs =
+            MediaNegotiator::build_caller_answer_codec_list(caller_offer, caller_is_webrtc);
+        let audio_caps: Vec<_> = caller_codecs
+            .iter()
+            .filter_map(|codec| codec.to_audio_capability())
+            .collect();
+        if !audio_caps.is_empty() {
+            bridge_builder = bridge_builder
+                .with_webrtc_audio_capabilities(audio_caps.clone())
+                .with_rtp_audio_capabilities(audio_caps);
+        }
+
+        if let Some(sender) = caller_codecs
+            .iter()
+            .find(|codec| !codec.is_dtmf())
+            .map(|codec| codec.to_params())
+        {
+            bridge_builder = bridge_builder.with_sender_codecs(sender.clone(), sender);
+        }
+
+        if self.context.dialplan.recording.enabled {
+            bridge_builder = bridge_builder.with_recorder(self.recorder.clone());
+        }
+
+        let bridge = bridge_builder.build();
+        bridge.setup_bridge().await?;
+        self.media_bridge = Some(bridge);
+
+        debug!(
+            session_id = %self.context.session_id,
+            caller_is_webrtc,
+            "Application caller media bridge prepared"
+        );
+
+        Ok(())
+    }
+
+    async fn replace_caller_bridge_output_with_silence(&self) {
+        let Some(bridge) = self.media_bridge.as_ref() else {
+            return;
+        };
+
+        if let Err(error) = bridge
+            .replace_output_with_silence(
+                self.caller_bridge_endpoint(),
+                self.caller_output_codec_info(),
+            )
+            .await
+        {
+            warn!(
+                session_id = %self.context.session_id,
+                error = %error,
+                "Failed to install caller bridge silence source"
+            );
+        }
+    }
+
+    fn caller_output_codec_info(&self) -> CodecInfo {
+        self.caller_offer
+            .as_ref()
+            .map(|offer| MediaNegotiator::extract_codec_params(offer).audio)
+            .and_then(|codecs| codecs.first().cloned())
+            .unwrap_or_else(|| {
+                let codec = CodecType::PCMU;
+                CodecInfo {
+                    payload_type: codec.payload_type(),
+                    codec,
+                    clock_rate: codec.clock_rate(),
+                    channels: codec.channels(),
+                }
+            })
     }
 
     async fn prepare_bridge_caller_answer(&self) -> Result<String> {
@@ -2762,18 +2917,6 @@ impl SipSession {
     }
 
     async fn start_caller_ingress_monitor_if_needed(&mut self) {
-        if self
-            .caller_ingress_monitor
-            .as_ref()
-            .is_some_and(|monitor| !monitor.task.is_finished())
-        {
-            return;
-        }
-
-        if self.caller_ingress_monitor.is_some() {
-            self.stop_caller_ingress_monitor().await;
-        }
-
         if self.connected_callee.is_some() {
             return;
         }
@@ -2787,16 +2930,73 @@ impl SipSession {
             return;
         };
 
-        let Some(caller_pc) = Self::get_peer_pc(&self.caller_peer, Self::CALLER_TRACK_ID).await
-        else {
+        let session_id = self.context.session_id.clone();
+        let app_runtime = self.app_runtime.clone();
+        let dtmf_payload_type = dtmf_codec.payload_type;
+
+        if self.caller_answer_uses_media_bridge {
+            if self.caller_ingress_monitor.is_some() {
+                self.stop_caller_ingress_monitor().await;
+            }
+
+            let Some(bridge) = self.media_bridge.as_ref() else {
+                return;
+            };
+            let endpoint = self.caller_bridge_endpoint();
+            bridge.set_dtmf_sink(
+                endpoint,
+                dtmf_payload_type,
+                Arc::new(move |digit| {
+                    let event = serde_json::json!({
+                        "type": "dtmf",
+                        "digit": digit.to_string(),
+                    });
+
+                    if let Err(error) = app_runtime.inject_event(event) {
+                        debug!(
+                            session_id = %session_id,
+                            digit = %digit,
+                            error = %error,
+                            "Bridge DTMF sink observed RTP DTMF with no active app receiver"
+                        );
+                    } else {
+                        debug!(
+                            session_id = %session_id,
+                            digit = %digit,
+                            "Injected RTP DTMF from bridge sink"
+                        );
+                    }
+                }),
+            );
+            bridge.start_bridge().await;
+            info!(
+                session_id = %self.context.session_id,
+                endpoint = ?endpoint,
+                payload_type = dtmf_payload_type,
+                "Installed caller bridge DTMF sink"
+            );
+            return;
+        }
+
+        if self
+            .caller_ingress_monitor
+            .as_ref()
+            .is_some_and(|monitor| !monitor.task.is_finished())
+        {
+            return;
+        }
+
+        if self.caller_ingress_monitor.is_some() {
+            self.stop_caller_ingress_monitor().await;
+        }
+
+        let caller_pc = Self::get_peer_pc(&self.caller_peer, Self::CALLER_TRACK_ID).await;
+        let Some(caller_pc) = caller_pc else {
             return;
         };
 
-        let session_id = self.context.session_id.clone();
-        let app_runtime = self.app_runtime.clone();
         let cancel_token = self.cancel_token.child_token();
         let monitor_cancel = cancel_token.clone();
-        let dtmf_payload_type = dtmf_codec.payload_type;
 
         let task = tokio::spawn(async move {
             let track = loop {
@@ -4640,7 +4840,12 @@ impl SipSession {
         match command {
             CallCommand::Answer { leg_id } => {
                 if leg_id.0 == "caller" {
-                    match self.accept_call(None, None, None).await {
+                    let answer_sdp = if self.app_runtime.is_running() {
+                        self.prepare_app_caller_media_bridge().await
+                    } else {
+                        None
+                    };
+                    match self.accept_call(None, answer_sdp, None).await {
                         Ok(()) => {
                             self.update_leg_state(&leg_id, LegState::Connected);
                             CommandResult::success()
@@ -7749,7 +7954,7 @@ impl crate::call::runtime::conference_media_bridge::AudioReceiver for PeerConnec
 mod tests {
     use super::*;
     use async_trait::async_trait;
-    use rustrtc::{MediaKind, PeerConnection, RtcConfiguration};
+    use rustrtc::{MediaKind, PeerConnection, RtcConfiguration, media::MediaStreamTrack};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct TestTrack {
@@ -8098,6 +8303,116 @@ mod tests {
         assert!(pc.is_some(), "bridge-backed caller leg should resolve a PC");
         assert_eq!(caller_peer.get_tracks_call_count(), 0);
         assert_eq!(callee_peer.get_tracks_call_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn test_prepare_app_caller_media_bridge_routes_playback_through_bridge() {
+        use crate::call::{DialDirection, Dialplan, TransactionCookie};
+        use crate::proxy::proxy_call::test_util::tests::MockMediaPeer;
+        use crate::proxy::tests::common::{
+            create_test_request, create_test_server, create_transaction,
+        };
+
+        let (server, _) = create_test_server().await;
+        let request = create_test_request(
+            rsipstack::sip::Method::Invite,
+            "alice",
+            None,
+            "rustpbx.com",
+            None,
+        );
+        let original_request = request.clone();
+        let (tx, _) = create_transaction(request).await;
+        let (state_tx, _state_rx) = mpsc::unbounded_channel();
+        let server_dialog = server
+            .dialog_layer
+            .get_or_create_server_invite(&tx, state_tx, None, None)
+            .expect("failed to create server dialog");
+
+        let context = CallContext {
+            session_id: "test-session".to_string(),
+            dialplan: Arc::new(Dialplan::new(
+                "test-session".to_string(),
+                original_request,
+                DialDirection::Inbound,
+            )),
+            cookie: TransactionCookie::default(),
+            start_time: Instant::now(),
+            original_caller: "sip:alice@rustpbx.com".to_string(),
+            original_callee: "sip:ivr@rustpbx.com".to_string(),
+            max_forwards: 70,
+            dtmf_digits: Vec::new(),
+        };
+
+        let caller_peer = Arc::new(MockMediaPeer::new());
+        let callee_peer = Arc::new(MockMediaPeer::new());
+        let (mut session, _handle, _cmd_rx) = SipSession::new(
+            server.clone(),
+            CancellationToken::new(),
+            None,
+            context,
+            server_dialog,
+            false,
+            caller_peer.clone(),
+            callee_peer,
+        );
+
+        session.caller_offer = Some(
+            concat!(
+                "v=0\r\n",
+                "o=alice 1 1 IN IP4 192.0.2.10\r\n",
+                "s=Talk\r\n",
+                "c=IN IP4 192.0.2.10\r\n",
+                "t=0 0\r\n",
+                "m=audio 40000 RTP/AVP 0 8 101\r\n",
+                "a=rtpmap:0 PCMU/8000\r\n",
+                "a=rtpmap:8 PCMA/8000\r\n",
+                "a=rtpmap:101 telephone-event/8000\r\n",
+                "a=sendrecv\r\n",
+            )
+            .to_string(),
+        );
+
+        let answer = session
+            .prepare_app_caller_media_bridge()
+            .await
+            .expect("app caller bridge answer should be prepared");
+
+        assert!(answer.contains("RTP/AVP"));
+        assert!(session.media_bridge.is_some());
+        assert!(session.caller_answer_uses_media_bridge);
+        assert_eq!(caller_peer.update_track_call_count(), 0);
+
+        let bridge = session
+            .media_bridge
+            .as_ref()
+            .expect("media bridge should exist")
+            .clone();
+        let rtp_track = bridge
+            .get_rtp_track()
+            .await
+            .expect("RTP bridge output track should exist");
+        let silence_sample =
+            tokio::time::timeout(Duration::from_millis(100), rtp_track.recv())
+                .await
+                .expect("bridge silence source should send promptly")
+                .expect("bridge silence source should produce a sample");
+        assert!(
+            matches!(silence_sample, rustrtc::media::MediaSample::Audio(_)),
+            "caller bridge should send silence before file playback is installed"
+        );
+
+        session
+            .play_audio_file("sounds/phone-calling.wav", false, "caller", true)
+            .await
+            .expect("app playback should install a bridge file source");
+
+        assert_eq!(caller_peer.update_track_call_count(), 0);
+        assert_eq!(caller_peer.get_tracks_call_count(), 0);
+
+        if let Some(bridge) = session.media_bridge.take() {
+            bridge.stop().await;
+        }
     }
 
     #[tokio::test]
