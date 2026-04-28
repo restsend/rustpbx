@@ -1408,6 +1408,11 @@ impl SipSession {
                 .await;
         }
 
+        if self.cancel_token.is_cancelled() || self.server_dialog.state().is_terminated() {
+            info!("Queue: caller ended, stopping queue execution");
+            return Ok(());
+        }
+
         match result {
             Ok(()) => {
                 info!("Queue: agent connected successfully");
@@ -1823,6 +1828,11 @@ impl SipSession {
         );
 
         for (idx, agent) in agents.iter().enumerate() {
+            if self.cancel_token.is_cancelled() || self.server_dialog.state().is_terminated() {
+                info!("Queue: caller ended before next agent");
+                return Ok(());
+            }
+
             info!(index = idx, agent = %agent.aor, "Queue: trying agent");
 
             match self
@@ -2133,9 +2143,23 @@ impl SipSession {
         let mut invitation = dialog_layer
             .do_invite(invite_option.clone(), state_tx.clone())
             .boxed();
+        let mut caller_end_check = tokio::time::interval(Duration::from_millis(100));
 
         let result = loop {
             tokio::select! {
+                _ = caller_end_check.tick() => {
+                    if self.server_dialog.state().is_terminated() {
+                        info!(
+                            session_id = %self.context.session_id,
+                            "Caller dialog terminated while callee INVITE was pending"
+                        );
+                        self.cancel_token.cancel();
+                        break Err((
+                            StatusCode::RequestTerminated,
+                            Some("Caller cancelled".to_string()),
+                        ));
+                    }
+                }
                 _ = self.cancel_token.cancelled() => {
                     break Err((
                         StatusCode::RequestTerminated,
