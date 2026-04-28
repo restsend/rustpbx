@@ -614,6 +614,13 @@
         let statsInterval = null;
         let ccWs = null;
         let sipMessageLog = [];
+        const pageInstanceId = (window.crypto && typeof window.crypto.randomUUID === 'function')
+            ? window.crypto.randomUUID()
+            : 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+                const r = Math.random() * 16 | 0;
+                const v = c === 'x' ? r : (r & 0x3) | 0x8;
+                return v.toString(16);
+            });
 
         // ========== DOM Elements ==========
         const serverInput = document.getElementById('server');
@@ -1383,7 +1390,7 @@
             log('Attempting to register via JsSIP...');
 
             const socket = new JsSIP.WebSocketInterface(server);
-            const configuration = { sockets: [socket], uri: `sip:${username}@${domain}`, password: password, display_name: displayName || username, register: true };
+            const configuration = { sockets: [socket], uri: `sip:${username}@${domain}`, password: password, display_name: displayName || username, register: true, instance_id: pageInstanceId };
             try {
                 const pcConfig = getEnabledPcConfigFromUi();
                 if (pcConfig) { configuration.pcConfig = pcConfig; log(`Using custom ICE servers for UA: ${JSON.stringify(configuration.pcConfig)}`); }
