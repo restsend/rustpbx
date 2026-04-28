@@ -513,6 +513,7 @@ impl SipServerBuilder {
             endpoint_option.t1x64 = Duration::from_millis(t1x64_timer);
         }
 
+        let endpoint_local_addrs = transport_layer.get_addrs();
         let mut endpoint_builder = endpoint_builder
             .with_cancel_token(cancel_token.clone())
             .with_option(endpoint_option)
@@ -551,16 +552,15 @@ impl SipServerBuilder {
             tx
         });
 
-        let locator_local_addrs = local_addrs
-            .iter()
-            .map(|addr| SipAddr {
-                r#type: None,
-                addr: (*addr).into(),
-            })
-            .collect();
+        let locator_local_addrs = endpoint_local_addrs;
+        let cluster_enabled = !config.cluster_peers.is_empty();
 
         endpoint_builder = endpoint_builder
-            .with_target_locator(DialogTargetLocator::new(locator.clone(), locator_local_addrs))
+            .with_target_locator(DialogTargetLocator::new(
+                locator.clone(),
+                locator_local_addrs,
+                cluster_enabled,
+            ))
             .with_transport_inspector(TransportInspectorLocator::new(
                 locator.clone(),
                 locator_events.clone(),

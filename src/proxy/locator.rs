@@ -69,14 +69,20 @@ pub trait Locator: Send + Sync {
 pub struct DialogTargetLocator {
     locator: Arc<Box<dyn Locator>>,
     local_addrs: Vec<SipAddr>,
+    cluster_enabled: bool,
 }
 
 impl DialogTargetLocator {
     #[allow(clippy::new_ret_no_self)]
-    pub fn new(locator: Arc<Box<dyn Locator>>, local_addrs: Vec<SipAddr>) -> Box<dyn TargetLocator> {
+    pub fn new(
+        locator: Arc<Box<dyn Locator>>,
+        local_addrs: Vec<SipAddr>,
+        cluster_enabled: bool,
+    ) -> Box<dyn TargetLocator> {
         Box::new(Self {
             locator,
             local_addrs,
+            cluster_enabled,
         }) as Box<dyn TargetLocator>
     }
 
@@ -92,7 +98,8 @@ impl TargetLocator for DialogTargetLocator {
     async fn locate(&self, uri: &rsipstack::sip::Uri) -> Result<SipAddr, rsipstack::Error> {
         if let Ok(locs) = self.locator.lookup(uri).await
             && let Some(loc) = locs.first() {
-                if loc.registered_aor.as_ref() == Some(uri)
+                if self.cluster_enabled
+                    && loc.registered_aor.as_ref() == Some(uri)
                     && let Some(home_proxy) = &loc.home_proxy {
                         if self.is_local_home_proxy(home_proxy)
                             && let Some(dest) = &loc.destination {
@@ -738,7 +745,7 @@ mod tests {
             .await
             .unwrap();
 
-        let target_locator = DialogTargetLocator::new(Arc::new(Box::new(locator)), vec![]);
+        let target_locator = DialogTargetLocator::new(Arc::new(Box::new(locator)), vec![], true);
         let result = target_locator.locate(&uri).await.unwrap();
         assert_eq!(
             result, home_proxy,
@@ -778,7 +785,7 @@ mod tests {
             .await
             .unwrap();
 
-        let target_locator = DialogTargetLocator::new(Arc::new(Box::new(locator)), vec![home_proxy]);
+        let target_locator = DialogTargetLocator::new(Arc::new(Box::new(locator)), vec![home_proxy], false);
         let result = target_locator.locate(&uri).await.unwrap();
         assert_eq!(
             result, destination,
@@ -819,7 +826,7 @@ mod tests {
             .await
             .unwrap();
 
-        let target_locator = DialogTargetLocator::new(Arc::new(Box::new(locator)), vec![]);
+        let target_locator = DialogTargetLocator::new(Arc::new(Box::new(locator)), vec![], false);
         let result = target_locator.locate(&uri).await.unwrap();
         assert_eq!(
             result, destination,
@@ -891,7 +898,7 @@ mod tests {
             .await
             .unwrap();
 
-        let target_locator = DialogTargetLocator::new(Arc::new(Box::new(locator)), vec![]);
+        let target_locator = DialogTargetLocator::new(Arc::new(Box::new(locator)), vec![], false);
         let result = target_locator.locate(&uri).await.unwrap();
         assert_eq!(result, destination, "DialogTargetLocator should fallback to destination when home_proxy is absent");
     }
