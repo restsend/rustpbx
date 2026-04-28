@@ -124,6 +124,9 @@ impl TransactionCookie {
 pub struct CalleeDisplayName(pub String);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CalleeOfflineMarker;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TenantId(pub i64);
 
 #[derive(Debug, Clone, PartialEq, Eq)]

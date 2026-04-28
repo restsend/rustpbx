@@ -1,7 +1,7 @@
 use super::{ProxyAction, ProxyModule, server::SipServerRef};
 use crate::call::runtime::SessionId;
 use crate::call::{
-    CalleeDisplayName, DialDirection, DialStrategy, Dialplan, Location, MediaConfig, RouteInvite,
+    CalleeDisplayName, CalleeOfflineMarker, DialDirection, DialStrategy, Dialplan, Location, MediaConfig, RouteInvite,
     RoutingState, SipUser, TransactionCookie, TrunkContext,
 };
 use crate::config::{ProxyConfig, RouteResult};
@@ -92,12 +92,13 @@ fn resolve_unhandled_targets(
     locs: Vec<Location>,
 ) -> Result<DialStrategy, RouteError> {
     if callee_is_same_realm && internal_lookup_empty {
-        return Err(RouteError::from((
-            anyhow!("target user is offline"),
-            Some(rsipstack::sip::StatusCode::TemporarilyUnavailable),
-        )));
+        // Return empty targets — the offline check is deferred to build_dialplan
+        // so dialplan inspectors (e.g. zhongan inbound, HTTP router) can attempt
+        // alternative routing before rejecting.
+        Ok(DialStrategy::Sequential(vec![]))
+    } else {
+        Ok(DialStrategy::Sequential(locs))
     }
-    Ok(DialStrategy::Sequential(locs))
 }
 
 pub fn q850_reason_value(code: &rsipstack::sip::StatusCode, detail: Option<&str>) -> String {
@@ -752,6 +753,12 @@ impl CallModule {
             }
         }
 
+        if callee_is_same_realm && internal_lookup_empty {
+            dialplan
+                .extensions
+                .insert(CalleeOfflineMarker);
+        }
+
         Ok(dialplan)
     }
 
@@ -1038,6 +1045,18 @@ impl CallModule {
             dialplan = inspector
                 .inspect_dialplan(dialplan, &cookie, &tx.original)
                 .await?
+        }
+
+        // After dialplan inspectors have had a chance to fill in routes,
+        // if the callee was deemed offline at resolution time and no
+        // inspector provided targets, reject with 480.
+        if dialplan.extensions.get::<CalleeOfflineMarker>().is_some()
+            && dialplan.is_empty()
+        {
+            return Err(RouteError::from((
+                anyhow!("target user is offline"),
+                Some(rsipstack::sip::StatusCode::TemporarilyUnavailable),
+            )));
         }
 
         // Optimization: skip callee lookup for wholesale (trunk-originated) calls.
@@ -2206,12 +2225,15 @@ mod tests {
     }
 
     #[test]
-    fn loop_guard_same_realm_offline_user_returns_480() {
+    fn loop_guard_same_realm_offline_returns_empty_targets() {
         let result = resolve_unhandled_targets(true, true, make_loc());
-        let err = result.expect_err("offline same-realm user should be rejected");
-        let code = err.status.unwrap();
-        assert_eq!(u16::from(code), 480);
-        assert!(err.error.to_string().contains("offline"));
+        assert!(result.is_ok(), "offline same-realm should not error");
+        match result.unwrap() {
+            DialStrategy::Sequential(locs) => {
+                assert!(locs.is_empty(), "offline same-realm should return empty targets");
+            }
+            _ => panic!("expected Sequential strategy"),
+        }
     }
 
     #[test]
@@ -2240,6 +2262,234 @@ mod tests {
         assert!(
             result.is_ok(),
             "external callee should fall through, offline flag is ignored"
+        );
+    }
+
+    // ---------------------------------------------------------------------------
+    // New tests: resolve_unhandled_targets + default_resolve + CalleeOfflineMarker
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn resolve_unhandled_targets_same_realm_offline_returns_empty() {
+        // same-realm + offline (internal_lookup_empty=true) should return Ok with empty targets,
+        // not 480 — the rejection is deferred to build_dialplan.
+        let result = resolve_unhandled_targets(true, true, make_loc());
+        assert!(result.is_ok());
+        match result.unwrap() {
+            DialStrategy::Sequential(locs) => assert!(locs.is_empty()),
+            _ => panic!("expected Sequential"),
+        }
+    }
+
+    #[test]
+    fn resolve_unhandled_targets_external_callee_retains_locs() {
+        // external callee (same_realm=false) keeps the original locs unchanged
+        let locs = make_loc();
+        let result = resolve_unhandled_targets(false, false, locs.clone());
+        let strategy = result.unwrap();
+        match strategy {
+            DialStrategy::Sequential(l) => assert_eq!(l.len(), locs.len()),
+            _ => panic!("expected Sequential"),
+        }
+    }
+
+    #[tokio::test]
+    async fn default_resolve_sets_offline_marker_for_empty_locator() {
+        let (server, config) = create_test_server().await;
+        let module = CallModule::new(config, server);
+
+        let mut request = crate::proxy::tests::common::create_test_request(
+            rsipstack::sip::Method::Invite,
+            "bp",
+            None,
+            "rustpbx.com",
+            None,
+        );
+        request.uri = rsipstack::sip::Uri::try_from("sip:nobody@rustpbx.com").unwrap();
+        replace_to_header(
+            &mut request,
+            rsipstack::sip::Uri::try_from("sip:nobody@rustpbx.com").unwrap(),
+        );
+
+        let caller = SipUser {
+            username: "bp".to_string(),
+            realm: Some("rustpbx.com".to_string()),
+            ..Default::default()
+        };
+
+        let dialplan = module
+            .default_resolve(
+                &request,
+                Box::new(NotHandledRouteInvite),
+                &caller,
+                &TransactionCookie::default(),
+            )
+            .await
+            .expect("offline user should not error at resolve time");
+
+        assert!(dialplan.is_empty(), "targets should be empty");
+        assert!(
+            dialplan.extensions.get::<CalleeOfflineMarker>().is_some(),
+            "offline marker should be set"
+        );
+    }
+
+    #[tokio::test]
+    async fn default_resolve_does_not_set_marker_for_online_user() {
+        let (server, config) = create_test_server().await;
+
+        // Register alice in the locator so she's online (BEFORE creating module)
+        server
+            .locator
+            .register(
+                "alice",
+                Some("rustpbx.com"),
+                Location {
+                    aor: rsipstack::sip::Uri::try_from("sip:alice@rustpbx.com").unwrap(),
+                    expires: 3600,
+                    destination: Some(rsipstack::transport::SipAddr {
+                        r#type: Some(rsipstack::sip::Transport::Udp),
+                        addr: rsipstack::sip::HostWithPort {
+                            host: "10.0.0.1".parse().unwrap(),
+                            port: Some(5060.into()),
+                        },
+                    }),
+                    ..Default::default()
+                },
+            )
+            .await;
+
+        let module = CallModule::new(config, server);
+
+        let mut request = crate::proxy::tests::common::create_test_request(
+            rsipstack::sip::Method::Invite,
+            "bp",
+            None,
+            "rustpbx.com",
+            None,
+        );
+        request.uri = rsipstack::sip::Uri::try_from("sip:alice@rustpbx.com").unwrap();
+        replace_to_header(
+            &mut request,
+            rsipstack::sip::Uri::try_from("sip:alice@rustpbx.com").unwrap(),
+        );
+
+        let caller = SipUser {
+            username: "bp".to_string(),
+            realm: Some("rustpbx.com".to_string()),
+            ..Default::default()
+        };
+
+        let dialplan = module
+            .default_resolve(
+                &request,
+                Box::new(NotHandledRouteInvite),
+                &caller,
+                &TransactionCookie::default(),
+            )
+            .await
+            .expect("online user should succeed");
+
+        assert!(!dialplan.is_empty(), "online user should have targets");
+        assert!(
+            dialplan.extensions.get::<CalleeOfflineMarker>().is_none(),
+            "online user should not have offline marker"
+        );
+    }
+
+    #[tokio::test]
+    async fn default_resolve_does_not_set_marker_for_external_callee() {
+        // external callee — even if locator returns empty, marker should not be set
+        let (server, config) = create_test_server().await;
+        let module = CallModule::new(config, server);
+
+        let mut request = crate::proxy::tests::common::create_test_request(
+            rsipstack::sip::Method::Invite,
+            "bp",
+            None,
+            "rustpbx.com",
+            None,
+        );
+        request.uri =
+            rsipstack::sip::Uri::try_from("sip:lp@172.25.52.29:63647;transport=UDP").unwrap();
+        replace_to_header(
+            &mut request,
+            rsipstack::sip::Uri::try_from("sip:lp@rustpbx.com").unwrap(),
+        );
+
+        let caller = SipUser {
+            username: "bp".to_string(),
+            realm: Some("rustpbx.com".to_string()),
+            ..Default::default()
+        };
+
+        let dialplan = module
+            .default_resolve(
+                &request,
+                Box::new(NotHandledRouteInvite),
+                &caller,
+                &TransactionCookie::default(),
+            )
+            .await
+            .expect("external destination should succeed");
+
+        assert!(!dialplan.is_empty(), "external callee should have targets");
+        assert!(
+            dialplan.extensions.get::<CalleeOfflineMarker>().is_none(),
+            "external callee should not have offline marker"
+        );
+    }
+
+    #[tokio::test]
+    async fn default_resolve_wholesale_trunk_gets_marker_and_empty_targets() {
+        // Wholesale trunks: same-realm, locator empty, with TrunkContext + tenant_id.
+        // resolve_unhandled_targets returns empty targets (not 480), and offline marker is set.
+        // This is correct — build_dialplan will let inspectors fill targets later.
+        let (server, config) = create_test_server().await;
+        let module = CallModule::new(config, server);
+
+        let mut request = crate::proxy::tests::common::create_test_request(
+            rsipstack::sip::Method::Invite,
+            "bp",
+            None,
+            "rustpbx.com",
+            None,
+        );
+        request.uri =
+            rsipstack::sip::Uri::try_from("sip:+862161952290@rustpbx.com;transport=UDP").unwrap();
+        replace_to_header(
+            &mut request,
+            rsipstack::sip::Uri::try_from("sip:+862161952290@rustpbx.com").unwrap(),
+        );
+
+        // Caller from trunk — realm matches server so callee_is_same_realm=true
+        let caller = SipUser {
+            username: "+8617301791502".to_string(),
+            realm: Some("rustpbx.com".to_string()),
+            ..Default::default()
+        };
+
+        let cookie = TransactionCookie::default();
+        cookie.insert_extension(TrunkContext {
+            id: Some(1),
+            name: "wholesale-trunk".to_string(),
+            tenant_id: Some(100),
+        });
+
+        let dialplan = module
+            .default_resolve(
+                &request,
+                Box::new(NotHandledRouteInvite),
+                &caller,
+                &cookie,
+            )
+            .await
+            .expect("wholesale trunk should not error at resolve time");
+
+        assert!(dialplan.is_empty(), "wholesale locator empty => empty targets");
+        assert!(
+            dialplan.extensions.get::<CalleeOfflineMarker>().is_some(),
+            "offline marker should be set for same-realm locator-empty"
         );
     }
 
@@ -2319,7 +2569,7 @@ mod tests {
             ..Default::default()
         };
 
-        let err = module
+        let dialplan = module
             .default_resolve(
                 &request,
                 Box::new(NotHandledRouteInvite),
@@ -2327,13 +2577,16 @@ mod tests {
                 &TransactionCookie::default(),
             )
             .await
-            .expect_err("offline internal user should reject with 480");
+            .expect("offline internal user should not error — 480 deferred to build_dialplan");
 
-        assert_eq!(
-            err.status,
-            Some(rsipstack::sip::StatusCode::TemporarilyUnavailable)
+        assert!(
+            dialplan.is_empty(),
+            "offline same-realm should have empty targets"
         );
-        assert!(err.error.to_string().contains("offline"));
+        assert!(
+            dialplan.extensions.get::<CalleeOfflineMarker>().is_some(),
+            "offline same-realm should have offline marker set"
+        );
     }
 
     #[tokio::test]

@@ -26,7 +26,7 @@ pub mod queue_config;
 pub mod runtime;
 pub mod sip;
 pub mod user;
-pub use cookie::{CalleeDisplayName, TenantId, TransactionCookie, TrunkContext};
+pub use cookie::{CalleeDisplayName, CalleeOfflineMarker, TenantId, TransactionCookie, TrunkContext};
 pub use user::SipUser;
 
 pub struct RouteContext<'a> {
