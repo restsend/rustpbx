@@ -4,7 +4,7 @@ use audio_codec::CodecType;
 use rustrtc::{
     Attribute, IceServer, IceTransportPolicy, MediaKind, PeerConnection, RtcConfiguration,
     RtpCodecParameters, SdpType, SessionDescription, TransceiverDirection, TransportMode,
-    media::SampleStreamSource,
+    media::{AudioFrame, MediaSample, SampleStreamSource},
 };
 use std::{
     collections::{HashMap, HashSet},
@@ -678,6 +678,7 @@ pub struct FileTrack {
     bind_ip: Option<String>,
     audio_source_manager: Option<Arc<audio_source::AudioSourceManager>>,
     muted: std::sync::atomic::AtomicBool,
+    lifetime_guard: Arc<()>,
 }
 
 impl Clone for FileTrack {
@@ -700,7 +701,55 @@ impl Clone for FileTrack {
             muted: std::sync::atomic::AtomicBool::new(
                 self.muted.load(std::sync::atomic::Ordering::Relaxed),
             ),
+            lifetime_guard: self.lifetime_guard.clone(),
         }
+    }
+}
+
+pub(crate) struct FileTrackPlaybackSource {
+    audio_source_manager: Arc<audio_source::AudioSourceManager>,
+    encoder: Box<dyn audio_codec::Encoder>,
+    codec_info: negotiate::CodecInfo,
+    samples_per_frame: usize,
+    rtp_ticks_per_frame: u32,
+    rtp_timestamp: u32,
+    sequence_number: u16,
+    completion_notify: Arc<tokio::sync::Notify>,
+    loop_playback: bool,
+}
+
+impl FileTrackPlaybackSource {
+    pub(crate) fn next_audio_sample(&mut self) -> Option<MediaSample> {
+        let mut pcm_buf = vec![0i16; self.samples_per_frame];
+        let mut read = self.audio_source_manager.read_samples(&mut pcm_buf);
+
+        if read == 0 && self.loop_playback {
+            read = self.audio_source_manager.read_samples(&mut pcm_buf);
+        }
+
+        if read == 0 {
+            debug!("FileTrack playback completed (source exhausted)");
+            self.completion_notify.notify_waiters();
+            return None;
+        }
+
+        let encoded = self.encoder.encode(&pcm_buf[..read]);
+        let frame = AudioFrame {
+            rtp_timestamp: self.rtp_timestamp,
+            clock_rate: self.codec_info.clock_rate,
+            data: encoded.into(),
+            sequence_number: Some(self.sequence_number),
+            payload_type: Some(self.codec_info.payload_type),
+            marker: false,
+            header_extension: None,
+            raw_packet: None,
+            source_addr: None,
+        };
+
+        self.rtp_timestamp = self.rtp_timestamp.wrapping_add(self.rtp_ticks_per_frame);
+        self.sequence_number = self.sequence_number.wrapping_add(1);
+
+        Some(MediaSample::Audio(frame))
     }
 }
 
@@ -730,6 +779,7 @@ impl FileTrack {
             bind_ip: None,
             audio_source_manager: None,
             muted: std::sync::atomic::AtomicBool::new(false),
+            lifetime_guard: Arc::new(()),
         }
     }
 
@@ -844,23 +894,15 @@ impl FileTrack {
     pub async fn start_playback(&self) -> Result<()> {
         self.start_playback_on(None).await
     }
-    /// Push audio frames through an existing SampleStreamSource (e.g. from an
-    /// RtcTrack).  Unlike start_playback_on, this does NOT create a new RTP
-    /// sender or change SSRC — it injects decoded frames into the same track
-    /// that was originally negotiated in the SDP, avoiding SSRC mismatches
-    /// that can break audio in WebRTC (DTLS/SRTP) mode.
-    pub async fn start_playback_on_sender(&self, sender: SampleStreamSource) -> Result<()> {
-        use audio_codec::create_encoder;
-        use rustrtc::media::{AudioFrame, MediaSample};
 
-        let file_path = self
-            .file_path
-            .as_ref()
-            .ok_or_else(|| anyhow!("No file path set"))?;
+    pub(crate) fn create_playback_source(&self) -> Result<FileTrackPlaybackSource> {
+        let file_path = self.file_path.as_deref();
 
-        let is_remote = file_path.starts_with("http://") || file_path.starts_with("https://");
-        if !is_remote && !std::path::Path::new(file_path).exists() {
-            return Err(anyhow!("Audio file not found: {}", file_path));
+        if let Some(file_path) = file_path {
+            let is_remote = file_path.starts_with("http://") || file_path.starts_with("https://");
+            if !is_remote && !std::path::Path::new(file_path).exists() {
+                return Err(anyhow!("Audio file not found: {}", file_path));
+            }
         }
 
         let selected = self.codec_info.clone().unwrap_or_else(|| {
@@ -876,21 +918,7 @@ impl FileTrack {
                 channels: codec.channels(),
             }
         });
-        let codec = selected.codec;
-        let payload_type = selected.payload_type;
-        let frame_timing = audio_frame_timing(codec, selected.clock_rate);
-        let samples_per_frame = frame_timing.pcm_samples_per_frame;
-
-        debug!(
-            file = %file_path,
-            loop_playback = self.loop_playback,
-            ?codec,
-            samples_per_frame,
-            pcm_sample_rate = frame_timing.pcm_sample_rate,
-            rtp_ticks_per_frame = frame_timing.rtp_ticks_per_frame,
-            "FileTrack start_playback_on_sender"
-        );
-
+        let frame_timing = audio_frame_timing(selected.codec, selected.clock_rate);
         let audio_source_manager = {
             if let Some(ref mgr) = self.audio_source_manager {
                 mgr.clone()
@@ -898,72 +926,36 @@ impl FileTrack {
                 let mgr = Arc::new(audio_source::AudioSourceManager::new(
                     frame_timing.pcm_sample_rate,
                 ));
-                mgr.switch_to_file(file_path.clone(), self.loop_playback)?;
+                if let Some(file_path) = file_path {
+                    mgr.switch_to_file(file_path.to_string(), self.loop_playback)?;
+                } else {
+                    mgr.switch_to_silence();
+                }
                 mgr
             }
         };
 
-        let completion_notify = self.completion_notify.clone();
-        let cancel_token = self.cancel_token.clone();
-        let loop_playback = self.loop_playback;
+        debug!(
+            file = %file_path.unwrap_or("<silence>"),
+            loop_playback = self.loop_playback,
+            codec = ?selected.codec,
+            samples_per_frame = frame_timing.pcm_samples_per_frame,
+            pcm_sample_rate = frame_timing.pcm_sample_rate,
+            rtp_ticks_per_frame = frame_timing.rtp_ticks_per_frame,
+            "FileTrack playback source created"
+        );
 
-        crate::utils::spawn(async move {
-            let mut encoder = create_encoder(codec);
-            let mut rtp_timestamp: u32 = rand::random();
-            let mut sequence_number: u16 = rand::random();
-            let interval_ms = 20u64;
-            let mut interval =
-                tokio::time::interval(tokio::time::Duration::from_millis(interval_ms));
-
-            loop {
-                tokio::select! {
-                    _ = cancel_token.cancelled() => {
-                        debug!("FileTrack playback cancelled");
-                        completion_notify.notify_waiters();
-                        break;
-                    }
-                    _ = interval.tick() => {
-                        let mut pcm_buf = vec![0i16; samples_per_frame];
-                        let read = audio_source_manager.read_samples(&mut pcm_buf);
-
-                        if read == 0 {
-                            if !loop_playback {
-                                debug!("FileTrack playback completed (file exhausted)");
-                                completion_notify.notify_waiters();
-                                break;
-                            }
-                            continue;
-                        }
-
-                        let encoded = encoder.encode(&pcm_buf[..read]);
-
-                        let frame = AudioFrame {
-                            rtp_timestamp,
-                            clock_rate: selected.clock_rate,
-                            data: encoded.into(),
-                            sequence_number: Some(sequence_number),
-                            payload_type: Some(payload_type),
-                            marker: false,
-                            header_extension: None,
-                            raw_packet: None,
-                            source_addr: None,
-                        };
-
-                        rtp_timestamp =
-                            rtp_timestamp.wrapping_add(frame_timing.rtp_ticks_per_frame);
-                        sequence_number = sequence_number.wrapping_add(1);
-
-                        if let Err(e) = sender.send(MediaSample::Audio(frame)).await {
-                            debug!("FileTrack sender.send failed (receiver gone): {}", e);
-                            completion_notify.notify_waiters();
-                            break;
-                        }
-                    }
-                }
-            }
-        });
-
-        Ok(())
+        Ok(FileTrackPlaybackSource {
+            audio_source_manager,
+            encoder: audio_codec::create_encoder(selected.codec),
+            codec_info: selected,
+            samples_per_frame: frame_timing.pcm_samples_per_frame,
+            rtp_ticks_per_frame: frame_timing.rtp_ticks_per_frame,
+            rtp_timestamp: rand::random(),
+            sequence_number: rand::random(),
+            completion_notify: self.completion_notify.clone(),
+            loop_playback: self.loop_playback,
+        })
     }
 
     pub async fn start_playback_on(&self, target_pc: Option<PeerConnection>) -> Result<()> {
@@ -1218,6 +1210,7 @@ impl Track for FileTrack {
 
     async fn stop(&self) {
         self.cancel_token.cancel();
+        self.completion_notify.notify_waiters();
     }
 
     async fn get_peer_connection(&self) -> Option<PeerConnection> {
@@ -1241,9 +1234,11 @@ impl Track for FileTrack {
 
 impl Drop for FileTrack {
     fn drop(&mut self) {
-        debug!(track_id = %self.track_id, "FileTrack dropping, closing PeerConnection");
-        self.cancel_token.cancel();
-        self.pc.close();
+        if Arc::strong_count(&self.lifetime_guard) == 1 {
+            debug!(track_id = %self.track_id, "FileTrack dropping, closing PeerConnection");
+            self.cancel_token.cancel();
+            self.pc.close();
+        }
     }
 }
 
