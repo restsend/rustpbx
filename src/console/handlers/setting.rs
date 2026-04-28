@@ -22,11 +22,12 @@ use argon2::password_hash::{PasswordHasher, SaltString};
 use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::sse::{KeepAlive, Sse};
+use futures::stream;
+use std::convert::Infallible;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, patch, post};
 use axum::{Json, Router};
 use chrono::{DateTime, Duration, Utc};
-use futures::stream;
 use sea_orm::sea_query::Condition;
 use sea_orm::{
     ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter,
@@ -34,7 +35,6 @@ use sea_orm::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value as JsonValue, json};
-use std::convert::Infallible;
 use std::collections::VecDeque;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Seek, SeekFrom};
@@ -174,7 +174,7 @@ impl From<UserModel> for UserView {
 }
 
 pub fn urls() -> Router<Arc<ConsoleState>> {
-    Router::new()
+    let router = Router::new()
         .route("/settings", get(page_settings))
         .route("/settings/logs/recent", get(fetch_recent_logs))
         .route("/settings/logs/follow", get(follow_logs))
@@ -199,7 +199,15 @@ pub fn urls() -> Router<Arc<ConsoleState>> {
             post(test_user_backend),
         )
         .route("/settings/config/security", patch(update_security_settings))
-        .route("/settings/config/rwi", patch(update_rwi_settings))
+        .route("/settings/config/rwi", patch(update_rwi_settings));
+
+    #[cfg(feature = "commerce")]
+    let router = router
+        .route("/settings/config/cluster", patch(update_cluster_settings))
+        .route("/settings/config/cluster/reload", get(cluster_reload_sse_handler))
+        .route("/settings/config/cluster/reload-addons", get(list_reload_addons_handler));
+
+    router
         .route(
             "/settings/departments",
             post(query_departments).put(create_department),
@@ -477,6 +485,20 @@ async fn build_settings_payload(state: &ConsoleState) -> JsonValue {
         "rwi".to_string(),
         serde_json::to_value(rwi_config).unwrap_or(JsonValue::Null),
     );
+
+    #[cfg(feature = "commerce")]
+    {
+        let cluster: Option<crate::config::ClusterConfig> = if let Some(app_state) = state.app_state() {
+            let config_arc = app_state.config().clone();
+            config_arc.cluster.clone().or_else(|| Some(crate::config::ClusterConfig::default()))
+        } else {
+            Some(crate::config::ClusterConfig::default())
+        };
+        data.insert(
+            "cluster".to_string(),
+            serde_json::to_value(cluster).unwrap_or(JsonValue::Null),
+        );
+    }
 
     JsonValue::Object(data)
 }
@@ -2215,6 +2237,266 @@ pub(crate) async fn update_rwi_settings(
         "rwi": rwi_config
     }))
     .into_response()
+}
+
+#[cfg(feature = "commerce")]
+#[derive(Debug, Deserialize)]
+pub(crate) struct ClusterSettingsPayload {
+    #[serde(default)]
+    pub peers: Option<Vec<ClusterPeerPayload>>,
+}
+
+#[cfg(feature = "commerce")]
+#[derive(Debug, Deserialize, Serialize)]
+pub(crate) struct ClusterPeerPayload {
+    pub addr: String,
+    pub sip_port: u16,
+    pub ami_port: u16,
+}
+
+#[cfg(feature = "commerce")]
+pub(crate) async fn update_cluster_settings(
+    State(state): State<Arc<ConsoleState>>,
+    AuthRequired(user): AuthRequired,
+    Json(payload): Json<ClusterSettingsPayload>,
+) -> Response {
+    if !state.has_permission(&user, "system", "write").await {
+        return json_error(StatusCode::FORBIDDEN, "Permission denied");
+    }
+    let config_path = match get_config_path(&state) {
+        Ok(path) => path,
+        Err(resp) => return resp,
+    };
+
+    let mut doc = match load_document(&config_path) {
+        Ok(doc) => doc,
+        Err(resp) => return resp,
+    };
+
+    let mut modified = false;
+
+    if let Some(peers) = payload.peers {
+        #[derive(Serialize)]
+        struct ClusterToml {
+            peers: Vec<ClusterPeerPayload>,
+        }
+        let peers_str = match toml::to_string(&ClusterToml { peers }) {
+            Ok(s) => s,
+            Err(err) => {
+                return json_error(
+                    StatusCode::BAD_REQUEST,
+                    format!("Failed to serialize cluster peers: {err}"),
+                );
+            }
+        };
+        let peers_doc = match peers_str.parse::<DocumentMut>() {
+            Ok(doc) => doc,
+            Err(err) => {
+                return json_error(
+                    StatusCode::BAD_REQUEST,
+                    format!("Invalid cluster peers payload: {err}"),
+                );
+            }
+        };
+        let cluster_table = ensure_table_mut(&mut doc, "cluster");
+        let Some(peers_item) = peers_doc.get("peers").cloned() else {
+            return json_error(StatusCode::BAD_REQUEST, "Invalid cluster peers payload");
+        };
+        cluster_table.insert("peers", peers_item);
+        modified = true;
+    }
+
+    let doc_text = doc.to_string();
+    let config = match parse_config_from_str(&doc_text) {
+        Ok(cfg) => cfg,
+        Err(resp) => return resp,
+    };
+
+    if modified
+        && let Err(resp) = persist_document(&config_path, doc_text) {
+            return resp;
+        }
+
+    let cluster = config.cluster;
+    Json(json!({
+        "status": "ok",
+        "requires_restart": true,
+        "message": "Cluster settings saved. Please restart the service for changes to take effect.",
+        "cluster": cluster,
+    }))
+    .into_response()
+}
+
+/// List registered export/reload addon handlers (no feature gate needed).
+#[cfg(feature = "commerce")]
+async fn list_reload_addons_handler(
+    State(state): State<Arc<ConsoleState>>,
+) -> Response {
+    let items: Vec<serde_json::Value> = if let Some(app_state) = state.app_state() {
+        app_state.addon_registry.export_reload.list()
+            .into_iter()
+            .map(|(id, name)| serde_json::json!({ "id": id, "name": name }))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    Json(json!({ "addons": items })).into_response()
+}
+
+/// SSE-based reload that processes current node + all peers.
+#[cfg(feature = "commerce")]
+async fn cluster_reload_sse_handler(
+    State(state): State<Arc<ConsoleState>>,
+    Query(query): Query<crate::handler::ami::PingReloadPayload>,
+) -> Response {
+    use axum::response::sse::Event as SseEvent;
+
+    let app_state = match state.app_state() {
+        Some(s) => s,
+        None => {
+            use axum::response::sse::Sse;
+            return Sse::new(futures::stream::once(async move {
+                Ok::<_, std::convert::Infallible>(SseEvent::default().event("error").data(r#"{"error":"PBX not running"}"#))
+            }))
+            .into_response();
+        }
+    };
+
+    use axum::response::sse::{KeepAlive, Sse};
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Result<SseEvent, std::convert::Infallible>>();
+
+    let payload = crate::handler::ami::PingReloadPayload {
+        trunks: query.trunks,
+        routes: query.routes,
+        addons: query.addons,
+    };
+
+    let app = app_state.clone();
+    tokio::spawn(async move {
+        macro_rules! sse_send {
+            ($event_type:expr, $data:expr) => {
+                let tx = tx.clone();
+                let _ = tx.send(Ok(SseEvent::default().event($event_type).data($data.to_string())));
+            };
+        }
+
+        // Process trunks on current node
+        if payload.trunks {
+            sse_send!("progress", serde_json::json!({"type": "addon_start", "node": "current", "addon": "trunks"}));
+            let result = reload_trunks(&app, "current").await;
+            sse_send!("progress", serde_json::json!({"type": "addon_complete", "node": "current", "addon": "trunks", "result": result}));
+        }
+
+        // Process routes on current node
+        if payload.routes {
+            sse_send!("progress", serde_json::json!({"type": "addon_start", "node": "current", "addon": "routes"}));
+            let result = reload_routes_console(&app, "current").await;
+            sse_send!("progress", serde_json::json!({"type": "addon_complete", "node": "current", "addon": "routes", "result": result}));
+        }
+
+        // Process addon-based handlers on current node
+        for addon_id in &payload.addons {
+            sse_send!("progress", serde_json::json!({"type": "addon_start", "node": "current", "addon": addon_id}));
+            let results = app.addon_registry.export_reload
+                .invoke_selected(&[addon_id.clone()], &app)
+                .await;
+            let json_result = match results.into_iter().next() {
+                Some((_, Ok(v))) => serde_json::json!({ "status": "ok", "details": v }),
+                Some((_, Err(e))) => serde_json::json!({ "status": "error", "message": e }),
+                None => serde_json::json!({ "status": "error", "message": "Handler not found" }),
+            };
+            sse_send!("progress", serde_json::json!({"type": "addon_complete", "node": "current", "addon": addon_id, "result": json_result}));
+        }
+
+        // Process peer nodes
+        let peers = app.config().cluster.as_ref()
+            .map(|c| c.peers.clone())
+            .unwrap_or_default();
+
+        for peer in &peers {
+            let peer_label = format!("{}:{}", peer.addr, peer.ami_port);
+            sse_send!("progress", serde_json::json!({"type": "node_start", "node": &peer_label}));
+
+            let url = format!("http://{}:{}/ami/v1/cluster/reload_sync", peer.addr, peer.ami_port);
+            let client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(120))
+                .build()
+                .unwrap_or_default();
+
+            match client.post(&url).json(&payload).send().await {
+                Ok(resp) => match resp.json::<serde_json::Value>().await {
+                    Ok(peer_results) => {
+                        sse_send!("progress", serde_json::json!({"type": "node_complete", "node": &peer_label, "result": peer_results}));
+                    }
+                    Err(e) => {
+                        sse_send!("progress", serde_json::json!({"type": "node_error", "node": &peer_label, "error": format!("Invalid JSON: {}", e)}));
+                    }
+                },
+                Err(e) => {
+                    sse_send!("progress", serde_json::json!({"type": "node_error", "node": &peer_label, "error": format!("Connection failed: {}", e)}));
+                }
+            }
+        }
+
+        sse_send!("complete", serde_json::json!({"type": "complete"}));
+    });
+
+    let sse_stream = futures::stream::unfold(rx, |mut rx| async move {
+        rx.recv().await.map(|event| (event, rx))
+    });
+    Sse::new(sse_stream)
+        .keep_alive(KeepAlive::new().interval(std::time::Duration::from_secs(15)).text("keep-alive"))
+        .into_response()
+}
+
+/// Reload trunks helper (mirrors the AMI handler's logic).
+#[cfg(feature = "commerce")]
+async fn reload_trunks(app: &crate::app::AppStateInner, _node: &str) -> serde_json::Value {
+    let config_path = app.config_path.clone();
+    let config_override = config_path.as_ref().and_then(|path| {
+        crate::config::Config::load(path).ok().map(|cfg| std::sync::Arc::new(cfg.proxy))
+    });
+
+    match app
+        .sip_server()
+        .inner
+        .data_context
+        .reload_trunks(true, config_override)
+        .await
+    {
+        Ok(metrics) => {
+            if let Some(ref console) = app.console {
+                console.clear_pending_reload();
+            }
+            serde_json::json!({ "addon": "trunks", "status": "ok", "reloaded": metrics.total })
+        }
+        Err(e) => serde_json::json!({ "addon": "trunks", "status": "error", "message": e.to_string() }),
+    }
+}
+
+/// Reload routes helper (mirrors the AMI handler's logic).
+#[cfg(feature = "commerce")]
+async fn reload_routes_console(app: &crate::app::AppStateInner, _node: &str) -> serde_json::Value {
+    let config_path = app.config_path.clone();
+    let config_override = config_path.as_ref().and_then(|path| {
+        crate::config::Config::load(path).ok().map(|cfg| std::sync::Arc::new(cfg.proxy))
+    });
+
+    match app
+        .sip_server()
+        .inner
+        .data_context
+        .reload_routes(true, config_override)
+        .await
+    {
+        Ok(metrics) => {
+            if let Some(ref console) = app.console {
+                console.clear_pending_reload();
+            }
+            serde_json::json!({ "addon": "routes", "status": "ok", "reloaded": metrics.total })
+        }
+        Err(e) => serde_json::json!({ "addon": "routes", "status": "error", "message": e.to_string() }),
+    }
 }
 
 const LOG_DEFAULT_LIMIT: usize = 200;

@@ -23,6 +23,7 @@ use super::agent_registry::{AgentRegistry, PresenceState, RoutingStrategy};
 use super::{AppAction, ApplicationContext, CallApp, CallAppType, CallController, PlaybackHandle};
 use crate::call::{
     DialStrategy, FailureAction, Location, QueueFallbackAction, QueueHoldConfig, QueuePlan,
+    VoicePrompts,
 };
 use crate::callrecord::CallRecordHangupReason;
 use async_trait::async_trait;
@@ -149,6 +150,8 @@ pub struct QueueConfig {
     pub callback_enabled: bool,
     /// Callback retry interval in seconds.
     pub callback_retry_secs: u64,
+    /// Built-in voice prompts for queue events.
+    pub voice_prompts: Option<VoicePrompts>,
 }
 
 impl Default for QueueConfig {
@@ -178,6 +181,7 @@ impl Default for QueueConfig {
             metrics_enabled: false,
             callback_enabled: false,
             callback_retry_secs: 300,
+            voice_prompts: None,
         }
     }
 }
@@ -196,6 +200,7 @@ impl QueueConfig {
             label: Some(self.name.clone()),
             retry_codes: None,
             no_trying_timeout: None,
+            voice_prompts: self.voice_prompts.clone(),
         }
     }
 }
@@ -213,6 +218,10 @@ pub enum QueueState {
     Answering,
     /// Playing hold music while waiting for an agent.
     PlayingHold { attempt: u32 },
+    /// Playing the transfer prompt before connecting to an agent.
+    PlayingTransferPrompt { agent_uri: String },
+    /// Playing the busy prompt before executing fallback.
+    PlayingBusyPrompt,
     /// Dialing agents (sequential or parallel).
     DialingAgents { attempt: u32 },
     /// Call connected to an agent.
@@ -462,33 +471,30 @@ impl QueueApp {
     }
 
     /// Handle agent unavailable (busy or no answer).
-    async fn handle_agent_unavailable(&mut self) -> anyhow::Result<AppAction> {
-        // Increment agent index for sequential
+    async fn handle_agent_unavailable(
+        &mut self,
+        ctrl: &mut CallController,
+    ) -> anyhow::Result<AppAction> {
         if !self.is_parallel() {
             self.current_agent_idx += 1;
         }
         self.dial_attempts += 1;
 
-        // Check if we should retry or fallback
         let agents = self.get_agents();
         if self.current_agent_idx >= agents.len() {
-            // Tried all agents
-            return self.handle_fallback_with_abandoned().await;
+            return self.play_busy_and_then_fallback(ctrl).await;
         }
 
-        // Continue with next agent
         self.state = QueueState::DialingAgents {
             attempt: self.dial_attempts,
         };
         Ok(AppAction::Continue)
     }
 
-    /// Execute fallback and record abandoned call.
     async fn handle_fallback_with_abandoned(&mut self) -> anyhow::Result<AppAction> {
         let queue_id = self.config.name.clone();
         let wait_secs = self.enqueued_at.map(|t| t.elapsed().as_secs()).unwrap_or(0);
 
-        // Record call abandoned
         self.update_stats(&queue_id, |stats| {
             stats.calls_abandoned += 1;
         })
@@ -499,6 +505,40 @@ impl QueueApp {
             wait_secs,
             "Queue: call abandoned, executing fallback"
         );
+
+        self.execute_fallback().await
+    }
+
+    /// Record abandoned call, then play busy prompt (if configured) before fallback.
+    async fn play_busy_and_then_fallback(
+        &mut self,
+        ctrl: &mut CallController,
+    ) -> anyhow::Result<AppAction> {
+        let queue_id = self.config.name.clone();
+        let wait_secs = self.enqueued_at.map(|t| t.elapsed().as_secs()).unwrap_or(0);
+
+        self.update_stats(&queue_id, |stats| {
+            stats.calls_abandoned += 1;
+        })
+        .await;
+
+        info!(
+            queue = %queue_id,
+            wait_secs,
+            "Queue: call abandoned, playing busy prompt or fallback"
+        );
+
+        let prompts = self
+            .plan
+            .voice_prompts
+            .as_ref()
+            .or(self.config.voice_prompts.as_ref());
+        if let Some(path) = prompts.and_then(|p| p.busy_prompt.as_ref()) {
+            info!("Queue: playing busy prompt before fallback");
+            self.state = QueueState::PlayingBusyPrompt;
+            ctrl.play_audio(path.clone(), false).await?;
+            return Ok(AppAction::Continue);
+        }
 
         self.execute_fallback().await
     }
@@ -627,9 +667,30 @@ impl CallApp for QueueApp {
     ) -> anyhow::Result<AppAction> {
         debug!("Queue: audio playback completed");
 
-        // If we're in hold state, restart hold music (it loops)
-        if let QueueState::PlayingHold { attempt: _ } = self.state {
-            self.start_hold_music(ctrl).await?;
+        match &self.state {
+            QueueState::PlayingHold { .. } => {
+                self.start_hold_music(ctrl).await?;
+            }
+            QueueState::PlayingTransferPrompt { agent_uri } => {
+                let agent_uri = agent_uri.clone();
+                self.state = QueueState::Connected {
+                    agent_uri: agent_uri.clone(),
+                };
+                let queue_id = self.config.name.clone();
+                let wait_secs =
+                    self.enqueued_at.map(|t| t.elapsed().as_secs()).unwrap_or(0);
+                info!(
+                    queue = %queue_id,
+                    agent = %agent_uri,
+                    wait_secs,
+                    "Queue: call connected to agent (after prompt)"
+                );
+                return Ok(AppAction::Transfer(agent_uri));
+            }
+            QueueState::PlayingBusyPrompt => {
+                return self.execute_fallback().await;
+            }
+            _ => {}
         }
 
         Ok(AppAction::Continue)
@@ -638,7 +699,7 @@ impl CallApp for QueueApp {
     async fn on_external_event(
         &mut self,
         event: super::AppEvent,
-        _ctrl: &mut CallController,
+        ctrl: &mut CallController,
         _ctx: &ApplicationContext,
     ) -> anyhow::Result<AppAction> {
         let queue_id = self.config.name.clone();
@@ -649,15 +710,10 @@ impl CallApp for QueueApp {
                     if let Some(agent_uri) = data.get("agent_uri").and_then(|v| v.as_str()) {
                         info!(agent = %agent_uri, "Queue: agent connected");
                         self._stop_hold_music().await;
-                        self.state = QueueState::Connected {
-                            agent_uri: agent_uri.to_string(),
-                        };
 
-                        // Calculate wait time
                         let wait_secs =
                             self.enqueued_at.map(|t| t.elapsed().as_secs()).unwrap_or(0);
 
-                        // Update statistics
                         self.update_stats(&queue_id, |stats| {
                             stats.calls_answered += 1;
                             stats.total_wait_secs += wait_secs;
@@ -665,15 +721,33 @@ impl CallApp for QueueApp {
                         })
                         .await;
 
-                        // Update agent state if registry is available
                         if let Some(ref registry) = self.agent_registry {
-                            // Extract agent_id from URI or data
                             let agent_id = data
                                 .get("agent_id")
                                 .and_then(|v| v.as_str())
                                 .unwrap_or(agent_uri);
                             let _ = registry.start_call(agent_id).await;
                         }
+
+                        let prompts = self
+                            .plan
+                            .voice_prompts
+                            .as_ref()
+                            .or(self.config.voice_prompts.as_ref());
+                        if let Some(path) =
+                            prompts.and_then(|p| p.transfer_prompt.as_ref())
+                        {
+                            info!("Queue: playing transfer prompt before connecting agent");
+                            self.state = QueueState::PlayingTransferPrompt {
+                                agent_uri: agent_uri.to_string(),
+                            };
+                            ctrl.play_audio(path.clone(), false).await?;
+                            return Ok(AppAction::Continue);
+                        }
+
+                        self.state = QueueState::Connected {
+                            agent_uri: agent_uri.to_string(),
+                        };
 
                         info!(
                             queue = %queue_id,
@@ -690,7 +764,6 @@ impl CallApp for QueueApp {
                     if let Some(agent_id) = data.get("agent_id").and_then(|v| v.as_str()) {
                         info!(agent = %agent_id, "Queue: agent ringing");
 
-                        // Update agent state if registry is available
                         if let Some(ref registry) = self.agent_registry {
                             let _ = registry
                                 .update_presence(agent_id, PresenceState::Ringing)
@@ -708,7 +781,7 @@ impl CallApp for QueueApp {
                             .update_presence(agent_id, PresenceState::Busy)
                             .await;
                     }
-                    self.handle_agent_unavailable().await
+                    self.handle_agent_unavailable(ctrl).await
                 }
                 "agent_no_answer" => {
                     info!("Queue: agent no answer");
@@ -719,11 +792,11 @@ impl CallApp for QueueApp {
                             .update_presence(agent_id, PresenceState::Available)
                             .await;
                     }
-                    self.handle_agent_unavailable().await
+                    self.handle_agent_unavailable(ctrl).await
                 }
                 "all_agents_busy" => {
                     warn!("Queue: all agents busy");
-                    self.handle_fallback_with_abandoned().await
+                    self.play_busy_and_then_fallback(ctrl).await
                 }
                 _ => Ok(AppAction::Continue),
             },
@@ -767,7 +840,7 @@ impl CallApp for QueueApp {
                     }
                 }
 
-                self.handle_agent_unavailable().await
+                self.handle_agent_unavailable(ctrl).await
             }
             "max_wait_timeout" => {
                 info!("Queue: max wait timeout, executing fallback");
@@ -783,7 +856,7 @@ impl CallApp for QueueApp {
                 )
                 .await?;
 
-                self.handle_fallback_with_abandoned().await
+                self.play_busy_and_then_fallback(ctrl).await
             }
             _ => Ok(AppAction::Continue),
         }
@@ -793,7 +866,7 @@ impl CallApp for QueueApp {
         info!(?reason, "Queue: exiting queue application");
 
         // Update statistics if call was not connected (abandoned)
-        if !matches!(self.state, QueueState::Connected { .. }) {
+        if !matches!(self.state, QueueState::Connected { .. } | QueueState::PlayingTransferPrompt { .. }) {
             let queue_id = self.config.name.clone();
 
             self.update_stats(&queue_id, |stats| {

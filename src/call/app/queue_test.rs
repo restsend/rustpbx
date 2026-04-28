@@ -11,6 +11,7 @@ mod tests {
     use crate::call::app::agent_registry::AgentRegistry;
     use crate::call::{
         DialStrategy, FailureAction, Location, QueueFallbackAction, QueueHoldConfig, QueuePlan,
+        VoicePrompts,
     };
     use crate::proxy::proxy_call::state::SessionAction;
     use rsipstack::sip::Uri;
@@ -876,5 +877,209 @@ mod tests {
 
         let result: anyhow::Result<()> = stack.join().await;
         result.expect("should complete successfully");
+    }
+
+    fn build_queue_config_with_prompts() -> QueueConfig {
+        let mut config = build_simple_queue_config();
+        config.voice_prompts = Some(VoicePrompts::zh());
+        config
+    }
+
+    #[tokio::test]
+    async fn test_queue_transfer_prompt() {
+        let plan = build_simple_queue();
+        let mut stack = MockCallStack::run(
+            Box::new(QueueApp::new(plan, build_queue_config_with_prompts())),
+            "caller",
+            "1000",
+        );
+
+        stack.assert_cmd(200, "AcceptCall", |c| {
+            matches!(c, SessionAction::AcceptCall { .. })
+        }).await;
+
+        stack.assert_cmd(200, "PlayPrompt-hold", |c| {
+            matches!(c, SessionAction::PlayPrompt { audio_file, .. }
+                if audio_file == "sounds/hold_music.wav")
+        }).await;
+
+        stack.custom("agent_connected",
+            serde_json::json!({"agent_uri": "sip:agent1@example.com"}));
+
+        stack.assert_cmd(200, "PlayPrompt-transfer", |c| {
+            matches!(c, SessionAction::PlayPrompt { audio_file, .. }
+                if audio_file == "sounds/queue-transfer-zh.wav")
+        }).await;
+
+        stack.audio_complete("default");
+
+        stack.assert_cmd(200, "Transfer", |c| {
+            matches!(c, SessionAction::TransferTarget(t) if t == "sip:agent1@example.com")
+        }).await;
+
+        stack.join().await.expect("should exit after transfer with prompt");
+    }
+
+    #[tokio::test]
+    async fn test_queue_no_prompts_transfers_directly() {
+        let plan = build_simple_queue();
+        let mut stack = MockCallStack::run(
+            Box::new(QueueApp::new(plan, build_simple_queue_config())),
+            "caller",
+            "1000",
+        );
+
+        stack.assert_cmd(200, "AcceptCall", |c| {
+            matches!(c, SessionAction::AcceptCall { .. })
+        }).await;
+
+        stack.assert_cmd(200, "PlayPrompt", |c| {
+            matches!(c, SessionAction::PlayPrompt { .. })
+        }).await;
+
+        stack.custom("agent_connected",
+            serde_json::json!({"agent_uri": "sip:agent1@example.com"}));
+
+        stack.assert_cmd(200, "Transfer", |c| {
+            matches!(c, SessionAction::TransferTarget(t) if t == "sip:agent1@example.com")
+        }).await;
+
+        stack.join().await.expect("should exit after direct transfer");
+    }
+
+    #[tokio::test]
+    async fn test_queue_busy_prompt_all_agents_busy() {
+        let plan = build_sequential_queue();
+        let mut stack = MockCallStack::run(
+            Box::new(QueueApp::new(plan, build_queue_config_with_prompts())),
+            "caller",
+            "1000",
+        );
+
+        stack.assert_cmd(200, "AcceptCall", |c| {
+            matches!(c, SessionAction::AcceptCall { .. })
+        }).await;
+
+        stack.assert_cmd(200, "PlayPrompt", |c| {
+            matches!(c, SessionAction::PlayPrompt { .. })
+        }).await;
+
+        stack.custom("all_agents_busy", serde_json::json!({}));
+
+        stack.assert_cmd(200, "PlayPrompt-busy", |c| {
+            matches!(c, SessionAction::PlayPrompt { audio_file, .. }
+                if audio_file == "sounds/queue-busy-zh.wav")
+        }).await;
+
+        stack.audio_complete("default");
+
+        stack.assert_cmd(200, "Hangup", |c| {
+            matches!(c, SessionAction::Hangup { .. })
+        }).await;
+    }
+
+    #[tokio::test]
+    async fn test_queue_busy_prompt_agent_exhaustion() {
+        let plan = build_sequential_queue();
+        let mut stack = MockCallStack::run(
+            Box::new(QueueApp::new(plan, build_queue_config_with_prompts())),
+            "caller",
+            "1000",
+        );
+
+        stack.assert_cmd(200, "AcceptCall", |c| {
+            matches!(c, SessionAction::AcceptCall { .. })
+        }).await;
+
+        stack.assert_cmd(200, "PlayPrompt", |c| {
+            matches!(c, SessionAction::PlayPrompt { .. })
+        }).await;
+
+        stack.custom("agent_busy", serde_json::json!({}));
+        stack.custom("agent_busy", serde_json::json!({}));
+        stack.custom("agent_busy", serde_json::json!({}));
+
+        stack.assert_cmd(200, "PlayPrompt-busy", |c| {
+            matches!(c, SessionAction::PlayPrompt { audio_file, .. }
+                if audio_file == "sounds/queue-busy-zh.wav")
+        }).await;
+
+        stack.audio_complete("default");
+
+        stack.assert_cmd(200, "Hangup", |c| {
+            matches!(c, SessionAction::Hangup { .. })
+        }).await;
+    }
+
+    #[tokio::test]
+    async fn test_queue_transfer_prompt_english() {
+        let mut config = build_simple_queue_config();
+        config.voice_prompts = Some(VoicePrompts::en());
+
+        let plan = config.to_plan();
+        let mut stack = MockCallStack::run(
+            Box::new(QueueApp::new(plan, config)),
+            "caller",
+            "1000",
+        );
+
+        stack.assert_cmd(200, "AcceptCall", |c| {
+            matches!(c, SessionAction::AcceptCall { .. })
+        }).await;
+        stack.assert_cmd(200, "PlayPrompt", |c| {
+            matches!(c, SessionAction::PlayPrompt { .. })
+        }).await;
+
+        stack.custom("agent_connected",
+            serde_json::json!({"agent_uri": "sip:agent1@example.com"}));
+
+        stack.assert_cmd(200, "PlayPrompt-en-transfer", |c| {
+            matches!(c, SessionAction::PlayPrompt { audio_file, .. }
+                if audio_file == "sounds/queue-transfer-en.wav")
+        }).await;
+
+        stack.audio_complete("default");
+
+        stack.assert_cmd(200, "Transfer", |c| {
+            matches!(c, SessionAction::TransferTarget(t) if t == "sip:agent1@example.com")
+        }).await;
+
+        stack.join().await.expect("should exit after english transfer prompt");
+    }
+
+    #[tokio::test]
+    async fn test_queue_busy_prompt_max_wait_timeout() {
+        let mut config = build_queue_config_with_prompts();
+        config.max_wait_secs = 0;
+        let plan = config.to_plan();
+
+        let app = QueueApp::new(plan, config);
+
+        let mut stack = MockCallStack::run(Box::new(app), "caller", "1000");
+
+        stack.assert_cmd(200, "AcceptCall", |c| {
+            matches!(c, SessionAction::AcceptCall { .. })
+        }).await;
+        stack.assert_cmd(200, "PlayPrompt", |c| {
+            matches!(c, SessionAction::PlayPrompt { .. })
+        }).await;
+
+        stack.timeout("max_wait_timeout");
+
+        stack.assert_cmd(200, "NotifyEvent", |c| {
+            matches!(c, SessionAction::NotifyEvent { event, .. }
+                if event == "queue.timeout")
+        }).await;
+
+        stack.assert_cmd(200, "PlayPrompt-busy-timeout", |c| {
+            matches!(c, SessionAction::PlayPrompt { audio_file, .. }
+                if audio_file == "sounds/queue-busy-zh.wav")
+        }).await;
+
+        stack.audio_complete("default");
+
+        stack.assert_cmd(200, "Hangup", |c| {
+            matches!(c, SessionAction::Hangup { .. })
+        }).await;
     }
 }

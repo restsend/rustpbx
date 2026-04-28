@@ -69,6 +69,49 @@ pub const DEFAULT_QUEUE_HOLD_AUDIO: &str = "sounds/phone-calling.wav";
 /// Default prompt played when a queue cannot find an available agent.
 pub const DEFAULT_QUEUE_FAILURE_AUDIO: &str = "sounds/unavailable-phone.wav";
 
+// --- Built-in voice prompts for queue events ---
+
+pub const DEFAULT_QUEUE_TRANSFER_PROMPT_ZH: &str = "sounds/queue-transfer-zh.wav";
+pub const DEFAULT_QUEUE_TRANSFER_PROMPT_EN: &str = "sounds/queue-transfer-en.wav";
+pub const DEFAULT_QUEUE_BUSY_PROMPT_ZH: &str = "sounds/queue-busy-zh.wav";
+pub const DEFAULT_QUEUE_BUSY_PROMPT_EN: &str = "sounds/queue-busy-en.wav";
+pub const DEFAULT_QUEUE_OFF_HOURS_PROMPT_ZH: &str = "sounds/queue-off-hours-zh.wav";
+pub const DEFAULT_QUEUE_OFF_HOURS_PROMPT_EN: &str = "sounds/queue-off-hours-en.wav";
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct VoicePrompts {
+    #[serde(default)]
+    pub transfer_prompt: Option<String>,
+    #[serde(default)]
+    pub busy_prompt: Option<String>,
+    #[serde(default)]
+    pub off_hours_prompt: Option<String>,
+}
+
+impl VoicePrompts {
+    pub fn zh() -> Self {
+        Self {
+            transfer_prompt: Some(DEFAULT_QUEUE_TRANSFER_PROMPT_ZH.to_string()),
+            busy_prompt: Some(DEFAULT_QUEUE_BUSY_PROMPT_ZH.to_string()),
+            off_hours_prompt: Some(DEFAULT_QUEUE_OFF_HOURS_PROMPT_ZH.to_string()),
+        }
+    }
+
+    pub fn en() -> Self {
+        Self {
+            transfer_prompt: Some(DEFAULT_QUEUE_TRANSFER_PROMPT_EN.to_string()),
+            busy_prompt: Some(DEFAULT_QUEUE_BUSY_PROMPT_EN.to_string()),
+            off_hours_prompt: Some(DEFAULT_QUEUE_OFF_HOURS_PROMPT_EN.to_string()),
+        }
+    }
+}
+
+impl Default for VoicePrompts {
+    fn default() -> Self {
+        Self::zh()
+    }
+}
+
 #[derive(Clone, Default)]
 pub struct Location {
     pub aor: rsipstack::sip::Uri,
@@ -400,6 +443,7 @@ pub struct QueuePlan {
     pub label: Option<String>,
     pub retry_codes: Option<Vec<u16>>,
     pub no_trying_timeout: Option<Duration>,
+    pub voice_prompts: Option<VoicePrompts>,
 }
 
 impl Default for QueuePlan {
@@ -424,6 +468,7 @@ impl Default for QueuePlan {
             label: None,
             retry_codes: None,
             no_trying_timeout: None,
+            voice_prompts: None,
         }
     }
 }
@@ -1203,6 +1248,7 @@ mod tests {
             label: None,
             retry_codes: None,
             no_trying_timeout: None,
+            voice_prompts: None,
         };
         let flow = DialplanFlow::Queue {
             plan: queue_plan,
@@ -1230,6 +1276,7 @@ mod tests {
             label: None,
             retry_codes: None,
             no_trying_timeout: None,
+            voice_prompts: None,
         };
         let flow = DialplanFlow::Queue {
             plan: queue_plan,
@@ -1257,6 +1304,7 @@ mod tests {
             label: None,
             retry_codes: None,
             no_trying_timeout: None,
+            voice_prompts: None,
         };
         let flow = DialplanFlow::Queue {
             plan: queue_plan,
@@ -1282,6 +1330,7 @@ mod tests {
             label: None,
             retry_codes: None,
             no_trying_timeout: None,
+            voice_prompts: None,
         };
         let flow = DialplanFlow::Queue {
             plan: queue_plan,

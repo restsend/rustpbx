@@ -8,6 +8,7 @@ subtitle = "服务队列"
 subtitle_desc = "创建语音队列，管理保持音乐，配置回落行为。"
 
 # 列表页操作
+reload_queues = "从文件重载"
 export_all = "全部导出"
 new_queue = "新建队列"
 
@@ -25,6 +26,7 @@ col_queue = "队列"
 col_hold_treatment = "保持处理"
 col_targets = "目标"
 col_fallback = "回落"
+col_prompts = "提示"
 col_updated = "更新时间"
 col_actions = "操作"
 
@@ -52,12 +54,16 @@ delete_queue = "删除队列"
 delete_confirm_title = "删除队列"
 delete_confirm_msg = "删除队列 {name}？此操作不可撤销。"
 delete_confirm_label = "删除"
+reload_confirm_title = "重载队列"
+reload_confirm_msg = "从文件重载队列配置？导出的变更将立即应用到运行中的系统。"
+reload_confirm_label = "重载"
 export_all_confirm_title = "导出全部队列"
 export_all_confirm_msg = "为所有队列生成最新配置文件？现有文件将被替换。"
 export_confirm_label = "导出"
 
 # 提示消息
 queue_deleted = "队列已删除。"
+queues_reloaded = "已重载 {count} 条路由规则。"
 queues_exported_n = "已导出 {count} 个队列文件。"
 queues_exported_n_plural = "已导出 {count} 个队列文件。"
 queues_exported = "队列已导出。"
@@ -71,6 +77,7 @@ file_queues_notice = "这些队列从 .toml 配置文件加载，无法通过 GU
 delete_error = "删除队列失败"
 export_error = "导出队列失败"
 export_all_error = "批量导出失败"
+reload_error = "重载队列失败"
 
 # 保持策略摘要（JS）
 hold_immediate_passthrough = "立即接通 · 透传回铃音"
@@ -107,6 +114,7 @@ detail_updated_label = "最后更新"
 tab_overview = "概览"
 tab_targets = "目标"
 tab_fallback = "回落"
+tab_voice_prompts = "语音提示"
 
 # 概览部分
 section_basics = "队列基本信息"
@@ -179,6 +187,24 @@ fallback_queue_hint = "提供生成的队列 TOML 文件（相对于 config/queu
 fallback_skill_group_label = "技能组"
 fallback_skill_group_placeholder = "选择技能组"
 fallback_skill_group_hint = "路由到匹配此技能组的坐席。"
+
+# 语音提示
+section_voice_prompts = "语音提示"
+section_voice_prompts_desc = "配置队列事件（转接、坐席忙、非工作时间）中播放的内置语音提示。"
+vp_none = "禁用"
+vp_chinese = "中文 (zh-CN)"
+vp_english = "英文 (en-US)"
+vp_custom = "自定义 URL / 路径"
+vp_url_placeholder = "https://example.com/prompt.wav 或 sounds/prompt.wav"
+vp_download = "下载"
+vp_downloading = "下载中..."
+vp_preview = "试听"
+vp_transfer = "转接提示"
+vp_transfer_desc = "转接坐席前播放，例如“稍等，正在为您转接”"
+vp_busy = "坐席忙提示"
+vp_busy_desc = "所有坐席忙时播放，例如“抱歉，当前坐席忙，请稍后再试”"
+vp_off_hours = "非工作时间提示"
+vp_off_hours_desc = "非工作时间播放，例如“抱歉，当前非工作时间，请在工作时间拨打”"
 
 # 表单底部
 save_hint = "队列变更保存后立即生效。"

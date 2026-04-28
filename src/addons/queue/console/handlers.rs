@@ -8,12 +8,13 @@ use crate::console::handlers::{bad_request, forms, normalize_optional_string, re
 use crate::console::{ConsoleState, middleware::AuthRequired};
 use crate::proxy::routing::{ConfigOrigin, RouteQueueConfig};
 use axum::{
-    Json, Router,
+    Json, Router, body::Body,
     extract::{Path as AxumPath, State},
-    http::{HeaderMap, StatusCode},
+    http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
+use std::path::PathBuf;
 use chrono::Utc;
 use sea_orm::{
     ActiveModelTrait, ActiveValue::Set, ColumnTrait, Condition, EntityTrait, PaginatorTrait,
@@ -22,7 +23,7 @@ use sea_orm::{
 use serde::Deserialize;
 use serde_json::{Map as JsonMap, Value, json};
 use std::sync::Arc;
-use tracing::warn;
+use tracing::{info, warn};
 
 pub fn urls() -> Router<Arc<ConsoleState>> {
     Router::new()
@@ -32,6 +33,9 @@ pub fn urls() -> Router<Arc<ConsoleState>> {
         )
         .route("/queues/new", get(page_queue_create))
         .route("/queues/export", post(export_all_queues))
+        .route("/queues/reload", post(reload_queues_handler))
+        .route("/queues/download-audio", post(download_audio_handler))
+        .route("/queues/sound/{*file_path}", get(serve_sound_handler))
         .route(
             "/queues/{id}",
             get(page_queue_edit)
@@ -638,6 +642,168 @@ fn format_metadata_text(metadata: &Option<Value>) -> String {
         .as_ref()
         .map(|value| serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string()))
         .unwrap_or_default()
+}
+
+pub async fn reload_queues_handler(
+    State(state): State<Arc<ConsoleState>>,
+    AuthRequired(_): AuthRequired,
+) -> Response {
+    let app_state = match state.app_state() {
+        Some(app) => app,
+        None => {
+            return (StatusCode::FAILED_DEPENDENCY, Json(json!({
+                "status": "error",
+                "message": "PBX is not running; cannot reload queues.",
+            }))).into_response();
+        }
+    };
+
+    let server = app_state.sip_server();
+    info!("Reloading queues via console");
+
+    match server.inner.data_context.reload_queues(true, None).await {
+        Ok(metrics) => {
+            let total = metrics.total;
+            let generated_entries = metrics
+                .generated
+                .as_ref()
+                .map(|g| g.entries)
+                .unwrap_or(0);
+            state.clear_pending_reload();
+            Json(json!({
+                "status": "ok",
+                "queues_reloaded": total,
+                "generated_queue_files": generated_entries,
+                "metrics": metrics,
+            })).into_response()
+        }
+        Err(err) => {
+            warn!("Queue reload failed: {}", err);
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({
+                "status": "error",
+                "message": format!("Failed to reload queues: {}", err),
+            }))).into_response()
+        }
+    }
+}
+
+pub async fn download_audio_handler(
+    State(_state): State<Arc<ConsoleState>>,
+    AuthRequired(_): AuthRequired,
+    Json(payload): Json<serde_json::Value>,
+) -> Response {
+    let url = match payload.get("url").and_then(|v| v.as_str()) {
+        Some(u) => u.trim().to_string(),
+        None => {
+            return (StatusCode::BAD_REQUEST, Json(json!({
+                "status": "error", "message": "Missing 'url' field."
+            }))).into_response();
+        }
+    };
+
+    if !url.starts_with("http://") && !url.starts_with("https://") {
+        return (StatusCode::BAD_REQUEST, Json(json!({
+            "status": "error", "message": "URL must start with http:// or https://"
+        }))).into_response();
+    }
+
+    // Determine sounds directory
+    let sounds_dir = if std::path::Path::new("config/sounds").exists() {
+        PathBuf::from("config/sounds")
+    } else {
+        PathBuf::from("sounds")
+    };
+
+    // Create filename from URL
+    let filename = sanitize_filename(url.split('/').last().unwrap_or("audio.wav"));
+    let dest_path = sounds_dir.join(&filename);
+
+    // Download
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .unwrap();
+    match client.get(&url).send().await {
+        Ok(resp) if resp.status().is_success() => {
+            let bytes = match resp.bytes().await {
+                Ok(b) => b,
+                Err(e) => {
+                    return (StatusCode::BAD_GATEWAY, Json(json!({
+                        "status": "error", "message": format!("Failed to read response: {}", e)
+                    }))).into_response();
+                }
+            };
+            if let Err(e) = tokio::fs::write(&dest_path, &bytes).await {
+                return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({
+                    "status": "error", "message": format!("Failed to save file: {}", e)
+                }))).into_response();
+            }
+            let relative_path = format!("sounds/{}", filename);
+            Json(json!({
+                "status": "ok",
+                "path": relative_path,
+                "filename": filename,
+            })).into_response()
+        }
+        Ok(resp) => {
+            (StatusCode::BAD_GATEWAY, Json(json!({
+                "status": "error",
+                "message": format!("Download failed with HTTP {}", resp.status())
+            }))).into_response()
+        }
+        Err(e) => {
+            (StatusCode::BAD_GATEWAY, Json(json!({
+                "status": "error",
+                "message": format!("Download failed: {}", e)
+            }))).into_response()
+        }
+    }
+}
+
+pub async fn serve_sound_handler(
+    AxumPath(file_path): AxumPath<String>,
+) -> Response {
+    let sounds_dir = if std::path::Path::new("config/sounds").exists() {
+        PathBuf::from("config/sounds")
+    } else {
+        PathBuf::from("sounds")
+    };
+    let file_path = file_path.trim_start_matches('/');
+    let full_path = sounds_dir.join(file_path);
+
+    // Security: prevent path traversal
+    let canonical = match full_path.canonicalize() {
+        Ok(p) => p,
+        Err(_) => {
+            return (StatusCode::NOT_FOUND, "Not found").into_response();
+        }
+    };
+    if !canonical.starts_with(&sounds_dir.canonicalize().unwrap_or(sounds_dir)) {
+        return (StatusCode::FORBIDDEN, "Forbidden").into_response();
+    }
+
+    match tokio::fs::read(&full_path).await {
+        Ok(bytes) => {
+            let content_type = if file_path.ends_with(".wav") {
+                "audio/wav"
+            } else if file_path.ends_with(".mp3") {
+                "audio/mpeg"
+            } else {
+                "application/octet-stream"
+            };
+            Response::builder()
+                .header(header::CONTENT_TYPE, content_type)
+                .body(Body::from(bytes))
+                .unwrap()
+        }
+        Err(_) => (StatusCode::NOT_FOUND, "Not found").into_response(),
+    }
+}
+
+fn sanitize_filename(name: &str) -> String {
+    name.chars()
+        .map(|c| if c.is_alphanumeric() || c == '.' || c == '-' || c == '_' { c } else { '_' })
+        .collect()
 }
 
 fn proxy_config_optional(state: &ConsoleState) -> Option<ProxyConfig> {

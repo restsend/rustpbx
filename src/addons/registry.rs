@@ -1,3 +1,4 @@
+use crate::addons::export_reload::ExportReloadRegistry;
 use crate::addons::Addon;
 use crate::app::AppState;
 use std::sync::Arc;
@@ -14,6 +15,7 @@ fn normalize_static_url(url: &str, config: &crate::config::Config) -> String {
 
 pub struct AddonRegistry {
     addons: Vec<Box<dyn Addon>>,
+    pub export_reload: ExportReloadRegistry,
 }
 
 impl Default for AddonRegistry {
@@ -84,7 +86,15 @@ impl AddonRegistry {
         #[cfg(feature = "addon-cc")]
         addons.push(Box::new(super::cc::CcAddon::new()));
 
-        Self { addons }
+        // Collect export/reload handlers from addons (not gated by feature)
+        let mut export_reload = ExportReloadRegistry::default();
+        for addon in &addons {
+            if let Some(handler) = addon.export_reload_handler() {
+                export_reload.register(handler);
+            }
+        }
+
+        Self { addons, export_reload }
     }
 
     pub async fn initialize_all(&self, state: AppState) -> anyhow::Result<()> {

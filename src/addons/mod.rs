@@ -172,8 +172,16 @@ pub trait Addon: Send + Sync {
     ) -> anyhow::Result<Option<crate::models::user::Model>> {
         Ok(None)
     }
+
+    /// Return an export/reload handler for this addon.
+    /// Addons that support export-and-reload (e.g. queues, IVR, CC) should
+    /// return a handler here so the cluster reload UI can discover them.
+    fn export_reload_handler(&self) -> Option<Box<dyn export_reload::ExportReloadHandler>> {
+        None
+    }
 }
 
+pub mod export_reload;
 pub mod registry;
 
 pub mod observability;
