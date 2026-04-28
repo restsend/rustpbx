@@ -211,12 +211,10 @@ pub struct Config {
     pub licenses: Option<LicenseConfig>,
     #[serde(default)]
     pub rwi: Option<RwiConfig>,
-    #[cfg(feature = "commerce")]
     #[serde(default)]
     pub cluster: Option<ClusterConfig>,
 }
 
-#[cfg(feature = "commerce")]
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ClusterPeer {
     pub addr: String,
@@ -224,7 +222,6 @@ pub struct ClusterPeer {
     pub ami_port: u16,
 }
 
-#[cfg(feature = "commerce")]
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct ClusterConfig {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -636,8 +633,6 @@ pub struct ProxyConfig {
     pub sip_flow_max_items: Option<usize>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub addons: Option<Vec<String>>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub cluster_peers: Vec<String>,
     #[serde(default = "default_passthrough_failure")]
     pub passthrough_failure: bool,
     #[serde(default = "default_dialog_auth_cache")]
@@ -896,7 +891,6 @@ impl Default for ProxyConfig {
             nat_fix: true,
             sip_flow_max_items: None,
             addons: None,
-            cluster_peers: Vec::new(),
             passthrough_failure: true,
             dialog_auth_cache: default_dialog_auth_cache(),
             blind_transfer_use_refer: false,
@@ -952,7 +946,6 @@ impl Default for Config {
             sipflow: None,
             #[cfg(feature = "commerce")]
             licenses: None,
-            #[cfg(feature = "commerce")]
             cluster: None,
         }
     }

@@ -486,17 +486,27 @@ async fn build_settings_payload(state: &ConsoleState) -> JsonValue {
         serde_json::to_value(rwi_config).unwrap_or(JsonValue::Null),
     );
 
-    #[cfg(feature = "commerce")]
     {
-        let cluster: Option<crate::config::ClusterConfig> = if let Some(app_state) = state.app_state() {
-            let config_arc = app_state.config().clone();
-            config_arc.cluster.clone().or_else(|| Some(crate::config::ClusterConfig::default()))
-        } else {
-            Some(crate::config::ClusterConfig::default())
-        };
+        let cluster: Option<crate::config::ClusterConfig> =
+            if let Some(app_state) = state.app_state() {
+                let cluster_config = app_state
+                    .cluster_config
+                    .read()
+                    .map(|c| c.clone())
+                    .unwrap_or(None);
+                cluster_config.or_else(|| {
+                    // fallback: read from backing config (stale snapshot)
+                    // This should not normally happen after startup.
+                    let config_arc = app_state.config().clone();
+                    config_arc.cluster.clone()
+                })
+            } else {
+                None
+            };
         data.insert(
             "cluster".to_string(),
-            serde_json::to_value(cluster).unwrap_or(JsonValue::Null),
+            serde_json::to_value(cluster.or_else(|| Some(crate::config::ClusterConfig::default())))
+                .unwrap_or(JsonValue::Null),
         );
     }
 
@@ -2318,6 +2328,10 @@ pub(crate) async fn update_cluster_settings(
         }
 
     let cluster = config.cluster;
+    // Update in-memory cluster config so the UI backfills on refresh without requiring restart.
+    if let Some(app_state) = state.app_state() {
+        app_state.update_cluster_config(cluster.clone());
+    }
     Json(json!({
         "status": "ok",
         "requires_restart": true,

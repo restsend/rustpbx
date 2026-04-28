@@ -16,7 +16,6 @@ use rsipstack::sip::prelude::{HeadersExt, ToTypedHeader};
 use rsipstack::sip::typed::Authorization;
 use rsipstack::transaction::transaction::Transaction;
 use std::net::IpAddr;
-use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, trace};
@@ -239,25 +238,10 @@ impl AuthModule {
         }
 
         self.server
-            .proxy_config
-            .cluster_peers
+            .cluster_peer_ips
             .iter()
-            .any(|peer| cluster_peer_matches_ip(peer, &source_ip))
+            .any(|peer_ip| *peer_ip == source_ip)
     }
-}
-
-fn cluster_peer_matches_ip(peer: &str, source_ip: &IpAddr) -> bool {
-    let trimmed = peer.trim();
-    if trimmed.is_empty() {
-        return false;
-    }
-    if let Ok(socket) = trimmed.parse::<SocketAddr>() {
-        return socket.ip() == *source_ip;
-    }
-    if let Ok(ip) = trimmed.parse::<IpAddr>() {
-        return ip == *source_ip;
-    }
-    false
 }
 
 #[async_trait]

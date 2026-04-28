@@ -3,7 +3,7 @@ use crate::{
         CallRecordFormatter, CallRecordManagerBuilder, CallRecordSender,
         DefaultCallRecordFormatter, noop_saver, sipflow_upload::SipFlowUploadHook,
     },
-    config::{Config, UserBackendConfig},
+    config::{ClusterConfig, Config, UserBackendConfig},
     handler::middleware::clientaddr::ClientAddr,
     models::call_record::DatabaseHook,
     proxy::{
@@ -75,6 +75,8 @@ pub struct AppStateInner {
     #[cfg(feature = "console")]
     pub console: Option<Arc<crate::console::ConsoleState>>,
     pub tls_reloader: Arc<RwLock<Option<Arc<TlsReloaderRegistry>>>>,
+    /// Cluster config with RwLock for live updates (written on save, read by UI).
+    pub cluster_config: std::sync::RwLock<Option<ClusterConfig>>,
 }
 
 pub type AppState = Arc<AppStateInner>;
@@ -92,6 +94,11 @@ pub struct AppStateBuilder {
 }
 
 impl AppStateInner {
+    /// Update the cluster config in-memory (used after save to enable backfill on refresh).
+    pub fn update_cluster_config(&self, config: Option<ClusterConfig>) {
+        *self.cluster_config.write().unwrap() = config;
+    }
+
     /// Get an addon state by type from the console state.
     /// Returns None if the console is not configured or the state is not registered.
     #[cfg(feature = "console")]
@@ -383,8 +390,19 @@ impl AppStateBuilder {
                 let proxy_config = Arc::new(proxy_config);
                 let call_record_hooks = addon_registry.get_call_record_hooks(&config, &db_conn);
 
+                // Derive cluster peer SocketAddrs from Config.cluster peers
+                let cluster_peers: Vec<SocketAddr> = config
+                    .cluster
+                    .as_ref()
+                    .map(|c| c.peers.as_slice())
+                    .unwrap_or(&[])
+                    .iter()
+                    .filter_map(|p| format!("{}:{}", p.addr, p.sip_port).parse().ok())
+                    .collect();
+
                 #[allow(unused_mut)]
                 let mut builder = SipServerBuilder::new(proxy_config.clone())
+                    .with_cluster_peers(cluster_peers)
                     .with_cancel_token(core.token.child_token())
                     .with_callrecord_sender(core.callrecord_sender.clone())
                     .with_rtp_config(config.rtp_config())
@@ -441,6 +459,7 @@ impl AppStateBuilder {
             #[cfg(feature = "console")]
             console: console_state,
             tls_reloader: Arc::new(RwLock::new(Some(Arc::new(TlsReloaderRegistry::new())))),
+            cluster_config: std::sync::RwLock::new(config.cluster.clone()),
         });
 
         // Register SIP TLS reloader if TLS is enabled

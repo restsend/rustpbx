@@ -52,11 +52,10 @@ pub fn ami_router(app_state: AppState) -> Router<AppState> {
         .route("/cluster/reload_config", get(cluster_reload_config_handler))
         .route("/cluster/reload_sync", post(cluster_reload_sync_handler));
 
-    let r = r
-        .layer(middleware::from_fn_with_state(
-            app_state.clone(),
-            crate::handler::middleware::ami_auth::ami_auth_middleware,
-        ));
+    let r = r.layer(middleware::from_fn_with_state(
+        app_state.clone(),
+        crate::handler::middleware::ami_auth::ami_auth_middleware,
+    ));
     Router::new().nest(&ami_path, r).with_state(app_state)
 }
 
@@ -135,25 +134,27 @@ async fn list_dialogs(State(state): State<AppState>) -> Response {
 }
 
 async fn hangup_dialog(Path(id): Path<String>, State(state): State<AppState>) -> Response {
-    if let Some(dlg) = state.sip_server.inner.dialog_layer.get_dialog_with(&id) { match dlg.hangup().await {
-        Ok(()) => {
-            return Json(serde_json::json!({
-                "status": "ok",
-                "message": format!("Dialog with id '{}' hangup initiated", id),
-            }))
-            .into_response();
-        }
-        Err(err) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({
-                    "status": "error",
-                    "message": format!("Failed to hangup dialog with id '{}': {}", id, err),
-                })),
-            )
+    if let Some(dlg) = state.sip_server.inner.dialog_layer.get_dialog_with(&id) {
+        match dlg.hangup().await {
+            Ok(()) => {
+                return Json(serde_json::json!({
+                    "status": "ok",
+                    "message": format!("Dialog with id '{}' hangup initiated", id),
+                }))
                 .into_response();
+            }
+            Err(err) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({
+                        "status": "error",
+                        "message": format!("Failed to hangup dialog with id '{}': {}", id, err),
+                    })),
+                )
+                    .into_response();
+            }
         }
-    } }
+    }
     (
         StatusCode::NOT_FOUND,
         Json(serde_json::json!({
@@ -171,7 +172,10 @@ async fn list_transactions(State(state): State<AppState>) -> Response {
         .inner
         .endpoint
         .inner
-        .get_running_transactions() { result.extend(ids) }
+        .get_running_transactions()
+    {
+        result.extend(ids)
+    }
     let result: Vec<String> = result.iter().map(|key| key.to_string()).collect();
     Json(result).into_response()
 }
@@ -553,22 +557,22 @@ async fn query_sipflow_flow(
             .filter(CallRecordColumn::CallId.eq(&call_id))
             .one(state.db())
             .await
-        {
-            if start_time.is_none() {
-                start_time = Some(
-                    record.started_at.with_timezone(&chrono::Local) - chrono::Duration::minutes(10),
-                );
-            }
-            if end_time.is_none() {
-                end_time = Some(
-                    record
-                        .ended_at
-                        .unwrap_or(record.started_at)
-                        .with_timezone(&chrono::Local)
-                        + chrono::Duration::hours(1),
-                );
-            }
+    {
+        if start_time.is_none() {
+            start_time = Some(
+                record.started_at.with_timezone(&chrono::Local) - chrono::Duration::minutes(10),
+            );
         }
+        if end_time.is_none() {
+            end_time = Some(
+                record
+                    .ended_at
+                    .unwrap_or(record.started_at)
+                    .with_timezone(&chrono::Local)
+                    + chrono::Duration::hours(1),
+            );
+        }
+    }
 
     let start_time = start_time.unwrap_or_else(|| now - chrono::Duration::hours(1));
     let end_time = end_time.unwrap_or(now);
@@ -664,22 +668,22 @@ async fn query_sipflow_media(
             .filter(CallRecordColumn::CallId.eq(&call_id))
             .one(state.db())
             .await
-        {
-            if start_time.is_none() {
-                start_time = Some(
-                    record.started_at.with_timezone(&chrono::Local) - chrono::Duration::minutes(10),
-                );
-            }
-            if end_time.is_none() {
-                end_time = Some(
-                    record
-                        .ended_at
-                        .unwrap_or(record.started_at)
-                        .with_timezone(&chrono::Local)
-                        + chrono::Duration::hours(1),
-                );
-            }
+    {
+        if start_time.is_none() {
+            start_time = Some(
+                record.started_at.with_timezone(&chrono::Local) - chrono::Duration::minutes(10),
+            );
         }
+        if end_time.is_none() {
+            end_time = Some(
+                record
+                    .ended_at
+                    .unwrap_or(record.started_at)
+                    .with_timezone(&chrono::Local)
+                    + chrono::Duration::hours(1),
+            );
+        }
+    }
 
     let start_time = start_time.unwrap_or_else(|| now - chrono::Duration::hours(1));
     let end_time = end_time.unwrap_or(now);
@@ -726,9 +730,10 @@ fn parse_datetime(s: &str) -> Option<chrono::DateTime<chrono::Local>> {
 
     // Try Unix timestamp
     if let Ok(ts) = s.parse::<i64>()
-        && let Some(dt) = chrono::Local.timestamp_opt(ts, 0).single() {
-            return Some(dt);
-        }
+        && let Some(dt) = chrono::Local.timestamp_opt(ts, 0).single()
+    {
+        return Some(dt);
+    }
 
     None
 }
@@ -786,7 +791,11 @@ impl<'de> serde::Deserialize<'de> for PingReloadPayload {
                     }
                 }
 
-                Ok(PingReloadPayload { trunks, routes, addons })
+                Ok(PingReloadPayload {
+                    trunks,
+                    routes,
+                    addons,
+                })
             }
         }
 
@@ -809,9 +818,15 @@ impl<'de> serde::de::DeserializeSeed<'de> for TrunksSeed {
             fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
                 f.write_str("a boolean or 'true'/'false' string")
             }
-            fn visit_bool<E: serde::de::Error>(self, v: bool) -> Result<Self::Value, E> { Ok(v) }
-            fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Self::Value, E> { Ok(v == "true" || v == "1") }
-            fn visit_string<E: serde::de::Error>(self, v: String) -> Result<Self::Value, E> { Ok(v == "true" || v == "1") }
+            fn visit_bool<E: serde::de::Error>(self, v: bool) -> Result<Self::Value, E> {
+                Ok(v)
+            }
+            fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Self::Value, E> {
+                Ok(v == "true" || v == "1")
+            }
+            fn visit_string<E: serde::de::Error>(self, v: String) -> Result<Self::Value, E> {
+                Ok(v == "true" || v == "1")
+            }
         }
         d.deserialize_any(TrunksVisitor)
     }
@@ -843,7 +858,10 @@ impl<'de> serde::de::DeserializeSeed<'de> for AddonsSeed {
                 Ok(vec![v])
             }
 
-            fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                self,
+                mut seq: A,
+            ) -> Result<Self::Value, A::Error> {
                 let mut out = Vec::new();
                 while let Some(s) = seq.next_element::<String>()? {
                     out.push(s);
@@ -939,28 +957,44 @@ async fn cluster_reload_config_handler(
         let send_event = |event_type: &'static str, data: serde_json::Value| {
             let tx = tx.clone();
             async move {
-                let _ = tx.send(Ok(SseEvent::default().event(event_type).data(data.to_string())));
+                let _ = tx.send(Ok(SseEvent::default()
+                    .event(event_type)
+                    .data(data.to_string())));
             }
         };
 
         // Process trunks on current node
         if payload.trunks {
-            send_event("progress", serde_json::json!({"type": "addon_start", "node": "current", "addon": "trunks"})).await;
+            send_event(
+                "progress",
+                serde_json::json!({"type": "addon_start", "node": "current", "addon": "trunks"}),
+            )
+            .await;
             let result = reload_trunks_on_node(&state, "current").await;
             send_event("progress", serde_json::json!({"type": "addon_complete", "node": "current", "addon": "trunks", "result": result})).await;
         }
 
         // Process routes on current node
         if payload.routes {
-            send_event("progress", serde_json::json!({"type": "addon_start", "node": "current", "addon": "routes"})).await;
+            send_event(
+                "progress",
+                serde_json::json!({"type": "addon_start", "node": "current", "addon": "routes"}),
+            )
+            .await;
             let result = reload_routes_on_node(&state, "current").await;
             send_event("progress", serde_json::json!({"type": "addon_complete", "node": "current", "addon": "routes", "result": result})).await;
         }
 
         // Process addon-based handlers on current node
         for addon_id in &payload.addons {
-            send_event("progress", serde_json::json!({"type": "addon_start", "node": "current", "addon": addon_id})).await;
-            let results = state.addon_registry.export_reload
+            send_event(
+                "progress",
+                serde_json::json!({"type": "addon_start", "node": "current", "addon": addon_id}),
+            )
+            .await;
+            let results = state
+                .addon_registry
+                .export_reload
                 .invoke_selected(&[addon_id.clone()], &state)
                 .await;
             let json_result = match results.into_iter().next() {
@@ -972,15 +1006,25 @@ async fn cluster_reload_config_handler(
         }
 
         // Process peer nodes
-        let peers = state.config().cluster.as_ref()
+        let peers = state
+            .config()
+            .cluster
+            .as_ref()
             .map(|c| c.peers.clone())
             .unwrap_or_default();
 
         for peer in &peers {
             let peer_label = format!("{}:{}", peer.addr, peer.ami_port);
-            send_event("progress", serde_json::json!({"type": "node_start", "node": &peer_label})).await;
+            send_event(
+                "progress",
+                serde_json::json!({"type": "node_start", "node": &peer_label}),
+            )
+            .await;
 
-            let url = format!("http://{}:{}/ami/v1/cluster/reload_sync", peer.addr, peer.ami_port);
+            let url = format!(
+                "http://{}:{}/ami/v1/cluster/reload_sync",
+                peer.addr, peer.ami_port
+            );
             let client = reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(120))
                 .build()
@@ -1008,7 +1052,11 @@ async fn cluster_reload_config_handler(
         rx.recv().await.map(|event| (event, rx))
     });
     Sse::new(stream)
-        .keep_alive(KeepAlive::new().interval(Duration::from_secs(15)).text("keep-alive"))
+        .keep_alive(
+            KeepAlive::new()
+                .interval(Duration::from_secs(15))
+                .text("keep-alive"),
+        )
         .into_response()
 }
 
@@ -1035,13 +1083,21 @@ async fn cluster_reload_sync_handler(
     }
 
     for addon_id in &payload.addons {
-        let result = state.addon_registry.export_reload
+        let result = state
+            .addon_registry
+            .export_reload
             .invoke_selected(&[addon_id.clone()], &state)
             .await;
         let json_result = match result.into_iter().next() {
-            Some((_, Ok(v))) => serde_json::json!({ "addon": addon_id, "status": "ok", "details": v }),
-            Some((_, Err(e))) => serde_json::json!({ "addon": addon_id, "status": "error", "message": e }),
-            None => serde_json::json!({ "addon": addon_id, "status": "error", "message": "Handler not found" }),
+            Some((_, Ok(v))) => {
+                serde_json::json!({ "addon": addon_id, "status": "ok", "details": v })
+            }
+            Some((_, Err(e))) => {
+                serde_json::json!({ "addon": addon_id, "status": "error", "message": e })
+            }
+            None => {
+                serde_json::json!({ "addon": addon_id, "status": "error", "message": "Handler not found" })
+            }
         };
         results.push(json_result);
     }
@@ -1072,7 +1128,9 @@ async fn reload_trunks_on_node(state: &AppState, _node: &str) -> serde_json::Val
             }
             serde_json::json!({ "addon": "trunks", "status": "ok", "reloaded": metrics.total })
         }
-        Err(e) => serde_json::json!({ "addon": "trunks", "status": "error", "message": e.to_string() }),
+        Err(e) => {
+            serde_json::json!({ "addon": "trunks", "status": "error", "message": e.to_string() })
+        }
     }
 }
 
@@ -1097,16 +1155,11 @@ async fn reload_routes_on_node(state: &AppState, _node: &str) -> serde_json::Val
             }
             serde_json::json!({ "addon": "routes", "status": "ok", "reloaded": metrics.total })
         }
-        Err(e) => serde_json::json!({ "addon": "routes", "status": "error", "message": e.to_string() }),
+        Err(e) => {
+            serde_json::json!({ "addon": "routes", "status": "error", "message": e.to_string() })
+        }
     }
 }
-
-#[cfg(feature = "commerce")]
-fn make_sse_event(event_type: &'static str, data: serde_json::Value) -> Result<SseEvent, Infallible> {
-    Ok(SseEvent::default().event(event_type).data(data.to_string()))
-}
-
-// ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 #[cfg(feature = "commerce")]
@@ -1149,7 +1202,11 @@ mod cluster_tests {
     fn test_json_roundtrip() {
         // Use JSON for roundtrip instead of serde_urlencoded which has
         // known limitations with Vec serialization.
-        let payload = PingReloadPayload { trunks: true, routes: false, addons: vec!["queue".into(), "ivr".into()] };
+        let payload = PingReloadPayload {
+            trunks: true,
+            routes: false,
+            addons: vec!["queue".into(), "ivr".into()],
+        };
         let json_str = serde_json::to_string(&payload).unwrap();
         let decoded: PingReloadPayload = serde_json::from_str(&json_str).unwrap();
         assert_eq!(decoded.trunks, true);

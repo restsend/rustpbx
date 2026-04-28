@@ -2031,7 +2031,7 @@ impl SipSession {
         })?;
 
         let local_addrs = self.server.endpoint.get_addrs();
-        let cluster_enabled = !self.server.proxy_config.cluster_peers.is_empty();
+        let cluster_enabled = !self.server.cluster_peer_ips.is_empty();
         let route_via_home_proxy = Self::route_via_home_proxy(target, &local_addrs, cluster_enabled);
         let callee_uri = Self::resolve_outbound_callee_uri(target, route_via_home_proxy);
 

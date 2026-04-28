@@ -111,15 +111,18 @@ async fn start_server_a(db_url: &str, port: u16, peer_port: u16) -> Result<Arc<c
         udp_port: Some(port),
         modules: Some(vec!["registrar".to_string(), "call".to_string()]),
         ensure_user: Some(false),
-        cluster_peers: vec![format!("127.0.0.1:{}", peer_port)],
         ..Default::default()
     });
+
+    let peer_addr: std::net::SocketAddr =
+        format!("127.0.0.1:{}", peer_port).parse().unwrap();
 
     let locator = DbLocator::new(db_url.to_string()).await?;
     let cancel = CancellationToken::new();
 
     let server = Arc::new(
         SipServerBuilder::new(config)
+            .with_cluster_peers(vec![peer_addr])
             .with_user_backend(Box::new(MemoryUserBackend::new(None)))
             .with_locator(Box::new(locator))
             .with_cancel_token(cancel)
@@ -150,15 +153,18 @@ async fn start_server_b(
         udp_port: Some(port),
         modules: Some(vec!["reject_invite".to_string(), "registrar".to_string()]),
         ensure_user: Some(false),
-        cluster_peers: vec![format!("127.0.0.1:{}", peer_port)],
         ..Default::default()
     });
+
+    let peer_addr: std::net::SocketAddr =
+        format!("127.0.0.1:{}", peer_port).parse().unwrap();
 
     let locator = DbLocator::new(db_url.to_string()).await?;
     let cancel = CancellationToken::new();
 
     let server = Arc::new(
         SipServerBuilder::new(config)
+            .with_cluster_peers(vec![peer_addr])
             .with_user_backend(Box::new(MemoryUserBackend::new(None)))
             .with_locator(Box::new(locator))
             .with_cancel_token(cancel)

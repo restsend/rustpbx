@@ -106,6 +106,7 @@ pub async fn create_test_server_with_config(
         agent_registry: None,
         transfer_notify_subscribers: Arc::new(tokio::sync::Mutex::new(Vec::new())),
         cluster_event_hub: None,
+        cluster_peer_ips: vec![],
     });
 
     // Add test users

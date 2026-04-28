@@ -35,7 +35,7 @@ use rsipstack::{
         transaction::Transaction,
     },
     transport::{
-        SipAddr, TcpListenerConnection, TlsConfig, TlsListenerConnection, TransportLayer,
+        TcpListenerConnection, TlsConfig, TlsListenerConnection, TransportLayer,
         WebSocketListenerConnection, udp::UdpConnection,
     },
 };
@@ -89,6 +89,8 @@ pub struct SipServerInner {
         Arc<tokio::sync::Mutex<Vec<crate::call::domain::ReferNotifyTx>>>,
     /// Cluster event hub for inter-node event sync via SIP MESSAGE.
     pub cluster_event_hub: Option<Arc<ClusterEventHub>>,
+    /// SIP peer IPs for cluster auth bypass.
+    pub cluster_peer_ips: Vec<IpAddr>,
 }
 
 pub type SipServerRef = Arc<SipServerInner>;
@@ -130,6 +132,8 @@ pub struct SipServerBuilder {
     /// AgentRegistry for agent management and presence state.
     agent_registry: Option<Arc<dyn crate::call::app::agent_registry::AgentRegistry>>,
     skip_migrate: bool,
+    /// Cluster peer SocketAddrs for inter-node sync (derived from Config.cluster).
+    cluster_peers: Vec<SocketAddr>,
 }
 
 impl SipServerBuilder {
@@ -161,7 +165,13 @@ impl SipServerBuilder {
             rwi_gateway: None,
             agent_registry: None,
             skip_migrate: false,
+            cluster_peers: Vec::new(),
         }
+    }
+
+    pub fn with_cluster_peers(mut self, peers: Vec<SocketAddr>) -> Self {
+        self.cluster_peers = peers;
+        self
     }
 
     pub fn with_sipflow_config(mut self, config: Option<SipFlowConfig>) -> Self {
@@ -553,7 +563,7 @@ impl SipServerBuilder {
         });
 
         let locator_local_addrs = endpoint_local_addrs;
-        let cluster_enabled = !config.cluster_peers.is_empty();
+        let cluster_enabled = !self.cluster_peers.is_empty();
 
         endpoint_builder = endpoint_builder
             .with_target_locator(DialogTargetLocator::new(
@@ -608,22 +618,14 @@ impl SipServerBuilder {
         presence_manager.load_from_db().await.ok();
 
         // Create cluster event hub for inter-node sync
-        let cluster_event_hub: Option<Arc<ClusterEventHub>> = if !config.cluster_peers.is_empty() {
-            let peers: Vec<SocketAddr> = config
-                .cluster_peers
-                .iter()
-                .filter_map(|s| s.parse().ok())
-                .collect();
-            if !peers.is_empty() {
-                Some(Arc::new(ClusterEventHub::new(
-                    locator_events.clone(),
-                    presence_manager.clone(),
-                    endpoint.inner.clone(),
-                    peers,
-                )))
-            } else {
-                None
-            }
+        let cluster_peer_ips: Vec<IpAddr> = self.cluster_peers.iter().map(|p| p.ip()).collect();
+        let cluster_event_hub: Option<Arc<ClusterEventHub>> = if !self.cluster_peers.is_empty() {
+            Some(Arc::new(ClusterEventHub::new(
+                locator_events.clone(),
+                presence_manager.clone(),
+                endpoint.inner.clone(),
+                self.cluster_peers.clone(),
+            )))
         } else {
             None
         };
@@ -665,6 +667,7 @@ impl SipServerBuilder {
             agent_registry: self.agent_registry,
             transfer_notify_subscribers: Arc::new(tokio::sync::Mutex::new(Vec::new())),
             cluster_event_hub,
+            cluster_peer_ips,
         });
 
         let inner_weak = Arc::downgrade(&inner);
@@ -685,14 +688,8 @@ impl SipServerBuilder {
 
         // Auto-load cluster_event module when cluster peers are configured
         if let Some(hub) = inner.cluster_event_hub.as_ref() {
-            let cluster_peers: Vec<SocketAddr> = inner
-                .proxy_config
-                .cluster_peers
-                .iter()
-                .filter_map(|s| s.parse().ok())
-                .collect();
             let mut module =
-                ClusterEventModule::create(hub.clone(), &cluster_peers, local_addrs.clone());
+                ClusterEventModule::create(hub.clone(), &self.cluster_peers, local_addrs.clone());
             let _ = module.on_start().await; // errors logged inside
             allow_methods.extend(module.allow_methods());
             modules.push(module);

@@ -508,6 +508,7 @@ async fn test_guest_call_allowed_extension() {
         agent_registry: None,
         transfer_notify_subscribers: Arc::new(tokio::sync::Mutex::new(Vec::new())),
         cluster_event_hub: None,
+        cluster_peer_ips: vec![],
     });
 
     let module = AuthModule::new(server_inner.clone(), server_inner.proxy_config.clone());
