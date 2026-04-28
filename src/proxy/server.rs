@@ -35,7 +35,7 @@ use rsipstack::{
         transaction::Transaction,
     },
     transport::{
-        TcpListenerConnection, TlsConfig, TlsListenerConnection, TransportLayer,
+        SipAddr, TcpListenerConnection, TlsConfig, TlsListenerConnection, TransportLayer,
         WebSocketListenerConnection, udp::UdpConnection,
     },
 };
@@ -551,8 +551,16 @@ impl SipServerBuilder {
             tx
         });
 
+        let locator_local_addrs = local_addrs
+            .iter()
+            .map(|addr| SipAddr {
+                r#type: None,
+                addr: (*addr).into(),
+            })
+            .collect();
+
         endpoint_builder = endpoint_builder
-            .with_target_locator(DialogTargetLocator::new(locator.clone()))
+            .with_target_locator(DialogTargetLocator::new(locator.clone(), locator_local_addrs))
             .with_transport_inspector(TransportInspectorLocator::new(
                 locator.clone(),
                 locator_events.clone(),
