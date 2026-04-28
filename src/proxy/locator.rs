@@ -68,12 +68,22 @@ pub trait Locator: Send + Sync {
 
 pub struct DialogTargetLocator {
     locator: Arc<Box<dyn Locator>>,
+    local_addrs: Vec<SipAddr>,
 }
 
 impl DialogTargetLocator {
     #[allow(clippy::new_ret_no_self)]
-    pub fn new(locator: Arc<Box<dyn Locator>>) -> Box<dyn TargetLocator> {
-        Box::new(Self { locator }) as Box<dyn TargetLocator>
+    pub fn new(locator: Arc<Box<dyn Locator>>, local_addrs: Vec<SipAddr>) -> Box<dyn TargetLocator> {
+        Box::new(Self {
+            locator,
+            local_addrs,
+        }) as Box<dyn TargetLocator>
+    }
+
+    fn is_local_home_proxy(&self, home_proxy: &SipAddr) -> bool {
+        self.local_addrs
+            .iter()
+            .any(|addr| addr.addr.to_string() == home_proxy.addr.to_string())
     }
 }
 
@@ -81,11 +91,24 @@ impl DialogTargetLocator {
 impl TargetLocator for DialogTargetLocator {
     async fn locate(&self, uri: &rsipstack::sip::Uri) -> Result<SipAddr, rsipstack::Error> {
         if let Ok(locs) = self.locator.lookup(uri).await
-            && let Some(loc) = locs.first()
-                && let Some(dest) = &loc.destination {
+            && let Some(loc) = locs.first() {
+                if loc.registered_aor.as_ref() == Some(uri)
+                    && let Some(home_proxy) = &loc.home_proxy {
+                        if self.is_local_home_proxy(home_proxy)
+                            && let Some(dest) = &loc.destination {
+                                debug!(%uri, %dest, %home_proxy, "Located local registered AOR target via destination");
+                                return Ok(dest.clone());
+                            }
+
+                        debug!(%uri, dest = %home_proxy, "Located registered AOR target via home proxy");
+                        return Ok(home_proxy.clone());
+                    }
+
+                if let Some(dest) = &loc.destination {
                     debug!(%uri, %dest, "Located target for dialog");
                     return Ok(dest.clone());
                 }
+            }
         SipAddr::try_from(uri).map_err(|e| {
             rsipstack::Error::Error(format!(
                 "failed to convert uri to sip addr: {}, error: {}",
@@ -684,7 +707,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dialog_target_locator_uses_destination() {
+    async fn dialog_target_locator_routes_registered_aor_via_home_proxy() {
         let locator = MemoryLocator::new();
         let uri: rsipstack::sip::Uri = "sip:alice@rustpbx.com".try_into().unwrap();
 
@@ -707,6 +730,7 @@ mod tests {
                     expires: 3600,
                     destination: Some(destination.clone()),
                     home_proxy: Some(home_proxy.clone()),
+                    registered_aor: Some(uri.clone()),
                     last_modified: Some(Instant::now()),
                     ..Default::default()
                 },
@@ -714,9 +738,93 @@ mod tests {
             .await
             .unwrap();
 
-        let target_locator = DialogTargetLocator::new(Arc::new(Box::new(locator)));
+        let target_locator = DialogTargetLocator::new(Arc::new(Box::new(locator)), vec![]);
         let result = target_locator.locate(&uri).await.unwrap();
-        assert_eq!(result, destination, "DialogTargetLocator should use destination");
+        assert_eq!(
+            result, home_proxy,
+            "DialogTargetLocator should route registered AOR via home_proxy"
+        );
+    }
+
+    #[tokio::test]
+    async fn dialog_target_locator_routes_local_registered_aor_to_destination() {
+        let locator = MemoryLocator::new();
+        let uri: rsipstack::sip::Uri = "sip:alice@pbx.rustpbx.com".try_into().unwrap();
+
+        let destination = SipAddr {
+            r#type: Some(Transport::Ws),
+            addr: HostWithPort::try_from("127.0.0.1:63255").unwrap(),
+        };
+
+        let home_proxy = SipAddr {
+            r#type: Some(Transport::Udp),
+            addr: HostWithPort::try_from("10.0.0.1:5060").unwrap(),
+        };
+
+        locator
+            .register(
+                "alice",
+                Some("pbx.rustpbx.com"),
+                Location {
+                    aor: "sip:abc@invalid.invalid;transport=ws".try_into().unwrap(),
+                    expires: 3600,
+                    destination: Some(destination.clone()),
+                    home_proxy: Some(home_proxy.clone()),
+                    registered_aor: Some(uri.clone()),
+                    last_modified: Some(Instant::now()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let target_locator = DialogTargetLocator::new(Arc::new(Box::new(locator)), vec![home_proxy]);
+        let result = target_locator.locate(&uri).await.unwrap();
+        assert_eq!(
+            result, destination,
+            "local registered AOR should be delivered to the stored device/WS destination"
+        );
+    }
+
+    #[tokio::test]
+    async fn dialog_target_locator_keeps_contact_destination_for_non_registered_aor() {
+        let locator = MemoryLocator::new();
+        let uri: rsipstack::sip::Uri = "sip:alice@rustpbx.com".try_into().unwrap();
+        let registered_aor: rsipstack::sip::Uri = "sip:alice@pbx.rustpbx.com".try_into().unwrap();
+
+        let destination = SipAddr {
+            r#type: Some(Transport::Udp),
+            addr: HostWithPort::try_from("192.168.1.10:5060").unwrap(),
+        };
+
+        let home_proxy = SipAddr {
+            r#type: Some(Transport::Tcp),
+            addr: HostWithPort::try_from("10.0.0.1:5060").unwrap(),
+        };
+
+        locator
+            .register(
+                "alice",
+                Some("rustpbx.com"),
+                Location {
+                    aor: uri.clone(),
+                    expires: 3600,
+                    destination: Some(destination.clone()),
+                    home_proxy: Some(home_proxy),
+                    registered_aor: Some(registered_aor),
+                    last_modified: Some(Instant::now()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        let target_locator = DialogTargetLocator::new(Arc::new(Box::new(locator)), vec![]);
+        let result = target_locator.locate(&uri).await.unwrap();
+        assert_eq!(
+            result, destination,
+            "DialogTargetLocator should keep contact destination when URI is not registered AOR"
+        );
     }
 
     #[test]
@@ -783,7 +891,7 @@ mod tests {
             .await
             .unwrap();
 
-        let target_locator = DialogTargetLocator::new(Arc::new(Box::new(locator)));
+        let target_locator = DialogTargetLocator::new(Arc::new(Box::new(locator)), vec![]);
         let result = target_locator.locate(&uri).await.unwrap();
         assert_eq!(result, destination, "DialogTargetLocator should fallback to destination when home_proxy is absent");
     }
