@@ -5,7 +5,8 @@
     <div class="mx-auto max-w-7xl space-y-6" x-data='routingConsole({
         basePath: {{ base_path | tojson }},
         filters: {{ filters | tojson }},
-        createUrl: {{ create_url | tojson }}
+        createUrl: {{ create_url | tojson }},
+        amiEndpoint: {{ ami_endpoint | default("/ami/v1") | tojson }}
     })' x-init="init()">
         <div class="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
             <div>

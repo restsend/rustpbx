@@ -818,6 +818,7 @@ pub async fn page_routing(
         })
         .unwrap_or(false);
 
+    let ami_endpoint = state.config().proxy.ami_path.clone().unwrap_or_else(|| "/ami/v1".to_string());
     state.render_with_headers(
         "console/routing.html",
         json!({
@@ -831,6 +832,7 @@ pub async fn page_routing(
             "create_url": state.url_for("/routing/new"),
             "current_user": current_user,
             "has_file_routes": has_file_routes,
+            "ami_endpoint": ami_endpoint,
         }),
         &headers,
     )

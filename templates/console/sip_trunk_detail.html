@@ -15,7 +15,8 @@ default('RustPBX') }}{% endblock %}
         tenants: {{ tenants | default([]) | tojson }},
         createUrl: {{ create_url | default(null) | tojson }},
         updateUrl: {{ update_url | default(null) | tojson }},
-        t: {{ t | tojson }}
+        t: {{ t | tojson }},
+        amiEndpoint: {{ ami_endpoint | default("/ami/v1") | tojson }}
     })' x-init="init()">
     <div class="mx-auto max-w-5xl space-y-6">
         <header class="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
@@ -434,6 +435,7 @@ default('RustPBX') }}{% endblock %}
             tenantsRaw: Array.isArray(options.tenants) ? options.tenants : [],
             filters: options.filters || {},
             t: options.t || {},
+            amiEndpoint: options.amiEndpoint || '/ami/v1',
             listUrl: `${options.basePath || '/console'}/sip-trunk`,
             createUrl: options.createUrl || null,
             updateUrl: options.updateUrl || null,

@@ -21,6 +21,8 @@ mod tests {
             name: "test-ivr".to_string(),
             description: Some("Test IVR".to_string()),
             lang: Some("en".to_string()),
+            default_voice: None,
+            dynamic_build: false,
             business_hours: None,
             tts: None,
             root: MenuNode {
@@ -569,6 +571,8 @@ action = { type = "transfer", target = "100" }
             name: "test-collect".to_string(),
             description: None,
             lang: None,
+            default_voice: None,
+            dynamic_build: false,
             business_hours: None,
             tts: None,
             root: MenuNode {
@@ -803,6 +807,8 @@ action = { type = "transfer", target = "100" }
             name: "webhook-ivr".to_string(),
             description: None,
             lang: None,
+            default_voice: None,
+            dynamic_build: false,
             business_hours: None,
             tts: None,
             root: MenuNode {
@@ -1386,6 +1392,8 @@ action = { type = "transfer", target = "100" }
             name: "play-and-hangup-ivr".to_string(),
             description: None,
             lang: None,
+            default_voice: None,
+            dynamic_build: false,
             business_hours: None,
             tts: None,
             root: MenuNode {
@@ -1604,6 +1612,8 @@ action = { type = "transfer", target = "100" }
             name: "e2e-ivr".to_string(),
             description: None,
             lang: None,
+            default_voice: None,
+            dynamic_build: false,
             business_hours: None,
             tts: None,
             root: MenuNode {
@@ -1676,6 +1686,8 @@ action = { type = "transfer", target = "100" }
             name: "e2e-submenu".to_string(),
             description: None,
             lang: None,
+            default_voice: None,
+            dynamic_build: false,
             business_hours: None,
             tts: None,
             root: MenuNode {
@@ -1786,6 +1798,8 @@ action = { type = "transfer", target = "100" }
             name: "e2e-hangup".to_string(),
             description: None,
             lang: None,
+            default_voice: None,
+            dynamic_build: false,
             business_hours: None,
             tts: None,
             root: MenuNode {
@@ -1861,6 +1875,8 @@ action = { type = "transfer", target = "100" }
             name: "e2e-invalid".to_string(),
             description: None,
             lang: None,
+            default_voice: None,
+            dynamic_build: false,
             business_hours: None,
             tts: None,
             root: MenuNode {
@@ -1932,6 +1948,8 @@ action = { type = "transfer", target = "100" }
             name: "e2e-play".to_string(),
             description: None,
             lang: None,
+            default_voice: None,
+            dynamic_build: false,
             business_hours: None,
             tts: None,
             root: MenuNode {
@@ -2019,6 +2037,8 @@ action = { type = "transfer", target = "100" }
             name: "e2e-bargein".to_string(),
             description: None,
             lang: None,
+            default_voice: None,
+            dynamic_build: false,
             business_hours: None,
             tts: None,
             root: MenuNode {
@@ -2092,6 +2112,8 @@ action = { type = "transfer", target = "100" }
             name: "e2e-timeout".to_string(),
             description: None,
             lang: None,
+            default_voice: None,
+            dynamic_build: false,
             business_hours: None,
             tts: None,
             root: MenuNode {
@@ -2162,6 +2184,8 @@ action = { type = "transfer", target = "100" }
             name: "e2e-play-and-hangup".to_string(),
             description: None,
             lang: None,
+            default_voice: None,
+            dynamic_build: false,
             business_hours: None,
             tts: None,
             root: MenuNode {
@@ -2354,6 +2378,8 @@ action = { type = "transfer", target = "100" }
             name: "tts-ivr".to_string(),
             description: None,
             lang: Some("en".to_string()),
+            default_voice: None,
+            dynamic_build: false,
             business_hours: None,
             tts: Some(tts_config),
             root: MenuNode {

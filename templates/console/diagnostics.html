@@ -1057,6 +1057,18 @@
                                     <div x-html="plugin.ui_form" x-show="callMode === plugin.mode" class="mb-4"></div>
                                 </template>
                             </div>
+                            <div class="flex flex-wrap items-center gap-4 text-xs text-slate-600" x-show="callMode === 'standard'">
+                                <label class="inline-flex items-center gap-1.5">
+                                    <input type="checkbox" x-model="sipIceEnable"
+                                        class="h-3.5 w-3.5 rounded border border-slate-300 text-sky-600 focus:ring-sky-500">
+                                    {{ "diagnostics.use_iceservers" | t }}
+                                </label>
+                                <label class="inline-flex items-center gap-1.5">
+                                    <input type="checkbox" x-model="sipRelayOnly"
+                                        class="h-3.5 w-3.5 rounded border border-slate-300 text-sky-600 focus:ring-sky-500">
+                                    {{ "diagnostics.relay_only" | t }}
+                                </label>
+                            </div>
                             <div class="flex flex-wrap items-center gap-3" x-show="callMode === 'standard'">
                                 <button type="button" @click="registerSip" :disabled="sipRegistering"
                                     class="inline-flex items-center gap-2 rounded-lg bg-sky-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60">
@@ -1421,6 +1433,8 @@
                     dialogCallIdInput: '',
                     dialogCallId: '',
                     dialer: {},
+                    sipIceEnable: true,
+                    sipRelayOnly: false,
                     sipForm: { wsServer: '', uri: '', authUser: '', password: '', displayName: '', target: '' },
                     sipUaReady: false,
                     get hasSipUa() {
@@ -2095,7 +2109,11 @@
                             this.sipRegisterError = this.t.err_invalid_sip_uri || 'Invalid SIP URI (expected sip:1001@rustpbx.com).';
                             return;
                         }
-                        await this.ensureIceServers();
+                        if (this.sipIceEnable) {
+                            await this.ensureIceServers();
+                        } else {
+                            this.sipIceServers = [];
+                        }
                         this.sipRegisterError = null;
                         this.sipRegistering = true;
                         this.setSipStatus(this.t.sip_status_connecting || 'Connecting...', 'pending');
@@ -2138,10 +2156,16 @@
                         if (!configuration.password) {
                             console.warn('[Diagnostics] No password provided for SIP registration. Authentication may fail.');
                         }
-                        const iceServers = Array.isArray(this.sipIceServers) ? this.sipIceServers : [];
-                        if (iceServers.length) {
-                            configuration.pcConfig = { iceServers };
-                            configuration.iceServers = iceServers;
+                        if (this.sipIceEnable) {
+                            const iceServers = Array.isArray(this.sipIceServers) ? this.sipIceServers : [];
+                            if (iceServers.length) {
+                                const pcConfig = { iceServers };
+                                if (this.sipRelayOnly) {
+                                    pcConfig.iceTransportPolicy = 'relay';
+                                }
+                                configuration.pcConfig = pcConfig;
+                                configuration.iceServers = iceServers;
+                            }
                         }
                         const ua = new JsSIP.UA(configuration);
                         sipUa = ua;
@@ -2265,7 +2289,11 @@
                             this.sipCallError = this.t.err_enter_destination || 'Enter a destination URI or number.';
                             return;
                         }
-                        await this.ensureIceServers();
+                        if (this.sipIceEnable) {
+                            await this.ensureIceServers();
+                        } else {
+                            this.sipIceServers = [];
+                        }
                         this.rememberRecentTarget(rawTarget, targetUri);
                         this.sipCallError = null;
                         let mediaStream = null;
@@ -2290,9 +2318,15 @@
                             rtcOfferConstraints: { offerToReceiveAudio: true, offerToReceiveVideo: false },
                             sessionTimersExpires: 120,
                         };
-                        const iceServers = Array.isArray(this.sipIceServers) ? this.sipIceServers : [];
-                        if (iceServers.length) {
-                            options.pcConfig = { iceServers };
+                        if (this.sipIceEnable) {
+                            const iceServers = Array.isArray(this.sipIceServers) ? this.sipIceServers : [];
+                            if (iceServers.length) {
+                                const pcConfig = { iceServers };
+                                if (this.sipRelayOnly) {
+                                    pcConfig.iceTransportPolicy = 'relay';
+                                }
+                                options.pcConfig = pcConfig;
+                            }
                         }
                         this.appendSipEvent(`Calling ${targetUri}`, 'info');
                         try {
@@ -2320,7 +2354,11 @@
                         }
                         this.sipCallError = null;
                         try {
-                            await this.ensureIceServers();
+                            if (this.sipIceEnable) {
+                                await this.ensureIceServers();
+                            } else {
+                                this.sipIceServers = [];
+                            }
                             const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
                             this.sipLocalStream = stream;
                             if (this.$refs.sipLocalAudio) {
@@ -2331,9 +2369,15 @@
                                 mediaStream: stream,
                                 mediaConstraints: { audio: true, video: false },
                             };
-                            const iceServers = Array.isArray(this.sipIceServers) ? this.sipIceServers : [];
-                            if (iceServers.length) {
-                                options.pcConfig = { iceServers };
+                            if (this.sipIceEnable) {
+                                const iceServers = Array.isArray(this.sipIceServers) ? this.sipIceServers : [];
+                                if (iceServers.length) {
+                                    const pcConfig = { iceServers };
+                                    if (this.sipRelayOnly) {
+                                        pcConfig.iceTransportPolicy = 'relay';
+                                    }
+                                    options.pcConfig = pcConfig;
+                                }
                             }
                             sipSession.answer(options);
                             this.appendSipEvent('Answered incoming call', 'success');

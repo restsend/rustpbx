@@ -1610,7 +1610,8 @@ no_transports = "请配置 UDP/TCP/WebSocket 监听器以开放 SIP 服务。"
 no_accounts = "请添加内存用户或分机以提供可用凭据。"
 
 # WebRTC 探测
-use_iceservers = "使用 /iceservers 数据"
+use_iceservers = "使用服务器 ICE"
+relay_only = "强制中继"
 btn_run_probe = "运行探测"
 btn_probing = "探测中…"
 probing_progress = "正在运行 WebRTC 探测…"
