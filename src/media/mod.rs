@@ -896,14 +896,13 @@ impl FileTrack {
     }
 
     pub(crate) fn create_playback_source(&self) -> Result<FileTrackPlaybackSource> {
-        let file_path = self
-            .file_path
-            .as_ref()
-            .ok_or_else(|| anyhow!("No file path set"))?;
+        let file_path = self.file_path.as_deref();
 
-        let is_remote = file_path.starts_with("http://") || file_path.starts_with("https://");
-        if !is_remote && !std::path::Path::new(file_path).exists() {
-            return Err(anyhow!("Audio file not found: {}", file_path));
+        if let Some(file_path) = file_path {
+            let is_remote = file_path.starts_with("http://") || file_path.starts_with("https://");
+            if !is_remote && !std::path::Path::new(file_path).exists() {
+                return Err(anyhow!("Audio file not found: {}", file_path));
+            }
         }
 
         let selected = self.codec_info.clone().unwrap_or_else(|| {
@@ -927,13 +926,17 @@ impl FileTrack {
                 let mgr = Arc::new(audio_source::AudioSourceManager::new(
                     frame_timing.pcm_sample_rate,
                 ));
-                mgr.switch_to_file(file_path.clone(), self.loop_playback)?;
+                if let Some(file_path) = file_path {
+                    mgr.switch_to_file(file_path.to_string(), self.loop_playback)?;
+                } else {
+                    mgr.switch_to_silence();
+                }
                 mgr
             }
         };
 
         debug!(
-            file = %file_path,
+            file = %file_path.unwrap_or("<silence>"),
             loop_playback = self.loop_playback,
             codec = ?selected.codec,
             samples_per_frame = frame_timing.pcm_samples_per_frame,

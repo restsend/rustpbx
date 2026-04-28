@@ -55,7 +55,7 @@ use rustrtc::{
 };
 use std::sync::{
     Arc,
-    atomic::{AtomicU8, AtomicU64, Ordering},
+    atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering},
 };
 use tokio::sync::Mutex as AsyncMutex;
 use tokio_util::sync::CancellationToken;
@@ -118,6 +118,13 @@ impl LegTransport {
             Self::Rtp => "RTP",
         }
     }
+
+    const fn endpoint(self) -> BridgeEndpoint {
+        match self {
+            Self::WebRtc => BridgeEndpoint::WebRtc,
+            Self::Rtp => BridgeEndpoint::Rtp,
+        }
+    }
 }
 
 /// Typed metadata describing source and destination leg transports.
@@ -132,6 +139,10 @@ impl ForwardPath {
         Self { from, to }
     }
 
+    const fn source_endpoint(self) -> BridgeEndpoint {
+        self.from.endpoint()
+    }
+
     /// Strip WebRTC-only fields when forwarding into a plain RTP pipeline.
     const fn should_strip_webrtc_audio_metadata(self) -> bool {
         matches!(
@@ -144,6 +155,55 @@ impl ForwardPath {
 impl std::fmt::Display for ForwardPath {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}→{}", self.from.as_str(), self.to.as_str())
+    }
+}
+
+type DtmfHandler = Arc<dyn Fn(char) + Send + Sync + 'static>;
+
+#[derive(Clone)]
+struct BridgeDtmfSink {
+    endpoint: BridgeEndpoint,
+    payload_type: u8,
+    handler: DtmfHandler,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BridgeDtmfEventKey {
+    digit_code: u8,
+    rtp_timestamp: u32,
+}
+
+#[derive(Debug, Default)]
+struct BridgeDtmfDetector {
+    last_event: Option<BridgeDtmfEventKey>,
+}
+
+impl BridgeDtmfDetector {
+    fn observe(&mut self, payload: &[u8], rtp_timestamp: u32) -> Option<char> {
+        if payload.len() < 4 {
+            return None;
+        }
+
+        let digit_code = payload[0];
+        let digit = match digit_code {
+            0..=9 => (b'0' + digit_code) as char,
+            10 => '*',
+            11 => '#',
+            12..=15 => (b'A' + (digit_code - 12)) as char,
+            _ => return None,
+        };
+
+        let event = BridgeDtmfEventKey {
+            digit_code,
+            rtp_timestamp,
+        };
+
+        if self.last_event == Some(event) {
+            return None;
+        }
+
+        self.last_event = Some(event);
+        Some(digit)
     }
 }
 
@@ -239,8 +299,10 @@ pub struct BridgePeer {
     bridge_tasks: AsyncMutex<Vec<tokio::task::JoinHandle<()>>>,
     /// Cancellation token
     cancel_token: CancellationToken,
+    forwarding_started: AtomicBool,
     /// Shared recorder for call recording (written by both bridge directions)
     recorder: Option<Arc<parking_lot::RwLock<Option<Recorder>>>>,
+    dtmf_sink: Arc<parking_lot::RwLock<Option<BridgeDtmfSink>>>,
     /// Audio sender channels for forwarding
     webrtc_send: Arc<AsyncMutex<Option<MediaSender>>>,
     rtp_send: Arc<AsyncMutex<Option<MediaSender>>>,
@@ -277,7 +339,9 @@ impl BridgePeer {
             rtp_pc,
             bridge_tasks: AsyncMutex::new(Vec::new()),
             cancel_token: CancellationToken::new(),
+            forwarding_started: AtomicBool::new(false),
             recorder: None,
+            dtmf_sink: Arc::new(parking_lot::RwLock::new(None)),
             webrtc_send: Arc::new(AsyncMutex::new(None)),
             rtp_send: Arc::new(AsyncMutex::new(None)),
             webrtc_output_mode: Arc::new(AtomicU8::new(BRIDGE_OUTPUT_PEER)),
@@ -396,6 +460,14 @@ impl BridgePeer {
     /// Start the bridge - begin forwarding media between sides
     /// Optimized: Merged bidirectional forwarding into a single task to reduce Tokio scheduling overhead
     pub async fn start_bridge(&self) {
+        if self
+            .forwarding_started
+            .swap(true, Ordering::AcqRel)
+        {
+            debug!(bridge_id = %self.id, "Media bridge forwarding already started");
+            return;
+        }
+
         // Extract video senders now (before spawning) so PLI forwarder tasks can use them
         let webrtc_video_sender = self.webrtc_video_sender.lock().await.clone();
         let rtp_video_sender = self.rtp_video_sender.lock().await.clone();
@@ -480,6 +552,27 @@ impl BridgePeer {
         self.rtp_send.lock().await.clone()
     }
 
+    pub fn set_dtmf_sink(
+        &self,
+        endpoint: BridgeEndpoint,
+        payload_type: u8,
+        handler: Arc<dyn Fn(char) + Send + Sync + 'static>,
+    ) {
+        let mut sink = self.dtmf_sink.write();
+        *sink = Some(BridgeDtmfSink {
+            endpoint,
+            payload_type,
+            handler,
+        });
+
+        debug!(
+            bridge_id = %self.id,
+            endpoint = ?endpoint,
+            payload_type,
+            "Bridge DTMF sink installed"
+        );
+    }
+
     pub async fn replace_output_with_file(
         &self,
         endpoint: BridgeEndpoint,
@@ -505,6 +598,38 @@ impl BridgePeer {
             bridge_id = %self.id,
             endpoint = ?endpoint,
             "Bridge output replaced with file source"
+        );
+        Ok(())
+    }
+
+    pub async fn replace_output_with_silence(
+        &self,
+        endpoint: BridgeEndpoint,
+        codec_info: crate::media::negotiate::CodecInfo,
+    ) -> Result<()> {
+        match endpoint {
+            BridgeEndpoint::WebRtc => self.get_webrtc_sender().await,
+            BridgeEndpoint::Rtp => self.get_rtp_sender().await,
+        }
+        .ok_or_else(|| anyhow::anyhow!("bridge {:?} output sender is not ready", endpoint))?;
+
+        let track = crate::media::FileTrack::new(format!("{}-{:?}-silence", self.id, endpoint))
+            .with_loop(true)
+            .with_codec_info(codec_info);
+        let source = track.create_playback_source()?;
+        let source_slot = Arc::clone(self.file_source(endpoint));
+        {
+            let mut guard = source_slot.lock().await;
+            *guard = Some(source);
+        }
+
+        self.output_mode(endpoint)
+            .store(BRIDGE_OUTPUT_FILE, Ordering::Release);
+
+        info!(
+            bridge_id = %self.id,
+            endpoint = ?endpoint,
+            "Bridge output replaced with silence source"
         );
         Ok(())
     }
@@ -655,6 +780,7 @@ impl BridgePeer {
         let w2r_stats = Arc::clone(&self.webrtc_to_rtp_stats);
         let r2w_stats = Arc::clone(&self.rtp_to_webrtc_stats);
         let recorder = self.recorder.clone();
+        let dtmf_sink = Arc::clone(&self.dtmf_sink);
 
         tokio::spawn(async move {
             // Create fused receivers for both directions
@@ -700,6 +826,7 @@ impl BridgePeer {
                                         Arc::clone(&w2r_stats),
                                         if !is_video { recorder.clone() } else { None },
                                         if !is_video { Some(RecLeg::A) } else { None },
+                                        Arc::clone(&dtmf_sink),
                                     ).await;
                                 }
                                 webrtc_recv = Box::pin(webrtc_pc.recv());
@@ -745,6 +872,7 @@ impl BridgePeer {
                                         Arc::clone(&r2w_stats),
                                         if !is_video { recorder.clone() } else { None },
                                         if !is_video { Some(RecLeg::B) } else { None },
+                                        Arc::clone(&dtmf_sink),
                                     ).await;
                                 }
                                 rtp_recv = Box::pin(rtp_pc.recv());
@@ -775,6 +903,7 @@ impl BridgePeer {
         leg_stats: Arc<LegStats>,
         recorder: Option<Arc<parking_lot::RwLock<Option<Recorder>>>>,
         recorder_leg: Option<RecLeg>,
+        dtmf_sink: Arc<parking_lot::RwLock<Option<BridgeDtmfSink>>>,
     ) {
         // Get the sender channel from weak pointer
         let sender = if let Some(strong) = sender_weak.upgrade() {
@@ -809,6 +938,7 @@ impl BridgePeer {
             }
 
         let is_video = track.kind() == MediaKind::Video;
+        let mut dtmf_detector = BridgeDtmfDetector::default();
         let mut packet_count: u64 = 0;
         // Last seen RTP sequence number for loss estimation
         let mut last_seq: Option<u16> = None;
@@ -842,6 +972,14 @@ impl BridgePeer {
                     match sample_result {
                         Ok(sample) => {
                             packet_count += 1;
+                            if !is_video {
+                                Self::observe_dtmf_sample(
+                                    &dtmf_sink,
+                                    path.source_endpoint(),
+                                    &sample,
+                                    &mut dtmf_detector,
+                                );
+                            }
                             let mode = output_mode.load(Ordering::Acquire);
                             if !is_video && mode != BRIDGE_OUTPUT_PEER {
                                 if packet_count == 1 {
@@ -1004,6 +1142,31 @@ impl BridgePeer {
         }
     }
 
+    fn observe_dtmf_sample(
+        dtmf_sink: &Arc<parking_lot::RwLock<Option<BridgeDtmfSink>>>,
+        endpoint: BridgeEndpoint,
+        sample: &MediaSample,
+        detector: &mut BridgeDtmfDetector,
+    ) {
+        let Some(sink) = dtmf_sink.read().clone() else {
+            return;
+        };
+        if sink.endpoint != endpoint {
+            return;
+        }
+
+        let MediaSample::Audio(frame) = sample else {
+            return;
+        };
+        if frame.payload_type != Some(sink.payload_type) {
+            return;
+        }
+
+        if let Some(digit) = detector.observe(&frame.data, frame.rtp_timestamp) {
+            (sink.handler)(digit);
+        }
+    }
+
     /// Forward media from a track to a sender channel.
     /// Spawns a sub-task; used by the PC-event-driven start paths.
     #[allow(clippy::too_many_arguments)]
@@ -1018,6 +1181,7 @@ impl BridgePeer {
         leg_stats: Arc<LegStats>,
         recorder: Option<Arc<parking_lot::RwLock<Option<Recorder>>>>,
         recorder_leg: Option<RecLeg>,
+        dtmf_sink: Arc<parking_lot::RwLock<Option<BridgeDtmfSink>>>,
     ) {
         tokio::spawn(async move {
             Self::run_forward_loop(
@@ -1031,6 +1195,7 @@ impl BridgePeer {
                 leg_stats,
                 recorder,
                 recorder_leg,
+                dtmf_sink,
             )
             .await;
         });
