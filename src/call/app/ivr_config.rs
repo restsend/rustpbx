@@ -85,13 +85,19 @@ fn default_timezone() -> String {
 }
 
 /// Complete IVR definition: metadata + root menu + sub-menus.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct IvrDefinition {
     pub name: String,
     #[serde(default)]
     pub description: Option<String>,
     #[serde(default)]
     pub lang: Option<String>,
+    /// Default TTS voice for the entire IVR (overridable per menu).
+    #[serde(default)]
+    pub default_voice: Option<String>,
+    /// When true, TTS is generated at runtime instead of pre-cached on publish.
+    #[serde(default)]
+    pub dynamic_build: bool,
     /// Business hours configuration. When enabled, calls outside business
     /// hours are routed to `closed_action` instead of the normal IVR menu.
     #[serde(default)]

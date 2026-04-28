@@ -1625,7 +1625,8 @@ no_transports = "Configure UDP/TCP/WebSocket listeners to expose SIP services."
 no_accounts = "Add memory users or extensions to surface ready credentials."
 
 # WebRTC probe
-use_iceservers = "Use /iceservers data"
+use_iceservers = "Use server ICE"
+relay_only = "Force relay"
 btn_run_probe = "Run probe"
 btn_probing = "Probing…"
 probing_progress = "Running WebRTC probe…"
