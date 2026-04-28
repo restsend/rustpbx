@@ -105,12 +105,13 @@ impl ProxyModule for RejectInviteModule {
     }
 }
 
-async fn start_server_a(db_url: &str, port: u16) -> Result<Arc<crate::proxy::server::SipServer>> {
+async fn start_server_a(db_url: &str, port: u16, peer_port: u16) -> Result<Arc<crate::proxy::server::SipServer>> {
     let config = Arc::new(ProxyConfig {
         addr: "127.0.0.1".to_string(),
         udp_port: Some(port),
         modules: Some(vec!["registrar".to_string(), "call".to_string()]),
         ensure_user: Some(false),
+        cluster_peers: vec![format!("127.0.0.1:{}", peer_port)],
         ..Default::default()
     });
 
@@ -141,6 +142,7 @@ async fn start_server_a(db_url: &str, port: u16) -> Result<Arc<crate::proxy::ser
 async fn start_server_b(
     db_url: &str,
     port: u16,
+    peer_port: u16,
     capture: Arc<Mutex<Vec<CapturedInvite>>>,
 ) -> Result<Arc<crate::proxy::server::SipServer>> {
     let config = Arc::new(ProxyConfig {
@@ -148,6 +150,7 @@ async fn start_server_b(
         udp_port: Some(port),
         modules: Some(vec!["reject_invite".to_string(), "registrar".to_string()]),
         ensure_user: Some(false),
+        cluster_peers: vec![format!("127.0.0.1:{}", peer_port)],
         ..Default::default()
     });
 
@@ -203,8 +206,8 @@ async fn test_cluster_home_proxy_request_shape_e2e() -> Result<()> {
 
     let captured = Arc::new(Mutex::new(Vec::<CapturedInvite>::new()));
 
-    let server_a = start_server_a(&db_url, port_a).await?;
-    let server_b = start_server_b(&db_url, port_b, captured.clone()).await?;
+    let server_a = start_server_a(&db_url, port_a, port_b).await?;
+    let server_b = start_server_b(&db_url, port_b, port_a, captured.clone()).await?;
 
     sleep(Duration::from_millis(250)).await;
 

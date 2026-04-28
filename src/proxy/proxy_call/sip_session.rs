@@ -611,7 +611,10 @@ impl SipSession {
             .any(|addr| addr.addr.to_string() == home_proxy.addr.to_string())
     }
 
-    fn route_via_home_proxy(target: &Location, local_addrs: &[SipAddr]) -> bool {
+    fn route_via_home_proxy(target: &Location, local_addrs: &[SipAddr], cluster_enabled: bool) -> bool {
+        if !cluster_enabled {
+            return false;
+        }
         if let Some(home_proxy) = target.home_proxy.as_ref() {
             return !Self::is_local_home_proxy(local_addrs, home_proxy);
         }
@@ -2018,7 +2021,8 @@ impl SipSession {
         })?;
 
         let local_addrs = self.server.endpoint.get_addrs();
-        let route_via_home_proxy = Self::route_via_home_proxy(target, &local_addrs);
+        let cluster_enabled = !self.server.proxy_config.cluster_peers.is_empty();
+        let route_via_home_proxy = Self::route_via_home_proxy(target, &local_addrs, cluster_enabled);
         let callee_uri = Self::resolve_outbound_callee_uri(target, route_via_home_proxy);
 
         let mut headers: Vec<rsipstack::sip::Header> =
@@ -8069,7 +8073,7 @@ mod tests {
             addr: rsipstack::sip::HostWithPort::try_from("10.0.0.1:5060").unwrap(),
         }];
 
-        assert!(SipSession::route_via_home_proxy(&target, &local_addrs));
+        assert!(SipSession::route_via_home_proxy(&target, &local_addrs, true));
     }
 
     #[test]
@@ -8094,7 +8098,7 @@ mod tests {
             addr: rsipstack::sip::HostWithPort::try_from("10.0.0.1:5060").unwrap(),
         }];
 
-        assert!(!SipSession::route_via_home_proxy(&target, &local_addrs));
+        assert!(!SipSession::route_via_home_proxy(&target, &local_addrs, true));
     }
 
     #[test]
@@ -8947,7 +8951,7 @@ mod tests {
             r#type: Some(rsipstack::sip::Transport::Udp),
             addr: rsipstack::sip::HostWithPort::try_from("10.0.0.1:5060").unwrap(),
         }];
-        assert!(!SipSession::route_via_home_proxy(&target, &local_addrs));
+        assert!(!SipSession::route_via_home_proxy(&target, &local_addrs, false));
     }
 
     #[test]
@@ -8970,7 +8974,7 @@ mod tests {
             r#type: Some(rsipstack::sip::Transport::Udp),
             addr: rsipstack::sip::HostWithPort::try_from("10.172.148.121:8060").unwrap(),
         }];
-        let via_home_proxy = SipSession::route_via_home_proxy(&target, &local_addrs);
+        let via_home_proxy = SipSession::route_via_home_proxy(&target, &local_addrs, true);
         assert!(
             via_home_proxy,
             "route_via_home_proxy must be true for remote home_proxy"
@@ -8996,7 +9000,7 @@ mod tests {
             r#type: Some(rsipstack::sip::Transport::Udp),
             addr: rsipstack::sip::HostWithPort::try_from("10.172.148.121:8060").unwrap(),
         }];
-        let via_home_proxy = SipSession::route_via_home_proxy(&target, &local_addrs);
+        let via_home_proxy = SipSession::route_via_home_proxy(&target, &local_addrs, true);
         assert!(
             !via_home_proxy,
             "route_via_home_proxy must be false when home_proxy is local"
@@ -9040,7 +9044,7 @@ mod tests {
             r#type: Some(rsipstack::sip::Transport::Udp),
             addr: rsipstack::sip::HostWithPort::try_from("10.172.148.121:8060").unwrap(),
         }];
-        let via_home_proxy = SipSession::route_via_home_proxy(&target, &local_addrs);
+        let via_home_proxy = SipSession::route_via_home_proxy(&target, &local_addrs, true);
         assert!(
             via_home_proxy,
             "route_via_home_proxy must be true for cross-node routing"
