@@ -211,6 +211,24 @@ pub struct Config {
     pub licenses: Option<LicenseConfig>,
     #[serde(default)]
     pub rwi: Option<RwiConfig>,
+    #[cfg(feature = "commerce")]
+    #[serde(default)]
+    pub cluster: Option<ClusterConfig>,
+}
+
+#[cfg(feature = "commerce")]
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ClusterPeer {
+    pub addr: String,
+    pub sip_port: u16,
+    pub ami_port: u16,
+}
+
+#[cfg(feature = "commerce")]
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct ClusterConfig {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub peers: Vec<ClusterPeer>,
 }
 
 fn default_locale() -> String {
@@ -934,6 +952,8 @@ impl Default for Config {
             sipflow: None,
             #[cfg(feature = "commerce")]
             licenses: None,
+            #[cfg(feature = "commerce")]
+            cluster: None,
         }
     }
 }
@@ -1084,5 +1104,61 @@ mod tests {
 
         assert_eq!(rtp_config.bind_ip.as_deref(), Some("120.228.209.243"));
         assert_eq!(rtp_config.external_ip.as_deref(), Some("203.0.113.10"));
+    }
+
+    #[cfg(feature = "commerce")]
+    #[test]
+    fn test_cluster_config_default_is_none() {
+        let config = Config::default();
+        assert!(config.cluster.is_none());
+    }
+
+    #[cfg(feature = "commerce")]
+    #[test]
+    fn test_cluster_peer_roundtrip() {
+        let peer = ClusterPeer {
+            addr: "10.0.0.2".to_string(),
+            sip_port: 5060,
+            ami_port: 8080,
+        };
+        let toml_str = toml::to_string(&peer).unwrap();
+        let parsed: ClusterPeer = toml::from_str(&toml_str).unwrap();
+        assert_eq!(parsed.addr, "10.0.0.2");
+        assert_eq!(parsed.sip_port, 5060);
+        assert_eq!(parsed.ami_port, 8080);
+    }
+
+    #[cfg(feature = "commerce")]
+    #[test]
+    fn test_cluster_config_toml_roundtrip() {
+        let config = ClusterConfig {
+            peers: vec![
+                ClusterPeer {
+                    addr: "10.0.0.2".to_string(),
+                    sip_port: 5060,
+                    ami_port: 8080,
+                },
+                ClusterPeer {
+                    addr: "10.0.0.3".to_string(),
+                    sip_port: 5061,
+                    ami_port: 8081,
+                },
+            ],
+        };
+        let toml_str = toml::to_string(&config).unwrap();
+        let parsed: ClusterConfig = toml::from_str(&toml_str).unwrap();
+        assert_eq!(parsed.peers.len(), 2);
+        assert_eq!(parsed.peers[0].addr, "10.0.0.2");
+        assert_eq!(parsed.peers[1].addr, "10.0.0.3");
+    }
+
+    #[cfg(feature = "commerce")]
+    #[test]
+    fn test_cluster_config_empty_peers() {
+        let config = ClusterConfig::default();
+        assert!(config.peers.is_empty());
+        let toml_str = toml::to_string(&config).unwrap();
+        let parsed: ClusterConfig = toml::from_str(&toml_str).unwrap();
+        assert!(parsed.peers.is_empty());
     }
 }

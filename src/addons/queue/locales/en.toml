@@ -8,6 +8,7 @@ subtitle = "Service queues"
 subtitle_desc = "Create voice queues, manage hold music, and configure fallback behaviors."
 
 # List page actions
+reload_queues = "Reload from files"
 export_all = "Export all"
 new_queue = "New queue"
 
@@ -25,6 +26,7 @@ col_queue = "Queue"
 col_hold_treatment = "Hold treatment"
 col_targets = "Targets"
 col_fallback = "Fallback"
+col_prompts = "Prompts"
 col_updated = "Updated"
 col_actions = "Actions"
 
@@ -52,12 +54,16 @@ delete_queue = "Delete queue"
 delete_confirm_title = "Delete queue"
 delete_confirm_msg = "Delete queue {name}? This cannot be undone."
 delete_confirm_label = "Delete"
+reload_confirm_title = "Reload queues"
+reload_confirm_msg = "Reload queue configurations from files? This will apply exported changes to the running system."
+reload_confirm_label = "Reload"
 export_all_confirm_title = "Export all queues"
 export_all_confirm_msg = "Generate updated queue configuration files for every queue? Existing files will be replaced."
 export_confirm_label = "Export"
 
 # Flash messages
 queue_deleted = "Queue deleted."
+queues_reloaded = "Reloaded {count} route rules."
 queues_exported_n = "Exported {count} queue file."
 queues_exported_n_plural = "Exported {count} queue files."
 queues_exported = "Queues exported."
@@ -71,6 +77,7 @@ file_queues_notice = "These queues are loaded from .toml configuration files and
 delete_error = "Failed to delete queue"
 export_error = "Failed to export queue"
 export_all_error = "Failed to export queues"
+reload_error = "Failed to reload queues"
 
 # Hold summaries (JS)
 hold_immediate_passthrough = "Answer immediately · passthrough ringback"
@@ -107,6 +114,7 @@ detail_updated_label = "Last updated"
 tab_overview = "Overview"
 tab_targets = "Targets"
 tab_fallback = "Fallback"
+tab_voice_prompts = "Voice Prompts"
 
 # Overview section
 section_basics = "Queue basics"
@@ -179,6 +187,24 @@ fallback_queue_hint = "Provide the generated queue TOML file (relative to config
 fallback_skill_group_label = "Skill group"
 fallback_skill_group_placeholder = "Select a skill group"
 fallback_skill_group_hint = "Route to agents matching this skill group."
+
+# Voice Prompts
+section_voice_prompts = "Voice Prompts"
+section_voice_prompts_desc = "Configure built-in voice prompts that are played during queue events (transfer, busy, off-hours)."
+vp_none = "Disabled"
+vp_chinese = "Chinese (zh-CN)"
+vp_english = "English (en-US)"
+vp_custom = "Custom URL / path"
+vp_url_placeholder = "https://example.com/prompt.wav or sounds/prompt.wav"
+vp_download = "Download"
+vp_downloading = "Downloading..."
+vp_preview = "Preview"
+vp_transfer = "Transfer prompt"
+vp_transfer_desc = "Played before connecting the caller to an agent. e.g. \"Hold on, transferring your call\""
+vp_busy = "Busy prompt"
+vp_busy_desc = "Played when all agents are busy. e.g. \"Sorry, all agents are busy\""
+vp_off_hours = "Off-hours prompt"
+vp_off_hours_desc = "Played when the queue is outside business hours. e.g. \"Sorry, it's non-working hours\""
 
 # Form footer
 save_hint = "Queue changes apply instantly after saving."

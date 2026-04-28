@@ -18,6 +18,25 @@
             <div class="flex flex-wrap items-center gap-3">
                 <button type="button"
                     class="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-600 transition hover:border-sky-300 hover:text-sky-700 focus:outline-none focus:ring-2 focus:ring-sky-200 focus:ring-offset-2"
+                    :class="reloading ? 'cursor-wait border-slate-200 text-slate-400 hover:border-slate-200 hover:text-slate-400' : ''"
+                    :disabled="reloading" @click="confirmReload()">
+                    <template x-if="!reloading">
+                        <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6">
+                            <path stroke-linecap="round" stroke-linejoin="round"
+                                d="M4.5 10a5.5 5.5 0 0 1 9.35-3.89l.65.65M15.5 10a5.5 5.5 0 0 1-9.35 3.89l-.65-.65M10 4.5V2m0 18v-2" />
+                        </svg>
+                    </template>
+                    <template x-if="reloading">
+                        <svg class="h-4 w-4 animate-spin text-slate-400" viewBox="0 0 24 24" fill="none"
+                            stroke="currentColor" stroke-width="1.8">
+                            <path stroke-linecap="round" stroke-linejoin="round"
+                                d="M12 3v3m6.364 1.636-2.121 2.121M21 12h-3m-1.636 6.364-2.121-2.121M12 21v-3m-6.364-1.636 2.121-2.121M3 12h3m1.636-6.364 2.121 2.121" />
+                        </svg>
+                    </template>
+                    {{ "queue.reload_queues" | t }}
+                </button>
+                <button type="button"
+                    class="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-600 transition hover:border-sky-300 hover:text-sky-700 focus:outline-none focus:ring-2 focus:ring-sky-200 focus:ring-offset-2"
                     :class="exportingAll ? 'cursor-wait border-slate-200 text-slate-400 hover:border-slate-200 hover:text-slate-400' : ''"
                     :disabled="exportingAll" @click="confirmExportAll()">
                     <template x-if="!exportingAll">
@@ -110,6 +129,7 @@
                             <th scope="col" class="px-4 py-2">{{ "queue.col_hold_treatment" | t }}</th>
                             <th scope="col" class="px-4 py-2">{{ "queue.col_targets" | t }}</th>
                             <th scope="col" class="px-4 py-2">{{ "queue.col_fallback" | t }}</th>
+                            <th scope="col" class="px-4 py-2">{{ "queue.col_prompts" | t }}</th>
                             <th scope="col" class="px-4 py-2">{{ "queue.col_updated" | t }}</th>
                             <th scope="col" class="px-4 py-2">{{ "queue.col_actions" | t }}</th>
                         </tr>
@@ -117,7 +137,7 @@
                     <tbody class="divide-y divide-slate-100 bg-white text-slate-600">
                         <template x-if="loading">
                             <tr>
-                                <td colspan="6" class="px-4 py-6 text-center text-sm text-slate-500">
+                                <td colspan="7" class="px-4 py-6 text-center text-sm text-slate-500">
                                     <div class="inline-flex items-center gap-2">
                                         <svg class="h-4 w-4 animate-spin text-slate-400" viewBox="0 0 24 24" fill="none"
                                             stroke="currentColor" stroke-width="2">
@@ -131,7 +151,7 @@
                         </template>
                         <template x-if="!loading && !queues.length">
                             <tr>
-                                <td colspan="6" class="px-4 py-6 text-center text-sm text-slate-500"
+                                <td colspan="7" class="px-4 py-6 text-center text-sm text-slate-500"
                                     x-text="tt('queue.no_queues')">
                                 </td>
                             </tr>
@@ -173,6 +193,9 @@
                                 </td>
                                 <td class="px-4 py-3">
                                     <span class="text-sm text-slate-700" x-text="fallbackSummary(queue)"></span>
+                                </td>
+                                <td class="px-4 py-3">
+                                    <span class="text-xs text-slate-500" x-text="promptsSummary(queue)"></span>
                                 </td>
                                 <td class="whitespace-nowrap px-4 py-3 text-slate-500"
                                     x-text="formatDate(queue.updated_at)"></td>
@@ -330,6 +353,7 @@
             listEndpoint: `${options.basePath || '/console'}/queues`,
             createUrl: options.createUrl || `${options.basePath || '/console'}/queues/new`,
             exportAllEndpoint: `${options.basePath || '/console'}/queues/export`,
+            reloadEndpoint: `${options.basePath || '/console'}/queues/reload`,
             filtersRaw: options.filters || {},
             t: options.t || {},
             keyword: '',
@@ -348,6 +372,7 @@
             processingDelete: null,
             exportingAll: false,
             exportingQueueId: null,
+            reloading: false,
             showingFrom: 0,
             showingTo: 0,
             tt(key) {
@@ -530,6 +555,15 @@
                 const extra = targets.length > 3 ? ` +${targets.length - 3}` : '';
                 return names + extra;
             },
+            promptsSummary(queue) {
+                const vp = queue?.spec?.voice_prompts;
+                if (!vp) return '—';
+                const labels = [];
+                if (vp.transfer_prompt) labels.push('T');
+                if (vp.busy_prompt) labels.push('B');
+                if (vp.off_hours_prompt) labels.push('O');
+                return labels.length ? labels.join(' · ') : '—';
+            },
             fallbackSummary(queue) {
                 const fallback = queue?.spec?.fallback;
                 if (!fallback) return this.tt('queue.fallback_continue');
@@ -578,6 +612,40 @@
                     this.error = err?.message || this.tt('queue.delete_error');
                 } finally {
                     this.processingDelete = null;
+                }
+            },
+            confirmReload() {
+                if (this.reloading) return;
+                window.dispatchEvent(new CustomEvent('console:confirm', {
+                    detail: {
+                        title: this.tt('queue.reload_confirm_title'),
+                        message: this.tt('queue.reload_confirm_msg'),
+                        confirmLabel: this.tt('queue.reload_confirm_label'),
+                        cancelLabel: this.tt('common.cancel'),
+                        destructive: false,
+                        onConfirm: () => this.reloadQueues(),
+                    },
+                }));
+            },
+            async reloadQueues() {
+                if (this.reloading) return;
+                this.reloading = true;
+                this.error = null;
+                try {
+                    const response = await fetch(this.reloadEndpoint, {
+                        method: 'POST',
+                        headers: { 'Accept': 'application/json' },
+                    });
+                    const data = await response.json().catch(() => ({}));
+                    if (!response.ok) throw new Error(data?.message || this.tt('queue.reload_error'));
+                    const count = data?.queues_reloaded || 0;
+                    this.flash = this.tt('queue.queues_reloaded').replace('{count}', count);
+                    await this.refresh();
+                } catch (err) {
+                    console.error(err);
+                    this.error = err?.message || this.tt('queue.reload_error');
+                } finally {
+                    this.reloading = false;
                 }
             },
             confirmExportAll() {

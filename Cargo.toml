@@ -192,6 +192,7 @@ tempfile = "3.27.0"
 portpicker = "0.1.1"
 tower = { version = "0.5", features = ["util"] }
 sipbot = { version = "=0.2.30", default-features = false }
+serde_urlencoded = "0.7"
 
 [build-dependencies]
 chrono = "0.4"

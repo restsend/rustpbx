@@ -1,7 +1,8 @@
-use crate::addons::{Addon, SidebarItem};
+use crate::addons::{Addon, SidebarItem, export_reload::ExportReloadHandler};
 use crate::app::AppState;
 use async_trait::async_trait;
 use axum::Router;
+use serde_json::{json, Value as JsonValue};
 use tower_http::services::ServeDir;
 
 pub mod console;
@@ -102,5 +103,46 @@ impl Addon for QueueAddon {
 
     fn migrations(&self) -> Vec<Box<dyn sea_orm_migration::MigrationTrait>> {
         vec![Box::new(models::Migration)]
+    }
+
+    fn export_reload_handler(&self) -> Option<Box<dyn ExportReloadHandler>> {
+        Some(Box::new(QueueExportReloadHandler))
+    }
+}
+
+// ── Export/Reload Handler ──────────────────────────────────────────────────────
+
+struct QueueExportReloadHandler;
+
+#[async_trait]
+impl ExportReloadHandler for QueueExportReloadHandler {
+    fn addon_id(&self) -> &str {
+        "queue"
+    }
+
+    fn display_name(&self) -> &str {
+        "Queues"
+    }
+
+    async fn export_and_reload(&self, app_state: &AppState) -> Result<JsonValue, String> {
+        let db = app_state.db();
+        let proxy_cfg = crate::config::ProxyConfig::default();
+        let exporter = crate::addons::queue::services::exporter::QueueExporter::new(db.clone());
+
+        exporter.export_all(&proxy_cfg).await.map_err(|e| format!("Export failed: {}", e))?;
+
+        app_state
+            .sip_server()
+            .inner
+            .data_context
+            .reload_queues(true, None)
+            .await
+            .map_err(|e| format!("Reload failed: {}", e))?;
+
+        if let Some(ref console) = app_state.console {
+            console.clear_pending_reload();
+        }
+
+        Ok(json!({"status": "ok"}))
     }
 }

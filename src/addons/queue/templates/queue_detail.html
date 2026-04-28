@@ -78,6 +78,9 @@ endblock %}
                     <button type="button" @click="activeTab = 'fallback'" :class="tabButtonClasses('fallback')"
                         x-text="tt('queue.tab_fallback')">
                     </button>
+                    <button type="button" @click="activeTab = 'voice_prompts'" :class="tabButtonClasses('voice_prompts')"
+                        x-text="tt('queue.tab_voice_prompts')">
+                    </button>
                 </div>
             </div>
 
@@ -387,6 +390,117 @@ endblock %}
                 </div>
             </section>
 
+            <!-- Voice Prompts tab -->
+            <section class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5" x-show="activeTab === 'voice_prompts'" x-cloak>
+                <div class="flex flex-col gap-1">
+                    <h2 class="text-sm font-semibold text-slate-900" x-text="tt('queue.section_voice_prompts')"></h2>
+                    <p class="text-sm text-slate-500" x-text="tt('queue.section_voice_prompts_desc')"></p>
+                </div>
+                <div class="mt-6 space-y-6">
+                    <!-- Transfer prompt -->
+                    <div class="rounded-lg border border-slate-200 p-4">
+                        <h3 class="text-sm font-semibold text-slate-800" x-text="tt('queue.vp_transfer')"></h3>
+                        <p class="mt-1 text-xs text-slate-500" x-text="tt('queue.vp_transfer_desc')"></p>
+                        <div class="mt-3 grid gap-3 md:grid-cols-3">
+                            <select x-model="vpTransferType"
+                                class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                                <option value="none" x-text="tt('queue.vp_none')"></option>
+                                <option value="zh" x-text="tt('queue.vp_chinese')"></option>
+                                <option value="en" x-text="tt('queue.vp_english')"></option>
+                                <option value="custom" x-text="tt('queue.vp_custom')"></option>
+                            </select>
+                            <div class="flex items-center gap-2 md:col-span-2">
+                                <input type="text" x-show="vpTransferType === 'custom'" x-model.trim="vpTransferCustom"
+                                    class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                    :placeholder="tt('queue.vp_url_placeholder')">
+                                <button type="button" x-show="vpTransferType === 'custom' && vpTransferCustom.startsWith('http')"
+                                    @click="downloadAudio(vpTransferCustom, 'transfer')"
+                                    :disabled="downloadingTransfer"
+                                    class="inline-flex items-center gap-1 rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-600 hover:border-sky-300 hover:text-sky-700"
+                                    x-text="downloadingTransfer ? tt('queue.vp_downloading') : tt('queue.vp_download')">
+                                </button>
+                            </div>
+                        </div>
+                        <div class="mt-2 flex items-center gap-2">
+                            <button type="button" @click="previewAudio('transfer')"
+                                class="inline-flex items-center gap-1 rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-600 hover:border-indigo-300 hover:text-indigo-700"
+                                x-text="tt('queue.vp_preview')">
+                            </button>
+                            <span class="text-xs text-slate-400" x-text="vpTransferPath || ''"></span>
+                        </div>
+                    </div>
+
+                    <!-- Busy prompt -->
+                    <div class="rounded-lg border border-slate-200 p-4">
+                        <h3 class="text-sm font-semibold text-slate-800" x-text="tt('queue.vp_busy')"></h3>
+                        <p class="mt-1 text-xs text-slate-500" x-text="tt('queue.vp_busy_desc')"></p>
+                        <div class="mt-3 grid gap-3 md:grid-cols-3">
+                            <select x-model="vpBusyType"
+                                class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                                <option value="none" x-text="tt('queue.vp_none')"></option>
+                                <option value="zh" x-text="tt('queue.vp_chinese')"></option>
+                                <option value="en" x-text="tt('queue.vp_english')"></option>
+                                <option value="custom" x-text="tt('queue.vp_custom')"></option>
+                            </select>
+                            <div class="flex items-center gap-2 md:col-span-2">
+                                <input type="text" x-show="vpBusyType === 'custom'" x-model.trim="vpBusyCustom"
+                                    class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                    :placeholder="tt('queue.vp_url_placeholder')">
+                                <button type="button" x-show="vpBusyType === 'custom' && vpBusyCustom.startsWith('http')"
+                                    @click="downloadAudio(vpBusyCustom, 'busy')"
+                                    :disabled="downloadingBusy"
+                                    class="inline-flex items-center gap-1 rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-600 hover:border-sky-300 hover:text-sky-700"
+                                    x-text="downloadingBusy ? tt('queue.vp_downloading') : tt('queue.vp_download')">
+                                </button>
+                            </div>
+                        </div>
+                        <div class="mt-2 flex items-center gap-2">
+                            <button type="button" @click="previewAudio('busy')"
+                                class="inline-flex items-center gap-1 rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-600 hover:border-indigo-300 hover:text-indigo-700"
+                                x-text="tt('queue.vp_preview')">
+                            </button>
+                            <span class="text-xs text-slate-400" x-text="vpBusyPath || ''"></span>
+                        </div>
+                    </div>
+
+                    <!-- Off-hours prompt -->
+                    <div class="rounded-lg border border-slate-200 p-4">
+                        <h3 class="text-sm font-semibold text-slate-800" x-text="tt('queue.vp_off_hours')"></h3>
+                        <p class="mt-1 text-xs text-slate-500" x-text="tt('queue.vp_off_hours_desc')"></p>
+                        <div class="mt-3 grid gap-3 md:grid-cols-3">
+                            <select x-model="vpOffHoursType"
+                                class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                                <option value="none" x-text="tt('queue.vp_none')"></option>
+                                <option value="zh" x-text="tt('queue.vp_chinese')"></option>
+                                <option value="en" x-text="tt('queue.vp_english')"></option>
+                                <option value="custom" x-text="tt('queue.vp_custom')"></option>
+                            </select>
+                            <div class="flex items-center gap-2 md:col-span-2">
+                                <input type="text" x-show="vpOffHoursType === 'custom'" x-model.trim="vpOffHoursCustom"
+                                    class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                    :placeholder="tt('queue.vp_url_placeholder')">
+                                <button type="button" x-show="vpOffHoursType === 'custom' && vpOffHoursCustom.startsWith('http')"
+                                    @click="downloadAudio(vpOffHoursCustom, 'offhours')"
+                                    :disabled="downloadingOffHours"
+                                    class="inline-flex items-center gap-1 rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-600 hover:border-sky-300 hover:text-sky-700"
+                                    x-text="downloadingOffHours ? tt('queue.vp_downloading') : tt('queue.vp_download')">
+                                </button>
+                            </div>
+                        </div>
+                        <div class="mt-2 flex items-center gap-2">
+                            <button type="button" @click="previewAudio('offhours')"
+                                class="inline-flex items-center gap-1 rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-600 hover:border-indigo-300 hover:text-indigo-700"
+                                x-text="tt('queue.vp_preview')">
+                            </button>
+                            <span class="text-xs text-slate-400" x-text="vpOffHoursPath || ''"></span>
+                        </div>
+                    </div>
+
+                    <!-- Preview audio element (hidden) -->
+                    <audio x-ref="audioPreview" controls class="hidden"></audio>
+                </div>
+            </section>
+
             <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                 <p class="text-xs text-slate-400" x-text="tt('queue.save_hint')"></p>
                 <div class="flex items-center gap-3">
@@ -459,6 +573,19 @@ endblock %}
             },
             holdEnabled: false,
             fallbackMode: 'none',
+            // Voice prompts
+            vpTransferType: 'none',
+            vpBusyType: 'none',
+            vpOffHoursType: 'none',
+            vpTransferCustom: '',
+            vpBusyCustom: '',
+            vpOffHoursCustom: '',
+            vpTransferPath: '',
+            vpBusyPath: '',
+            vpOffHoursPath: '',
+            downloadingTransfer: false,
+            downloadingBusy: false,
+            downloadingOffHours: false,
             saving: false,
             success: null,
             error: null,
@@ -580,6 +707,90 @@ endblock %}
                 }
                 return val != null ? String(val) : key;
             },
+            VP_PATHS: {
+                transfer: { zh: 'sounds/queue-transfer-zh.wav', en: 'sounds/queue-transfer-en.wav' },
+                busy: { zh: 'sounds/queue-busy-zh.wav', en: 'sounds/queue-busy-en.wav' },
+                offhours: { zh: 'sounds/queue-off-hours-zh.wav', en: 'sounds/queue-off-hours-en.wav' },
+            },
+            vpTypeFor(path) {
+                if (!path) return 'none';
+                for (const [type, langs] of Object.entries(this.VP_PATHS)) {
+                    for (const [lang, p] of Object.entries(langs)) {
+                        if (path === p) return lang;
+                    }
+                }
+                return 'custom';
+            },
+            loadVoicePrompts(vp) {
+                if (!vp || typeof vp !== 'object') return;
+                this.vpTransferType = this.vpTypeFor(vp.transfer_prompt);
+                this.vpBusyType = this.vpTypeFor(vp.busy_prompt);
+                this.vpOffHoursType = this.vpTypeFor(vp.off_hours_prompt);
+                this.vpTransferPath = vp.transfer_prompt || '';
+                this.vpBusyPath = vp.busy_prompt || '';
+                this.vpOffHoursPath = vp.off_hours_prompt || '';
+                if (this.vpTransferType === 'custom') this.vpTransferCustom = vp.transfer_prompt;
+                if (this.vpBusyType === 'custom') this.vpBusyCustom = vp.busy_prompt;
+                if (this.vpOffHoursType === 'custom') this.vpOffHoursCustom = vp.off_hours_prompt;
+            },
+            buildVoicePrompts() {
+                const result = {};
+                const transfer = this.resolvePrompt('transfer', this.vpTransferType, this.vpTransferCustom);
+                const busy = this.resolvePrompt('busy', this.vpBusyType, this.vpBusyCustom);
+                const offhours = this.resolvePrompt('offhours', this.vpOffHoursType, this.vpOffHoursCustom);
+                if (transfer) result.transfer_prompt = transfer;
+                if (busy) result.busy_prompt = busy;
+                if (offhours) result.off_hours_prompt = offhours;
+                return Object.keys(result).length ? result : null;
+            },
+            resolvePrompt(type, lang, custom) {
+                if (lang === 'none' || !lang) return null;
+                if (lang === 'custom') return custom || null;
+                return this.VP_PATHS[type]?.[lang] || null;
+            },
+            async downloadAudio(url, type) {
+                const loadingKey = type === 'transfer' ? 'downloadingTransfer'
+                    : type === 'busy' ? 'downloadingBusy' : 'downloadingOffHours';
+                this[loadingKey] = true;
+                try {
+                    const resp = await fetch(`${this.basePath}/queues/download-audio`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+                        body: JSON.stringify({ url }),
+                    });
+                    const data = await resp.json().catch(() => ({}));
+                    if (!resp.ok) throw new Error(data?.message || 'Download failed');
+                    const path = data.path;
+                    if (type === 'transfer') { this.vpTransferCustom = path; this.vpTransferPath = path; }
+                    else if (type === 'busy') { this.vpBusyCustom = path; this.vpBusyPath = path; }
+                    else { this.vpOffHoursCustom = path; this.vpOffHoursPath = path; }
+                } catch (err) {
+                    console.error(err);
+                    alert(err.message || 'Download failed');
+                } finally {
+                    this[loadingKey] = false;
+                }
+            },
+            previewAudio(type) {
+                let path = type === 'transfer' ? this.vpTransferPath
+                    : type === 'busy' ? this.vpBusyPath : this.vpOffHoursPath;
+                if (!path) {
+                    // Use built-in path based on type
+                    const lang = type === 'transfer' ? this.vpTransferType
+                        : type === 'busy' ? this.vpBusyType : this.vpOffHoursType;
+                    if (lang && lang !== 'none' && lang !== 'custom') {
+                        path = this.VP_PATHS[type]?.[lang];
+                    }
+                }
+                if (!path) return;
+                const url = `${this.basePath}/queues/sound/${path.replace(/^sounds\//, '')}`;
+                const audio = this.$refs.audioPreview;
+                if (audio) {
+                    audio.src = url;
+                    audio.classList.remove('hidden');
+                    audio.play().catch(() => {});
+                }
+            },
             tabButtonClasses(tab) {
                 return this.activeTab === tab
                     ? 'rounded-lg bg-sky-600 px-4 py-2 text-sm font-semibold text-white shadow-sm'
@@ -601,6 +812,8 @@ endblock %}
                 this.form.spec = spec;
                 this.holdEnabled = Boolean(spec.hold && (spec.hold.audio_file || spec.hold.loop_playback === false));
                 this.fallbackMode = this.detectFallbackMode(spec.fallback);
+                // Parse voice prompts from spec
+                this.loadVoicePrompts(spec.voice_prompts);
                 this.pageTitle = this.mode === 'edit'
                     ? (model.name ? `${this.tt('queue.detail_subtitle_edit')} - ${model.name}` : this.tt('queue.detail_subtitle_edit'))
                     : this.tt('queue.new_queue');
@@ -813,6 +1026,8 @@ endblock %}
                 if (acdPolicy) {
                     spec.acd_policy = acdPolicy;
                 }
+                // Voice prompts
+                spec.voice_prompts = this.buildVoicePrompts();
                 return spec;
             },
             buildPayload() {

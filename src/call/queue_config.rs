@@ -1,5 +1,6 @@
 use crate::call::{
     DialStrategy, FailureAction, Location, QueueFallbackAction, QueueHoldConfig, QueuePlan,
+    VoicePrompts,
 };
 use anyhow::{Result, anyhow};
 use rsipstack::sip::{StatusCode, Uri};
@@ -38,6 +39,10 @@ pub struct QueueConfig {
     /// Fallback action when all agents fail
     #[serde(default)]
     pub fallback: Option<FallbackConfig>,
+
+    /// Voice prompts for queue events (transfer, busy, off-hours).
+    #[serde(default)]
+    pub voice_prompts: Option<VoicePrompts>,
 }
 
 /// Hold music configuration
@@ -164,6 +169,7 @@ impl QueueConfig {
             label: self.name.clone(),
             retry_codes: None,
             no_trying_timeout: None,
+            voice_prompts: self.voice_prompts.clone(),
         };
 
         Ok(plan)
@@ -551,6 +557,7 @@ uri = "://invalid"
             ring_timeout_secs: Some(15),
             acd_policy: Some("support-default".to_string()),
             fallback: None,
+            voice_prompts: None,
         };
 
         let toml_str = original.to_toml().expect("Failed to serialize");

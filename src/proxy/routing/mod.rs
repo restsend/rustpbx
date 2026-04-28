@@ -519,6 +519,8 @@ pub struct RouteQueueConfig {
     pub fallback: Option<RouteQueueFallbackConfig>,
     #[serde(default)]
     pub strategy: RouteQueueStrategyConfig,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub voice_prompts: Option<crate::call::VoicePrompts>,
     #[serde(skip)]
     pub origin: ConfigOrigin,
 }
@@ -609,6 +611,7 @@ impl RouteQueueConfig {
             && timeout > 0 {
                 plan.ring_timeout = Some(Duration::from_secs(timeout as u64));
             }
+        plan.voice_prompts = self.voice_prompts.clone();
         Ok(plan)
     }
 

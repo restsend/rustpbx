@@ -1718,6 +1718,178 @@
             </div>
         </section>
 
+        <section x-show="activeTab === 'cluster'" x-cloak x-transition.opacity class="space-y-6"
+            id="settings-tab-cluster" role="tabpanel" tabindex="0">
+            <div class="grid gap-6 lg:grid-cols-1">
+                <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+                    <div class="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+                        <div>
+                            <h2 class="text-base font-semibold text-slate-900">{{ "settings_page.cluster_peers" | t }}</h2>
+                            <p class="text-xs text-slate-500">{{ "settings_page.cluster_peers_desc" | t }}</p>
+                        </div>
+                        <button type="button" @click="addClusterPeer()"
+                            class="inline-flex items-center gap-2 rounded-lg border border-dashed border-slate-300 px-3 py-1.5 text-xs font-semibold text-slate-600 transition hover:border-sky-300 hover:text-sky-700">
+                            <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.8">
+                                <path stroke-linecap="round" stroke-linejoin="round" d="M10 4v12m6-6H4" />
+                            </svg>
+                            {{ "settings_page.cluster_add_peer" | t }}
+                        </button>
+                    </div>
+
+                    <div class="mt-4 space-y-4" x-data="{}">
+                        <template x-for="(peer, index) in clusterDraft.peers" :key="index">
+                            <div class="rounded-lg border border-slate-200 bg-slate-50 p-4">
+                                <div class="flex items-start justify-between gap-4">
+                                    <div class="flex-1 grid gap-4 md:grid-cols-3">
+                                        <div>
+                                            <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">{{ "settings_page.cluster_peer_addr" | t }}</label>
+                                            <input type="text" x-model="peer.addr"
+                                                class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                                placeholder="192.168.1.100">
+                                        </div>
+                                        <div>
+                                            <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">{{ "settings_page.cluster_sip_port" | t }}</label>
+                                            <input type="number" min="1" max="65535" x-model="peer.sip_port"
+                                                class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                                placeholder="5060">
+                                        </div>
+                                        <div>
+                                            <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">{{ "settings_page.cluster_ami_port" | t }}</label>
+                                            <input type="number" min="1" max="65535" x-model="peer.ami_port"
+                                                class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                                placeholder="8080">
+                                        </div>
+                                    </div>
+                                    <button type="button" @click="removeClusterPeer(index)"
+                                        class="mt-6 rounded-lg p-1.5 text-slate-400 transition hover:bg-slate-100 hover:text-rose-500">
+                                        <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2">
+                                            <path stroke-linecap="round" stroke-linejoin="round" d="M6 6l8 8M14 6l-8 8" />
+                                        </svg>
+                                    </button>
+                                </div>
+                            </div>
+                        </template>
+                        <template x-if="!clusterDraft.peers.length">
+                            <div class="rounded-lg border border-dashed border-slate-200 px-4 py-6 text-center text-xs text-slate-400">
+                                {{ "settings_page.cluster_no_peers" | t }}
+                            </div>
+                        </template>
+                    </div>
+
+                    <div class="mt-4 flex items-center justify-end gap-3 border-t border-slate-200 pt-4">
+                        <button type="button"
+                            class="inline-flex items-center justify-center rounded-lg border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-600 transition hover:bg-slate-100"
+                            @click="resetClusterDraft()">
+                            {{ "common.reset" | t }}
+                        </button>
+                        <button type="button" @click="saveClusterSettings()"
+                            class="inline-flex items-center justify-center rounded-lg bg-sky-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-offset-2"
+                            :disabled="clusterProcessing">
+                            <span x-text="clusterProcessing ? tt('common.saving') : tt('common.save_changes')"></span>
+                        </button>
+                    </div>
+                </div>
+
+                <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5" x-data="{}">
+                    <div class="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+                        <div>
+                            <h2 class="text-base font-semibold text-slate-900">{{ "settings_page.cluster_ping" | t }}</h2>
+                            <p class="text-xs text-slate-500">{{ "settings_page.cluster_ping_desc" | t }}</p>
+                        </div>
+                        <button type="button" @click="pingClusterPeers()"
+                            class="inline-flex items-center gap-2 rounded-lg bg-sky-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-offset-2"
+                            :disabled="clusterPinging">
+                            <span x-text="clusterPinging ? tt('common.loading') : tt('settings_page.cluster_ping_btn')"></span>
+                        </button>
+                    </div>
+                    <template x-if="clusterPingResults.length">
+                        <div class="mt-4 space-y-3">
+                            <template x-for="result in clusterPingResults" :key="result.peer">
+                                <div class="rounded-lg border px-4 py-3 text-sm"
+                                    :class="result.reachable ? 'border-emerald-200 bg-emerald-50' : 'border-rose-200 bg-rose-50'">
+                                    <div class="flex items-center justify-between">
+                                        <div>
+                                            <span class="font-semibold text-slate-800" x-text="result.peer"></span>
+                                            <span class="ml-2 text-xs text-slate-500" x-text="`AMI · ${result.ami_addr}`"></span>
+                                        </div>
+                                        <div class="flex items-center gap-3">
+                                            <span class="rounded-full px-2 py-0.5 text-[11px] font-semibold"
+                                                :class="result.reachable ? 'bg-emerald-100 text-emerald-700' : 'bg-rose-100 text-rose-700'"
+                                                x-text="result.reachable ? '{{ "settings_page.cluster_reachable" | t }}' : '{{ "settings_page.cluster_unreachable" | t }}'"></span>
+                                            <template x-if="result.latency_ms !== null && result.latency_ms !== undefined">
+                                                <span class="text-xs text-slate-500" x-text="`${result.latency_ms}ms`"></span>
+                                            </template>
+                                        </div>
+                                    </div>
+                                    <div x-show="result.error" class="mt-1 text-xs text-rose-600" x-text="result.error"></div>
+                                </div>
+                            </template>
+                        </div>
+                    </template>
+                    <template x-if="clusterPingResults.length === 0 && clusterPingDone">
+                        <div class="mt-4 rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-xs text-slate-500">
+                            {{ "settings_page.cluster_ping_empty" | t }}
+                        </div>
+                    </template>
+                </div>
+
+                <div class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+                    <div class="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+                        <div>
+                            <h2 class="text-base font-semibold text-slate-900">{{ "settings_page.cluster_reload_config" | t }}</h2>
+                            <p class="text-xs text-slate-500">{{ "settings_page.cluster_reload_config_desc" | t }}</p>
+                        </div>
+                    </div>
+                    <div class="mt-4 space-y-3">
+                        <label class="flex items-center gap-3 rounded-lg border border-slate-200 px-4 py-3 text-sm font-semibold text-slate-700 hover:border-sky-200 hover:bg-sky-50 cursor-pointer transition">
+                            <input type="checkbox" class="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-500" x-model="clusterReloadDraft.trunks">
+                            <span>Trunks</span>
+                        </label>
+                        <label class="flex items-center gap-3 rounded-lg border border-slate-200 px-4 py-3 text-sm font-semibold text-slate-700 hover:border-sky-200 hover:bg-sky-50 cursor-pointer transition">
+                            <input type="checkbox" class="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-500" x-model="clusterReloadDraft.routes">
+                            <span>Routes</span>
+                        </label>
+                        <template x-for="addon in reloadAddonList" :key="addon.id">
+                            <label class="flex items-center gap-3 rounded-lg border border-slate-200 px-4 py-3 text-sm font-semibold text-slate-700 hover:border-sky-200 hover:bg-sky-50 cursor-pointer transition">
+                                <input type="checkbox" class="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-500" x-model="clusterReloadDraft[addon.id]">
+                                <span x-text="addon.name"></span>
+                            </label>
+                        </template>
+                    </div>
+                    <div class="mt-4 flex items-center justify-end gap-3 border-t border-slate-200 pt-4">
+                        <button type="button" @click="clusterReloadDraft = { trunks: true, routes: true }; clusterReloadResults = []; for (const a of reloadAddonList) clusterReloadDraft[a.id] = true"
+                            class="inline-flex items-center justify-center rounded-lg border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-600 transition hover:bg-slate-100">
+                            {{ "common.reset" | t }}
+                        </button>
+                        <button type="button" @click="reloadClusterConfig()"
+                            class="inline-flex items-center justify-center gap-2 rounded-lg bg-sky-600 px-4 py-2 text-sm font-semibold text-white shadow-sm transition hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-400 focus:ring-offset-2"
+                            :disabled="clusterReloading">
+                            <svg class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6">
+                                <path stroke-linecap="round" stroke-linejoin="round" d="M7 5l6 5-6 5" />
+                            </svg>
+                            <span x-text="clusterReloading ? tt('common.loading') : tt('settings_page.cluster_execute_reload')"></span>
+                        </button>
+                    </div>
+                    <template x-if="clusterReloadResults.length">
+                        <div class="mt-4 space-y-2 border-t border-slate-200 pt-4">
+                            <template x-for="result in clusterReloadResults" :key="result.addon">
+                                <div class="rounded-lg border px-4 py-2 text-sm"
+                                    :class="result.status === 'ok' ? 'border-emerald-200 bg-emerald-50' : (result.status === 'skipped' ? 'border-slate-200 bg-slate-50' : 'border-rose-200 bg-rose-50')">
+                                    <div class="flex items-center justify-between">
+                                        <span class="font-semibold text-slate-700" x-text="result.addon"></span>
+                                        <span class="rounded-full px-2 py-0.5 text-[11px] font-semibold"
+                                            :class="result.status === 'ok' ? 'bg-emerald-100 text-emerald-700' : (result.status === 'skipped' ? 'bg-slate-200 text-slate-600' : 'bg-rose-100 text-rose-700')"
+                                            x-text="result.status"></span>
+                                    </div>
+                                    <div x-show="result.message" class="mt-1 text-xs text-slate-500" x-text="result.message"></div>
+                                </div>
+                            </template>
+                        </div>
+                    </template>
+                </div>
+            </div>
+        </section>
+
         <section x-show="activeTab === 'departments'" id="settings-tab-departments" role="tabpanel" tabindex="0">
             <div class="grid gap-6 lg:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
                 <div class="space-y-6">
@@ -2434,6 +2606,7 @@
                     { id: 'security', label: tget(tt, 'settings_page.security_posture') || 'Security posture' },
                     { id: 'logs', label: tget(tt, 'settings_page.logs_viewer') || 'Logs', requiresSuperuser: true },
                     { id: 'rwi', label: tget(tt, 'settings_page.rwi_settings') || 'RWI' },
+                    { id: 'cluster', label: tget(tt, 'settings_page.cluster') || 'Cluster', requireClusterData: true },
                     { id: 'departments', label: tget(tt, 'settings_page.departments') || 'Departments' },
                     { id: 'users', label: tget(tt, 'settings_page.users_title') || 'Users', requiresPermission: 'users:manage' },
                     { id: 'roles', label: tget(tt, 'settings_page.roles_title') || 'Roles', requiresPermission: 'users:manage' },
@@ -2540,6 +2713,15 @@
                 contexts: [],
             },
             rwiProcessing: false,
+            clusterDraft: { peers: [] },
+            clusterProcessing: false,
+            clusterPinging: false,
+            clusterPingResults: [],
+            clusterPingDone: false,
+            reloadAddonList: [],
+            clusterReloadDraft: { trunks: true, routes: true },
+            clusterReloading: false,
+            clusterReloadResults: [],
             logViewer: {
                 lines: [],
                 limit: 200,
@@ -2718,6 +2900,7 @@
                 this.initStorageDraft();
                 this.initSecurityDraft();
                 this.fetchSipFlowSettings();
+                this.initClusterDraft();
                 this.directory = { departments: [], users: [], pending_invites: [] };
                 this.departmentPagination = null;
                 this.userPagination = null;
@@ -2754,6 +2937,9 @@
                         return false;
                     }
                     if (tab.requiresSuperuser && !this.currentUser?.is_superuser) {
+                        return false;
+                    }
+                    if (tab.requireClusterData && !this.rawSettings?.cluster) {
                         return false;
                     }
                     return true;
@@ -5183,6 +5369,182 @@
                     });
                 } finally {
                     this.rwiProcessing = false;
+                }
+            },
+            // ── Cluster methods ────────────────────────────────────────────
+            initClusterDraft() {
+                const cluster = this.rawSettings?.cluster;
+                this.clusterDraft = {
+                    peers: (cluster?.peers || []).map(p => ({
+                        addr: p.addr || '',
+                        sip_port: p.sip_port || 5060,
+                        ami_port: p.ami_port || 8080,
+                    })),
+                };
+                this.fetchReloadAddons();
+            },
+            async fetchReloadAddons() {
+                try {
+                    const resp = await fetch(`${this.basePath}/settings/config/cluster/reload-addons`);
+                    const data = await resp.json();
+                    this.reloadAddonList = data.addons || [];
+                    // Auto-check all by default
+                    this.clusterReloadDraft = {};
+                    for (const a of this.reloadAddonList) {
+                        this.clusterReloadDraft[a.id] = true;
+                    }
+                    this.clusterReloadDraft.trunks = true;
+                } catch (e) {
+                    console.warn('Failed to fetch reload addons', e);
+                }
+            },
+            addClusterPeer() {
+                this.clusterDraft.peers.push({ addr: '', sip_port: 5060, ami_port: 8080 });
+            },
+            removeClusterPeer(index) {
+                this.clusterDraft.peers.splice(index, 1);
+            },
+            resetClusterDraft() {
+                this.initClusterDraft();
+            },
+            async saveClusterSettings() {
+                if (this.clusterProcessing) return;
+                const body = {
+                    peers: this.clusterDraft.peers
+                        .filter(p => p.addr.trim())
+                        .map(p => ({
+                            addr: p.addr.trim(),
+                            sip_port: Number(p.sip_port) || 5060,
+                            ami_port: Number(p.ami_port) || 8080,
+                        })),
+                };
+                this.clusterProcessing = true;
+                try {
+                    const response = await fetch(`${this.basePath}/settings/config/cluster`, {
+                        method: 'PATCH',
+                        headers: {
+                            Accept: 'application/json',
+                            'Content-Type': 'application/json',
+                        },
+                        body: JSON.stringify(body),
+                    });
+                    const data = await response.json().catch(() => ({}));
+                    if (!response.ok) {
+                        throw new Error(data?.message || 'Failed to update cluster settings');
+                    }
+                    this.rawSettings.cluster = data.cluster || body;
+                    this.initClusterDraft();
+                    this.$dispatch('toast', {
+                        title: 'Settings saved',
+                        message: data?.message || 'Cluster settings saved.',
+                    });
+                    this.lastOperation = {
+                        label: 'Cluster settings',
+                        timestamp: new Date().toLocaleString(),
+                    };
+                } catch (err) {
+                    this.$dispatch('toast', {
+                        type: 'error',
+                        title: 'Error',
+                        message: err?.message || 'Unable to update cluster settings.',
+                    });
+                } finally {
+                    this.clusterProcessing = false;
+                }
+            },
+            async pingClusterPeers() {
+                if (this.clusterPinging) return;
+                this.clusterPinging = true;
+                this.clusterPingResults = [];
+                this.clusterPingDone = false;
+                try {
+                    const response = await fetch(`${this.amiEndpoint}/cluster/ping`, {
+                        method: 'POST',
+                        headers: { Accept: 'application/json' },
+                    });
+                    const data = await response.json().catch(() => ({}));
+                    if (response.ok) {
+                        this.clusterPingResults = data.peers || [];
+                    } else {
+                        this.$dispatch('toast', {
+                            type: 'error',
+                            title: 'Ping failed',
+                            message: data?.message || 'Failed to ping cluster peers.',
+                        });
+                    }
+                } catch (err) {
+                    this.$dispatch('toast', {
+                        type: 'error',
+                        title: 'Error',
+                        message: err?.message || 'Unable to ping cluster peers.',
+                    });
+                } finally {
+                    this.clusterPinging = false;
+                    this.clusterPingDone = true;
+                }
+            },
+            async reloadClusterConfig() {
+                if (this.clusterReloading) return;
+                const draft = this.clusterReloadDraft;
+                const trunkSelected = draft.trunks;
+                const routesSelected = draft.routes;
+                const addonIds = this.reloadAddonList.map(a => a.id).filter(id => draft[id]);
+                if (!trunkSelected && !routesSelected && !addonIds.length) {
+                    this.$dispatch('toast', { title: 'No addons selected', message: 'Please select at least one addon to reload.' });
+                    return;
+                }
+                this.clusterReloading = true;
+                this.clusterReloadResults = [];
+
+                const params = new URLSearchParams();
+                if (trunkSelected) params.set('trunks', 'true');
+                if (routesSelected) params.set('routes', 'true');
+                for (const id of addonIds) params.append('addons', id);
+
+                try {
+                    const response = await fetch(`${this.basePath}/settings/config/cluster/reload?${params.toString()}`);
+                    if (!response.ok) throw new Error('Failed to connect');
+                    const reader = response.body.getReader();
+                    const decoder = new TextDecoder();
+                    let buffer = '';
+
+                    while (true) {
+                        const { done, value } = await reader.read();
+                        if (done) break;
+                        buffer += decoder.decode(value, { stream: true });
+                        const lines = buffer.split('\n');
+                        buffer = lines.pop() || '';
+                        for (const line of lines) {
+                            if (line.startsWith('data: ')) {
+                                try {
+                                    const data = JSON.parse(line.slice(6));
+                                    this.handleReloadEvent(data);
+                                } catch (e) { /* ignore parse errors */ }
+                            }
+                        }
+                    }
+                } catch (err) {
+                    this.$dispatch('toast', { type: 'error', title: 'Error', message: err?.message || 'Unable to reload config.' });
+                } finally {
+                    this.clusterReloading = false;
+                }
+            },
+            handleReloadEvent(data) {
+                if (!data) return;
+                const t = data.type;
+                if (t === 'addon_start') {
+                    this.clusterReloadResults.push({ addon: data.addon, node: data.node, status: 'running' });
+                } else if (t === 'addon_complete') {
+                    const existing = this.clusterReloadResults.find(r => r.addon === data.addon && r.node === data.node);
+                    if (existing) existing.status = data.result?.status || 'ok';
+                    else this.clusterReloadResults.push({ addon: data.addon, node: data.node, status: data.result?.status || 'ok', result: data.result });
+                } else if (t === 'node_start') {
+                    this.clusterReloadResults.push({ addon: null, node: data.node, status: 'running' });
+                } else if (t === 'node_complete' || t === 'node_error') {
+                    const existing = this.clusterReloadResults.find(r => r.addon === null && r.node === data.node);
+                    if (existing) existing.status = t === 'node_complete' ? 'ok' : 'error';
+                } else if (t === 'complete') {
+                    this.$dispatch('toast', { title: 'Reload complete', message: 'All selected addons have been reloaded.' });
                 }
             },
         }));
