@@ -56,7 +56,6 @@ default = [
     "addon-transcript",
     "addon-archive",
     "addon-observability",
-    "addon-jsonrpc-router",
 ]
 cross = ["aws-lc-rs/bindgen"]
 perfcli-bin = []
