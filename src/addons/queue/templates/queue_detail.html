@@ -258,7 +258,7 @@ endblock %}
                                         <label class="flex flex-col gap-1 text-xs font-semibold uppercase tracking-wide text-slate-500">
                                             <span x-text="tt('queue.target_skill_group')"></span>
                                             <select x-model="target.skill_group_id"
-                                                x-show="skillGroups.length > 0"
+                                                x-effect="target.skill_group_id && skillGroups.length ? $el.value = target.skill_group_id : ''"
                                                 @change="target.uri = 'skill-group:' + target.skill_group_id"
                                                 class="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
                                                 <option value="" x-text="tt('queue.skill_group_select_placeholder')"></option>
@@ -266,10 +266,6 @@ endblock %}
                                                     <option :value="group.skill_group_id" x-text="group.display_name || group.skill_group_id"></option>
                                                 </template>
                                             </select>
-                                            <input type="text" x-show="skillGroups.length === 0"
-                                                :value="target.skill_group_id || target.uri"
-                                                disabled
-                                                class="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-500">
                                         </label>
                                     </template>
                                     <label
@@ -371,13 +367,13 @@ endblock %}
                             <span x-text="tt('queue.fallback_skill_group_label')"></span>
                             <template x-if="skillGroups.length">
                                                 <select x-model="form.spec.fallback.skill_group_ref"
-                                                    :key="'sg-fb-' + (skillGroups?.length || 0)"
+                                                    x-effect="form.spec.fallback.skill_group_ref && skillGroups.length ? $el.value = form.spec.fallback.skill_group_ref : ''"
                                                     class="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
                                                     <option value="" x-text="tt('queue.fallback_skill_group_placeholder')"></option>
                                                     <template x-for="group in skillGroups" :key="group.skill_group_id">
                                                         <option :value="group.skill_group_id" x-text="group.display_name || group.skill_group_id"></option>
                                                     </template>
-                                </select>
+                                                </select>
                             </template>
                             <template x-if="!skillGroups.length">
                                 <input type="text" x-model.trim="form.spec.fallback.skill_group_ref"
@@ -678,21 +674,6 @@ endblock %}
                 if (fallbackRef && this.form?.spec?.fallback) {
                     this.form.spec.fallback.skill_group_ref = fallbackRef;
                 }
-                this.$nextTick(() => {
-                    targets.forEach((target) => {
-                        if (target.skill_group_id) {
-                            const v = target.skill_group_id;
-                            target.skill_group_id = '';
-                            this.$nextTick(() => { target.skill_group_id = v; });
-                        }
-                    });
-                    const fb = this.form?.spec?.fallback;
-                    if (fb?.skill_group_ref) {
-                        const v = fb.skill_group_ref;
-                        fb.skill_group_ref = '';
-                        this.$nextTick(() => { fb.skill_group_ref = v; });
-                    }
-                });
             },
             hasSkillGroupOption(value) {
                 const target = this.extractSkillGroupId(value);
