@@ -2404,7 +2404,46 @@ impl SipSession {
             && self.callee_offer_uses_media_bridge
         {
             match self.apply_bridge_callee_answer(&callee_sdp_value).await {
-                Ok(()) => self.start_media_bridge_forwarding().await,
+                Ok(()) => {
+                    // The app media bridge was created with the caller's codec only
+                    // (build_caller_answer_codec_list).  If the callee negotiated a
+                    // different codec, the bridge passthrough would send garbled audio.
+                    // Detect the mismatch and configure per-direction transcoders.
+                    if let Some(ref bridge) = self.media_bridge {
+                        let caller_profile = self
+                            .answer
+                            .as_deref()
+                            .map(MediaNegotiator::extract_leg_profile)
+                            .unwrap_or_default();
+                        let callee_profile =
+                            MediaNegotiator::extract_leg_profile(&callee_sdp_value);
+
+                        if let (Some(ca), Some(ce)) =
+                            (&caller_profile.audio, &callee_profile.audio)
+                            && ca.codec != ce.codec
+                        {
+                            bridge.set_transcoder(
+                                self.caller_bridge_endpoint(),
+                                ca.codec,
+                                ce.codec,
+                                ce.payload_type,
+                            );
+                            bridge.set_transcoder(
+                                self.callee_bridge_endpoint(),
+                                ce.codec,
+                                ca.codec,
+                                ca.payload_type,
+                            );
+                            info!(
+                                session_id = %self.context.session_id,
+                                caller_codec = ?ca.codec,
+                                callee_codec = ?ce.codec,
+                                "Bridge transcoder configured for codec mismatch"
+                            );
+                        }
+                    }
+                    self.start_media_bridge_forwarding().await;
+                }
                 Err(error) => {
                     warn!(
                         session_id = %self.context.session_id,

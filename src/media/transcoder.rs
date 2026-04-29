@@ -131,6 +131,10 @@ impl Transcoder {
         self.target.clock_rate()
     }
 
+    pub fn target_pt(&self) -> u8 {
+        self.target_pt
+    }
+
     pub fn transcode(&mut self, frame: &AudioFrame) -> AudioFrame {
         let mut pcmbuf = self.decoder.decode(&frame.data);
         if let Some(resampler) = &mut self.resampler {
