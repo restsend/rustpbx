@@ -1567,24 +1567,48 @@ impl SipSession {
             bridge_builder = bridge_builder.with_ice_servers(ice_servers.clone());
         }
 
-        let caller_codecs =
-            MediaNegotiator::build_caller_answer_codec_list(caller_offer, caller_is_webrtc);
-        let audio_caps: Vec<_> = caller_codecs
+        let allow_codecs = &self.context.dialplan.allow_codecs;
+        let codec_lists = MediaNegotiator::build_bridge_codec_lists(
+            caller_offer,
+            caller_is_webrtc,
+            !caller_is_webrtc,
+            allow_codecs,
+        );
+        let webrtc_side_codecs = if caller_is_webrtc {
+            &codec_lists.caller_side
+        } else {
+            &codec_lists.callee_side
+        };
+        let rtp_side_codecs = if caller_is_webrtc {
+            &codec_lists.callee_side
+        } else {
+            &codec_lists.caller_side
+        };
+
+        let webrtc_caps: Vec<_> = webrtc_side_codecs
             .iter()
             .filter_map(|codec| codec.to_audio_capability())
             .collect();
-        if !audio_caps.is_empty() {
+        let rtp_caps: Vec<_> = rtp_side_codecs
+            .iter()
+            .filter_map(|codec| codec.to_audio_capability())
+            .collect();
+        if !webrtc_caps.is_empty() || !rtp_caps.is_empty() {
             bridge_builder = bridge_builder
-                .with_webrtc_audio_capabilities(audio_caps.clone())
-                .with_rtp_audio_capabilities(audio_caps);
+                .with_webrtc_audio_capabilities(webrtc_caps)
+                .with_rtp_audio_capabilities(rtp_caps);
         }
 
-        if let Some(sender) = caller_codecs
+        let webrtc_sender = webrtc_side_codecs
             .iter()
             .find(|codec| !codec.is_dtmf())
-            .map(|codec| codec.to_params())
-        {
-            bridge_builder = bridge_builder.with_sender_codecs(sender.clone(), sender);
+            .map(|codec| codec.to_params());
+        let rtp_sender = rtp_side_codecs
+            .iter()
+            .find(|codec| !codec.is_dtmf())
+            .map(|codec| codec.to_params());
+        if let (Some(webrtc_sender), Some(rtp_sender)) = (webrtc_sender, rtp_sender) {
+            bridge_builder = bridge_builder.with_sender_codecs(webrtc_sender, rtp_sender);
         }
 
         if self.context.dialplan.recording.enabled {
@@ -2700,7 +2724,11 @@ impl SipSession {
 
             if let Some(ref caller_offer) = self.caller_offer {
                 let codec_info =
-                    MediaNegotiator::build_caller_answer_codec_list(caller_offer, caller_is_webrtc);
+                    MediaNegotiator::build_caller_answer_codec_list_with_allow(
+                        caller_offer,
+                        caller_is_webrtc,
+                        &self.context.dialplan.allow_codecs,
+                    );
 
                 let mut track_builder = RtpTrackBuilder::new(Self::CALLER_TRACK_ID.to_string())
                     .with_cancel_token(self.caller_peer.cancel_token())
@@ -3410,19 +3438,22 @@ impl SipSession {
                     allow_codecs,
                 );
 
-                // Use the COMMON codec set (intersection of both sides) for
-                // both WebRTC and RTP audio capabilities. Without this, a
-                // mixed-transport bridge (RTP ↔ WebRTC) can end up with
-                // mismatched sender codecs (e.g. RTP=G729, WebRTC=PCMU),
-                // and the passthrough forwarder delivers garbage audio
-                // because the bridge has no internal transcoder.
-                let webrtc_caps: Vec<_> = codec_lists
-                    .common
+                let webrtc_side_codecs = if caller_is_webrtc {
+                    &codec_lists.caller_side
+                } else {
+                    &codec_lists.callee_side
+                };
+                let rtp_side_codecs = if caller_is_webrtc {
+                    &codec_lists.callee_side
+                } else {
+                    &codec_lists.caller_side
+                };
+
+                let webrtc_caps: Vec<_> = webrtc_side_codecs
                     .iter()
                     .filter_map(|c| c.to_audio_capability())
                     .collect();
-                let rtp_caps: Vec<_> = codec_lists
-                    .common
+                let rtp_caps: Vec<_> = rtp_side_codecs
                     .iter()
                     .filter_map(|c| c.to_audio_capability())
                     .collect();
@@ -3431,23 +3462,25 @@ impl SipSession {
                     .with_webrtc_audio_capabilities(webrtc_caps.clone())
                     .with_rtp_audio_capabilities(rtp_caps);
 
-                // Sender codecs: use the first common non-DTMF codec for BOTH sides.
-                // When the codec lists are aligned (via intersection), both sender
-                // codecs will be the same codec type, enabling direct passthrough.
-                let common_sender = codec_lists
-                    .common
+                let webrtc_sender = webrtc_side_codecs
+                    .iter()
+                    .find(|c| !c.is_dtmf())
+                    .map(|c| c.to_params());
+                let rtp_sender = rtp_side_codecs
                     .iter()
                     .find(|c| !c.is_dtmf())
                     .map(|c| c.to_params());
 
-                if let Some(sender) = common_sender {
-                    bridge_builder = bridge_builder.with_sender_codecs(sender.clone(), sender);
+                if let (Some(webrtc_sender), Some(rtp_sender)) = (webrtc_sender, rtp_sender) {
+                    bridge_builder = bridge_builder.with_sender_codecs(webrtc_sender, rtp_sender);
                 }
 
                 debug!(
                     session_id = %self.context.session_id,
+                    caller_side_codecs = ?codec_lists.caller_side.iter().filter(|c| !c.is_dtmf()).map(|c| format!("{:?}", c.codec)).collect::<Vec<_>>(),
+                    callee_side_codecs = ?codec_lists.callee_side.iter().filter(|c| !c.is_dtmf()).map(|c| format!("{:?}", c.codec)).collect::<Vec<_>>(),
                     common_codecs = ?codec_lists.common.iter().filter(|c| !c.is_dtmf()).map(|c| format!("{:?}", c.codec)).collect::<Vec<_>>(),
-                    "Bridge codecs configured from common intersection"
+                    "Bridge codecs configured for transport sides"
                 );
 
                 // Extract video capabilities from caller SDP
@@ -3517,17 +3550,15 @@ impl SipSession {
                 debug!(
                     session_id = %self.id,
                     common_codecs = ?codec_lists.common.iter().filter(|c| !c.is_dtmf()).map(|c| format!("{:?}", c.codec)).collect::<Vec<_>>(),
-                    webrtc_codecs = ?codec_lists
-                        .common
+                    webrtc_codecs = ?webrtc_side_codecs
                         .iter()
                         .map(|c| format!("{:?}", c.codec))
                         .collect::<Vec<_>>(),
-                    rtp_codecs = ?codec_lists
-                        .common
+                    rtp_codecs = ?rtp_side_codecs
                         .iter()
                         .map(|c| format!("{:?}", c.codec))
                         .collect::<Vec<_>>(),
-                    "Bridge codecs configured from common intersection"
+                    "Bridge codecs configured for transport sides"
                 );
             }
 
@@ -3602,7 +3633,11 @@ impl SipSession {
 
             if let Some(ref caller_offer) = self.caller_offer {
                 let codecs =
-                    MediaNegotiator::build_callee_codec_offer(caller_offer, callee_is_webrtc);
+                    MediaNegotiator::build_callee_codec_offer_with_allow(
+                        caller_offer,
+                        callee_is_webrtc,
+                        &self.context.dialplan.allow_codecs,
+                    );
                 if !codecs.is_empty() {
                     track_builder = track_builder.with_codec_info(codecs);
                 }
@@ -3671,7 +3706,11 @@ impl SipSession {
         let caller_is_webrtc = self.is_caller_webrtc();
 
         let codec_info =
-            MediaNegotiator::build_caller_answer_codec_list(&caller_offer, caller_is_webrtc);
+            MediaNegotiator::build_caller_answer_codec_list_with_allow(
+                &caller_offer,
+                caller_is_webrtc,
+                &self.context.dialplan.allow_codecs,
+            );
 
         let mut track_builder = RtpTrackBuilder::new(Self::CALLER_TRACK_ID.to_string())
             .with_cancel_token(self.caller_peer.cancel_token())
