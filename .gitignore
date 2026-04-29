@@ -51,6 +51,7 @@ config/routing_profiles/*.toml
 config/rate_decks/*.toml
 config/recordings/
 config/ivr/
+config/sounds/
 *.bak
 *.jsonl
 config.toml.dev

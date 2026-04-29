@@ -22,6 +22,14 @@ pub async fn ami_auth_middleware(
         ami.is_allowed(client_ip.ip().to_string().as_str())
     });
 
+    // Allow cluster peer nodes to access AMI endpoints
+    if !allowed {
+        if let Some(cluster) = state.config().cluster.as_ref() {
+            let client_ip_str = client_ip.ip().to_string();
+            allowed = cluster.peers.iter().any(|p| p.addr == client_ip_str);
+        }
+    }
+
     #[cfg(feature = "console")]
     if !allowed {
         // Let authenticated console superusers bypass AMI IP checks.
