@@ -1872,11 +1872,11 @@
                     </div>
                     <template x-if="clusterReloadResults.length">
                         <div class="mt-4 space-y-2 border-t border-slate-200 pt-4">
-                            <template x-for="result in clusterReloadResults" :key="result.addon">
+                            <template x-for="result in clusterReloadResults" :key="(result.addon || 'node') + '-' + result.node">
                                 <div class="rounded-lg border px-4 py-2 text-sm"
                                     :class="result.status === 'ok' ? 'border-emerald-200 bg-emerald-50' : (result.status === 'skipped' ? 'border-slate-200 bg-slate-50' : 'border-rose-200 bg-rose-50')">
                                     <div class="flex items-center justify-between">
-                                        <span class="font-semibold text-slate-700" x-text="result.addon"></span>
+                                        <span class="font-semibold text-slate-700" x-text="(result.addon || result.node)"></span>
                                         <span class="rounded-full px-2 py-0.5 text-[11px] font-semibold"
                                             :class="result.status === 'ok' ? 'bg-emerald-100 text-emerald-700' : (result.status === 'skipped' ? 'bg-slate-200 text-slate-600' : 'bg-rose-100 text-rose-700')"
                                             x-text="result.status"></span>
@@ -5536,13 +5536,16 @@
                     this.clusterReloadResults.push({ addon: data.addon, node: data.node, status: 'running' });
                 } else if (t === 'addon_complete') {
                     const existing = this.clusterReloadResults.find(r => r.addon === data.addon && r.node === data.node);
-                    if (existing) existing.status = data.result?.status || 'ok';
-                    else this.clusterReloadResults.push({ addon: data.addon, node: data.node, status: data.result?.status || 'ok', result: data.result });
+                    if (existing) Object.assign(existing, { status: data.result?.status || 'ok', result: data.result, message: data.result?.message || '' });
+                    else this.clusterReloadResults.push({ addon: data.addon, node: data.node, status: data.result?.status || 'ok', result: data.result, message: data.result?.message || '' });
                 } else if (t === 'node_start') {
                     this.clusterReloadResults.push({ addon: null, node: data.node, status: 'running' });
                 } else if (t === 'node_complete' || t === 'node_error') {
                     const existing = this.clusterReloadResults.find(r => r.addon === null && r.node === data.node);
-                    if (existing) existing.status = t === 'node_complete' ? 'ok' : 'error';
+                    const nodeStatus = t === 'node_complete' ? (data.result?.status || 'ok') : 'error';
+                    const nodeMsg = data.error || '';
+                    if (existing) Object.assign(existing, { status: nodeStatus, result: data.result, message: nodeMsg });
+                    else this.clusterReloadResults.push({ addon: null, node: data.node, status: nodeStatus, result: data.result, message: nodeMsg });
                 } else if (t === 'complete') {
                     this.$dispatch('toast', { title: 'Reload complete', message: 'All selected addons have been reloaded.' });
                 }
