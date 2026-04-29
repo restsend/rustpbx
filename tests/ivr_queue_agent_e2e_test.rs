@@ -71,6 +71,7 @@ async fn ws_send_recv(ws: &mut WsStream, json: &str) -> serde_json::Value {
     }
 }
 
+#[allow(dead_code)]
 async fn recv_until(
     ws: &mut WsStream,
     timeout_secs: u64,
@@ -118,7 +119,7 @@ async fn test_ivr_queue_agent_flow() {
     let _ = tracing_subscriber::fmt::try_init();
 
     let sip_port = portpicker::pick_unused_port().expect("no free SIP port");
-    let caller_port = portpicker::pick_unused_port().expect("no free caller port");
+    let _caller_port = portpicker::pick_unused_port().expect("no free caller port");
     let agent_port = portpicker::pick_unused_port().expect("no free agent port");
 
     // Start the PBX

@@ -76,6 +76,7 @@ impl TestPbx {
     /// Start a TestPbx bound to the given `sip_port`.
     ///
     /// Use `portpicker::pick_unused_port().unwrap()` to choose ports.
+    #[allow(dead_code)]
     pub async fn start(sip_port: u16) -> Self {
         Self::start_with_inject(sip_port, TestPbxInject::default()).await
     }

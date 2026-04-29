@@ -2339,7 +2339,7 @@ mod tests {
         let (server, config) = create_test_server().await;
 
         // Register alice in the locator so she's online (BEFORE creating module)
-        server
+        let _ = server
             .locator
             .register(
                 "alice",

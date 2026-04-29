@@ -82,6 +82,7 @@ fn rwi_req(action: &str, params: serde_json::Value) -> (String, String) {
     (id, json)
 }
 
+#[allow(dead_code)]
 async fn recv_until<F>(ws: &mut WsStream, timeout_ms: u64, predicate: F) -> serde_json::Value
 where
     F: Fn(&serde_json::Value) -> bool,
