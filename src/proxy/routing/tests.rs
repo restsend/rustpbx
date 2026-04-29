@@ -608,6 +608,20 @@ fn test_queue_fallback_to_named_queue() {
 }
 
 #[test]
+fn test_queue_plan_preserves_missing_hold_section() {
+    let queue_cfg = RouteQueueConfig {
+        hold: None,
+        ..RouteQueueConfig::default()
+    };
+
+    let plan = queue_cfg
+        .to_queue_plan()
+        .expect("queue config should convert to plan");
+
+    assert!(plan.hold.is_none());
+}
+
+#[test]
 fn test_queue_strategy_builds_dial_targets() {
     let queue_cfg = RouteQueueConfig {
         strategy: RouteQueueStrategyConfig {

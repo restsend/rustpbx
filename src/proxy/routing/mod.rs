@@ -586,6 +586,7 @@ impl RouteQueueConfig {
         let mut plan = crate::call::QueuePlan {
             accept_immediately: self.accept_immediately,
             passthrough_ringback: self.passthrough_ringback && self.accept_immediately,
+            hold: None,
             acd_policy: self
                 .acd_policy
                 .as_ref()

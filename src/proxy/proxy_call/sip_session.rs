@@ -1290,7 +1290,7 @@ impl SipSession {
         for (idx, target) in targets.iter().enumerate() {
             info!(index = idx, target = %target.aor, "Trying sequential target");
 
-            match self.try_single_target(target, callee_state_rx, None).await {
+            match self.try_single_target(target, callee_state_rx, None, None).await {
                 Ok(()) => {
                     info!(index = idx, "Sequential target succeeded");
                     return Ok(());
@@ -1311,7 +1311,7 @@ impl SipSession {
         callee_state_rx: &mut mpsc::UnboundedReceiver<DialogState>,
     ) -> Result<(), (StatusCode, Option<String>)> {
         if let Some(target) = targets.first() {
-            self.try_single_target(target, callee_state_rx, None).await
+            self.try_single_target(target, callee_state_rx, None, None).await
         } else {
             Err((
                 StatusCode::TemporarilyUnavailable,
@@ -1395,12 +1395,26 @@ impl SipSession {
 
         let result = match &plan.dial_strategy {
             Some(DialStrategy::Sequential(_)) => {
-                self.dial_queue_sequential(&resolved_agents, plan.ring_timeout, callee_state_rx)
-                    .await
+                self.dial_queue_sequential(
+                    &resolved_agents,
+                    plan.ring_timeout,
+                    callee_state_rx,
+                    plan.voice_prompts
+                        .as_ref()
+                        .and_then(|prompts| prompts.transfer_prompt.as_deref()),
+                )
+                .await
             }
             Some(DialStrategy::Parallel(_)) => {
-                self.dial_queue_parallel(&resolved_agents, plan.ring_timeout, callee_state_rx)
-                    .await
+                self.dial_queue_parallel(
+                    &resolved_agents,
+                    plan.ring_timeout,
+                    callee_state_rx,
+                    plan.voice_prompts
+                        .as_ref()
+                        .and_then(|prompts| prompts.transfer_prompt.as_deref()),
+                )
+                .await
             }
             None => Ok(()),
         };
@@ -1848,6 +1862,7 @@ impl SipSession {
         agents: &[crate::call::Location],
         _ring_timeout: Option<Duration>,
         callee_state_rx: &mut mpsc::UnboundedReceiver<DialogState>,
+        transfer_prompt: Option<&str>,
     ) -> Result<(), (StatusCode, Option<String>)> {
         let mut last_error = (
             StatusCode::TemporarilyUnavailable,
@@ -1863,7 +1878,12 @@ impl SipSession {
             info!(index = idx, agent = %agent.aor, "Queue: trying agent");
 
             match self
-                .try_single_target(agent, callee_state_rx, Some(Self::QUEUE_HOLD_TRACK_ID))
+                .try_single_target(
+                    agent,
+                    callee_state_rx,
+                    Some(Self::QUEUE_HOLD_TRACK_ID),
+                    transfer_prompt,
+                )
                 .await
             {
                 Ok(()) => {
@@ -1885,16 +1905,48 @@ impl SipSession {
         agents: &[crate::call::Location],
         _ring_timeout: Option<Duration>,
         callee_state_rx: &mut mpsc::UnboundedReceiver<DialogState>,
+        transfer_prompt: Option<&str>,
     ) -> Result<(), (StatusCode, Option<String>)> {
         if let Some(agent) = agents.first() {
             info!(agent = %agent.aor, "Queue: trying parallel agent");
-            self.try_single_target(agent, callee_state_rx, Some(Self::QUEUE_HOLD_TRACK_ID))
-                .await
+            self.try_single_target(
+                agent,
+                callee_state_rx,
+                Some(Self::QUEUE_HOLD_TRACK_ID),
+                transfer_prompt,
+            )
+            .await
         } else {
             Err((
                 StatusCode::TemporarilyUnavailable,
                 Some("No agents available".to_string()),
             ))
+        }
+    }
+
+    async fn play_queue_transfer_prompt_before_bridge(&mut self, transfer_prompt: Option<&str>) {
+        let Some(audio_file) = transfer_prompt.map(str::trim).filter(|value| !value.is_empty())
+        else {
+            debug!("Queue: no transfer prompt configured");
+            return;
+        };
+
+        info!(file = %audio_file, "Queue: playing transfer prompt before bridging agent audio");
+        match self
+            .play_audio_file(audio_file, true, "queue-transfer-prompt", false)
+            .await
+        {
+            Ok(()) => {
+                self.stop_playback_track("queue-transfer-prompt", false).await;
+                info!(file = %audio_file, "Queue: transfer prompt completed");
+            }
+            Err(error) => {
+                warn!(
+                    error = %error,
+                    file = %audio_file,
+                    "Queue: failed to play transfer prompt before bridging agent audio"
+                );
+            }
         }
     }
 
@@ -2051,6 +2103,7 @@ impl SipSession {
         target: &crate::call::Location,
         callee_state_rx: &mut mpsc::UnboundedReceiver<DialogState>,
         stop_playback_on_answer: Option<&str>,
+        transfer_prompt_after_answer: Option<&str>,
     ) -> Result<(), (StatusCode, Option<String>)> {
         use rsipstack::dialog::dialog::DialogState;
         use rsipstack::dialog::invitation::InviteOption;
@@ -2370,6 +2423,9 @@ impl SipSession {
         )
         .await
         .map_err(|e| (StatusCode::ServerInternalError, Some(e.to_string())))?;
+
+        self.play_queue_transfer_prompt_before_bridge(transfer_prompt_after_answer)
+            .await;
 
         self.connected_callee_dialog_id = Some(dialog_id.clone());
         self.callee_dialogs.insert(dialog_id.clone(), ());
@@ -6059,7 +6115,7 @@ impl SipSession {
             };
             let (_tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
             return self
-                .try_single_target(&location, &mut rx, None)
+                .try_single_target(&location, &mut rx, None, None)
                 .await
                 .map_err(|(code, reason)| {
                     anyhow!(
