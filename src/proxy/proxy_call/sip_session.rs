@@ -1972,6 +1972,8 @@ impl SipSession {
             })) => {
                 info!(file = %audio_file, "Queue fallback - play then hangup");
 
+                self.prepare_queue_fallback_audio_media().await;
+
                 if let Err(e) = self
                     .play_audio_file(audio_file, true, "caller", false)
                     .await
@@ -2095,6 +2097,21 @@ impl SipSession {
                     Some("All agents unavailable".to_string()),
                 ))
             }
+        }
+    }
+
+    async fn prepare_queue_fallback_audio_media(&mut self) {
+        if self.server_dialog.state().is_confirmed() {
+            let _ = self.ensure_caller_answer_sdp().await;
+            return;
+        }
+
+        let caller_answer = self.ensure_caller_answer_sdp().await;
+        if let Err(error) = self.accept_call(None, caller_answer, None).await {
+            warn!(
+                error = %error,
+                "Queue fallback: failed to prepare caller media before fallback audio"
+            );
         }
     }
 
