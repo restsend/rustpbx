@@ -1943,19 +1943,27 @@ impl SipSession {
                             })
                     }
                     TransferEndpoint::Queue(queue_name) => {
-                        Box::pin(self.handle_queue_transfer(LegId::from("caller"), queue_name))
-                            .await
-                            .map_err(|e| {
-                                (
-                                    StatusCode::TemporarilyUnavailable,
-                                    Some(format!("Transfer failed: {}", e)),
-                                )
-                            })
+                        Box::pin(
+                            self.handle_queue_transfer(LegId::from("caller"), queue_name, None),
+                        )
+                        .await
+                        .map_err(|e| {
+                            (
+                                StatusCode::TemporarilyUnavailable,
+                                Some(format!("Transfer failed: {}", e)),
+                            )
+                        })
                     }
-                    TransferEndpoint::Ivr(_) => Err((
-                        StatusCode::NotImplemented,
-                        Some("IVR transfer not supported here".to_string()),
-                    )),
+                    TransferEndpoint::Ivr(ivr_name) => {
+                        info!(ivr = %ivr_name, "Queue fallback - transferring to IVR");
+                        self.start_ivr_app(ivr_name).await.map_err(|e| {
+                            (
+                                StatusCode::ServerInternalError,
+                                Some(format!("Failed to start IVR: {}", e)),
+                            )
+                        })?;
+                        Ok(())
+                    }
                 }
             }
             Some(QueueFallbackAction::Redirect { target }) => {
@@ -2013,7 +2021,7 @@ impl SipSession {
                 } else {
                     info!(queue = %name, "Queue fallback - transfer to another queue");
                     // Re-enqueue to another queue by starting QueueApp with new plan
-                    match Box::pin(self.handle_queue_transfer(LegId::from("caller"), name)).await {
+                    match Box::pin(self.handle_queue_transfer(LegId::from("caller"), name, None)).await {
                         Ok(_) => {
                             info!(queue = %name, "Queue fallback - re-enqueue succeeded");
                             Ok(())
@@ -5999,12 +6007,38 @@ impl SipSession {
     }
 
     async fn handle_blind_transfer(&mut self, leg_id: LegId, target: String) -> Result<()> {
-        // Handle queue: prefix - start QueueApp instead of sending REFER
+        // Handle queue: prefix — start queue instead of sending REFER.
+        // The target may carry an optional ?return_ivr= parameter set by IVR
+        // so that when the queue exhausts all agents the call goes back to IVR.
         if target.starts_with("queue:") {
-            let queue_name = target.strip_prefix("queue:").unwrap_or(&target).trim();
+            let remainder = target.strip_prefix("queue:").unwrap_or(&target).trim();
+            let (queue_name, return_ivr) =
+                if let Some(pos) = remainder.find("?return_ivr=") {
+                    let q = remainder[..pos].trim();
+                    let ivr = remainder[pos + "?return_ivr=".len()..].to_string();
+                    (q, Some(ivr))
+                } else {
+                    (remainder, None)
+                };
             if !queue_name.is_empty() {
-                info!(%leg_id, queue = %queue_name, "Handling queue transfer by starting QueueApp");
-                return self.handle_queue_transfer(leg_id, queue_name).await;
+                info!(
+                    %leg_id,
+                    queue = %queue_name,
+                    ?return_ivr,
+                    "Handling queue transfer"
+                );
+                return self
+                    .handle_queue_transfer(leg_id, queue_name, return_ivr)
+                    .await;
+            }
+        }
+
+        // Handle ivr: prefix — start an IVR application directly.
+        if target.starts_with("ivr:") {
+            let ivr_name = target.strip_prefix("ivr:").unwrap_or(&target).trim();
+            if !ivr_name.is_empty() {
+                info!(%leg_id, ivr = %ivr_name, "Handling ivr transfer by starting IvrApp");
+                return self.start_ivr_app(ivr_name).await;
             }
         }
 
@@ -6174,8 +6208,15 @@ impl SipSession {
 
     /// Handle queue transfer by loading queue config and executing queue plan.
     /// This is called when a transfer target starts with "queue:".
-    async fn handle_queue_transfer(&mut self, leg_id: LegId, queue_name: &str) -> Result<()> {
-        info!(%leg_id, queue = %queue_name, "Starting queue transfer");
+    /// `return_ivr` — if set, the queue plan's fallback is overridden to return
+    /// the call to the given IVR when all agents are exhausted.
+    async fn handle_queue_transfer(
+        &mut self,
+        leg_id: LegId,
+        queue_name: &str,
+        return_ivr: Option<String>,
+    ) -> Result<()> {
+        info!(%leg_id, queue = %queue_name, ?return_ivr, "Starting queue transfer");
 
         // Load queue configuration from data context
         let queue_config = self
@@ -6192,9 +6233,23 @@ impl SipSession {
         };
 
         // Convert to queue plan
-        let queue_plan = queue_config
+        let mut queue_plan = queue_config
             .to_queue_plan()
             .map_err(|e| anyhow!("Invalid queue config: {}", e))?;
+
+        // If return_ivr is specified, override fallback so the queue sends
+        // the caller back to the IVR when all agents are exhausted.
+        if let Some(ref ivr_name) = return_ivr {
+            info!(
+                queue = %queue_name,
+                ivr = %ivr_name,
+                "Queue transfer: will return to IVR on fallback"
+            );
+            let name = ivr_name.clone();
+            queue_plan.fallback = Some(crate::call::QueueFallbackAction::Failure(
+                crate::call::FailureAction::Transfer(crate::call::TransferEndpoint::Ivr(name)),
+            ));
+        }
 
         // Execute queue plan
         // Create a channel for callee state (not used in this context)
@@ -6229,6 +6284,24 @@ impl SipSession {
                 Err(anyhow!("Queue transfer failed: {:?} - {:?}", code, reason))
             }
         }
+    }
+
+    /// Start an IVR application by name.
+    /// This is used by the queue fallback path when the fallback action
+    /// specifies `TransferEndpoint::Ivr`, and by `handle_blind_transfer`
+    /// when the transfer target has an `ivr:` prefix.
+    async fn start_ivr_app(&self, ivr_name: &str) -> Result<()> {
+        let ivr_file = format!("config/ivr/{}.toml", ivr_name);
+        info!(ivr = %ivr_name, file = %ivr_file, "Starting IVR application");
+        self.app_runtime
+            .start_app(
+                "ivr",
+                Some(serde_json::json!({"file": ivr_file})),
+                true,
+            )
+            .await
+            .map_err(|e| anyhow!("Failed to start IVR '{}': {:?}", ivr_name, e))?;
+        Ok(())
     }
 
     fn build_replaces_header(&self) -> Option<String> {

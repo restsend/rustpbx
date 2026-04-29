@@ -615,6 +615,7 @@ action = { type = "transfer", target = "100" }
                         label: Some("Queue".to_string()),
                         action: EntryAction::Queue {
                             target: "sales".to_string(),
+                            return_to_ivr: None,
                         },
                     },
                 ],
@@ -764,6 +765,171 @@ action = { type = "transfer", target = "100" }
                 300,
                 "TransferTarget-queue",
                 |c| matches!(c, SessionAction::TransferTarget(t) if t == "queue:sales"),
+            )
+            .await;
+
+        stack
+            .join()
+            .await
+            .expect("should exit after queue transfer");
+    }
+
+    // ── 16. Queue action with return_to_ivr ──
+
+    /// Build an IVR where DTMF "3" sends to queue with return_to_ivr enabled.
+    fn build_queue_return_to_ivr_ivr() -> IvrDefinition {
+        IvrDefinition {
+            name: "test-queue-return".to_string(),
+            description: None,
+            lang: None,
+            default_voice: None,
+            dynamic_build: false,
+            business_hours: None,
+            tts: None,
+            root: MenuNode {
+                greeting: "sounds/queue_menu.wav".to_string(),
+                timeout_ms: 200,
+                max_retries: 1,
+                invalid_prompt: None,
+                timeout_action: Some(EntryAction::Hangup {
+                    prompt: None,
+                    prompt_text: None,
+                    prompt_voice: None,
+                }),
+                max_retries_action: Some(EntryAction::Hangup {
+                    prompt: None,
+                    prompt_text: None,
+                    prompt_voice: None,
+                }),
+                entries: vec![
+                    MenuEntry {
+                        key: "1".to_string(),
+                        label: Some("Queue no return".to_string()),
+                        action: EntryAction::Queue {
+                            target: "normal_queue".to_string(),
+                            return_to_ivr: None,
+                        },
+                    },
+                    MenuEntry {
+                        key: "2".to_string(),
+                        label: Some("Queue with return".to_string()),
+                        action: EntryAction::Queue {
+                            target: "support".to_string(),
+                            return_to_ivr: Some(true),
+                        },
+                    },
+                    MenuEntry {
+                        key: "3".to_string(),
+                        label: Some("Queue return=false".to_string()),
+                        action: EntryAction::Queue {
+                            target: "overflow".to_string(),
+                            return_to_ivr: Some(false),
+                        },
+                    },
+                ],
+                ..Default::default()
+            },
+            menus: HashMap::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_ivr_queue_action_default_no_return_to_ivr() {
+        let ivr = build_queue_return_to_ivr_ivr();
+        let mut stack = MockCallStack::run(Box::new(IvrApp::new(ivr)), "caller", "1000");
+
+        stack
+            .assert_cmd(200, "AcceptCall", |c| {
+                matches!(c, SessionAction::AcceptCall { .. })
+            })
+            .await;
+        stack
+            .assert_cmd(200, "PlayPrompt", |c| {
+                matches!(c, SessionAction::PlayPrompt { .. })
+            })
+            .await;
+        stack.audio_complete("default");
+
+        // Press "1" → Queue without return_to_ivr (None) → plain queue: target
+        stack.dtmf("1");
+
+        stack
+            .assert_cmd(
+                300,
+                "TransferTarget-queue-no-return",
+                |c| matches!(c, SessionAction::TransferTarget(t) if t == "queue:normal_queue"),
+            )
+            .await;
+
+        stack
+            .join()
+            .await
+            .expect("should exit after queue transfer");
+    }
+
+    #[tokio::test]
+    async fn test_ivr_queue_action_with_return_to_ivr() {
+        let ivr = build_queue_return_to_ivr_ivr();
+        let mut stack = MockCallStack::run(Box::new(IvrApp::new(ivr)), "caller", "1000");
+
+        stack
+            .assert_cmd(200, "AcceptCall", |c| {
+                matches!(c, SessionAction::AcceptCall { .. })
+            })
+            .await;
+        stack
+            .assert_cmd(200, "PlayPrompt", |c| {
+                matches!(c, SessionAction::PlayPrompt { .. })
+            })
+            .await;
+        stack.audio_complete("default");
+
+        // Press "2" → Queue with return_to_ivr: true
+        // Should encode the IVR name in the transfer target
+        stack.dtmf("2");
+
+        stack
+            .assert_cmd(
+                300,
+                "TransferTarget-queue-with-return",
+                |c| {
+                    matches!(c, SessionAction::TransferTarget(t)
+                        if t == "queue:support?return_ivr=test-queue-return")
+                },
+            )
+            .await;
+
+        stack
+            .join()
+            .await
+            .expect("should exit after queue transfer");
+    }
+
+    #[tokio::test]
+    async fn test_ivr_queue_action_return_to_ivr_false() {
+        let ivr = build_queue_return_to_ivr_ivr();
+        let mut stack = MockCallStack::run(Box::new(IvrApp::new(ivr)), "caller", "1000");
+
+        stack
+            .assert_cmd(200, "AcceptCall", |c| {
+                matches!(c, SessionAction::AcceptCall { .. })
+            })
+            .await;
+        stack
+            .assert_cmd(200, "PlayPrompt", |c| {
+                matches!(c, SessionAction::PlayPrompt { .. })
+            })
+            .await;
+        stack.audio_complete("default");
+
+        // Press "3" → Queue with return_to_ivr: Some(false) → plain queue: target
+        stack.dtmf("3");
+
+        stack
+            .assert_cmd(
+                300,
+                "TransferTarget-queue-return-false",
+                |c| matches!(c, SessionAction::TransferTarget(t) if t == "queue:overflow"),
             )
             .await;
 
@@ -1432,6 +1598,16 @@ action = { type = "transfer", target = "100" }
                             code: Some(503),
                         },
                     },
+                    MenuEntry {
+                        key: "6".to_string(),
+                        label: Some("Goodbye no code".to_string()),
+                        action: EntryAction::PlayAndHangup {
+                            prompt: Some("sounds/goodbye.wav".to_string()),
+                            prompt_text: None,
+                            prompt_voice: None,
+                            code: None,
+                        },
+                    },
                 ],
                 ..Default::default()
             },
@@ -1508,6 +1684,48 @@ action = { type = "transfer", target = "100" }
                     c,
                     SessionAction::Hangup {
                         code: Some(503),
+                        ..
+                    }
+                )
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn test_ivr_play_and_hangup_without_code() {
+        let ivr = build_play_and_hangup_ivr();
+        let mut stack = MockCallStack::run(Box::new(IvrApp::new(ivr)), "caller", "1000");
+
+        stack
+            .assert_cmd(200, "AcceptCall", |c| {
+                matches!(c, SessionAction::AcceptCall { .. })
+            })
+            .await;
+        stack
+            .assert_cmd(200, "PlayPrompt-greeting", |c| {
+                matches!(c, SessionAction::PlayPrompt { audio_file, .. } if audio_file == "sounds/welcome.wav")
+            })
+            .await;
+        stack.audio_complete("default");
+
+        // Press "6" → PlayAndHangup with prompt but NO status code
+        stack.dtmf("6");
+
+        // Should play the goodbye prompt
+        stack
+            .assert_cmd(200, "PlayPrompt-goodbye", |c| {
+                matches!(c, SessionAction::PlayPrompt { audio_file, .. } if audio_file == "sounds/goodbye.wav")
+            })
+            .await;
+
+        // After prompt completes → hangup with code: None (normal hangup)
+        stack.audio_complete("default");
+        stack
+            .assert_cmd(200, "Hangup-no-code", |c| {
+                matches!(
+                    c,
+                    SessionAction::Hangup {
+                        code: None,
                         ..
                     }
                 )

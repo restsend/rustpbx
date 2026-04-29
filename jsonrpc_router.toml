@@ -1,0 +1,47 @@
+enabled = false
+timeout_ms = 5000
+fallback_on_error = false
+
+[[rules]]
+name = "new-rule"
+enabled = true
+when = 'str::regex_matches(callee, "20001")'
+extractors = []
+
+[rules.upstream]
+method = "POST"
+url = ""
+body = ""
+
+[rules.upstream.headers]
+
+[rules.response]
+success_when = "json.code == 0"
+callee_rewrite = ""
+caller_rewrite = ""
+reject_status = 403
+reject_reason = ""
+passthrough_original_headers = true
+inject_headers = []
+
+[[rules]]
+name = "new-rule"
+enabled = true
+when = 'str::regex_matches(callee, "20001")'
+extractors = []
+
+[rules.upstream]
+method = "POST"
+url = ""
+body = ""
+
+[rules.upstream.headers]
+
+[rules.response]
+success_when = "json.code == 0"
+callee_rewrite = ""
+caller_rewrite = ""
+reject_status = 403
+reject_reason = ""
+passthrough_original_headers = true
+inject_headers = []

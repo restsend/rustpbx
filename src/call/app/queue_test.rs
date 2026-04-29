@@ -794,6 +794,104 @@ mod tests {
         result.expect("should complete successfully");
     }
 
+    /// Test autonomous routing with all agents busy plays busy prompt before fallback.
+    #[tokio::test]
+    async fn test_autonomous_routing_all_agents_busy_plays_busy_prompt() {
+        use crate::call::app::agent_registry::db::DbRegistry;
+        use std::sync::Arc;
+
+        // Create empty DbRegistry (no available agents)
+        let db = sea_orm::Database::connect("sqlite::memory:").await.unwrap();
+        let agent_registry = Arc::new(DbRegistry::new(db));
+
+        // Build queue config with autonomous routing + busy prompt configured
+        let mut config = build_simple_queue_config();
+        config.autonomous_routing = true;
+        config.skill_routing_enabled = false;
+        config.voice_prompts = Some(VoicePrompts::zh());
+        config.hold = None;
+
+        let plan = config.to_plan();
+        let mut queue = QueueApp::new(plan, config);
+        queue = queue.with_agent_registry(agent_registry);
+
+        let mut stack = MockCallStack::run(Box::new(queue), "1001", "1002");
+
+        stack.enter().await;
+
+        // Should answer the call (from accept_immediately)
+        stack
+            .assert_cmd(200, "AcceptCall", |c| {
+                matches!(c, SessionAction::AcceptCall { .. })
+            })
+            .await;
+
+        // Should play the busy prompt since all agents are busy/unavailable
+        stack
+            .assert_cmd(200, "PlayPrompt-busy-auto", |c| {
+                matches!(c, SessionAction::PlayPrompt { audio_file, .. }
+                    if audio_file == "sounds/queue-busy-zh.wav")
+            })
+            .await;
+
+        stack.audio_complete("default");
+
+        // Should then execute fallback (hangup)
+        stack
+            .assert_cmd(200, "Hangup-auto", |c| {
+                matches!(c, SessionAction::Hangup { .. })
+            })
+            .await;
+
+        stack.join().await.expect("should complete successfully");
+    }
+
+    /// Test skill routing with no resolved agents plays busy prompt before fallback.
+    #[tokio::test]
+    async fn test_skill_routing_no_agents_plays_busy_prompt() {
+        // Build queue config with skill routing enabled but no agents configured
+        let mut config = build_simple_queue_config();
+        config.skill_routing_enabled = true;
+        config.required_skills = vec!["support".to_string()];
+        config.agents = vec![];
+        config.strategy = DialStrategy::Sequential(vec![]);
+        config.voice_prompts = Some(VoicePrompts::zh());
+        config.hold = None;
+
+        let plan = config.to_plan();
+        let queue = QueueApp::new(plan, config);
+
+        let mut stack = MockCallStack::run(Box::new(queue), "1001", "1002");
+
+        stack.enter().await;
+
+        // Should answer the call (for busy prompt audio playback)
+        stack
+            .assert_cmd(200, "AcceptCall", |c| {
+                matches!(c, SessionAction::AcceptCall { .. })
+            })
+            .await;
+
+        // Should play the busy prompt since no agents resolved
+        stack
+            .assert_cmd(200, "PlayPrompt-busy-skill", |c| {
+                matches!(c, SessionAction::PlayPrompt { audio_file, .. }
+                    if audio_file == "sounds/queue-busy-zh.wav")
+            })
+            .await;
+
+        stack.audio_complete("default");
+
+        // Should then execute fallback (hangup)
+        stack
+            .assert_cmd(200, "Hangup-skill", |c| {
+                matches!(c, SessionAction::Hangup { .. })
+            })
+            .await;
+
+        stack.join().await.expect("should complete successfully");
+    }
+
     /// Test agent ring timeout handling.
     #[tokio::test]
     async fn test_agent_ring_timeout() {

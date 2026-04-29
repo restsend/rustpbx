@@ -308,11 +308,26 @@ impl IvrApp {
                 self.state = IvrState::Done;
                 Ok(AppAction::Transfer(target.clone()))
             }
-            EntryAction::Queue { target } => {
-                info!(ivr = %self.definition.name, queue = target, "IVR sending to queue");
+            EntryAction::Queue {
+                target,
+                return_to_ivr,
+            } => {
+                info!(
+                    ivr = %self.definition.name,
+                    queue = target,
+                    return_to_ivr = ?return_to_ivr,
+                    "IVR sending to queue"
+                );
                 self.state = IvrState::Done;
-                // Queue is handled as a transfer to the queue endpoint
-                Ok(AppAction::Transfer(format!("queue:{}", target)))
+                if return_to_ivr.unwrap_or(false) {
+                    // Encode return IVR name so the queue can come back on failure
+                    Ok(AppAction::Transfer(format!(
+                        "queue:{}?return_ivr={}",
+                        target, self.definition.name
+                    )))
+                } else {
+                    Ok(AppAction::Transfer(format!("queue:{}", target)))
+                }
             }
             EntryAction::Menu { menu } => {
                 info!(ivr = %self.definition.name, from = %self.current_menu_key(), to = %menu, "IVR navigating to menu");

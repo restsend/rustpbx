@@ -38,7 +38,6 @@ commerce = [
     "addon-voicemail",
     "addon-ivr-editor",
     "addon-telemetry",
-    "addon-jsonrpc-router",
 ]
 wholesale = ["addon-wholesale"]
 contact-center = [
@@ -57,6 +56,7 @@ default = [
     "addon-transcript",
     "addon-archive",
     "addon-observability",
+    "addon-jsonrpc-router",
 ]
 cross = ["aws-lc-rs/bindgen"]
 perfcli-bin = []

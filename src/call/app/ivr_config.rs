@@ -190,7 +190,13 @@ pub enum EntryAction {
     /// Transfer the call to a SIP extension or URI.
     Transfer { target: String },
     /// Send the call to a queue.
-    Queue { target: String },
+    Queue {
+        target: String,
+        /// If true, when the queue ends (all agents exhausted / timeout),
+        /// the call returns to the current IVR instead of hanging up.
+        #[serde(default)]
+        return_to_ivr: Option<bool>,
+    },
     /// Navigate to a sub-menu (or "root" for top level).
     Menu { menu: String },
     /// Transfer to voicemail for the given extension.
@@ -290,7 +296,12 @@ pub enum WebhookResponse {
     /// Transfer the call to a SIP extension or URI.
     Transfer { target: String },
     /// Send the call to a queue.
-    Queue { target: String },
+    Queue {
+        target: String,
+        /// If true, when the queue ends, call returns to the current IVR.
+        #[serde(default)]
+        return_to_ivr: Option<bool>,
+    },
     /// Navigate to a sub-menu.
     Menu { menu: String },
     /// Transfer to voicemail.
@@ -347,7 +358,13 @@ impl WebhookResponse {
     pub fn into_entry_action(self) -> EntryAction {
         match self {
             WebhookResponse::Transfer { target } => EntryAction::Transfer { target },
-            WebhookResponse::Queue { target } => EntryAction::Queue { target },
+            WebhookResponse::Queue {
+                target,
+                return_to_ivr,
+            } => EntryAction::Queue {
+                target,
+                return_to_ivr,
+            },
             WebhookResponse::Menu { menu } => EntryAction::Menu { menu },
             WebhookResponse::Voicemail { target } => EntryAction::Voicemail { target },
             WebhookResponse::Play { prompt, .. } => EntryAction::Play {

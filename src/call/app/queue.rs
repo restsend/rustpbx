@@ -506,24 +506,6 @@ impl QueueApp {
         Ok(AppAction::Continue)
     }
 
-    async fn handle_fallback_with_abandoned(&mut self) -> anyhow::Result<AppAction> {
-        let queue_id = self.config.name.clone();
-        let wait_secs = self.enqueued_at.map(|t| t.elapsed().as_secs()).unwrap_or(0);
-
-        self.update_stats(&queue_id, |stats| {
-            stats.calls_abandoned += 1;
-        })
-        .await;
-
-        info!(
-            queue = %queue_id,
-            wait_secs,
-            "Queue: call abandoned, executing fallback"
-        );
-
-        self.execute_fallback().await
-    }
-
     /// Record abandoned call, then play busy prompt (if configured) before fallback.
     async fn play_busy_and_then_fallback(
         &mut self,
@@ -629,7 +611,19 @@ impl CallApp for QueueApp {
         let agents = self.get_agents();
         if agents.is_empty() {
             warn!("Queue: no agents configured, executing fallback");
-            return self.handle_fallback_with_abandoned().await;
+            // Answer first if we need to play a busy prompt (needs media path)
+            if !self.answered {
+                let prompts = self
+                    .plan
+                    .voice_prompts
+                    .as_ref()
+                    .or(self.config.voice_prompts.as_ref());
+                if prompts.and_then(|p| p.busy_prompt.as_ref()).is_some() {
+                    ctrl.answer().await?;
+                    self.answered = true;
+                }
+            }
+            return self.play_busy_and_then_fallback(ctrl).await;
         }
 
         // Answer immediately if configured
@@ -697,7 +691,19 @@ impl CallApp for QueueApp {
                 return Ok(AppAction::Continue);
             } else {
                 warn!("Queue: no available agents for skill routing");
-                return self.handle_fallback_with_abandoned().await;
+                // Answer first if we need to play a busy prompt (needs media path)
+                if !self.answered {
+                    let prompts = self
+                        .plan
+                        .voice_prompts
+                        .as_ref()
+                        .or(self.config.voice_prompts.as_ref());
+                    if prompts.and_then(|p| p.busy_prompt.as_ref()).is_some() {
+                        ctrl.answer().await?;
+                        self.answered = true;
+                    }
+                }
+                return self.play_busy_and_then_fallback(ctrl).await;
             }
         }
 
