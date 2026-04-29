@@ -2429,43 +2429,10 @@ impl SipSession {
         {
             match self.apply_bridge_callee_answer(&callee_sdp_value).await {
                 Ok(()) => {
-                    // The app media bridge was created with the caller's codec only
-                    // (build_caller_answer_codec_list).  If the callee negotiated a
-                    // different codec, the bridge passthrough would send garbled audio.
-                    // Detect the mismatch and configure per-direction transcoders.
-                    if let Some(ref bridge) = self.media_bridge {
-                        let caller_profile = self
-                            .answer
-                            .as_deref()
-                            .map(MediaNegotiator::extract_leg_profile)
-                            .unwrap_or_default();
-                        let callee_profile =
-                            MediaNegotiator::extract_leg_profile(&callee_sdp_value);
-
-                        if let (Some(ca), Some(ce)) =
-                            (&caller_profile.audio, &callee_profile.audio)
-                            && ca.codec != ce.codec
-                        {
-                            bridge.set_transcoder(
-                                self.caller_bridge_endpoint(),
-                                ca.codec,
-                                ce.codec,
-                                ce.payload_type,
-                            );
-                            bridge.set_transcoder(
-                                self.callee_bridge_endpoint(),
-                                ce.codec,
-                                ca.codec,
-                                ca.payload_type,
-                            );
-                            info!(
-                                session_id = %self.context.session_id,
-                                caller_codec = ?ca.codec,
-                                callee_codec = ?ce.codec,
-                                "Bridge transcoder configured for codec mismatch"
-                            );
-                        }
-                    }
+                    self.configure_media_bridge_transcoders(
+                        self.answer.as_deref(),
+                        Some(&callee_sdp_value),
+                    );
                     self.start_media_bridge_forwarding().await;
                 }
                 Err(error) => {
@@ -2800,6 +2767,8 @@ impl SipSession {
             && self.media_bridge.is_some()
             && caller_answer.is_some();
 
+        self.configure_media_bridge_transcoders(caller_answer.as_deref(), callee_sdp.as_deref());
+
         if self.media_profile.path == MediaPathMode::Anchored && self.media_bridge.is_none() {
             let caller_answer_for_forwarding = self.answer.clone();
             let callee_answer_for_forwarding = callee_sdp.clone();
@@ -2815,6 +2784,63 @@ impl SipSession {
         }
 
         caller_answer
+    }
+
+    fn configure_media_bridge_transcoders(
+        &self,
+        caller_answer_sdp: Option<&str>,
+        callee_answer_sdp: Option<&str>,
+    ) {
+        let Some(bridge) = self.media_bridge.as_ref() else {
+            return;
+        };
+        let Some(caller_answer_sdp) = caller_answer_sdp else {
+            return;
+        };
+        let Some(callee_answer_sdp) = callee_answer_sdp else {
+            return;
+        };
+
+        let caller_profile = MediaNegotiator::extract_leg_profile(caller_answer_sdp);
+        let callee_profile = MediaNegotiator::extract_leg_profile(callee_answer_sdp);
+
+        let (Some(caller_audio), Some(callee_audio)) =
+            (&caller_profile.audio, &callee_profile.audio)
+        else {
+            return;
+        };
+
+        if caller_audio.codec == callee_audio.codec {
+            bridge.clear_transcoder(self.caller_bridge_endpoint());
+            bridge.clear_transcoder(self.callee_bridge_endpoint());
+            debug!(
+                session_id = %self.context.session_id,
+                codec = ?caller_audio.codec,
+                "Bridge transcoder not needed; caller and callee selected the same codec"
+            );
+            return;
+        }
+
+        bridge.set_transcoder(
+            self.caller_bridge_endpoint(),
+            caller_audio.codec,
+            callee_audio.codec,
+            callee_audio.payload_type,
+        );
+        bridge.set_transcoder(
+            self.callee_bridge_endpoint(),
+            callee_audio.codec,
+            caller_audio.codec,
+            caller_audio.payload_type,
+        );
+        info!(
+            session_id = %self.context.session_id,
+            caller_codec = ?caller_audio.codec,
+            caller_pt = caller_audio.payload_type,
+            callee_codec = ?callee_audio.codec,
+            callee_pt = callee_audio.payload_type,
+            "Bridge transcoder configured for selected codec mismatch"
+        );
     }
 
     async fn start_media_bridge_forwarding(&mut self) {
