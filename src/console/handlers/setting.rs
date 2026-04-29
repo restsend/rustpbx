@@ -2427,11 +2427,18 @@ async fn cluster_reload_sse_handler(
             .map(|c| c.peers.clone())
             .unwrap_or_default();
 
+        let ami_path = app
+            .config()
+            .proxy
+            .ami_path
+            .clone()
+            .unwrap_or_else(|| "/ami/v1".to_string());
+
         for peer in &peers {
             let peer_label = format!("{}:{}", peer.addr, peer.ami_port);
             sse_send!("progress", serde_json::json!({"type": "node_start", "node": &peer_label}));
 
-            let url = format!("http://{}:{}/ami/v1/cluster/reload_sync", peer.addr, peer.ami_port);
+            let url = format!("http://{}:{}{}/cluster/reload_sync", peer.addr, peer.ami_port, ami_path);
             let client = reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(120))
                 .build()

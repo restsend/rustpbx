@@ -895,17 +895,20 @@ async fn cluster_ping_handler(State(state): State<AppState>) -> Response {
         .into_response();
     }
 
-    // Start with current node
-    let mut results = vec![serde_json::json!({
-        "peer": "current",
-        "ami_addr": "local",
-        "reachable": true,
-        "latency_ms": 0,
-        "is_current": true,
-    })];
+    let mut results: Vec<serde_json::Value> = Vec::new();
+
+    let ami_path = state
+        .config()
+        .proxy
+        .ami_path
+        .clone()
+        .unwrap_or_else(|| "/ami/v1".to_string());
 
     for peer in &peers {
-        let url = format!("http://{}:{}/ami/v1/health", peer.addr, peer.ami_port);
+        let url = format!(
+            "http://{}:{}{}/health",
+            peer.addr, peer.ami_port, ami_path
+        );
         let start = Instant::now();
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(5))
@@ -914,13 +917,34 @@ async fn cluster_ping_handler(State(state): State<AppState>) -> Response {
         match client.get(&url).send().await {
             Ok(resp) => {
                 let latency = start.elapsed().as_millis() as u64;
-                results.push(serde_json::json!({
+                let mut entry = serde_json::json!({
                     "peer": format!("{}:{}", peer.addr, peer.sip_port),
                     "ami_addr": format!("{}:{}", peer.addr, peer.ami_port),
                     "reachable": resp.status().is_success(),
                     "latency_ms": latency,
-                    "is_current": false,
-                }));
+                });
+
+                // Parse health response for version/uptime/calls info
+                if let Ok(body) = resp.json::<serde_json::Value>().await {
+                    if let Some(obj) = body.as_object() {
+                        if let Some(version) = obj.get("version") {
+                            entry["version"] = version.clone();
+                        }
+                        if let Some(uptime) = obj.get("uptime") {
+                            entry["uptime"] = uptime.clone();
+                        }
+                        if let Some(total) = obj.get("total") {
+                            entry["total_calls"] = total.clone();
+                        }
+                        if let Some(sip) = obj.get("sipserver") {
+                            if let Some(calls) = sip.get("calls") {
+                                entry["active_calls"] = calls.clone();
+                            }
+                        }
+                    }
+                }
+
+                results.push(entry);
             }
             Err(e) => {
                 results.push(serde_json::json!({
@@ -928,7 +952,6 @@ async fn cluster_ping_handler(State(state): State<AppState>) -> Response {
                     "ami_addr": format!("{}:{}", peer.addr, peer.ami_port),
                     "reachable": false,
                     "latency_ms": null,
-                    "is_current": false,
                     "error": e.to_string(),
                 }));
             }
@@ -1013,6 +1036,13 @@ async fn cluster_reload_config_handler(
             .map(|c| c.peers.clone())
             .unwrap_or_default();
 
+        let ami_path = state
+            .config()
+            .proxy
+            .ami_path
+            .clone()
+            .unwrap_or_else(|| "/ami/v1".to_string());
+
         for peer in &peers {
             let peer_label = format!("{}:{}", peer.addr, peer.ami_port);
             send_event(
@@ -1022,8 +1052,8 @@ async fn cluster_reload_config_handler(
             .await;
 
             let url = format!(
-                "http://{}:{}/ami/v1/cluster/reload_sync",
-                peer.addr, peer.ami_port
+                "http://{}:{}{}/cluster/reload_sync",
+                peer.addr, peer.ami_port, ami_path
             );
             let client = reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(120))
