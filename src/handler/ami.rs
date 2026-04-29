@@ -9,14 +9,11 @@ use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
     middleware,
-    response::sse::{Event as SseEvent, KeepAlive, Sse},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
 use chrono::TimeZone;
-use futures::stream;
 use serde::Deserialize;
-use std::convert::Infallible;
 use std::sync::{Arc, atomic::Ordering};
 use tokio::time::{Duration, sleep};
 use tracing::{info, warn};
@@ -973,6 +970,10 @@ async fn cluster_reload_config_handler(
     State(state): State<AppState>,
     Query(query): Query<PingReloadPayload>,
 ) -> Response {
+    use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
+    use futures::stream;
+    use std::convert::Infallible;
+
     let payload = query;
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Result<SseEvent, Infallible>>();
 
