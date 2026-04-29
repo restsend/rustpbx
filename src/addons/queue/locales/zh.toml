@@ -190,7 +190,7 @@ fallback_skill_group_hint = "路由到匹配此技能组的坐席。"
 
 # 语音提示
 section_voice_prompts = "语音提示"
-section_voice_prompts_desc = "配置队列事件（转接、坐席忙、非工作时间）中播放的内置语音提示。"
+section_voice_prompts_desc = "配置队列事件（转接、坐席忙、无人应答、非工作时间）中播放的内置语音提示。"
 vp_none = "禁用"
 vp_chinese = "中文 (zh-CN)"
 vp_english = "英文 (en-US)"
@@ -205,6 +205,8 @@ vp_busy = "坐席忙提示"
 vp_busy_desc = "所有坐席忙时播放，例如“抱歉，当前坐席忙，请稍后再试”"
 vp_off_hours = "非工作时间提示"
 vp_off_hours_desc = "非工作时间播放，例如“抱歉，当前非工作时间，请在工作时间拨打”"
+vp_no_answer = "无人应答提示"
+vp_no_answer_desc = "所有坐席均无人接听时播放，例如“抱歉，坐席暂时无人接听”"
 
 # 表单底部
 save_hint = "队列变更保存后立即生效。"

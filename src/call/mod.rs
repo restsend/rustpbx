@@ -77,6 +77,8 @@ pub const DEFAULT_QUEUE_BUSY_PROMPT_ZH: &str = "sounds/queue-busy-zh.wav";
 pub const DEFAULT_QUEUE_BUSY_PROMPT_EN: &str = "sounds/queue-busy-en.wav";
 pub const DEFAULT_QUEUE_OFF_HOURS_PROMPT_ZH: &str = "sounds/queue-off-hours-zh.wav";
 pub const DEFAULT_QUEUE_OFF_HOURS_PROMPT_EN: &str = "sounds/queue-off-hours-en.wav";
+pub const DEFAULT_QUEUE_NO_ANSWER_PROMPT_ZH: &str = "sounds/queue-no-answer-zh.wav";
+pub const DEFAULT_QUEUE_NO_ANSWER_PROMPT_EN: &str = "sounds/queue-no-answer-en.wav";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct VoicePrompts {
@@ -86,6 +88,8 @@ pub struct VoicePrompts {
     pub busy_prompt: Option<String>,
     #[serde(default)]
     pub off_hours_prompt: Option<String>,
+    #[serde(default)]
+    pub no_answer_prompt: Option<String>,
 }
 
 impl VoicePrompts {
@@ -94,6 +98,7 @@ impl VoicePrompts {
             transfer_prompt: Some(DEFAULT_QUEUE_TRANSFER_PROMPT_ZH.to_string()),
             busy_prompt: Some(DEFAULT_QUEUE_BUSY_PROMPT_ZH.to_string()),
             off_hours_prompt: Some(DEFAULT_QUEUE_OFF_HOURS_PROMPT_ZH.to_string()),
+            no_answer_prompt: Some(DEFAULT_QUEUE_NO_ANSWER_PROMPT_ZH.to_string()),
         }
     }
 
@@ -102,6 +107,7 @@ impl VoicePrompts {
             transfer_prompt: Some(DEFAULT_QUEUE_TRANSFER_PROMPT_EN.to_string()),
             busy_prompt: Some(DEFAULT_QUEUE_BUSY_PROMPT_EN.to_string()),
             off_hours_prompt: Some(DEFAULT_QUEUE_OFF_HOURS_PROMPT_EN.to_string()),
+            no_answer_prompt: Some(DEFAULT_QUEUE_NO_ANSWER_PROMPT_EN.to_string()),
         }
     }
 }

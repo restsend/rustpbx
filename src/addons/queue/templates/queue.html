@@ -562,6 +562,7 @@
                 if (vp.transfer_prompt) labels.push('T');
                 if (vp.busy_prompt) labels.push('B');
                 if (vp.off_hours_prompt) labels.push('O');
+                if (vp.no_answer_prompt) labels.push('N');
                 return labels.length ? labels.join(' · ') : '—';
             },
             fallbackSummary(queue) {

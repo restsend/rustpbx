@@ -258,16 +258,18 @@ endblock %}
                                         <label class="flex flex-col gap-1 text-xs font-semibold uppercase tracking-wide text-slate-500">
                                             <span x-text="tt('queue.target_skill_group')"></span>
                                             <select x-model="target.skill_group_id"
+                                                x-show="skillGroups.length > 0"
                                                 @change="target.uri = 'skill-group:' + target.skill_group_id"
                                                 class="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
                                                 <option value="" x-text="tt('queue.skill_group_select_placeholder')"></option>
-                                                <template x-if="target.skill_group_id && !hasSkillGroupOption(target.skill_group_id)">
-                                                    <option :value="target.skill_group_id" x-text="target.skill_group_id"></option>
-                                                </template>
                                                 <template x-for="group in skillGroups" :key="group.skill_group_id">
                                                     <option :value="group.skill_group_id" x-text="group.display_name || group.skill_group_id"></option>
                                                 </template>
                                             </select>
+                                            <input type="text" x-show="skillGroups.length === 0"
+                                                :value="target.skill_group_id || target.uri"
+                                                disabled
+                                                class="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-500">
                                         </label>
                                     </template>
                                     <label
@@ -368,15 +370,13 @@ endblock %}
                         <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
                             <span x-text="tt('queue.fallback_skill_group_label')"></span>
                             <template x-if="skillGroups.length">
-                                <select x-model="form.spec.fallback.skill_group_ref"
-                                    class="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
-                                    <option value="" x-text="tt('queue.fallback_skill_group_placeholder')"></option>
-                                    <template x-if="form.spec.fallback.skill_group_ref && !hasSkillGroupOption(form.spec.fallback.skill_group_ref)">
-                                        <option :value="form.spec.fallback.skill_group_ref" x-text="form.spec.fallback.skill_group_ref"></option>
-                                    </template>
-                                    <template x-for="group in skillGroups" :key="group.skill_group_id">
-                                        <option :value="group.skill_group_id" x-text="group.display_name || group.skill_group_id"></option>
-                                    </template>
+                                                <select x-model="form.spec.fallback.skill_group_ref"
+                                                    :key="'sg-fb-' + (skillGroups?.length || 0)"
+                                                    class="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                                                    <option value="" x-text="tt('queue.fallback_skill_group_placeholder')"></option>
+                                                    <template x-for="group in skillGroups" :key="group.skill_group_id">
+                                                        <option :value="group.skill_group_id" x-text="group.display_name || group.skill_group_id"></option>
+                                                    </template>
                                 </select>
                             </template>
                             <template x-if="!skillGroups.length">
@@ -496,6 +496,39 @@ endblock %}
                         </div>
                     </div>
 
+                    <!-- No-answer prompt -->
+                    <div class="rounded-lg border border-slate-200 p-4">
+                        <h3 class="text-sm font-semibold text-slate-800" x-text="tt('queue.vp_no_answer')"></h3>
+                        <p class="mt-1 text-xs text-slate-500" x-text="tt('queue.vp_no_answer_desc')"></p>
+                        <div class="mt-3 grid gap-3 md:grid-cols-3">
+                            <select x-model="vpNoAnswerType"
+                                class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                                <option value="none" x-text="tt('queue.vp_none')"></option>
+                                <option value="zh" x-text="tt('queue.vp_chinese')"></option>
+                                <option value="en" x-text="tt('queue.vp_english')"></option>
+                                <option value="custom" x-text="tt('queue.vp_custom')"></option>
+                            </select>
+                            <div class="flex items-center gap-2 md:col-span-2">
+                                <input type="text" x-show="vpNoAnswerType === 'custom'" x-model.trim="vpNoAnswerCustom"
+                                    class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                    :placeholder="tt('queue.vp_url_placeholder')">
+                                <button type="button" x-show="vpNoAnswerType === 'custom' && vpNoAnswerCustom.startsWith('http')"
+                                    @click="downloadAudio(vpNoAnswerCustom, 'noanswer')"
+                                    :disabled="downloadingNoAnswer"
+                                    class="inline-flex items-center gap-1 rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-600 hover:border-sky-300 hover:text-sky-700"
+                                    x-text="downloadingNoAnswer ? tt('queue.vp_downloading') : tt('queue.vp_download')">
+                                </button>
+                            </div>
+                        </div>
+                        <div class="mt-2 flex items-center gap-2">
+                            <button type="button" @click="previewAudio('noanswer')"
+                                class="inline-flex items-center gap-1 rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-600 hover:border-indigo-300 hover:text-indigo-700"
+                                x-text="tt('queue.vp_preview')">
+                            </button>
+                            <span class="text-xs text-slate-400" x-text="vpNoAnswerPath || ''"></span>
+                        </div>
+                    </div>
+
                     <!-- Preview audio element (hidden) -->
                     <audio x-ref="audioPreview" controls class="hidden"></audio>
                 </div>
@@ -577,15 +610,19 @@ endblock %}
             vpTransferType: 'none',
             vpBusyType: 'none',
             vpOffHoursType: 'none',
+            vpNoAnswerType: 'none',
             vpTransferCustom: '',
             vpBusyCustom: '',
             vpOffHoursCustom: '',
+            vpNoAnswerCustom: '',
             vpTransferPath: '',
             vpBusyPath: '',
             vpOffHoursPath: '',
+            vpNoAnswerPath: '',
             downloadingTransfer: false,
             downloadingBusy: false,
             downloadingOffHours: false,
+            downloadingNoAnswer: false,
             saving: false,
             success: null,
             error: null,
@@ -641,6 +678,21 @@ endblock %}
                 if (fallbackRef && this.form?.spec?.fallback) {
                     this.form.spec.fallback.skill_group_ref = fallbackRef;
                 }
+                this.$nextTick(() => {
+                    targets.forEach((target) => {
+                        if (target.skill_group_id) {
+                            const v = target.skill_group_id;
+                            target.skill_group_id = '';
+                            this.$nextTick(() => { target.skill_group_id = v; });
+                        }
+                    });
+                    const fb = this.form?.spec?.fallback;
+                    if (fb?.skill_group_ref) {
+                        const v = fb.skill_group_ref;
+                        fb.skill_group_ref = '';
+                        this.$nextTick(() => { fb.skill_group_ref = v; });
+                    }
+                });
             },
             hasSkillGroupOption(value) {
                 const target = this.extractSkillGroupId(value);
@@ -711,6 +763,7 @@ endblock %}
                 transfer: { zh: 'sounds/queue-transfer-zh.wav', en: 'sounds/queue-transfer-en.wav' },
                 busy: { zh: 'sounds/queue-busy-zh.wav', en: 'sounds/queue-busy-en.wav' },
                 offhours: { zh: 'sounds/queue-off-hours-zh.wav', en: 'sounds/queue-off-hours-en.wav' },
+                noanswer: { zh: 'sounds/queue-no-answer-zh.wav', en: 'sounds/queue-no-answer-en.wav' },
             },
             vpTypeFor(path) {
                 if (!path) return 'none';
@@ -726,21 +779,26 @@ endblock %}
                 this.vpTransferType = this.vpTypeFor(vp.transfer_prompt);
                 this.vpBusyType = this.vpTypeFor(vp.busy_prompt);
                 this.vpOffHoursType = this.vpTypeFor(vp.off_hours_prompt);
+                this.vpNoAnswerType = this.vpTypeFor(vp.no_answer_prompt);
                 this.vpTransferPath = vp.transfer_prompt || '';
                 this.vpBusyPath = vp.busy_prompt || '';
                 this.vpOffHoursPath = vp.off_hours_prompt || '';
+                this.vpNoAnswerPath = vp.no_answer_prompt || '';
                 if (this.vpTransferType === 'custom') this.vpTransferCustom = vp.transfer_prompt;
                 if (this.vpBusyType === 'custom') this.vpBusyCustom = vp.busy_prompt;
                 if (this.vpOffHoursType === 'custom') this.vpOffHoursCustom = vp.off_hours_prompt;
+                if (this.vpNoAnswerType === 'custom') this.vpNoAnswerCustom = vp.no_answer_prompt;
             },
             buildVoicePrompts() {
                 const result = {};
                 const transfer = this.resolvePrompt('transfer', this.vpTransferType, this.vpTransferCustom);
                 const busy = this.resolvePrompt('busy', this.vpBusyType, this.vpBusyCustom);
                 const offhours = this.resolvePrompt('offhours', this.vpOffHoursType, this.vpOffHoursCustom);
+                const noanswer = this.resolvePrompt('noanswer', this.vpNoAnswerType, this.vpNoAnswerCustom);
                 if (transfer) result.transfer_prompt = transfer;
                 if (busy) result.busy_prompt = busy;
                 if (offhours) result.off_hours_prompt = offhours;
+                if (noanswer) result.no_answer_prompt = noanswer;
                 return Object.keys(result).length ? result : null;
             },
             resolvePrompt(type, lang, custom) {
@@ -750,7 +808,8 @@ endblock %}
             },
             async downloadAudio(url, type) {
                 const loadingKey = type === 'transfer' ? 'downloadingTransfer'
-                    : type === 'busy' ? 'downloadingBusy' : 'downloadingOffHours';
+                    : type === 'busy' ? 'downloadingBusy'
+                    : type === 'noanswer' ? 'downloadingNoAnswer' : 'downloadingOffHours';
                 this[loadingKey] = true;
                 try {
                     const resp = await fetch(`${this.basePath}/queues/download-audio`, {
@@ -763,6 +822,7 @@ endblock %}
                     const path = data.path;
                     if (type === 'transfer') { this.vpTransferCustom = path; this.vpTransferPath = path; }
                     else if (type === 'busy') { this.vpBusyCustom = path; this.vpBusyPath = path; }
+                    else if (type === 'noanswer') { this.vpNoAnswerCustom = path; this.vpNoAnswerPath = path; }
                     else { this.vpOffHoursCustom = path; this.vpOffHoursPath = path; }
                 } catch (err) {
                     console.error(err);
@@ -773,11 +833,12 @@ endblock %}
             },
             previewAudio(type) {
                 let path = type === 'transfer' ? this.vpTransferPath
-                    : type === 'busy' ? this.vpBusyPath : this.vpOffHoursPath;
+                    : type === 'busy' ? this.vpBusyPath
+                    : type === 'noanswer' ? this.vpNoAnswerPath : this.vpOffHoursPath;
                 if (!path) {
-                    // Use built-in path based on type
                     const lang = type === 'transfer' ? this.vpTransferType
-                        : type === 'busy' ? this.vpBusyType : this.vpOffHoursType;
+                        : type === 'busy' ? this.vpBusyType
+                        : type === 'noanswer' ? this.vpNoAnswerType : this.vpOffHoursType;
                     if (lang && lang !== 'none' && lang !== 'custom') {
                         path = this.VP_PATHS[type]?.[lang];
                     }
@@ -886,6 +947,7 @@ endblock %}
                         })(),
                     },
                     acd_policy: raw?.acd_policy || '',
+                    voice_prompts: raw?.voice_prompts || null,
                 };
                 return spec;
             },

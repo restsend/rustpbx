@@ -222,6 +222,8 @@ pub enum QueueState {
     PlayingTransferPrompt { agent_uri: String },
     /// Playing the busy prompt before executing fallback.
     PlayingBusyPrompt,
+    /// Playing the no-answer prompt before executing fallback.
+    PlayingNoAnswerPrompt,
     /// Dialing agents (sequential or parallel).
     DialingAgents { attempt: u32 },
     /// Call connected to an agent.
@@ -230,6 +232,13 @@ pub enum QueueState {
     ExecutingFallback,
     /// Terminal state.
     Done,
+}
+
+/// Reason why an agent is unavailable.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum AgentUnavailableReason {
+    Busy,
+    NoAnswer,
 }
 
 /// A built-in Queue application for call distribution.
@@ -474,6 +483,7 @@ impl QueueApp {
     async fn handle_agent_unavailable(
         &mut self,
         ctrl: &mut CallController,
+        reason: AgentUnavailableReason,
     ) -> anyhow::Result<AppAction> {
         if !self.is_parallel() {
             self.current_agent_idx += 1;
@@ -482,7 +492,12 @@ impl QueueApp {
 
         let agents = self.get_agents();
         if self.current_agent_idx >= agents.len() {
-            return self.play_busy_and_then_fallback(ctrl).await;
+            return match reason {
+                AgentUnavailableReason::Busy => self.play_busy_and_then_fallback(ctrl).await,
+                AgentUnavailableReason::NoAnswer => {
+                    self.play_no_answer_and_then_fallback(ctrl).await
+                }
+            };
         }
 
         self.state = QueueState::DialingAgents {
@@ -536,6 +551,40 @@ impl QueueApp {
         if let Some(path) = prompts.and_then(|p| p.busy_prompt.as_ref()) {
             info!("Queue: playing busy prompt before fallback");
             self.state = QueueState::PlayingBusyPrompt;
+            ctrl.play_audio(path.clone(), false).await?;
+            return Ok(AppAction::Continue);
+        }
+
+        self.execute_fallback().await
+    }
+
+    /// Record abandoned call, then play no-answer prompt (if configured) before fallback.
+    async fn play_no_answer_and_then_fallback(
+        &mut self,
+        ctrl: &mut CallController,
+    ) -> anyhow::Result<AppAction> {
+        let queue_id = self.config.name.clone();
+        let wait_secs = self.enqueued_at.map(|t| t.elapsed().as_secs()).unwrap_or(0);
+
+        self.update_stats(&queue_id, |stats| {
+            stats.calls_abandoned += 1;
+        })
+        .await;
+
+        info!(
+            queue = %queue_id,
+            wait_secs,
+            "Queue: call abandoned, playing no-answer prompt or fallback"
+        );
+
+        let prompts = self
+            .plan
+            .voice_prompts
+            .as_ref()
+            .or(self.config.voice_prompts.as_ref());
+        if let Some(path) = prompts.and_then(|p| p.no_answer_prompt.as_ref()) {
+            info!("Queue: playing no-answer prompt before fallback");
+            self.state = QueueState::PlayingNoAnswerPrompt;
             ctrl.play_audio(path.clone(), false).await?;
             return Ok(AppAction::Continue);
         }
@@ -690,6 +739,9 @@ impl CallApp for QueueApp {
             QueueState::PlayingBusyPrompt => {
                 return self.execute_fallback().await;
             }
+            QueueState::PlayingNoAnswerPrompt => {
+                return self.execute_fallback().await;
+            }
             _ => {}
         }
 
@@ -781,7 +833,7 @@ impl CallApp for QueueApp {
                             .update_presence(agent_id, PresenceState::Busy)
                             .await;
                     }
-                    self.handle_agent_unavailable(ctrl).await
+                    self.handle_agent_unavailable(ctrl, AgentUnavailableReason::Busy).await
                 }
                 "agent_no_answer" => {
                     info!("Queue: agent no answer");
@@ -792,7 +844,7 @@ impl CallApp for QueueApp {
                             .update_presence(agent_id, PresenceState::Available)
                             .await;
                     }
-                    self.handle_agent_unavailable(ctrl).await
+                    self.handle_agent_unavailable(ctrl, AgentUnavailableReason::NoAnswer).await
                 }
                 "all_agents_busy" => {
                     warn!("Queue: all agents busy");
@@ -840,7 +892,7 @@ impl CallApp for QueueApp {
                     }
                 }
 
-                self.handle_agent_unavailable(ctrl).await
+                self.handle_agent_unavailable(ctrl, AgentUnavailableReason::NoAnswer).await
             }
             "max_wait_timeout" => {
                 info!("Queue: max wait timeout, executing fallback");

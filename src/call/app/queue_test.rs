@@ -1082,4 +1082,141 @@ mod tests {
             matches!(c, SessionAction::Hangup { .. })
         }).await;
     }
+
+    #[tokio::test]
+    async fn test_queue_no_answer_prompt_all_agents_noanswer() {
+        let plan = build_sequential_queue();
+        let mut stack = MockCallStack::run(
+            Box::new(QueueApp::new(plan, build_queue_config_with_prompts())),
+            "caller",
+            "1000",
+        );
+
+        stack.assert_cmd(200, "AcceptCall", |c| {
+            matches!(c, SessionAction::AcceptCall { .. })
+        }).await;
+
+        stack.assert_cmd(200, "PlayPrompt", |c| {
+            matches!(c, SessionAction::PlayPrompt { .. })
+        }).await;
+
+        // All agents no-answer
+        stack.custom("agent_no_answer", serde_json::json!({}));
+        stack.custom("agent_no_answer", serde_json::json!({}));
+        stack.custom("agent_no_answer", serde_json::json!({}));
+
+        // Should play no-answer prompt (not busy prompt)
+        stack.assert_cmd(200, "PlayPrompt-noanswer", |c| {
+            matches!(c, SessionAction::PlayPrompt { audio_file, .. }
+                if audio_file == "sounds/queue-no-answer-zh.wav")
+        }).await;
+
+        stack.audio_complete("default");
+
+        stack.assert_cmd(200, "Hangup", |c| {
+            matches!(c, SessionAction::Hangup { .. })
+        }).await;
+    }
+
+    #[tokio::test]
+    async fn test_queue_no_answer_prompt_fallback_to_busy_when_mixed() {
+        let plan = build_sequential_queue();
+        let mut stack = MockCallStack::run(
+            Box::new(QueueApp::new(plan, build_queue_config_with_prompts())),
+            "caller",
+            "1000",
+        );
+
+        stack.assert_cmd(200, "AcceptCall", |c| {
+            matches!(c, SessionAction::AcceptCall { .. })
+        }).await;
+
+        stack.assert_cmd(200, "PlayPrompt", |c| {
+            matches!(c, SessionAction::PlayPrompt { .. })
+        }).await;
+
+        // Agent 1 busy, Agent 2 no-answer, Agent 3 busy
+        stack.custom("agent_busy", serde_json::json!({}));
+        stack.custom("agent_no_answer", serde_json::json!({}));
+        stack.custom("agent_busy", serde_json::json!({}));
+
+        // Last one was busy, so should play busy prompt
+        stack.assert_cmd(200, "PlayPrompt-busy-mixed", |c| {
+            matches!(c, SessionAction::PlayPrompt { audio_file, .. }
+                if audio_file == "sounds/queue-busy-zh.wav")
+        }).await;
+
+        stack.audio_complete("default");
+
+        stack.assert_cmd(200, "Hangup", |c| {
+            matches!(c, SessionAction::Hangup { .. })
+        }).await;
+    }
+
+    #[tokio::test]
+    async fn test_queue_no_answer_prompt_without_config_fallsback_directly() {
+        let mut config = build_simple_queue_config();
+        config.voice_prompts = Some(VoicePrompts {
+            no_answer_prompt: None,
+            ..VoicePrompts::zh()
+        });
+        // Only set no_answer_prompt to None, keep transfer and busy prompts
+
+        let plan = config.to_plan();
+        let mut stack = MockCallStack::run(
+            Box::new(QueueApp::new(plan, config)),
+            "caller",
+            "1000",
+        );
+
+        stack.assert_cmd(200, "AcceptCall", |c| {
+            matches!(c, SessionAction::AcceptCall { .. })
+        }).await;
+
+        stack.assert_cmd(200, "PlayPrompt", |c| {
+            matches!(c, SessionAction::PlayPrompt { .. })
+        }).await;
+
+        // All agents no-answer, no no_answer_prompt configured -> should go directly to fallback
+        stack.custom("agent_no_answer", serde_json::json!({}));
+        stack.custom("agent_no_answer", serde_json::json!({}));
+        stack.custom("agent_no_answer", serde_json::json!({}));
+
+        // Should NOT play any prompt, just hangup
+        stack.assert_cmd(200, "Hangup", |c| {
+            matches!(c, SessionAction::Hangup { .. })
+        }).await;
+    }
+
+    #[tokio::test]
+    async fn test_queue_no_answer_prompt_ring_timeout() {
+        let mut config = build_queue_config_with_prompts();
+        config.max_wait_secs = 0;
+        let plan = config.to_plan();
+
+        let app = QueueApp::new(plan, config);
+
+        let mut stack = MockCallStack::run(Box::new(app), "caller", "1000");
+
+        stack.assert_cmd(200, "AcceptCall", |c| {
+            matches!(c, SessionAction::AcceptCall { .. })
+        }).await;
+        stack.assert_cmd(200, "PlayPrompt", |c| {
+            matches!(c, SessionAction::PlayPrompt { .. })
+        }).await;
+
+        // Ring timeout triggers no-answer path (only 1 agent in simple queue)
+        stack.timeout("agent_ring_timeout");
+
+        stack.assert_cmd(200, "PlayPrompt-noanswer-timeout", |c| {
+            matches!(c, SessionAction::PlayPrompt { audio_file, .. }
+                if audio_file == "sounds/queue-no-answer-zh.wav")
+        }).await;
+
+        stack.audio_complete("default");
+
+        stack.assert_cmd(200, "Hangup", |c| {
+            matches!(c, SessionAction::Hangup { .. })
+        }).await;
+    }
 }

@@ -190,7 +190,7 @@ fallback_skill_group_hint = "Route to agents matching this skill group."
 
 # Voice Prompts
 section_voice_prompts = "Voice Prompts"
-section_voice_prompts_desc = "Configure built-in voice prompts that are played during queue events (transfer, busy, off-hours)."
+section_voice_prompts_desc = "Configure built-in voice prompts that are played during queue events (transfer, busy, no-answer, off-hours)."
 vp_none = "Disabled"
 vp_chinese = "Chinese (zh-CN)"
 vp_english = "English (en-US)"
@@ -205,6 +205,8 @@ vp_busy = "Busy prompt"
 vp_busy_desc = "Played when all agents are busy. e.g. \"Sorry, all agents are busy\""
 vp_off_hours = "Off-hours prompt"
 vp_off_hours_desc = "Played when the queue is outside business hours. e.g. \"Sorry, it's non-working hours\""
+vp_no_answer = "No-answer prompt"
+vp_no_answer_desc = "Played when all agents are unreachable (no answer). e.g. \"Sorry, the agent didn't answer\""
 
 # Form footer
 save_hint = "Queue changes apply instantly after saving."
