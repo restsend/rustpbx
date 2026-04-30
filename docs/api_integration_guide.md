@@ -131,20 +131,31 @@ Real-time notification when devices come online or go offline.
 }
 ```
 
-### 1.4 CDR Event Push (with Recording)
-Push call details and recording file immediately after a call ends.
+### 1.4 CDR Event Push and Recording Upload
+Push call details immediately after a call ends. Recording media upload is configured separately.
 
 - **Config**:
   ```toml
+  [recording]
+  enabled = true
+  auto_start = true
+  type = "http"
+  path = "./config/recorders"
+  url = "https://your-api.com/pbx/recording"
+
   [callrecord]
   type = "http"
   url = "https://your-api.com/pbx/cdr"
+  # Accepted for compatibility, but ignored. Use [recording] for media upload.
   with_media = true
   ```
 
-**Format**: `multipart/form-data`
+**CDR format**: `multipart/form-data`
 - Field `calllog.json`: The full CDR JSON (see next section).
-- File `media_audio-0`: The recording WAV/MP3 file.
+
+**Recording format**: `multipart/form-data`
+- File field `recording`: The recorded WAV file.
+- Fields `call_id` and `track_id`: Recording metadata.
 
 ---
 
@@ -246,5 +257,6 @@ GET /ami/v1/sipflow/media/abc123?start=1713232800&end=1713234600
 
 ### Scenario D: Compliance Recording
 1. Configure `[recording] enabled = true`.
-2. Configure `[callrecord] type = "s3"`.
-3. All calls are recorded locally, then asynchronously uploaded to AWS S3 / MinIO for long-term archival.
+2. Configure `[recording] type = "s3"` for recording WAV archival.
+3. Configure `[callrecord] type = "s3"` if CDR JSON should also be archived to object storage.
+4. All calls are recorded locally first, then the recording is asynchronously uploaded to AWS S3 / MinIO for long-term archival.

@@ -19,10 +19,16 @@ codecs = ["opus", "pcmu", "pcma", "g729"]
 ## Recording Policy
 Control when calls are recorded. Can be set at top-level `[recording]` or per-proxy `[proxy.recording]` (proxy-level overrides top-level).
 
+`[recording]` controls the live WAV recorder. When enabled, the recorder always writes a local WAV first. Set `type = "http"` or `type = "s3"` only to upload that local WAV after the call completes.
+
 ```toml
 # Top-level recording config (applies to all proxies unless overridden)
 [recording]
 enabled = false
+
+# Recording upload mode: "local" (default), "http", or "s3".
+type = "local"
+
 # Record these directions
 directions = ["inbound", "outbound", "internal"]
 
@@ -31,6 +37,10 @@ auto_start = true
 
 # Storage path for raw audio files
 path = "./recordings"
+
+# Optional local filename template. Supported tokens:
+# {session_id}, {caller}, {callee}, {direction}, {timestamp}
+filename_pattern = "{session_id}"
 
 # Fine-grained filters
 caller_allow = ["1001", "1002"]
@@ -43,8 +53,37 @@ directions = ["inbound"]
 auto_start = true
 ```
 
-## CDR & Record Storage (`[callrecord]`)
-Configure where metadata and recordings are permanently stored.
+### HTTP Recording Upload
+```toml
+[recording]
+enabled = true
+auto_start = true
+type = "http"
+path = "./recordings"
+url = "https://archive.example.com/recording"
+# headers = { "Authorization" = "Bearer token" }
+```
+
+### S3 Recording Upload
+```toml
+[recording]
+enabled = true
+auto_start = true
+type = "s3"
+path = "./recordings"
+vendor = "minio" # aws, gcp, azure, aliyun, tencent, minio, digitalocean
+bucket = "recordings"
+region = "us-east-1"
+access_key = "MINIO_ACCESS_KEY"
+secret_key = "MINIO_SECRET_KEY"
+endpoint = "http://minio:9000"
+root = "recordings"
+```
+
+If `[sipflow]` is active, RustPBX disables the live WAV recorder for the call so SIP+RTP capture is not duplicated. Use SipFlow export/upload for media in that mode.
+
+## CDR Storage (`[callrecord]`)
+Configure where post-call CDR JSON is stored or sent. This does not control recording media upload.
 
 ### Local Filesystem
 ```toml
@@ -54,7 +93,7 @@ root = "./cdr_archive"
 ```
 
 ### S3 Compatible Object Storage
-Uploads recordings to AWS S3, MinIO, DigitalOcean Spaces, etc.
+Uploads CDR JSON to AWS S3, MinIO, DigitalOcean Spaces, etc.
 
 ```toml
 [callrecord]
@@ -67,6 +106,10 @@ access_key = "MINIO_ACCESS_KEY"
 secret_key = "MINIO_SECRET_KEY"
 endpoint = "http://minio:9000" # needed for non-AWS
 root = "/daily-records"
+
+# Deprecated and ignored. Recording media upload is configured by [recording].
+with_media = true
+keep_media_copy = false
 ```
 
 ### HTTP Webhook
@@ -75,5 +118,10 @@ Send CDR JSON to an endpoint.
 [callrecord]
 type = "http"
 url = "http://my-crm/cdr-hook"
-keep_media_copy = true
+
+# Deprecated and ignored. Recording media upload is configured by [recording].
+with_media = true
+keep_media_copy = false
 ```
+
+HTTP CDR delivery uses `multipart/form-data` with field `calllog.json`. Recording media is delivered separately by `[recording] type = "http"`.

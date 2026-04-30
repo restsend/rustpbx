@@ -125,7 +125,7 @@ users = [{ username = "1001", password = "password" }]
 
 [sipflow]
 type = "local"
-root = "./config/cdr"
+root = "./config/sipflow"
 subdirs = "hourly"
 ```
 

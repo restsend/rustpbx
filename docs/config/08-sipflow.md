@@ -97,18 +97,20 @@ url = "https://archive.example.com/upload"
 
 ---
 
-## Enabling SipFlow per Call Record
+## Enabling SipFlow
 
-SipFlow recording is enabled on a per-call-record basis via the `enable_sipflow` flag in `[callrecord]`:
+SipFlow recording is enabled by configuring the `[sipflow]` backend. It is independent from `[callrecord]`, which only controls CDR JSON storage.
 
 ```toml
-[callrecord]
+[sipflow]
 type = "local"
-root = "./config/cdr"
-enable_sipflow = true
+root = "./config/sipflow"
+subdirs = "daily"
 ```
 
-When set, each CDR entry in the console will display a **SIP Flow** tab with the signalling ladder and an audio player.
+When SipFlow is active, each CDR entry in the console can display a **SIP Flow** tab with the signalling ladder and an audio player.
+
+SipFlow captures RTP media itself. When a SipFlow backend is active, RustPBX disables the live WAV recorder configured by `[recording]` for that call to avoid duplicate media recording. Use `[sipflow.upload]` to export SipFlow-generated WAV media after call completion.
 
 ---
 
