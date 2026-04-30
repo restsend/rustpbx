@@ -593,7 +593,7 @@ impl CallRecordManager {
                         endpoint,
                         with_media,
                         keep_media_copy,
-                        &record,
+                        &mut record,
                     )
                     .await
                 }
@@ -743,7 +743,7 @@ impl CallRecordManager {
         endpoint: &str,
         with_media: &Option<bool>,
         keep_media_copy: &Option<bool>,
-        record: &CallRecord,
+        record: &mut CallRecord,
     ) -> Result<String> {
         let start_time = Instant::now();
         let storage_config = crate::storage::StorageConfig::S3 {
@@ -757,7 +757,60 @@ impl CallRecordManager {
         };
         let storage = crate::storage::Storage::new(&storage_config)?;
 
-        // Serialize call record to JSON
+        // Upload media files if with_media is true
+        let mut uploaded_local_media_paths = Vec::new();
+        let mut recording_url_updated = false;
+        if with_media.unwrap_or(false) {
+            let mut media_files = vec![];
+            for (index, media) in record.recorder.iter().enumerate() {
+                if Path::new(&media.path).exists() {
+                    let media_path = formatter.format_media_path(record, media);
+                    media_files.push((index, media.path.clone(), media_path));
+                }
+            }
+            for (index, path, media_path) in &media_files {
+                let start_time = Instant::now();
+                let file_content = match tokio::fs::read(path).await {
+                    Ok(file_content) => file_content,
+                    Err(e) => {
+                        warn!("failed to read media file {}: {}", path, e);
+                        continue;
+                    }
+                };
+                let buf_size = file_content.len();
+                match storage.write(media_path, file_content.into()).await {
+                    Ok(_) => {
+                        info!(
+                            elapsed = start_time.elapsed().as_secs_f64(),
+                            media_path, buf_size, "upload media file"
+                        );
+                        uploaded_local_media_paths.push(path.clone());
+                        let media_url = format!(
+                            "{}/{}/{}",
+                            endpoint.trim_end_matches('/'),
+                            bucket.trim_matches('/'),
+                            media_path.trim_start_matches('/')
+                        );
+                        if let Some(media) = record.recorder.get_mut(*index) {
+                            media.path = media_url.clone();
+                        }
+                        if !recording_url_updated {
+                            record.details.recording_url = Some(media_url);
+                            record.details.recording_duration_secs = Some(
+                                (record.end_time - record.start_time).num_seconds().max(0) as i32,
+                            );
+                            recording_url_updated = true;
+                        }
+                    }
+                    Err(e) => {
+                        warn!(media_path, "failed to upload media file: {}", e);
+                    }
+                }
+            }
+        }
+
+        // Serialize call record after media upload so the CDR and DB hook see
+        // the storage URL instead of the live recorder's temporary local path.
         let call_log_json = formatter.format(record)?;
         // Upload call log JSON
         let filename = formatter.format_file_name(record);
@@ -774,42 +827,11 @@ impl CallRecordManager {
                 warn!(filename, "failed to upload call record: {}", e);
             }
         }
-        // Upload media files if with_media is true
-        if with_media.unwrap_or(false) {
-            let mut media_files = vec![];
-            for media in &record.recorder {
-                if Path::new(&media.path).exists() {
-                    let media_path = formatter.format_media_path(record, media);
-                    media_files.push((media.path.clone(), media_path));
-                }
-            }
-            for (path, media_path) in &media_files {
-                let start_time = Instant::now();
-                let file_content = match tokio::fs::read(path).await {
-                    Ok(file_content) => file_content,
-                    Err(e) => {
-                        warn!("failed to read media file {}: {}", path, e);
-                        continue;
-                    }
-                };
-                let buf_size = file_content.len();
-                match storage.write(media_path, file_content.into()).await {
-                    Ok(_) => {
-                        info!(
-                            elapsed = start_time.elapsed().as_secs_f64(),
-                            media_path, buf_size, "upload media file"
-                        );
-                    }
-                    Err(e) => {
-                        warn!(media_path, "failed to upload media file: {}", e);
-                    }
-                }
-            }
-        }
+
         // Optionally delete local media files if keep_media_copy is false
         if !keep_media_copy.unwrap_or(false) {
-            for media in &record.recorder {
-                let p = Path::new(&media.path);
+            for path in uploaded_local_media_paths {
+                let p = Path::new(&path);
                 if p.exists() {
                     tokio::fs::remove_file(p).await.ok();
                 }
@@ -823,8 +845,9 @@ impl CallRecordManager {
         }
 
         Ok(format!(
-            "{}/{}",
+            "{}/{}/{}",
             endpoint.trim_end_matches('/'),
+            bucket.trim_matches('/'),
             filename.trim_start_matches('/')
         ))
     }
