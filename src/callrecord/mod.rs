@@ -18,6 +18,7 @@ use tracing::{info, warn};
 
 pub mod sipflow;
 pub mod sipflow_upload;
+pub mod recording_upload;
 pub mod storage;
 #[cfg(test)]
 mod tests;
@@ -579,8 +580,6 @@ impl CallRecordManager {
                     access_key,
                     secret_key,
                     endpoint,
-                    with_media,
-                    keep_media_copy,
                     ..
                 } => {
                     Self::save_with_s3_like(
@@ -591,8 +590,6 @@ impl CallRecordManager {
                         access_key,
                         secret_key,
                         endpoint,
-                        with_media,
-                        keep_media_copy,
                         &mut record,
                     )
                     .await
@@ -600,18 +597,9 @@ impl CallRecordManager {
                 CallRecordConfig::Http {
                     url,
                     headers,
-                    with_media,
-                    keep_media_copy,
+                    ..
                 } => {
-                    Self::save_with_http(
-                        formatter.clone(),
-                        url,
-                        headers,
-                        with_media,
-                        keep_media_copy,
-                        &record,
-                    )
-                    .await
+                    Self::save_with_http(formatter.clone(), url, headers, &record).await
                 }
                 CallRecordConfig::Database {
                     database_url,
@@ -659,51 +647,12 @@ impl CallRecordManager {
         formatter: Arc<dyn CallRecordFormatter>,
         url: &String,
         headers: &Option<HashMap<String, String>>,
-        with_media: &Option<bool>,
-        keep_media_copy: &Option<bool>,
         record: &CallRecord,
     ) -> Result<String> {
         let client = reqwest::Client::new();
-        // Serialize call record to JSON
         let call_log_json = formatter.format(record)?;
-        // Create multipart form
-        let mut form = reqwest::multipart::Form::new().text("calllog.json", call_log_json);
+        let form = reqwest::multipart::Form::new().text("calllog.json", call_log_json);
 
-        // Add media files if with_media is true
-        if with_media.unwrap_or(false) {
-            for media in &record.recorder {
-                if std::path::Path::new(&media.path).exists() {
-                    match tokio::fs::read(&media.path).await {
-                        Ok(file_content) => {
-                            let file_name = std::path::Path::new(&media.path)
-                                .file_name()
-                                .unwrap_or_else(|| std::ffi::OsStr::new("unknown"))
-                                .to_string_lossy()
-                                .to_string();
-
-                            let part = match reqwest::multipart::Part::bytes(file_content)
-                                .file_name(file_name.clone())
-                                .mime_str("application/octet-stream")
-                            {
-                                Ok(part) => part,
-                                Err(_) => {
-                                    // Fallback to default MIME type if parsing fails
-                                    reqwest::multipart::Part::bytes(
-                                        tokio::fs::read(&media.path).await?,
-                                    )
-                                    .file_name(file_name)
-                                }
-                            };
-
-                            form = form.part(format!("media_{}", media.track_id), part);
-                        }
-                        Err(e) => {
-                            warn!("Failed to read media file {}: {}", media.path, e);
-                        }
-                    }
-                }
-            }
-        }
         let mut request = client.post(url).multipart(form);
         if let Some(headers_map) = headers {
             for (key, value) in headers_map {
@@ -713,15 +662,6 @@ impl CallRecordManager {
         let response = request.send().await?;
         if response.status().is_success() {
             let response_text = response.text().await.unwrap_or_default();
-
-            if keep_media_copy.unwrap_or(false) {
-                for media in &record.recorder {
-                    let p = Path::new(&media.path);
-                    if p.exists() {
-                        tokio::fs::remove_file(p).await.ok();
-                    }
-                }
-            }
             Ok(format!("HTTP upload successful: {}", response_text))
         } else {
             Err(anyhow::anyhow!(
@@ -741,8 +681,6 @@ impl CallRecordManager {
         access_key: &str,
         secret_key: &str,
         endpoint: &str,
-        with_media: &Option<bool>,
-        keep_media_copy: &Option<bool>,
         record: &mut CallRecord,
     ) -> Result<String> {
         let start_time = Instant::now();
@@ -757,64 +695,8 @@ impl CallRecordManager {
         };
         let storage = crate::storage::Storage::new(&storage_config)?;
 
-        // Upload media files if with_media is true
-        let mut uploaded_local_media_paths = Vec::new();
-        let mut recording_url_updated = false;
-        if with_media.unwrap_or(false) {
-            let mut media_files = vec![];
-            for (index, media) in record.recorder.iter().enumerate() {
-                if Path::new(&media.path).exists() {
-                    let media_path = formatter.format_media_path(record, media);
-                    media_files.push((index, media.path.clone(), media_path));
-                }
-            }
-            for (index, path, media_path) in &media_files {
-                let start_time = Instant::now();
-                let file_content = match tokio::fs::read(path).await {
-                    Ok(file_content) => file_content,
-                    Err(e) => {
-                        warn!("failed to read media file {}: {}", path, e);
-                        continue;
-                    }
-                };
-                let buf_size = file_content.len();
-                match storage.write(media_path, file_content.into()).await {
-                    Ok(_) => {
-                        info!(
-                            elapsed = start_time.elapsed().as_secs_f64(),
-                            media_path, buf_size, "upload media file"
-                        );
-                        uploaded_local_media_paths.push(path.clone());
-                        let media_url = format!(
-                            "{}/{}/{}",
-                            endpoint.trim_end_matches('/'),
-                            bucket.trim_matches('/'),
-                            media_path.trim_start_matches('/')
-                        );
-                        if let Some(media) = record.recorder.get_mut(*index) {
-                            media.path = media_url.clone();
-                        }
-                        if !recording_url_updated {
-                            record.details.recording_url = Some(media_url);
-                            record.details.recording_duration_secs = Some(
-                                (record.end_time - record.start_time).num_seconds().max(0) as i32,
-                            );
-                            recording_url_updated = true;
-                        }
-                    }
-                    Err(e) => {
-                        warn!(media_path, "failed to upload media file: {}", e);
-                    }
-                }
-            }
-        }
-
-        // Serialize call record after media upload so the CDR and DB hook see
-        // the storage URL instead of the live recorder's temporary local path.
         let call_log_json = formatter.format(record)?;
-        // Upload call log JSON
         let filename = formatter.format_file_name(record);
-        let local_files = vec![filename.clone()];
         let buf_size = call_log_json.len();
         match storage.write(&filename, call_log_json.into()).await {
             Ok(_) => {
@@ -825,22 +707,6 @@ impl CallRecordManager {
             }
             Err(e) => {
                 warn!(filename, "failed to upload call record: {}", e);
-            }
-        }
-
-        // Optionally delete local media files if keep_media_copy is false
-        if !keep_media_copy.unwrap_or(false) {
-            for path in uploaded_local_media_paths {
-                let p = Path::new(&path);
-                if p.exists() {
-                    tokio::fs::remove_file(p).await.ok();
-                }
-            }
-            for file_name in &local_files {
-                let p = Path::new(file_name);
-                if p.exists() {
-                    tokio::fs::remove_file(p).await.ok();
-                }
             }
         }
 

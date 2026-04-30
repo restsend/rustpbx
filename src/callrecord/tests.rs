@@ -22,7 +22,6 @@ async fn test_save_with_http_without_media() {
     // Test without media (should not fail if no server available)
     let url = "http://httpbin.org/post".to_string();
     let headers = None;
-    let with_media = Some(false);
 
     // This test will only pass if httpbin.org is available
     // In production, you might want to use a mock server
@@ -30,8 +29,6 @@ async fn test_save_with_http_without_media() {
         Arc::new(DefaultCallRecordFormatter::default()),
         &url,
         &headers,
-        &with_media,
-        &None, // keep_media_copy is irrelevant here
         &record,
     )
     .await;
@@ -74,17 +71,14 @@ async fn test_save_with_http_with_media() {
         ..Default::default()
     };
 
-    // Test with media
+    // Media stays local; `[recording]` controls recording upload.
     let url = "http://httpbin.org/post".to_string();
     let headers = None;
-    let with_media = Some(true);
 
     let result = CallRecordManager::save_with_http(
         Arc::new(DefaultCallRecordFormatter::default()),
         &url,
         &headers,
-        &with_media,
-        &None, // keep_media_copy is irrelevant here
         &record,
     )
     .await;
@@ -117,14 +111,11 @@ async fn test_save_with_http_with_custom_headers() {
     };
 
     let url = "http://httpbin.org/post".to_string();
-    let with_media = Some(false);
 
     let result = CallRecordManager::save_with_http(
         Arc::new(DefaultCallRecordFormatter::default()),
         &url,
         &Some(headers),
-        &with_media,
-        &None, // keep_media_copy is irrelevant here
         &record,
     )
     .await;
@@ -157,14 +148,11 @@ async fn test_save_with_s3_like_with_custom_headers() {
     };
 
     let url = "http://httpbin.org/post".to_string();
-    let with_media = Some(false);
 
     let result = CallRecordManager::save_with_http(
         Arc::new(DefaultCallRecordFormatter::default()),
         &url,
         &Some(headers),
-        &with_media,
-        &None,
         &record,
     )
     .await;
@@ -188,8 +176,6 @@ async fn test_save_with_s3_like_memory_store() {
     let access_key = "minioadmin".to_string();
     let secret_key = "minioadmin".to_string();
     let endpoint = "http://localhost:9000".to_string(); // Local minio endpoint
-    let with_media = Some(false);
-    let keep_media_copy = Some(false);
 
     let mut record = CallRecord {
         call_id: "test_s3_call_123".to_string(),
@@ -212,8 +198,6 @@ async fn test_save_with_s3_like_memory_store() {
         &access_key,
         &secret_key,
         &endpoint,
-        &with_media,
-        &keep_media_copy,
         &mut record,
     )
     .await;
@@ -272,8 +256,6 @@ async fn test_save_with_s3_like_with_media() {
         let access_key = "test_access_key".to_string();
         let secret_key = "test_secret_key".to_string();
         let endpoint = endpoint.to_string();
-        let with_media = Some(true);
-        let keep_media_copy = Some(false);
 
         let result = CallRecordManager::save_with_s3_like(
             Arc::new(DefaultCallRecordFormatter::default()),
@@ -283,8 +265,6 @@ async fn test_save_with_s3_like_with_media() {
             &access_key,
             &secret_key,
             &endpoint,
-            &with_media,
-            &keep_media_copy,
             &mut record,
         )
         .await;

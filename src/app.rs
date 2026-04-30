@@ -1,7 +1,8 @@
 use crate::{
     callrecord::{
         CallRecordFormatter, CallRecordManagerBuilder, CallRecordSender,
-        DefaultCallRecordFormatter, noop_saver, sipflow_upload::SipFlowUploadHook,
+        DefaultCallRecordFormatter, noop_saver, recording_upload::RecordingUploadHook,
+        sipflow_upload::SipFlowUploadHook,
     },
     config::{ClusterConfig, Config, UserBackendConfig},
     handler::middleware::clientaddr::ClientAddr,
@@ -285,6 +286,11 @@ impl AppStateBuilder {
                 crate::config::SipFlowConfig::Local { upload, .. } => upload.clone(),
                 _ => None,
             });
+        let recording_upload_policy = config
+            .recording
+            .as_ref()
+            .filter(|policy| policy.uploads_recording() && sipflow_backend_arc.is_none())
+            .cloned();
 
         let callrecord_formatter = if let Some(formatter) = self.callrecord_formatter {
             formatter
@@ -301,17 +307,18 @@ impl AppStateBuilder {
         let mut callrecord_manager = None;
         let callrecord_sender = if let Some(sender) = self.callrecord_sender {
             Some(sender)
-        } else if config.callrecord.is_some() || sipflow_upload_config.is_some() {
+        } else if config.callrecord.is_some()
+            || sipflow_upload_config.is_some()
+            || recording_upload_policy.is_some()
+        {
             // Build a CallRecordManager when either:
             //  - [callrecord] is configured (CDR JSON files / S3), or
             //  - [sipflow.upload] is configured (post-call WAV upload)
+            //  - [recording].type exports live recorder WAV after call completion.
             // DatabaseHook is always included so call records reach the DB.
             let mut builder = CallRecordManagerBuilder::new()
                 .with_cancel_token(token.child_token())
-                .with_formatter(callrecord_formatter.clone())
-                .with_hook(Box::new(DatabaseHook {
-                    db: db_conn.clone(),
-                }));
+                .with_formatter(callrecord_formatter.clone());
 
             if let Some(ref callrecord) = config.callrecord {
                 builder = builder.with_config(callrecord.clone());
@@ -331,6 +338,14 @@ impl AppStateBuilder {
                     upload_config: upload_cfg.clone(),
                 }));
             }
+
+            if let Some(policy) = recording_upload_policy.as_ref() {
+                builder = builder.with_hook(Box::new(RecordingUploadHook::new(policy.clone())));
+            }
+
+            builder = builder.with_hook(Box::new(DatabaseHook {
+                db: db_conn.clone(),
+            }));
 
             for hook in addon_registry.get_call_record_hooks(&config, &db_conn) {
                 builder = builder.with_hook(hook);

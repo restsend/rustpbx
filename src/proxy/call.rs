@@ -763,10 +763,17 @@ impl CallModule {
     }
 
     fn apply_recording_policy(&self, mut dialplan: Dialplan, caller: &SipUser) -> Dialplan {
+        let sipflow_active = self.inner.server.sip_flow.is_some();
         let policy = match self.inner.config.recording.as_ref() {
             Some(policy) if policy.enabled => policy,
             _ => return dialplan,
         };
+
+        if sipflow_active {
+            dialplan.recording.enabled = false;
+            dialplan.recording.option = None;
+            return dialplan;
+        }
 
         if dialplan.recording.enabled && dialplan.recording.option.is_some() {
             return dialplan;
