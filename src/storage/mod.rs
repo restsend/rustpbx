@@ -95,6 +95,9 @@ impl Storage {
                         if let Some(ep) = endpoint
                             && !ep.is_empty() {
                                 builder = builder.with_endpoint(ep);
+                                if ep.starts_with("http://") {
+                                    builder = builder.with_allow_http(true);
+                                }
                             }
                         Arc::new(builder.build()?)
                     }
