@@ -531,12 +531,8 @@ impl Recorder {
             return Ok(());
         }
         let digit_code = payload[0];
-        let digit = match digit_code {
-            0..=9 => (b'0' + digit_code) as char,
-            10 => '*',
-            11 => '#',
-            12..=15 => (b'A' + (digit_code - 12)) as char,
-            _ => return Ok(()),
+        let Some(digit) = crate::media::telephone_event::dtmf_code_to_char(digit_code) else {
+            return Ok(());
         };
 
         let end_bit = (payload[1] & 0x80) != 0;

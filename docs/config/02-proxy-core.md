@@ -93,7 +93,12 @@ media_proxy = "auto"
 # Preferred codec order for SDP negotiation
 codecs = ["opus", "pcmu", "pcma", "g729"]
 
-# Enable NAT media latching (helps with RTP behind NAT)
+# Codec selection strategy for WebRTC endpoints.
+# "performance" (default): avoid transcoding, keep only caller-offered codecs.
+# "quality": prefer Opus > G729 > G722 > G711 (may require transcoding).
+codec_strategy = "performance"
+
+# Enable NAT media latching (helps with RTP behind NAT, default: true)
 enable_latching = true
 
 # Enable NAT fix for SIP signaling

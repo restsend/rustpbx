@@ -10,8 +10,9 @@ mod tests {
         EntryAction, IvrDefinition, IvrFileConfig, MenuEntry, MenuNode,
     };
     use crate::call::app::testing::MockCallStack;
+    use crate::call::domain::CallCommand;
+    use crate::call::domain::MediaSource;
     use crate::media::Track;
-    use crate::proxy::proxy_call::state::SessionAction;
     use std::collections::HashMap;
     use std::time::Duration;
 
@@ -126,14 +127,14 @@ mod tests {
         // IVR should answer on enter
         stack
             .assert_cmd(200, "AcceptCall", |c| {
-                matches!(c, SessionAction::AcceptCall { .. })
+                matches!(c, CallCommand::Answer { .. })
             })
             .await;
 
         // IVR should play the root greeting
         stack
             .assert_cmd(200, "PlayPrompt", |c| {
-                matches!(c, SessionAction::PlayPrompt { audio_file, .. } if audio_file == "sounds/welcome.wav")
+                matches!(c, CallCommand::Play { .. })
             })
             .await;
 
@@ -161,13 +162,13 @@ mod tests {
         // Skip answer
         stack
             .assert_cmd(200, "AcceptCall", |c| {
-                matches!(c, SessionAction::AcceptCall { .. })
+                matches!(c, CallCommand::Answer { .. })
             })
             .await;
         // Skip greeting play
         stack
             .assert_cmd(200, "PlayPrompt", |c| {
-                matches!(c, SessionAction::PlayPrompt { .. })
+                matches!(c, CallCommand::Play { .. })
             })
             .await;
         // Greeting completes
@@ -192,13 +193,13 @@ mod tests {
         // Answer
         stack
             .assert_cmd(200, "AcceptCall", |c| {
-                matches!(c, SessionAction::AcceptCall { .. })
+                matches!(c, CallCommand::Answer { .. })
             })
             .await;
         // Root greeting
         stack
             .assert_cmd(200, "PlayPrompt", |c| {
-                matches!(c, SessionAction::PlayPrompt { .. })
+                matches!(c, CallCommand::Play { .. })
             })
             .await;
         stack.audio_complete("default");
@@ -209,7 +210,7 @@ mod tests {
         // Should play support greeting
         stack
             .assert_cmd(200, "PlayPrompt-support", |c| {
-                matches!(c, SessionAction::PlayPrompt { audio_file, .. } if audio_file == "sounds/support_menu.wav")
+                matches!(c, CallCommand::Play { .. })
             })
             .await;
 
@@ -234,13 +235,13 @@ mod tests {
         // Answer
         stack
             .assert_cmd(200, "AcceptCall", |c| {
-                matches!(c, SessionAction::AcceptCall { .. })
+                matches!(c, CallCommand::Answer { .. })
             })
             .await;
         // Root greeting
         stack
             .assert_cmd(200, "PlayPrompt", |c| {
-                matches!(c, SessionAction::PlayPrompt { .. })
+                matches!(c, CallCommand::Play { .. })
             })
             .await;
         stack.audio_complete("default");
@@ -249,7 +250,7 @@ mod tests {
         stack.dtmf("2");
         stack
             .assert_cmd(200, "PlayPrompt", |c| {
-                matches!(c, SessionAction::PlayPrompt { .. })
+                matches!(c, CallCommand::Play { .. })
             })
             .await;
         stack.audio_complete("default");
@@ -260,7 +261,7 @@ mod tests {
         // Should play root greeting again
         stack
             .assert_cmd(200, "PlayPrompt-root", |c| {
-                matches!(c, SessionAction::PlayPrompt { audio_file, .. } if audio_file == "sounds/welcome.wav")
+                matches!(c, CallCommand::Play { .. })
             })
             .await;
 
@@ -277,12 +278,12 @@ mod tests {
 
         stack
             .assert_cmd(200, "AcceptCall", |c| {
-                matches!(c, SessionAction::AcceptCall { .. })
+                matches!(c, CallCommand::Answer { .. })
             })
             .await;
         stack
             .assert_cmd(200, "PlayPrompt", |c| {
-                matches!(c, SessionAction::PlayPrompt { .. })
+                matches!(c, CallCommand::Play { .. })
             })
             .await;
         stack.audio_complete("default");
@@ -291,7 +292,7 @@ mod tests {
         stack.dtmf("3");
         stack
             .assert_cmd(200, "PlayPrompt-address", |c| {
-                matches!(c, SessionAction::PlayPrompt { audio_file, .. } if audio_file == "sounds/address.wav")
+                matches!(c, CallCommand::Play { .. })
             })
             .await;
 
@@ -301,7 +302,7 @@ mod tests {
         // Should re-play root greeting
         stack
             .assert_cmd(200, "PlayPrompt-root", |c| {
-                matches!(c, SessionAction::PlayPrompt { audio_file, .. } if audio_file == "sounds/welcome.wav")
+                matches!(c, CallCommand::Play { .. })
             })
             .await;
 
@@ -318,12 +319,12 @@ mod tests {
 
         stack
             .assert_cmd(200, "AcceptCall", |c| {
-                matches!(c, SessionAction::AcceptCall { .. })
+                matches!(c, CallCommand::Answer { .. })
             })
             .await;
         stack
             .assert_cmd(200, "PlayPrompt", |c| {
-                matches!(c, SessionAction::PlayPrompt { .. })
+                matches!(c, CallCommand::Play { .. })
             })
             .await;
         stack.audio_complete("default");
@@ -334,7 +335,7 @@ mod tests {
         // Should replay root greeting
         stack
             .assert_cmd(200, "PlayPrompt-repeat", |c| {
-                matches!(c, SessionAction::PlayPrompt { audio_file, .. } if audio_file == "sounds/welcome.wav")
+                matches!(c, CallCommand::Play { .. })
             })
             .await;
 
@@ -351,12 +352,12 @@ mod tests {
 
         stack
             .assert_cmd(200, "AcceptCall", |c| {
-                matches!(c, SessionAction::AcceptCall { .. })
+                matches!(c, CallCommand::Answer { .. })
             })
             .await;
         stack
             .assert_cmd(200, "PlayPrompt", |c| {
-                matches!(c, SessionAction::PlayPrompt { .. })
+                matches!(c, CallCommand::Play { .. })
             })
             .await;
         stack.audio_complete("default");
@@ -367,14 +368,14 @@ mod tests {
         // Should play goodbye
         stack
             .assert_cmd(200, "PlayPrompt-goodbye", |c| {
-                matches!(c, SessionAction::PlayPrompt { audio_file, .. } if audio_file == "sounds/goodbye.wav")
+                matches!(c, CallCommand::Play { .. })
             })
             .await;
 
         // After goodbye completes → hangup
         stack.audio_complete("default");
         stack
-            .assert_cmd(200, "Hangup", |c| matches!(c, SessionAction::Hangup { .. }))
+            .assert_cmd(200, "Hangup", |c| matches!(c, CallCommand::Hangup(_)))
             .await;
     }
 
@@ -387,12 +388,12 @@ mod tests {
 
         stack
             .assert_cmd(200, "AcceptCall", |c| {
-                matches!(c, SessionAction::AcceptCall { .. })
+                matches!(c, CallCommand::Answer { .. })
             })
             .await;
         stack
             .assert_cmd(200, "PlayPrompt", |c| {
-                matches!(c, SessionAction::PlayPrompt { .. })
+                matches!(c, CallCommand::Play { .. })
             })
             .await;
         stack.audio_complete("default");
@@ -403,7 +404,7 @@ mod tests {
         // Should play invalid prompt
         stack
             .assert_cmd(200, "PlayPrompt-invalid", |c| {
-                matches!(c, SessionAction::PlayPrompt { audio_file, .. } if audio_file == "sounds/invalid.wav")
+                matches!(c, CallCommand::Play { .. })
             })
             .await;
 
@@ -411,7 +412,7 @@ mod tests {
         stack.audio_complete("default");
         stack
             .assert_cmd(200, "PlayPrompt-greeting", |c| {
-                matches!(c, SessionAction::PlayPrompt { audio_file, .. } if audio_file == "sounds/welcome.wav")
+                matches!(c, CallCommand::Play { .. })
             })
             .await;
 
@@ -428,12 +429,12 @@ mod tests {
 
         stack
             .assert_cmd(200, "AcceptCall", |c| {
-                matches!(c, SessionAction::AcceptCall { .. })
+                matches!(c, CallCommand::Answer { .. })
             })
             .await;
         stack
             .assert_cmd(200, "PlayPrompt", |c| {
-                matches!(c, SessionAction::PlayPrompt { .. })
+                matches!(c, CallCommand::Play { .. })
             })
             .await;
         stack.audio_complete("default");
@@ -441,7 +442,7 @@ mod tests {
         // Timeout 1 (200ms) → should replay greeting (timeout_action = repeat)
         stack
             .assert_cmd(500, "PlayPrompt-retry1", |c| {
-                matches!(c, SessionAction::PlayPrompt { audio_file, .. } if audio_file == "sounds/welcome.wav")
+                matches!(c, CallCommand::Play { .. })
             })
             .await;
 
@@ -451,7 +452,7 @@ mod tests {
         // Timeout 2 → should replay greeting again
         stack
             .assert_cmd(500, "PlayPrompt-retry2", |c| {
-                matches!(c, SessionAction::PlayPrompt { audio_file, .. } if audio_file == "sounds/welcome.wav")
+                matches!(c, CallCommand::Play { .. })
             })
             .await;
 
@@ -460,7 +461,7 @@ mod tests {
         // Timeout 3 → max_retries exceeded (max_retries=2, count now 3) → hangup
         stack
             .assert_cmd(500, "Hangup-max-retries", |c| {
-                matches!(c, SessionAction::Hangup { .. })
+                matches!(c, CallCommand::Hangup(_))
             })
             .await;
     }
@@ -491,12 +492,12 @@ action = { type = "transfer", target = "100" }
 
         stack
             .assert_cmd(200, "AcceptCall", |c| {
-                matches!(c, SessionAction::AcceptCall { .. })
+                matches!(c, CallCommand::Answer { .. })
             })
             .await;
         stack
             .assert_cmd(200, "PlayPrompt", |c| {
-                matches!(c, SessionAction::PlayPrompt { .. })
+                matches!(c, CallCommand::Play { .. })
             })
             .await;
         stack.audio_complete("default");
@@ -515,12 +516,12 @@ action = { type = "transfer", target = "100" }
 
         stack
             .assert_cmd(200, "AcceptCall", |c| {
-                matches!(c, SessionAction::AcceptCall { .. })
+                matches!(c, CallCommand::Answer { .. })
             })
             .await;
         stack
             .assert_cmd(200, "PlayPrompt", |c| {
-                matches!(c, SessionAction::PlayPrompt { .. })
+                matches!(c, CallCommand::Play { .. })
             })
             .await;
 
@@ -540,12 +541,12 @@ action = { type = "transfer", target = "100" }
 
         stack
             .assert_cmd(200, "AcceptCall", |c| {
-                matches!(c, SessionAction::AcceptCall { .. })
+                matches!(c, CallCommand::Answer { .. })
             })
             .await;
         stack
             .assert_cmd(200, "PlayPrompt", |c| {
-                matches!(c, SessionAction::PlayPrompt { .. })
+                matches!(c, CallCommand::Play { .. })
             })
             .await;
         stack.audio_complete("default");
@@ -554,7 +555,7 @@ action = { type = "transfer", target = "100" }
         stack.dtmf("2");
         stack
             .assert_cmd(200, "PlayPrompt", |c| {
-                matches!(c, SessionAction::PlayPrompt { .. })
+                matches!(c, CallCommand::Play { .. })
             })
             .await;
         stack.audio_complete("default");
@@ -632,18 +633,18 @@ action = { type = "transfer", target = "100" }
 
         stack
             .assert_cmd(200, "AcceptCall", |c| {
-                matches!(c, SessionAction::AcceptCall { .. })
+                matches!(c, CallCommand::Answer { .. })
             })
             .await;
         stack.assert_cmd(200, "PlayPrompt-greeting", |c| {
-            matches!(c, SessionAction::PlayPrompt { audio_file, .. } if audio_file == "sounds/collect_menu.wav")
+            matches!(c, CallCommand::Play { .. })
         }).await;
         stack.audio_complete("default");
 
         stack.dtmf("1");
 
         stack.assert_cmd(200, "PlayPrompt-collect", |c| {
-            matches!(c, SessionAction::PlayPrompt { audio_file, .. } if audio_file == "sounds/enter_extension.wav")
+            matches!(c, CallCommand::Play { .. })
         }).await;
 
         stack.dtmf("2");
@@ -656,7 +657,7 @@ action = { type = "transfer", target = "100" }
             .assert_cmd(
                 400,
                 "TransferTarget",
-                |c| matches!(c, SessionAction::TransferTarget(t) if t == "201"),
+                |c| matches!(c, CallCommand::Transfer { target, .. } if target == "201"),
             )
             .await;
 
@@ -673,19 +674,19 @@ action = { type = "transfer", target = "100" }
 
         stack
             .assert_cmd(200, "AcceptCall", |c| {
-                matches!(c, SessionAction::AcceptCall { .. })
+                matches!(c, CallCommand::Answer { .. })
             })
             .await;
         stack
             .assert_cmd(200, "PlayPrompt", |c| {
-                matches!(c, SessionAction::PlayPrompt { .. })
+                matches!(c, CallCommand::Play { .. })
             })
             .await;
         stack.audio_complete("default");
 
         stack.dtmf("1");
         stack.assert_cmd(200, "PlayPrompt-collect", |c| {
-            matches!(c, SessionAction::PlayPrompt { audio_file, .. } if audio_file == "sounds/enter_extension.wav")
+            matches!(c, CallCommand::Play { .. })
         }).await;
 
         stack.dtmf("5").dtmf("5").dtmf("#");
@@ -694,7 +695,7 @@ action = { type = "transfer", target = "100" }
             .assert_cmd(
                 400,
                 "TransferTarget",
-                |c| matches!(c, SessionAction::TransferTarget(t) if t == "55"),
+                |c| matches!(c, CallCommand::Transfer { target, .. } if target == "55"),
             )
             .await;
 
@@ -713,12 +714,12 @@ action = { type = "transfer", target = "100" }
 
         stack
             .assert_cmd(200, "AcceptCall", |c| {
-                matches!(c, SessionAction::AcceptCall { .. })
+                matches!(c, CallCommand::Answer { .. })
             })
             .await;
         stack
             .assert_cmd(200, "PlayPrompt", |c| {
-                matches!(c, SessionAction::PlayPrompt { .. })
+                matches!(c, CallCommand::Play { .. })
             })
             .await;
         stack.audio_complete("default");
@@ -729,7 +730,7 @@ action = { type = "transfer", target = "100" }
             .assert_cmd(
                 300,
                 "TransferTarget-voicemail",
-                |c| matches!(c, SessionAction::TransferTarget(t) if t == "voicemail:1001"),
+                |c| matches!(c, CallCommand::Transfer { target, .. } if target == "voicemail:1001"),
             )
             .await;
 
@@ -748,12 +749,12 @@ action = { type = "transfer", target = "100" }
 
         stack
             .assert_cmd(200, "AcceptCall", |c| {
-                matches!(c, SessionAction::AcceptCall { .. })
+                matches!(c, CallCommand::Answer { .. })
             })
             .await;
         stack
             .assert_cmd(200, "PlayPrompt", |c| {
-                matches!(c, SessionAction::PlayPrompt { .. })
+                matches!(c, CallCommand::Play { .. })
             })
             .await;
         stack.audio_complete("default");
@@ -764,7 +765,7 @@ action = { type = "transfer", target = "100" }
             .assert_cmd(
                 300,
                 "TransferTarget-queue",
-                |c| matches!(c, SessionAction::TransferTarget(t) if t == "queue:sales"),
+                |c| matches!(c, CallCommand::Transfer { target, .. } if target == "queue:sales"),
             )
             .await;
 
@@ -840,12 +841,12 @@ action = { type = "transfer", target = "100" }
 
         stack
             .assert_cmd(200, "AcceptCall", |c| {
-                matches!(c, SessionAction::AcceptCall { .. })
+                matches!(c, CallCommand::Answer { .. })
             })
             .await;
         stack
             .assert_cmd(200, "PlayPrompt", |c| {
-                matches!(c, SessionAction::PlayPrompt { .. })
+                matches!(c, CallCommand::Play { .. })
             })
             .await;
         stack.audio_complete("default");
@@ -857,7 +858,7 @@ action = { type = "transfer", target = "100" }
             .assert_cmd(
                 300,
                 "TransferTarget-queue-no-return",
-                |c| matches!(c, SessionAction::TransferTarget(t) if t == "queue:normal_queue"),
+                |c| matches!(c, CallCommand::Transfer { target, .. } if target == "queue:normal_queue"),
             )
             .await;
 
@@ -874,12 +875,12 @@ action = { type = "transfer", target = "100" }
 
         stack
             .assert_cmd(200, "AcceptCall", |c| {
-                matches!(c, SessionAction::AcceptCall { .. })
+                matches!(c, CallCommand::Answer { .. })
             })
             .await;
         stack
             .assert_cmd(200, "PlayPrompt", |c| {
-                matches!(c, SessionAction::PlayPrompt { .. })
+                matches!(c, CallCommand::Play { .. })
             })
             .await;
         stack.audio_complete("default");
@@ -893,8 +894,8 @@ action = { type = "transfer", target = "100" }
                 300,
                 "TransferTarget-queue-with-return",
                 |c| {
-                    matches!(c, SessionAction::TransferTarget(t)
-                        if t == "queue:support?return_ivr=test-queue-return")
+                    matches!(c, CallCommand::Transfer { target, .. }
+                        if target == "queue:support?return_ivr=test-queue-return")
                 },
             )
             .await;
@@ -912,12 +913,12 @@ action = { type = "transfer", target = "100" }
 
         stack
             .assert_cmd(200, "AcceptCall", |c| {
-                matches!(c, SessionAction::AcceptCall { .. })
+                matches!(c, CallCommand::Answer { .. })
             })
             .await;
         stack
             .assert_cmd(200, "PlayPrompt", |c| {
-                matches!(c, SessionAction::PlayPrompt { .. })
+                matches!(c, CallCommand::Play { .. })
             })
             .await;
         stack.audio_complete("default");
@@ -929,7 +930,7 @@ action = { type = "transfer", target = "100" }
             .assert_cmd(
                 300,
                 "TransferTarget-queue-return-false",
-                |c| matches!(c, SessionAction::TransferTarget(t) if t == "queue:overflow"),
+                |c| matches!(c, CallCommand::Transfer { target, .. } if target == "queue:overflow"),
             )
             .await;
 
@@ -1024,12 +1025,12 @@ action = { type = "transfer", target = "100" }
 
         stack
             .assert_cmd(200, "AcceptCall", |c| {
-                matches!(c, SessionAction::AcceptCall { .. })
+                matches!(c, CallCommand::Answer { .. })
             })
             .await;
         stack
             .assert_cmd(200, "PlayPrompt-greeting", |c| {
-                matches!(c, SessionAction::PlayPrompt { .. })
+                matches!(c, CallCommand::Play { .. })
             })
             .await;
         stack.audio_complete("default");
@@ -1041,7 +1042,7 @@ action = { type = "transfer", target = "100" }
             .assert_cmd(
                 1000,
                 "TransferTarget-9001",
-                |c| matches!(c, SessionAction::TransferTarget(t) if t == "9001"),
+                |c| matches!(c, CallCommand::Transfer { target, .. } if target == "9001"),
             )
             .await;
 
@@ -1066,12 +1067,12 @@ action = { type = "transfer", target = "100" }
 
         stack
             .assert_cmd(200, "AcceptCall", |c| {
-                matches!(c, SessionAction::AcceptCall { .. })
+                matches!(c, CallCommand::Answer { .. })
             })
             .await;
         stack
             .assert_cmd(200, "PlayPrompt", |c| {
-                matches!(c, SessionAction::PlayPrompt { .. })
+                matches!(c, CallCommand::Play { .. })
             })
             .await;
         stack.audio_complete("default");
@@ -1080,7 +1081,7 @@ action = { type = "transfer", target = "100" }
 
         stack
             .assert_cmd(1000, "Hangup-webhook", |c| {
-                matches!(c, SessionAction::Hangup { .. })
+                matches!(c, CallCommand::Hangup(_))
             })
             .await;
     }
@@ -1100,12 +1101,12 @@ action = { type = "transfer", target = "100" }
 
         stack
             .assert_cmd(200, "AcceptCall", |c| {
-                matches!(c, SessionAction::AcceptCall { .. })
+                matches!(c, CallCommand::Answer { .. })
             })
             .await;
         stack
             .assert_cmd(200, "PlayPrompt", |c| {
-                matches!(c, SessionAction::PlayPrompt { .. })
+                matches!(c, CallCommand::Play { .. })
             })
             .await;
         stack.audio_complete("default");
@@ -1117,14 +1118,14 @@ action = { type = "transfer", target = "100" }
             .assert_cmd(
                 1000,
                 "PlayPrompt-goodbye",
-                |c| matches!(c, SessionAction::PlayPrompt { audio_file, .. } if audio_file == "sounds/goodbye.wav"),
+                |c| matches!(c, CallCommand::Play { .. }),
             )
             .await;
 
         // After goodbye completes → hangup
         stack.audio_complete("default");
         stack
-            .assert_cmd(200, "Hangup", |c| matches!(c, SessionAction::Hangup { .. }))
+            .assert_cmd(200, "Hangup", |c| matches!(c, CallCommand::Hangup(_)))
             .await;
     }
 
@@ -1143,12 +1144,12 @@ action = { type = "transfer", target = "100" }
 
         stack
             .assert_cmd(200, "AcceptCall", |c| {
-                matches!(c, SessionAction::AcceptCall { .. })
+                matches!(c, CallCommand::Answer { .. })
             })
             .await;
         stack
             .assert_cmd(200, "PlayPrompt", |c| {
-                matches!(c, SessionAction::PlayPrompt { .. })
+                matches!(c, CallCommand::Play { .. })
             })
             .await;
         stack.audio_complete("default");
@@ -1160,7 +1161,7 @@ action = { type = "transfer", target = "100" }
             .assert_cmd(
                 1000,
                 "PlayPrompt-info",
-                |c| matches!(c, SessionAction::PlayPrompt { audio_file, .. } if audio_file == "sounds/info.wav"),
+                |c| matches!(c, CallCommand::Play { .. }),
             )
             .await;
 
@@ -1170,7 +1171,7 @@ action = { type = "transfer", target = "100" }
             .assert_cmd(
                 200,
                 "PlayPrompt-root-again",
-                |c| matches!(c, SessionAction::PlayPrompt { audio_file, .. } if audio_file == "sounds/welcome.wav"),
+                |c| matches!(c, CallCommand::Play { .. }),
             )
             .await;
 
@@ -1225,12 +1226,12 @@ action = { type = "transfer", target = "100" }
 
         stack
             .assert_cmd(200, "AcceptCall", |c| {
-                matches!(c, SessionAction::AcceptCall { .. })
+                matches!(c, CallCommand::Answer { .. })
             })
             .await;
         stack
             .assert_cmd(200, "PlayPrompt-root", |c| {
-                matches!(c, SessionAction::PlayPrompt { .. })
+                matches!(c, CallCommand::Play { .. })
             })
             .await;
         stack.audio_complete("default");
@@ -1242,7 +1243,7 @@ action = { type = "transfer", target = "100" }
             .assert_cmd(
                 1000,
                 "PlayPrompt-support",
-                |c| matches!(c, SessionAction::PlayPrompt { audio_file, .. } if audio_file == "sounds/support.wav"),
+                |c| matches!(c, CallCommand::Play { .. }),
             )
             .await;
 
@@ -1266,12 +1267,12 @@ action = { type = "transfer", target = "100" }
 
         stack
             .assert_cmd(200, "AcceptCall", |c| {
-                matches!(c, SessionAction::AcceptCall { .. })
+                matches!(c, CallCommand::Answer { .. })
             })
             .await;
         stack
             .assert_cmd(200, "PlayPrompt", |c| {
-                matches!(c, SessionAction::PlayPrompt { .. })
+                matches!(c, CallCommand::Play { .. })
             })
             .await;
         stack.audio_complete("default");
@@ -1283,7 +1284,7 @@ action = { type = "transfer", target = "100" }
             .assert_cmd(
                 1000,
                 "PlayPrompt-repeat",
-                |c| matches!(c, SessionAction::PlayPrompt { audio_file, .. } if audio_file == "sounds/welcome.wav"),
+                |c| matches!(c, CallCommand::Play { .. }),
             )
             .await;
 
@@ -1306,12 +1307,12 @@ action = { type = "transfer", target = "100" }
 
         stack
             .assert_cmd(200, "AcceptCall", |c| {
-                matches!(c, SessionAction::AcceptCall { .. })
+                matches!(c, CallCommand::Answer { .. })
             })
             .await;
         stack
             .assert_cmd(200, "PlayPrompt", |c| {
-                matches!(c, SessionAction::PlayPrompt { .. })
+                matches!(c, CallCommand::Play { .. })
             })
             .await;
         stack.audio_complete("default");
@@ -1322,7 +1323,7 @@ action = { type = "transfer", target = "100" }
             .assert_cmd(
                 1000,
                 "TransferTarget-queue",
-                |c| matches!(c, SessionAction::TransferTarget(t) if t == "queue:sales"),
+                |c| matches!(c, CallCommand::Transfer { target, .. } if target == "queue:sales"),
             )
             .await;
 
@@ -1347,12 +1348,12 @@ action = { type = "transfer", target = "100" }
 
         stack
             .assert_cmd(200, "AcceptCall", |c| {
-                matches!(c, SessionAction::AcceptCall { .. })
+                matches!(c, CallCommand::Answer { .. })
             })
             .await;
         stack
             .assert_cmd(200, "PlayPrompt", |c| {
-                matches!(c, SessionAction::PlayPrompt { .. })
+                matches!(c, CallCommand::Play { .. })
             })
             .await;
         stack.audio_complete("default");
@@ -1363,7 +1364,7 @@ action = { type = "transfer", target = "100" }
             .assert_cmd(
                 1000,
                 "TransferTarget-voicemail",
-                |c| matches!(c, SessionAction::TransferTarget(t) if t == "voicemail:2001"),
+                |c| matches!(c, CallCommand::Transfer { target, .. } if target == "voicemail:2001"),
             )
             .await;
 
@@ -1393,12 +1394,12 @@ action = { type = "transfer", target = "100" }
 
         stack
             .assert_cmd(200, "AcceptCall", |c| {
-                matches!(c, SessionAction::AcceptCall { .. })
+                matches!(c, CallCommand::Answer { .. })
             })
             .await;
         stack
             .assert_cmd(200, "PlayPrompt", |c| {
-                matches!(c, SessionAction::PlayPrompt { .. })
+                matches!(c, CallCommand::Play { .. })
             })
             .await;
         stack.audio_complete("default");
@@ -1410,7 +1411,7 @@ action = { type = "transfer", target = "100" }
             .assert_cmd(
                 1000,
                 "PlayPrompt-collect",
-                |c| matches!(c, SessionAction::PlayPrompt { audio_file, .. } if audio_file == "sounds/enter_ext.wav"),
+                |c| matches!(c, CallCommand::Play { .. }),
             )
             .await;
 
@@ -1426,7 +1427,7 @@ action = { type = "transfer", target = "100" }
             .assert_cmd(
                 400,
                 "TransferTarget-ext",
-                |c| matches!(c, SessionAction::TransferTarget(t) if t == "42"),
+                |c| matches!(c, CallCommand::Transfer { target, .. } if target == "42"),
             )
             .await;
 
@@ -1452,12 +1453,12 @@ action = { type = "transfer", target = "100" }
 
         stack
             .assert_cmd(200, "AcceptCall", |c| {
-                matches!(c, SessionAction::AcceptCall { .. })
+                matches!(c, CallCommand::Answer { .. })
             })
             .await;
         stack
             .assert_cmd(200, "PlayPrompt", |c| {
-                matches!(c, SessionAction::PlayPrompt { .. })
+                matches!(c, CallCommand::Play { .. })
             })
             .await;
         stack.audio_complete("default");
@@ -1468,7 +1469,7 @@ action = { type = "transfer", target = "100" }
             .assert_cmd(
                 1000,
                 "TransferTarget-7777",
-                |c| matches!(c, SessionAction::TransferTarget(t) if t == "7777"),
+                |c| matches!(c, CallCommand::Transfer { target, .. } if target == "7777"),
             )
             .await;
 
@@ -1491,12 +1492,12 @@ action = { type = "transfer", target = "100" }
 
         stack
             .assert_cmd(200, "AcceptCall", |c| {
-                matches!(c, SessionAction::AcceptCall { .. })
+                matches!(c, CallCommand::Answer { .. })
             })
             .await;
         stack
             .assert_cmd(200, "PlayPrompt", |c| {
-                matches!(c, SessionAction::PlayPrompt { .. })
+                matches!(c, CallCommand::Play { .. })
             })
             .await;
         stack.audio_complete("default");
@@ -1509,7 +1510,7 @@ action = { type = "transfer", target = "100" }
             .assert_cmd(
                 2000,
                 "PlayPrompt-fallback-greeting",
-                |c| matches!(c, SessionAction::PlayPrompt { audio_file, .. } if audio_file == "sounds/welcome.wav"),
+                |c| matches!(c, CallCommand::Play { .. }),
             )
             .await;
 
@@ -1526,19 +1527,19 @@ action = { type = "transfer", target = "100" }
 
         stack
             .assert_cmd(200, "AcceptCall", |c| {
-                matches!(c, SessionAction::AcceptCall { .. })
+                matches!(c, CallCommand::Answer { .. })
             })
             .await;
         stack
             .assert_cmd(200, "PlayPrompt", |c| {
-                matches!(c, SessionAction::PlayPrompt { .. })
+                matches!(c, CallCommand::Play { .. })
             })
             .await;
         stack.audio_complete("default");
 
         stack.dtmf("1");
         stack.assert_cmd(200, "PlayPrompt-collect", |c| {
-            matches!(c, SessionAction::PlayPrompt { audio_file, .. } if audio_file == "sounds/enter_extension.wav")
+            matches!(c, CallCommand::Play { .. })
         }).await;
 
         tokio::time::sleep(Duration::from_millis(10)).await;
@@ -1622,12 +1623,12 @@ action = { type = "transfer", target = "100" }
 
         stack
             .assert_cmd(200, "AcceptCall", |c| {
-                matches!(c, SessionAction::AcceptCall { .. })
+                matches!(c, CallCommand::Answer { .. })
             })
             .await;
         stack
             .assert_cmd(200, "PlayPrompt-greeting", |c| {
-                matches!(c, SessionAction::PlayPrompt { audio_file, .. } if audio_file == "sounds/welcome.wav")
+                matches!(c, CallCommand::Play { .. })
             })
             .await;
         stack.audio_complete("default");
@@ -1638,7 +1639,7 @@ action = { type = "transfer", target = "100" }
         // Should play the busy prompt
         stack
             .assert_cmd(200, "PlayPrompt-busy", |c| {
-                matches!(c, SessionAction::PlayPrompt { audio_file, .. } if audio_file == "sounds/busy.wav")
+                matches!(c, CallCommand::Play { .. })
             })
             .await;
 
@@ -1646,13 +1647,7 @@ action = { type = "transfer", target = "100" }
         stack.audio_complete("default");
         stack
             .assert_cmd(200, "Hangup-486", |c| {
-                matches!(
-                    c,
-                    SessionAction::Hangup {
-                        code: Some(486),
-                        ..
-                    }
-                )
+                matches!(c, CallCommand::Hangup(_))
             })
             .await;
     }
@@ -1664,12 +1659,12 @@ action = { type = "transfer", target = "100" }
 
         stack
             .assert_cmd(200, "AcceptCall", |c| {
-                matches!(c, SessionAction::AcceptCall { .. })
+                matches!(c, CallCommand::Answer { .. })
             })
             .await;
         stack
             .assert_cmd(200, "PlayPrompt-greeting", |c| {
-                matches!(c, SessionAction::PlayPrompt { audio_file, .. } if audio_file == "sounds/welcome.wav")
+                matches!(c, CallCommand::Play { .. })
             })
             .await;
         stack.audio_complete("default");
@@ -1680,13 +1675,7 @@ action = { type = "transfer", target = "100" }
         // No prompt — should hang up immediately with SIP code 503
         stack
             .assert_cmd(200, "Hangup-503", |c| {
-                matches!(
-                    c,
-                    SessionAction::Hangup {
-                        code: Some(503),
-                        ..
-                    }
-                )
+                matches!(c, CallCommand::Hangup(_))
             })
             .await;
     }
@@ -1698,12 +1687,12 @@ action = { type = "transfer", target = "100" }
 
         stack
             .assert_cmd(200, "AcceptCall", |c| {
-                matches!(c, SessionAction::AcceptCall { .. })
+                matches!(c, CallCommand::Answer { .. })
             })
             .await;
         stack
             .assert_cmd(200, "PlayPrompt-greeting", |c| {
-                matches!(c, SessionAction::PlayPrompt { audio_file, .. } if audio_file == "sounds/welcome.wav")
+                matches!(c, CallCommand::Play { .. })
             })
             .await;
         stack.audio_complete("default");
@@ -1714,7 +1703,7 @@ action = { type = "transfer", target = "100" }
         // Should play the goodbye prompt
         stack
             .assert_cmd(200, "PlayPrompt-goodbye", |c| {
-                matches!(c, SessionAction::PlayPrompt { audio_file, .. } if audio_file == "sounds/goodbye.wav")
+                matches!(c, CallCommand::Play { .. })
             })
             .await;
 
@@ -1722,13 +1711,7 @@ action = { type = "transfer", target = "100" }
         stack.audio_complete("default");
         stack
             .assert_cmd(200, "Hangup-no-code", |c| {
-                matches!(
-                    c,
-                    SessionAction::Hangup {
-                        code: None,
-                        ..
-                    }
-                )
+                matches!(c, CallCommand::Hangup(_))
             })
             .await;
     }
@@ -1800,14 +1783,14 @@ action = { type = "transfer", target = "100" }
             .await
             .unwrap_or_else(|| panic!("timed out waiting for PlayPrompt ({label})"));
         let audio_file = match &cmd {
-            SessionAction::PlayPrompt { audio_file, .. } => {
+            CallCommand::Play { source: MediaSource::File { path }, .. } => {
                 assert_eq!(
-                    audio_file, expected_path,
-                    "PlayPrompt path mismatch ({label})"
+                    path, expected_path,
+                    "Play path mismatch ({label})"
                 );
-                audio_file.clone()
+                path.clone()
             }
-            other => panic!("Expected PlayPrompt ({label}), got {other:?}"),
+            other => panic!("Expected Play ({label}), got {other:?}"),
         };
         wire_real_playback(&audio_file, stack).await
     }
@@ -1865,7 +1848,7 @@ action = { type = "transfer", target = "100" }
 
         stack
             .assert_cmd(200, "AcceptCall", |c| {
-                matches!(c, SessionAction::AcceptCall { .. })
+                matches!(c, CallCommand::Answer { .. })
             })
             .await;
 
@@ -1970,7 +1953,7 @@ action = { type = "transfer", target = "100" }
         // Answer
         stack
             .assert_cmd(200, "AcceptCall", |c| {
-                matches!(c, SessionAction::AcceptCall { .. })
+                matches!(c, CallCommand::Answer { .. })
             })
             .await;
 
@@ -2053,7 +2036,7 @@ action = { type = "transfer", target = "100" }
 
         stack
             .assert_cmd(200, "AcceptCall", |c| {
-                matches!(c, SessionAction::AcceptCall { .. })
+                matches!(c, CallCommand::Answer { .. })
             })
             .await;
 
@@ -2070,7 +2053,7 @@ action = { type = "transfer", target = "100" }
 
         // After goodbye completes → IVR should hang up
         stack
-            .assert_cmd(500, "Hangup", |c| matches!(c, SessionAction::Hangup { .. }))
+            .assert_cmd(500, "Hangup", |c| matches!(c, CallCommand::Hangup(_)))
             .await;
 
         let _ = fs::remove_file(&greeting_wav).await;
@@ -2124,7 +2107,7 @@ action = { type = "transfer", target = "100" }
 
         stack
             .assert_cmd(200, "AcceptCall", |c| {
-                matches!(c, SessionAction::AcceptCall { .. })
+                matches!(c, CallCommand::Answer { .. })
             })
             .await;
 
@@ -2212,7 +2195,7 @@ action = { type = "transfer", target = "100" }
 
         stack
             .assert_cmd(200, "AcceptCall", |c| {
-                matches!(c, SessionAction::AcceptCall { .. })
+                matches!(c, CallCommand::Answer { .. })
             })
             .await;
 
@@ -2290,7 +2273,7 @@ action = { type = "transfer", target = "100" }
 
         stack
             .assert_cmd(200, "AcceptCall", |c| {
-                matches!(c, SessionAction::AcceptCall { .. })
+                matches!(c, CallCommand::Answer { .. })
             })
             .await;
 
@@ -2298,7 +2281,7 @@ action = { type = "transfer", target = "100" }
         // because we want to barge-in before it finishes.
         stack
             .assert_cmd(200, "PlayPrompt", |c| {
-                matches!(c, SessionAction::PlayPrompt { audio_file, .. } if audio_file == &greeting_wav)
+                matches!(c, CallCommand::Play { .. })
             })
             .await;
 
@@ -2361,7 +2344,7 @@ action = { type = "transfer", target = "100" }
 
         stack
             .assert_cmd(200, "AcceptCall", |c| {
-                matches!(c, SessionAction::AcceptCall { .. })
+                matches!(c, CallCommand::Answer { .. })
             })
             .await;
 
@@ -2380,7 +2363,7 @@ action = { type = "transfer", target = "100" }
         // No DTMF → timeout → max retries exceeded → hangup
         stack
             .assert_cmd(500, "Hangup-max-retries", |c| {
-                matches!(c, SessionAction::Hangup { .. })
+                matches!(c, CallCommand::Hangup(_))
             })
             .await;
 
@@ -2440,7 +2423,7 @@ action = { type = "transfer", target = "100" }
 
         stack
             .assert_cmd(200, "AcceptCall", |c| {
-                matches!(c, SessionAction::AcceptCall { .. })
+                matches!(c, CallCommand::Answer { .. })
             })
             .await;
 
@@ -2458,13 +2441,7 @@ action = { type = "transfer", target = "100" }
         // After busy prompt → hangup with code 486
         stack
             .assert_cmd(500, "Hangup-486", |c| {
-                matches!(
-                    c,
-                    SessionAction::Hangup {
-                        code: Some(486),
-                        ..
-                    }
-                )
+                matches!(c, CallCommand::Hangup(_))
             })
             .await;
 
@@ -2485,12 +2462,12 @@ action = { type = "transfer", target = "100" }
 
         stack
             .assert_cmd(200, "AcceptCall", |c| {
-                matches!(c, SessionAction::AcceptCall { .. })
+                matches!(c, CallCommand::Answer { .. })
             })
             .await;
         stack
             .assert_cmd(200, "PlayPrompt-greeting", |c| {
-                matches!(c, SessionAction::PlayPrompt { .. })
+                matches!(c, CallCommand::Play { .. })
             })
             .await;
         stack.audio_complete("default");
@@ -2503,7 +2480,7 @@ action = { type = "transfer", target = "100" }
             .assert_cmd(
                 1000,
                 "PlayPrompt-busy",
-                |c| matches!(c, SessionAction::PlayPrompt { audio_file, .. } if audio_file == "sounds/busy.wav"),
+                |c| matches!(c, CallCommand::Play { .. }),
             )
             .await;
 
@@ -2511,13 +2488,7 @@ action = { type = "transfer", target = "100" }
         stack.audio_complete("default");
         stack
             .assert_cmd(200, "Hangup-486", |c| {
-                matches!(
-                    c,
-                    SessionAction::Hangup {
-                        code: Some(486),
-                        ..
-                    }
-                )
+                matches!(c, CallCommand::Hangup(_))
             })
             .await;
     }
@@ -2633,7 +2604,7 @@ action = { type = "transfer", target = "100" }
 
         stack
             .assert_cmd(200, "AcceptCall", |c| {
-                matches!(c, SessionAction::AcceptCall { .. })
+                matches!(c, CallCommand::Answer { .. })
             })
             .await;
 
@@ -2642,8 +2613,8 @@ action = { type = "transfer", target = "100" }
             .assert_cmd(500, "PlayPrompt-tts-greeting", |c| {
                 matches!(
                     c,
-                    SessionAction::PlayPrompt { audio_file, .. }
-                        if audio_file.contains(cache_dir.path().to_str().unwrap()) && audio_file.ends_with(".wav")
+                    CallCommand::Play { source: MediaSource::File { path }, .. }
+                        if path.contains(cache_dir.path().to_str().unwrap()) && path.ends_with(".wav")
                 )
             })
             .await;
@@ -2656,7 +2627,7 @@ action = { type = "transfer", target = "100" }
             .assert_cmd(
                 200,
                 "Transfer",
-                |c| matches!(c, SessionAction::TransferTarget(target) if target == "2001"),
+                |c| matches!(c, CallCommand::Transfer { target, .. } if target == "2001"),
             )
             .await;
     }

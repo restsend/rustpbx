@@ -241,7 +241,7 @@ async fn test_full_duplex_media_bridge() {
     // Start full-duplex bridge
     let leg_id = LegId::new("test-leg");
     let handle = bridge
-        .start_bridge_full_duplex("conf4", &leg_id, sender_tx, receiver)
+        .start_bridge_full_duplex("conf4", &leg_id, sender_tx, receiver, audio_codec::CodecType::PCMU)
         .await;
     
     assert!(handle.is_ok(), "Full-duplex bridge should start successfully");

@@ -368,9 +368,12 @@ pub enum CallCommand {
     },
 
     /// Leg dial completed successfully (async notification)
+    /// Leg connected (async notification)
     LegConnected {
         /// Leg ID that connected
         leg_id: LegId,
+        /// Answer SDP from the leg (for codec resolution)
+        answer_sdp: Option<String>,
     },
 
     /// Leg dial failed (async notification)

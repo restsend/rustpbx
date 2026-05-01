@@ -70,6 +70,8 @@ pub enum RwiCommand {
     MediaPlay(MediaPlayParams),
     MediaStop {
         call_id: String,
+        /// Target leg (None = all legs)
+        leg_id: Option<String>,
     },
     MediaStreamStart(MediaStreamParams),
     MediaStreamStop {
@@ -78,6 +80,11 @@ pub enum RwiCommand {
     MediaInjectStart(MediaInjectParams),
     MediaInjectStop {
         call_id: String,
+    },
+    CallSendDtmf {
+        call_id: String,
+        leg_id: Option<String>,
+        digits: String,
     },
     RecordStart(RecordStartParams),
     RecordPause {
@@ -233,6 +240,9 @@ pub struct MediaPlayParams {
     pub source: MediaSource,
     #[serde(default)]
     pub interrupt_on_dtmf: bool,
+    /// Target leg (None = all legs)
+    #[serde(default)]
+    pub leg_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -381,10 +391,12 @@ pub enum RwiEvent {
     },
     MediaPlayStarted {
         call_id: String,
+        leg_id: Option<String>,
         track_id: String,
     },
     MediaPlayFinished {
         call_id: String,
+        leg_id: Option<String>,
         track_id: String,
         interrupted: bool,
     },
@@ -489,6 +501,8 @@ pub enum RwiEvent {
     Dtmf {
         call_id: String,
         digit: String,
+        /// Leg that generated the DTMF
+        leg_id: Option<String>,
     },
     ConferenceCreated {
         conf_id: String,

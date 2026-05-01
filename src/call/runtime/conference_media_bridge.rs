@@ -81,6 +81,7 @@ impl ConferenceMediaBridge {
         conf_id: &str,
         leg_id: &LegId,
         audio_sender: S,
+        codec: audio_codec::CodecType,
     ) -> anyhow::Result<ConferenceBridgeHandle>
     where
         S: AudioSender + Send + Sync + 'static,
@@ -113,6 +114,7 @@ impl ConferenceMediaBridge {
                 leg_id_clone,
                 conf_id_string,
                 cancel_token_clone,
+                codec,
             ).await;
         });
 
@@ -133,6 +135,7 @@ impl ConferenceMediaBridge {
         leg_id: &LegId,
         audio_sender: S,
         audio_receiver: Box<dyn AudioReceiver>,
+        codec: audio_codec::CodecType,
     ) -> anyhow::Result<ConferenceBridgeHandle>
     where
         S: AudioSender + Send + Sync + 'static,
@@ -173,6 +176,7 @@ impl ConferenceMediaBridge {
                 leg_id_forward,
                 conf_id_forward,
                 forward_cancel,
+                codec,
             ).await;
         });
 
@@ -203,6 +207,7 @@ impl ConferenceMediaBridge {
         leg_id: LegId,
         conf_id: String,
         cancel_token: tokio_util::sync::CancellationToken,
+        codec: audio_codec::CodecType,
     ) where
         S: AudioSender + Send + Sync + 'static,
     {
@@ -212,14 +217,15 @@ impl ConferenceMediaBridge {
         info!(
             leg_id = %leg_id,
             conf_id = %conf_id,
+            codec = ?codec,
             "Conference media bridge forward loop started"
         );
 
-        // Initialize PCMU encoder for 8kHz mono (default, can be overridden per-leg)
-        let mut encoder = create_encoder(audio_codec::CodecType::PCMU);
+        let mut encoder = create_encoder(codec);
+        let payload_type = codec.payload_type();
+        let sample_rate = codec.clock_rate() as u32;
         let mut rtp_timestamp: u32 = rand::random();
         let mut sequence_number: u16 = rand::random();
-        let sample_rate = 8000u32;
         let interval_ms = 20u64;
         let samples_per_frame = (sample_rate * interval_ms as u32 / 1000) as usize;
         let rtp_ticks_per_frame = sample_rate * interval_ms as u32 / 1000;
@@ -264,7 +270,7 @@ impl ConferenceMediaBridge {
                             clock_rate: sample_rate,
                             data: encoded.into(),
                             sequence_number: Some(sequence_number),
-                            payload_type: Some(0), // PCMU = 0
+                            payload_type: Some(payload_type),
                             marker: false,
                             header_extension: None,
                             raw_packet: None,
@@ -526,7 +532,7 @@ mod tests {
         let bridge = ConferenceMediaBridge::new(conf_mgr);
         let leg_id = LegId::new("test-leg");
         let (tx, _rx) = tokio::sync::mpsc::channel(100);
-        let result = bridge.start_bridge("conf-1", &leg_id, tx).await;
+        let result = bridge.start_bridge("conf-1", &leg_id, tx, audio_codec::CodecType::PCMU).await;
         assert!(result.is_err());
     }
 
@@ -536,7 +542,7 @@ mod tests {
         let bridge = ConferenceMediaBridge::new(conf_mgr);
         let leg_id = LegId::new("test-leg");
         let (tx, _rx) = tokio::sync::mpsc::channel(100);
-        if let Ok(handle) = bridge.start_bridge("conf-1", &leg_id, tx).await {
+        if let Ok(handle) = bridge.start_bridge("conf-1", &leg_id, tx, audio_codec::CodecType::PCMU).await {
             handle.stop();
         }
     }
@@ -559,6 +565,7 @@ mod tests {
                 LegId::new("test-leg"),
                 "conf-1".to_string(),
                 cancel_clone,
+                audio_codec::CodecType::PCMU,
             )
             .await;
         });
@@ -619,6 +626,7 @@ mod tests {
                 LegId::new("test-leg"),
                 "conf-1".to_string(),
                 cancel_clone,
+                audio_codec::CodecType::PCMU,
             )
             .await;
         });
@@ -662,6 +670,7 @@ mod tests {
                 LegId::new("test-leg"),
                 "conf-1".to_string(),
                 cancel_clone,
+                audio_codec::CodecType::PCMU,
             )
             .await;
         });
@@ -760,7 +769,7 @@ mod tests {
             PcmAudioFrame::new(vec![1000i16; 160], 8000),
         ]);
         
-        let handle = bridge.start_bridge_full_duplex("conf-1", &leg_id, sender, Box::new(receiver)).await;
+        let handle = bridge.start_bridge_full_duplex("conf-1", &leg_id, sender, Box::new(receiver), audio_codec::CodecType::PCMU).await;
         assert!(handle.is_ok(), "Full-duplex bridge should start successfully");
         
         let handle = handle.unwrap();
@@ -794,6 +803,7 @@ mod tests {
                 LegId::new("test-leg"),
                 "conf-1".to_string(),
                 cancel_clone,
+                audio_codec::CodecType::PCMU,
             )
             .await;
         });

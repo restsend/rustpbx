@@ -54,6 +54,7 @@ impl E2eTestServer {
             ]),
             media_proxy: mode,
             ensure_user: Some(false),
+            enable_latching: false,
             ..Default::default()
         });
 

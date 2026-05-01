@@ -1,6 +1,7 @@
+use crate::call::domain::{CallCommand, HangupCommand, LegId, MediaSource};
+use crate::call::domain::PlayOptions;
 use crate::callrecord::CallRecordHangupReason;
-use crate::proxy::proxy_call::state::SessionAction;
-use crate::proxy::proxy_call::state::SipSessionHandle;
+use crate::proxy::proxy_call::sip_session::SipSessionHandle;
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -128,11 +129,10 @@ impl CallController {
 
     /// Answer the call (send 200 OK).
     pub async fn answer(&self) -> anyhow::Result<()> {
-        self.session.send_command(SessionAction::AcceptCall {
-            callee: None,
-            sdp: None,
-            dialog_id: None,
-        })?;
+        self.session
+            .send_command(CallCommand::Answer {
+                leg_id: LegId::from("caller"),
+            })?;
         Ok(())
     }
 
@@ -141,18 +141,20 @@ impl CallController {
         reason: Option<CallRecordHangupReason>,
         code: Option<u16>,
     ) -> anyhow::Result<()> {
-        self.session.send_command(SessionAction::Hangup {
-            reason,
-            code,
-            initiator: Some("app".to_string()),
-        })?;
+        self.session.send_command(CallCommand::Hangup(
+            HangupCommand::all(reason, code),
+        ))?;
         Ok(())
     }
 
     pub async fn transfer(&self, target: impl Into<String>) -> anyhow::Result<()> {
         let target = target.into();
         self.session
-            .send_command(SessionAction::from_transfer_target(&target))?;
+            .send_command(CallCommand::Transfer {
+                leg_id: LegId::from("caller"),
+                target,
+                attended: false,
+            })?;
         Ok(())
     }
 
@@ -184,13 +186,16 @@ impl CallController {
     ) -> anyhow::Result<PlaybackHandle> {
         let path = file.into();
         let track_id = track_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-        self.session.send_command(SessionAction::PlayPrompt {
-            audio_file: path.clone(),
-            send_progress: false,
-            await_completion: true,
-            track_id: Some(track_id.clone()),
-            loop_playback,
-            interrupt_on_dtmf: interruptible,
+        self.session.send_command(CallCommand::Play {
+            leg_id: None,
+            source: MediaSource::File { path: path.clone() },
+            options: Some(PlayOptions {
+                loop_playback,
+                await_completion: true,
+                interrupt_on_dtmf: interruptible,
+                track_id: Some(track_id.clone()),
+                send_progress: false,
+            }),
         })?;
 
         Ok(PlaybackHandle {
@@ -201,7 +206,7 @@ impl CallController {
 
     /// Stop current audio playback.
     pub async fn stop_audio(&self) -> anyhow::Result<()> {
-        self.session.send_command(SessionAction::StopPlayback)?;
+        self.session.send_command(CallCommand::StopPlayback { leg_id: None })?;
         Ok(())
     }
 
@@ -247,11 +252,14 @@ impl CallController {
         beep: bool,
     ) -> anyhow::Result<RecordingHandle> {
         let p = path.into();
-        self.session.send_command(SessionAction::StartRecording {
+        let config = crate::call::domain::RecordConfig {
             path: p.clone(),
-            max_duration,
+            max_duration_secs: max_duration.map(|d| d.as_secs() as u32),
             beep,
-        })?;
+            format: None,
+        };
+        self.session
+            .send_command(CallCommand::StartRecording { config })?;
         Ok(RecordingHandle { path: p })
     }
 
@@ -263,7 +271,7 @@ impl CallController {
     /// # Errors
     /// Returns an error if the event channel is closed or a hangup occurs.
     pub async fn stop_recording(&mut self) -> anyhow::Result<RecordingInfo> {
-        self.session.send_command(SessionAction::StopRecording)?;
+        self.session.send_command(CallCommand::StopRecording)?;
 
         loop {
             match self.event_rx.recv().await {
@@ -287,7 +295,7 @@ impl CallController {
     }
 
     /// Collect DTMF digits with timeout and inter-digit gap detection.
-    ///
+
     /// Blocks until one of the following:
     /// - `max_digits` collected
     /// - terminator digit pressed
@@ -357,17 +365,17 @@ impl CallController {
     pub async fn originate_call(
         &self,
         target_uri: impl Into<String>,
-        caller_id: Option<String>,
+        _caller_id: Option<String>,
     ) -> anyhow::Result<String> {
         let target = target_uri.into();
         let call_id = uuid::Uuid::new_v4().to_string();
-        
-        self.session.send_command(SessionAction::OriginateCall {
-            target: target.clone(),
-            caller_id,
-            call_id: call_id.clone(),
-        })?;
-        
+
+        self.session
+            .send_command(CallCommand::LegAdd {
+                target: target.clone(),
+                leg_id: Some(LegId::from(call_id.clone())),
+            })?;
+
         info!(target = %target, call_id = %call_id, "Queue: originated call to agent");
         Ok(call_id)
     }
@@ -379,10 +387,10 @@ impl CallController {
         data: serde_json::Value,
     ) -> anyhow::Result<()> {
         let name = event_name.into();
-        self.session.send_command(SessionAction::NotifyEvent {
-            event: name,
-            data,
-        })?;
+        self.session
+            .send_command(CallCommand::InjectAppEvent {
+                event: crate::call::domain::AppEvent::Custom { name, data },
+            })?;
         Ok(())
     }
 }
@@ -390,8 +398,8 @@ impl CallController {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::call::DialDirection;
-    use crate::proxy::proxy_call::state::{SessionAction, SipSessionHandle, SipSessionShared};
+    use crate::call::domain::CallCommand;
+    use tokio::sync::mpsc;
     use tokio::time::{Duration, timeout};
 
     /// Creates a controller with access to both the event sender and command receiver.
@@ -399,17 +407,14 @@ mod tests {
     fn make_controller_with_channels() -> (
         CallController,
         mpsc::UnboundedSender<ControllerEvent>,
-        mpsc::UnboundedReceiver<SessionAction>,
+        mpsc::UnboundedReceiver<CallCommand>,
     ) {
-        let shared = SipSessionShared::new(
-            "test-session".to_string(),
-            DialDirection::Inbound,
-            Some("caller".to_string()),
-            Some("callee".to_string()),
-            None,
-        );
-        let (handle, cmd_rx) = SipSessionHandle::with_shared(shared);
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        // Create a minimal SipSessionHandle for testing
+        use crate::proxy::proxy_call::sip_session::SipSessionHandle;
+        let handle = SipSessionHandle::new_for_test("test-session-id", cmd_tx);
         let (controller, _timer_rx) = CallController::new(handle, event_rx);
         (controller, event_tx, cmd_rx)
     }
@@ -422,7 +427,7 @@ mod tests {
         let event_tx_clone = event_tx.clone();
         tokio::spawn(async move {
             while let Some(cmd) = cmd_rx.recv().await {
-                if matches!(cmd, SessionAction::StopRecording) {
+                if matches!(cmd, CallCommand::StopRecording) {
                     // Simulate the session processing the stop and sending back RecordingComplete
                     let _ =
                         event_tx_clone.send(ControllerEvent::RecordingComplete(RecordingInfo {
@@ -451,7 +456,7 @@ mod tests {
         tokio::spawn(async move {
             // Wait for StopRecording command
             while let Some(cmd) = cmd_rx.recv().await {
-                if matches!(cmd, SessionAction::StopRecording) {
+                if matches!(cmd, CallCommand::StopRecording) {
                     let _ = event_tx.send(ControllerEvent::Hangup(None));
                     break;
                 }
@@ -474,7 +479,7 @@ mod tests {
         tokio::spawn(async move {
             // Wait for StopRecording command
             while let Some(cmd) = cmd_rx.recv().await {
-                if matches!(cmd, SessionAction::StopRecording) {
+                if matches!(cmd, CallCommand::StopRecording) {
                     // Send some other events first (simulating concurrent events)
                     let _ = event_tx_clone.send(ControllerEvent::DtmfReceived("1".to_string()));
                     let _ = event_tx_clone.send(ControllerEvent::AudioComplete {

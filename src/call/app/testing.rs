@@ -7,26 +7,26 @@
 //!
 //! ```rust,ignore
 //! use crate::call::app::testing::MockCallStack;
-//! use crate::proxy::proxy_call::state::SessionAction;
+//! use crate::call::domain::CallCommand;
 //!
 //! let mut stack = MockCallStack::run(Box::new(MyApp::new()), "1001", "1002");
 //!
-//! // App answers on enter → assert AcceptCall
-//! stack.assert_cmd(50, "answer", |c| matches!(c, SessionAction::AcceptCall { .. })).await;
+//! // App answers on enter → assert Accept
+//! stack.assert_cmd(50, "answer", |c| matches!(c, CallCommand::Accept)).await;
 //!
 //! // Simulate audio playback finishing
 //! stack.audio_complete("default");
 //!
 //! // App should now hang up
-//! stack.assert_cmd(50, "hangup", |c| matches!(c, SessionAction::Hangup { .. })).await;
+//! stack.assert_cmd(50, "hangup", |c| matches!(c, CallCommand::Hangup { .. })).await;
 //! ```
 
 use super::{AppEventLoop, CallApp, CallController, ControllerEvent, RecordingInfo};
-use crate::call::DialDirection;
+use crate::call::domain::CallCommand;
 use tokio::sync::mpsc;
 use crate::call::app::{ApplicationContext, CallInfo};
 use crate::config::Config;
-use crate::proxy::proxy_call::state::{SessionAction, SipSessionHandle, SipSessionShared};
+use crate::proxy::proxy_call::sip_session::SipSessionHandle;
 use chrono::Utc;
 use sea_orm::DatabaseConnection;
 use std::sync::Arc;
@@ -34,9 +34,9 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 /// Type alias for mock call stack command sender.
-pub type MockCmdTx = tokio::sync::mpsc::UnboundedSender<SessionAction>;
+pub type MockCmdTx = tokio::sync::mpsc::UnboundedSender<CallCommand>;
 /// Type alias for mock call stack command receiver.
-pub type MockCmdRx = tokio::sync::mpsc::UnboundedReceiver<SessionAction>;
+pub type MockCmdRx = tokio::sync::mpsc::UnboundedReceiver<CallCommand>;
 
 /// Fully assembled, in-memory [`CallApp`] harness — no SIP stack required.
 ///
@@ -47,7 +47,7 @@ pub type MockCmdRx = tokio::sync::mpsc::UnboundedReceiver<SessionAction>;
 pub struct MockCallStack {
     /// Inject SIP-originated events into the running app.
     event_tx: mpsc::UnboundedSender<ControllerEvent>,
-    /// Observe [`SessionAction`]s emitted by the app toward the SIP layer.
+    /// Observe [`CallCommand`]s emitted by the app toward the SIP layer.
     cmd_rx: MockCmdRx,
     /// Cancel token wired to the AppEventLoop's child token.
     cancel: CancellationToken,
@@ -81,14 +81,8 @@ impl MockCallStack {
 
     pub fn run_with_context(app: Box<dyn CallApp>, ctx: ApplicationContext) -> Self {
         // Real SipSessionHandle — backed only by channels, no SIP socket.
-        let shared = SipSessionShared::new(
-            "test-session".to_string(),
-            DialDirection::Inbound,
-            Some(ctx.call_info.caller.clone()),
-            Some(ctx.call_info.callee.clone()),
-            None,
-        );
-        let (handle, cmd_rx) = SipSessionHandle::with_shared(shared);
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+        let handle = SipSessionHandle::new_for_test("test-session", cmd_tx);
 
         // Synthetic event channel: test → controller.
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel::<ControllerEvent>();
@@ -177,10 +171,10 @@ impl MockCallStack {
 
     // ── Command observation ───────────────────────────────────────────────────
 
-    /// Wait up to `timeout_ms` milliseconds for the next [`SessionAction`] sent by the app.
+    /// Wait up to `timeout_ms` milliseconds for the next [`CallCommand`] sent by the app.
     ///
     /// Returns `None` on timeout.
-    pub async fn next_cmd(&mut self, timeout_ms: u64) -> Option<SessionAction> {
+    pub async fn next_cmd(&mut self, timeout_ms: u64) -> Option<CallCommand> {
         tokio::time::timeout(Duration::from_millis(timeout_ms), self.cmd_rx.recv())
             .await
             .ok()
@@ -193,7 +187,7 @@ impl MockCallStack {
     /// If the timeout elapses or the matcher returns `false`.
     pub async fn assert_cmd<F>(&mut self, timeout_ms: u64, label: &str, matcher: F)
     where
-        F: FnOnce(&SessionAction) -> bool,
+        F: FnOnce(&CallCommand) -> bool,
     {
         let cmd = self
             .next_cmd(timeout_ms)
@@ -203,7 +197,7 @@ impl MockCallStack {
     }
 
     /// Drain all immediately-available commands without blocking.
-    pub fn drain_cmds(&mut self) -> Vec<SessionAction> {
+    pub fn drain_cmds(&mut self) -> Vec<CallCommand> {
         let mut out = Vec::new();
         while let Ok(cmd) = self.cmd_rx.try_recv() {
             out.push(cmd);

@@ -160,6 +160,7 @@ impl CallApp for RwiApp {
                 self.interrupt_on_dtmf = false;
                 self.send_event(RwiEvent::MediaPlayFinished {
                     call_id: context.call_info.session_id.clone(),
+                    leg_id: Some("caller".to_string()),
                     track_id,
                     interrupted: true,
                 })
@@ -169,6 +170,7 @@ impl CallApp for RwiApp {
         self.send_event(RwiEvent::Dtmf {
             call_id: context.call_info.session_id.clone(),
             digit,
+            leg_id: None,
         })
         .await;
         Ok(AppAction::Continue)
@@ -186,6 +188,7 @@ impl CallApp for RwiApp {
         }
         self.send_event(RwiEvent::MediaPlayFinished {
             call_id: context.call_info.session_id.clone(),
+            leg_id: Some("caller".to_string()),
             track_id,
             interrupted: false,
         })
@@ -421,13 +424,14 @@ mod tests {
         };
 
         let app = RwiApp::new("ctx".to_string(), Some(session_id.clone()), gateway.clone());
-        app.send_event(crate::rwi::proto::RwiEvent::Dtmf {
-            call_id: "c1".to_string(),
-            digit: "5".to_string(),
-        })
-        .await;
+    app.send_event(crate::rwi::proto::RwiEvent::Dtmf {
+        call_id: "c1".to_string(),
+        digit: "5".to_string(),
+        leg_id: None,
+    })
+    .await;
 
-        let v = event_rx.try_recv().expect("event should be delivered");
+    let v = event_rx.try_recv().expect("event should be delivered");
         let s = serde_json::to_string(&v).unwrap();
         assert!(
             s.contains("dtmf") || s.contains("Dtmf"),
@@ -460,6 +464,7 @@ mod tests {
         app.send_event(crate::rwi::proto::RwiEvent::Dtmf {
             call_id: "c2".to_string(),
             digit: "9".to_string(),
+            leg_id: None,
         })
         .await;
 
@@ -475,6 +480,7 @@ mod tests {
         app.send_event(crate::rwi::proto::RwiEvent::Dtmf {
             call_id: "c3".to_string(),
             digit: "1".to_string(),
+            leg_id: None,
         })
         .await;
     }
@@ -501,6 +507,7 @@ mod tests {
         app.send_event(crate::rwi::proto::RwiEvent::Dtmf {
             call_id: "c4".to_string(),
             digit: "0".to_string(),
+            leg_id: None,
         })
         .await;
 

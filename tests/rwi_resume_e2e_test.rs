@@ -422,6 +422,7 @@ async fn test_event_sequence_monotonicity() {
             let event = rustpbx::rwi::RwiEvent::Dtmf {
                 call_id: "dtmf-call".to_string(),
                 digit: i.to_string(),
+                leg_id: None,
             };
             gw.cache_event(&"dtmf-call".to_string(), &event);
         }

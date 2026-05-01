@@ -64,7 +64,8 @@ pub fn rwi_to_call_command(
         | RwiCommandPayload::LegAdd { .. }
         | RwiCommandPayload::LegRemove { .. }
         | RwiCommandPayload::AppStart { .. }
-        | RwiCommandPayload::AppStop { .. } => {
+        | RwiCommandPayload::AppStop { .. }
+        | RwiCommandPayload::AppChain { .. } => {
             Err(AdapterError::NotSupported("session management command".to_string()).into())
         }
 
@@ -219,7 +220,7 @@ pub fn rwi_to_call_command(
                 .ok_or(AdapterError::MissingField("session_id or call_id"))?;
             let source = convert_media_source(req.source).unwrap_or(MediaSource::Silence);
             Ok(CallCommand::Play {
-                leg_id: Some(LegId::new(sid)),
+                leg_id: req.leg_id.map(LegId::new).or(Some(LegId::new(sid))),
                 source,
                 options: Some(PlayOptions {
                     interrupt_on_dtmf: req.interrupt_on_dtmf,
@@ -228,14 +229,21 @@ pub fn rwi_to_call_command(
             })
         }
 
-        RwiCommandPayload::MediaStop { call_id } => {
-            let sid = session_id
-                .or(Some(&call_id))
-                .ok_or(AdapterError::MissingField("session_id or call_id"))?;
+        RwiCommandPayload::MediaStop { leg_id, .. } => {
             Ok(CallCommand::StopPlayback {
-                leg_id: Some(LegId::new(sid)),
+                leg_id: leg_id.map(LegId::new),
             })
         }
+
+        // ========================================================================
+        // DTMF
+        // ========================================================================
+        RwiCommandPayload::CallSendDtmf {
+            leg_id, digits, ..
+        } => Ok(CallCommand::SendDtmf {
+            leg_id: leg_id.map(LegId::new).unwrap_or(LegId::from("caller")),
+            digits,
+        }),
 
         RwiCommandPayload::SetRingbackSource {
             target_call_id,

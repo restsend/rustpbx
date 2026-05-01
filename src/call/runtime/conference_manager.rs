@@ -10,7 +10,7 @@ use audio_codec::CodecType;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{RwLock, mpsc};
-use tracing::{info, warn};
+use tracing::info;
 
 /// Unique identifier for a conference
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -75,8 +75,7 @@ impl ConferenceRoom {
             }
 
         if self.participants.contains_key(&leg_id) {
-            warn!(leg_id = %leg_id, "Leg already in conference");
-            return Ok(());
+            return Err(anyhow!("Leg {} already in conference", leg_id));
         }
 
         let participant = ConferenceParticipant::new(leg_id.clone());
@@ -580,11 +579,11 @@ mod tests {
             .await
             .unwrap();
 
-        // Add same participant again (should succeed but be a no-op)
-        manager
+        // Add same participant again (should return error)
+        assert!(manager
             .add_participant(&conf_id, leg_id.clone())
             .await
-            .unwrap();
+            .is_err());
 
         let conf = manager.get_conference(&conf_id).await.unwrap();
         assert_eq!(conf.participant_count(), 1);

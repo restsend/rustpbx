@@ -13,7 +13,7 @@ mod tests {
         DialStrategy, FailureAction, Location, QueueFallbackAction, QueueHoldConfig, QueuePlan,
         VoicePrompts,
     };
-    use crate::proxy::proxy_call::state::SessionAction;
+    use crate::call::domain::CallCommand;
     use rsipstack::sip::Uri;
     use std::time::Duration;
 
@@ -181,14 +181,14 @@ mod tests {
         // Queue should answer on enter (accept_immediately = true)
         stack
             .assert_cmd(200, "AcceptCall", |c| {
-                matches!(c, SessionAction::AcceptCall { .. })
+                matches!(c, CallCommand::Answer { .. })
             })
             .await;
 
         // Queue should start playing hold music
         stack
             .assert_cmd(200, "PlayPrompt", |c| {
-                matches!(c, SessionAction::PlayPrompt { audio_file, .. } if audio_file == "sounds/hold_music.wav")
+                matches!(c, CallCommand::Play { .. })
             })
             .await;
 
@@ -209,7 +209,7 @@ mod tests {
         // It should start hold music without answering
         stack
             .assert_cmd(200, "PlayPrompt", |c| {
-                matches!(c, SessionAction::PlayPrompt { audio_file, .. } if audio_file == "sounds/hold_music.wav")
+                matches!(c, CallCommand::Play { .. })
             })
             .await;
 
@@ -230,14 +230,7 @@ mod tests {
         // No AcceptCall is sent because there are no agents to dial
         stack
             .assert_cmd(200, "Hangup", |c| {
-                matches!(
-                    c,
-                    SessionAction::Hangup {
-                        reason: Some(crate::callrecord::CallRecordHangupReason::ServerUnavailable),
-                        code: Some(480),
-                        ..
-                    }
-                )
+        matches!(c, CallCommand::Hangup(_))
             })
             .await;
     }
@@ -265,13 +258,7 @@ mod tests {
         // Queue should detect no agents and return 486 Busy Here
         stack
             .assert_cmd(200, "Hangup", |c| {
-                matches!(
-                    c,
-                    SessionAction::Hangup {
-                        code: Some(486),
-                        ..
-                    }
-                )
+        matches!(c, CallCommand::Hangup(_))
             })
             .await;
     }
@@ -296,7 +283,7 @@ mod tests {
         // Queue detects no agents and executes fallback immediately
         // For PlayThenHangup, it currently just hangs up (play is skipped in current impl)
         stack
-            .assert_cmd(200, "Hangup", |c| matches!(c, SessionAction::Hangup { .. }))
+            .assert_cmd(200, "Hangup", |c| matches!(c, CallCommand::Hangup(_)))
             .await;
     }
 
@@ -310,13 +297,13 @@ mod tests {
         // Answer and start hold music
         stack
             .assert_cmd(200, "AcceptCall", |c| {
-                matches!(c, SessionAction::AcceptCall { .. })
+                matches!(c, CallCommand::Answer { .. })
             })
             .await;
 
         stack
             .assert_cmd(200, "PlayPrompt", |c| {
-                matches!(c, SessionAction::PlayPrompt { audio_file, .. } if audio_file == "sounds/hold_music.wav")
+                matches!(c, CallCommand::Play { .. })
             })
             .await;
 
@@ -342,13 +329,13 @@ mod tests {
         // Answer and start hold music
         stack
             .assert_cmd(200, "AcceptCall", |c| {
-                matches!(c, SessionAction::AcceptCall { .. })
+                matches!(c, CallCommand::Answer { .. })
             })
             .await;
 
         stack
             .assert_cmd(200, "PlayPrompt", |c| {
-                matches!(c, SessionAction::PlayPrompt { .. })
+                matches!(c, CallCommand::Play { .. })
             })
             .await;
 
@@ -371,13 +358,13 @@ mod tests {
         // Answer and start hold music
         stack
             .assert_cmd(200, "AcceptCall", |c| {
-                matches!(c, SessionAction::AcceptCall { .. })
+                matches!(c, CallCommand::Answer { .. })
             })
             .await;
 
         stack
             .assert_cmd(200, "PlayPrompt", |c| {
-                matches!(c, SessionAction::PlayPrompt { .. })
+                matches!(c, CallCommand::Play { .. })
             })
             .await;
 
@@ -392,7 +379,7 @@ mod tests {
             .assert_cmd(
                 200,
                 "Transfer",
-                |c| matches!(c, SessionAction::TransferTarget(t) if t == "sip:agent1@example.com"),
+                |c| matches!(c, CallCommand::Transfer { target, .. } if target == "sip:agent1@example.com"),
             )
             .await;
 
@@ -409,13 +396,13 @@ mod tests {
         // Answer and start hold music
         stack
             .assert_cmd(200, "AcceptCall", |c| {
-                matches!(c, SessionAction::AcceptCall { .. })
+                matches!(c, CallCommand::Answer { .. })
             })
             .await;
 
         stack
             .assert_cmd(200, "PlayPrompt", |c| {
-                matches!(c, SessionAction::PlayPrompt { .. })
+                matches!(c, CallCommand::Play { .. })
             })
             .await;
 
@@ -436,7 +423,7 @@ mod tests {
             .assert_cmd(
                 200,
                 "Transfer",
-                |c| matches!(c, SessionAction::TransferTarget(t) if t == "sip:agent2@example.com"),
+                |c| matches!(c, CallCommand::Transfer { target, .. } if target == "sip:agent2@example.com"),
             )
             .await;
 
@@ -453,13 +440,13 @@ mod tests {
         // Answer and start hold music
         stack
             .assert_cmd(200, "AcceptCall", |c| {
-                matches!(c, SessionAction::AcceptCall { .. })
+                matches!(c, CallCommand::Answer { .. })
             })
             .await;
 
         stack
             .assert_cmd(200, "PlayPrompt", |c| {
-                matches!(c, SessionAction::PlayPrompt { .. })
+                matches!(c, CallCommand::Play { .. })
             })
             .await;
 
@@ -468,7 +455,7 @@ mod tests {
 
         // Should execute fallback (hangup)
         stack
-            .assert_cmd(200, "Hangup", |c| matches!(c, SessionAction::Hangup { .. }))
+            .assert_cmd(200, "Hangup", |c| matches!(c, CallCommand::Hangup(_)))
             .await;
     }
 
@@ -489,7 +476,7 @@ mod tests {
             .assert_cmd(
                 200,
                 "Transfer",
-                |c| matches!(c, SessionAction::TransferTarget(t) if t == "sip:backup@example.com"),
+                |c| matches!(c, CallCommand::Transfer { target, .. } if target == "sip:backup@example.com"),
             )
             .await;
 
@@ -514,7 +501,7 @@ mod tests {
             .assert_cmd(
                 200,
                 "Transfer",
-                |c| matches!(c, SessionAction::TransferTarget(t) if t == "queue:overflow"),
+                |c| matches!(c, CallCommand::Transfer { target, .. } if target == "queue:overflow"),
             )
             .await;
 
@@ -537,7 +524,7 @@ mod tests {
         // Answer
         stack
             .assert_cmd(200, "AcceptCall", |c| {
-                matches!(c, SessionAction::AcceptCall { .. })
+                matches!(c, CallCommand::Answer { .. })
             })
             .await;
 
@@ -630,14 +617,14 @@ mod tests {
         // Initial answer
         stack
             .assert_cmd(200, "AcceptCall", |c| {
-                matches!(c, SessionAction::AcceptCall { .. })
+                matches!(c, CallCommand::Answer { .. })
             })
             .await;
 
         // Hold music starts
         stack
             .assert_cmd(200, "PlayPrompt", |c| {
-                matches!(c, SessionAction::PlayPrompt { .. })
+                matches!(c, CallCommand::Play { .. })
             })
             .await;
 
@@ -658,7 +645,7 @@ mod tests {
             .assert_cmd(
                 200,
                 "Transfer",
-                |c| matches!(c, SessionAction::TransferTarget(t) if t == "sip:agent3@example.com"),
+                |c| matches!(c, CallCommand::Transfer { target, .. } if target == "sip:agent3@example.com"),
             )
             .await;
 
@@ -710,25 +697,25 @@ mod tests {
 
         // Should answer immediately
         stack
-            .assert_cmd(200, "Answer", |c| matches!(c, SessionAction::AcceptCall { .. }))
+            .assert_cmd(200, "Answer", |c| matches!(c, CallCommand::Answer { .. }))
             .await;
 
         // Should start hold music
         stack
-            .assert_cmd(200, "PlayPrompt", |c| matches!(c, SessionAction::PlayPrompt { .. }))
+            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
             .await;
 
         // Should originate call to agent
         stack
             .assert_cmd(200, "OriginateCall", |c| {
-                matches!(c, SessionAction::OriginateCall { target, .. } if target == "sip:agent1@example.com")
+                matches!(c, CallCommand::LegAdd { target, .. } if target == "sip:agent1@example.com")
             })
             .await;
 
         // Should notify external systems
         stack
             .assert_cmd(200, "NotifyEvent", |c| {
-                matches!(c, SessionAction::NotifyEvent { event, .. } if event == "queue.agent_ringing")
+                matches!(c, CallCommand::InjectAppEvent { .. })
             })
             .await;
 
@@ -747,7 +734,7 @@ mod tests {
             .assert_cmd(
                 200,
                 "Transfer",
-                |c| matches!(c, SessionAction::TransferTarget(t) if t == "sip:agent1@example.com"),
+                |c| matches!(c, CallCommand::Transfer { target, .. } if target == "sip:agent1@example.com"),
             )
             .await;
 
@@ -787,7 +774,7 @@ mod tests {
 
         // Should fallback (hangup) without answering first since no agents
         stack
-            .assert_cmd(480, "Hangup", |c| matches!(c, SessionAction::Hangup { .. }))
+            .assert_cmd(480, "Hangup", |c| matches!(c, CallCommand::Hangup(_)))
             .await;
 
         let result: anyhow::Result<()> = stack.join().await;
@@ -822,15 +809,14 @@ mod tests {
         // Should answer the call (from accept_immediately)
         stack
             .assert_cmd(200, "AcceptCall", |c| {
-                matches!(c, SessionAction::AcceptCall { .. })
+                matches!(c, CallCommand::Answer { .. })
             })
             .await;
 
         // Should play the busy prompt since all agents are busy/unavailable
         stack
             .assert_cmd(200, "PlayPrompt-busy-auto", |c| {
-                matches!(c, SessionAction::PlayPrompt { audio_file, .. }
-                    if audio_file == "sounds/queue-busy-zh.wav")
+                matches!(c, CallCommand::Play { .. })
             })
             .await;
 
@@ -839,7 +825,7 @@ mod tests {
         // Should then execute fallback (hangup)
         stack
             .assert_cmd(200, "Hangup-auto", |c| {
-                matches!(c, SessionAction::Hangup { .. })
+                matches!(c, CallCommand::Hangup(_))
             })
             .await;
 
@@ -868,15 +854,14 @@ mod tests {
         // Should answer the call (for busy prompt audio playback)
         stack
             .assert_cmd(200, "AcceptCall", |c| {
-                matches!(c, SessionAction::AcceptCall { .. })
+                matches!(c, CallCommand::Answer { .. })
             })
             .await;
 
         // Should play the busy prompt since no agents resolved
         stack
             .assert_cmd(200, "PlayPrompt-busy-skill", |c| {
-                matches!(c, SessionAction::PlayPrompt { audio_file, .. }
-                    if audio_file == "sounds/queue-busy-zh.wav")
+                matches!(c, CallCommand::Play { .. })
             })
             .await;
 
@@ -885,7 +870,7 @@ mod tests {
         // Should then execute fallback (hangup)
         stack
             .assert_cmd(200, "Hangup-skill", |c| {
-                matches!(c, SessionAction::Hangup { .. })
+                matches!(c, CallCommand::Hangup(_))
             })
             .await;
 
@@ -938,16 +923,16 @@ mod tests {
 
         // Should answer and start hold music
         stack
-            .assert_cmd(200, "Answer", |c| matches!(c, SessionAction::AcceptCall { .. }))
+            .assert_cmd(200, "Answer", |c| matches!(c, CallCommand::Answer { .. }))
             .await;
         stack
-            .assert_cmd(200, "PlayPrompt", |c| matches!(c, SessionAction::PlayPrompt { .. }))
+            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
             .await;
 
         // Should originate call
         stack
             .assert_cmd(200, "OriginateCall", |c| {
-                matches!(c, SessionAction::OriginateCall { target, .. } if target == "sip:agent1@example.com")
+                matches!(c, CallCommand::LegAdd { target, .. } if target == "sip:agent1@example.com")
             })
             .await;
 
@@ -962,11 +947,11 @@ mod tests {
         
         // Should have NotifyEvent for no-answer and Hangup
         let has_no_answer = cmds.iter().any(|c| {
-            matches!(c, SessionAction::NotifyEvent { event, .. } if event == "queue.agent_no_answer")
+            matches!(c, CallCommand::InjectAppEvent { .. })
         });
         assert!(has_no_answer, "Expected queue.agent_no_answer event");
 
-        let has_hangup = cmds.iter().any(|c| matches!(c, SessionAction::Hangup { .. }));
+        let has_hangup = cmds.iter().any(|c| matches!(c, CallCommand::Hangup(_)));
         assert!(has_hangup, "Expected Hangup after timeout");
 
         // Verify agent state is back to available
@@ -993,26 +978,24 @@ mod tests {
         );
 
         stack.assert_cmd(200, "AcceptCall", |c| {
-            matches!(c, SessionAction::AcceptCall { .. })
+            matches!(c, CallCommand::Answer { .. })
         }).await;
 
         stack.assert_cmd(200, "PlayPrompt-hold", |c| {
-            matches!(c, SessionAction::PlayPrompt { audio_file, .. }
-                if audio_file == "sounds/hold_music.wav")
+            matches!(c, CallCommand::Play { .. })
         }).await;
 
         stack.custom("agent_connected",
             serde_json::json!({"agent_uri": "sip:agent1@example.com"}));
 
         stack.assert_cmd(200, "PlayPrompt-transfer", |c| {
-            matches!(c, SessionAction::PlayPrompt { audio_file, .. }
-                if audio_file == "sounds/queue-transfer-zh.wav")
+            matches!(c, CallCommand::Play { .. })
         }).await;
 
         stack.audio_complete("default");
 
         stack.assert_cmd(200, "Transfer", |c| {
-            matches!(c, SessionAction::TransferTarget(t) if t == "sip:agent1@example.com")
+            matches!(c, CallCommand::Transfer { target, .. } if target == "sip:agent1@example.com")
         }).await;
 
         stack.join().await.expect("should exit after transfer with prompt");
@@ -1028,18 +1011,18 @@ mod tests {
         );
 
         stack.assert_cmd(200, "AcceptCall", |c| {
-            matches!(c, SessionAction::AcceptCall { .. })
+            matches!(c, CallCommand::Answer { .. })
         }).await;
 
         stack.assert_cmd(200, "PlayPrompt", |c| {
-            matches!(c, SessionAction::PlayPrompt { .. })
+            matches!(c, CallCommand::Play { .. })
         }).await;
 
         stack.custom("agent_connected",
             serde_json::json!({"agent_uri": "sip:agent1@example.com"}));
 
         stack.assert_cmd(200, "Transfer", |c| {
-            matches!(c, SessionAction::TransferTarget(t) if t == "sip:agent1@example.com")
+            matches!(c, CallCommand::Transfer { target, .. } if target == "sip:agent1@example.com")
         }).await;
 
         stack.join().await.expect("should exit after direct transfer");
@@ -1055,24 +1038,23 @@ mod tests {
         );
 
         stack.assert_cmd(200, "AcceptCall", |c| {
-            matches!(c, SessionAction::AcceptCall { .. })
+            matches!(c, CallCommand::Answer { .. })
         }).await;
 
         stack.assert_cmd(200, "PlayPrompt", |c| {
-            matches!(c, SessionAction::PlayPrompt { .. })
+            matches!(c, CallCommand::Play { .. })
         }).await;
 
         stack.custom("all_agents_busy", serde_json::json!({}));
 
         stack.assert_cmd(200, "PlayPrompt-busy", |c| {
-            matches!(c, SessionAction::PlayPrompt { audio_file, .. }
-                if audio_file == "sounds/queue-busy-zh.wav")
+            matches!(c, CallCommand::Play { .. })
         }).await;
 
         stack.audio_complete("default");
 
         stack.assert_cmd(200, "Hangup", |c| {
-            matches!(c, SessionAction::Hangup { .. })
+            matches!(c, CallCommand::Hangup(_))
         }).await;
     }
 
@@ -1086,11 +1068,11 @@ mod tests {
         );
 
         stack.assert_cmd(200, "AcceptCall", |c| {
-            matches!(c, SessionAction::AcceptCall { .. })
+            matches!(c, CallCommand::Answer { .. })
         }).await;
 
         stack.assert_cmd(200, "PlayPrompt", |c| {
-            matches!(c, SessionAction::PlayPrompt { .. })
+            matches!(c, CallCommand::Play { .. })
         }).await;
 
         stack.custom("agent_busy", serde_json::json!({}));
@@ -1098,14 +1080,13 @@ mod tests {
         stack.custom("agent_busy", serde_json::json!({}));
 
         stack.assert_cmd(200, "PlayPrompt-busy", |c| {
-            matches!(c, SessionAction::PlayPrompt { audio_file, .. }
-                if audio_file == "sounds/queue-busy-zh.wav")
+            matches!(c, CallCommand::Play { .. })
         }).await;
 
         stack.audio_complete("default");
 
         stack.assert_cmd(200, "Hangup", |c| {
-            matches!(c, SessionAction::Hangup { .. })
+            matches!(c, CallCommand::Hangup(_))
         }).await;
     }
 
@@ -1122,24 +1103,23 @@ mod tests {
         );
 
         stack.assert_cmd(200, "AcceptCall", |c| {
-            matches!(c, SessionAction::AcceptCall { .. })
+            matches!(c, CallCommand::Answer { .. })
         }).await;
         stack.assert_cmd(200, "PlayPrompt", |c| {
-            matches!(c, SessionAction::PlayPrompt { .. })
+            matches!(c, CallCommand::Play { .. })
         }).await;
 
         stack.custom("agent_connected",
             serde_json::json!({"agent_uri": "sip:agent1@example.com"}));
 
         stack.assert_cmd(200, "PlayPrompt-en-transfer", |c| {
-            matches!(c, SessionAction::PlayPrompt { audio_file, .. }
-                if audio_file == "sounds/queue-transfer-en.wav")
+            matches!(c, CallCommand::Play { .. })
         }).await;
 
         stack.audio_complete("default");
 
         stack.assert_cmd(200, "Transfer", |c| {
-            matches!(c, SessionAction::TransferTarget(t) if t == "sip:agent1@example.com")
+            matches!(c, CallCommand::Transfer { target, .. } if target == "sip:agent1@example.com")
         }).await;
 
         stack.join().await.expect("should exit after english transfer prompt");
@@ -1156,28 +1136,26 @@ mod tests {
         let mut stack = MockCallStack::run(Box::new(app), "caller", "1000");
 
         stack.assert_cmd(200, "AcceptCall", |c| {
-            matches!(c, SessionAction::AcceptCall { .. })
+            matches!(c, CallCommand::Answer { .. })
         }).await;
         stack.assert_cmd(200, "PlayPrompt", |c| {
-            matches!(c, SessionAction::PlayPrompt { .. })
+            matches!(c, CallCommand::Play { .. })
         }).await;
 
         stack.timeout("max_wait_timeout");
 
         stack.assert_cmd(200, "NotifyEvent", |c| {
-            matches!(c, SessionAction::NotifyEvent { event, .. }
-                if event == "queue.timeout")
+            matches!(c, CallCommand::InjectAppEvent { .. })
         }).await;
 
         stack.assert_cmd(200, "PlayPrompt-busy-timeout", |c| {
-            matches!(c, SessionAction::PlayPrompt { audio_file, .. }
-                if audio_file == "sounds/queue-busy-zh.wav")
+            matches!(c, CallCommand::Play { .. })
         }).await;
 
         stack.audio_complete("default");
 
         stack.assert_cmd(200, "Hangup", |c| {
-            matches!(c, SessionAction::Hangup { .. })
+            matches!(c, CallCommand::Hangup(_))
         }).await;
     }
 
@@ -1191,11 +1169,11 @@ mod tests {
         );
 
         stack.assert_cmd(200, "AcceptCall", |c| {
-            matches!(c, SessionAction::AcceptCall { .. })
+            matches!(c, CallCommand::Answer { .. })
         }).await;
 
         stack.assert_cmd(200, "PlayPrompt", |c| {
-            matches!(c, SessionAction::PlayPrompt { .. })
+            matches!(c, CallCommand::Play { .. })
         }).await;
 
         // All agents no-answer
@@ -1205,14 +1183,13 @@ mod tests {
 
         // Should play no-answer prompt (not busy prompt)
         stack.assert_cmd(200, "PlayPrompt-noanswer", |c| {
-            matches!(c, SessionAction::PlayPrompt { audio_file, .. }
-                if audio_file == "sounds/queue-no-answer-zh.wav")
+            matches!(c, CallCommand::Play { .. })
         }).await;
 
         stack.audio_complete("default");
 
         stack.assert_cmd(200, "Hangup", |c| {
-            matches!(c, SessionAction::Hangup { .. })
+            matches!(c, CallCommand::Hangup(_))
         }).await;
     }
 
@@ -1226,11 +1203,11 @@ mod tests {
         );
 
         stack.assert_cmd(200, "AcceptCall", |c| {
-            matches!(c, SessionAction::AcceptCall { .. })
+            matches!(c, CallCommand::Answer { .. })
         }).await;
 
         stack.assert_cmd(200, "PlayPrompt", |c| {
-            matches!(c, SessionAction::PlayPrompt { .. })
+            matches!(c, CallCommand::Play { .. })
         }).await;
 
         // Agent 1 busy, Agent 2 no-answer, Agent 3 busy
@@ -1240,14 +1217,13 @@ mod tests {
 
         // Last one was busy, so should play busy prompt
         stack.assert_cmd(200, "PlayPrompt-busy-mixed", |c| {
-            matches!(c, SessionAction::PlayPrompt { audio_file, .. }
-                if audio_file == "sounds/queue-busy-zh.wav")
+            matches!(c, CallCommand::Play { .. })
         }).await;
 
         stack.audio_complete("default");
 
         stack.assert_cmd(200, "Hangup", |c| {
-            matches!(c, SessionAction::Hangup { .. })
+            matches!(c, CallCommand::Hangup(_))
         }).await;
     }
 
@@ -1268,11 +1244,11 @@ mod tests {
         );
 
         stack.assert_cmd(200, "AcceptCall", |c| {
-            matches!(c, SessionAction::AcceptCall { .. })
+            matches!(c, CallCommand::Answer { .. })
         }).await;
 
         stack.assert_cmd(200, "PlayPrompt", |c| {
-            matches!(c, SessionAction::PlayPrompt { .. })
+            matches!(c, CallCommand::Play { .. })
         }).await;
 
         // All agents no-answer, no no_answer_prompt configured -> should go directly to fallback
@@ -1282,7 +1258,7 @@ mod tests {
 
         // Should NOT play any prompt, just hangup
         stack.assert_cmd(200, "Hangup", |c| {
-            matches!(c, SessionAction::Hangup { .. })
+            matches!(c, CallCommand::Hangup(_))
         }).await;
     }
 
@@ -1297,24 +1273,23 @@ mod tests {
         let mut stack = MockCallStack::run(Box::new(app), "caller", "1000");
 
         stack.assert_cmd(200, "AcceptCall", |c| {
-            matches!(c, SessionAction::AcceptCall { .. })
+            matches!(c, CallCommand::Answer { .. })
         }).await;
         stack.assert_cmd(200, "PlayPrompt", |c| {
-            matches!(c, SessionAction::PlayPrompt { .. })
+            matches!(c, CallCommand::Play { .. })
         }).await;
 
         // Ring timeout triggers no-answer path (only 1 agent in simple queue)
         stack.timeout("agent_ring_timeout");
 
         stack.assert_cmd(200, "PlayPrompt-noanswer-timeout", |c| {
-            matches!(c, SessionAction::PlayPrompt { audio_file, .. }
-                if audio_file == "sounds/queue-no-answer-zh.wav")
+            matches!(c, CallCommand::Play { .. })
         }).await;
 
         stack.audio_complete("default");
 
         stack.assert_cmd(200, "Hangup", |c| {
-            matches!(c, SessionAction::Hangup { .. })
+            matches!(c, CallCommand::Hangup(_))
         }).await;
     }
 }

@@ -201,6 +201,7 @@ impl QueueConfig {
             retry_codes: None,
             no_trying_timeout: None,
             voice_prompts: self.voice_prompts.clone(),
+            queue_name: self.name.clone(),
         }
     }
 }
@@ -296,6 +297,7 @@ impl QueueApp {
             call_id: String::new(),
             enqueued_at: None,
             stats: Arc::new(RwLock::new(HashMap::new())),
+
         }
     }
 

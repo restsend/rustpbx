@@ -5,6 +5,7 @@ use crate::call::runtime::conference_media_bridge::{
     AudioReceiver, ConferenceBridgeHandle, PcmAudioFrame,
 };
 use crate::media;
+use crate::media::mixer::SupervisorMixerMode;
 use crate::media::Track as MediaTrackTrait;
 use crate::proxy::active_call_registry::ActiveProxyCallRegistry;
 use crate::proxy::proxy_call::media_peer::VoiceEnginePeer;
@@ -152,7 +153,7 @@ async fn start_peer_conference_bridge(
     // Start the full-duplex bridge
     let bridge = crate::call::runtime::ConferenceMediaBridge::new(conf_manager.clone());
     match bridge
-        .start_bridge_full_duplex(conf_id, leg_id, tx, audio_receiver)
+        .start_bridge_full_duplex(conf_id, leg_id, tx, audio_receiver, audio_codec::CodecType::PCMU)
         .await
     {
         Ok(handle) => {
@@ -546,6 +547,9 @@ impl RwiCommandProcessor {
             } => {
                 self.get_handle(supervisor_call_id).await?;
                 self.get_handle(target_call_id).await?;
+                return self
+                    .supervisor_listen(supervisor_call_id, target_call_id)
+                    .await;
             }
             RwiCommandPayload::SupervisorWhisper {
                 supervisor_call_id,
@@ -557,6 +561,9 @@ impl RwiCommandProcessor {
                 if !agent_leg.is_empty() {
                     self.get_handle(agent_leg).await?;
                 }
+                return self
+                    .supervisor_whisper(supervisor_call_id, target_call_id, agent_leg)
+                    .await;
             }
             RwiCommandPayload::SupervisorBarge {
                 supervisor_call_id,
@@ -568,6 +575,9 @@ impl RwiCommandProcessor {
                 if !agent_leg.is_empty() {
                     self.get_handle(agent_leg).await?;
                 }
+                return self
+                    .supervisor_barge(supervisor_call_id, target_call_id, agent_leg)
+                    .await;
             }
             RwiCommandPayload::SupervisorTakeover {
                 supervisor_call_id,
@@ -575,6 +585,9 @@ impl RwiCommandProcessor {
             } => {
                 self.get_handle(supervisor_call_id).await?;
                 self.get_handle(target_call_id).await?;
+                return self
+                    .supervisor_takeover(supervisor_call_id, target_call_id)
+                    .await;
             }
             RwiCommandPayload::SupervisorStop {
                 supervisor_call_id,
@@ -759,16 +772,15 @@ impl RwiCommandProcessor {
             RwiCommandPayload::AppStop { call_id, reason } => {
                 return self.app_stop(call_id, reason.clone()).await;
             }
+            RwiCommandPayload::AppChain {
+                call_id,
+                app_name,
+                params,
+            } => {
+                return self.app_chain(call_id.as_str(), app_name.clone(), params.clone()).await;
+            }
             RwiCommandPayload::SipOptionsPing { call_id } => {
                 return self.sip_options_ping(call_id).await;
-            }
-            RwiCommandPayload::MediaPlay(req) => {
-                return self
-                    .media_play(&req.call_id, req.source.clone(), req.interrupt_on_dtmf)
-                    .await;
-            }
-            RwiCommandPayload::MediaStop { call_id } => {
-                return self.media_stop(call_id).await;
             }
             RwiCommandPayload::MediaStreamStart(req) => {
                 return self
@@ -785,6 +797,13 @@ impl RwiCommandProcessor {
             }
             RwiCommandPayload::MediaInjectStop { call_id } => {
                 return self.media_inject_stop(call_id).await;
+            }
+            RwiCommandPayload::CallSendDtmf {
+                call_id,
+                leg_id,
+                digits,
+            } => {
+                return self.send_dtmf(call_id.clone(), leg_id.clone(), digits.clone()).await;
             }
 
             RwiCommandPayload::QueueEnqueue(req) => {
@@ -932,7 +951,7 @@ impl RwiCommandProcessor {
                 Some(target_call_id.clone())
             }
             RwiCommandPayload::MediaPlay(req) => Some(req.call_id.clone()),
-            RwiCommandPayload::MediaStop { call_id } => Some(call_id.clone()),
+            RwiCommandPayload::MediaStop { call_id, .. } => Some(call_id.clone()),
             RwiCommandPayload::MediaStreamStart(req) => Some(req.call_id.clone()),
             RwiCommandPayload::MediaStreamStop { call_id } => Some(call_id.clone()),
             RwiCommandPayload::MediaInjectStart(req) => Some(req.call_id.clone()),
@@ -1253,7 +1272,7 @@ impl RwiCommandProcessor {
                                     // Create audio receiver from caller_peer
                                     let audio_receiver = Box::new(OriginateAudioReceiver);
 
-                                    if let Err(e) = bridge.start_bridge_full_duplex(&mixer_id, &participant_leg, tx, audio_receiver).await {
+                                    if let Err(e) = bridge.start_bridge_full_duplex(&mixer_id, &participant_leg, tx, audio_receiver, audio_codec::CodecType::PCMU).await {
                                         tracing::warn!(%cmd_call_id, %mixer_id, error = %e, "Failed to start conference bridge");
                                     } else {
                                         tracing::info!(%cmd_call_id, %mixer_id, "Successfully joined conference from originate");
@@ -2165,11 +2184,46 @@ impl RwiCommandProcessor {
         Ok(CommandResult::Success)
     }
 
+    async fn app_chain(
+        &self,
+        call_id: &str,
+        app_name: String,
+        params: Option<serde_json::Value>,
+    ) -> Result<CommandResult, CommandError> {
+        let handle = self.get_handle(call_id).await?;
+
+        // Stop current app first
+        handle
+            .send_command(CallCommand::StopApp { reason: Some("chaining".into()) })
+            .map_err(|e| CommandError::CommandFailed(e.to_string()))?;
+
+        // Brief yield to let the app stop complete
+        tokio::task::yield_now().await;
+
+        // Start new app
+        handle
+            .send_command(CallCommand::StartApp {
+                app_name: app_name.clone(),
+                params: params.clone(),
+                auto_answer: false,
+            })
+            .map_err(|e| CommandError::CommandFailed(e.to_string()))?;
+
+        info!(
+            call_id = %call_id,
+            new_app = %app_name,
+            "App chained successfully"
+        );
+
+        Ok(CommandResult::Success)
+    }
+
     async fn media_play(
         &self,
         call_id: &str,
         source: crate::rwi::session::MediaSource,
         _interrupt_on_dtmf: bool,
+        leg_id: Option<String>,
     ) -> Result<CommandResult, CommandError> {
         use crate::call::domain::{MediaSource as DomainMediaSource, PlayOptions};
 
@@ -2184,9 +2238,10 @@ impl RwiCommandProcessor {
         };
 
         let track_id = uuid::Uuid::new_v4().to_string();
+        let event_leg_id = leg_id.clone();
         handle
             .send_command(CallCommand::Play {
-                leg_id: None,
+                leg_id: leg_id.map(LegId::new),
                 source: domain_source,
                 options: Some(PlayOptions {
                     loop_playback: false,
@@ -2198,13 +2253,32 @@ impl RwiCommandProcessor {
             })
             .map_err(|e| CommandError::CommandFailed(e.to_string()))?;
 
+        let event = RwiEvent::MediaPlayStarted {
+            call_id: call_id.to_string(),
+            leg_id: event_leg_id,
+            track_id: track_id.clone(),
+        };
+        let gw = self.gateway.read().await;
+        gw.send_event_to_call_owner(&call_id.to_string(), &event);
+
         Ok(CommandResult::MediaPlay { track_id })
     }
 
-    async fn media_stop(&self, call_id: &str) -> Result<CommandResult, CommandError> {
+    async fn media_stop(&self, call_id: &str, leg_id: Option<String>) -> Result<CommandResult, CommandError> {
         let handle = self.get_handle(call_id).await?;
         handle
-            .send_command(CallCommand::StopPlayback { leg_id: None })
+            .send_command(CallCommand::StopPlayback { leg_id: leg_id.map(LegId::new) })
+            .map_err(|e| CommandError::CommandFailed(e.to_string()))?;
+        Ok(CommandResult::Success)
+    }
+
+    async fn send_dtmf(&self, call_id: String, leg_id: Option<String>, digits: String) -> Result<CommandResult, CommandError> {
+        let handle = self.get_handle(&call_id).await?;
+        handle
+            .send_command(CallCommand::SendDtmf {
+                leg_id: leg_id.map(LegId::new).unwrap_or(LegId::from("caller")),
+                digits,
+            })
             .map_err(|e| CommandError::CommandFailed(e.to_string()))?;
         Ok(CommandResult::Success)
     }
@@ -2922,10 +2996,18 @@ impl RwiCommandProcessor {
 
         let manager = self.conference_manager();
         let max_participants = req.max_members.map(|m| m as usize);
-        manager
+        if let Err(e) = manager
             .create_conference(conf_id.clone().into(), max_participants)
             .await
-            .map_err(|e| CommandError::CommandFailed(e.to_string()))?;
+        {
+            let err_event = RwiEvent::ConferenceError {
+                conf_id: conf_id.clone(),
+                error: e.to_string(),
+            };
+            let gw = self.gateway.read().await;
+            gw.broadcast_event(&err_event);
+            return Err(CommandError::CommandFailed(e.to_string()));
+        }
 
         let event = RwiEvent::ConferenceCreated {
             conf_id: conf_id.clone(),
@@ -2945,10 +3027,18 @@ impl RwiCommandProcessor {
         self.get_handle(call_id).await?;
 
         let manager = self.conference_manager();
-        manager
+        if let Err(e) = manager
             .add_participant(&conf_id.into(), LegId::new(call_id))
             .await
-            .map_err(|e| CommandError::CommandFailed(e.to_string()))?;
+        {
+            let err_event = RwiEvent::ConferenceError {
+                conf_id: conf_id.to_string(),
+                error: e.to_string(),
+            };
+            let gw = self.gateway.read().await;
+            gw.broadcast_event(&err_event);
+            return Err(CommandError::CommandFailed(e.to_string()));
+        }
 
         let event = RwiEvent::ConferenceMemberJoined {
             conf_id: conf_id.to_string(),
@@ -2970,10 +3060,18 @@ impl RwiCommandProcessor {
         call_id: &str,
     ) -> Result<CommandResult, CommandError> {
         let manager = self.conference_manager();
-        manager
+        if let Err(e) = manager
             .remove_participant(&conf_id.into(), &LegId::new(call_id))
             .await
-            .map_err(|e| CommandError::CommandFailed(e.to_string()))?;
+        {
+            let err_event = RwiEvent::ConferenceError {
+                conf_id: conf_id.to_string(),
+                error: e.to_string(),
+            };
+            let gw = self.gateway.read().await;
+            gw.broadcast_event(&err_event);
+            return Err(CommandError::CommandFailed(e.to_string()));
+        }
 
         let event = RwiEvent::ConferenceMemberLeft {
             conf_id: conf_id.to_string(),
@@ -2995,10 +3093,18 @@ impl RwiCommandProcessor {
         call_id: &str,
     ) -> Result<CommandResult, CommandError> {
         let manager = self.conference_manager();
-        manager
+        if let Err(e) = manager
             .mute_participant(&conf_id.into(), &LegId::new(call_id))
             .await
-            .map_err(|e| CommandError::CommandFailed(e.to_string()))?;
+        {
+            let err_event = RwiEvent::ConferenceError {
+                conf_id: conf_id.to_string(),
+                error: e.to_string(),
+            };
+            let gw = self.gateway.read().await;
+            gw.broadcast_event(&err_event);
+            return Err(CommandError::CommandFailed(e.to_string()));
+        }
 
         let event = RwiEvent::ConferenceMemberMuted {
             conf_id: conf_id.to_string(),
@@ -3020,10 +3126,18 @@ impl RwiCommandProcessor {
         call_id: &str,
     ) -> Result<CommandResult, CommandError> {
         let manager = self.conference_manager();
-        manager
+        if let Err(e) = manager
             .unmute_participant(&conf_id.into(), &LegId::new(call_id))
             .await
-            .map_err(|e| CommandError::CommandFailed(e.to_string()))?;
+        {
+            let err_event = RwiEvent::ConferenceError {
+                conf_id: conf_id.to_string(),
+                error: e.to_string(),
+            };
+            let gw = self.gateway.read().await;
+            gw.broadcast_event(&err_event);
+            return Err(CommandError::CommandFailed(e.to_string()));
+        }
 
         let event = RwiEvent::ConferenceMemberUnmuted {
             conf_id: conf_id.to_string(),
@@ -3041,10 +3155,18 @@ impl RwiCommandProcessor {
 
     async fn conference_destroy(&self, conf_id: &str) -> Result<CommandResult, CommandError> {
         let manager = self.conference_manager();
-        manager
+        if let Err(e) = manager
             .destroy_conference(&conf_id.into())
             .await
-            .map_err(|e| CommandError::CommandFailed(e.to_string()))?;
+        {
+            let err_event = RwiEvent::ConferenceError {
+                conf_id: conf_id.to_string(),
+                error: e.to_string(),
+            };
+            let gw = self.gateway.read().await;
+            gw.broadcast_event(&err_event);
+            return Err(CommandError::CommandFailed(e.to_string()));
+        }
 
         let event = RwiEvent::ConferenceDestroyed {
             conf_id: conf_id.to_string(),
@@ -3123,6 +3245,13 @@ impl RwiCommandProcessor {
                 Ok(CommandResult::Success)
             }
             Err(e) => {
+                let err_event = RwiEvent::ConferenceError {
+                    conf_id: conf_id.to_string(),
+                    error: e.to_string(),
+                };
+                let gw = self.gateway.read().await;
+                gw.broadcast_event(&err_event);
+
                 let event = RwiEvent::ConferenceMergeFailed {
                     conf_id: conf_id.to_string(),
                     call_id: call_id.to_string(),
@@ -3298,6 +3427,284 @@ impl RwiCommandProcessor {
         let gw = self.gateway.read().await;
         gw.send_event_to_call_owner(&target_call_id.to_string(), &event);
         gw.send_event_to_call_owner(&source_call_id.to_string(), &event);
+        Ok(CommandResult::Success)
+    }
+
+    async fn supervisor_listen(
+        &self,
+        supervisor_call_id: &str,
+        target_call_id: &str,
+    ) -> Result<CommandResult, CommandError> {
+        let mixer_id = format!("supervisor-{}-{}", supervisor_call_id, target_call_id);
+        tracing::info!(
+            "supervisor_listen: creating mixer id={} sup={} target={}",
+            mixer_id,
+            supervisor_call_id,
+            target_call_id
+        );
+
+        self.mixer_registry.create_supervisor_mixer(
+            mixer_id.clone(),
+            supervisor_call_id.to_string(),
+            target_call_id.to_string(),
+            SupervisorMixerMode::Listen,
+        );
+
+        if let Ok(handle) = self.get_handle(target_call_id).await {
+            let _ = handle.send_command(CallCommand::SupervisorListen {
+                supervisor_leg: LegId::new(supervisor_call_id),
+                target_leg: LegId::new(target_call_id),
+                supervisor_session_id: None,
+            });
+        }
+
+        info!(
+            audit_event = "supervisor_action",
+            action = "listen_start",
+            supervisor_call_id = %supervisor_call_id,
+            target_call_id = %target_call_id,
+            result = "success",
+            "Supervisor listen mode started"
+        );
+
+        let mut states = self.supervisor_states.write().await;
+        states.insert(
+            supervisor_call_id.to_string(),
+            SupervisorState {
+                supervisor_call_id: supervisor_call_id.to_string(),
+                target_call_id: target_call_id.to_string(),
+                mode: SupervisorMode::Listen,
+                mixer_id: mixer_id.clone(),
+                agent_leg: None,
+            },
+        );
+
+        let event = RwiEvent::SupervisorListenStarted {
+            supervisor_call_id: supervisor_call_id.to_string(),
+            target_call_id: target_call_id.to_string(),
+        };
+        let gw = self.gateway.read().await;
+        gw.send_event_to_call_owner(&supervisor_call_id.to_string(), &event);
+        if self.get_handle(target_call_id).await.is_ok() {
+            gw.send_event_to_call_owner(&target_call_id.to_string(), &event);
+        }
+        Ok(CommandResult::Success)
+    }
+
+    async fn supervisor_whisper(
+        &self,
+        supervisor_call_id: &str,
+        target_call_id: &str,
+        agent_leg: &str,
+    ) -> Result<CommandResult, CommandError> {
+        let mixer_id = format!("supervisor-{}-{}", supervisor_call_id, target_call_id);
+        tracing::info!(
+            "supervisor_whisper: creating mixer id={} sup={} target={}",
+            mixer_id,
+            supervisor_call_id,
+            target_call_id
+        );
+
+        self.mixer_registry.create_supervisor_mixer(
+            mixer_id.clone(),
+            supervisor_call_id.to_string(),
+            target_call_id.to_string(),
+            SupervisorMixerMode::Whisper,
+        );
+
+        if !agent_leg.is_empty() {
+            self.mixer_registry.add_participant(
+                &mixer_id,
+                agent_leg.to_string(),
+                crate::media::mixer_registry::MixerParticipantRole::Customer,
+            );
+        }
+
+        if let Ok(handle) = self.get_handle(target_call_id).await {
+            let _ = handle.send_command(CallCommand::SupervisorWhisper {
+                supervisor_leg: LegId::new(supervisor_call_id),
+                target_leg: LegId::new(target_call_id),
+                supervisor_session_id: None,
+            });
+        }
+
+        info!(
+            audit_event = "supervisor_action",
+            action = "whisper_start",
+            supervisor_call_id = %supervisor_call_id,
+            target_call_id = %target_call_id,
+            agent_leg = %agent_leg,
+            result = "success",
+            "Supervisor whisper mode started"
+        );
+
+        let mut states = self.supervisor_states.write().await;
+        states.insert(
+            supervisor_call_id.to_string(),
+            SupervisorState {
+                supervisor_call_id: supervisor_call_id.to_string(),
+                target_call_id: target_call_id.to_string(),
+                mode: SupervisorMode::Whisper,
+                mixer_id: mixer_id.clone(),
+                agent_leg: if agent_leg.is_empty() {
+                    None
+                } else {
+                    Some(agent_leg.to_string())
+                },
+            },
+        );
+
+        let event = RwiEvent::SupervisorWhisperStarted {
+            supervisor_call_id: supervisor_call_id.to_string(),
+            target_call_id: target_call_id.to_string(),
+        };
+        let gw = self.gateway.read().await;
+        gw.send_event_to_call_owner(&supervisor_call_id.to_string(), &event);
+        if self.get_handle(target_call_id).await.is_ok() {
+            gw.send_event_to_call_owner(&target_call_id.to_string(), &event);
+        }
+        if !agent_leg.is_empty() && self.get_handle(agent_leg).await.is_ok() {
+            gw.send_event_to_call_owner(&agent_leg.to_string(), &event);
+        }
+        Ok(CommandResult::Success)
+    }
+
+    async fn supervisor_barge(
+        &self,
+        supervisor_call_id: &str,
+        target_call_id: &str,
+        agent_leg: &str,
+    ) -> Result<CommandResult, CommandError> {
+        let mixer_id = format!("supervisor-{}-{}", supervisor_call_id, target_call_id);
+        tracing::info!(
+            "supervisor_barge: creating mixer id={} sup={} target={}",
+            mixer_id,
+            supervisor_call_id,
+            target_call_id
+        );
+
+        self.mixer_registry.create_supervisor_mixer(
+            mixer_id.clone(),
+            supervisor_call_id.to_string(),
+            target_call_id.to_string(),
+            SupervisorMixerMode::Barge,
+        );
+
+        if !agent_leg.is_empty() {
+            self.mixer_registry.add_participant(
+                &mixer_id,
+                agent_leg.to_string(),
+                crate::media::mixer_registry::MixerParticipantRole::Customer,
+            );
+        }
+
+        if let Ok(handle) = self.get_handle(target_call_id).await {
+            let _ = handle.send_command(CallCommand::SupervisorBarge {
+                supervisor_leg: LegId::new(supervisor_call_id),
+                target_leg: LegId::new(target_call_id),
+                supervisor_session_id: None,
+            });
+        }
+
+        info!(
+            audit_event = "supervisor_action",
+            action = "barge_start",
+            supervisor_call_id = %supervisor_call_id,
+            target_call_id = %target_call_id,
+            agent_leg = %agent_leg,
+            result = "success",
+            "Supervisor barge mode started"
+        );
+
+        let mut states = self.supervisor_states.write().await;
+        states.insert(
+            supervisor_call_id.to_string(),
+            SupervisorState {
+                supervisor_call_id: supervisor_call_id.to_string(),
+                target_call_id: target_call_id.to_string(),
+                mode: SupervisorMode::Barge,
+                mixer_id: mixer_id.clone(),
+                agent_leg: if agent_leg.is_empty() {
+                    None
+                } else {
+                    Some(agent_leg.to_string())
+                },
+            },
+        );
+
+        let event = RwiEvent::SupervisorBargeStarted {
+            supervisor_call_id: supervisor_call_id.to_string(),
+            target_call_id: target_call_id.to_string(),
+        };
+        let gw = self.gateway.read().await;
+        gw.send_event_to_call_owner(&supervisor_call_id.to_string(), &event);
+        if self.get_handle(target_call_id).await.is_ok() {
+            gw.send_event_to_call_owner(&target_call_id.to_string(), &event);
+        }
+        if !agent_leg.is_empty() && self.get_handle(agent_leg).await.is_ok() {
+            gw.send_event_to_call_owner(&agent_leg.to_string(), &event);
+        }
+        Ok(CommandResult::Success)
+    }
+
+    async fn supervisor_takeover(
+        &self,
+        supervisor_call_id: &str,
+        target_call_id: &str,
+    ) -> Result<CommandResult, CommandError> {
+        let mixer_id = format!("supervisor-{}-{}", supervisor_call_id, target_call_id);
+        tracing::info!(
+            "supervisor_takeover: creating mixer id={} sup={} target={}",
+            mixer_id,
+            supervisor_call_id,
+            target_call_id
+        );
+
+        self.mixer_registry.create_supervisor_mixer(
+            mixer_id.clone(),
+            supervisor_call_id.to_string(),
+            target_call_id.to_string(),
+            SupervisorMixerMode::Barge,
+        );
+
+        if let Ok(handle) = self.get_handle(target_call_id).await {
+            let _ = handle.send_command(CallCommand::SupervisorTakeover {
+                supervisor_leg: LegId::new(supervisor_call_id),
+                target_leg: LegId::new(target_call_id),
+                supervisor_session_id: None,
+            });
+        }
+
+        info!(
+            audit_event = "supervisor_action",
+            action = "takeover_start",
+            supervisor_call_id = %supervisor_call_id,
+            target_call_id = %target_call_id,
+            result = "success",
+            "Supervisor takeover mode started"
+        );
+
+        let mut states = self.supervisor_states.write().await;
+        states.insert(
+            supervisor_call_id.to_string(),
+            SupervisorState {
+                supervisor_call_id: supervisor_call_id.to_string(),
+                target_call_id: target_call_id.to_string(),
+                mode: SupervisorMode::Barge,
+                mixer_id: mixer_id.clone(),
+                agent_leg: None,
+            },
+        );
+
+        let event = RwiEvent::SupervisorTakeoverStarted {
+            supervisor_call_id: supervisor_call_id.to_string(),
+            target_call_id: target_call_id.to_string(),
+        };
+        let gw = self.gateway.read().await;
+        gw.send_event_to_call_owner(&supervisor_call_id.to_string(), &event);
+        if self.get_handle(target_call_id).await.is_ok() {
+            gw.send_event_to_call_owner(&target_call_id.to_string(), &event);
+        }
         Ok(CommandResult::Success)
     }
 
@@ -3980,6 +4387,7 @@ mod tests {
                         looped: None,
                     },
                     interrupt_on_dtmf: false,
+                    leg_id: None,
                 },
             ))
             .await;
@@ -4221,6 +4629,7 @@ mod tests {
         let result = processor
             .process_command(RwiCommandPayload::MediaStop {
                 call_id: "ghost".into(),
+                leg_id: None,
             })
             .await;
         assert!(result.is_err());
@@ -4242,6 +4651,7 @@ mod tests {
         let result = processor
             .process_command(RwiCommandPayload::MediaStop {
                 call_id: "call-stop".into(),
+                leg_id: None,
             })
             .await;
 

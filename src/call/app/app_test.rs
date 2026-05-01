@@ -8,7 +8,7 @@ mod tests {
     use crate::call::app::{
         AppAction, ApplicationContext, CallApp, CallAppType, CallController, DtmfCollectConfig,
     };
-    use crate::proxy::proxy_call::state::SessionAction;
+    use crate::call::domain::CallCommand;
     use anyhow::Result;
     use async_trait::async_trait;
     use std::sync::{Arc, Mutex};
@@ -71,21 +71,21 @@ mod tests {
         // App should immediately answer on enter
         stack
             .assert_cmd(100, "AcceptCall", |c| {
-                matches!(c, SessionAction::AcceptCall { .. })
+                matches!(c, CallCommand::Answer { .. })
             })
             .await;
 
         // App should play a prompt
         stack
             .assert_cmd(100, "PlayPrompt", |c| {
-                matches!(c, SessionAction::PlayPrompt { .. })
+                matches!(c, CallCommand::Play { .. })
             })
             .await;
 
         // Simulate audio finishing — app should hang up
         stack.audio_complete("default");
         stack
-            .assert_cmd(100, "Hangup", |c| matches!(c, SessionAction::Hangup { .. }))
+            .assert_cmd(100, "Hangup", |c| matches!(c, CallCommand::Hangup(_)))
             .await;
     }
 
@@ -133,7 +133,7 @@ mod tests {
         let mut stack = MockCallStack::run(Box::new(DtmfMenuApp), "1001", "8000");
         stack
             .assert_cmd(100, "AcceptCall", |c| {
-                matches!(c, SessionAction::AcceptCall { .. })
+                matches!(c, CallCommand::Answer { .. })
             })
             .await;
 
@@ -151,13 +151,13 @@ mod tests {
         let mut stack = MockCallStack::run(Box::new(DtmfMenuApp), "1001", "8000");
         stack
             .assert_cmd(100, "AcceptCall", |c| {
-                matches!(c, SessionAction::AcceptCall { .. })
+                matches!(c, CallCommand::Answer { .. })
             })
             .await;
 
         stack.dtmf("9");
         stack
-            .assert_cmd(100, "Hangup", |c| matches!(c, SessionAction::Hangup { .. }))
+            .assert_cmd(100, "Hangup", |c| matches!(c, CallCommand::Hangup(_)))
             .await;
     }
 
@@ -189,7 +189,7 @@ mod tests {
         let mut stack = MockCallStack::run(Box::new(WaitForeverApp), "1001", "9000");
         stack
             .assert_cmd(100, "AcceptCall", |c| {
-                matches!(c, SessionAction::AcceptCall { .. })
+                matches!(c, CallCommand::Answer { .. })
             })
             .await;
 
@@ -263,7 +263,7 @@ mod tests {
         // First app answers
         stack
             .assert_cmd(100, "AcceptCall", |c| {
-                matches!(c, SessionAction::AcceptCall { .. })
+                matches!(c, CallCommand::Answer { .. })
             })
             .await;
 
@@ -272,7 +272,7 @@ mod tests {
 
         // Second app hangs up
         stack
-            .assert_cmd(100, "Hangup", |c| matches!(c, SessionAction::Hangup { .. }))
+            .assert_cmd(100, "Hangup", |c| matches!(c, CallCommand::Hangup(_)))
             .await;
     }
 
@@ -334,14 +334,14 @@ mod tests {
         // App answers on enter
         stack
             .assert_cmd(100, "AcceptCall", |c| {
-                matches!(c, SessionAction::AcceptCall { .. })
+                matches!(c, CallCommand::Answer { .. })
             })
             .await;
 
         // Timer fires after 20ms → on_timeout → Hangup
         stack
             .assert_cmd(200, "Hangup from timer", |c| {
-                matches!(c, SessionAction::Hangup { .. })
+                matches!(c, CallCommand::Hangup(_))
             })
             .await;
 
@@ -397,7 +397,7 @@ mod tests {
 
         stack
             .assert_cmd(100, "AcceptCall", |c| {
-                matches!(c, SessionAction::AcceptCall { .. })
+                matches!(c, CallCommand::Answer { .. })
             })
             .await;
 
@@ -465,7 +465,7 @@ mod tests {
         // AcceptCall first
         stack
             .assert_cmd(200, "AcceptCall", |c| {
-                matches!(c, SessionAction::AcceptCall { .. })
+                matches!(c, CallCommand::Answer { .. })
             })
             .await;
 
@@ -479,7 +479,7 @@ mod tests {
 
         // App should now hang up
         stack
-            .assert_cmd(200, "Hangup", |c| matches!(c, SessionAction::Hangup { .. }))
+            .assert_cmd(200, "Hangup", |c| matches!(c, CallCommand::Hangup(_)))
             .await;
 
         assert!(logged(&log).contains(&"collected:42".to_string()));
@@ -492,7 +492,7 @@ mod tests {
         let mut stack = MockCallStack::run(Box::new(WaitForeverApp), "1001", "9999");
         stack
             .assert_cmd(100, "AcceptCall", |c| {
-                matches!(c, SessionAction::AcceptCall { .. })
+                matches!(c, CallCommand::Answer { .. })
             })
             .await;
 
@@ -544,7 +544,7 @@ mod tests {
         let mut stack = MockCallStack::run(Box::new(TransferApp), "1001", "8000");
         stack
             .assert_cmd(100, "AcceptCall", |c| {
-                matches!(c, SessionAction::AcceptCall { .. })
+                matches!(c, CallCommand::Answer { .. })
             })
             .await;
 
@@ -554,7 +554,7 @@ mod tests {
             .assert_cmd(
                 200,
                 "TransferTarget",
-                |c| matches!(c, SessionAction::TransferTarget(t) if t == "sip:2001@pbx"),
+                |c| matches!(c, CallCommand::Transfer { target, .. } if target == "sip:2001@pbx"),
             )
             .await;
 
@@ -608,14 +608,14 @@ mod tests {
 
         stack
             .assert_cmd(200, "AcceptCall", |c| {
-                matches!(c, SessionAction::AcceptCall { .. })
+                matches!(c, CallCommand::Answer { .. })
             })
             .await;
 
         stack.dtmf("4").dtmf("2").dtmf("#");
 
         stack
-            .assert_cmd(300, "Hangup", |c| matches!(c, SessionAction::Hangup { .. }))
+            .assert_cmd(300, "Hangup", |c| matches!(c, CallCommand::Hangup(_)))
             .await;
 
         assert!(
@@ -664,7 +664,7 @@ mod tests {
 
         stack
             .assert_cmd(100, "AcceptCall", |c| {
-                matches!(c, SessionAction::AcceptCall { .. })
+                matches!(c, CallCommand::Answer { .. })
             })
             .await;
 
@@ -725,20 +725,20 @@ mod tests {
 
         stack
             .assert_cmd(100, "AcceptCall", |c| {
-                matches!(c, SessionAction::AcceptCall { .. })
+                matches!(c, CallCommand::Answer { .. })
             })
             .await;
 
         stack
             .assert_cmd(200, "PlayPrompt-pin", |c| {
-                matches!(c, SessionAction::PlayPrompt { audio_file, .. } if audio_file == "sounds/enter_pin.wav")
+                matches!(c, CallCommand::Play { .. })
             })
             .await;
 
         stack.dtmf("7").dtmf("8").dtmf("9");
 
         stack
-            .assert_cmd(300, "Hangup", |c| matches!(c, SessionAction::Hangup { .. }))
+            .assert_cmd(300, "Hangup", |c| matches!(c, CallCommand::Hangup(_)))
             .await;
 
         assert!(

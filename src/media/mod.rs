@@ -32,6 +32,7 @@ pub mod mixer_output;
 pub mod mixer_registry;
 pub mod negotiate;
 pub mod sdp_bridge;
+pub mod telephone_event;
 pub mod transcoder;
 pub mod transcoding_pipeline;
 #[cfg(test)]
@@ -516,12 +517,7 @@ impl RtpTrackBuilder {
                 CodecType::TelephoneEvent,
             ]
             .into_iter()
-            .map(|c| negotiate::CodecInfo {
-                payload_type: c.payload_type(),
-                clock_rate: c.clock_rate(),
-                channels: c.channels(),
-                codec: c,
-            })
+            .map(negotiate::MediaNegotiator::codec_info_for_type)
             .collect(),
             video_capabilities: Vec::new(),
         }
@@ -555,12 +551,7 @@ impl RtpTrackBuilder {
     pub fn with_codec_preference(mut self, codecs: Vec<CodecType>) -> Self {
         self.rtp_map = codecs
             .into_iter()
-            .map(|c| negotiate::CodecInfo {
-                payload_type: c.payload_type(),
-                clock_rate: c.clock_rate(),
-                channels: c.channels(),
-                codec: c,
-            })
+            .map(negotiate::MediaNegotiator::codec_info_for_type)
             .collect();
         self
     }
@@ -612,13 +603,7 @@ impl RtpTrackBuilder {
         }
         .into_iter()
         .filter_map(|codec| {
-            negotiate::CodecInfo {
-                payload_type: codec.payload_type(),
-                clock_rate: codec.clock_rate(),
-                channels: codec.channels(),
-                codec,
-            }
-            .to_audio_capability()
+            negotiate::MediaNegotiator::codec_info_for_type(codec).to_audio_capability()
         })
         .collect();
 
@@ -911,12 +896,7 @@ impl FileTrack {
                 .first()
                 .copied()
                 .unwrap_or(CodecType::PCMU);
-            negotiate::CodecInfo {
-                payload_type: codec.payload_type(),
-                codec,
-                clock_rate: codec.clock_rate(),
-                channels: codec.channels(),
-            }
+            negotiate::MediaNegotiator::codec_info_for_type(codec)
         });
         let frame_timing = audio_frame_timing(selected.codec, selected.clock_rate);
         let audio_source_manager = {
@@ -980,12 +960,7 @@ impl FileTrack {
                 .first()
                 .copied()
                 .unwrap_or(CodecType::PCMU);
-            negotiate::CodecInfo {
-                payload_type: codec.payload_type(),
-                codec,
-                clock_rate: codec.clock_rate(),
-                channels: codec.channels(),
-            }
+            negotiate::MediaNegotiator::codec_info_for_type(codec)
         });
         let codec = selected.codec;
         let payload_type = selected.payload_type;

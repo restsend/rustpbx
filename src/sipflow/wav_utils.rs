@@ -157,13 +157,7 @@ fn parse_dtmf_payload(payload: &[u8], clock_rate: u32) -> Option<(char, u32)> {
         return None;
     }
 
-    let digit = match payload[0] {
-        0..=9 => (b'0' + payload[0]) as char,
-        10 => '*',
-        11 => '#',
-        12..=15 => (b'A' + (payload[0] - 12)) as char,
-        _ => return None,
-    };
+    let digit = crate::media::telephone_event::dtmf_code_to_char(payload[0])?;
 
     let end_bit = (payload[1] & 0x80) != 0;
     if !end_bit {

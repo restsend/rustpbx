@@ -89,7 +89,6 @@ impl TestPbx {
         let mut cfg = inject.proxy_config.unwrap_or_else(|| ProxyConfig {
             addr: "127.0.0.1".to_string(),
             udp_port: Some(sip_port),
-            enable_latching: true,
             ..Default::default()
         });
         cfg.addr = "127.0.0.1".to_string();

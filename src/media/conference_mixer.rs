@@ -5,7 +5,7 @@
 
 use crate::call::domain::LegId;
 use crate::media::mixer::AudioMixer;
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use audio_codec::CodecType;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -108,6 +108,14 @@ impl ConferenceAudioMixer {
         leg_id: LegId,
         codec: CodecType,
     ) -> Result<(mpsc::Sender<AudioFrame>, mpsc::Receiver<AudioFrame>)> {
+        // Reject duplicate participants
+        {
+            let participants = self.participants.lock().await;
+            if participants.contains_key(&leg_id) {
+                return Err(anyhow!("Participant {} already exists in conference", leg_id));
+            }
+        }
+
         let (input_tx, input_rx) = mpsc::channel::<AudioFrame>(100);
         let (output_tx, output_rx) = mpsc::channel::<AudioFrame>(100);
 

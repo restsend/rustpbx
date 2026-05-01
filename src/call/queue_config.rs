@@ -170,6 +170,7 @@ impl QueueConfig {
             retry_codes: None,
             no_trying_timeout: None,
             voice_prompts: self.voice_prompts.clone(),
+            queue_name: self.name.clone().unwrap_or_default(),
         };
 
         Ok(plan)

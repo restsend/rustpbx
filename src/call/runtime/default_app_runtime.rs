@@ -4,13 +4,14 @@
 //! `CallApp` / `AppEventLoop` framework.
 
 use async_trait::async_trait;
+use parking_lot::RwLock as ParkingRwLock;
 use std::sync::Arc;
 use tokio::sync::{RwLock, mpsc};
 use tokio_util::sync::CancellationToken;
 
 use crate::call::app::{ApplicationContext, CallApp, CallController, ControllerEvent};
-use crate::call::domain::MediaCapability;
-use crate::proxy::proxy_call::state::{SessionAction, SipSessionHandle};
+use crate::call::domain::{CallCommand, MediaCapability};
+use crate::proxy::proxy_call::sip_session::SipSessionHandle;
 
 use super::{AppDescriptor, AppResult, AppRuntime, AppRuntimeError, AppStatus};
 
@@ -106,11 +107,13 @@ impl AppRuntime for DefaultAppRuntime {
         // Create cancel token
         let cancel_token = CancellationToken::new();
 
-        // Get the app from factory
+        // Get the app from factory (try per-session factory first, then global registry)
         let app = if let Some(factory) = &self.app_factory {
-            factory.create_app(app_name, params.clone(), &self.context)
+            factory
+                .create_app(app_name, params.clone(), &self.context)
+                .or_else(|| lookup_custom_app(app_name, params.clone(), &self.context))
         } else {
-            None
+            lookup_custom_app(app_name, params.clone(), &self.context)
         };
 
         let app = match app {
@@ -133,10 +136,8 @@ impl AppRuntime for DefaultAppRuntime {
         // Auto-answer if requested
         if auto_answer {
             self.handle
-                .send_command(SessionAction::AcceptCall {
-                    callee: None,
-                    sdp: None,
-                    dialog_id: None,
+                .send_command(CallCommand::Answer {
+                    leg_id: crate::call::domain::LegId::from("caller"),
                 })
                 .map_err(|e| AppRuntimeError::StartFailed(e.to_string()))?;
         }
@@ -336,6 +337,97 @@ fn parse_json_event(value: &serde_json::Value) -> AppResult<ControllerEvent> {
             "unknown event type: {}",
             event_type
         ))),
+    }
+}
+
+// ── Global AppFactory Registry ────────────────────────────────────────────────
+//
+// Addons can register custom call apps here so they are available session-wide
+// without modifying the builtin factory.
+
+type AppFactoryFn = Arc<
+    dyn Fn(&str, Option<serde_json::Value>, &ApplicationContext) -> Option<Box<dyn CallApp>>
+        + Send
+        + Sync,
+>;
+
+static GLOBAL_APP_FACTORIES: std::sync::OnceLock<ParkingRwLock<Vec<(&'static str, AppFactoryFn)>>> =
+    std::sync::OnceLock::new();
+
+fn global_factories() -> &'static ParkingRwLock<Vec<(&'static str, AppFactoryFn)>> {
+    GLOBAL_APP_FACTORIES
+        .get_or_init(|| ParkingRwLock::new(Vec::new()))
+}
+
+/// Register a custom call app factory that will be available to all sessions.
+pub fn register_call_app(
+    name: &'static str,
+    factory: AppFactoryFn,
+) {
+    global_factories().write().push((name, factory));
+}
+
+/// Look up a custom call app from the global registry.
+pub fn lookup_custom_app(
+    app_name: &str,
+    params: Option<serde_json::Value>,
+    context: &ApplicationContext,
+) -> Option<Box<dyn CallApp>> {
+    let factories = global_factories().read();
+    for (name, factory) in factories.iter() {
+        if *name == app_name {
+            let app = factory(app_name, params.clone(), context);
+            if app.is_some() {
+                return app;
+            }
+        }
+    }
+    None
+}
+
+/// PostCallHook allows addons to react when the connected callee (agent)
+/// disconnects after a queue call.  The hook can start a survey app, log
+/// results, etc.
+#[async_trait]
+pub trait PostCallHook: Send + Sync {
+    /// Called when the queue's connected callee (agent) disconnects.
+    /// If the hook returns `true`, the caller's session will NOT be hung up
+    /// (the hook is responsible for starting a survey app or taking other action).
+    /// If it returns `false`, normal hangup proceeds.
+    async fn on_agent_disconnected(
+        &self,
+        session_id: &str,
+        caller: &str,
+        agent_id: &str,
+        queue_name: &str,
+        app_runtime: &dyn AppRuntime,
+    ) -> bool;
+}
+
+static POST_CALL_HOOK: std::sync::OnceLock<ParkingRwLock<Option<Arc<dyn PostCallHook>>>> =
+    std::sync::OnceLock::new();
+
+/// Register a global PostCallHook (only one can be set; subsequent calls replace).
+pub fn set_post_call_hook(hook: Arc<dyn PostCallHook>) {
+    let storage = POST_CALL_HOOK.get_or_init(|| ParkingRwLock::new(None));
+    *storage.write() = Some(hook);
+}
+
+/// Invoke the global PostCallHook, if registered.
+pub async fn invoke_post_call_hook(
+    session_id: &str,
+    caller: &str,
+    agent_id: &str,
+    queue_name: &str,
+    app_runtime: &dyn AppRuntime,
+) -> bool {
+    let storage = POST_CALL_HOOK.get_or_init(|| ParkingRwLock::new(None));
+    let hook = { storage.read().clone() };
+    if let Some(ref hook) = hook {
+        hook.on_agent_disconnected(session_id, caller, agent_id, queue_name, app_runtime)
+            .await
+    } else {
+        false
     }
 }
 

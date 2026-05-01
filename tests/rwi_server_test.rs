@@ -550,6 +550,7 @@ async fn test_event_pushed_from_gateway_arrives_at_client() {
     let event = rustpbx::rwi::RwiEvent::Dtmf {
         call_id: "pushed-call".to_string(),
         digit: "7".to_string(),
+        leg_id: None,
     };
     {
         let gw = gateway.read().await;

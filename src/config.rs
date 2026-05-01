@@ -1,3 +1,4 @@
+use crate::media::negotiate::CodecSelectionStrategy;
 use crate::rwi::auth::RwiConfig;
 use crate::{
     call::{CallRecordingConfig, DialDirection, QueuePlan, user::SipUser},
@@ -78,6 +79,10 @@ fn default_callid_suffix() -> Option<String> {
 
 fn default_user_backends() -> Vec<UserBackendConfig> {
     vec![UserBackendConfig::default()]
+}
+
+fn default_enable_latching() -> bool {
+    true
 }
 
 fn default_generated_config_dir() -> String {
@@ -665,7 +670,7 @@ pub struct ProxyConfig {
     pub queues: HashMap<String, RouteQueueConfig>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub queues_files: Vec<String>,
-    #[serde(default)]
+    #[serde(default = "default_enable_latching")]
     pub enable_latching: bool,
     #[serde(default)]
     pub trunks: HashMap<String, TrunkConfig>,
@@ -688,6 +693,11 @@ pub struct ProxyConfig {
     pub dialog_auth_cache: Option<AuthCacheConfig>,
     #[serde(default)]
     pub blind_transfer_use_refer: bool,
+    /// Codec selection strategy for WebRTC endpoints.
+    /// `performance` (default): avoid transcoding, keep caller's codecs only.
+    /// `quality`: prefer Opus > G729 > G722 > G711 (may require transcoding).
+    #[serde(default)]
+    pub codec_strategy: CodecSelectionStrategy,
 }
 
 fn default_auth_cache_size() -> usize {
@@ -912,7 +922,7 @@ impl Default for ProxyConfig {
             max_concurrency: None,
             registrar_expires: Some(60),
             ensure_user: Some(true),
-            enable_latching: false,
+            enable_latching: true,
             user_backends: default_user_backends(),
             locator: LocatorConfig::default(),
             locator_webhook: None,
@@ -943,6 +953,7 @@ impl Default for ProxyConfig {
             passthrough_failure: true,
             dialog_auth_cache: default_dialog_auth_cache(),
             blind_transfer_use_refer: false,
+            codec_strategy: CodecSelectionStrategy::default(),
         }
     }
 }

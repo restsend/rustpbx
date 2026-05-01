@@ -613,6 +613,7 @@ impl RouteQueueConfig {
                 plan.ring_timeout = Some(Duration::from_secs(timeout as u64));
             }
         plan.voice_prompts = self.voice_prompts.clone();
+        plan.queue_name = self.name.clone().unwrap_or_default();
         Ok(plan)
     }
 

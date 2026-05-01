@@ -1,6 +1,7 @@
 use crate::{
     config::{MediaProxyMode, RouteResult},
     media::recorder::RecorderOption,
+    media::negotiate::CodecSelectionStrategy,
 };
 use anyhow::Result;
 use audio_codec::CodecType;
@@ -450,6 +451,7 @@ pub struct QueuePlan {
     pub retry_codes: Option<Vec<u16>>,
     pub no_trying_timeout: Option<Duration>,
     pub voice_prompts: Option<VoicePrompts>,
+    pub queue_name: String,
 }
 
 impl Default for QueuePlan {
@@ -475,6 +477,7 @@ impl Default for QueuePlan {
             retry_codes: None,
             no_trying_timeout: None,
             voice_prompts: None,
+            queue_name: String::new(),
         }
     }
 }
@@ -669,7 +672,7 @@ impl Default for FailureAction {
 }
 
 /// Media configuration for call control
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct MediaConfig {
     /// Media proxy mode
     pub proxy_mode: MediaProxyMode,
@@ -680,6 +683,16 @@ pub struct MediaConfig {
     pub webrtc_port_end: Option<u16>,
     pub ice_servers: Option<Vec<IceServer>>,
     pub enable_latching: bool,
+    /// Codec selection strategy when target is WebRTC.
+    /// Performance (default): avoid transcoding, keep caller's codecs only.
+    /// Quality: prefer Opus > G729 > G722 > G711 (may transcode).
+    pub codec_strategy: CodecSelectionStrategy,
+}
+
+impl Default for MediaConfig {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl MediaConfig {
@@ -692,7 +705,8 @@ impl MediaConfig {
             webrtc_port_start: None,
             webrtc_port_end: None,
             ice_servers: None,
-            enable_latching: false,
+            enable_latching: true,
+            codec_strategy: CodecSelectionStrategy::default(),
         }
     }
 
@@ -725,6 +739,10 @@ impl MediaConfig {
     }
     pub fn with_webrtc_end_port(mut self, end: Option<u16>) -> Self {
         self.webrtc_port_end = end;
+        self
+    }
+    pub fn with_codec_strategy(mut self, strategy: CodecSelectionStrategy) -> Self {
+        self.codec_strategy = strategy;
         self
     }
 }
@@ -1248,13 +1266,7 @@ mod tests {
             passthrough_ringback: false,
             hold: None,
             dial_strategy: None,
-            ring_timeout: None,
-            fallback: None,
-            acd_policy: None,
-            label: None,
-            retry_codes: None,
-            no_trying_timeout: None,
-            voice_prompts: None,
+            ..Default::default()
         };
         let flow = DialplanFlow::Queue {
             plan: queue_plan,
@@ -1276,13 +1288,7 @@ mod tests {
                 "sip:webrtc@example.com",
                 true,
             )])),
-            ring_timeout: None,
-            fallback: None,
-            acd_policy: None,
-            label: None,
-            retry_codes: None,
-            no_trying_timeout: None,
-            voice_prompts: None,
+            ..Default::default()
         };
         let flow = DialplanFlow::Queue {
             plan: queue_plan,
@@ -1304,13 +1310,7 @@ mod tests {
                 "sip:trunk@example.com",
                 false,
             )])),
-            ring_timeout: None,
-            fallback: None,
-            acd_policy: None,
-            label: None,
-            retry_codes: None,
-            no_trying_timeout: None,
-            voice_prompts: None,
+            ..Default::default()
         };
         let flow = DialplanFlow::Queue {
             plan: queue_plan,
@@ -1330,13 +1330,7 @@ mod tests {
             passthrough_ringback: false,
             hold: None,
             dial_strategy: Some(DialStrategy::Sequential(vec![])),
-            ring_timeout: None,
-            fallback: None,
-            acd_policy: None,
-            label: None,
-            retry_codes: None,
-            no_trying_timeout: None,
-            voice_prompts: None,
+            ..Default::default()
         };
         let flow = DialplanFlow::Queue {
             plan: queue_plan,

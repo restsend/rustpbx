@@ -134,8 +134,10 @@ impl SdpBridge {
 
         // Transform media sections
         for section in &parsed.media_sections {
-            if section.kind != MediaKind::Audio {
-                continue; // Skip non-audio for now
+            let is_audio = section.kind == MediaKind::Audio;
+            let is_video = section.kind == MediaKind::Video;
+            if !is_audio && !is_video {
+                continue;
             }
 
             // Convert protocol and build format list
@@ -159,36 +161,53 @@ impl SdpBridge {
                             let pt_str = parts[0];
                             let codec_info = parts[1];
 
-                            // Keep PCMU, PCMA, telephone-event (skip Opus for RTP)
-                            if codec_info.contains("PCMU")
-                                || codec_info.contains("PCMA")
-                                || codec_info.contains("telephone-event")
-                                || codec_info.contains("G722")
-                                || codec_info.contains("G729")
-                            {
+                            if is_audio {
+                                // Keep PCMU, PCMA, telephone-event (skip Opus for RTP)
+                                if codec_info.contains("PCMU")
+                                    || codec_info.contains("PCMA")
+                                    || codec_info.contains("telephone-event")
+                                    || codec_info.contains("G722")
+                                    || codec_info.contains("G729")
+                                {
+                                    rtp_attrs.push(format!("a=rtpmap:{} {}\r\n", pt_str, codec_info));
+                                    codec_found = true;
+                                }
+                            } else if is_video {
+                                // Keep all video codecs as-is for RTP
                                 rtp_attrs.push(format!("a=rtpmap:{} {}\r\n", pt_str, codec_info));
                                 codec_found = true;
                             }
                         }
                     }
                 } else if attr.key == "fmtp" {
-                    // Keep fmtp for telephone-event
-                    if let Some(ref value) = attr.value
-                        && (value.contains("101") || value.contains("telephone-event")) {
+                    if is_audio {
+                        if let Some(ref value) = attr.value
+                            && (value.contains("101") || value.contains("telephone-event"))
+                        {
                             rtp_attrs.push(format!("a=fmtp:{}\r\n", value));
                         }
+                    } else if is_video {
+                        // Keep video fmtp (profile-level-id, packetization-mode, etc.)
+                        if let Some(ref value) = attr.value {
+                            rtp_attrs.push(format!("a=fmtp:{}\r\n", value));
+                        }
+                    }
                 } else if attr.key == "sendrecv"
                     || attr.key == "sendonly"
                     || attr.key == "recvonly"
                     || attr.key == "inactive"
                 {
                     rtp_attrs.push(format!("a={}\r\n", attr.key));
+                } else if is_video && (attr.key == "rtcp-fb" || attr.key == "rtx") {
+                    if let Some(ref value) = attr.value {
+                        rtp_attrs.push(format!("a={}:{}\r\n", attr.key, value));
+                    }
                 }
                 // Skip: fingerprint, setup, ice-ufrag, ice-pwd, rtcp-mux, candidate, mid
             }
 
-            // If no compatible codec found, add default PCMU
-            if !codec_found {
+            // If no compatible codec found, add default PCMU for audio
+            if is_audio && !codec_found {
                 rtp_formats = vec![0, 101];
                 rtp_attrs.push("a=rtpmap:0 PCMU/8000\r\n".to_string());
                 rtp_attrs.push("a=rtpmap:101 telephone-event/8000\r\n".to_string());
@@ -201,9 +220,10 @@ impl SdpBridge {
                 .map(|p| p.to_string())
                 .collect::<Vec<_>>()
                 .join(" ");
+            let media_type = if is_audio { "audio" } else { "video" };
             rtp_sdp.push_str(&format!(
-                "m=audio {} RTP/AVP {}\r\n",
-                section.port, format_str
+                "m={} {} RTP/AVP {}\r\n",
+                media_type, section.port, format_str
             ));
 
             // Add collected attributes
@@ -250,7 +270,9 @@ impl SdpBridge {
 
         // Transform media sections
         for section in &parsed.media_sections {
-            if section.kind != MediaKind::Audio {
+            let is_audio = section.kind == MediaKind::Audio;
+            let is_video = section.kind == MediaKind::Video;
+            if !is_audio && !is_video {
                 continue;
             }
 
@@ -280,6 +302,10 @@ impl SdpBridge {
                     || attr.key == "inactive"
                 {
                     webrtc_attrs.push(format!("a={}\r\n", attr.key));
+                } else if is_video && (attr.key == "rtcp-fb" || attr.key == "rtx") {
+                    if let Some(ref value) = attr.value {
+                        webrtc_attrs.push(format!("a={}:{}\r\n", attr.key, value));
+                    }
                 }
             }
 
@@ -297,9 +323,10 @@ impl SdpBridge {
                 .map(|p| p.to_string())
                 .collect::<Vec<_>>()
                 .join(" ");
+            let media_type = if is_audio { "audio" } else { "video" };
             webrtc_sdp.push_str(&format!(
-                "m=audio {} UDP/TLS/RTP/SAVPF {}\r\n",
-                section.port, format_str
+                "m={} {} UDP/TLS/RTP/SAVPF {}\r\n",
+                media_type, section.port, format_str
             ));
 
             // Add attributes

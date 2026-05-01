@@ -118,6 +118,8 @@ pub enum RwiCommandPayload {
     MediaPlay(MediaPlayRequest),
     MediaStop {
         call_id: String,
+        /// Target leg (None = all legs)
+        leg_id: Option<String>,
     },
     MediaStreamStart(MediaStreamRequest),
     MediaStreamStop {
@@ -126,6 +128,11 @@ pub enum RwiCommandPayload {
     MediaInjectStart(MediaInjectRequest),
     MediaInjectStop {
         call_id: String,
+    },
+    CallSendDtmf {
+        call_id: String,
+        leg_id: Option<String>,
+        digits: String,
     },
     RecordStart(RecordStartRequest),
     RecordPause {
@@ -213,6 +220,11 @@ pub enum RwiCommandPayload {
     AppStop {
         call_id: String,
         reason: Option<String>,
+    },
+    AppChain {
+        call_id: String,
+        app_name: String,
+        params: Option<serde_json::Value>,
     },
     ConferenceCreate(ConferenceCreateRequest),
     ConferenceAdd {
@@ -340,6 +352,9 @@ pub struct MediaPlayRequest {
     pub source: MediaSource,
     #[serde(default)]
     pub interrupt_on_dtmf: bool,
+    /// Target leg (None = all legs)
+    #[serde(default)]
+    pub leg_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -595,7 +610,7 @@ pub enum RwiRequestPayload {
     #[serde(rename = "media.play", alias = "MediaPlay")]
     MediaPlay(MediaPlayRequest),
     #[serde(rename = "media.stop")]
-    MediaStop { call_id: Option<String> },
+    MediaStop { call_id: Option<String>, leg_id: Option<String> },
     #[serde(rename = "media.stream_start")]
     MediaStreamStart(MediaStreamRequest),
     #[serde(rename = "media.stream_stop")]
@@ -604,6 +619,12 @@ pub enum RwiRequestPayload {
     MediaInjectStart(MediaInjectRequest),
     #[serde(rename = "media.inject_stop")]
     MediaInjectStop { call_id: Option<String> },
+    #[serde(rename = "call.send_dtmf")]
+    CallSendDtmf {
+        call_id: Option<String>,
+        leg_id: Option<String>,
+        digits: Option<String>,
+    },
     #[serde(rename = "record.start")]
     RecordStart(RecordStartRequest),
     #[serde(rename = "record.pause")]
@@ -699,6 +720,12 @@ pub enum RwiRequestPayload {
     AppStop {
         call_id: Option<String>,
         reason: Option<String>,
+    },
+    #[serde(rename = "app.chain", alias = "AppChain")]
+    AppChain {
+        call_id: Option<String>,
+        app_name: Option<String>,
+        params: Option<serde_json::Value>,
     },
     #[serde(rename = "conference.create")]
     ConferenceCreate(ConferenceCreateRequest),
@@ -835,8 +862,9 @@ impl From<RwiRequest> for RwiCommandPayload {
                 }
                 RwiCommandPayload::MediaPlay(r)
             }
-            RwiRequestPayload::MediaStop { call_id } => RwiCommandPayload::MediaStop {
+            RwiRequestPayload::MediaStop { call_id, leg_id } => RwiCommandPayload::MediaStop {
                 call_id: call_id.unwrap_or_default(),
+                leg_id,
             },
             RwiRequestPayload::MediaStreamStart(mut r) => {
                 if r.call_id.is_empty() {
@@ -855,6 +883,15 @@ impl From<RwiRequest> for RwiCommandPayload {
             }
             RwiRequestPayload::MediaInjectStop { call_id } => RwiCommandPayload::MediaInjectStop {
                 call_id: call_id.unwrap_or_default(),
+            },
+            RwiRequestPayload::CallSendDtmf {
+                call_id,
+                leg_id,
+                digits,
+            } => RwiCommandPayload::CallSendDtmf {
+                call_id: call_id.unwrap_or_default(),
+                leg_id,
+                digits: digits.unwrap_or_default(),
             },
             RwiRequestPayload::RecordStart(mut r) => {
                 if r.call_id.is_empty() {
@@ -991,6 +1028,13 @@ impl From<RwiRequest> for RwiCommandPayload {
                 call_id: call_id.unwrap_or_default(),
                 reason,
             },
+            RwiRequestPayload::AppChain { call_id, app_name, params } => {
+                RwiCommandPayload::AppChain {
+                    call_id: call_id.unwrap_or_default(),
+                    app_name: app_name.unwrap_or_default(),
+                    params,
+                }
+            }
             RwiRequestPayload::ConferenceCreate(mut r) => {
                 if r.conf_id.is_empty() {
                     r.conf_id = Uuid::new_v4().to_string();
