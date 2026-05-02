@@ -78,6 +78,10 @@ const BRIDGE_OUTPUT_MUTED: u8 = 2;
 struct OutputState {
     mode: u8,
     file_source: Option<crate::media::FileTrackPlaybackSource>,
+    next_rtp_timestamp: Option<u32>,
+    next_sequence_number: Option<u16>,
+    active_rtp_offset: Option<u32>,
+    active_seq_offset: Option<u16>,
 }
 
 /// One peer's media endpoint within an N-peer bridge.
@@ -240,6 +244,10 @@ fn output_mode_name(mode: u8) -> &'static str {
     }
 }
 
+fn frame_ticks_20ms(clock_rate: u32) -> u32 {
+    (clock_rate / 50).max(1)
+}
+
 /// Fragment a reassembled H264 NAL unit into FU-A (RFC 6184 §5.8) VideoFrame entries
 /// sized to fit within `mtu` bytes, reusing the metadata from `template`.
 ///
@@ -395,8 +403,22 @@ impl BridgePeer {
             dtmf_sink: Arc::new(parking_lot::RwLock::new(None)),
             webrtc_send: Arc::new(AsyncMutex::new(None)),
             rtp_send: Arc::new(AsyncMutex::new(None)),
-            webrtc_output_state: Arc::new(AsyncMutex::new(OutputState { mode: BRIDGE_OUTPUT_PEER, file_source: None })),
-            rtp_output_state: Arc::new(AsyncMutex::new(OutputState { mode: BRIDGE_OUTPUT_PEER, file_source: None })),
+            webrtc_output_state: Arc::new(AsyncMutex::new(OutputState {
+                mode: BRIDGE_OUTPUT_PEER,
+                file_source: None,
+                next_rtp_timestamp: None,
+                next_sequence_number: None,
+                active_rtp_offset: None,
+                active_seq_offset: None,
+            })),
+            rtp_output_state: Arc::new(AsyncMutex::new(OutputState {
+                mode: BRIDGE_OUTPUT_PEER,
+                file_source: None,
+                next_rtp_timestamp: None,
+                next_sequence_number: None,
+                active_rtp_offset: None,
+                active_seq_offset: None,
+            })),
             webrtc_output_mode: Arc::new(AtomicU8::new(BRIDGE_OUTPUT_PEER)),
             rtp_output_mode: Arc::new(AtomicU8::new(BRIDGE_OUTPUT_PEER)),
             webrtc_video_send: Arc::new(AsyncMutex::new(None)),
@@ -496,11 +518,7 @@ impl BridgePeer {
     /// Used when a re-INVITE adds video to a previously audio-only call.
     /// Caller side determines the codec PT/clock-rate from its offer;
     /// the same params are used on the opposite side for symmetric video.
-    pub async fn add_video_track(
-        &self,
-        pt: u8,
-        clock_rate: u32,
-    ) -> Result<()> {
+    pub async fn add_video_track(&self, pt: u8, clock_rate: u32) -> Result<()> {
         let params = RtpCodecParameters {
             payload_type: pt,
             clock_rate,
@@ -534,8 +552,7 @@ impl BridgePeer {
 
     /// Check whether video senders have been configured on this bridge.
     pub async fn has_video(&self) -> bool {
-        self.webrtc_video_send.lock().await.is_some()
-            && self.rtp_video_send.lock().await.is_some()
+        self.webrtc_video_send.lock().await.is_some() && self.rtp_video_send.lock().await.is_some()
     }
 
     /// Setup the bridge with codec parameters.
@@ -561,10 +578,7 @@ impl BridgePeer {
     /// Start the bridge - begin forwarding media between sides
     /// Optimized: Merged bidirectional forwarding into a single task to reduce Tokio scheduling overhead
     pub async fn start_bridge(&self) {
-        if self
-            .forwarding_started
-            .swap(true, Ordering::AcqRel)
-        {
+        if self.forwarding_started.swap(true, Ordering::AcqRel) {
             debug!(bridge_id = %self.id, "Media bridge forwarding already started");
             return;
         }
@@ -690,7 +704,10 @@ impl BridgePeer {
         let mut state = self.output_state(endpoint).lock().await;
         state.file_source = Some(source);
         state.mode = BRIDGE_OUTPUT_FILE;
-        self.output_mode(endpoint).store(BRIDGE_OUTPUT_FILE, Ordering::Release);
+        state.active_rtp_offset = None;
+        state.active_seq_offset = None;
+        self.output_mode(endpoint)
+            .store(BRIDGE_OUTPUT_FILE, Ordering::Release);
 
         info!(
             bridge_id = %self.id,
@@ -718,7 +735,10 @@ impl BridgePeer {
         let mut state = self.output_state(endpoint).lock().await;
         state.file_source = Some(source);
         state.mode = BRIDGE_OUTPUT_FILE;
-        self.output_mode(endpoint).store(BRIDGE_OUTPUT_FILE, Ordering::Release);
+        state.active_rtp_offset = None;
+        state.active_seq_offset = None;
+        self.output_mode(endpoint)
+            .store(BRIDGE_OUTPUT_FILE, Ordering::Release);
 
         info!(
             bridge_id = %self.id,
@@ -732,7 +752,8 @@ impl BridgePeer {
         let mut state = self.output_state(endpoint).lock().await;
         state.mode = BRIDGE_OUTPUT_PEER;
         state.file_source = None;
-        self.output_mode(endpoint).store(BRIDGE_OUTPUT_PEER, Ordering::Release);
+        self.output_mode(endpoint)
+            .store(BRIDGE_OUTPUT_PEER, Ordering::Release);
         info!(
             bridge_id = %self.id,
             endpoint = ?endpoint,
@@ -743,7 +764,8 @@ impl BridgePeer {
     pub async fn mute_output(&self, endpoint: BridgeEndpoint) {
         let mut state = self.output_state(endpoint).lock().await;
         state.mode = BRIDGE_OUTPUT_MUTED;
-        self.output_mode(endpoint).store(BRIDGE_OUTPUT_MUTED, Ordering::Release);
+        self.output_mode(endpoint)
+            .store(BRIDGE_OUTPUT_MUTED, Ordering::Release);
         info!(
             bridge_id = %self.id,
             endpoint = ?endpoint,
@@ -755,7 +777,11 @@ impl BridgePeer {
     pub async fn add_peer(&self, peer_id: PeerId, entry: PeerEntry) -> Result<()> {
         let mut peers = self.peers.lock().await;
         if peers.contains_key(&peer_id) {
-            return Err(anyhow::anyhow!("Peer {} already exists in bridge {}", peer_id, self.id));
+            return Err(anyhow::anyhow!(
+                "Peer {} already exists in bridge {}",
+                peer_id,
+                self.id
+            ));
         }
         peers.insert(peer_id, entry);
         Ok(())
@@ -774,7 +800,11 @@ impl BridgePeer {
     }
 
     /// Set forwarding route: audio from `from_peer` is sent to all peers in `to_peers`.
-    pub async fn set_route(&self, from_peer: PeerId, to_peers: std::collections::HashSet<PeerId>) -> Result<()> {
+    pub async fn set_route(
+        &self,
+        from_peer: PeerId,
+        to_peers: std::collections::HashSet<PeerId>,
+    ) -> Result<()> {
         let peers = self.peers.lock().await;
         for dest in &to_peers {
             if !peers.contains_key(dest) {
@@ -803,14 +833,8 @@ impl BridgePeer {
         target_pt: u8,
     ) {
         let (transcoder_slot, timing_slot) = match from_endpoint {
-            BridgeEndpoint::Rtp => (
-                &self.rtp_to_webrtc_transcoder,
-                &self.rtp_to_webrtc_timing,
-            ),
-            BridgeEndpoint::WebRtc => (
-                &self.webrtc_to_rtp_transcoder,
-                &self.webrtc_to_rtp_timing,
-            ),
+            BridgeEndpoint::Rtp => (&self.rtp_to_webrtc_transcoder, &self.rtp_to_webrtc_timing),
+            BridgeEndpoint::WebRtc => (&self.webrtc_to_rtp_transcoder, &self.webrtc_to_rtp_timing),
         };
         let source_cr = source.clock_rate();
         let target_cr = target.clock_rate();
@@ -832,14 +856,8 @@ impl BridgePeer {
     /// Remove the transcoder for a given direction.
     pub fn clear_transcoder(&self, from_endpoint: BridgeEndpoint) {
         let (transcoder_slot, timing_slot) = match from_endpoint {
-            BridgeEndpoint::Rtp => (
-                &self.rtp_to_webrtc_transcoder,
-                &self.rtp_to_webrtc_timing,
-            ),
-            BridgeEndpoint::WebRtc => (
-                &self.webrtc_to_rtp_transcoder,
-                &self.webrtc_to_rtp_timing,
-            ),
+            BridgeEndpoint::Rtp => (&self.rtp_to_webrtc_transcoder, &self.rtp_to_webrtc_timing),
+            BridgeEndpoint::WebRtc => (&self.webrtc_to_rtp_transcoder, &self.webrtc_to_rtp_timing),
         };
         *transcoder_slot.write() = None;
         *timing_slot.write() = None;
@@ -876,7 +894,7 @@ impl BridgePeer {
                         break;
                     }
                     _ = interval.tick() => {
-                        let sample = {
+                            let sample = {
                             let mut guard = output_state.lock().await;
                             if guard.mode != BRIDGE_OUTPUT_FILE {
                                 continue;
@@ -888,10 +906,12 @@ impl BridgePeer {
                             source.next_audio_sample()
                         };
 
-                        let Some(sample) = sample else {
+                        let Some(mut sample) = sample else {
                             let mut guard = output_state.lock().await;
                             guard.mode = BRIDGE_OUTPUT_MUTED;
                             guard.file_source.take();
+                            guard.active_rtp_offset = None;
+                            guard.active_seq_offset = None;
                             debug!(
                                 bridge_id = %bridge_id,
                                 endpoint = ?endpoint,
@@ -899,6 +919,42 @@ impl BridgePeer {
                             );
                             continue;
                         };
+
+                        if let MediaSample::Audio(frame) = &mut sample {
+                            let mut guard = output_state.lock().await;
+
+                            let src_seq = frame.sequence_number.unwrap_or_default();
+                            let src_ts = frame.rtp_timestamp;
+
+                            let seq_offset = match guard.active_seq_offset {
+                                Some(offset) => offset,
+                                None => {
+                                    let expected = guard.next_sequence_number.unwrap_or(src_seq);
+                                    let offset = expected.wrapping_sub(src_seq);
+                                    guard.active_seq_offset = Some(offset);
+                                    offset
+                                }
+                            };
+
+                            let ts_offset = match guard.active_rtp_offset {
+                                Some(offset) => offset,
+                                None => {
+                                    let expected = guard.next_rtp_timestamp.unwrap_or(src_ts);
+                                    let offset = expected.wrapping_sub(src_ts);
+                                    guard.active_rtp_offset = Some(offset);
+                                    offset
+                                }
+                            };
+
+                            let mapped_seq = src_seq.wrapping_add(seq_offset);
+                            let mapped_ts = src_ts.wrapping_add(ts_offset);
+                            frame.sequence_number = Some(mapped_seq);
+                            frame.rtp_timestamp = mapped_ts;
+
+                            guard.next_sequence_number = Some(mapped_seq.wrapping_add(1));
+                            guard.next_rtp_timestamp =
+                                Some(mapped_ts.wrapping_add(frame_ticks_20ms(frame.clock_rate)));
+                        }
 
                         let Some(sender) = sender.as_ref() else {
                             warn!(
@@ -1215,9 +1271,10 @@ impl BridgePeer {
         };
 
         if track.kind() == MediaKind::Video
-            && let Err(e) = track.request_key_frame().await {
-                debug!(bridge_id = %bridge_id, direction = %path, error = %e, "Failed to request initial keyframe");
-            }
+            && let Err(e) = track.request_key_frame().await
+        {
+            debug!(bridge_id = %bridge_id, direction = %path, error = %e, "Failed to request initial keyframe");
+        }
 
         let is_video = track.kind() == MediaKind::Video;
         let mut dtmf_detector = BridgeDtmfDetector::default();
@@ -3031,8 +3088,8 @@ mod tests {
                     ForwardPath::new(LegTransport::Rtp, LegTransport::WebRtc),
                     None, // no audio fallback
                     st,
-                    None,  // no recorder
-                    None,  // no recorder leg
+                    None, // no recorder
+                    None, // no recorder leg
                     ds,
                     tr,
                     ti,
@@ -3047,11 +3104,8 @@ mod tests {
         let _ = task_handle.await;
 
         // Read from the output track – should receive ONE transcoded PCMU frame
-        let captured = tokio::time::timeout(
-            std::time::Duration::from_secs(1),
-            output_track.recv(),
-        )
-        .await;
+        let captured =
+            tokio::time::timeout(std::time::Duration::from_secs(1), output_track.recv()).await;
 
         match captured {
             Ok(Ok(MediaSample::Audio(frame))) => {
@@ -3061,10 +3115,7 @@ mod tests {
                     "Output should be PCMU (PT=0), got {:?}",
                     frame.payload_type
                 );
-                assert_eq!(
-                    frame.clock_rate, 8000,
-                    "PCMU clock rate should be 8000"
-                );
+                assert_eq!(frame.clock_rate, 8000, "PCMU clock rate should be 8000");
                 assert_eq!(
                     frame.data.len(),
                     160,
@@ -3143,11 +3194,8 @@ mod tests {
         cancel.cancel();
         let _ = task_handle.await;
 
-        let captured = tokio::time::timeout(
-            std::time::Duration::from_secs(1),
-            output_track.recv(),
-        )
-        .await;
+        let captured =
+            tokio::time::timeout(std::time::Duration::from_secs(1), output_track.recv()).await;
 
         match captured {
             Ok(Ok(MediaSample::Audio(frame))) => {
