@@ -26,5 +26,6 @@ mod test_inbound_refer;
 mod test_ivr_queue_e2e;
 mod test_media_e2e;
 mod test_rtp_e2e;
+mod test_sip_session_regressions;
 mod test_trunk_e2e;
 mod test_wholesale_e2e;

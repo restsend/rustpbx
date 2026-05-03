@@ -654,7 +654,7 @@ impl SipSession {
         Ok(())
     }
 
-    fn check_media_proxy(context: &CallContext, mode: &MediaProxyMode) -> bool {
+    pub(crate) fn check_media_proxy(context: &CallContext, mode: &MediaProxyMode) -> bool {
         if context.dialplan.recording.enabled {
             return true;
         }
@@ -6540,7 +6540,7 @@ impl SipSession {
     /// This is called when a transfer target starts with "queue:".
     /// `return_ivr` — if set, the queue plan's fallback is overridden to return
     /// the call to the given IVR when all agents are exhausted.
-    async fn handle_queue_transfer(
+    pub(crate) async fn handle_queue_transfer(
         &mut self,
         leg_id: LegId,
         queue_name: &str,
@@ -6620,7 +6620,7 @@ impl SipSession {
     /// This is used by the queue fallback path when the fallback action
     /// specifies `TransferEndpoint::Ivr`, and by `handle_blind_transfer`
     /// when the transfer target has an `ivr:` prefix.
-    async fn start_ivr_app(&self, ivr_name: &str) -> Result<()> {
+    pub(crate) async fn start_ivr_app(&self, ivr_name: &str) -> Result<()> {
         use crate::call::runtime::AppRuntimeError;
 
         let ivr_file = format!("config/ivr/{}.toml", ivr_name);
