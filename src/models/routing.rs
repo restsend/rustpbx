@@ -28,7 +28,6 @@ impl RoutingDirection {
     }
 }
 
-
 #[derive(Copy, Clone, Debug, PartialEq, Eq, EnumIter, DeriveActiveEnum, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 #[sea_orm(rs_type = "String", db_type = "Text")]
@@ -54,7 +53,6 @@ impl RoutingSelectionStrategy {
         }
     }
 }
-
 
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Serialize, Deserialize)]
 #[sea_orm(table_name = "rustpbx_routes")]

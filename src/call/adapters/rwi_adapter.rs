@@ -229,18 +229,14 @@ pub fn rwi_to_call_command(
             })
         }
 
-        RwiCommandPayload::MediaStop { leg_id, .. } => {
-            Ok(CallCommand::StopPlayback {
-                leg_id: leg_id.map(LegId::new),
-            })
-        }
+        RwiCommandPayload::MediaStop { leg_id, .. } => Ok(CallCommand::StopPlayback {
+            leg_id: leg_id.map(LegId::new),
+        }),
 
         // ========================================================================
         // DTMF
         // ========================================================================
-        RwiCommandPayload::CallSendDtmf {
-            leg_id, digits, ..
-        } => Ok(CallCommand::SendDtmf {
+        RwiCommandPayload::CallSendDtmf { leg_id, digits, .. } => Ok(CallCommand::SendDtmf {
             leg_id: leg_id.map(LegId::new).unwrap_or(LegId::from("caller")),
             digits,
         }),

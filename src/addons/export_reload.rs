@@ -48,10 +48,7 @@ impl ExportReloadRegistry {
 
     /// Invoke all registered handlers sequentially.
     /// Returns a list of `(id, result)` pairs.
-    pub async fn invoke_all(
-        &self,
-        app_state: &AppState,
-    ) -> Vec<(&str, Result<JsonValue, String>)> {
+    pub async fn invoke_all(&self, app_state: &AppState) -> Vec<(&str, Result<JsonValue, String>)> {
         let mut results = Vec::new();
         for handler in &self.handlers {
             let id = handler.addon_id();
@@ -95,8 +92,12 @@ mod tests {
 
     #[async_trait]
     impl ExportReloadHandler for MockHandler {
-        fn addon_id(&self) -> &str { self.id }
-        fn display_name(&self) -> &str { self.name }
+        fn addon_id(&self) -> &str {
+            self.id
+        }
+        fn display_name(&self) -> &str {
+            self.name
+        }
         async fn export_and_reload(&self, _app_state: &AppState) -> Result<JsonValue, String> {
             if self.should_fail {
                 Err(format!("{} failed", self.id))
@@ -111,8 +112,16 @@ mod tests {
         let mut registry = ExportReloadRegistry::default();
         assert!(registry.list().is_empty());
 
-        registry.register(Box::new(MockHandler { id: "queue", name: "Queues", should_fail: false }));
-        registry.register(Box::new(MockHandler { id: "ivr", name: "IVR", should_fail: false }));
+        registry.register(Box::new(MockHandler {
+            id: "queue",
+            name: "Queues",
+            should_fail: false,
+        }));
+        registry.register(Box::new(MockHandler {
+            id: "ivr",
+            name: "IVR",
+            should_fail: false,
+        }));
 
         let list = registry.list();
         assert_eq!(list.len(), 2);
@@ -123,16 +132,31 @@ mod tests {
     #[tokio::test]
     async fn test_invoke_selected_returns_matching_only() {
         let mut registry = ExportReloadRegistry::default();
-        registry.register(Box::new(MockHandler { id: "queue", name: "Queues", should_fail: false }));
-        registry.register(Box::new(MockHandler { id: "ivr", name: "IVR", should_fail: false }));
-        registry.register(Box::new(MockHandler { id: "cc", name: "CC", should_fail: false }));
+        registry.register(Box::new(MockHandler {
+            id: "queue",
+            name: "Queues",
+            should_fail: false,
+        }));
+        registry.register(Box::new(MockHandler {
+            id: "ivr",
+            name: "IVR",
+            should_fail: false,
+        }));
+        registry.register(Box::new(MockHandler {
+            id: "cc",
+            name: "CC",
+            should_fail: false,
+        }));
 
         // Need a real AppState for invoke. Since we can't easily create one,
         // we just verify the selection logic via list().
         // invoke_selected requires &AppState which is not easily constructable in unit tests.
         // The selection logic is: for each handler, check if id in selected.
         let ids: Vec<String> = registry.list().iter().map(|(id, _)| id.clone()).collect();
-        assert_eq!(ids, vec!["queue".to_string(), "ivr".to_string(), "cc".to_string()]);
+        assert_eq!(
+            ids,
+            vec!["queue".to_string(), "ivr".to_string(), "cc".to_string()]
+        );
     }
 
     #[tokio::test]
@@ -144,8 +168,16 @@ mod tests {
     #[tokio::test]
     async fn test_register_same_id_twice() {
         let mut registry = ExportReloadRegistry::default();
-        registry.register(Box::new(MockHandler { id: "queue", name: "Queues", should_fail: false }));
-        registry.register(Box::new(MockHandler { id: "queue", name: "Queues v2", should_fail: false }));
+        registry.register(Box::new(MockHandler {
+            id: "queue",
+            name: "Queues",
+            should_fail: false,
+        }));
+        registry.register(Box::new(MockHandler {
+            id: "queue",
+            name: "Queues v2",
+            should_fail: false,
+        }));
         // Duplicate IDs are allowed; listing returns both.
         assert_eq!(registry.list().len(), 2);
     }

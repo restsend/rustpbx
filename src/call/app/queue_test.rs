@@ -6,14 +6,14 @@
 #[cfg(test)]
 mod tests {
     use crate::call::app::CallApp;
+    use crate::call::app::agent_registry::AgentRegistry;
     use crate::call::app::queue::{QueueApp, QueueConfig};
     use crate::call::app::testing::MockCallStack;
-    use crate::call::app::agent_registry::AgentRegistry;
+    use crate::call::domain::CallCommand;
     use crate::call::{
         DialStrategy, FailureAction, Location, QueueFallbackAction, QueueHoldConfig, QueuePlan,
         VoicePrompts,
     };
-    use crate::call::domain::CallCommand;
     use rsipstack::sip::Uri;
     use std::time::Duration;
 
@@ -176,7 +176,11 @@ mod tests {
     #[tokio::test]
     async fn test_queue_basic_enter() {
         let plan = build_simple_queue();
-        let mut stack = MockCallStack::run(Box::new(QueueApp::new(plan, build_simple_queue_config())), "caller", "1000");
+        let mut stack = MockCallStack::run(
+            Box::new(QueueApp::new(plan, build_simple_queue_config())),
+            "caller",
+            "1000",
+        );
 
         // Queue should answer on enter (accept_immediately = true)
         stack
@@ -187,9 +191,7 @@ mod tests {
 
         // Queue should start playing hold music
         stack
-            .assert_cmd(200, "PlayPrompt", |c| {
-                matches!(c, CallCommand::Play { .. })
-            })
+            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
             .await;
 
         stack.cancel();
@@ -203,14 +205,16 @@ mod tests {
         let mut plan = build_simple_queue();
         plan.accept_immediately = false;
 
-        let mut stack = MockCallStack::run(Box::new(QueueApp::new(plan, build_simple_queue_config())), "caller", "1000");
+        let mut stack = MockCallStack::run(
+            Box::new(QueueApp::new(plan, build_simple_queue_config())),
+            "caller",
+            "1000",
+        );
 
         // Queue should NOT answer immediately
         // It should start hold music without answering
         stack
-            .assert_cmd(200, "PlayPrompt", |c| {
-                matches!(c, CallCommand::Play { .. })
-            })
+            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
             .await;
 
         stack.cancel();
@@ -224,14 +228,16 @@ mod tests {
         let mut plan = build_simple_queue();
         plan.dial_strategy = Some(DialStrategy::Sequential(vec![]));
 
-        let mut stack = MockCallStack::run(Box::new(QueueApp::new(plan, build_simple_queue_config())), "caller", "1000");
+        let mut stack = MockCallStack::run(
+            Box::new(QueueApp::new(plan, build_simple_queue_config())),
+            "caller",
+            "1000",
+        );
 
         // Queue should detect no agents and execute fallback immediately
         // No AcceptCall is sent because there are no agents to dial
         stack
-            .assert_cmd(200, "Hangup", |c| {
-        matches!(c, CallCommand::Hangup(_))
-            })
+            .assert_cmd(200, "Hangup", |c| matches!(c, CallCommand::Hangup(_)))
             .await;
     }
 
@@ -257,9 +263,7 @@ mod tests {
 
         // Queue should detect no agents and return 486 Busy Here
         stack
-            .assert_cmd(200, "Hangup", |c| {
-        matches!(c, CallCommand::Hangup(_))
-            })
+            .assert_cmd(200, "Hangup", |c| matches!(c, CallCommand::Hangup(_)))
             .await;
     }
 
@@ -278,7 +282,11 @@ mod tests {
         ));
         plan.dial_strategy = Some(DialStrategy::Sequential(vec![]));
 
-        let mut stack = MockCallStack::run(Box::new(QueueApp::new(plan, build_simple_queue_config())), "caller", "1000");
+        let mut stack = MockCallStack::run(
+            Box::new(QueueApp::new(plan, build_simple_queue_config())),
+            "caller",
+            "1000",
+        );
 
         // Queue detects no agents and executes fallback immediately
         // For PlayThenHangup, it currently just hangs up (play is skipped in current impl)
@@ -292,7 +300,11 @@ mod tests {
     #[tokio::test]
     async fn test_queue_hold_music_completes() {
         let plan = build_simple_queue();
-        let mut stack = MockCallStack::run(Box::new(QueueApp::new(plan, build_simple_queue_config())), "caller", "1000");
+        let mut stack = MockCallStack::run(
+            Box::new(QueueApp::new(plan, build_simple_queue_config())),
+            "caller",
+            "1000",
+        );
 
         // Answer and start hold music
         stack
@@ -302,9 +314,7 @@ mod tests {
             .await;
 
         stack
-            .assert_cmd(200, "PlayPrompt", |c| {
-                matches!(c, CallCommand::Play { .. })
-            })
+            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
             .await;
 
         // Simulate hold music completing
@@ -324,7 +334,11 @@ mod tests {
     #[tokio::test]
     async fn test_queue_remote_hangup() {
         let plan = build_simple_queue();
-        let mut stack = MockCallStack::run(Box::new(QueueApp::new(plan, build_simple_queue_config())), "caller", "1000");
+        let mut stack = MockCallStack::run(
+            Box::new(QueueApp::new(plan, build_simple_queue_config())),
+            "caller",
+            "1000",
+        );
 
         // Answer and start hold music
         stack
@@ -334,9 +348,7 @@ mod tests {
             .await;
 
         stack
-            .assert_cmd(200, "PlayPrompt", |c| {
-                matches!(c, CallCommand::Play { .. })
-            })
+            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
             .await;
 
         // Remote party hangs up
@@ -353,7 +365,11 @@ mod tests {
     #[tokio::test]
     async fn test_queue_agent_connected_event() {
         let plan = build_simple_queue();
-        let mut stack = MockCallStack::run(Box::new(QueueApp::new(plan, build_simple_queue_config())), "caller", "1000");
+        let mut stack = MockCallStack::run(
+            Box::new(QueueApp::new(plan, build_simple_queue_config())),
+            "caller",
+            "1000",
+        );
 
         // Answer and start hold music
         stack
@@ -363,9 +379,7 @@ mod tests {
             .await;
 
         stack
-            .assert_cmd(200, "PlayPrompt", |c| {
-                matches!(c, CallCommand::Play { .. })
-            })
+            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
             .await;
 
         // Simulate agent connected event
@@ -391,7 +405,11 @@ mod tests {
     #[tokio::test]
     async fn test_queue_agent_busy_retry() {
         let plan = build_sequential_queue();
-        let mut stack = MockCallStack::run(Box::new(QueueApp::new(plan, build_simple_queue_config())), "caller", "1000");
+        let mut stack = MockCallStack::run(
+            Box::new(QueueApp::new(plan, build_simple_queue_config())),
+            "caller",
+            "1000",
+        );
 
         // Answer and start hold music
         stack
@@ -401,9 +419,7 @@ mod tests {
             .await;
 
         stack
-            .assert_cmd(200, "PlayPrompt", |c| {
-                matches!(c, CallCommand::Play { .. })
-            })
+            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
             .await;
 
         // First agent is busy
@@ -435,7 +451,11 @@ mod tests {
     #[tokio::test]
     async fn test_queue_all_agents_busy_fallback() {
         let plan = build_sequential_queue();
-        let mut stack = MockCallStack::run(Box::new(QueueApp::new(plan, build_simple_queue_config())), "caller", "1000");
+        let mut stack = MockCallStack::run(
+            Box::new(QueueApp::new(plan, build_simple_queue_config())),
+            "caller",
+            "1000",
+        );
 
         // Answer and start hold music
         stack
@@ -445,9 +465,7 @@ mod tests {
             .await;
 
         stack
-            .assert_cmd(200, "PlayPrompt", |c| {
-                matches!(c, CallCommand::Play { .. })
-            })
+            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
             .await;
 
         // All agents are busy
@@ -469,7 +487,11 @@ mod tests {
             target: Uri::try_from("sip:backup@example.com").unwrap(),
         });
 
-        let mut stack = MockCallStack::run(Box::new(QueueApp::new(plan, build_simple_queue_config())), "caller", "1000");
+        let mut stack = MockCallStack::run(
+            Box::new(QueueApp::new(plan, build_simple_queue_config())),
+            "caller",
+            "1000",
+        );
 
         // Queue detects no agents and executes redirect fallback
         stack
@@ -623,9 +645,7 @@ mod tests {
 
         // Hold music starts
         stack
-            .assert_cmd(200, "PlayPrompt", |c| {
-                matches!(c, CallCommand::Play { .. })
-            })
+            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
             .await;
 
         // Agent 1 is busy
@@ -655,7 +675,7 @@ mod tests {
     /// Test autonomous routing with DbRegistry.
     #[tokio::test]
     async fn test_autonomous_routing_with_agent_registry() {
-        use crate::call::app::agent_registry::{db::DbRegistry, PresenceState, RoutingStrategy};
+        use crate::call::app::agent_registry::{PresenceState, RoutingStrategy, db::DbRegistry};
         use std::sync::Arc;
 
         // Create a DbRegistry and register an agent
@@ -824,9 +844,7 @@ mod tests {
 
         // Should then execute fallback (hangup)
         stack
-            .assert_cmd(200, "Hangup-auto", |c| {
-                matches!(c, CallCommand::Hangup(_))
-            })
+            .assert_cmd(200, "Hangup-auto", |c| matches!(c, CallCommand::Hangup(_)))
             .await;
 
         stack.join().await.expect("should complete successfully");
@@ -869,9 +887,7 @@ mod tests {
 
         // Should then execute fallback (hangup)
         stack
-            .assert_cmd(200, "Hangup-skill", |c| {
-                matches!(c, CallCommand::Hangup(_))
-            })
+            .assert_cmd(200, "Hangup-skill", |c| matches!(c, CallCommand::Hangup(_)))
             .await;
 
         stack.join().await.expect("should complete successfully");
@@ -880,7 +896,7 @@ mod tests {
     /// Test agent ring timeout handling.
     #[tokio::test]
     async fn test_agent_ring_timeout() {
-        use crate::call::app::agent_registry::{db::DbRegistry, PresenceState, RoutingStrategy};
+        use crate::call::app::agent_registry::{PresenceState, RoutingStrategy, db::DbRegistry};
         use std::sync::Arc;
 
         // Create a DbRegistry and register an agent
@@ -944,11 +960,11 @@ mod tests {
 
         // Drain any pending commands (the timeout handler may send multiple)
         let cmds = stack.drain_cmds();
-        
+
         // Should have NotifyEvent for no-answer and Hangup
-        let has_no_answer = cmds.iter().any(|c| {
-            matches!(c, CallCommand::InjectAppEvent { .. })
-        });
+        let has_no_answer = cmds
+            .iter()
+            .any(|c| matches!(c, CallCommand::InjectAppEvent { .. }));
         assert!(has_no_answer, "Expected queue.agent_no_answer event");
 
         let has_hangup = cmds.iter().any(|c| matches!(c, CallCommand::Hangup(_)));
@@ -977,20 +993,28 @@ mod tests {
             "1000",
         );
 
-        stack.assert_cmd(200, "AcceptCall", |c| {
-            matches!(c, CallCommand::Answer { .. })
-        }).await;
+        stack
+            .assert_cmd(200, "AcceptCall", |c| {
+                matches!(c, CallCommand::Answer { .. })
+            })
+            .await;
 
-        stack.assert_cmd(200, "PlayPrompt-hold", |c| {
-            matches!(c, CallCommand::Play { .. })
-        }).await;
+        stack
+            .assert_cmd(200, "PlayPrompt-hold", |c| {
+                matches!(c, CallCommand::Play { .. })
+            })
+            .await;
 
-        stack.custom("agent_connected",
-            serde_json::json!({"agent_uri": "sip:agent1@example.com"}));
+        stack.custom(
+            "agent_connected",
+            serde_json::json!({"agent_uri": "sip:agent1@example.com"}),
+        );
 
-        stack.assert_cmd(200, "PlayPrompt-transfer", |c| {
-            matches!(c, CallCommand::Play { .. })
-        }).await;
+        stack
+            .assert_cmd(200, "PlayPrompt-transfer", |c| {
+                matches!(c, CallCommand::Play { .. })
+            })
+            .await;
 
         stack.audio_complete("default");
 
@@ -998,7 +1022,10 @@ mod tests {
             matches!(c, CallCommand::Transfer { target, .. } if target == "sip:agent1@example.com")
         }).await;
 
-        stack.join().await.expect("should exit after transfer with prompt");
+        stack
+            .join()
+            .await
+            .expect("should exit after transfer with prompt");
     }
 
     #[tokio::test]
@@ -1010,22 +1037,29 @@ mod tests {
             "1000",
         );
 
-        stack.assert_cmd(200, "AcceptCall", |c| {
-            matches!(c, CallCommand::Answer { .. })
-        }).await;
+        stack
+            .assert_cmd(200, "AcceptCall", |c| {
+                matches!(c, CallCommand::Answer { .. })
+            })
+            .await;
 
-        stack.assert_cmd(200, "PlayPrompt", |c| {
-            matches!(c, CallCommand::Play { .. })
-        }).await;
+        stack
+            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .await;
 
-        stack.custom("agent_connected",
-            serde_json::json!({"agent_uri": "sip:agent1@example.com"}));
+        stack.custom(
+            "agent_connected",
+            serde_json::json!({"agent_uri": "sip:agent1@example.com"}),
+        );
 
         stack.assert_cmd(200, "Transfer", |c| {
             matches!(c, CallCommand::Transfer { target, .. } if target == "sip:agent1@example.com")
         }).await;
 
-        stack.join().await.expect("should exit after direct transfer");
+        stack
+            .join()
+            .await
+            .expect("should exit after direct transfer");
     }
 
     #[tokio::test]
@@ -1037,25 +1071,29 @@ mod tests {
             "1000",
         );
 
-        stack.assert_cmd(200, "AcceptCall", |c| {
-            matches!(c, CallCommand::Answer { .. })
-        }).await;
+        stack
+            .assert_cmd(200, "AcceptCall", |c| {
+                matches!(c, CallCommand::Answer { .. })
+            })
+            .await;
 
-        stack.assert_cmd(200, "PlayPrompt", |c| {
-            matches!(c, CallCommand::Play { .. })
-        }).await;
+        stack
+            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .await;
 
         stack.custom("all_agents_busy", serde_json::json!({}));
 
-        stack.assert_cmd(200, "PlayPrompt-busy", |c| {
-            matches!(c, CallCommand::Play { .. })
-        }).await;
+        stack
+            .assert_cmd(200, "PlayPrompt-busy", |c| {
+                matches!(c, CallCommand::Play { .. })
+            })
+            .await;
 
         stack.audio_complete("default");
 
-        stack.assert_cmd(200, "Hangup", |c| {
-            matches!(c, CallCommand::Hangup(_))
-        }).await;
+        stack
+            .assert_cmd(200, "Hangup", |c| matches!(c, CallCommand::Hangup(_)))
+            .await;
     }
 
     #[tokio::test]
@@ -1067,27 +1105,31 @@ mod tests {
             "1000",
         );
 
-        stack.assert_cmd(200, "AcceptCall", |c| {
-            matches!(c, CallCommand::Answer { .. })
-        }).await;
+        stack
+            .assert_cmd(200, "AcceptCall", |c| {
+                matches!(c, CallCommand::Answer { .. })
+            })
+            .await;
 
-        stack.assert_cmd(200, "PlayPrompt", |c| {
-            matches!(c, CallCommand::Play { .. })
-        }).await;
+        stack
+            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .await;
 
         stack.custom("agent_busy", serde_json::json!({}));
         stack.custom("agent_busy", serde_json::json!({}));
         stack.custom("agent_busy", serde_json::json!({}));
 
-        stack.assert_cmd(200, "PlayPrompt-busy", |c| {
-            matches!(c, CallCommand::Play { .. })
-        }).await;
+        stack
+            .assert_cmd(200, "PlayPrompt-busy", |c| {
+                matches!(c, CallCommand::Play { .. })
+            })
+            .await;
 
         stack.audio_complete("default");
 
-        stack.assert_cmd(200, "Hangup", |c| {
-            matches!(c, CallCommand::Hangup(_))
-        }).await;
+        stack
+            .assert_cmd(200, "Hangup", |c| matches!(c, CallCommand::Hangup(_)))
+            .await;
     }
 
     #[tokio::test]
@@ -1096,25 +1138,27 @@ mod tests {
         config.voice_prompts = Some(VoicePrompts::en());
 
         let plan = config.to_plan();
-        let mut stack = MockCallStack::run(
-            Box::new(QueueApp::new(plan, config)),
-            "caller",
-            "1000",
+        let mut stack = MockCallStack::run(Box::new(QueueApp::new(plan, config)), "caller", "1000");
+
+        stack
+            .assert_cmd(200, "AcceptCall", |c| {
+                matches!(c, CallCommand::Answer { .. })
+            })
+            .await;
+        stack
+            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .await;
+
+        stack.custom(
+            "agent_connected",
+            serde_json::json!({"agent_uri": "sip:agent1@example.com"}),
         );
 
-        stack.assert_cmd(200, "AcceptCall", |c| {
-            matches!(c, CallCommand::Answer { .. })
-        }).await;
-        stack.assert_cmd(200, "PlayPrompt", |c| {
-            matches!(c, CallCommand::Play { .. })
-        }).await;
-
-        stack.custom("agent_connected",
-            serde_json::json!({"agent_uri": "sip:agent1@example.com"}));
-
-        stack.assert_cmd(200, "PlayPrompt-en-transfer", |c| {
-            matches!(c, CallCommand::Play { .. })
-        }).await;
+        stack
+            .assert_cmd(200, "PlayPrompt-en-transfer", |c| {
+                matches!(c, CallCommand::Play { .. })
+            })
+            .await;
 
         stack.audio_complete("default");
 
@@ -1122,7 +1166,10 @@ mod tests {
             matches!(c, CallCommand::Transfer { target, .. } if target == "sip:agent1@example.com")
         }).await;
 
-        stack.join().await.expect("should exit after english transfer prompt");
+        stack
+            .join()
+            .await
+            .expect("should exit after english transfer prompt");
     }
 
     #[tokio::test]
@@ -1135,28 +1182,34 @@ mod tests {
 
         let mut stack = MockCallStack::run(Box::new(app), "caller", "1000");
 
-        stack.assert_cmd(200, "AcceptCall", |c| {
-            matches!(c, CallCommand::Answer { .. })
-        }).await;
-        stack.assert_cmd(200, "PlayPrompt", |c| {
-            matches!(c, CallCommand::Play { .. })
-        }).await;
+        stack
+            .assert_cmd(200, "AcceptCall", |c| {
+                matches!(c, CallCommand::Answer { .. })
+            })
+            .await;
+        stack
+            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .await;
 
         stack.timeout("max_wait_timeout");
 
-        stack.assert_cmd(200, "NotifyEvent", |c| {
-            matches!(c, CallCommand::InjectAppEvent { .. })
-        }).await;
+        stack
+            .assert_cmd(200, "NotifyEvent", |c| {
+                matches!(c, CallCommand::InjectAppEvent { .. })
+            })
+            .await;
 
-        stack.assert_cmd(200, "PlayPrompt-busy-timeout", |c| {
-            matches!(c, CallCommand::Play { .. })
-        }).await;
+        stack
+            .assert_cmd(200, "PlayPrompt-busy-timeout", |c| {
+                matches!(c, CallCommand::Play { .. })
+            })
+            .await;
 
         stack.audio_complete("default");
 
-        stack.assert_cmd(200, "Hangup", |c| {
-            matches!(c, CallCommand::Hangup(_))
-        }).await;
+        stack
+            .assert_cmd(200, "Hangup", |c| matches!(c, CallCommand::Hangup(_)))
+            .await;
     }
 
     #[tokio::test]
@@ -1168,13 +1221,15 @@ mod tests {
             "1000",
         );
 
-        stack.assert_cmd(200, "AcceptCall", |c| {
-            matches!(c, CallCommand::Answer { .. })
-        }).await;
+        stack
+            .assert_cmd(200, "AcceptCall", |c| {
+                matches!(c, CallCommand::Answer { .. })
+            })
+            .await;
 
-        stack.assert_cmd(200, "PlayPrompt", |c| {
-            matches!(c, CallCommand::Play { .. })
-        }).await;
+        stack
+            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .await;
 
         // All agents no-answer
         stack.custom("agent_no_answer", serde_json::json!({}));
@@ -1182,15 +1237,17 @@ mod tests {
         stack.custom("agent_no_answer", serde_json::json!({}));
 
         // Should play no-answer prompt (not busy prompt)
-        stack.assert_cmd(200, "PlayPrompt-noanswer", |c| {
-            matches!(c, CallCommand::Play { .. })
-        }).await;
+        stack
+            .assert_cmd(200, "PlayPrompt-noanswer", |c| {
+                matches!(c, CallCommand::Play { .. })
+            })
+            .await;
 
         stack.audio_complete("default");
 
-        stack.assert_cmd(200, "Hangup", |c| {
-            matches!(c, CallCommand::Hangup(_))
-        }).await;
+        stack
+            .assert_cmd(200, "Hangup", |c| matches!(c, CallCommand::Hangup(_)))
+            .await;
     }
 
     #[tokio::test]
@@ -1202,13 +1259,15 @@ mod tests {
             "1000",
         );
 
-        stack.assert_cmd(200, "AcceptCall", |c| {
-            matches!(c, CallCommand::Answer { .. })
-        }).await;
+        stack
+            .assert_cmd(200, "AcceptCall", |c| {
+                matches!(c, CallCommand::Answer { .. })
+            })
+            .await;
 
-        stack.assert_cmd(200, "PlayPrompt", |c| {
-            matches!(c, CallCommand::Play { .. })
-        }).await;
+        stack
+            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .await;
 
         // Agent 1 busy, Agent 2 no-answer, Agent 3 busy
         stack.custom("agent_busy", serde_json::json!({}));
@@ -1216,15 +1275,17 @@ mod tests {
         stack.custom("agent_busy", serde_json::json!({}));
 
         // Last one was busy, so should play busy prompt
-        stack.assert_cmd(200, "PlayPrompt-busy-mixed", |c| {
-            matches!(c, CallCommand::Play { .. })
-        }).await;
+        stack
+            .assert_cmd(200, "PlayPrompt-busy-mixed", |c| {
+                matches!(c, CallCommand::Play { .. })
+            })
+            .await;
 
         stack.audio_complete("default");
 
-        stack.assert_cmd(200, "Hangup", |c| {
-            matches!(c, CallCommand::Hangup(_))
-        }).await;
+        stack
+            .assert_cmd(200, "Hangup", |c| matches!(c, CallCommand::Hangup(_)))
+            .await;
     }
 
     #[tokio::test]
@@ -1237,19 +1298,17 @@ mod tests {
         // Only set no_answer_prompt to None, keep transfer and busy prompts
 
         let plan = config.to_plan();
-        let mut stack = MockCallStack::run(
-            Box::new(QueueApp::new(plan, config)),
-            "caller",
-            "1000",
-        );
+        let mut stack = MockCallStack::run(Box::new(QueueApp::new(plan, config)), "caller", "1000");
 
-        stack.assert_cmd(200, "AcceptCall", |c| {
-            matches!(c, CallCommand::Answer { .. })
-        }).await;
+        stack
+            .assert_cmd(200, "AcceptCall", |c| {
+                matches!(c, CallCommand::Answer { .. })
+            })
+            .await;
 
-        stack.assert_cmd(200, "PlayPrompt", |c| {
-            matches!(c, CallCommand::Play { .. })
-        }).await;
+        stack
+            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .await;
 
         // All agents no-answer, no no_answer_prompt configured -> should go directly to fallback
         stack.custom("agent_no_answer", serde_json::json!({}));
@@ -1257,9 +1316,9 @@ mod tests {
         stack.custom("agent_no_answer", serde_json::json!({}));
 
         // Should NOT play any prompt, just hangup
-        stack.assert_cmd(200, "Hangup", |c| {
-            matches!(c, CallCommand::Hangup(_))
-        }).await;
+        stack
+            .assert_cmd(200, "Hangup", |c| matches!(c, CallCommand::Hangup(_)))
+            .await;
     }
 
     #[tokio::test]
@@ -1272,24 +1331,28 @@ mod tests {
 
         let mut stack = MockCallStack::run(Box::new(app), "caller", "1000");
 
-        stack.assert_cmd(200, "AcceptCall", |c| {
-            matches!(c, CallCommand::Answer { .. })
-        }).await;
-        stack.assert_cmd(200, "PlayPrompt", |c| {
-            matches!(c, CallCommand::Play { .. })
-        }).await;
+        stack
+            .assert_cmd(200, "AcceptCall", |c| {
+                matches!(c, CallCommand::Answer { .. })
+            })
+            .await;
+        stack
+            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .await;
 
         // Ring timeout triggers no-answer path (only 1 agent in simple queue)
         stack.timeout("agent_ring_timeout");
 
-        stack.assert_cmd(200, "PlayPrompt-noanswer-timeout", |c| {
-            matches!(c, CallCommand::Play { .. })
-        }).await;
+        stack
+            .assert_cmd(200, "PlayPrompt-noanswer-timeout", |c| {
+                matches!(c, CallCommand::Play { .. })
+            })
+            .await;
 
         stack.audio_complete("default");
 
-        stack.assert_cmd(200, "Hangup", |c| {
-            matches!(c, CallCommand::Hangup(_))
-        }).await;
+        stack
+            .assert_cmd(200, "Hangup", |c| matches!(c, CallCommand::Hangup(_)))
+            .await;
     }
 }

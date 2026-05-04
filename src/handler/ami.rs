@@ -902,10 +902,7 @@ async fn cluster_ping_handler(State(state): State<AppState>) -> Response {
         .unwrap_or_else(|| "/ami/v1".to_string());
 
     for peer in &peers {
-        let url = format!(
-            "http://{}:{}{}/health",
-            peer.addr, peer.ami_port, ami_path
-        );
+        let url = format!("http://{}:{}{}/health", peer.addr, peer.ami_port, ami_path);
         let start = Instant::now();
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(5))

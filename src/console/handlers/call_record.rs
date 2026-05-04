@@ -309,36 +309,38 @@ async fn stream_call_recording(
     // Try to stream from file first
     if let Some(ref path) = recording_path
         && let Ok(meta) = tokio::fs::metadata(path).await
-            && meta.is_file() && meta.len() > 0 {
-                return stream_file_with_range(path, meta.len(), &headers).await;
-            }
+        && meta.is_file()
+        && meta.len() > 0
+    {
+        return stream_file_with_range(path, meta.len(), &headers).await;
+    }
 
     // Fallback: Try to get recording from sipflow backend
     if let Some(server) = state.sip_server()
         && let Some(sipflow) = &server.sip_flow
-            && let Some(backend) = sipflow.backend() {
-                let call_time = record.created_at;
-                let start_time =
-                    (call_time - chrono::Duration::hours(1)).with_timezone(&chrono::Local);
-                let end_time =
-                    (call_time + chrono::Duration::hours(2)).with_timezone(&chrono::Local);
+        && let Some(backend) = sipflow.backend()
+    {
+        let call_time = record.created_at;
+        let start_time = (call_time - chrono::Duration::hours(1)).with_timezone(&chrono::Local);
+        let end_time = (call_time + chrono::Duration::hours(2)).with_timezone(&chrono::Local);
 
-                if let Ok(audio_data) = backend
-                    .query_media(&record.call_id, start_time, end_time)
-                    .await
-                    && !audio_data.is_empty() {
-                        return Response::builder()
-                            .status(StatusCode::OK)
-                            .header(http::header::CONTENT_TYPE, "audio/wav")
-                            .header(http::header::CONTENT_LENGTH, audio_data.len())
-                            .header(
-                                http::header::CONTENT_DISPOSITION,
-                                "inline; filename=\"recording.wav\"",
-                            )
-                            .body(Body::from(audio_data))
-                            .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
-                    }
-            }
+        if let Ok(audio_data) = backend
+            .query_media(&record.call_id, start_time, end_time)
+            .await
+            && !audio_data.is_empty()
+        {
+            return Response::builder()
+                .status(StatusCode::OK)
+                .header(http::header::CONTENT_TYPE, "audio/wav")
+                .header(http::header::CONTENT_LENGTH, audio_data.len())
+                .header(
+                    http::header::CONTENT_DISPOSITION,
+                    "inline; filename=\"recording.wav\"",
+                )
+                .body(Body::from(audio_data))
+                .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
+        }
+    }
 
     (
         StatusCode::NOT_FOUND,
@@ -384,14 +386,15 @@ async fn stream_file_with_range(
     };
 
     if start > 0
-        && let Err(err) = file.seek(std::io::SeekFrom::Start(start)).await {
-            warn!(path = %recording_path, "failed to seek recording file: {}", err);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "message": format!("Failed to read recording file: {}", err) })),
-            )
-                .into_response();
-        }
+        && let Err(err) = file.seek(std::io::SeekFrom::Start(start)).await
+    {
+        warn!(path = %recording_path, "failed to seek recording file: {}", err);
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json!({ "message": format!("Failed to read recording file: {}", err) })),
+        )
+            .into_response();
+    }
 
     let bytes_to_send = end.saturating_sub(start) + 1;
     let stream = ReaderStream::new(file.take(bytes_to_send));
@@ -543,19 +546,20 @@ async fn download_call_record_metadata(
         .as_ref()
         .map(|value| value.trim())
         .filter(|value| !value.is_empty())
-        && requested != cdr_data.cdr_path {
-            warn!(
-                id = pk,
-                requested_path = requested,
-                actual_path = %cdr_data.cdr_path,
-                "metadata download path mismatch"
-            );
-            return (
-                StatusCode::NOT_FOUND,
-                Json(json!({ "message": "Metadata file not found" })),
-            )
-                .into_response();
-        }
+        && requested != cdr_data.cdr_path
+    {
+        warn!(
+            id = pk,
+            requested_path = requested,
+            actual_path = %cdr_data.cdr_path,
+            "metadata download path mismatch"
+        );
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "message": "Metadata file not found" })),
+        )
+            .into_response();
+    }
 
     let filename = safe_download_filename(&cdr_data.cdr_path, &format!("call-record-{}.json", pk));
 

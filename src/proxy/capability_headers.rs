@@ -28,8 +28,7 @@ impl CapabilityHeadersInspector {
             SipMessage::Request(request) => request.method == rsipstack::sip::Method::Invite,
             SipMessage::Response(response) => {
                 response.status_code == rsipstack::sip::StatusCode::MethodNotAllowed
-                    || (response.status_code.kind()
-                        == rsipstack::sip::StatusCodeKind::Successful
+                    || (response.status_code.kind() == rsipstack::sip::StatusCodeKind::Successful
                         && Self::cseq_method(msg) == Some(rsipstack::sip::Method::Invite))
             }
         }
@@ -130,9 +129,8 @@ mod tests {
             rsipstack::sip::Method::Invite,
             rsipstack::sip::Method::Options,
         ]));
-        let msg = parse_request(
-            "INVITE sip:alice@example.com SIP/2.0\r\nContent-Length: 0\r\n\r\n",
-        );
+        let msg =
+            parse_request("INVITE sip:alice@example.com SIP/2.0\r\nContent-Length: 0\r\n\r\n");
 
         let rewritten = inspector.before_send(msg, None).to_string();
 
@@ -146,13 +144,11 @@ mod tests {
             rsipstack::sip::Method::Ack,
             rsipstack::sip::Method::Options,
         ]));
-        let msg = parse_response(
-            concat!(
-                "SIP/2.0 200 OK\r\n",
-                "CSeq: 1 INVITE\r\n",
-                "Content-Length: 0\r\n\r\n"
-            ),
-        );
+        let msg = parse_response(concat!(
+            "SIP/2.0 200 OK\r\n",
+            "CSeq: 1 INVITE\r\n",
+            "Content-Length: 0\r\n\r\n"
+        ));
 
         let rewritten = inspector.before_send(msg, None).to_string();
 
@@ -166,13 +162,11 @@ mod tests {
             rsipstack::sip::Method::Ack,
             rsipstack::sip::Method::Register,
         ]));
-        let msg = parse_response(
-            concat!(
-                "SIP/2.0 405 Method Not Allowed\r\n",
-                "CSeq: 1 INVITE\r\n",
-                "Content-Length: 0\r\n\r\n"
-            ),
-        );
+        let msg = parse_response(concat!(
+            "SIP/2.0 405 Method Not Allowed\r\n",
+            "CSeq: 1 INVITE\r\n",
+            "Content-Length: 0\r\n\r\n"
+        ));
 
         let rewritten = inspector.before_send(msg, None).to_string();
 
@@ -185,9 +179,8 @@ mod tests {
             rsipstack::sip::Method::Invite,
             rsipstack::sip::Method::Register,
         ]));
-        let msg = parse_request(
-            "OPTIONS sip:alice@example.com SIP/2.0\r\nContent-Length: 0\r\n\r\n",
-        );
+        let msg =
+            parse_request("OPTIONS sip:alice@example.com SIP/2.0\r\nContent-Length: 0\r\n\r\n");
 
         let rewritten = inspector.before_send(msg, None).to_string();
 
@@ -200,13 +193,11 @@ mod tests {
             rsipstack::sip::Method::Invite,
             rsipstack::sip::Method::Register,
         ]));
-        let msg = parse_response(
-            concat!(
-                "SIP/2.0 200 OK\r\n",
-                "CSeq: 1 REGISTER\r\n",
-                "Content-Length: 0\r\n\r\n"
-            ),
-        );
+        let msg = parse_response(concat!(
+            "SIP/2.0 200 OK\r\n",
+            "CSeq: 1 REGISTER\r\n",
+            "Content-Length: 0\r\n\r\n"
+        ));
 
         let rewritten = inspector.before_send(msg, None).to_string();
 
@@ -223,9 +214,8 @@ mod tests {
             rsipstack::sip::Method::Options,
             rsipstack::sip::Method::Bye,
         ]));
-        let msg = parse_request(
-            "INVITE sip:alice@example.com SIP/2.0\r\nContent-Length: 0\r\n\r\n",
-        );
+        let msg =
+            parse_request("INVITE sip:alice@example.com SIP/2.0\r\nContent-Length: 0\r\n\r\n");
 
         let rewritten = inspector.before_send(msg, None).to_string();
 
@@ -235,5 +225,4 @@ mod tests {
         assert!(!rewritten.contains("PUBLISH"));
         assert!(!rewritten.contains("OPTIONS"));
     }
-
 }

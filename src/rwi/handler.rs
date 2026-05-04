@@ -65,9 +65,10 @@ fn extract_token(
 ) -> Option<String> {
     if let Some(auth_header) = headers.get("authorization")
         && let Ok(auth_str) = auth_header.to_str()
-            && auth_str.starts_with("Bearer ") {
-                return Some(auth_str[7..].to_string());
-            }
+        && auth_str.starts_with("Bearer ")
+    {
+        return Some(auth_str[7..].to_string());
+    }
 
     query_params.get("token").cloned()
 }
@@ -304,16 +305,16 @@ async fn handle_text_message(
             CommandResult::Originated { call_id: ref cid }
             | CommandResult::CallFound { call_id: ref cid },
         ) = result
-        {
-            let mut gw = gateway.write().await;
-            let _ = gw
-                .claim_call_ownership(
-                    &session_id.to_string(),
-                    cid.clone(),
-                    crate::rwi::session::OwnershipMode::Control,
-                )
-                .await;
-        }
+    {
+        let mut gw = gateway.write().await;
+        let _ = gw
+            .claim_call_ownership(
+                &session_id.to_string(),
+                cid.clone(),
+                crate::rwi::session::OwnershipMode::Control,
+            )
+            .await;
+    }
 
     let event = build_command_result_event(&action_id, &action, call_id.as_deref(), result);
     if let Ok(json) = serde_json::to_string(&event) {
@@ -632,6 +633,8 @@ fn extract_call_id(cmd: &RwiCommandPayload) -> Option<String> {
         RwiCommandPayload::ConsultInitiate { call_id, .. } => Some(call_id.clone()),
         RwiCommandPayload::ConsultMerge { call_id, .. } => Some(call_id.clone()),
         RwiCommandPayload::ConsultComplete { call_id, .. } => Some(call_id.clone()),
-        RwiCommandPayload::ConsultCancel { consultation_call_id } => Some(consultation_call_id.clone()),
+        RwiCommandPayload::ConsultCancel {
+            consultation_call_id,
+        } => Some(consultation_call_id.clone()),
     }
 }

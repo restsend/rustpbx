@@ -97,8 +97,7 @@ impl Default for CdrCapture {
 }
 
 /// CDR expectation for validation
-#[derive(Debug, Clone)]
-#[derive(Default)]
+#[derive(Debug, Clone, Default)]
 pub struct CdrExpectation {
     pub expected_direction: Option<String>,
     pub expected_status: Option<String>,
@@ -109,7 +108,6 @@ pub struct CdrExpectation {
     pub expected_caller: Option<String>,
     pub expected_callee: Option<String>,
 }
-
 
 impl CdrExpectation {
     pub fn with_direction(mut self, direction: impl Into<String>) -> Self {
@@ -182,21 +180,23 @@ pub fn validate_cdr(record: &CallRecord, expected: &CdrExpectation) -> CdrValida
 
     // Validate direction
     if let Some(ref expected_dir) = expected.expected_direction
-        && record.details.direction != *expected_dir {
-            result.add_error(format!(
-                "Direction mismatch: expected '{}', got '{}'",
-                expected_dir, record.details.direction
-            ));
-        }
+        && record.details.direction != *expected_dir
+    {
+        result.add_error(format!(
+            "Direction mismatch: expected '{}', got '{}'",
+            expected_dir, record.details.direction
+        ));
+    }
 
     // Validate status
     if let Some(ref expected_status) = expected.expected_status
-        && record.details.status != *expected_status {
-            result.add_error(format!(
-                "Status mismatch: expected '{}', got '{}'",
-                expected_status, record.details.status
-            ));
-        }
+        && record.details.status != *expected_status
+    {
+        result.add_error(format!(
+            "Status mismatch: expected '{}', got '{}'",
+            expected_status, record.details.status
+        ));
+    }
 
     // Validate recording
     if let Some(expect_recording) = expected.expect_recording {
@@ -231,37 +231,41 @@ pub fn validate_cdr(record: &CallRecord, expected: &CdrExpectation) -> CdrValida
     // Validate duration
     let duration = (record.end_time - record.start_time).num_seconds();
     if let Some(min) = expected.min_duration_secs
-        && duration < min {
-            result.add_error(format!(
-                "Duration too short: expected >= {}s, got {}s",
-                min, duration
-            ));
-        }
+        && duration < min
+    {
+        result.add_error(format!(
+            "Duration too short: expected >= {}s, got {}s",
+            min, duration
+        ));
+    }
     if let Some(max) = expected.max_duration_secs
-        && duration > max {
-            result.add_error(format!(
-                "Duration too long: expected <= {}s, got {}s",
-                max, duration
-            ));
-        }
+        && duration > max
+    {
+        result.add_error(format!(
+            "Duration too long: expected <= {}s, got {}s",
+            max, duration
+        ));
+    }
 
     // Validate caller
     if let Some(ref expected_caller) = expected.expected_caller
-        && !record.caller.contains(expected_caller) {
-            result.add_error(format!(
-                "Caller mismatch: expected containing '{}', got '{}'",
-                expected_caller, record.caller
-            ));
-        }
+        && !record.caller.contains(expected_caller)
+    {
+        result.add_error(format!(
+            "Caller mismatch: expected containing '{}', got '{}'",
+            expected_caller, record.caller
+        ));
+    }
 
     // Validate callee
     if let Some(ref expected_callee) = expected.expected_callee
-        && !record.callee.contains(expected_callee) {
-            result.add_error(format!(
-                "Callee mismatch: expected containing '{}', got '{}'",
-                expected_callee, record.callee
-            ));
-        }
+        && !record.callee.contains(expected_callee)
+    {
+        result.add_error(format!(
+            "Callee mismatch: expected containing '{}', got '{}'",
+            expected_callee, record.callee
+        ));
+    }
 
     // Basic completeness checks
     if record.call_id.is_empty() {

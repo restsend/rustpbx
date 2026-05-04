@@ -35,7 +35,6 @@ impl SipTrunkStatus {
     }
 }
 
-
 #[derive(Copy, Clone, Debug, PartialEq, Eq, EnumIter, DeriveActiveEnum, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 #[sea_orm(rs_type = "String", db_type = "Text")]
@@ -60,7 +59,6 @@ impl SipTrunkDirection {
     }
 }
 
-
 #[derive(Copy, Clone, Debug, PartialEq, Eq, EnumIter, DeriveActiveEnum, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 #[sea_orm(rs_type = "String", db_type = "Text")]
@@ -84,7 +82,6 @@ impl SipTransport {
         }
     }
 }
-
 
 #[derive(Clone, Debug, PartialEq, DeriveEntityModel, Serialize, Deserialize, Default)]
 #[sea_orm(table_name = "rustpbx_sip_trunks")]

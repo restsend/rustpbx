@@ -69,8 +69,7 @@ impl CallApp for VoicemailApp {
             // Use session_id as trace_id for full lifecycle tracking
             let path = format!(
                 "/tmp/voicemail_{}_{}.wav",
-                self.extension,
-                ctx.call_info.session_id
+                self.extension, ctx.call_info.session_id
             );
             info!(
                 path = %path,

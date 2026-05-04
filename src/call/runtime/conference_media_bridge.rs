@@ -20,7 +20,9 @@ pub trait AudioSender: Send + Sync {
     fn send(
         &self,
         sample: rustrtc::media::MediaSample,
-    ) -> impl std::future::Future<Output = Result<(), mpsc::error::SendError<rustrtc::media::MediaSample>>> + Send;
+    ) -> impl std::future::Future<
+        Output = Result<(), mpsc::error::SendError<rustrtc::media::MediaSample>>,
+    > + Send;
 }
 
 impl AudioSender for tokio::sync::mpsc::Sender<rustrtc::media::MediaSample> {
@@ -87,12 +89,19 @@ impl ConferenceMediaBridge {
         S: AudioSender + Send + Sync + 'static,
     {
         let _conf_id_obj = crate::call::runtime::ConferenceId::from(conf_id);
-        
+
         // Take the output_rx for this leg
-        let output_rx = self.conference_manager
+        let output_rx = self
+            .conference_manager
             .take_participant_output_rx(leg_id)
             .await
-            .ok_or_else(|| anyhow::anyhow!("No output_rx found for leg {} in conference {}", leg_id, conf_id))?;
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "No output_rx found for leg {} in conference {}",
+                    leg_id,
+                    conf_id
+                )
+            })?;
 
         info!(
             conf_id = %conf_id,
@@ -104,7 +113,7 @@ impl ConferenceMediaBridge {
         // Spawn background task to forward mixed audio
         let cancel_token = tokio_util::sync::CancellationToken::new();
         let cancel_token_clone = cancel_token.clone();
-        
+
         let leg_id_clone = leg_id.clone();
         let conf_id_string = conf_id.to_string();
         let handle = tokio::spawn(async move {
@@ -115,7 +124,8 @@ impl ConferenceMediaBridge {
                 conf_id_string,
                 cancel_token_clone,
                 codec,
-            ).await;
+            )
+            .await;
         });
 
         Ok(ConferenceBridgeHandle {
@@ -141,20 +151,28 @@ impl ConferenceMediaBridge {
         S: AudioSender + Send + Sync + 'static,
     {
         let conf_id_obj = crate::call::runtime::ConferenceId::from(conf_id);
-        
+
         // Add participant to conference and get channels
-        let channels = self.conference_manager
+        let channels = self
+            .conference_manager
             .add_participant(&conf_id_obj, leg_id.clone())
             .await
             .map_err(|e| anyhow::anyhow!("Failed to add participant to conference: {}", e))?;
-        
+
         let input_tx = channels.input_tx;
-        
+
         // Take the output_rx for this leg
-        let output_rx = self.conference_manager
+        let output_rx = self
+            .conference_manager
             .take_participant_output_rx(leg_id)
             .await
-            .ok_or_else(|| anyhow::anyhow!("No output_rx found for leg {} in conference {}", leg_id, conf_id))?;
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "No output_rx found for leg {} in conference {}",
+                    leg_id,
+                    conf_id
+                )
+            })?;
 
         info!(
             conf_id = %conf_id,
@@ -164,7 +182,7 @@ impl ConferenceMediaBridge {
         crate::metrics::conference::created();
 
         let cancel_token = tokio_util::sync::CancellationToken::new();
-        
+
         // Spawn forward loop: conference → SIP
         let forward_cancel = cancel_token.child_token();
         let leg_id_forward = leg_id.clone();
@@ -177,7 +195,8 @@ impl ConferenceMediaBridge {
                 conf_id_forward,
                 forward_cancel,
                 codec,
-            ).await;
+            )
+            .await;
         });
 
         // Spawn reverse loop: SIP → conference
@@ -191,7 +210,8 @@ impl ConferenceMediaBridge {
                 leg_id_reverse,
                 conf_id_reverse,
                 reverse_cancel,
-            ).await;
+            )
+            .await;
         });
 
         Ok(ConferenceBridgeHandle {
@@ -346,7 +366,7 @@ impl ConferenceMediaBridge {
                     let sample_count = pcm_frame.samples.len();
                     let sample_rate = pcm_frame.sample_rate;
                     let audio_frame = AudioFrame::new(pcm_frame.samples, sample_rate);
-                    
+
                     if let Err(e) = input_tx.send(audio_frame).await {
                         warn!(
                             leg_id = %leg_id,
@@ -507,7 +527,8 @@ mod tests {
     impl AudioReceiver for MockAudioReceiver {
         fn recv(
             &mut self,
-        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<PcmAudioFrame>> + Send + '_>> {
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Option<PcmAudioFrame>> + Send + '_>>
+        {
             Box::pin(async move {
                 if self.index < self.frames.len() {
                     let frame = self.frames[self.index].clone();
@@ -532,7 +553,9 @@ mod tests {
         let bridge = ConferenceMediaBridge::new(conf_mgr);
         let leg_id = LegId::new("test-leg");
         let (tx, _rx) = tokio::sync::mpsc::channel(100);
-        let result = bridge.start_bridge("conf-1", &leg_id, tx, audio_codec::CodecType::PCMU).await;
+        let result = bridge
+            .start_bridge("conf-1", &leg_id, tx, audio_codec::CodecType::PCMU)
+            .await;
         assert!(result.is_err());
     }
 
@@ -542,7 +565,10 @@ mod tests {
         let bridge = ConferenceMediaBridge::new(conf_mgr);
         let leg_id = LegId::new("test-leg");
         let (tx, _rx) = tokio::sync::mpsc::channel(100);
-        if let Ok(handle) = bridge.start_bridge("conf-1", &leg_id, tx, audio_codec::CodecType::PCMU).await {
+        if let Ok(handle) = bridge
+            .start_bridge("conf-1", &leg_id, tx, audio_codec::CodecType::PCMU)
+            .await
+        {
             handle.stop();
         }
     }
@@ -585,11 +611,7 @@ mod tests {
 
         // Cancel and wait
         cancel.cancel();
-        let _ = tokio::time::timeout(
-            tokio::time::Duration::from_secs(2),
-            handle,
-        )
-        .await;
+        let _ = tokio::time::timeout(tokio::time::Duration::from_secs(2), handle).await;
 
         // Verify audio was encoded and sent
         let sent = sender.get_samples().await;
@@ -643,11 +665,7 @@ mod tests {
 
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
         cancel.cancel();
-        let _ = tokio::time::timeout(
-            tokio::time::Duration::from_secs(2),
-            handle,
-        )
-        .await;
+        let _ = tokio::time::timeout(tokio::time::Duration::from_secs(2), handle).await;
 
         let sent = sender.get_samples().await;
         assert!(!sent.is_empty(), "Expected resampled audio to be sent");
@@ -689,11 +707,7 @@ mod tests {
 
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
         cancel.cancel();
-        let _ = tokio::time::timeout(
-            tokio::time::Duration::from_secs(2),
-            handle,
-        )
-        .await;
+        let _ = tokio::time::timeout(tokio::time::Duration::from_secs(2), handle).await;
 
         let sent = sender.get_samples().await;
         assert!(sent.len() >= 2, "Expected at least 2 audio packets");
@@ -739,11 +753,7 @@ mod tests {
         // Wait for frames to be processed
         tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
         cancel.cancel();
-        let _ = tokio::time::timeout(
-            tokio::time::Duration::from_secs(2),
-            handle,
-        )
-        .await;
+        let _ = tokio::time::timeout(tokio::time::Duration::from_secs(2), handle).await;
 
         // Verify frames were sent to mixer input
         let mut received_count = 0;
@@ -752,26 +762,41 @@ mod tests {
             assert_eq!(frame.samples.len(), 160);
             assert_eq!(frame.sample_rate, 8000);
         }
-        assert_eq!(received_count, 2, "Expected 2 frames to be sent to mixer input");
+        assert_eq!(
+            received_count, 2,
+            "Expected 2 frames to be sent to mixer input"
+        );
     }
 
     #[tokio::test]
     async fn test_full_duplex_bridge() {
         let conf_mgr = Arc::new(ConferenceManager::new());
         let bridge = ConferenceMediaBridge::new(conf_mgr.clone());
-        
+
         // Create conference first
-        conf_mgr.create_conference("conf-1".into(), None).await.unwrap();
-        
+        conf_mgr
+            .create_conference("conf-1".into(), None)
+            .await
+            .unwrap();
+
         let leg_id = LegId::new("test-leg");
         let sender = MockAudioSender::new();
-        let receiver = MockAudioReceiver::new(vec![
-            PcmAudioFrame::new(vec![1000i16; 160], 8000),
-        ]);
-        
-        let handle = bridge.start_bridge_full_duplex("conf-1", &leg_id, sender, Box::new(receiver), audio_codec::CodecType::PCMU).await;
-        assert!(handle.is_ok(), "Full-duplex bridge should start successfully");
-        
+        let receiver = MockAudioReceiver::new(vec![PcmAudioFrame::new(vec![1000i16; 160], 8000)]);
+
+        let handle = bridge
+            .start_bridge_full_duplex(
+                "conf-1",
+                &leg_id,
+                sender,
+                Box::new(receiver),
+                audio_codec::CodecType::PCMU,
+            )
+            .await;
+        assert!(
+            handle.is_ok(),
+            "Full-duplex bridge should start successfully"
+        );
+
         let handle = handle.unwrap();
         handle.stop();
     }
@@ -810,11 +835,7 @@ mod tests {
 
         // Cancel immediately
         cancel.cancel();
-        let result = tokio::time::timeout(
-            tokio::time::Duration::from_secs(2),
-            handle,
-        )
-        .await;
+        let result = tokio::time::timeout(tokio::time::Duration::from_secs(2), handle).await;
 
         assert!(result.is_ok(), "Forward loop should exit cleanly on cancel");
     }

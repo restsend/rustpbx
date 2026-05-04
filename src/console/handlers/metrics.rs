@@ -43,8 +43,9 @@ fn get_prometheus_config(state: &ConsoleState) -> PrometheusConfig {
     // Check if metrics are configured via addon-specific config file
     if let Some(app_state) = state.app_state() {
         let cfg = crate::addons::observability::ObservabilityAddon::load_config_sync(
-            &app_state.config_path
-        ).unwrap_or_default();
+            &app_state.config_path,
+        )
+        .unwrap_or_default();
         return PrometheusConfig {
             enabled: cfg.enabled,
             path: cfg.path,

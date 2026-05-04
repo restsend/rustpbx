@@ -190,11 +190,7 @@ impl RecordingPolicy {
     }
 
     pub fn uploads_recording(&self) -> bool {
-        self.enabled
-            && matches!(
-                self.recording_type,
-                RecordingType::Http | RecordingType::S3
-            )
+        self.enabled && matches!(self.recording_type, RecordingType::Http | RecordingType::S3)
     }
 
     pub fn ensure_defaults(&mut self) -> bool {

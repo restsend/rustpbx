@@ -238,13 +238,13 @@ impl ConsoleState {
                 .addon_registry
                 .authenticate_all(app_state.clone(), identifier, password)
                 .await
-            {
-                tracing::info!(
-                    "User {} authenticated via Enterprise Auth addon",
-                    user.username
-                );
-                return Ok(Some(user));
-            }
+        {
+            tracing::info!(
+                "User {} authenticated via Enterprise Auth addon",
+                user.username
+            );
+            return Ok(Some(user));
+        }
 
         let trimmed = identifier.trim();
         if trimmed.is_empty() {

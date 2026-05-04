@@ -574,7 +574,9 @@ impl ProxyModule for RegistrarModule {
                 })
                 .collect::<Vec<Header>>();
             let rendered_contact = entry.contact_value(expires);
-            let home_proxy = self.server.default_contact_uri()
+            let home_proxy = self
+                .server
+                .default_contact_uri()
                 .and_then(|uri| SipAddr::try_from(uri).ok());
             let mut location = Location {
                 aor: entry.uri().clone(),

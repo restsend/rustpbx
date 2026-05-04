@@ -143,10 +143,11 @@ impl ActiveFileRollingWriterInner {
         }
 
         if let Some(ref old_period) = self.current_period
-            && self.base_path.exists() {
-                let archived = self.next_archive_path(old_period);
-                fs::rename(&self.base_path, archived)?;
-            }
+            && self.base_path.exists()
+        {
+            let archived = self.next_archive_path(old_period);
+            fs::rename(&self.base_path, archived)?;
+        }
 
         self.file = Some(self.open_active_file()?);
         self.current_period = Some(next_period);
@@ -155,9 +156,10 @@ impl ActiveFileRollingWriterInner {
 
     fn open_active_file(&self) -> io::Result<File> {
         if let Some(parent) = self.base_path.parent()
-            && !parent.as_os_str().is_empty() {
-                fs::create_dir_all(parent)?;
-            }
+            && !parent.as_os_str().is_empty()
+        {
+            fs::create_dir_all(parent)?;
+        }
         OpenOptions::new()
             .create(true)
             .append(true)
@@ -414,9 +416,8 @@ async fn main() -> Result<()> {
         let log_path = PathBuf::from(log_file);
         let mode = LogRotationMode::from_config(&config.log_rotation);
         let appender = ActiveFileRollingWriter::new(log_path, mode)?;
-        let (non_blocking, guard) = tracing_appender::non_blocking(
-            ActiveFileRollingWriteGuard::from_writer(appender),
-        );
+        let (non_blocking, guard) =
+            tracing_appender::non_blocking(ActiveFileRollingWriteGuard::from_writer(appender));
         guard_holder = Some(guard);
         file_layer = Some(
             tracing_subscriber::fmt::layer()

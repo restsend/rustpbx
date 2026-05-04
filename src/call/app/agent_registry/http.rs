@@ -6,14 +6,14 @@
 //! - Scenarios where agent data is managed externally
 
 use super::{AgentRecord, AgentRegistry, PresenceState, RoutingStrategy};
+use async_trait::async_trait;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
-use tracing::{info, error};
-use async_trait::async_trait;
+use tracing::{error, info};
 
 /// HTTP API-backed agent registry implementation
-/// 
+///
 /// Communicates with an external HTTP API for agent management.
 /// Suitable for integration with existing systems.
 pub struct HttpRegistry {
@@ -71,11 +71,11 @@ impl HttpRegistry {
     }
 
     /// Fetch agent from HTTP API
-    async fn fetch_agent(
-        &self, agent_id: &str) -> anyhow::Result<Option<AgentRecord>> {
+    async fn fetch_agent(&self, agent_id: &str) -> anyhow::Result<Option<AgentRecord>> {
         let url = format!("{}/agents/{}", self.base_url, agent_id);
-        
-        let response = self.client
+
+        let response = self
+            .client
             .get(&url)
             .headers(self.build_headers())
             .send()
@@ -90,24 +90,27 @@ impl HttpRegistry {
         }
 
         let data: serde_json::Value = response.json().await?;
-        
+
         // Parse agent record from JSON
         let record = Self::parse_agent_from_json(&data)?;
-        
+
         // Update cache
         let mut cache = self.cache.write().await;
         cache.insert(agent_id.to_string(), (record.clone(), Instant::now()));
-        
+
         Ok(Some(record))
     }
 
     /// Update agent via HTTP API
     async fn update_agent_api(
-        &self, agent_id: &str, updates: serde_json::Value
+        &self,
+        agent_id: &str,
+        updates: serde_json::Value,
     ) -> anyhow::Result<()> {
         let url = format!("{}/agents/{}", self.base_url, agent_id);
-        
-        let response = self.client
+
+        let response = self
+            .client
             .patch(&url)
             .headers(self.build_headers())
             .json(&updates)
@@ -123,26 +126,27 @@ impl HttpRegistry {
 
     /// Parse agent record from JSON
     pub fn parse_agent_from_json(data: &serde_json::Value) -> anyhow::Result<AgentRecord> {
-        let agent_id = data["agent_id"].as_str()
+        let agent_id = data["agent_id"]
+            .as_str()
             .ok_or_else(|| anyhow::anyhow!("Missing agent_id"))?;
-        let display_name = data["display_name"].as_str()
-            .unwrap_or(agent_id);
-        let uri = data["uri"].as_str()
-            .unwrap_or("");
-        let skills: Vec<String> = data["skills"].as_array()
-            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        let display_name = data["display_name"].as_str().unwrap_or(agent_id);
+        let uri = data["uri"].as_str().unwrap_or("");
+        let skills: Vec<String> = data["skills"]
+            .as_array()
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
             .unwrap_or_default();
-        let max_concurrency = data["max_concurrency"].as_u64()
-            .unwrap_or(1) as u32;
-        let current_calls = data["current_calls"].as_u64()
-            .unwrap_or(0) as u32;
-        let presence = data["presence"].as_str()
+        let max_concurrency = data["max_concurrency"].as_u64().unwrap_or(1) as u32;
+        let current_calls = data["current_calls"].as_u64().unwrap_or(0) as u32;
+        let presence = data["presence"]
+            .as_str()
             .and_then(PresenceState::parse_state)
             .unwrap_or(PresenceState::Offline);
-        let total_calls_handled = data["total_calls_handled"].as_u64()
-            .unwrap_or(0);
-        let total_talk_time_secs = data["total_talk_time_secs"].as_u64()
-            .unwrap_or(0);
+        let total_calls_handled = data["total_calls_handled"].as_u64().unwrap_or(0);
+        let total_talk_time_secs = data["total_talk_time_secs"].as_u64().unwrap_or(0);
 
         Ok(AgentRecord {
             agent_id: agent_id.to_string(),
@@ -172,7 +176,7 @@ impl AgentRegistry for HttpRegistry {
         max_concurrency: u32,
     ) -> anyhow::Result<()> {
         let url = format!("{}/agents", self.base_url);
-        
+
         let payload = serde_json::json!({
             "agent_id": agent_id,
             "display_name": display_name,
@@ -182,7 +186,8 @@ impl AgentRegistry for HttpRegistry {
             "presence": "available",
         });
 
-        let response = self.client
+        let response = self
+            .client
             .post(&url)
             .headers(self.build_headers())
             .json(&payload)
@@ -199,8 +204,9 @@ impl AgentRegistry for HttpRegistry {
 
     async fn unregister(&self, agent_id: &str) -> anyhow::Result<()> {
         let url = format!("{}/agents/{}", self.base_url, agent_id);
-        
-        let response = self.client
+
+        let response = self
+            .client
             .delete(&url)
             .headers(self.build_headers())
             .send()
@@ -222,9 +228,10 @@ impl AgentRegistry for HttpRegistry {
         // Try cache first
         let cache = self.cache.read().await;
         if let Some((record, timestamp)) = cache.get(agent_id)
-            && self.is_cache_valid(*timestamp) {
-                return Some(record.clone());
-            }
+            && self.is_cache_valid(*timestamp)
+        {
+            return Some(record.clone());
+        }
         drop(cache);
 
         // Fetch from API
@@ -239,8 +246,9 @@ impl AgentRegistry for HttpRegistry {
 
     async fn list_agents(&self) -> Vec<AgentRecord> {
         let url = format!("{}/agents", self.base_url);
-        
-        match self.client
+
+        match self
+            .client
             .get(&url)
             .headers(self.build_headers())
             .send()
@@ -248,11 +256,10 @@ impl AgentRegistry for HttpRegistry {
         {
             Ok(response) if response.status().is_success() => {
                 match response.json::<Vec<serde_json::Value>>().await {
-                    Ok(data) => {
-                        data.iter()
-                            .filter_map(|v| Self::parse_agent_from_json(v).ok())
-                            .collect()
-                    }
+                    Ok(data) => data
+                        .iter()
+                        .filter_map(|v| Self::parse_agent_from_json(v).ok())
+                        .collect(),
                     Err(e) => {
                         error!(error = %e, "Failed to parse agents list");
                         Vec::new()
@@ -262,7 +269,8 @@ impl AgentRegistry for HttpRegistry {
             _ => {
                 // Fallback to cache
                 let cache = self.cache.read().await;
-                cache.values()
+                cache
+                    .values()
                     .filter(|(_, ts)| self.is_cache_valid(*ts))
                     .map(|(record, _)| record.clone())
                     .collect()
@@ -311,8 +319,7 @@ impl AgentRegistry for HttpRegistry {
         Ok(())
     }
 
-    async fn end_call(
-        &self, agent_id: &str, talk_time_secs: u64) -> anyhow::Result<()> {
+    async fn end_call(&self, agent_id: &str, talk_time_secs: u64) -> anyhow::Result<()> {
         let updates = serde_json::json!({
             "talk_time_secs": talk_time_secs,
         });
@@ -328,7 +335,7 @@ impl AgentRegistry for HttpRegistry {
             record.total_calls_handled += 1;
             record.total_talk_time_secs += talk_time_secs;
             record.last_call_end = Some(Instant::now());
-            
+
             if record.current_calls == 0 {
                 record.presence = PresenceState::Wrapup;
             }
@@ -337,12 +344,10 @@ impl AgentRegistry for HttpRegistry {
         Ok(())
     }
 
-    async fn find_available_agents(
-        &self,
-        required_skills: &[String],
-    ) -> Vec<AgentRecord> {
+    async fn find_available_agents(&self, required_skills: &[String]) -> Vec<AgentRecord> {
         let agents = self.list_agents().await;
-        agents.into_iter()
+        agents
+            .into_iter()
             .filter(|a| a.has_capacity() && a.has_skills(required_skills))
             .collect()
     }
@@ -357,15 +362,14 @@ impl AgentRegistry for HttpRegistry {
         super::select_best_agent(candidates, strategy, &mut rr_counter)
     }
 
-    async fn on_state_change(
-        &self, handler: Box<dyn Fn(&AgentRecord) + Send + Sync>) {
+    async fn on_state_change(&self, handler: Box<dyn Fn(&AgentRecord) + Send + Sync>) {
         let mut handlers = self.event_handlers.write().await;
-        let handler: Box<dyn Fn(&AgentRecord) + Send + Sync + 'static> = unsafe { std::mem::transmute(handler) };
+        let handler: Box<dyn Fn(&AgentRecord) + Send + Sync + 'static> =
+            unsafe { std::mem::transmute(handler) };
         handlers.push(handler);
     }
 
-    async fn resolve_target(
-        &self, _target_uri: &str) -> Vec<String> {
+    async fn resolve_target(&self, _target_uri: &str) -> Vec<String> {
         // HTTP registry could query external API for target resolution
         // For now, return empty list - CC addon should override if needed
         vec![]

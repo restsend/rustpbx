@@ -22,7 +22,6 @@ pub enum S3Vendor {
     DigitalOcean,
 }
 
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum StorageConfig {
@@ -93,12 +92,13 @@ impl Storage {
                             .with_secret_access_key(secret_key);
 
                         if let Some(ep) = endpoint
-                            && !ep.is_empty() {
-                                builder = builder.with_endpoint(ep);
-                                if ep.starts_with("http://") {
-                                    builder = builder.with_allow_http(true);
-                                }
+                            && !ep.is_empty()
+                        {
+                            builder = builder.with_endpoint(ep);
+                            if ep.starts_with("http://") {
+                                builder = builder.with_allow_http(true);
                             }
+                        }
                         Arc::new(builder.build()?)
                     }
                     S3Vendor::GCP => {
@@ -144,9 +144,10 @@ impl Storage {
     pub async fn write(&self, path: &str, bytes: Bytes) -> Result<()> {
         if self.is_local
             && let Some(local_path) = self.local_path(path)
-                && let Some(parent) = local_path.parent() {
-                    tokio::fs::create_dir_all(parent).await?;
-                }
+            && let Some(parent) = local_path.parent()
+        {
+            tokio::fs::create_dir_all(parent).await?;
+        }
         let object_path = self.object_path(path);
         self.inner.put(&object_path, bytes.into()).await?;
         Ok(())
@@ -183,7 +184,9 @@ impl Storage {
     }
 
     pub fn local_path(&self, path: &str) -> Option<PathBuf> {
-        self.local_root.as_ref().map(|root| root.join(path.trim_start_matches('/')))
+        self.local_root
+            .as_ref()
+            .map(|root| root.join(path.trim_start_matches('/')))
     }
 
     // Helper to upload a local file to storage (move)

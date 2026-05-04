@@ -610,7 +610,10 @@ pub enum RwiRequestPayload {
     #[serde(rename = "media.play", alias = "MediaPlay")]
     MediaPlay(MediaPlayRequest),
     #[serde(rename = "media.stop")]
-    MediaStop { call_id: Option<String>, leg_id: Option<String> },
+    MediaStop {
+        call_id: Option<String>,
+        leg_id: Option<String>,
+    },
     #[serde(rename = "media.stream_start")]
     MediaStreamStart(MediaStreamRequest),
     #[serde(rename = "media.stream_stop")]
@@ -1006,35 +1009,41 @@ impl From<RwiRequest> for RwiCommandPayload {
             RwiRequestPayload::SipOptionsPing { call_id } => RwiCommandPayload::SipOptionsPing {
                 call_id: call_id.unwrap_or_default(),
             },
-            RwiRequestPayload::LegAdd { call_id, target, leg_id } => {
-                RwiCommandPayload::LegAdd {
-                    call_id: call_id.unwrap_or_default(),
-                    target: target.unwrap_or_default(),
-                    leg_id,
-                }
-            }
+            RwiRequestPayload::LegAdd {
+                call_id,
+                target,
+                leg_id,
+            } => RwiCommandPayload::LegAdd {
+                call_id: call_id.unwrap_or_default(),
+                target: target.unwrap_or_default(),
+                leg_id,
+            },
             RwiRequestPayload::LegRemove { call_id, leg_id } => RwiCommandPayload::LegRemove {
                 call_id: call_id.unwrap_or_default(),
                 leg_id: leg_id.unwrap_or_default(),
             },
-            RwiRequestPayload::AppStart { call_id, app_name, params } => {
-                RwiCommandPayload::AppStart {
-                    call_id: call_id.unwrap_or_default(),
-                    app_name: app_name.unwrap_or_default(),
-                    params,
-                }
-            }
+            RwiRequestPayload::AppStart {
+                call_id,
+                app_name,
+                params,
+            } => RwiCommandPayload::AppStart {
+                call_id: call_id.unwrap_or_default(),
+                app_name: app_name.unwrap_or_default(),
+                params,
+            },
             RwiRequestPayload::AppStop { call_id, reason } => RwiCommandPayload::AppStop {
                 call_id: call_id.unwrap_or_default(),
                 reason,
             },
-            RwiRequestPayload::AppChain { call_id, app_name, params } => {
-                RwiCommandPayload::AppChain {
-                    call_id: call_id.unwrap_or_default(),
-                    app_name: app_name.unwrap_or_default(),
-                    params,
-                }
-            }
+            RwiRequestPayload::AppChain {
+                call_id,
+                app_name,
+                params,
+            } => RwiCommandPayload::AppChain {
+                call_id: call_id.unwrap_or_default(),
+                app_name: app_name.unwrap_or_default(),
+                params,
+            },
             RwiRequestPayload::ConferenceCreate(mut r) => {
                 if r.conf_id.is_empty() {
                     r.conf_id = Uuid::new_v4().to_string();

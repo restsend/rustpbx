@@ -22,12 +22,11 @@ use argon2::password_hash::{PasswordHasher, SaltString};
 use axum::extract::{Path as AxumPath, Query, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::sse::{KeepAlive, Sse};
-use futures::stream;
-use std::convert::Infallible;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, patch, post};
 use axum::{Json, Router};
 use chrono::{DateTime, Duration, Utc};
+use futures::stream;
 use sea_orm::sea_query::Condition;
 use sea_orm::{
     ActiveModelTrait, ActiveValue::Set, ColumnTrait, EntityTrait, PaginatorTrait, QueryFilter,
@@ -36,6 +35,7 @@ use sea_orm::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Value as JsonValue, json};
 use std::collections::VecDeque;
+use std::convert::Infallible;
 use std::fs::File;
 use std::io::{self, BufRead, BufReader, Seek, SeekFrom};
 use std::time::Duration as StdDuration;
@@ -204,8 +204,14 @@ pub fn urls() -> Router<Arc<ConsoleState>> {
     #[cfg(feature = "commerce")]
     let router = router
         .route("/settings/config/cluster", patch(update_cluster_settings))
-        .route("/settings/config/cluster/reload", get(cluster_reload_sse_handler))
-        .route("/settings/config/cluster/reload-addons", get(list_reload_addons_handler));
+        .route(
+            "/settings/config/cluster/reload",
+            get(cluster_reload_sse_handler),
+        )
+        .route(
+            "/settings/config/cluster/reload-addons",
+            get(list_reload_addons_handler),
+        );
 
     router
         .route(
@@ -279,7 +285,11 @@ async fn build_settings_payload(state: &ConsoleState) -> JsonValue {
 
     if let Some(app_state) = state.app_state() {
         let config_arc = app_state.config().clone();
-        ami_endpoint = config_arc.proxy.ami_path.clone().unwrap_or_else(|| "/ami/v1".to_string());
+        ami_endpoint = config_arc
+            .proxy
+            .ami_path
+            .clone()
+            .unwrap_or_else(|| "/ami/v1".to_string());
         let mut loaded_config: Option<Config> = None;
 
         if let Some(path) = app_state.config_path.as_ref() {
@@ -693,9 +703,10 @@ fn build_storage_profiles(config: &crate::config::Config) -> (JsonValue, Vec<Jso
     spool_profile.insert("recorder_path", json!(&recorder_path));
 
     if let Some(policy) = config.recording.as_ref()
-        && let Ok(policy_value) = serde_json::to_value(policy) {
-            spool_profile.insert("recording", policy_value);
-        }
+        && let Ok(policy_value) = serde_json::to_value(policy)
+    {
+        spool_profile.insert("recording", policy_value);
+    }
 
     let active_profile_id = callrecord_profile.id.clone();
     let active_description = callrecord_profile.description.clone();
@@ -740,15 +751,15 @@ async fn query_departments(
             .as_ref()
             .map(|v| v.trim())
             .filter(|v| !v.is_empty())
-        {
-            let pattern = format!("%{}%", keyword);
-            selector = selector.filter(
-                Condition::any()
-                    .add(DepartmentColumn::Name.like(pattern.clone()))
-                    .add(DepartmentColumn::DisplayLabel.like(pattern.clone()))
-                    .add(DepartmentColumn::Slug.like(pattern)),
-            );
-        }
+    {
+        let pattern = format!("%{}%", keyword);
+        selector = selector.filter(
+            Condition::any()
+                .add(DepartmentColumn::Name.like(pattern.clone()))
+                .add(DepartmentColumn::DisplayLabel.like(pattern.clone()))
+                .add(DepartmentColumn::Slug.like(pattern)),
+        );
+    }
 
     let paginator = selector.paginate(db, payload.normalize().1);
     let pagination = match forms::paginate(paginator, &payload).await {
@@ -1000,9 +1011,10 @@ async fn query_users(
             );
         }
         if let Some(active_only) = filters.active
-            && active_only {
-                selector = selector.filter(UserColumn::IsActive.eq(true));
-            }
+            && active_only
+        {
+            selector = selector.filter(UserColumn::IsActive.eq(true));
+        }
     }
 
     let paginator = selector.paginate(db, query.normalize().1);
@@ -1600,17 +1612,17 @@ pub(crate) async fn update_platform_settings(
     };
 
     if let (Some(start), Some(end)) = (config.rtp_start_port, config.rtp_end_port)
-        && start > end {
-            return json_error(
-                StatusCode::UNPROCESSABLE_ENTITY,
-                "rtp_start_port must be less than or equal to rtp_end_port",
-            );
-        }
+        && start > end
+    {
+        return json_error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "rtp_start_port must be less than or equal to rtp_end_port",
+        );
+    }
 
-    if modified
-        && let Err(resp) = persist_document(&config_path, doc_text) {
-            return resp;
-        }
+    if modified && let Err(resp) = persist_document(&config_path, doc_text) {
+        return resp;
+    }
 
     Json(json!({
         "status": "ok",
@@ -2003,10 +2015,9 @@ pub(crate) async fn update_storage_settings(
         Err(resp) => return resp,
     };
 
-    if modified
-        && let Err(resp) = persist_document(&config_path, doc_text) {
-            return resp;
-        }
+    if modified && let Err(resp) = persist_document(&config_path, doc_text) {
+        return resp;
+    }
 
     let (storage_meta, storage_profiles) = build_storage_profiles(&config);
 
@@ -2064,10 +2075,9 @@ pub(crate) async fn update_security_settings(
         Err(resp) => return resp,
     };
 
-    if modified
-        && let Err(resp) = persist_document(&config_path, doc_text) {
-            return resp;
-        }
+    if modified && let Err(resp) = persist_document(&config_path, doc_text) {
+        return resp;
+    }
 
     let acl_rules = config.proxy.acl_rules.clone().unwrap_or_default();
     if let Some(app_state) = state.app_state() {
@@ -2234,10 +2244,9 @@ pub(crate) async fn update_rwi_settings(
         Err(resp) => return resp,
     };
 
-    if modified
-        && let Err(resp) = persist_document(&config_path, doc_text) {
-            return resp;
-        }
+    if modified && let Err(resp) = persist_document(&config_path, doc_text) {
+        return resp;
+    }
 
     let rwi_config = config.rwi.unwrap_or_default();
     Json(json!({
@@ -2322,10 +2331,9 @@ pub(crate) async fn update_cluster_settings(
         Err(resp) => return resp,
     };
 
-    if modified
-        && let Err(resp) = persist_document(&config_path, doc_text) {
-            return resp;
-        }
+    if modified && let Err(resp) = persist_document(&config_path, doc_text) {
+        return resp;
+    }
 
     let cluster = config.cluster;
     // Update in-memory cluster config so the UI backfills on refresh without requiring restart.
@@ -2343,11 +2351,12 @@ pub(crate) async fn update_cluster_settings(
 
 /// List registered export/reload addon handlers (no feature gate needed).
 #[cfg(feature = "commerce")]
-async fn list_reload_addons_handler(
-    State(state): State<Arc<ConsoleState>>,
-) -> Response {
+async fn list_reload_addons_handler(State(state): State<Arc<ConsoleState>>) -> Response {
     let items: Vec<serde_json::Value> = if let Some(app_state) = state.app_state() {
-        app_state.addon_registry.export_reload.list()
+        app_state
+            .addon_registry
+            .export_reload
+            .list()
             .into_iter()
             .map(|(id, name)| serde_json::json!({ "id": id, "name": name }))
             .collect()
@@ -2370,14 +2379,19 @@ async fn cluster_reload_sse_handler(
         None => {
             use axum::response::sse::Sse;
             return Sse::new(futures::stream::once(async move {
-                Ok::<_, std::convert::Infallible>(SseEvent::default().event("error").data(r#"{"error":"PBX not running"}"#))
+                Ok::<_, std::convert::Infallible>(
+                    SseEvent::default()
+                        .event("error")
+                        .data(r#"{"error":"PBX not running"}"#),
+                )
             }))
             .into_response();
         }
     };
 
     use axum::response::sse::{KeepAlive, Sse};
-    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Result<SseEvent, std::convert::Infallible>>();
+    let (tx, rx) =
+        tokio::sync::mpsc::unbounded_channel::<Result<SseEvent, std::convert::Infallible>>();
 
     let payload = crate::handler::ami::PingReloadPayload {
         trunks: query.trunks,
@@ -2390,28 +2404,47 @@ async fn cluster_reload_sse_handler(
         macro_rules! sse_send {
             ($event_type:expr, $data:expr) => {
                 let tx = tx.clone();
-                let _ = tx.send(Ok(SseEvent::default().event($event_type).data($data.to_string())));
+                let _ = tx.send(Ok(SseEvent::default()
+                    .event($event_type)
+                    .data($data.to_string())));
             };
         }
 
         // Process trunks on current node
         if payload.trunks {
-            sse_send!("progress", serde_json::json!({"type": "addon_start", "node": "current", "addon": "trunks"}));
+            sse_send!(
+                "progress",
+                serde_json::json!({"type": "addon_start", "node": "current", "addon": "trunks"})
+            );
             let result = reload_trunks(&app, "current").await;
-            sse_send!("progress", serde_json::json!({"type": "addon_complete", "node": "current", "addon": "trunks", "result": result}));
+            sse_send!(
+                "progress",
+                serde_json::json!({"type": "addon_complete", "node": "current", "addon": "trunks", "result": result})
+            );
         }
 
         // Process routes on current node
         if payload.routes {
-            sse_send!("progress", serde_json::json!({"type": "addon_start", "node": "current", "addon": "routes"}));
+            sse_send!(
+                "progress",
+                serde_json::json!({"type": "addon_start", "node": "current", "addon": "routes"})
+            );
             let result = reload_routes_console(&app, "current").await;
-            sse_send!("progress", serde_json::json!({"type": "addon_complete", "node": "current", "addon": "routes", "result": result}));
+            sse_send!(
+                "progress",
+                serde_json::json!({"type": "addon_complete", "node": "current", "addon": "routes", "result": result})
+            );
         }
 
         // Process addon-based handlers on current node
         for addon_id in &payload.addons {
-            sse_send!("progress", serde_json::json!({"type": "addon_start", "node": "current", "addon": addon_id}));
-            let results = app.addon_registry.export_reload
+            sse_send!(
+                "progress",
+                serde_json::json!({"type": "addon_start", "node": "current", "addon": addon_id})
+            );
+            let results = app
+                .addon_registry
+                .export_reload
                 .invoke_selected(&[addon_id.clone()], &app)
                 .await;
             let json_result = match results.into_iter().next() {
@@ -2419,11 +2452,17 @@ async fn cluster_reload_sse_handler(
                 Some((_, Err(e))) => serde_json::json!({ "status": "error", "message": e }),
                 None => serde_json::json!({ "status": "error", "message": "Handler not found" }),
             };
-            sse_send!("progress", serde_json::json!({"type": "addon_complete", "node": "current", "addon": addon_id, "result": json_result}));
+            sse_send!(
+                "progress",
+                serde_json::json!({"type": "addon_complete", "node": "current", "addon": addon_id, "result": json_result})
+            );
         }
 
         // Process peer nodes
-        let peers = app.config().cluster.as_ref()
+        let peers = app
+            .config()
+            .cluster
+            .as_ref()
             .map(|c| c.peers.clone())
             .unwrap_or_default();
 
@@ -2436,9 +2475,15 @@ async fn cluster_reload_sse_handler(
 
         for peer in &peers {
             let peer_label = format!("{}:{}", peer.addr, peer.ami_port);
-            sse_send!("progress", serde_json::json!({"type": "node_start", "node": &peer_label}));
+            sse_send!(
+                "progress",
+                serde_json::json!({"type": "node_start", "node": &peer_label})
+            );
 
-            let url = format!("http://{}:{}{}/cluster/reload_sync", peer.addr, peer.ami_port, ami_path);
+            let url = format!(
+                "http://{}:{}{}/cluster/reload_sync",
+                peer.addr, peer.ami_port, ami_path
+            );
             let client = reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(120))
                 .build()
@@ -2447,14 +2492,23 @@ async fn cluster_reload_sse_handler(
             match client.post(&url).json(&payload).send().await {
                 Ok(resp) => match resp.json::<serde_json::Value>().await {
                     Ok(peer_results) => {
-                        sse_send!("progress", serde_json::json!({"type": "node_complete", "node": &peer_label, "result": peer_results}));
+                        sse_send!(
+                            "progress",
+                            serde_json::json!({"type": "node_complete", "node": &peer_label, "result": peer_results})
+                        );
                     }
                     Err(e) => {
-                        sse_send!("progress", serde_json::json!({"type": "node_error", "node": &peer_label, "error": format!("Invalid JSON: {}", e)}));
+                        sse_send!(
+                            "progress",
+                            serde_json::json!({"type": "node_error", "node": &peer_label, "error": format!("Invalid JSON: {}", e)})
+                        );
                     }
                 },
                 Err(e) => {
-                    sse_send!("progress", serde_json::json!({"type": "node_error", "node": &peer_label, "error": format!("Connection failed: {}", e)}));
+                    sse_send!(
+                        "progress",
+                        serde_json::json!({"type": "node_error", "node": &peer_label, "error": format!("Connection failed: {}", e)})
+                    );
                 }
             }
         }
@@ -2466,7 +2520,11 @@ async fn cluster_reload_sse_handler(
         rx.recv().await.map(|event| (event, rx))
     });
     Sse::new(sse_stream)
-        .keep_alive(KeepAlive::new().interval(std::time::Duration::from_secs(15)).text("keep-alive"))
+        .keep_alive(
+            KeepAlive::new()
+                .interval(std::time::Duration::from_secs(15))
+                .text("keep-alive"),
+        )
         .into_response()
 }
 
@@ -2475,7 +2533,9 @@ async fn cluster_reload_sse_handler(
 async fn reload_trunks(app: &crate::app::AppStateInner, _node: &str) -> serde_json::Value {
     let config_path = app.config_path.clone();
     let config_override = config_path.as_ref().and_then(|path| {
-        crate::config::Config::load(path).ok().map(|cfg| std::sync::Arc::new(cfg.proxy))
+        crate::config::Config::load(path)
+            .ok()
+            .map(|cfg| std::sync::Arc::new(cfg.proxy))
     });
 
     match app
@@ -2491,7 +2551,9 @@ async fn reload_trunks(app: &crate::app::AppStateInner, _node: &str) -> serde_js
             }
             serde_json::json!({ "addon": "trunks", "status": "ok", "reloaded": metrics.total })
         }
-        Err(e) => serde_json::json!({ "addon": "trunks", "status": "error", "message": e.to_string() }),
+        Err(e) => {
+            serde_json::json!({ "addon": "trunks", "status": "error", "message": e.to_string() })
+        }
     }
 }
 
@@ -2500,7 +2562,9 @@ async fn reload_trunks(app: &crate::app::AppStateInner, _node: &str) -> serde_js
 async fn reload_routes_console(app: &crate::app::AppStateInner, _node: &str) -> serde_json::Value {
     let config_path = app.config_path.clone();
     let config_override = config_path.as_ref().and_then(|path| {
-        crate::config::Config::load(path).ok().map(|cfg| std::sync::Arc::new(cfg.proxy))
+        crate::config::Config::load(path)
+            .ok()
+            .map(|cfg| std::sync::Arc::new(cfg.proxy))
     });
 
     match app
@@ -2516,7 +2580,9 @@ async fn reload_routes_console(app: &crate::app::AppStateInner, _node: &str) -> 
             }
             serde_json::json!({ "addon": "routes", "status": "ok", "reloaded": metrics.total })
         }
-        Err(e) => serde_json::json!({ "addon": "routes", "status": "error", "message": e.to_string() }),
+        Err(e) => {
+            serde_json::json!({ "addon": "routes", "status": "error", "message": e.to_string() })
+        }
     }
 }
 
@@ -2536,7 +2602,10 @@ async fn fetch_recent_logs(
     Query(query): Query<LogRecentQuery>,
 ) -> Response {
     if !user.is_superuser {
-        return json_error(StatusCode::FORBIDDEN, "Permission denied. Superuser required.");
+        return json_error(
+            StatusCode::FORBIDDEN,
+            "Permission denied. Superuser required.",
+        );
     }
 
     let Some(path) = resolve_log_file_path(&state) else {
@@ -2593,7 +2662,10 @@ async fn follow_logs(
     Query(query): Query<LogFollowQuery>,
 ) -> Response {
     if !user.is_superuser {
-        return json_error(StatusCode::FORBIDDEN, "Permission denied. Superuser required.");
+        return json_error(
+            StatusCode::FORBIDDEN,
+            "Permission denied. Superuser required.",
+        );
     }
 
     let Some(path) = resolve_log_file_path(&state) else {
@@ -2652,7 +2724,10 @@ async fn stream_logs(
     Query(query): Query<LogStreamQuery>,
 ) -> Response {
     if !user.is_superuser {
-        return json_error(StatusCode::FORBIDDEN, "Permission denied. Superuser required.");
+        return json_error(
+            StatusCode::FORBIDDEN,
+            "Permission denied. Superuser required.",
+        );
     }
 
     let Some(path) = resolve_log_file_path(&state) else {
@@ -2710,7 +2785,9 @@ async fn stream_logs(
                 }),
             };
 
-            let event = axum::response::sse::Event::default().event("logs").data(payload.to_string());
+            let event = axum::response::sse::Event::default()
+                .event("logs")
+                .data(payload.to_string());
             Some((Ok::<_, Infallible>(event), cursor))
         }
     });

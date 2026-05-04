@@ -56,7 +56,10 @@ impl RecordingUploadHook {
     }
 
     fn s3_url(endpoint: Option<&str>, bucket: &str, key: &str) -> String {
-        match endpoint.map(str::trim).filter(|endpoint| !endpoint.is_empty()) {
+        match endpoint
+            .map(str::trim)
+            .filter(|endpoint| !endpoint.is_empty())
+        {
             Some(endpoint) => format!(
                 "{}/{}/{}",
                 endpoint.trim_end_matches('/'),

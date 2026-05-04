@@ -77,12 +77,13 @@ impl ActiveProxyCallRegistry {
     pub fn unregister_dialog(&self, dialog_id: &str) {
         let mut guard = self.inner.lock().unwrap();
         if let Some(handle) = guard.handles_by_dialog.remove(dialog_id)
-            && let Some(dialogs) = guard.dialog_by_session.get_mut(handle.session_id()) {
-                dialogs.retain(|d| d != dialog_id);
-                if dialogs.is_empty() {
-                    guard.dialog_by_session.remove(handle.session_id());
-                }
+            && let Some(dialogs) = guard.dialog_by_session.get_mut(handle.session_id())
+        {
+            dialogs.retain(|d| d != dialog_id);
+            if dialogs.is_empty() {
+                guard.dialog_by_session.remove(handle.session_id());
             }
+        }
     }
 
     pub fn get_handle_by_dialog(&self, dialog_id: &str) -> Option<SipSessionHandle> {

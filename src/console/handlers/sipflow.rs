@@ -337,22 +337,22 @@ async fn query_flow(
             .filter(CallRecordColumn::CallId.eq(&call_id))
             .one(state.db())
             .await
-        {
-            if start_time.is_none() {
-                start_time = Some(
-                    record.started_at.with_timezone(&chrono::Local) - chrono::Duration::minutes(10),
-                );
-            }
-            if end_time.is_none() {
-                end_time = Some(
-                    record
-                        .ended_at
-                        .unwrap_or(record.started_at)
-                        .with_timezone(&chrono::Local)
-                        + chrono::Duration::hours(1),
-                );
-            }
+    {
+        if start_time.is_none() {
+            start_time = Some(
+                record.started_at.with_timezone(&chrono::Local) - chrono::Duration::minutes(10),
+            );
         }
+        if end_time.is_none() {
+            end_time = Some(
+                record
+                    .ended_at
+                    .unwrap_or(record.started_at)
+                    .with_timezone(&chrono::Local)
+                    + chrono::Duration::hours(1),
+            );
+        }
+    }
 
     let start_time = start_time.unwrap_or_else(|| now - chrono::Duration::hours(1));
     let end_time = end_time.unwrap_or(now);
@@ -456,22 +456,22 @@ async fn query_media(
             .filter(CallRecordColumn::CallId.eq(&call_id))
             .one(state.db())
             .await
-        {
-            if start_time.is_none() {
-                start_time = Some(
-                    record.started_at.with_timezone(&chrono::Local) - chrono::Duration::minutes(10),
-                );
-            }
-            if end_time.is_none() {
-                end_time = Some(
-                    record
-                        .ended_at
-                        .unwrap_or(record.started_at)
-                        .with_timezone(&chrono::Local)
-                        + chrono::Duration::hours(1),
-                );
-            }
+    {
+        if start_time.is_none() {
+            start_time = Some(
+                record.started_at.with_timezone(&chrono::Local) - chrono::Duration::minutes(10),
+            );
         }
+        if end_time.is_none() {
+            end_time = Some(
+                record
+                    .ended_at
+                    .unwrap_or(record.started_at)
+                    .with_timezone(&chrono::Local)
+                    + chrono::Duration::hours(1),
+            );
+        }
+    }
 
     let start_time = start_time.unwrap_or_else(|| now - chrono::Duration::hours(1));
     let end_time = end_time.unwrap_or(now);
@@ -518,9 +518,10 @@ fn parse_datetime(s: &str) -> Option<DateTime<chrono::Local>> {
 
     // Try Unix timestamp
     if let Ok(ts) = s.parse::<i64>()
-        && let Some(dt) = chrono::Local.timestamp_opt(ts, 0).single() {
-            return Some(dt);
-        }
+        && let Some(dt) = chrono::Local.timestamp_opt(ts, 0).single()
+    {
+        return Some(dt);
+    }
 
     None
 }

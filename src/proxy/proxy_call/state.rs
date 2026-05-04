@@ -244,9 +244,10 @@ impl SipSessionShared {
     /// Returns `true` if the event was delivered (i.e. an app is currently running).
     pub fn send_app_event(&self, event: crate::call::app::ControllerEvent) -> bool {
         if let Ok(slot) = self.app_event_tx.read()
-            && let Some(tx) = slot.as_ref() {
-                return tx.send(event).is_ok();
-            }
+            && let Some(tx) = slot.as_ref()
+        {
+            return tx.send(event).is_ok();
+        }
         false
     }
 
@@ -336,21 +337,22 @@ impl SipSessionShared {
         self.update(|inner| {
             let mut changed = false;
             if let Some(ref caller) = caller
-                && inner.caller != Some(caller.clone()) {
-                    inner.caller = Some(caller.clone());
-                    changed = true;
-                }
+                && inner.caller != Some(caller.clone())
+            {
+                inner.caller = Some(caller.clone());
+                changed = true;
+            }
             if let Some(ref callee) = callee
-                && inner.callee != Some(callee.clone()) {
-                    inner.callee = Some(callee.clone());
-                    changed = true;
-                }
+                && inner.callee != Some(callee.clone())
+            {
+                inner.callee = Some(callee.clone());
+                changed = true;
+            }
             changed
         });
     }
 
     pub fn transition_to_ringing(&self, has_early_media: bool) -> bool {
-        
         self.update(|inner| match inner.phase {
             ProxyCallPhase::Initializing | ProxyCallPhase::Ringing | ProxyCallPhase::EarlyMedia => {
                 if inner.ring_time.is_none() {

@@ -21,7 +21,6 @@ pub enum HangupCascade {
     Other,
 }
 
-
 /// Who initiated the hangup
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]

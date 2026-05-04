@@ -100,9 +100,10 @@ impl UserBackend for ExtensionUserBackend {
         if self.ttl.as_secs() > 0 {
             let mut cache = self.cache.lock().unwrap();
             if let Some((user, timestamp)) = cache.get(&cache_key)
-                && timestamp.elapsed() < self.ttl {
-                    return Ok(user.clone());
-                }
+                && timestamp.elapsed() < self.ttl
+            {
+                return Ok(user.clone());
+            }
         }
 
         let result = self

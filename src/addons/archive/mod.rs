@@ -63,17 +63,18 @@ impl ArchiveAddon {
             let addon_config_path = config_dir.join("archive.toml");
             if addon_config_path.exists() {
                 match tokio::fs::read_to_string(&addon_config_path).await {
-                    Ok(content) => {
-                        match toml::from_str::<ArchiveConfig>(&content) {
-                            Ok(config) => {
-                                tracing::info!("Archive config loaded from {}", addon_config_path.display());
-                                return Some(config);
-                            }
-                            Err(e) => {
-                                tracing::warn!("Failed to parse archive.toml: {}", e);
-                            }
+                    Ok(content) => match toml::from_str::<ArchiveConfig>(&content) {
+                        Ok(config) => {
+                            tracing::info!(
+                                "Archive config loaded from {}",
+                                addon_config_path.display()
+                            );
+                            return Some(config);
                         }
-                    }
+                        Err(e) => {
+                            tracing::warn!("Failed to parse archive.toml: {}", e);
+                        }
+                    },
                     Err(e) => {
                         tracing::warn!("Failed to read archive.toml: {}", e);
                     }
@@ -267,9 +268,8 @@ impl ArchiveAddon {
 
             if should_run {
                 info!("Starting scheduled archive job");
-                let archive_dir = archive_config.effective_archive_dir(
-                    &state.config().recorder_path()
-                );
+                let archive_dir =
+                    archive_config.effective_archive_dir(&state.config().recorder_path());
                 if let Err(e) =
                     Self::perform_archive(state.db(), &archive_config, &archive_dir).await
                 {

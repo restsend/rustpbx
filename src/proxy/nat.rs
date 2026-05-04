@@ -63,31 +63,33 @@ impl NatInspector {
             };
 
             if let Ok(ip) = host_only.parse::<IpAddr>()
-                && Self::is_private_ip(&ip) {
-                    let from_host = from_addr.host.to_string();
-                    if let Ok(from_ip) = from_host.parse::<IpAddr>()
-                        && (from_ip == ip || Self::is_private_ip(&from_ip)) {
-                            return;
-                        }
-
-                    let from_port = from_addr.port.as_ref().map(|p| p.to_string());
-
-                    let mut new_host_part = from_host;
-                    if let Some(port) = from_port {
-                        new_host_part.push(':');
-                        new_host_part.push_str(&port);
-                    } else if let Some(col_idx) = host_part.find(':') {
-                        // Keep original port if from_addr doesn't have one (though it should)
-                        new_host_part.push_str(&host_part[col_idx..]);
-                    }
-
-                    let mut new_header = header_value[..uri_start + at_idx + 1].to_string();
-                    new_header.push_str(&new_host_part);
-                    new_header.push_str(&header_value[uri_end..]);
-
-                    debug!(old = %header_value, new = %new_header, "Fixed NAT Contact header");
-                    *header_value = new_header;
+                && Self::is_private_ip(&ip)
+            {
+                let from_host = from_addr.host.to_string();
+                if let Ok(from_ip) = from_host.parse::<IpAddr>()
+                    && (from_ip == ip || Self::is_private_ip(&from_ip))
+                {
+                    return;
                 }
+
+                let from_port = from_addr.port.as_ref().map(|p| p.to_string());
+
+                let mut new_host_part = from_host;
+                if let Some(port) = from_port {
+                    new_host_part.push(':');
+                    new_host_part.push_str(&port);
+                } else if let Some(col_idx) = host_part.find(':') {
+                    // Keep original port if from_addr doesn't have one (though it should)
+                    new_host_part.push_str(&host_part[col_idx..]);
+                }
+
+                let mut new_header = header_value[..uri_start + at_idx + 1].to_string();
+                new_header.push_str(&new_host_part);
+                new_header.push_str(&header_value[uri_end..]);
+
+                debug!(old = %header_value, new = %new_header, "Fixed NAT Contact header");
+                *header_value = new_header;
+            }
         } else if let Some(host_part) = uri_str.strip_prefix("sip:") {
             let host_only = if let Some(col_idx) = host_part.find(':') {
                 &host_part[..col_idx]
@@ -96,31 +98,33 @@ impl NatInspector {
             };
 
             if let Ok(ip) = host_only.parse::<IpAddr>()
-                && Self::is_private_ip(&ip) {
-                    let from_host = from_addr.host.to_string();
-                    // If the ip is the same as the source ip, we don't need to fix it
-                    if let Ok(from_ip) = from_host.parse::<IpAddr>()
-                        && from_ip == ip {
-                            return;
-                        }
-
-                    let from_port = from_addr.port.as_ref().map(|p| p.to_string());
-
-                    let mut new_host_part = from_host;
-                    if let Some(port) = from_port {
-                        new_host_part.push(':');
-                        new_host_part.push_str(&port);
-                    } else if let Some(col_idx) = host_part.find(':') {
-                        new_host_part.push_str(&host_part[col_idx..]);
-                    }
-
-                    let mut new_header = header_value[..uri_start + 4].to_string();
-                    new_header.push_str(&new_host_part);
-                    new_header.push_str(&header_value[uri_end..]);
-
-                    debug!(old = %header_value, new = %new_header, "Fixed NAT Contact header");
-                    *header_value = new_header;
+                && Self::is_private_ip(&ip)
+            {
+                let from_host = from_addr.host.to_string();
+                // If the ip is the same as the source ip, we don't need to fix it
+                if let Ok(from_ip) = from_host.parse::<IpAddr>()
+                    && from_ip == ip
+                {
+                    return;
                 }
+
+                let from_port = from_addr.port.as_ref().map(|p| p.to_string());
+
+                let mut new_host_part = from_host;
+                if let Some(port) = from_port {
+                    new_host_part.push(':');
+                    new_host_part.push_str(&port);
+                } else if let Some(col_idx) = host_part.find(':') {
+                    new_host_part.push_str(&host_part[col_idx..]);
+                }
+
+                let mut new_header = header_value[..uri_start + 4].to_string();
+                new_header.push_str(&new_host_part);
+                new_header.push_str(&header_value[uri_end..]);
+
+                debug!(old = %header_value, new = %new_header, "Fixed NAT Contact header");
+                *header_value = new_header;
+            }
         }
     }
 }
@@ -209,8 +213,7 @@ mod tests {
             .expect("Contact header should exist");
 
         assert_eq!(
-            contact_line,
-            "Contact: <sip:41111112222@198.51.100.24:15060>",
+            contact_line, "Contact: <sip:41111112222@198.51.100.24:15060>",
             "rewritten Contact header should not duplicate the header name"
         );
     }

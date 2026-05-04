@@ -108,22 +108,22 @@ impl UserBackend for DbBackend {
         let mut bind_params: Vec<&str> = vec![username];
 
         if let Some(realm) = realm
-            && let Some(ref realm_col) = self.config.realm_column {
-                let host = if let Some(pos) = realm.find(':') {
-                    &realm[..pos]
-                } else {
-                    realm
-                };
-                if host != realm {
-                    where_clause
-                        .push_str(&format!(" AND ({} = ? OR {} = ?)", realm_col, realm_col));
-                    bind_params.push(realm);
-                    bind_params.push(host);
-                } else {
-                    where_clause.push_str(&format!(" AND {} = ?", realm_col));
-                    bind_params.push(realm);
-                }
+            && let Some(ref realm_col) = self.config.realm_column
+        {
+            let host = if let Some(pos) = realm.find(':') {
+                &realm[..pos]
+            } else {
+                realm
+            };
+            if host != realm {
+                where_clause.push_str(&format!(" AND ({} = ? OR {} = ?)", realm_col, realm_col));
+                bind_params.push(realm);
+                bind_params.push(host);
+            } else {
+                where_clause.push_str(&format!(" AND {} = ?", realm_col));
+                bind_params.push(realm);
             }
+        }
         if let Some(ref deleted_at_col) = self.config.deleted_at_column {
             where_clause.push_str(&format!(" AND {} IS NULL", deleted_at_col));
         }

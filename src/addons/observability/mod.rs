@@ -105,17 +105,18 @@ impl ObservabilityAddon {
             let addon_config_path = config_dir.join("observability.toml");
             if addon_config_path.exists() {
                 match tokio::fs::read_to_string(&addon_config_path).await {
-                    Ok(content) => {
-                        match toml::from_str::<MetricsConfig>(&content) {
-                            Ok(config) => {
-                                tracing::info!("Observability config loaded from {}", addon_config_path.display());
-                                return Some(config);
-                            }
-                            Err(e) => {
-                                tracing::warn!("Failed to parse observability.toml: {}", e);
-                            }
+                    Ok(content) => match toml::from_str::<MetricsConfig>(&content) {
+                        Ok(config) => {
+                            tracing::info!(
+                                "Observability config loaded from {}",
+                                addon_config_path.display()
+                            );
+                            return Some(config);
                         }
-                    }
+                        Err(e) => {
+                            tracing::warn!("Failed to parse observability.toml: {}", e);
+                        }
+                    },
                     Err(e) => {
                         tracing::warn!("Failed to read observability.toml: {}", e);
                     }
@@ -133,17 +134,18 @@ impl ObservabilityAddon {
             let addon_config_path = config_dir.join("observability.toml");
             if addon_config_path.exists() {
                 match std::fs::read_to_string(&addon_config_path) {
-                    Ok(content) => {
-                        match toml::from_str::<MetricsConfig>(&content) {
-                            Ok(config) => {
-                                tracing::info!("Observability config loaded from {}", addon_config_path.display());
-                                return Some(config);
-                            }
-                            Err(e) => {
-                                tracing::warn!("Failed to parse observability.toml: {}", e);
-                            }
+                    Ok(content) => match toml::from_str::<MetricsConfig>(&content) {
+                        Ok(config) => {
+                            tracing::info!(
+                                "Observability config loaded from {}",
+                                addon_config_path.display()
+                            );
+                            return Some(config);
                         }
-                    }
+                        Err(e) => {
+                            tracing::warn!("Failed to parse observability.toml: {}", e);
+                        }
+                    },
                     Err(e) => {
                         tracing::warn!("Failed to read observability.toml: {}", e);
                     }

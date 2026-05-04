@@ -61,9 +61,10 @@ fn metadata_tags(metadata: Option<&serde_json::Value>) -> Vec<String> {
         return Vec::new();
     };
     if let Some(tags_value) = value.get("tags")
-        && let Ok(tags) = serde_json::from_value::<Vec<String>>(tags_value.clone()) {
-            return normalize_tags(tags);
-        }
+        && let Ok(tags) = serde_json::from_value::<Vec<String>>(tags_value.clone())
+    {
+        return normalize_tags(tags);
+    }
     Vec::new()
 }
 
@@ -162,20 +163,24 @@ pub fn slugify_queue_name(value: &str) -> String {
             slug.push(lower);
             last_dash = false;
         } else if (lower.is_ascii_whitespace() || matches!(lower, '-' | '_' | '.' | '/'))
-            && !slug.is_empty() && !last_dash {
-                slug.push('-');
-                last_dash = true;
-            }
+            && !slug.is_empty()
+            && !last_dash
+        {
+            slug.push('-');
+            last_dash = true;
+        }
     }
     slug.trim_matches('-').to_string()
 }
 
 fn ensure_parent_dir(path: &Path) -> Result<()> {
     if let Some(parent) = path.parent()
-        && !parent.as_os_str().is_empty() && !parent.exists() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("failed to create directory {}", parent.display()))?;
-        }
+        && !parent.as_os_str().is_empty()
+        && !parent.exists()
+    {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create directory {}", parent.display()))?;
+    }
     Ok(())
 }
 

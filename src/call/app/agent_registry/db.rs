@@ -6,15 +6,15 @@
 //! - Scenarios where agent data must survive restarts
 
 use super::{AgentRecord, AgentRegistry, PresenceState, RoutingStrategy, select_best_agent};
-use sea_orm::{DatabaseConnection};
+use async_trait::async_trait;
+use sea_orm::DatabaseConnection;
 use std::collections::HashMap;
 use std::time::Instant;
 use tokio::sync::RwLock;
 use tracing::info;
-use async_trait::async_trait;
 
 /// Database-backed agent registry implementation
-/// 
+///
 /// Persists agent data to a relational database via SeaORM.
 /// Suitable for production multi-node deployments.
 pub struct DbRegistry {
@@ -64,7 +64,7 @@ impl AgentRegistry for DbRegistry {
     ) -> anyhow::Result<()> {
         // Note: This is a placeholder implementation
         // In production, you'd use SeaORM entities and migrations
-        
+
         let record = AgentRecord {
             agent_id: agent_id.clone(),
             display_name,
@@ -165,8 +165,7 @@ impl AgentRegistry for DbRegistry {
         Ok(())
     }
 
-    async fn end_call(
-        &self, agent_id: &str, talk_time_secs: u64) -> anyhow::Result<()> {
+    async fn end_call(&self, agent_id: &str, talk_time_secs: u64) -> anyhow::Result<()> {
         let mut cache = self.cache.write().await;
         let agent = cache
             .get_mut(agent_id)
@@ -191,10 +190,7 @@ impl AgentRegistry for DbRegistry {
         Ok(())
     }
 
-    async fn find_available_agents(
-        &self,
-        required_skills: &[String],
-    ) -> Vec<AgentRecord> {
+    async fn find_available_agents(&self, required_skills: &[String]) -> Vec<AgentRecord> {
         let cache = self.cache.read().await;
         cache
             .values()
@@ -213,15 +209,14 @@ impl AgentRegistry for DbRegistry {
         select_best_agent(candidates, strategy, &mut rr_counter)
     }
 
-    async fn on_state_change(
-        &self, handler: Box<dyn Fn(&AgentRecord) + Send + Sync>) {
+    async fn on_state_change(&self, handler: Box<dyn Fn(&AgentRecord) + Send + Sync>) {
         let mut handlers = self.event_handlers.write().await;
-        let handler: Box<dyn Fn(&AgentRecord) + Send + Sync + 'static> = unsafe { std::mem::transmute(handler) };
+        let handler: Box<dyn Fn(&AgentRecord) + Send + Sync + 'static> =
+            unsafe { std::mem::transmute(handler) };
         handlers.push(handler);
     }
 
-    async fn resolve_target(
-        &self, _target_uri: &str) -> Vec<String> {
+    async fn resolve_target(&self, _target_uri: &str) -> Vec<String> {
         // Db registry doesn't support custom targets by default.
         // CC addon should provide a custom registry implementation.
         vec![]
@@ -235,10 +230,8 @@ mod tests {
     #[tokio::test]
     async fn test_agent_registry_basic() {
         // Create an in-memory SQLite database for testing
-        let db = sea_orm::Database::connect("sqlite::memory:")
-            .await
-            .unwrap();
-        
+        let db = sea_orm::Database::connect("sqlite::memory:").await.unwrap();
+
         let registry = DbRegistry::new(db);
 
         // Register

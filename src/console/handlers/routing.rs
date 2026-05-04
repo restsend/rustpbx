@@ -114,7 +114,6 @@ pub(crate) enum RouteTargetKind {
     Ivr,
 }
 
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct RouteActionDocument {
     select: RoutingSelectionStrategy,
@@ -185,36 +184,37 @@ impl Default for RouteActionDocument {
 impl RouteDocument {
     fn from_model(model: &RoutingModel) -> Self {
         if let Some(meta) = model.metadata.clone()
-            && let Ok(mut doc) = serde_json::from_value::<RouteDocument>(meta) {
-                doc.id = Some(model.id);
-                doc.name = model.name.clone();
-                doc.description = model.description.clone();
-                doc.owner = model.owner.clone();
-                doc.direction = model.direction;
-                doc.priority = model.priority;
-                doc.disabled = !model.is_active;
-                doc.action.select = model.selection_strategy;
-                doc.action.hash_key = if doc.action.select == RoutingSelectionStrategy::Hash {
-                    sanitize_optional_string(model.hash_key.clone()).or(doc.action.hash_key)
-                } else {
-                    None
-                };
-                if let Some(filters) = model.header_filters.clone() {
-                    doc.matchers = value_to_map(filters);
-                }
-                if let Some(rewrites) = model.rewrite_rules.clone() {
-                    doc.rewrite = value_to_map(rewrites);
-                }
-                let assignments = parse_trunk_assignments(model.target_trunks.clone());
-                if !assignments.is_empty() {
-                    doc.action.trunks = assignments;
-                }
-                if let Some(notes) = model.notes.clone() {
-                    doc.notes = parse_notes_value(Some(notes));
-                }
-                doc.ensure_consistency();
-                return doc;
+            && let Ok(mut doc) = serde_json::from_value::<RouteDocument>(meta)
+        {
+            doc.id = Some(model.id);
+            doc.name = model.name.clone();
+            doc.description = model.description.clone();
+            doc.owner = model.owner.clone();
+            doc.direction = model.direction;
+            doc.priority = model.priority;
+            doc.disabled = !model.is_active;
+            doc.action.select = model.selection_strategy;
+            doc.action.hash_key = if doc.action.select == RoutingSelectionStrategy::Hash {
+                sanitize_optional_string(model.hash_key.clone()).or(doc.action.hash_key)
+            } else {
+                None
+            };
+            if let Some(filters) = model.header_filters.clone() {
+                doc.matchers = value_to_map(filters);
             }
+            if let Some(rewrites) = model.rewrite_rules.clone() {
+                doc.rewrite = value_to_map(rewrites);
+            }
+            let assignments = parse_trunk_assignments(model.target_trunks.clone());
+            if !assignments.is_empty() {
+                doc.action.trunks = assignments;
+            }
+            if let Some(notes) = model.notes.clone() {
+                doc.notes = parse_notes_value(Some(notes));
+            }
+            doc.ensure_consistency();
+            return doc;
+        }
 
         let mut doc = RouteDocument {
             id: Some(model.id),
@@ -369,9 +369,10 @@ impl RouteDocument {
     fn apply_trunk_context(&mut self, model: &RoutingModel, trunks: &HashMap<i64, SipTrunkModel>) {
         if self.source_trunk.is_none()
             && let Some(source_id) = model.source_trunk_id
-                && let Some(trunk) = trunks.get(&source_id) {
-                    self.source_trunk = Some(trunk.name.clone());
-                }
+            && let Some(trunk) = trunks.get(&source_id)
+        {
+            self.source_trunk = Some(trunk.name.clone());
+        }
 
         if !matches!(self.action.target_type, RouteTargetKind::SipTrunk) {
             return;
@@ -380,17 +381,17 @@ impl RouteDocument {
         if self.action.trunks.is_empty() {
             if let Some(default_id) = model.default_trunk_id
                 && let Some(trunk) = trunks.get(&default_id)
-                    && !self
-                        .action
-                        .trunks
-                        .iter()
-                        .any(|t| t.name.eq_ignore_ascii_case(&trunk.name))
-                    {
-                        self.action.trunks.push(RouteTrunkDocument {
-                            name: trunk.name.clone(),
-                            weight: DEFAULT_PRIORITY,
-                        });
-                    }
+                && !self
+                    .action
+                    .trunks
+                    .iter()
+                    .any(|t| t.name.eq_ignore_ascii_case(&trunk.name))
+            {
+                self.action.trunks.push(RouteTrunkDocument {
+                    name: trunk.name.clone(),
+                    weight: DEFAULT_PRIORITY,
+                });
+            }
             self.ensure_consistency();
         }
     }
@@ -818,7 +819,12 @@ pub async fn page_routing(
         })
         .unwrap_or(false);
 
-    let ami_endpoint = state.config().proxy.ami_path.clone().unwrap_or_else(|| "/ami/v1".to_string());
+    let ami_endpoint = state
+        .config()
+        .proxy
+        .ami_path
+        .clone()
+        .unwrap_or_else(|| "/ami/v1".to_string());
     state.render_with_headers(
         "console/routing.html",
         json!({
@@ -1263,9 +1269,10 @@ pub async fn clone_routing(
 
     doc.source_trunk = sanitize_optional_string(doc.source_trunk.take());
     if let Some(ref name) = doc.source_trunk
-        && resolve_trunk_id(&trunk_lookup, Some(name.as_str())).is_none() {
-            return bad_request(format!("Source trunk \"{}\" was not found", name));
-        }
+        && resolve_trunk_id(&trunk_lookup, Some(name.as_str())).is_none()
+    {
+        return bad_request(format!("Source trunk \"{}\" was not found", name));
+    }
 
     let tx = match db.begin().await {
         Ok(tx) => tx,
@@ -1411,9 +1418,10 @@ pub(crate) async fn create_routing(
     let trunk_lookup = build_trunk_name_lookup(&trunks);
     doc.source_trunk = sanitize_optional_string(doc.source_trunk.take());
     if let Some(ref name) = doc.source_trunk
-        && resolve_trunk_id(&trunk_lookup, Some(name.as_str())).is_none() {
-            return bad_request(format!("Source trunk \"{}\" was not found", name));
-        }
+        && resolve_trunk_id(&trunk_lookup, Some(name.as_str())).is_none()
+    {
+        return bad_request(format!("Source trunk \"{}\" was not found", name));
+    }
 
     let tx = match db.begin().await {
         Ok(tx) => tx,
@@ -1538,9 +1546,10 @@ pub(crate) async fn update_routing(
 
     doc.source_trunk = sanitize_optional_string(doc.source_trunk.take());
     if let Some(ref name) = doc.source_trunk
-        && resolve_trunk_id(&trunk_lookup, Some(name.as_str())).is_none() {
-            return bad_request(format!("Source trunk \"{}\" was not found", name));
-        }
+        && resolve_trunk_id(&trunk_lookup, Some(name.as_str())).is_none()
+    {
+        return bad_request(format!("Source trunk \"{}\" was not found", name));
+    }
 
     let tx = match db.begin().await {
         Ok(tx) => tx,

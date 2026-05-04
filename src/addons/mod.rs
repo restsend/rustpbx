@@ -147,9 +147,7 @@ pub trait Addon: Send + Sync {
     }
 
     /// Return a dialplan inspector for intercepting SIP INVITEs
-    fn dialplan_inspector(
-        &self,
-    ) -> Option<Box<dyn crate::proxy::call::DialplanInspector>> {
+    fn dialplan_inspector(&self) -> Option<Box<dyn crate::proxy::call::DialplanInspector>> {
         None
     }
 
@@ -195,11 +193,11 @@ pub mod transcript;
 #[cfg(feature = "addon-wholesale")]
 pub mod wholesale;
 
-pub mod queue;
-#[cfg(feature = "addon-jsonrpc-router")]
-pub mod jsonrpc_router;
 #[cfg(feature = "addon-cc")]
 pub mod cc;
+#[cfg(feature = "addon-jsonrpc-router")]
+pub mod jsonrpc_router;
+pub mod queue;
 
 #[cfg(feature = "addon-endpoint-manager")]
 pub mod endpoint_manager;

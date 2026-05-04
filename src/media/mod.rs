@@ -351,33 +351,33 @@ impl RtcTrack {
                 .media_sections
                 .iter_mut()
                 .find(|m| m.kind == MediaKind::Audio)
-            {
-                section.formats.clear();
-                section
-                    .attributes
-                    .retain(|a| a.key != "rtpmap" && a.key != "fmtp");
+        {
+            section.formats.clear();
+            section
+                .attributes
+                .retain(|a| a.key != "rtpmap" && a.key != "fmtp");
 
-                // Build RTP map from codec preference list
-                let mut seen_pts = HashSet::new();
-                for info in self.rtp_map.iter() {
-                    let pt = info.payload_type;
-                    if !seen_pts.insert(pt) {
-                        continue;
-                    }
-                    section.formats.push(pt.to_string());
+            // Build RTP map from codec preference list
+            let mut seen_pts = HashSet::new();
+            for info in self.rtp_map.iter() {
+                let pt = info.payload_type;
+                if !seen_pts.insert(pt) {
+                    continue;
+                }
+                section.formats.push(pt.to_string());
 
+                section.attributes.push(Attribute {
+                    key: "rtpmap".to_string(),
+                    value: Some(format!("{} {}", pt, codec_info_rtpmap(info))),
+                });
+                if let Some(fmtp) = info.codec.fmtp() {
                     section.attributes.push(Attribute {
-                        key: "rtpmap".to_string(),
-                        value: Some(format!("{} {}", pt, codec_info_rtpmap(info))),
+                        key: "fmtp".to_string(),
+                        value: Some(format!("{} {}", pt, fmtp)),
                     });
-                    if let Some(fmtp) = info.codec.fmtp() {
-                        section.attributes.push(Attribute {
-                            key: "fmtp".to_string(),
-                            value: Some(format!("{} {}", pt, fmtp)),
-                        });
-                    }
                 }
             }
+        }
         pc.set_local_description(desc)?;
         let desc = pc
             .local_description()
@@ -427,9 +427,10 @@ impl Track for RtcTrack {
             Err(e) => {
                 let err_str = e.to_string();
                 if err_str.contains("HaveLocalOffer")
-                    && let Some(desc) = self.pc.local_description() {
-                        return Ok(desc.to_sdp_string());
-                    }
+                    && let Some(desc) = self.pc.local_description()
+                {
+                    return Ok(desc.to_sdp_string());
+                }
                 Err(anyhow!(e))
             }
         }
@@ -1144,33 +1145,33 @@ impl Track for FileTrack {
                 .media_sections
                 .iter_mut()
                 .find(|m| m.kind == MediaKind::Audio)
-            {
-                section.formats.clear();
-                section
-                    .attributes
-                    .retain(|a| a.key != "rtpmap" && a.key != "fmtp");
+        {
+            section.formats.clear();
+            section
+                .attributes
+                .retain(|a| a.key != "rtpmap" && a.key != "fmtp");
 
-                let mut seen_pts = HashSet::new();
-                for codec in &self.codec_preference {
-                    let pt = codec.payload_type();
-                    if !seen_pts.insert(pt) {
-                        continue;
-                    }
-                    let pt_str = pt.to_string();
-                    section.formats.push(pt_str.clone());
+            let mut seen_pts = HashSet::new();
+            for codec in &self.codec_preference {
+                let pt = codec.payload_type();
+                if !seen_pts.insert(pt) {
+                    continue;
+                }
+                let pt_str = pt.to_string();
+                section.formats.push(pt_str.clone());
 
+                section.attributes.push(Attribute {
+                    key: "rtpmap".to_string(),
+                    value: Some(format!("{} {}", pt_str, codec.rtpmap())),
+                });
+                if let Some(fmtp) = codec.fmtp() {
                     section.attributes.push(Attribute {
-                        key: "rtpmap".to_string(),
-                        value: Some(format!("{} {}", pt_str, codec.rtpmap())),
+                        key: "fmtp".to_string(),
+                        value: Some(format!("{} {}", pt_str, fmtp)),
                     });
-                    if let Some(fmtp) = codec.fmtp() {
-                        section.attributes.push(Attribute {
-                            key: "fmtp".to_string(),
-                            value: Some(format!("{} {}", pt_str, fmtp)),
-                        });
-                    }
                 }
             }
+        }
 
         self.pc.set_local_description(offer.clone())?;
         Ok(offer.to_sdp_string())

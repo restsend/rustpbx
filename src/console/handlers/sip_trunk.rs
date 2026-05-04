@@ -83,7 +83,12 @@ async fn page_sip_trunks(
                 .any(|t| matches!(t.origin, ConfigOrigin::File(_)))
         })
         .unwrap_or(false);
-    let ami_endpoint = state.config().proxy.ami_path.clone().unwrap_or_else(|| "/ami/v1".to_string());
+    let ami_endpoint = state
+        .config()
+        .proxy
+        .ami_path
+        .clone()
+        .unwrap_or_else(|| "/ami/v1".to_string());
     state.render_with_headers(
         "console/sip_trunk.html",
         json!({
@@ -105,7 +110,12 @@ async fn page_sip_trunk_create(
 ) -> Response {
     let (filters, tenants) = build_filters_payload(state.db()).await;
     let current_user = state.build_current_user_ctx(&user).await;
-    let ami_endpoint = state.config().proxy.ami_path.clone().unwrap_or_else(|| "/ami/v1".to_string());
+    let ami_endpoint = state
+        .config()
+        .proxy
+        .ami_path
+        .clone()
+        .unwrap_or_else(|| "/ami/v1".to_string());
     state.render_with_headers(
         "console/sip_trunk_detail.html",
         json!({
@@ -178,7 +188,12 @@ async fn page_sip_trunk_detail(
                 let _ = tenant_link;
             }
 
-            let ami_endpoint = state.config().proxy.ami_path.clone().unwrap_or_else(|| "/ami/v1".to_string());
+            let ami_endpoint = state
+                .config()
+                .proxy
+                .ami_path
+                .clone()
+                .unwrap_or_else(|| "/ami/v1".to_string());
             state.render_with_headers(
                 "console/sip_trunk_detail.html",
                 json!({

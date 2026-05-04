@@ -155,17 +155,18 @@ impl CallApp for RwiApp {
         context: &ApplicationContext,
     ) -> anyhow::Result<AppAction> {
         if self.interrupt_on_dtmf
-            && let Some(track_id) = self.current_track_id.take() {
-                controller.stop_audio().await.ok();
-                self.interrupt_on_dtmf = false;
-                self.send_event(RwiEvent::MediaPlayFinished {
-                    call_id: context.call_info.session_id.clone(),
-                    leg_id: Some("caller".to_string()),
-                    track_id,
-                    interrupted: true,
-                })
-                .await;
-            }
+            && let Some(track_id) = self.current_track_id.take()
+        {
+            controller.stop_audio().await.ok();
+            self.interrupt_on_dtmf = false;
+            self.send_event(RwiEvent::MediaPlayFinished {
+                call_id: context.call_info.session_id.clone(),
+                leg_id: Some("caller".to_string()),
+                track_id,
+                interrupted: true,
+            })
+            .await;
+        }
 
         self.send_event(RwiEvent::Dtmf {
             call_id: context.call_info.session_id.clone(),
@@ -424,14 +425,14 @@ mod tests {
         };
 
         let app = RwiApp::new("ctx".to_string(), Some(session_id.clone()), gateway.clone());
-    app.send_event(crate::rwi::proto::RwiEvent::Dtmf {
-        call_id: "c1".to_string(),
-        digit: "5".to_string(),
-        leg_id: None,
-    })
-    .await;
+        app.send_event(crate::rwi::proto::RwiEvent::Dtmf {
+            call_id: "c1".to_string(),
+            digit: "5".to_string(),
+            leg_id: None,
+        })
+        .await;
 
-    let v = event_rx.try_recv().expect("event should be delivered");
+        let v = event_rx.try_recv().expect("event should be delivered");
         let s = serde_json::to_string(&v).unwrap();
         assert!(
             s.contains("dtmf") || s.contains("Dtmf"),

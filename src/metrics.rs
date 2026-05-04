@@ -729,8 +729,7 @@ pub mod cc {
 
     // ===== Autonomous Mode Metrics =====
     pub fn set_autonomous_mode(enabled: bool) {
-        metrics::gauge!("rustpbx_cc_autonomous_mode_enabled")
-            .set(if enabled { 1.0 } else { 0.0 });
+        metrics::gauge!("rustpbx_cc_autonomous_mode_enabled").set(if enabled { 1.0 } else { 0.0 });
     }
 
     pub fn autonomous_decision(decision_type: &str) {

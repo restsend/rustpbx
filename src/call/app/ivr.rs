@@ -211,8 +211,24 @@ impl IvrApp {
         // If already on this menu (e.g. Repeat), keep the stack as-is.
     }
 
-    /// Resolve an audio source: if `file` is non-empty use it directly;
-    /// otherwise try TTS synthesis from `text`/`voice`.
+    fn navigate_back(&mut self) -> String {
+        if self.menu_stack.len() > 1 {
+            let popped = self.menu_stack.pop();
+            info!(
+                ivr = %self.definition.name,
+                popped = ?popped,
+                new_top = ?self.menu_stack.last(),
+                "IVR navigating back"
+            );
+        } else {
+            info!(ivr = %self.definition.name, "IVR Back called at root, staying on root");
+        }
+        self.menu_stack
+            .last()
+            .cloned()
+            .unwrap_or_else(|| "root".to_string())
+    }
+
     async fn resolve_audio(
         &self,
         file: Option<&str>,
@@ -387,6 +403,11 @@ impl IvrApp {
             EntryAction::Menu { menu } => {
                 info!(ivr = %self.definition.name, from = %self.current_menu_key(), to = %menu, "IVR navigating to menu");
                 self.enter_menu(menu, ctrl, ctx).await
+            }
+            EntryAction::Back => {
+                let target = self.navigate_back();
+                info!(ivr = %self.definition.name, menu = %target, "IVR entering parent menu after Back");
+                self.enter_menu(&target, ctrl, ctx).await
             }
             EntryAction::Voicemail { target } => {
                 info!(ivr = %self.definition.name, target, "IVR transferring to voicemail");

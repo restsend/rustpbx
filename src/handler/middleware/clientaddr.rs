@@ -43,13 +43,14 @@ impl ClientAddr {
             "cf-connecting-ip",
         ] {
             if let Some(value) = headers.get(header)
-                && let Ok(ip) = value.to_str() {
-                    let first_ip = ip.split(',').next().unwrap_or(ip).trim();
-                    if let Ok(parsed_ip) = first_ip.parse::<IpAddr>() {
-                        remote_addr.set_ip(parsed_ip);
-                    }
-                    break;
+                && let Ok(ip) = value.to_str()
+            {
+                let first_ip = ip.split(',').next().unwrap_or(ip).trim();
+                if let Ok(parsed_ip) = first_ip.parse::<IpAddr>() {
+                    remote_addr.set_ip(parsed_ip);
                 }
+                break;
+            }
         }
 
         ClientAddr {

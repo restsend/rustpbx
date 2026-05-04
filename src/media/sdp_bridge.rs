@@ -169,7 +169,8 @@ impl SdpBridge {
                                     || codec_info.contains("G722")
                                     || codec_info.contains("G729")
                                 {
-                                    rtp_attrs.push(format!("a=rtpmap:{} {}\r\n", pt_str, codec_info));
+                                    rtp_attrs
+                                        .push(format!("a=rtpmap:{} {}\r\n", pt_str, codec_info));
                                     codec_found = true;
                                 }
                             } else if is_video {

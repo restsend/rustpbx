@@ -41,35 +41,33 @@ async fn reload_certificates(
     let key_path_str = key_path.to_string_lossy().to_string();
 
     // Reload HTTPS if enabled
-    if enable_https
-        && let Some(registry_guard) = app_state.tls_reloader.read().await.as_ref() {
-            if registry_guard.has_https_reloader().await {
-                match registry_guard
-                    .reload_https(&cert_path_str, &key_path_str)
-                    .await
-                {
-                    Ok(()) => info!("HTTPS certificate reloaded for {}", domain),
-                    Err(e) => warn!("Failed to reload HTTPS certificate: {}", e),
-                }
-            } else {
-                info!("HTTPS reloader not available, certificate saved but not reloaded");
+    if enable_https && let Some(registry_guard) = app_state.tls_reloader.read().await.as_ref() {
+        if registry_guard.has_https_reloader().await {
+            match registry_guard
+                .reload_https(&cert_path_str, &key_path_str)
+                .await
+            {
+                Ok(()) => info!("HTTPS certificate reloaded for {}", domain),
+                Err(e) => warn!("Failed to reload HTTPS certificate: {}", e),
             }
+        } else {
+            info!("HTTPS reloader not available, certificate saved but not reloaded");
         }
+    }
 
     // Reload SIP TLS if enabled
-    if enable_sip_tls
-        && let Some(registry_guard) = app_state.tls_reloader.read().await.as_ref() {
-            if registry_guard.has_sip_tls_reloader().await {
-                let cert_data = tokio::fs::read(&cert_path).await?;
-                let key_data = tokio::fs::read(&key_path).await?;
-                match registry_guard.reload_sip_tls(cert_data, key_data).await {
-                    Ok(()) => info!("SIP TLS certificate reloaded for {}", domain),
-                    Err(e) => warn!("Failed to reload SIP TLS certificate: {}", e),
-                }
-            } else {
-                info!("SIP TLS reloader not available, certificate saved but not reloaded");
+    if enable_sip_tls && let Some(registry_guard) = app_state.tls_reloader.read().await.as_ref() {
+        if registry_guard.has_sip_tls_reloader().await {
+            let cert_data = tokio::fs::read(&cert_path).await?;
+            let key_data = tokio::fs::read(&key_path).await?;
+            match registry_guard.reload_sip_tls(cert_data, key_data).await {
+                Ok(()) => info!("SIP TLS certificate reloaded for {}", domain),
+                Err(e) => warn!("Failed to reload SIP TLS certificate: {}", e),
             }
+        } else {
+            info!("SIP TLS reloader not available, certificate saved but not reloaded");
         }
+    }
 
     Ok(())
 }
@@ -296,27 +294,26 @@ async fn process_acme(
                                 Ok(resp) => {
                                     if let Ok(json) = resp.json::<serde_json::Value>().await
                                         && let Some(s) = json.get("status").and_then(|s| s.as_str())
-                                        {
-                                            info!("Manual check status: {}", s);
-                                            if s == "invalid" {
-                                                status = AuthorizationStatus::Invalid;
-                                                // Try to extract error from challenges
-                                                if let Some(challenges) = json
-                                                    .get("challenges")
-                                                    .and_then(|c| c.as_array())
-                                                {
-                                                    for c in challenges {
-                                                        if let Some(c_status) =
-                                                            c.get("status").and_then(|s| s.as_str())
-                                                            && c_status == "invalid"
-                                                                && let Some(err) = c.get("error") {
-                                                                    challenge_error =
-                                                                        Some(format!("{}", err));
-                                                                }
+                                    {
+                                        info!("Manual check status: {}", s);
+                                        if s == "invalid" {
+                                            status = AuthorizationStatus::Invalid;
+                                            // Try to extract error from challenges
+                                            if let Some(challenges) =
+                                                json.get("challenges").and_then(|c| c.as_array())
+                                            {
+                                                for c in challenges {
+                                                    if let Some(c_status) =
+                                                        c.get("status").and_then(|s| s.as_str())
+                                                        && c_status == "invalid"
+                                                        && let Some(err) = c.get("error")
+                                                    {
+                                                        challenge_error = Some(format!("{}", err));
                                                     }
                                                 }
                                             }
                                         }
+                                    }
                                 }
                                 Err(e) => warn!("Manual check failed: {}", e),
                             }
@@ -516,10 +513,9 @@ fn save_cert_and_update_config(
         proxy["ssl_certificate"] = value(cert_path.to_string_lossy().to_string());
         proxy["ssl_private_key"] = value(key_path.to_string_lossy().to_string());
 
-        if enable_sip_tls
-            && proxy.get("tls_port").is_none() {
-                proxy["tls_port"] = value(5061);
-            }
+        if enable_sip_tls && proxy.get("tls_port").is_none() {
+            proxy["tls_port"] = value(5061);
+        }
 
         if enable_https {
             doc["ssl_certificate"] = value(cert_path.to_string_lossy().to_string());

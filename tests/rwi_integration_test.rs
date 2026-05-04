@@ -73,10 +73,7 @@ impl RwiTestClient {
         Ok(Self { ws: ws_stream })
     }
 
-    pub async fn send_request(
-        &mut self,
-        request: RwiRequest,
-    ) -> TestResult<RwiResponse> {
+    pub async fn send_request(&mut self, request: RwiRequest) -> TestResult<RwiResponse> {
         let json = request.to_json();
         self.ws.send(Message::Text(json.into())).await?;
 
@@ -98,26 +95,18 @@ impl RwiTestClient {
         }
     }
 
-    pub async fn subscribe(
-        &mut self,
-        contexts: Vec<&str>,
-    ) -> TestResult<RwiResponse> {
+    pub async fn subscribe(&mut self, contexts: Vec<&str>) -> TestResult<RwiResponse> {
         let request = RwiRequest::new("session.subscribe")
             .with_params(serde_json::json!({ "contexts": contexts }));
         self.send_request(request).await
     }
 
-    pub async fn list_calls(
-        &mut self,
-    ) -> TestResult<RwiResponse> {
+    pub async fn list_calls(&mut self) -> TestResult<RwiResponse> {
         let request = RwiRequest::new("session.list_calls");
         self.send_request(request).await
     }
 
-    pub async fn answer_call(
-        &mut self,
-        call_id: &str,
-    ) -> TestResult<RwiResponse> {
+    pub async fn answer_call(&mut self, call_id: &str) -> TestResult<RwiResponse> {
         let request =
             RwiRequest::new("call.answer").with_params(serde_json::json!({ "call_id": call_id }));
         self.send_request(request).await
@@ -149,20 +138,13 @@ impl RwiTestClient {
         self.send_request(request).await
     }
 
-    pub async fn ring_call(
-        &mut self,
-        call_id: &str,
-    ) -> TestResult<RwiResponse> {
+    pub async fn ring_call(&mut self, call_id: &str) -> TestResult<RwiResponse> {
         let request =
             RwiRequest::new("call.ring").with_params(serde_json::json!({ "call_id": call_id }));
         self.send_request(request).await
     }
 
-    pub async fn transfer_call(
-        &mut self,
-        call_id: &str,
-        target: &str,
-    ) -> TestResult<RwiResponse> {
+    pub async fn transfer_call(&mut self, call_id: &str, target: &str) -> TestResult<RwiResponse> {
         let request = RwiRequest::new("call.transfer")
             .with_params(serde_json::json!({ "call_id": call_id, "target": target }));
         self.send_request(request).await
@@ -185,11 +167,7 @@ impl RwiTestClient {
         self.send_request(request).await
     }
 
-    pub async fn bridge(
-        &mut self,
-        leg_a: &str,
-        leg_b: &str,
-    ) -> TestResult<RwiResponse> {
+    pub async fn bridge(&mut self, leg_a: &str, leg_b: &str) -> TestResult<RwiResponse> {
         let request = RwiRequest::new("call.bridge")
             .with_params(serde_json::json!({ "leg_a": leg_a, "leg_b": leg_b }));
         self.send_request(request).await
@@ -228,29 +206,19 @@ impl RwiTestClient {
         self.send_request(request).await
     }
 
-    pub async fn queue_dequeue(
-        &mut self,
-        call_id: &str,
-    ) -> TestResult<RwiResponse> {
+    pub async fn queue_dequeue(&mut self, call_id: &str) -> TestResult<RwiResponse> {
         let request =
             RwiRequest::new("queue.dequeue").with_params(serde_json::json!({ "call_id": call_id }));
         self.send_request(request).await
     }
 
-    pub async fn send_dtmf(
-        &mut self,
-        call_id: &str,
-        digits: &str,
-    ) -> TestResult<RwiResponse> {
+    pub async fn send_dtmf(&mut self, call_id: &str, digits: &str) -> TestResult<RwiResponse> {
         let request = RwiRequest::new("call.send_dtmf")
             .with_params(serde_json::json!({ "call_id": call_id, "digits": digits }));
         self.send_request(request).await
     }
 
-    pub async fn conference_create(
-        &mut self,
-        conf_id: &str,
-    ) -> TestResult<RwiResponse> {
+    pub async fn conference_create(&mut self, conf_id: &str) -> TestResult<RwiResponse> {
         let request = RwiRequest::new("conference.create")
             .with_params(serde_json::json!({ "conference_id": conf_id }));
         self.send_request(request).await
@@ -276,10 +244,7 @@ impl RwiTestClient {
         self.send_request(request).await
     }
 
-    pub async fn conference_destroy(
-        &mut self,
-        conf_id: &str,
-    ) -> TestResult<RwiResponse> {
+    pub async fn conference_destroy(&mut self, conf_id: &str) -> TestResult<RwiResponse> {
         let request = RwiRequest::new("conference.destroy")
             .with_params(serde_json::json!({ "conference_id": conf_id }));
         self.send_request(request).await

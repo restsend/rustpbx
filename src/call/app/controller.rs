@@ -1,5 +1,5 @@
-use crate::call::domain::{CallCommand, HangupCommand, LegId, MediaSource};
 use crate::call::domain::PlayOptions;
+use crate::call::domain::{CallCommand, HangupCommand, LegId, MediaSource};
 use crate::callrecord::CallRecordHangupReason;
 use crate::proxy::proxy_call::sip_session::SipSessionHandle;
 use std::collections::HashSet;
@@ -9,8 +9,6 @@ use thiserror::Error;
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 use tracing::info;
-
-
 
 /// An audio playback session.
 #[derive(Debug, Clone)]
@@ -129,10 +127,9 @@ impl CallController {
 
     /// Answer the call (send 200 OK).
     pub async fn answer(&self) -> anyhow::Result<()> {
-        self.session
-            .send_command(CallCommand::Answer {
-                leg_id: LegId::from("caller"),
-            })?;
+        self.session.send_command(CallCommand::Answer {
+            leg_id: LegId::from("caller"),
+        })?;
         Ok(())
     }
 
@@ -141,20 +138,18 @@ impl CallController {
         reason: Option<CallRecordHangupReason>,
         code: Option<u16>,
     ) -> anyhow::Result<()> {
-        self.session.send_command(CallCommand::Hangup(
-            HangupCommand::all(reason, code),
-        ))?;
+        self.session
+            .send_command(CallCommand::Hangup(HangupCommand::all(reason, code)))?;
         Ok(())
     }
 
     pub async fn transfer(&self, target: impl Into<String>) -> anyhow::Result<()> {
         let target = target.into();
-        self.session
-            .send_command(CallCommand::Transfer {
-                leg_id: LegId::from("caller"),
-                target,
-                attended: false,
-            })?;
+        self.session.send_command(CallCommand::Transfer {
+            leg_id: LegId::from("caller"),
+            target,
+            attended: false,
+        })?;
         Ok(())
     }
 
@@ -206,7 +201,8 @@ impl CallController {
 
     /// Stop current audio playback.
     pub async fn stop_audio(&self) -> anyhow::Result<()> {
-        self.session.send_command(CallCommand::StopPlayback { leg_id: None })?;
+        self.session
+            .send_command(CallCommand::StopPlayback { leg_id: None })?;
         Ok(())
     }
 
@@ -335,9 +331,10 @@ impl CallController {
             match tokio::time::timeout(wait, self.event_rx.recv()).await {
                 Ok(Some(ControllerEvent::DtmfReceived(digit))) => {
                     if let Some(term) = config.terminator
-                        && digit.contains(term) {
-                            break;
-                        }
+                        && digit.contains(term)
+                    {
+                        break;
+                    }
                     collected.push_str(&digit);
                     if collected.len() >= config.max_digits {
                         break;
@@ -370,11 +367,10 @@ impl CallController {
         let target = target_uri.into();
         let call_id = uuid::Uuid::new_v4().to_string();
 
-        self.session
-            .send_command(CallCommand::LegAdd {
-                target: target.clone(),
-                leg_id: Some(LegId::from(call_id.clone())),
-            })?;
+        self.session.send_command(CallCommand::LegAdd {
+            target: target.clone(),
+            leg_id: Some(LegId::from(call_id.clone())),
+        })?;
 
         info!(target = %target, call_id = %call_id, "Queue: originated call to agent");
         Ok(call_id)
@@ -387,10 +383,9 @@ impl CallController {
         data: serde_json::Value,
     ) -> anyhow::Result<()> {
         let name = event_name.into();
-        self.session
-            .send_command(CallCommand::InjectAppEvent {
-                event: crate::call::domain::AppEvent::Custom { name, data },
-            })?;
+        self.session.send_command(CallCommand::InjectAppEvent {
+            event: crate::call::domain::AppEvent::Custom { name, data },
+        })?;
         Ok(())
     }
 }

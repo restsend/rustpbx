@@ -92,7 +92,6 @@ pub enum AppStatus {
     Failed,
 }
 
-
 impl std::fmt::Display for AppStatus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {

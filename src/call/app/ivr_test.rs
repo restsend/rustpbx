@@ -133,9 +133,7 @@ mod tests {
 
         // IVR should play the root greeting
         stack
-            .assert_cmd(200, "PlayPrompt", |c| {
-                matches!(c, CallCommand::Play { .. })
-            })
+            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
             .await;
 
         // Simulate greeting complete — IVR waits for DTMF
@@ -167,9 +165,7 @@ mod tests {
             .await;
         // Skip greeting play
         stack
-            .assert_cmd(200, "PlayPrompt", |c| {
-                matches!(c, CallCommand::Play { .. })
-            })
+            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
             .await;
         // Greeting completes
         stack.audio_complete("default");
@@ -198,9 +194,7 @@ mod tests {
             .await;
         // Root greeting
         stack
-            .assert_cmd(200, "PlayPrompt", |c| {
-                matches!(c, CallCommand::Play { .. })
-            })
+            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
             .await;
         stack.audio_complete("default");
 
@@ -240,18 +234,14 @@ mod tests {
             .await;
         // Root greeting
         stack
-            .assert_cmd(200, "PlayPrompt", |c| {
-                matches!(c, CallCommand::Play { .. })
-            })
+            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
             .await;
         stack.audio_complete("default");
 
         // Press "2" → support
         stack.dtmf("2");
         stack
-            .assert_cmd(200, "PlayPrompt", |c| {
-                matches!(c, CallCommand::Play { .. })
-            })
+            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
             .await;
         stack.audio_complete("default");
 
@@ -269,6 +259,140 @@ mod tests {
         let _ = stack.join().await;
     }
 
+    // ── 4b. EntryAction::Back pops one level off the menu stack ──
+
+    #[tokio::test]
+    async fn test_ivr_back_action_pops_one_level() {
+        let ivr = IvrDefinition {
+            name: "back-test".to_string(),
+            root: MenuNode {
+                greeting: "sounds/root.wav".to_string(),
+                entries: vec![MenuEntry {
+                    key: "1".to_string(),
+                    label: None,
+                    action: EntryAction::Menu {
+                        menu: "sub_a".to_string(),
+                    },
+                }],
+                ..Default::default()
+            },
+            menus: {
+                let mut m = HashMap::new();
+                m.insert(
+                    "sub_a".to_string(),
+                    MenuNode {
+                        greeting: "sounds/sub_a.wav".to_string(),
+                        entries: vec![
+                            MenuEntry {
+                                key: "1".to_string(),
+                                label: None,
+                                action: EntryAction::Menu {
+                                    menu: "sub_b".to_string(),
+                                },
+                            },
+                            MenuEntry {
+                                key: "9".to_string(),
+                                label: Some("Back".to_string()),
+                                action: EntryAction::Back,
+                            },
+                        ],
+                        ..Default::default()
+                    },
+                );
+                m.insert(
+                    "sub_b".to_string(),
+                    MenuNode {
+                        greeting: "sounds/sub_b.wav".to_string(),
+                        entries: vec![MenuEntry {
+                            key: "9".to_string(),
+                            label: Some("Back".to_string()),
+                            action: EntryAction::Back,
+                        }],
+                        ..Default::default()
+                    },
+                );
+                m
+            },
+            ..Default::default()
+        };
+        let mut stack = MockCallStack::run(Box::new(IvrApp::new(ivr)), "caller", "1000");
+        stack
+            .assert_cmd(200, "AcceptCall", |c| {
+                matches!(c, CallCommand::Answer { .. })
+            })
+            .await;
+        stack
+            .assert_cmd(200, "PlayPrompt-root", |c| {
+                matches!(c, CallCommand::Play { .. })
+            })
+            .await;
+        stack.audio_complete("default");
+        stack.dtmf("1");
+        stack
+            .assert_cmd(200, "PlayPrompt-sub_a", |c| {
+                matches!(c, CallCommand::Play { .. })
+            })
+            .await;
+        stack.audio_complete("default");
+        stack.dtmf("1");
+        stack
+            .assert_cmd(200, "PlayPrompt-sub_b", |c| {
+                matches!(c, CallCommand::Play { .. })
+            })
+            .await;
+        stack.audio_complete("default");
+        // Back from sub_b → should return to sub_a (one level up, not root)
+        stack.dtmf("9");
+        stack
+            .assert_cmd(200, "PlayPrompt-sub_a-2", |c| {
+                matches!(c, CallCommand::Play { .. })
+            })
+            .await;
+        stack.cancel();
+        let _ = stack.join().await;
+    }
+
+    // ── 4c. EntryAction::Back at root is a no-op ──
+
+    #[tokio::test]
+    async fn test_ivr_back_at_root_is_noop() {
+        let ivr = IvrDefinition {
+            name: "back-root-test".to_string(),
+            root: MenuNode {
+                greeting: "sounds/root.wav".to_string(),
+                entries: vec![MenuEntry {
+                    key: "9".to_string(),
+                    label: Some("Back".to_string()),
+                    action: EntryAction::Back,
+                }],
+                ..Default::default()
+            },
+            menus: HashMap::new(),
+            ..Default::default()
+        };
+        let mut stack = MockCallStack::run(Box::new(IvrApp::new(ivr)), "caller", "1000");
+        stack
+            .assert_cmd(200, "AcceptCall", |c| {
+                matches!(c, CallCommand::Answer { .. })
+            })
+            .await;
+        stack
+            .assert_cmd(200, "PlayPrompt-root", |c| {
+                matches!(c, CallCommand::Play { .. })
+            })
+            .await;
+        stack.audio_complete("default");
+        // Back at root is a no-op — should replay root greeting
+        stack.dtmf("9");
+        stack
+            .assert_cmd(200, "PlayPrompt-root-2", |c| {
+                matches!(c, CallCommand::Play { .. })
+            })
+            .await;
+        stack.cancel();
+        let _ = stack.join().await;
+    }
+
     // ── 5. Play announcement returns to menu ──
 
     #[tokio::test]
@@ -282,9 +406,7 @@ mod tests {
             })
             .await;
         stack
-            .assert_cmd(200, "PlayPrompt", |c| {
-                matches!(c, CallCommand::Play { .. })
-            })
+            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
             .await;
         stack.audio_complete("default");
 
@@ -323,9 +445,7 @@ mod tests {
             })
             .await;
         stack
-            .assert_cmd(200, "PlayPrompt", |c| {
-                matches!(c, CallCommand::Play { .. })
-            })
+            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
             .await;
         stack.audio_complete("default");
 
@@ -356,9 +476,7 @@ mod tests {
             })
             .await;
         stack
-            .assert_cmd(200, "PlayPrompt", |c| {
-                matches!(c, CallCommand::Play { .. })
-            })
+            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
             .await;
         stack.audio_complete("default");
 
@@ -392,9 +510,7 @@ mod tests {
             })
             .await;
         stack
-            .assert_cmd(200, "PlayPrompt", |c| {
-                matches!(c, CallCommand::Play { .. })
-            })
+            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
             .await;
         stack.audio_complete("default");
 
@@ -433,9 +549,7 @@ mod tests {
             })
             .await;
         stack
-            .assert_cmd(200, "PlayPrompt", |c| {
-                matches!(c, CallCommand::Play { .. })
-            })
+            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
             .await;
         stack.audio_complete("default");
 
@@ -496,9 +610,7 @@ action = { type = "transfer", target = "100" }
             })
             .await;
         stack
-            .assert_cmd(200, "PlayPrompt", |c| {
-                matches!(c, CallCommand::Play { .. })
-            })
+            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
             .await;
         stack.audio_complete("default");
 
@@ -520,9 +632,7 @@ action = { type = "transfer", target = "100" }
             })
             .await;
         stack
-            .assert_cmd(200, "PlayPrompt", |c| {
-                matches!(c, CallCommand::Play { .. })
-            })
+            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
             .await;
 
         stack.remote_hangup();
@@ -545,18 +655,14 @@ action = { type = "transfer", target = "100" }
             })
             .await;
         stack
-            .assert_cmd(200, "PlayPrompt", |c| {
-                matches!(c, CallCommand::Play { .. })
-            })
+            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
             .await;
         stack.audio_complete("default");
 
         // Navigate to support sub-menu
         stack.dtmf("2");
         stack
-            .assert_cmd(200, "PlayPrompt", |c| {
-                matches!(c, CallCommand::Play { .. })
-            })
+            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
             .await;
         stack.audio_complete("default");
 
@@ -636,16 +742,20 @@ action = { type = "transfer", target = "100" }
                 matches!(c, CallCommand::Answer { .. })
             })
             .await;
-        stack.assert_cmd(200, "PlayPrompt-greeting", |c| {
-            matches!(c, CallCommand::Play { .. })
-        }).await;
+        stack
+            .assert_cmd(200, "PlayPrompt-greeting", |c| {
+                matches!(c, CallCommand::Play { .. })
+            })
+            .await;
         stack.audio_complete("default");
 
         stack.dtmf("1");
 
-        stack.assert_cmd(200, "PlayPrompt-collect", |c| {
-            matches!(c, CallCommand::Play { .. })
-        }).await;
+        stack
+            .assert_cmd(200, "PlayPrompt-collect", |c| {
+                matches!(c, CallCommand::Play { .. })
+            })
+            .await;
 
         stack.dtmf("2");
         tokio::time::sleep(Duration::from_millis(10)).await;
@@ -678,16 +788,16 @@ action = { type = "transfer", target = "100" }
             })
             .await;
         stack
-            .assert_cmd(200, "PlayPrompt", |c| {
-                matches!(c, CallCommand::Play { .. })
-            })
+            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
             .await;
         stack.audio_complete("default");
 
         stack.dtmf("1");
-        stack.assert_cmd(200, "PlayPrompt-collect", |c| {
-            matches!(c, CallCommand::Play { .. })
-        }).await;
+        stack
+            .assert_cmd(200, "PlayPrompt-collect", |c| {
+                matches!(c, CallCommand::Play { .. })
+            })
+            .await;
 
         stack.dtmf("5").dtmf("5").dtmf("#");
 
@@ -718,9 +828,7 @@ action = { type = "transfer", target = "100" }
             })
             .await;
         stack
-            .assert_cmd(200, "PlayPrompt", |c| {
-                matches!(c, CallCommand::Play { .. })
-            })
+            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
             .await;
         stack.audio_complete("default");
 
@@ -753,9 +861,7 @@ action = { type = "transfer", target = "100" }
             })
             .await;
         stack
-            .assert_cmd(200, "PlayPrompt", |c| {
-                matches!(c, CallCommand::Play { .. })
-            })
+            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
             .await;
         stack.audio_complete("default");
 
@@ -845,9 +951,7 @@ action = { type = "transfer", target = "100" }
             })
             .await;
         stack
-            .assert_cmd(200, "PlayPrompt", |c| {
-                matches!(c, CallCommand::Play { .. })
-            })
+            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
             .await;
         stack.audio_complete("default");
 
@@ -879,9 +983,7 @@ action = { type = "transfer", target = "100" }
             })
             .await;
         stack
-            .assert_cmd(200, "PlayPrompt", |c| {
-                matches!(c, CallCommand::Play { .. })
-            })
+            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
             .await;
         stack.audio_complete("default");
 
@@ -890,14 +992,10 @@ action = { type = "transfer", target = "100" }
         stack.dtmf("2");
 
         stack
-            .assert_cmd(
-                300,
-                "TransferTarget-queue-with-return",
-                |c| {
-                    matches!(c, CallCommand::Transfer { target, .. }
+            .assert_cmd(300, "TransferTarget-queue-with-return", |c| {
+                matches!(c, CallCommand::Transfer { target, .. }
                         if target == "queue:support?return_ivr=test-queue-return")
-                },
-            )
+            })
             .await;
 
         stack
@@ -917,9 +1015,7 @@ action = { type = "transfer", target = "100" }
             })
             .await;
         stack
-            .assert_cmd(200, "PlayPrompt", |c| {
-                matches!(c, CallCommand::Play { .. })
-            })
+            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
             .await;
         stack.audio_complete("default");
 
@@ -1071,9 +1167,7 @@ action = { type = "transfer", target = "100" }
             })
             .await;
         stack
-            .assert_cmd(200, "PlayPrompt", |c| {
-                matches!(c, CallCommand::Play { .. })
-            })
+            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
             .await;
         stack.audio_complete("default");
 
@@ -1105,9 +1199,7 @@ action = { type = "transfer", target = "100" }
             })
             .await;
         stack
-            .assert_cmd(200, "PlayPrompt", |c| {
-                matches!(c, CallCommand::Play { .. })
-            })
+            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
             .await;
         stack.audio_complete("default");
 
@@ -1115,11 +1207,9 @@ action = { type = "transfer", target = "100" }
 
         // Webhook → hangup with prompt → play goodbye
         stack
-            .assert_cmd(
-                1000,
-                "PlayPrompt-goodbye",
-                |c| matches!(c, CallCommand::Play { .. }),
-            )
+            .assert_cmd(1000, "PlayPrompt-goodbye", |c| {
+                matches!(c, CallCommand::Play { .. })
+            })
             .await;
 
         // After goodbye completes → hangup
@@ -1148,9 +1238,7 @@ action = { type = "transfer", target = "100" }
             })
             .await;
         stack
-            .assert_cmd(200, "PlayPrompt", |c| {
-                matches!(c, CallCommand::Play { .. })
-            })
+            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
             .await;
         stack.audio_complete("default");
 
@@ -1158,21 +1246,17 @@ action = { type = "transfer", target = "100" }
 
         // Webhook → play announcement
         stack
-            .assert_cmd(
-                1000,
-                "PlayPrompt-info",
-                |c| matches!(c, CallCommand::Play { .. }),
-            )
+            .assert_cmd(1000, "PlayPrompt-info", |c| {
+                matches!(c, CallCommand::Play { .. })
+            })
             .await;
 
         // Announcement completes → returns to root greeting
         stack.audio_complete("default");
         stack
-            .assert_cmd(
-                200,
-                "PlayPrompt-root-again",
-                |c| matches!(c, CallCommand::Play { .. }),
-            )
+            .assert_cmd(200, "PlayPrompt-root-again", |c| {
+                matches!(c, CallCommand::Play { .. })
+            })
             .await;
 
         stack.cancel();
@@ -1240,11 +1324,9 @@ action = { type = "transfer", target = "100" }
 
         // Webhook → navigate to "support" sub-menu
         stack
-            .assert_cmd(
-                1000,
-                "PlayPrompt-support",
-                |c| matches!(c, CallCommand::Play { .. }),
-            )
+            .assert_cmd(1000, "PlayPrompt-support", |c| {
+                matches!(c, CallCommand::Play { .. })
+            })
             .await;
 
         // Press "1" in support menu → transfer to billing
@@ -1271,9 +1353,7 @@ action = { type = "transfer", target = "100" }
             })
             .await;
         stack
-            .assert_cmd(200, "PlayPrompt", |c| {
-                matches!(c, CallCommand::Play { .. })
-            })
+            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
             .await;
         stack.audio_complete("default");
 
@@ -1281,11 +1361,9 @@ action = { type = "transfer", target = "100" }
 
         // Webhook → repeat → re-play root greeting
         stack
-            .assert_cmd(
-                1000,
-                "PlayPrompt-repeat",
-                |c| matches!(c, CallCommand::Play { .. }),
-            )
+            .assert_cmd(1000, "PlayPrompt-repeat", |c| {
+                matches!(c, CallCommand::Play { .. })
+            })
             .await;
 
         stack.cancel();
@@ -1311,9 +1389,7 @@ action = { type = "transfer", target = "100" }
             })
             .await;
         stack
-            .assert_cmd(200, "PlayPrompt", |c| {
-                matches!(c, CallCommand::Play { .. })
-            })
+            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
             .await;
         stack.audio_complete("default");
 
@@ -1352,9 +1428,7 @@ action = { type = "transfer", target = "100" }
             })
             .await;
         stack
-            .assert_cmd(200, "PlayPrompt", |c| {
-                matches!(c, CallCommand::Play { .. })
-            })
+            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
             .await;
         stack.audio_complete("default");
 
@@ -1398,9 +1472,7 @@ action = { type = "transfer", target = "100" }
             })
             .await;
         stack
-            .assert_cmd(200, "PlayPrompt", |c| {
-                matches!(c, CallCommand::Play { .. })
-            })
+            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
             .await;
         stack.audio_complete("default");
 
@@ -1408,11 +1480,9 @@ action = { type = "transfer", target = "100" }
 
         // Webhook → collect_extension → play collect prompt
         stack
-            .assert_cmd(
-                1000,
-                "PlayPrompt-collect",
-                |c| matches!(c, CallCommand::Play { .. }),
-            )
+            .assert_cmd(1000, "PlayPrompt-collect", |c| {
+                matches!(c, CallCommand::Play { .. })
+            })
             .await;
 
         // Dial digits: 4 2 # (terminator)
@@ -1457,9 +1527,7 @@ action = { type = "transfer", target = "100" }
             })
             .await;
         stack
-            .assert_cmd(200, "PlayPrompt", |c| {
-                matches!(c, CallCommand::Play { .. })
-            })
+            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
             .await;
         stack.audio_complete("default");
 
@@ -1496,9 +1564,7 @@ action = { type = "transfer", target = "100" }
             })
             .await;
         stack
-            .assert_cmd(200, "PlayPrompt", |c| {
-                matches!(c, CallCommand::Play { .. })
-            })
+            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
             .await;
         stack.audio_complete("default");
 
@@ -1507,11 +1573,9 @@ action = { type = "transfer", target = "100" }
 
         // On error the IVR should fall back: re-enter current menu (re-play greeting)
         stack
-            .assert_cmd(
-                2000,
-                "PlayPrompt-fallback-greeting",
-                |c| matches!(c, CallCommand::Play { .. }),
-            )
+            .assert_cmd(2000, "PlayPrompt-fallback-greeting", |c| {
+                matches!(c, CallCommand::Play { .. })
+            })
             .await;
 
         stack.cancel();
@@ -1531,16 +1595,16 @@ action = { type = "transfer", target = "100" }
             })
             .await;
         stack
-            .assert_cmd(200, "PlayPrompt", |c| {
-                matches!(c, CallCommand::Play { .. })
-            })
+            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
             .await;
         stack.audio_complete("default");
 
         stack.dtmf("1");
-        stack.assert_cmd(200, "PlayPrompt-collect", |c| {
-            matches!(c, CallCommand::Play { .. })
-        }).await;
+        stack
+            .assert_cmd(200, "PlayPrompt-collect", |c| {
+                matches!(c, CallCommand::Play { .. })
+            })
+            .await;
 
         tokio::time::sleep(Duration::from_millis(10)).await;
         stack.remote_hangup();
@@ -1646,9 +1710,7 @@ action = { type = "transfer", target = "100" }
         // After prompt completes → hangup with SIP code 486
         stack.audio_complete("default");
         stack
-            .assert_cmd(200, "Hangup-486", |c| {
-                matches!(c, CallCommand::Hangup(_))
-            })
+            .assert_cmd(200, "Hangup-486", |c| matches!(c, CallCommand::Hangup(_)))
             .await;
     }
 
@@ -1674,9 +1736,7 @@ action = { type = "transfer", target = "100" }
 
         // No prompt — should hang up immediately with SIP code 503
         stack
-            .assert_cmd(200, "Hangup-503", |c| {
-                matches!(c, CallCommand::Hangup(_))
-            })
+            .assert_cmd(200, "Hangup-503", |c| matches!(c, CallCommand::Hangup(_)))
             .await;
     }
 
@@ -1783,11 +1843,11 @@ action = { type = "transfer", target = "100" }
             .await
             .unwrap_or_else(|| panic!("timed out waiting for PlayPrompt ({label})"));
         let audio_file = match &cmd {
-            CallCommand::Play { source: MediaSource::File { path }, .. } => {
-                assert_eq!(
-                    path, expected_path,
-                    "Play path mismatch ({label})"
-                );
+            CallCommand::Play {
+                source: MediaSource::File { path },
+                ..
+            } => {
+                assert_eq!(path, expected_path, "Play path mismatch ({label})");
                 path.clone()
             }
             other => panic!("Expected Play ({label}), got {other:?}"),
@@ -2280,9 +2340,7 @@ action = { type = "transfer", target = "100" }
         // Greeting starts — we deliberately DO NOT wire real playback completion
         // because we want to barge-in before it finishes.
         stack
-            .assert_cmd(200, "PlayPrompt", |c| {
-                matches!(c, CallCommand::Play { .. })
-            })
+            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
             .await;
 
         // Barge-in: press "1" while greeting is still "playing"
@@ -2440,9 +2498,7 @@ action = { type = "transfer", target = "100" }
 
         // After busy prompt → hangup with code 486
         stack
-            .assert_cmd(500, "Hangup-486", |c| {
-                matches!(c, CallCommand::Hangup(_))
-            })
+            .assert_cmd(500, "Hangup-486", |c| matches!(c, CallCommand::Hangup(_)))
             .await;
 
         let _ = fs::remove_file(&greeting_wav).await;
@@ -2477,19 +2533,15 @@ action = { type = "transfer", target = "100" }
 
         // Webhook should cause the busy prompt to be played
         stack
-            .assert_cmd(
-                1000,
-                "PlayPrompt-busy",
-                |c| matches!(c, CallCommand::Play { .. }),
-            )
+            .assert_cmd(1000, "PlayPrompt-busy", |c| {
+                matches!(c, CallCommand::Play { .. })
+            })
             .await;
 
         // After prompt completes → hangup with code 486
         stack.audio_complete("default");
         stack
-            .assert_cmd(200, "Hangup-486", |c| {
-                matches!(c, CallCommand::Hangup(_))
-            })
+            .assert_cmd(200, "Hangup-486", |c| matches!(c, CallCommand::Hangup(_)))
             .await;
     }
 

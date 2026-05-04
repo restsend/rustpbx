@@ -61,9 +61,7 @@ impl TranscodingPipeline {
     /// Decode RTP payload to 8kHz PCM.
     ///
     /// This is used for the reverse loop (SIP → conference mixer).
-    pub fn decode_to_pcm(&mut self,
-        payload: &[u8],
-    ) -> Vec<i16> {
+    pub fn decode_to_pcm(&mut self, payload: &[u8]) -> Vec<i16> {
         let mut pcm = self.decoder.decode(payload);
 
         if let Some(ref mut resampler) = self.resampler_input {
@@ -76,10 +74,7 @@ impl TranscodingPipeline {
     /// Encode 8kHz PCM to RTP payload.
     ///
     /// This is used for the forward loop (conference mixer → SIP).
-    pub fn encode_from_pcm(
-        &mut self,
-        pcm: &[i16],
-    ) -> Vec<u8> {
+    pub fn encode_from_pcm(&mut self, pcm: &[i16]) -> Vec<u8> {
         let mut pcm = pcm.to_vec();
 
         if let Some(ref mut resampler) = self.resampler_output {

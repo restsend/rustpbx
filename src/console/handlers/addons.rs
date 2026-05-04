@@ -186,10 +186,11 @@ pub async fn toggle_addon(
         let mut exists = false;
         for i in 0..addons_array.len() {
             if let Some(s) = addons_array.get(i).and_then(|v| v.as_str())
-                && s == payload.id {
-                    exists = true;
-                    break;
-                }
+                && s == payload.id
+            {
+                exists = true;
+                break;
+            }
         }
         if !exists {
             addons_array.push(payload.id);
@@ -199,10 +200,11 @@ pub async fn toggle_addon(
         let mut index_to_remove = None;
         for i in 0..addons_array.len() {
             if let Some(s) = addons_array.get(i).and_then(|v| v.as_str())
-                && s == payload.id {
-                    index_to_remove = Some(i);
-                    break;
-                }
+                && s == payload.id
+            {
+                index_to_remove = Some(i);
+                break;
+            }
         }
         if let Some(idx) = index_to_remove {
             addons_array.remove(idx);

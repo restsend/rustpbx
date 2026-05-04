@@ -188,7 +188,9 @@ pub struct MenuEntry {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum EntryAction {
     /// Transfer the call to a SIP extension or URI.
-    Transfer { target: String },
+    Transfer {
+        target: String,
+    },
     /// Send the call to a queue.
     Queue {
         target: String,
@@ -198,9 +200,13 @@ pub enum EntryAction {
         return_to_ivr: Option<bool>,
     },
     /// Navigate to a sub-menu (or "root" for top level).
-    Menu { menu: String },
+    Menu {
+        menu: String,
+    },
     /// Transfer to voicemail for the given extension.
-    Voicemail { target: String },
+    Voicemail {
+        target: String,
+    },
     /// Play an announcement and return to the current menu.
     Play {
         prompt: String,
@@ -287,6 +293,7 @@ pub enum EntryAction {
         #[serde(default)]
         code: Option<u16>,
     },
+    Back,
 }
 
 /// Response from a webhook, determining the next IVR action.
@@ -294,7 +301,9 @@ pub enum EntryAction {
 #[serde(tag = "action", content = "params", rename_all = "snake_case")]
 pub enum WebhookResponse {
     /// Transfer the call to a SIP extension or URI.
-    Transfer { target: String },
+    Transfer {
+        target: String,
+    },
     /// Send the call to a queue.
     Queue {
         target: String,
@@ -303,9 +312,13 @@ pub enum WebhookResponse {
         return_to_ivr: Option<bool>,
     },
     /// Navigate to a sub-menu.
-    Menu { menu: String },
+    Menu {
+        menu: String,
+    },
     /// Transfer to voicemail.
-    Voicemail { target: String },
+    Voicemail {
+        target: String,
+    },
     /// Play an announcement (optionally with TTS data).
     Play {
         prompt: String,
@@ -350,6 +363,7 @@ pub enum WebhookResponse {
         #[serde(default)]
         code: Option<u16>,
     },
+    Back,
 }
 
 impl WebhookResponse {
@@ -416,6 +430,7 @@ impl WebhookResponse {
                 prompt_voice: None,
                 code,
             },
+            WebhookResponse::Back => EntryAction::Back,
         }
     }
 }
@@ -472,28 +487,34 @@ impl IvrDefinition {
     ) -> Result<(), String> {
         for entry in &menu.entries {
             if let EntryAction::Menu { menu: ref target } = entry.action
-                && target != "root" && !menus.contains_key(target) {
-                    return Err(format!(
-                        "menu '{}' entry key '{}' references unknown menu '{}'",
-                        menu_key, entry.key, target
-                    ));
-                }
+                && target != "root"
+                && !menus.contains_key(target)
+            {
+                return Err(format!(
+                    "menu '{}' entry key '{}' references unknown menu '{}'",
+                    menu_key, entry.key, target
+                ));
+            }
         }
         // Also check timeout_action and max_retries_action
         if let Some(EntryAction::Menu { menu: ref target }) = menu.timeout_action
-            && target != "root" && !menus.contains_key(target) {
-                return Err(format!(
-                    "menu '{}' timeout_action references unknown menu '{}'",
-                    menu_key, target
-                ));
-            }
+            && target != "root"
+            && !menus.contains_key(target)
+        {
+            return Err(format!(
+                "menu '{}' timeout_action references unknown menu '{}'",
+                menu_key, target
+            ));
+        }
         if let Some(EntryAction::Menu { menu: ref target }) = menu.max_retries_action
-            && target != "root" && !menus.contains_key(target) {
-                return Err(format!(
-                    "menu '{}' max_retries_action references unknown menu '{}'",
-                    menu_key, target
-                ));
-            }
+            && target != "root"
+            && !menus.contains_key(target)
+        {
+            return Err(format!(
+                "menu '{}' max_retries_action references unknown menu '{}'",
+                menu_key, target
+            ));
+        }
         Ok(())
     }
 }

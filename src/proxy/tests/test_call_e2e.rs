@@ -668,7 +668,10 @@ async fn test_mid_dialog_passthrough_none_mode() -> Result<()> {
         sleep(Duration::from_millis(100)).await;
     }
 
-    assert!(saw_update, "Bob should receive the relayed UPDATE in None mode");
+    assert!(
+        saw_update,
+        "Bob should receive the relayed UPDATE in None mode"
+    );
 
     let update_answer = tokio::time::timeout(Duration::from_secs(5), update_handle)
         .await
@@ -703,7 +706,10 @@ async fn test_mid_dialog_passthrough_none_mode() -> Result<()> {
         for event in events {
             if let TestUaEvent::CallUpdated(id, method, Some(sdp)) = event {
                 if id == bob_id && method == rsipstack::sip::Method::Invite {
-                    assert_eq!(sdp, reinvite_sdp, "re-INVITE SDP should be relayed unchanged");
+                    assert_eq!(
+                        sdp, reinvite_sdp,
+                        "re-INVITE SDP should be relayed unchanged"
+                    );
                     saw_reinvite = true;
                     break;
                 }
@@ -1026,10 +1032,7 @@ async fn test_reinvite_hold_resume() -> Result<()> {
 
     let hold_result = alice.send_reinvite(&alice_id, Some(hold_sdp)).await;
     info!("Alice re-INVITE (hold) result: {:?}", hold_result);
-    assert!(
-        hold_result.is_ok(),
-        "Hold re-INVITE should succeed"
-    );
+    assert!(hold_result.is_ok(), "Hold re-INVITE should succeed");
     assert!(
         hold_result.as_ref().unwrap().is_some(),
         "Hold re-INVITE should return SDP answer"
@@ -1051,10 +1054,7 @@ async fn test_reinvite_hold_resume() -> Result<()> {
 
     let resume_result = alice.send_reinvite(&alice_id, Some(resume_sdp)).await;
     info!("Alice re-INVITE (resume) result: {:?}", resume_result);
-    assert!(
-        resume_result.is_ok(),
-        "Resume re-INVITE should succeed"
-    );
+    assert!(resume_result.is_ok(), "Resume re-INVITE should succeed");
     assert!(
         resume_result.as_ref().unwrap().is_some(),
         "Resume re-INVITE should return SDP answer"

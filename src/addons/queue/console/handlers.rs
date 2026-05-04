@@ -8,13 +8,13 @@ use crate::console::handlers::{bad_request, forms, normalize_optional_string, re
 use crate::console::{ConsoleState, middleware::AuthRequired};
 use crate::proxy::routing::{ConfigOrigin, RouteQueueConfig};
 use axum::{
-    Json, Router, body::Body,
+    Json, Router,
+    body::Body,
     extract::{Path as AxumPath, State},
     http::{HeaderMap, StatusCode, header},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
-use std::path::PathBuf;
 use chrono::Utc;
 use sea_orm::{
     ActiveModelTrait, ActiveValue::Set, ColumnTrait, Condition, EntityTrait, PaginatorTrait,
@@ -22,6 +22,7 @@ use sea_orm::{
 };
 use serde::Deserialize;
 use serde_json::{Map as JsonMap, Value, json};
+use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::{info, warn};
 
@@ -651,10 +652,14 @@ pub async fn reload_queues_handler(
     let app_state = match state.app_state() {
         Some(app) => app,
         None => {
-            return (StatusCode::FAILED_DEPENDENCY, Json(json!({
-                "status": "error",
-                "message": "PBX is not running; cannot reload queues.",
-            }))).into_response();
+            return (
+                StatusCode::FAILED_DEPENDENCY,
+                Json(json!({
+                    "status": "error",
+                    "message": "PBX is not running; cannot reload queues.",
+                })),
+            )
+                .into_response();
         }
     };
 
@@ -664,25 +669,26 @@ pub async fn reload_queues_handler(
     match server.inner.data_context.reload_queues(true, None).await {
         Ok(metrics) => {
             let total = metrics.total;
-            let generated_entries = metrics
-                .generated
-                .as_ref()
-                .map(|g| g.entries)
-                .unwrap_or(0);
+            let generated_entries = metrics.generated.as_ref().map(|g| g.entries).unwrap_or(0);
             state.clear_pending_reload();
             Json(json!({
                 "status": "ok",
                 "queues_reloaded": total,
                 "generated_queue_files": generated_entries,
                 "metrics": metrics,
-            })).into_response()
+            }))
+            .into_response()
         }
         Err(err) => {
             warn!("Queue reload failed: {}", err);
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({
-                "status": "error",
-                "message": format!("Failed to reload queues: {}", err),
-            }))).into_response()
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({
+                    "status": "error",
+                    "message": format!("Failed to reload queues: {}", err),
+                })),
+            )
+                .into_response()
         }
     }
 }
@@ -695,16 +701,24 @@ pub async fn download_audio_handler(
     let url = match payload.get("url").and_then(|v| v.as_str()) {
         Some(u) => u.trim().to_string(),
         None => {
-            return (StatusCode::BAD_REQUEST, Json(json!({
-                "status": "error", "message": "Missing 'url' field."
-            }))).into_response();
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "status": "error", "message": "Missing 'url' field."
+                })),
+            )
+                .into_response();
         }
     };
 
     if !url.starts_with("http://") && !url.starts_with("https://") {
-        return (StatusCode::BAD_REQUEST, Json(json!({
-            "status": "error", "message": "URL must start with http:// or https://"
-        }))).into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "status": "error", "message": "URL must start with http:// or https://"
+            })),
+        )
+            .into_response();
     }
 
     // Determine sounds directory
@@ -725,44 +739,52 @@ pub async fn download_audio_handler(
         .unwrap();
     match client.get(&url).send().await {
         Ok(resp) if resp.status().is_success() => {
-            let bytes = match resp.bytes().await {
-                Ok(b) => b,
-                Err(e) => {
-                    return (StatusCode::BAD_GATEWAY, Json(json!({
+            let bytes =
+                match resp.bytes().await {
+                    Ok(b) => b,
+                    Err(e) => {
+                        return (StatusCode::BAD_GATEWAY, Json(json!({
                         "status": "error", "message": format!("Failed to read response: {}", e)
                     }))).into_response();
-                }
-            };
+                    }
+                };
             if let Err(e) = tokio::fs::write(&dest_path, &bytes).await {
-                return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({
-                    "status": "error", "message": format!("Failed to save file: {}", e)
-                }))).into_response();
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(json!({
+                        "status": "error", "message": format!("Failed to save file: {}", e)
+                    })),
+                )
+                    .into_response();
             }
             let relative_path = format!("sounds/{}", filename);
             Json(json!({
                 "status": "ok",
                 "path": relative_path,
                 "filename": filename,
-            })).into_response()
+            }))
+            .into_response()
         }
-        Ok(resp) => {
-            (StatusCode::BAD_GATEWAY, Json(json!({
+        Ok(resp) => (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({
                 "status": "error",
                 "message": format!("Download failed with HTTP {}", resp.status())
-            }))).into_response()
-        }
-        Err(e) => {
-            (StatusCode::BAD_GATEWAY, Json(json!({
+            })),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({
                 "status": "error",
                 "message": format!("Download failed: {}", e)
-            }))).into_response()
-        }
+            })),
+        )
+            .into_response(),
     }
 }
 
-pub async fn serve_sound_handler(
-    AxumPath(file_path): AxumPath<String>,
-) -> Response {
+pub async fn serve_sound_handler(AxumPath(file_path): AxumPath<String>) -> Response {
     let sounds_dir = if std::path::Path::new("config/sounds").exists() {
         PathBuf::from("config/sounds")
     } else {
@@ -802,7 +824,13 @@ pub async fn serve_sound_handler(
 
 fn sanitize_filename(name: &str) -> String {
     name.chars()
-        .map(|c| if c.is_alphanumeric() || c == '.' || c == '-' || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_alphanumeric() || c == '.' || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect()
 }
 

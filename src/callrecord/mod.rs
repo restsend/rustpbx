@@ -16,9 +16,9 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
+pub mod recording_upload;
 pub mod sipflow;
 pub mod sipflow_upload;
-pub mod recording_upload;
 pub mod storage;
 #[cfg(test)]
 mod tests;
@@ -594,11 +594,7 @@ impl CallRecordManager {
                     )
                     .await
                 }
-                CallRecordConfig::Http {
-                    url,
-                    headers,
-                    ..
-                } => {
+                CallRecordConfig::Http { url, headers, .. } => {
                     Self::save_with_http(formatter.clone(), url, headers, &record).await
                 }
                 CallRecordConfig::Database {
@@ -728,9 +724,9 @@ impl CallRecordManager {
             // This is a placeholder - in production you'd access the global config
             "sqlite::memory:".to_string()
         });
-        
+
         let db = crate::models::connect_db(&db_url).await?;
-        
+
         // Create table if not exists
         let create_table_sql = format!(
             r#"
@@ -749,17 +745,18 @@ impl CallRecordManager {
             "#,
             table_name
         );
-        
+
         use sea_orm::ConnectionTrait;
         db.execute(sea_orm::Statement::from_string(
             db.get_database_backend(),
             create_table_sql,
-        )).await?;
-        
+        ))
+        .await?;
+
         // Insert record
         let details_json = serde_json::to_string(&record.details)?;
         let hangup_reason = record.hangup_reason.as_ref().map(|r| r.to_string());
-        
+
         let insert_sql = format!(
             r#"
             INSERT INTO {} (call_id, caller, callee, start_time, end_time, status_code, hangup_reason, details)
@@ -767,7 +764,7 @@ impl CallRecordManager {
             "#,
             table_name
         );
-        
+
         db.execute(sea_orm::Statement::from_sql_and_values(
             db.get_database_backend(),
             insert_sql,
@@ -781,8 +778,9 @@ impl CallRecordManager {
                 hangup_reason.into(),
                 details_json.into(),
             ],
-        )).await?;
-        
+        ))
+        .await?;
+
         Ok(format!("database:{}/{}", db_url, record.call_id))
     }
 

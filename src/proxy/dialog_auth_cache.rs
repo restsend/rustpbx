@@ -38,9 +38,8 @@ pub struct DialogAuthCache {
 
 impl DialogAuthCache {
     pub fn new(config: &AuthCacheConfig) -> Self {
-        let cache_size = NonZeroUsize::new(config.cache_size).unwrap_or_else(|| {
-            NonZeroUsize::new(10000).unwrap()
-        });
+        let cache_size = NonZeroUsize::new(config.cache_size)
+            .unwrap_or_else(|| NonZeroUsize::new(10000).unwrap());
 
         Self {
             inner: Arc::new(Mutex::new(LruCache::new(cache_size))),

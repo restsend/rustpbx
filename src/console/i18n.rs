@@ -176,16 +176,18 @@ impl I18n {
 
         // 1. Requested locale
         if let Some(flat) = cache.get(locale)
-            && let Some(v) = flat.get(key) {
-                return v.clone();
-            }
+            && let Some(v) = flat.get(key)
+        {
+            return v.clone();
+        }
 
         // 2. Default locale fallback
         if locale != self.config.default
             && let Some(flat) = cache.get(&self.config.default)
-                && let Some(v) = flat.get(key) {
-                    return v.clone();
-                }
+            && let Some(v) = flat.get(key)
+        {
+            return v.clone();
+        }
 
         // 3. Return the key itself so templates always render something
         key.to_string()
@@ -295,33 +297,34 @@ pub fn detect_locale(
 
     // 2. Accept-Language header
     if let Some(accept) = headers.get(axum::http::header::ACCEPT_LANGUAGE)
-        && let Ok(s) = accept.to_str() {
-            // Parse "zh-CN,zh;q=0.9,en;q=0.8" style values
-            let mut candidates: Vec<(&str, f32)> = s
-                .split(',')
-                .filter_map(|item| {
-                    let mut parts = item.trim().splitn(2, ';');
-                    let tag = parts.next()?.trim();
-                    let q: f32 = parts
-                        .next()
-                        .and_then(|p| p.trim().strip_prefix("q="))
-                        .and_then(|q| q.parse().ok())
-                        .unwrap_or(1.0);
-                    Some((tag, q))
-                })
-                .collect();
-            candidates.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-            for (tag, _) in candidates {
-                // Match full tag first ("zh-CN"), then base language ("zh")
-                if is_available(tag, available) {
-                    return tag.to_string();
-                }
-                let base = tag.split('-').next().unwrap_or(tag);
-                if is_available(base, available) {
-                    return base.to_string();
-                }
+        && let Ok(s) = accept.to_str()
+    {
+        // Parse "zh-CN,zh;q=0.9,en;q=0.8" style values
+        let mut candidates: Vec<(&str, f32)> = s
+            .split(',')
+            .filter_map(|item| {
+                let mut parts = item.trim().splitn(2, ';');
+                let tag = parts.next()?.trim();
+                let q: f32 = parts
+                    .next()
+                    .and_then(|p| p.trim().strip_prefix("q="))
+                    .and_then(|q| q.parse().ok())
+                    .unwrap_or(1.0);
+                Some((tag, q))
+            })
+            .collect();
+        candidates.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        for (tag, _) in candidates {
+            // Match full tag first ("zh-CN"), then base language ("zh")
+            if is_available(tag, available) {
+                return tag.to_string();
+            }
+            let base = tag.split('-').next().unwrap_or(tag);
+            if is_available(base, available) {
+                return base.to_string();
             }
         }
+    }
 
     // 3. Default
     default.to_string()

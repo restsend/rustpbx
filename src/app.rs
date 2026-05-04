@@ -249,9 +249,7 @@ impl AppStateBuilder {
         let storage_config = config.storage.clone().unwrap_or_default();
         let storage = crate::storage::Storage::new(&storage_config)?;
 
-        let token = self
-            .cancel_token
-            .unwrap_or_default();
+        let token = self.cancel_token.unwrap_or_default();
         let config_loaded_at = self.config_loaded_at.unwrap_or_else(Utc::now);
         let config_path = self.config_path.clone();
         let db_conn = if self.skip_migrate {
@@ -264,9 +262,10 @@ impl AppStateBuilder {
 
         // Run addon migrations if not skipped
         if !self.skip_migrate
-            && let Err(e) = addon_registry.run_migrations(&db_conn).await {
-                tracing::error!("Failed to run addon migrations: {}", e);
-            }
+            && let Err(e) = addon_registry.run_migrations(&db_conn).await
+        {
+            tracing::error!("Failed to run addon migrations: {}", e);
+        }
 
         // Pre-build the SipFlow backend so it can be shared between the SipServer
         // (for recording RTP packets) and the SipFlowUploadHook (for post-call upload).
@@ -393,9 +392,10 @@ impl AppStateBuilder {
                 let mut proxy_config = config.proxy.clone();
                 for backend in proxy_config.user_backends.iter_mut() {
                     if let UserBackendConfig::Extension { database_url, .. } = backend
-                        && database_url.is_none() {
-                            *database_url = Some(config.database_url.clone());
-                        }
+                        && database_url.is_none()
+                    {
+                        *database_url = Some(config.database_url.clone());
+                    }
                 }
                 if proxy_config.recording.is_none() {
                     proxy_config.recording = config.recording.clone();
@@ -588,21 +588,22 @@ pub async fn run(state: AppState, mut router: Router) -> Result<()> {
         // Auto-detect from config/certs
         let cert_dir = std::path::Path::new("config/certs");
         if cert_dir.exists()
-            && let Ok(entries) = std::fs::read_dir(cert_dir) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if path.extension().and_then(|s| s.to_str()) == Some("crt") {
-                        let key_path = path.with_extension("key");
-                        if key_path.exists() {
-                            ssl_config = Some((
-                                path.to_string_lossy().to_string(),
-                                key_path.to_string_lossy().to_string(),
-                            ));
-                            break;
-                        }
+            && let Ok(entries) = std::fs::read_dir(cert_dir)
+        {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|s| s.to_str()) == Some("crt") {
+                    let key_path = path.with_extension("key");
+                    if key_path.exists() {
+                        ssl_config = Some((
+                            path.to_string_lossy().to_string(),
+                            key_path.to_string_lossy().to_string(),
+                        ));
+                        break;
                     }
                 }
             }
+        }
     }
 
     let https_config = if let Some((cert, key)) = ssl_config {
@@ -762,14 +763,20 @@ pub fn create_router(state: AppState) -> Router {
 
     // Read paths from proxy config (fallback to hardcoded defaults)
     let proxy_cfg = &state.config().proxy;
-    let ice_servers_path = proxy_cfg.ice_servers_path.clone().unwrap_or_else(|| "/iceservers".to_string());
+    let ice_servers_path = proxy_cfg
+        .ice_servers_path
+        .clone()
+        .unwrap_or_else(|| "/iceservers".to_string());
     let static_path = state.config().static_path();
 
     // Merge call and WebSocket handlers with static file serving
     let call_routes = crate::handler::ami_router(state.clone()).with_state(state.clone());
     #[allow(unused_mut)]
     let mut router = router
-        .route("/api/config/phone", get(phone_config_handler).with_state(state.clone()))
+        .route(
+            "/api/config/phone",
+            get(phone_config_handler).with_state(state.clone()),
+        )
         .route(
             &ice_servers_path,
             get(iceservers_handler).with_state(state.clone()),

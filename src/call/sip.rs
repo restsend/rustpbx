@@ -52,9 +52,10 @@ impl DialogStateReceiverGuard {
 
     pub async fn drop_async(&mut self) {
         if let Some(dialog) = self.take_dialog()
-            && let Err(e) = dialog.hangup().await {
-                warn!(id=%dialog.id(), "error hanging up dialog on drop: {}", e);
-            }
+            && let Err(e) = dialog.hangup().await
+        {
+            warn!(id=%dialog.id(), "error hanging up dialog on drop: {}", e);
+        }
     }
 }
 

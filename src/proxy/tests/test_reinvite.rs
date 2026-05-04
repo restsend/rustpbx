@@ -3,11 +3,15 @@ use crate::call::user::SipUser;
 use crate::config::ProxyConfig;
 use crate::media::negotiate::CodecSelectionStrategy;
 use crate::proxy::{
-    auth::AuthModule, call::CallModule, locator::MemoryLocator, registrar::RegistrarModule,
-    server::{SipServer, SipServerBuilder}, user::MemoryUserBackend,
+    auth::AuthModule,
+    call::CallModule,
+    locator::MemoryLocator,
+    registrar::RegistrarModule,
+    server::{SipServer, SipServerBuilder},
+    user::MemoryUserBackend,
 };
-use rsipstack::dialog::DialogId;
 use anyhow::Result;
+use rsipstack::dialog::DialogId;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
@@ -53,7 +57,6 @@ async fn setup_proxy_and_users_with_config(
     _port: u16,
     config: Arc<ProxyConfig>,
 ) -> (Arc<SipServer>, CancellationToken) {
-
     let user_backend = MemoryUserBackend::new(None);
     user_backend
         .create_user(SipUser {
@@ -90,7 +93,10 @@ async fn setup_proxy_and_users_with_config(
             Ok(Box::new(RegistrarModule::new(inner, config)))
         })
         .register_module("auth", |inner, _config| {
-            Ok(Box::new(AuthModule::new(inner.clone(), inner.proxy_config.clone())))
+            Ok(Box::new(AuthModule::new(
+                inner.clone(),
+                inner.proxy_config.clone(),
+            )))
         })
         .register_module("call", |inner, config| {
             Ok(Box::new(CallModule::new(config, inner)))
@@ -128,7 +134,9 @@ async fn establish_call(
         if let Ok(events) = bob.process_dialog_events().await {
             for event in events {
                 if let TestUaEvent::IncomingCall(id, _) = event {
-                    bob.answer_call(&id, Some(bob_answer_sdp.to_string())).await.unwrap();
+                    bob.answer_call(&id, Some(bob_answer_sdp.to_string()))
+                        .await
+                        .unwrap();
                     bob_call_id = Some(id);
                     break;
                 }
@@ -153,7 +161,9 @@ async fn test_reinvite_audio_hold_unhold() {
     let proxy_addr: SocketAddr = format!("127.0.0.1:{}", port).parse().unwrap();
     let alice_port = portpicker::pick_unused_port().unwrap_or(25061);
     let bob_port = portpicker::pick_unused_port().unwrap_or(25062);
-    let alice = create_test_ua("alice", proxy_addr, alice_port).await.unwrap();
+    let alice = create_test_ua("alice", proxy_addr, alice_port)
+        .await
+        .unwrap();
     let bob = create_test_ua("bob", proxy_addr, bob_port).await.unwrap();
     alice.register().await.unwrap();
     bob.register().await.unwrap();
@@ -186,13 +196,22 @@ async fn test_reinvite_audio_hold_unhold() {
         .send_reinvite(&alice_call_id, Some(hold_sdp.clone()))
         .await
         .unwrap();
-    assert!(alice_received_sdp.is_some(), "Alice should receive SDP answer");
-    info!("Alice received SDP answer from Proxy: {:?}", alice_received_sdp);
+    assert!(
+        alice_received_sdp.is_some(),
+        "Alice should receive SDP answer"
+    );
+    info!(
+        "Alice received SDP answer from Proxy: {:?}",
+        alice_received_sdp
+    );
     let bob_processed = bob_handle.await.unwrap();
     assert!(bob_processed, "Bob should receive forwarded re-INVITE");
 
     let received_sdp = alice_received_sdp.unwrap();
-    assert!(received_sdp.contains("PCMU/8000"), "SDP answer should contain PCMU");
+    assert!(
+        received_sdp.contains("PCMU/8000"),
+        "SDP answer should contain PCMU"
+    );
 
     // Cleanup
     alice.hangup(&alice_call_id).await.ok();
@@ -208,7 +227,9 @@ async fn test_reinvite_audio_only_no_video() {
     let proxy_addr: SocketAddr = format!("127.0.0.1:{}", port).parse().unwrap();
     let alice_port = portpicker::pick_unused_port().unwrap_or(25063);
     let bob_port = portpicker::pick_unused_port().unwrap_or(25064);
-    let alice = create_test_ua("alice", proxy_addr, alice_port).await.unwrap();
+    let alice = create_test_ua("alice", proxy_addr, alice_port)
+        .await
+        .unwrap();
     let bob = create_test_ua("bob", proxy_addr, bob_port).await.unwrap();
     alice.register().await.unwrap();
     bob.register().await.unwrap();
@@ -237,7 +258,11 @@ async fn test_reinvite_audio_to_video_add_via_bridge() {
 
     let caller_sdp = "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0 101\r\na=rtpmap:0 PCMU/8000\r\na=rtpmap:101 telephone-event/8000\r\n";
     let codec_lists = MediaNegotiator::build_bridge_codec_lists(
-        caller_sdp, false, true, &[], CodecSelectionStrategy::default(),
+        caller_sdp,
+        false,
+        true,
+        &[],
+        CodecSelectionStrategy::default(),
     );
     let audio_caps: Vec<_> = codec_lists
         .caller_side
@@ -252,10 +277,7 @@ async fn test_reinvite_audio_to_video_add_via_bridge() {
     bridge.setup_bridge().await.unwrap();
 
     // Initially no video on either side
-    assert!(
-        !bridge.has_video().await,
-        "No video before add_video_track"
-    );
+    assert!(!bridge.has_video().await, "No video before add_video_track");
 
     // Add video track (simulates re-INVITE adding video)
     bridge.add_video_track(96, 90000).await.unwrap();

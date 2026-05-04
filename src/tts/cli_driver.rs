@@ -47,7 +47,7 @@ mod tests {
         };
 
         // echo doesn't write to file, so this just tests arg replacement and success path
-        let result = synthesize_cli(&cfg, "world", &path).await;
+        let result = synthesize_cli(&cfg, "world", "en-US", &path).await;
         assert!(result.is_ok());
     }
 }

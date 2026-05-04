@@ -104,11 +104,7 @@ impl TestUa {
     }
 
     /// Create and start an outbound caller UA that will place calls to `target_uri`.
-    pub async fn caller_with_target(
-        sip_port: u16,
-        username: &str,
-        target_uri: String,
-    ) -> Self {
+    pub async fn caller_with_target(sip_port: u16, username: &str, target_uri: String) -> Self {
         let cancel_token = CancellationToken::new();
         let domain = format!("127.0.0.1:{}", sip_port);
 

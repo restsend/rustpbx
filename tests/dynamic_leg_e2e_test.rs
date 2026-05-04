@@ -15,9 +15,9 @@
 
 mod helpers;
 
+use futures::{SinkExt, StreamExt};
 use helpers::sipbot_helper::TestUa;
 use helpers::test_server::{TEST_TOKEN, TestPbx};
-use futures::{SinkExt, StreamExt};
 use std::time::Duration;
 use tokio::time::timeout;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
@@ -194,9 +194,7 @@ async fn test_dynamic_leg_add_remove() {
     // Stop the IVR app
     tracing::info!("Stopping IVR app on session {}", call_id);
     handle
-        .send_command(rustpbx::call::domain::CallCommand::StopApp {
-            reason: None,
-        })
+        .send_command(rustpbx::call::domain::CallCommand::StopApp { reason: None })
         .expect("Should be able to send StopApp command");
 
     // Give it a moment to process

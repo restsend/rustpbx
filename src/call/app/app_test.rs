@@ -77,9 +77,7 @@ mod tests {
 
         // App should play a prompt
         stack
-            .assert_cmd(100, "PlayPrompt", |c| {
-                matches!(c, CallCommand::Play { .. })
-            })
+            .assert_cmd(100, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
             .await;
 
         // Simulate audio finishing — app should hang up

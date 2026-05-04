@@ -98,13 +98,14 @@ impl CallReporter {
 
         let mut hangup_messages = snapshot.hangup_messages.clone();
         if hangup_messages.is_empty()
-            && let Some((code, reason)) = snapshot.last_error.as_ref() {
-                hangup_messages.push(CallRecordHangupMessage {
-                    code: u16::from(code.clone()),
-                    reason: reason.clone(),
-                    target: None,
-                });
-            }
+            && let Some((code, reason)) = snapshot.last_error.as_ref()
+        {
+            hangup_messages.push(CallRecordHangupMessage {
+                code: u16::from(code.clone()),
+                reason: reason.clone(),
+                target: None,
+            });
+        }
 
         let rewrite = CallRecordRewrite {
             caller_original: original_caller.clone(),
@@ -148,17 +149,18 @@ impl CallReporter {
 
         if self.context.dialplan.recording.enabled
             && let Some(recorder_config) = self.context.dialplan.recording.option.as_ref()
-                && !recorder_config.recorder_file.is_empty() {
-                    let size = fs::metadata(&recorder_config.recorder_file)
-                        .map(|meta| meta.len())
-                        .unwrap_or(0);
-                    recorder.push(CallRecordMedia {
-                        track_id: "mixed".to_string(),
-                        path: recorder_config.recorder_file.clone(),
-                        size,
-                        extra: None,
-                    });
-                }
+            && !recorder_config.recorder_file.is_empty()
+        {
+            let size = fs::metadata(&recorder_config.recorder_file)
+                .map(|meta| meta.len())
+                .unwrap_or(0);
+            recorder.push(CallRecordMedia {
+                track_id: "mixed".to_string(),
+                path: recorder_config.recorder_file.clone(),
+                size,
+                extra: None,
+            });
+        }
         tracing::info!(
             recording = ?self.context.dialplan.recording,
             has_sipflow_backend = ?has_sipflow_backend,

@@ -122,67 +122,71 @@ impl PolicyGuard {
     ) -> Result<PolicyCheckStatus> {
         // 1. Static Checks
         if let Some(prefix) = &policy.called_prefix
-            && !callee.starts_with(prefix) {
-                // If prefix doesn't match, does the policy apply?
-                // Usually policy applies if conditions match.
-                // If this is a restriction, maybe we skip this policy?
-                // Assuming this is a filter for the policy.
-                return Ok(PolicyCheckStatus::Allowed);
-            }
+            && !callee.starts_with(prefix)
+        {
+            // If prefix doesn't match, does the policy apply?
+            // Usually policy applies if conditions match.
+            // If this is a restriction, maybe we skip this policy?
+            // Assuming this is a filter for the policy.
+            return Ok(PolicyCheckStatus::Allowed);
+        }
 
         if let Some(tc) = &policy.trunk_country
             && let Some(oc) = origin_country
-                && tc != oc {
-                    // Policy for different country
-                    return Ok(PolicyCheckStatus::Allowed);
-                }
+            && tc != oc
+        {
+            // Policy for different country
+            return Ok(PolicyCheckStatus::Allowed);
+        }
 
         // Parse the callee number to get country and type
         let parsed_number = phonenumber::parse(None, callee).ok();
 
         if !policy.allowed_destination_countries.is_empty()
-            && let Some(ref number) = parsed_number {
-                if let Some(id) = number.country().id() {
-                    let region_str = id.as_ref();
-                    if !policy
-                        .allowed_destination_countries
-                        .iter()
-                        .any(|c| c.eq_ignore_ascii_case(region_str))
-                    {
-                        let reason = format!(
-                            "Destination country {} not allowed for callee {}",
-                            region_str, callee
-                        );
-                        warn!("{}", reason);
-                        return Ok(PolicyCheckStatus::Rejected(
-                            PolicyRejection::DestinationNotAllowed(reason),
-                        ));
-                    }
-                } else {
-                    let reason = format!("No country ID found for callee {}", callee);
-                    warn!("{}", reason);
-                    return Ok(PolicyCheckStatus::Rejected(PolicyRejection::InvalidNumber(
-                        reason,
-                    )));
-                }
-            }
-
-        if let Some(allow_landline) = policy.allow_landline
-            && let Some(ref number) = parsed_number {
-                let num_type = number.number_type(&phonenumber::metadata::DATABASE);
-                let is_fixed = matches!(
-                    num_type,
-                    phonenumber::Type::FixedLine | phonenumber::Type::FixedLineOrMobile
-                );
-
-                if !allow_landline && is_fixed {
-                    let reason = format!("Landline calls are not allowed: {}", callee);
+            && let Some(ref number) = parsed_number
+        {
+            if let Some(id) = number.country().id() {
+                let region_str = id.as_ref();
+                if !policy
+                    .allowed_destination_countries
+                    .iter()
+                    .any(|c| c.eq_ignore_ascii_case(region_str))
+                {
+                    let reason = format!(
+                        "Destination country {} not allowed for callee {}",
+                        region_str, callee
+                    );
                     warn!("{}", reason);
                     return Ok(PolicyCheckStatus::Rejected(
-                        PolicyRejection::LandlineNotAllowed(reason),
+                        PolicyRejection::DestinationNotAllowed(reason),
                     ));
                 }
+            } else {
+                let reason = format!("No country ID found for callee {}", callee);
+                warn!("{}", reason);
+                return Ok(PolicyCheckStatus::Rejected(PolicyRejection::InvalidNumber(
+                    reason,
+                )));
             }
+        }
+
+        if let Some(allow_landline) = policy.allow_landline
+            && let Some(ref number) = parsed_number
+        {
+            let num_type = number.number_type(&phonenumber::metadata::DATABASE);
+            let is_fixed = matches!(
+                num_type,
+                phonenumber::Type::FixedLine | phonenumber::Type::FixedLineOrMobile
+            );
+
+            if !allow_landline && is_fixed {
+                let reason = format!("Landline calls are not allowed: {}", callee);
+                warn!("{}", reason);
+                return Ok(PolicyCheckStatus::Rejected(
+                    PolicyRejection::LandlineNotAllowed(reason),
+                ));
+            }
+        }
 
         if let Some(window) = &policy.time_window {
             use chrono::NaiveTime;
@@ -231,44 +235,46 @@ impl PolicyGuard {
         if !policy.deny_regions.is_empty() {
             // Check Callee Region
             if let Some(ref number) = parsed_number
-                && let Some(id) = number.country().id() {
-                    let region_str = id.as_ref();
-                    if policy
-                        .deny_regions
-                        .iter()
-                        .any(|r| r.eq_ignore_ascii_case(region_str))
-                    {
-                        let reason = format!(
-                            "Destination country {} is denied for callee {}",
-                            region_str, callee
-                        );
-                        warn!("{}", reason);
-                        return Ok(PolicyCheckStatus::Rejected(PolicyRejection::RegionDenied(
-                            reason,
-                        )));
-                    }
+                && let Some(id) = number.country().id()
+            {
+                let region_str = id.as_ref();
+                if policy
+                    .deny_regions
+                    .iter()
+                    .any(|r| r.eq_ignore_ascii_case(region_str))
+                {
+                    let reason = format!(
+                        "Destination country {} is denied for callee {}",
+                        region_str, callee
+                    );
+                    warn!("{}", reason);
+                    return Ok(PolicyCheckStatus::Rejected(PolicyRejection::RegionDenied(
+                        reason,
+                    )));
                 }
+            }
 
             // Check Caller Region
             let parsed_caller = phonenumber::parse(None, caller).ok();
             if let Some(ref number) = parsed_caller
-                && let Some(id) = number.country().id() {
-                    let region_str = id.as_ref();
-                    if policy
-                        .deny_regions
-                        .iter()
-                        .any(|r| r.eq_ignore_ascii_case(region_str))
-                    {
-                        let reason = format!(
-                            "Source country {} is denied for caller {}",
-                            region_str, caller
-                        );
-                        warn!("{}", reason);
-                        return Ok(PolicyCheckStatus::Rejected(PolicyRejection::RegionDenied(
-                            reason,
-                        )));
-                    }
+                && let Some(id) = number.country().id()
+            {
+                let region_str = id.as_ref();
+                if policy
+                    .deny_regions
+                    .iter()
+                    .any(|r| r.eq_ignore_ascii_case(region_str))
+                {
+                    let reason = format!(
+                        "Source country {} is denied for caller {}",
+                        region_str, caller
+                    );
+                    warn!("{}", reason);
+                    return Ok(PolicyCheckStatus::Rejected(PolicyRejection::RegionDenied(
+                        reason,
+                    )));
                 }
+            }
 
             // Check Origin Country
             if let Some(oc) = origin_country
@@ -276,13 +282,13 @@ impl PolicyGuard {
                     .deny_regions
                     .iter()
                     .any(|r| r.eq_ignore_ascii_case(oc))
-                {
-                    let reason = format!("Origin country {} is denied", oc);
-                    warn!("{}", reason);
-                    return Ok(PolicyCheckStatus::Rejected(PolicyRejection::RegionDenied(
-                        reason,
-                    )));
-                }
+            {
+                let reason = format!("Origin country {} is denied", oc);
+                warn!("{}", reason);
+                return Ok(PolicyCheckStatus::Rejected(PolicyRejection::RegionDenied(
+                    reason,
+                )));
+            }
         }
 
         // 2. Dynamic Checks (Frequency Limit)
@@ -291,39 +297,39 @@ impl PolicyGuard {
                 .limiter
                 .check_and_increment(policy_id, "caller", caller, limit.count, limit.window_hours)
                 .await?
-            {
-                let reason = format!("Frequency limit reached for caller {}", caller);
-                warn!("{}", reason);
-                return Ok(PolicyCheckStatus::Rejected(
-                    PolicyRejection::FrequencyLimitExceeded(reason),
-                ));
-            }
+        {
+            let reason = format!("Frequency limit reached for caller {}", caller);
+            warn!("{}", reason);
+            return Ok(PolicyCheckStatus::Rejected(
+                PolicyRejection::FrequencyLimitExceeded(reason),
+            ));
+        }
 
         if let Some(limit) = &policy.daily_limit
             && !self
                 .limiter
                 .check_daily_limit(policy_id, "caller", caller, limit.count)
                 .await?
-            {
-                let reason = format!("Daily limit reached for caller {}", caller);
-                warn!("{}", reason);
-                return Ok(PolicyCheckStatus::Rejected(
-                    PolicyRejection::DailyLimitExceeded(reason),
-                ));
-            }
+        {
+            let reason = format!("Daily limit reached for caller {}", caller);
+            warn!("{}", reason);
+            return Ok(PolicyCheckStatus::Rejected(
+                PolicyRejection::DailyLimitExceeded(reason),
+            ));
+        }
 
         if let Some(limit) = &policy.concurrency
             && !self
                 .limiter
                 .check_concurrency(policy_id, "caller", caller, limit.max_total)
                 .await?
-            {
-                let reason = format!("Concurrency limit reached for caller {}", caller);
-                warn!("{}", reason);
-                return Ok(PolicyCheckStatus::Rejected(
-                    PolicyRejection::ConcurrencyLimitExceeded(reason),
-                ));
-            }
+        {
+            let reason = format!("Concurrency limit reached for caller {}", caller);
+            warn!("{}", reason);
+            return Ok(PolicyCheckStatus::Rejected(
+                PolicyRejection::ConcurrencyLimitExceeded(reason),
+            ));
+        }
 
         Ok(PolicyCheckStatus::Allowed)
     }
@@ -538,9 +544,10 @@ impl FrequencyLimiter for InMemoryFrequencyLimiter {
         let key = self.get_key(policy_id, scope, scope_value, "concurrency");
         let mut counts = self.counts.write().unwrap();
         if let Some((count, _)) = counts.get_mut(&key)
-            && *count > 0 {
-                *count -= 1;
-            }
+            && *count > 0
+        {
+            *count -= 1;
+        }
         Ok(())
     }
 
@@ -564,21 +571,25 @@ impl FrequencyLimiter for InMemoryFrequencyLimiter {
             let l_type = parts[3];
 
             if let Some(ref pid) = policy_id
-                && pid != p_id {
-                    continue;
-                }
+                && pid != p_id
+            {
+                continue;
+            }
             if let Some(ref sc) = scope
-                && sc != s {
-                    continue;
-                }
+                && sc != s
+            {
+                continue;
+            }
             if let Some(ref sv) = scope_value
-                && sv != s_val {
-                    continue;
-                }
+                && sv != s_val
+            {
+                continue;
+            }
             if let Some(ref lt) = limit_type
-                && lt != l_type {
-                    continue;
-                }
+                && lt != l_type
+            {
+                continue;
+            }
 
             results.push(crate::models::frequency_limit::Model {
                 id: 0, // Dummy ID
@@ -618,21 +629,25 @@ impl FrequencyLimiter for InMemoryFrequencyLimiter {
             let l_type = parts[3];
 
             if let Some(ref pid) = policy_id
-                && pid != p_id {
-                    return true;
-                }
+                && pid != p_id
+            {
+                return true;
+            }
             if let Some(ref sc) = scope
-                && sc != s {
-                    return true;
-                }
+                && sc != s
+            {
+                return true;
+            }
             if let Some(ref sv) = scope_value
-                && sv != s_val {
-                    return true;
-                }
+                && sv != s_val
+            {
+                return true;
+            }
             if let Some(ref lt) = limit_type
-                && lt != l_type {
-                    return true;
-                }
+                && lt != l_type
+            {
+                return true;
+            }
             false // Remove
         });
         Ok((initial_len - counts.len()) as u64)
@@ -894,13 +909,14 @@ impl FrequencyLimiter for DbFrequencyLimiter {
             .await?;
 
         if let Some(model) = record
-            && model.count > 0 {
-                let count = model.count;
-                let mut active: frequency_limit::ActiveModel = model.into();
-                active.count = Set(count - 1);
-                active.updated_at = Set(now);
-                active.update(&self.db).await?;
-            }
+            && model.count > 0
+        {
+            let count = model.count;
+            let mut active: frequency_limit::ActiveModel = model.into();
+            active.count = Set(count - 1);
+            active.updated_at = Set(now);
+            active.update(&self.db).await?;
+        }
         Ok(())
     }
 

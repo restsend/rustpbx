@@ -39,14 +39,15 @@ pub fn prepare_sqlite_database(database_url: &str) -> Result<()> {
 
     let path = std::path::Path::new(path_str);
     if let Some(parent) = path.parent()
-        && !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent).with_context(|| {
-                format!(
-                    "failed to create directory for console database at {}",
-                    parent.display()
-                )
-            })?;
-        }
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "failed to create directory for console database at {}",
+                parent.display()
+            )
+        })?;
+    }
 
     if !path.exists() {
         std::fs::OpenOptions::new()

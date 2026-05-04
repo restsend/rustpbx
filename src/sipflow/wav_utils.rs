@@ -380,12 +380,8 @@ pub(crate) fn generate_wav_from_packets_with_leg_map_ex(
         s.iter()
             .any(|c| *c != CodecType::PCMU && *c != CodecType::PCMA)
     });
-    let has_pcmu = legs_codecs
-        .values()
-        .any(|s| s.contains(&CodecType::PCMU));
-    let has_pcma = legs_codecs
-        .values()
-        .any(|s| s.contains(&CodecType::PCMA));
+    let has_pcmu = legs_codecs.values().any(|s| s.contains(&CodecType::PCMU));
+    let has_pcma = legs_codecs.values().any(|s| s.contains(&CodecType::PCMA));
 
     // If force_pcm is true, always output PCM format (for ASR compatibility)
     let (target_codec, target_sample_rate) = if force_pcm {
@@ -404,7 +400,7 @@ pub(crate) fn generate_wav_from_packets_with_leg_map_ex(
         target_sample_rate
     );
     let ptime_ms = 20;
-    let step_samples = target_sample_rate * ptime_ms / 1000 ;
+    let step_samples = target_sample_rate * ptime_ms / 1000;
     let bytes_per_chunk = match target_codec {
         Some(CodecType::PCMU) | Some(CodecType::PCMA) => step_samples as usize,
         None => (step_samples * 2) as usize,

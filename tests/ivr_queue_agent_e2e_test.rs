@@ -176,10 +176,7 @@ async fn test_ivr_queue_agent_flow() {
 
     // Step 2: Stop the current app before adding agent
     tracing::info!("Stopping queue app on session {}", call_id);
-    let (_, app_stop_json) = rwi_req(
-        "call.app_stop",
-        serde_json::json!({"call_id": call_id}),
-    );
+    let (_, app_stop_json) = rwi_req("call.app_stop", serde_json::json!({"call_id": call_id}));
     let v = ws_send_recv(&mut ws, &app_stop_json).await;
     tracing::info!("app_stop response: {:?}", v);
 
@@ -196,10 +193,7 @@ async fn test_ivr_queue_agent_flow() {
         }),
     );
     let v = ws_send_recv(&mut ws, &agent_add_json).await;
-    assert_eq!(
-        v["type"], "command_completed",
-        "agent leg_add failed: {v}"
-    );
+    assert_eq!(v["type"], "command_completed", "agent leg_add failed: {v}");
 
     // Wait for agent to answer
     tokio::time::sleep(Duration::from_secs(2)).await;

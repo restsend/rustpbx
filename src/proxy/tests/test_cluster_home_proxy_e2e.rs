@@ -105,7 +105,11 @@ impl ProxyModule for RejectInviteModule {
     }
 }
 
-async fn start_server_a(db_url: &str, port: u16, peer_port: u16) -> Result<Arc<crate::proxy::server::SipServer>> {
+async fn start_server_a(
+    db_url: &str,
+    port: u16,
+    peer_port: u16,
+) -> Result<Arc<crate::proxy::server::SipServer>> {
     let config = Arc::new(ProxyConfig {
         addr: "127.0.0.1".to_string(),
         udp_port: Some(port),
@@ -114,8 +118,7 @@ async fn start_server_a(db_url: &str, port: u16, peer_port: u16) -> Result<Arc<c
         ..Default::default()
     });
 
-    let peer_addr: std::net::SocketAddr =
-        format!("127.0.0.1:{}", peer_port).parse().unwrap();
+    let peer_addr: std::net::SocketAddr = format!("127.0.0.1:{}", peer_port).parse().unwrap();
 
     let locator = DbLocator::new(db_url.to_string()).await?;
     let cancel = CancellationToken::new();
@@ -129,7 +132,9 @@ async fn start_server_a(db_url: &str, port: u16, peer_port: u16) -> Result<Arc<c
             .register_module("registrar", |inner, config| {
                 Ok(Box::new(RegistrarModule::new(inner, config)))
             })
-            .register_module("call", |inner, config| Ok(Box::new(CallModule::new(config, inner))))
+            .register_module("call", |inner, config| {
+                Ok(Box::new(CallModule::new(config, inner)))
+            })
             .build()
             .await?,
     );
@@ -156,8 +161,7 @@ async fn start_server_b(
         ..Default::default()
     });
 
-    let peer_addr: std::net::SocketAddr =
-        format!("127.0.0.1:{}", peer_port).parse().unwrap();
+    let peer_addr: std::net::SocketAddr = format!("127.0.0.1:{}", peer_port).parse().unwrap();
 
     let locator = DbLocator::new(db_url.to_string()).await?;
     let cancel = CancellationToken::new();
@@ -280,7 +284,10 @@ async fn test_cluster_home_proxy_request_shape_e2e() -> Result<()> {
     );
 
     let request_line = format!("{} {} SIP/2.0", request.method, request.uri);
-    println!("[cluster-e2e] A->B source transport: {}", captured_invite.from_addr);
+    println!(
+        "[cluster-e2e] A->B source transport: {}",
+        captured_invite.from_addr
+    );
     println!("[cluster-e2e] A->B request-line: {}", request_line);
     println!("[cluster-e2e] A->B From: {}", from_uri);
     println!("[cluster-e2e] A->B To: {}", to_uri);

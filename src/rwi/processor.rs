@@ -5,8 +5,8 @@ use crate::call::runtime::conference_media_bridge::{
     AudioReceiver, ConferenceBridgeHandle, PcmAudioFrame,
 };
 use crate::media;
-use crate::media::mixer::SupervisorMixerMode;
 use crate::media::Track as MediaTrackTrait;
+use crate::media::mixer::SupervisorMixerMode;
 use crate::proxy::active_call_registry::ActiveProxyCallRegistry;
 use crate::proxy::proxy_call::media_peer::VoiceEnginePeer;
 use crate::proxy::proxy_call::sip_session::{PeerConnectionAudioReceiver, SipSessionHandle};
@@ -153,7 +153,13 @@ async fn start_peer_conference_bridge(
     // Start the full-duplex bridge
     let bridge = crate::call::runtime::ConferenceMediaBridge::new(conf_manager.clone());
     match bridge
-        .start_bridge_full_duplex(conf_id, leg_id, tx, audio_receiver, audio_codec::CodecType::PCMU)
+        .start_bridge_full_duplex(
+            conf_id,
+            leg_id,
+            tx,
+            audio_receiver,
+            audio_codec::CodecType::PCMU,
+        )
         .await
     {
         Ok(handle) => {
@@ -777,7 +783,9 @@ impl RwiCommandProcessor {
                 app_name,
                 params,
             } => {
-                return self.app_chain(call_id.as_str(), app_name.clone(), params.clone()).await;
+                return self
+                    .app_chain(call_id.as_str(), app_name.clone(), params.clone())
+                    .await;
             }
             RwiCommandPayload::SipOptionsPing { call_id } => {
                 return self.sip_options_ping(call_id).await;
@@ -803,7 +811,9 @@ impl RwiCommandProcessor {
                 leg_id,
                 digits,
             } => {
-                return self.send_dtmf(call_id.clone(), leg_id.clone(), digits.clone()).await;
+                return self
+                    .send_dtmf(call_id.clone(), leg_id.clone(), digits.clone())
+                    .await;
             }
 
             RwiCommandPayload::QueueEnqueue(req) => {
@@ -2194,7 +2204,9 @@ impl RwiCommandProcessor {
 
         // Stop current app first
         handle
-            .send_command(CallCommand::StopApp { reason: Some("chaining".into()) })
+            .send_command(CallCommand::StopApp {
+                reason: Some("chaining".into()),
+            })
             .map_err(|e| CommandError::CommandFailed(e.to_string()))?;
 
         // Brief yield to let the app stop complete
@@ -2264,15 +2276,26 @@ impl RwiCommandProcessor {
         Ok(CommandResult::MediaPlay { track_id })
     }
 
-    async fn media_stop(&self, call_id: &str, leg_id: Option<String>) -> Result<CommandResult, CommandError> {
+    async fn media_stop(
+        &self,
+        call_id: &str,
+        leg_id: Option<String>,
+    ) -> Result<CommandResult, CommandError> {
         let handle = self.get_handle(call_id).await?;
         handle
-            .send_command(CallCommand::StopPlayback { leg_id: leg_id.map(LegId::new) })
+            .send_command(CallCommand::StopPlayback {
+                leg_id: leg_id.map(LegId::new),
+            })
             .map_err(|e| CommandError::CommandFailed(e.to_string()))?;
         Ok(CommandResult::Success)
     }
 
-    async fn send_dtmf(&self, call_id: String, leg_id: Option<String>, digits: String) -> Result<CommandResult, CommandError> {
+    async fn send_dtmf(
+        &self,
+        call_id: String,
+        leg_id: Option<String>,
+        digits: String,
+    ) -> Result<CommandResult, CommandError> {
         let handle = self.get_handle(&call_id).await?;
         handle
             .send_command(CallCommand::SendDtmf {
@@ -3155,10 +3178,7 @@ impl RwiCommandProcessor {
 
     async fn conference_destroy(&self, conf_id: &str) -> Result<CommandResult, CommandError> {
         let manager = self.conference_manager();
-        if let Err(e) = manager
-            .destroy_conference(&conf_id.into())
-            .await
-        {
+        if let Err(e) = manager.destroy_conference(&conf_id.into()).await {
             let err_event = RwiEvent::ConferenceError {
                 conf_id: conf_id.to_string(),
                 error: e.to_string(),

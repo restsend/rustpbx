@@ -28,7 +28,6 @@ pub enum SessionState {
     Ended,
 }
 
-
 impl From<crate::proxy::proxy_call::state::ProxyCallPhase> for SessionState {
     fn from(phase: crate::proxy::proxy_call::state::ProxyCallPhase) -> Self {
         use crate::proxy::proxy_call::state::ProxyCallPhase;
@@ -75,7 +74,6 @@ pub enum MediaPathMode {
     /// Policy decides per leg/bridge at runtime based on capabilities and requirements.
     Adaptive,
 }
-
 
 impl std::fmt::Display for MediaPathMode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

@@ -97,11 +97,7 @@ pub struct ApplicationContext {
 
 impl ApplicationContext {
     /// Create a new application context.
-    pub fn new(
-        db: DatabaseConnection,
-        call_info: CallInfo,
-        config: Arc<Config>,
-    ) -> Self {
+    pub fn new(db: DatabaseConnection, call_info: CallInfo, config: Arc<Config>) -> Self {
         Self {
             session_vars: Arc::new(RwLock::new(HashMap::new())),
             db,
@@ -164,8 +160,7 @@ mod tests {
     #[tokio::test]
     async fn test_session_vars() {
         let db = sea_orm::Database::connect("sqlite::memory:").await.unwrap();
-        let ctx =
-            ApplicationContext::new(db, make_call_info(), Arc::new(Config::default()));
+        let ctx = ApplicationContext::new(db, make_call_info(), Arc::new(Config::default()));
 
         // Initially empty
         assert!(ctx.get_var("lang").await.is_none());

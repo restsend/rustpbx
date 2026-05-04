@@ -91,9 +91,10 @@ async fn resolve_agent_id(state: &ConsoleState, user_id: i64) -> Option<i64> {
 pub fn extract_session_cookie(headers: &HeaderMap) -> Option<String> {
     if let Some(auth_header) = headers.get(axum::http::header::AUTHORIZATION)
         && let Ok(auth_str) = auth_header.to_str()
-            && let Some(token) = auth_str.strip_prefix("Bearer ") {
-                return Some(token.trim().to_string());
-            }
+        && let Some(token) = auth_str.strip_prefix("Bearer ")
+    {
+        return Some(token.trim().to_string());
+    }
 
     for cookie_header in headers.get_all(COOKIE) {
         if let Ok(s) = cookie_header.to_str() {
@@ -158,9 +159,9 @@ mod tests {
     use sea_orm_migration::MigratorTrait;
 
     #[cfg(feature = "addon-wholesale")]
-    use chrono::Utc;
-    #[cfg(feature = "addon-wholesale")]
     use crate::addons::wholesale::models::wholesale_agent;
+    #[cfg(feature = "addon-wholesale")]
+    use chrono::Utc;
     #[cfg(feature = "addon-wholesale")]
     use sea_orm::{ActiveValue::Set, EntityTrait};
 
@@ -172,7 +173,9 @@ mod tests {
         #[cfg(feature = "addon-wholesale")]
         {
             use crate::addons::wholesale::migration::Migrator as WholesaleMigrator;
-            WholesaleMigrator::up(&db, None).await.expect("run wholesale migrations");
+            WholesaleMigrator::up(&db, None)
+                .await
+                .expect("run wholesale migrations");
         }
         ConsoleState::initialize(
             Arc::new(crate::callrecord::DefaultCallRecordFormatter::default()),

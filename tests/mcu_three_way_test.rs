@@ -10,7 +10,10 @@ use rustpbx::media::conference_mixer::AudioFrame;
 async fn test_three_way_conference_audio_flow() {
     // 1. Create conference
     let manager = ConferenceManager::new();
-    manager.create_conference("conf1".into(), None).await.unwrap();
+    manager
+        .create_conference("conf1".into(), None)
+        .await
+        .unwrap();
 
     // 2. Add 3 participants
     let channels_a = manager
@@ -31,9 +34,18 @@ async fn test_three_way_conference_audio_flow() {
     let tx_c = channels_c.input_tx;
 
     // Get output receivers
-    let mut rx_a = manager.take_participant_output_rx(&LegId::new("a")).await.unwrap();
-    let mut rx_b = manager.take_participant_output_rx(&LegId::new("b")).await.unwrap();
-    let mut rx_c = manager.take_participant_output_rx(&LegId::new("c")).await.unwrap();
+    let mut rx_a = manager
+        .take_participant_output_rx(&LegId::new("a"))
+        .await
+        .unwrap();
+    let mut rx_b = manager
+        .take_participant_output_rx(&LegId::new("b"))
+        .await
+        .unwrap();
+    let mut rx_c = manager
+        .take_participant_output_rx(&LegId::new("c"))
+        .await
+        .unwrap();
 
     // 3. A sends audio
     let samples = vec![1000i16; 160];
@@ -78,7 +90,10 @@ async fn test_three_way_conference_audio_flow() {
 #[tokio::test]
 async fn test_conference_participant_join_leave() {
     let manager = ConferenceManager::new();
-    manager.create_conference("conf2".into(), None).await.unwrap();
+    manager
+        .create_conference("conf2".into(), None)
+        .await
+        .unwrap();
 
     // Add 2 participants
     let channels_a = manager
@@ -91,7 +106,10 @@ async fn test_conference_participant_join_leave() {
         .unwrap();
 
     let tx_a = channels_a.input_tx;
-    let mut rx_b = manager.take_participant_output_rx(&LegId::new("b")).await.unwrap();
+    let mut rx_b = manager
+        .take_participant_output_rx(&LegId::new("b"))
+        .await
+        .unwrap();
 
     // A speaks
     tx_a.send(AudioFrame::new(vec![1000i16; 160], 8000))
@@ -108,8 +126,14 @@ async fn test_conference_participant_join_leave() {
         .await
         .unwrap();
     let tx_c = channels_c.input_tx;
-    let mut rx_a = manager.take_participant_output_rx(&LegId::new("a")).await.unwrap();
-    let mut rx_c = manager.take_participant_output_rx(&LegId::new("c")).await.unwrap();
+    let mut rx_a = manager
+        .take_participant_output_rx(&LegId::new("a"))
+        .await
+        .unwrap();
+    let mut rx_c = manager
+        .take_participant_output_rx(&LegId::new("c"))
+        .await
+        .unwrap();
 
     // C speaks
     tx_c.send(AudioFrame::new(vec![2000i16; 160], 8000))
@@ -143,7 +167,10 @@ async fn test_conference_participant_join_leave() {
 #[tokio::test]
 async fn test_conference_mute_unmute() {
     let manager = ConferenceManager::new();
-    manager.create_conference("conf3".into(), None).await.unwrap();
+    manager
+        .create_conference("conf3".into(), None)
+        .await
+        .unwrap();
 
     let channels_a = manager
         .add_participant(&"conf3".into(), LegId::new("a"))
@@ -155,7 +182,10 @@ async fn test_conference_mute_unmute() {
         .unwrap();
 
     let tx_a = channels_a.input_tx;
-    let mut rx_b = manager.take_participant_output_rx(&LegId::new("b")).await.unwrap();
+    let mut rx_b = manager
+        .take_participant_output_rx(&LegId::new("b"))
+        .await
+        .unwrap();
 
     // Mute A
     manager
@@ -203,7 +233,10 @@ async fn test_full_duplex_media_bridge() {
     let bridge = ConferenceMediaBridge::new(manager.clone());
 
     // Create conference
-    manager.create_conference("conf4".into(), None).await.unwrap();
+    manager
+        .create_conference("conf4".into(), None)
+        .await
+        .unwrap();
 
     // Create mock audio receiver that provides test frames
     struct MockReceiver {
@@ -234,17 +267,26 @@ async fn test_full_duplex_media_bridge() {
         ],
         index: 0,
     });
-    
+
     // Create mock audio sender
     let (sender_tx, _sender_rx) = tokio::sync::mpsc::channel(100);
-    
+
     // Start full-duplex bridge
     let leg_id = LegId::new("test-leg");
     let handle = bridge
-        .start_bridge_full_duplex("conf4", &leg_id, sender_tx, receiver, audio_codec::CodecType::PCMU)
+        .start_bridge_full_duplex(
+            "conf4",
+            &leg_id,
+            sender_tx,
+            receiver,
+            audio_codec::CodecType::PCMU,
+        )
         .await;
-    
-    assert!(handle.is_ok(), "Full-duplex bridge should start successfully");
+
+    assert!(
+        handle.is_ok(),
+        "Full-duplex bridge should start successfully"
+    );
 
     // Give it time to process
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -259,8 +301,8 @@ async fn test_full_duplex_media_bridge() {
 
 #[tokio::test]
 async fn test_transcoding_pipeline() {
-    use rustpbx::media::transcoding_pipeline::TranscodingPipeline;
     use audio_codec::CodecType;
+    use rustpbx::media::transcoding_pipeline::TranscodingPipeline;
 
     // Test PCMU to PCMU (no transcoding needed)
     let mut pipeline = TranscodingPipeline::new(CodecType::PCMU, CodecType::PCMU);
@@ -275,11 +317,14 @@ async fn test_transcoding_pipeline() {
 
 #[tokio::test]
 async fn test_conference_with_transcoding() {
-    use rustpbx::media::transcoding_pipeline::TranscodingPipeline;
     use audio_codec::CodecType;
+    use rustpbx::media::transcoding_pipeline::TranscodingPipeline;
 
     let manager = ConferenceManager::new();
-    manager.create_conference("conf5".into(), None).await.unwrap();
+    manager
+        .create_conference("conf5".into(), None)
+        .await
+        .unwrap();
 
     // Add participants
     let channels_a = manager
@@ -292,7 +337,10 @@ async fn test_conference_with_transcoding() {
         .unwrap();
 
     let tx_a = channels_a.input_tx;
-    let mut rx_b = manager.take_participant_output_rx(&LegId::new("b")).await.unwrap();
+    let mut rx_b = manager
+        .take_participant_output_rx(&LegId::new("b"))
+        .await
+        .unwrap();
 
     // Simulate transcoding: encode PCMU, decode to PCM, send to mixer
     let mut pipeline = TranscodingPipeline::new(CodecType::PCMU, CodecType::PCMU);

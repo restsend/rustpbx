@@ -1,8 +1,8 @@
 use super::{ProxyAction, ProxyModule, server::SipServerRef};
 use crate::call::runtime::SessionId;
 use crate::call::{
-    CalleeDisplayName, CalleeOfflineMarker, DialDirection, DialStrategy, Dialplan, Location, MediaConfig, RouteInvite,
-    RoutingState, SipUser, TransactionCookie, TrunkContext,
+    CalleeDisplayName, CalleeOfflineMarker, DialDirection, DialStrategy, Dialplan, Location,
+    MediaConfig, RouteInvite, RoutingState, SipUser, TransactionCookie, TrunkContext,
 };
 use crate::config::{ProxyConfig, RouteResult};
 use crate::media::{Track, recorder::RecorderOption};
@@ -755,9 +755,7 @@ impl CallModule {
         }
 
         if callee_is_same_realm && internal_lookup_empty {
-            dialplan
-                .extensions
-                .insert(CalleeOfflineMarker);
+            dialplan.extensions.insert(CalleeOfflineMarker);
         }
 
         Ok(dialplan)
@@ -1058,9 +1056,7 @@ impl CallModule {
         // After dialplan inspectors have had a chance to fill in routes,
         // if the callee was deemed offline at resolution time and no
         // inspector provided targets, reject with 480.
-        if dialplan.extensions.get::<CalleeOfflineMarker>().is_some()
-            && dialplan.is_empty()
-        {
+        if dialplan.extensions.get::<CalleeOfflineMarker>().is_some() && dialplan.is_empty() {
             return Err(RouteError::from((
                 anyhow!("target user is offline"),
                 Some(rsipstack::sip::StatusCode::TemporarilyUnavailable),
@@ -2238,7 +2234,10 @@ mod tests {
         assert!(result.is_ok(), "offline same-realm should not error");
         match result.unwrap() {
             DialStrategy::Sequential(locs) => {
-                assert!(locs.is_empty(), "offline same-realm should return empty targets");
+                assert!(
+                    locs.is_empty(),
+                    "offline same-realm should return empty targets"
+                );
             }
             _ => panic!("expected Sequential strategy"),
         }
@@ -2485,16 +2484,14 @@ mod tests {
         });
 
         let dialplan = module
-            .default_resolve(
-                &request,
-                Box::new(NotHandledRouteInvite),
-                &caller,
-                &cookie,
-            )
+            .default_resolve(&request, Box::new(NotHandledRouteInvite), &caller, &cookie)
             .await
             .expect("wholesale trunk should not error at resolve time");
 
-        assert!(dialplan.is_empty(), "wholesale locator empty => empty targets");
+        assert!(
+            dialplan.is_empty(),
+            "wholesale locator empty => empty targets"
+        );
         assert!(
             dialplan.extensions.get::<CalleeOfflineMarker>().is_some(),
             "offline marker should be set for same-realm locator-empty"

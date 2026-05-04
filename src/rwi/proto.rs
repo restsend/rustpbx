@@ -327,7 +327,6 @@ pub enum ConferenceBackend {
     External,
 }
 
-
 /// Type alias for RWI event sender.
 pub type RwiEventTx = tokio::sync::mpsc::UnboundedSender<RwiEvent>;
 /// Type alias for RWI event receiver.

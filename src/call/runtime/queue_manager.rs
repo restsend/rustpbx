@@ -220,11 +220,12 @@ impl QueueManager {
     pub async fn remove_queue_if_empty(&self, queue_id: &QueueId) -> Result<bool> {
         let mut queues = self.queues.write().await;
         if let Some(queue) = queues.get(queue_id)
-            && queue.is_empty() {
-                queues.remove(queue_id);
-                info!(queue_id = %queue_id.0, "Empty queue removed");
-                return Ok(true);
-            }
+            && queue.is_empty()
+        {
+            queues.remove(queue_id);
+            info!(queue_id = %queue_id.0, "Empty queue removed");
+            return Ok(true);
+        }
         Ok(false)
     }
 

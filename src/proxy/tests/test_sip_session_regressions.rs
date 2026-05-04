@@ -445,8 +445,7 @@ fn test_queue_fallback_with_prompt_maps_to_play_then_hangup() {
     let plan = queue.to_queue_plan().expect("queue plan should build");
     match plan.fallback {
         Some(QueueFallbackAction::Failure(FailureAction::PlayThenHangup {
-            audio_file,
-            ..
+            audio_file, ..
         })) => assert_eq!(audio_file, "sounds/queue-fallback.wav"),
         other => panic!("expected PlayThenHangup fallback, got {:?}", other),
     }
@@ -487,11 +486,7 @@ async fn test_queue_transfer_return_ivr_overrides_hangup_fallback_when_no_agents
     session.app_runtime = runtime.clone();
 
     session
-        .handle_queue_transfer(
-            LegId::from("caller"),
-            "support",
-            Some("hello".to_string()),
-        )
+        .handle_queue_transfer(LegId::from("caller"), "support", Some("hello".to_string()))
         .await
         .expect("return_ivr should override hangup fallback and start IVR");
 

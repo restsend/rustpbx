@@ -2,7 +2,7 @@ use crate::addons::{Addon, SidebarItem, export_reload::ExportReloadHandler};
 use crate::app::AppState;
 use async_trait::async_trait;
 use axum::Router;
-use serde_json::{json, Value as JsonValue};
+use serde_json::{Value as JsonValue, json};
 use tower_http::services::ServeDir;
 
 pub mod console;
@@ -61,7 +61,10 @@ impl Addon for QueueAddon {
 
         Some(
             Router::new()
-                .nest_service(&format!("{}/queue", static_url_prefix), ServeDir::new(static_fs_path))
+                .nest_service(
+                    &format!("{}/queue", static_url_prefix),
+                    ServeDir::new(static_fs_path),
+                )
                 .nest(&base_path, router),
         )
     }
@@ -129,7 +132,10 @@ impl ExportReloadHandler for QueueExportReloadHandler {
         let proxy_cfg = crate::config::ProxyConfig::default();
         let exporter = crate::addons::queue::services::exporter::QueueExporter::new(db.clone());
 
-        exporter.export_all(&proxy_cfg).await.map_err(|e| format!("Export failed: {}", e))?;
+        exporter
+            .export_all(&proxy_cfg)
+            .await
+            .map_err(|e| format!("Export failed: {}", e))?;
 
         app_state
             .sip_server()

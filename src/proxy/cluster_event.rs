@@ -906,12 +906,17 @@ mod tests {
 
         let handler: Arc<dyn ClusterEventHandler> = Arc::new(DummyHandler);
         let aor: Uri = "sip:test@x".parse().unwrap();
-        let loc = Location { aor, ..Default::default() };
+        let loc = Location {
+            aor,
+            ..Default::default()
+        };
         let state = PresenceState::default();
         let source = EventSource::Local;
 
         // Just verify they run without panic
-        handler.on_locator_event(&LocatorEvent::Registered(loc), &source).await;
+        handler
+            .on_locator_event(&LocatorEvent::Registered(loc), &source)
+            .await;
         handler.on_presence_event("1001", &state, &source).await;
     }
 
@@ -1032,7 +1037,8 @@ mod tests {
             5060,
         ));
 
-        hub.on_remote_presence_change(identity, state.clone(), remote_source).await;
+        hub.on_remote_presence_change(identity, state.clone(), remote_source)
+            .await;
 
         // Memory state should be updated
         let stored = hub.presence_manager.get_state(identity);
@@ -1077,7 +1083,8 @@ mod tests {
         // Simulate what the hub's broadcast subscriber does for local events
         // (dispatch_local_locator_event only calls notify handlers + forward,
         // it does NOT call handle_locator_event)
-        hub.notify_locator_handlers(&event, &EventSource::Local).await;
+        hub.notify_locator_handlers(&event, &EventSource::Local)
+            .await;
 
         // Handler got notified
         assert_eq!(*handler.locator_count.lock().unwrap(), 1);

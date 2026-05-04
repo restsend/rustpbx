@@ -22,15 +22,15 @@
 //! ```
 
 use super::{AppEventLoop, CallApp, CallController, ControllerEvent, RecordingInfo};
-use crate::call::domain::CallCommand;
-use tokio::sync::mpsc;
 use crate::call::app::{ApplicationContext, CallInfo};
+use crate::call::domain::CallCommand;
 use crate::config::Config;
 use crate::proxy::proxy_call::sip_session::SipSessionHandle;
 use chrono::Utc;
 use sea_orm::DatabaseConnection;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 /// Type alias for mock call stack command sender.
@@ -219,9 +219,7 @@ impl MockCallStack {
 
     /// Inject a timeout event.
     pub fn timeout(&self, id: impl Into<String>) -> &Self {
-        let _ = self
-            .event_tx
-            .send(ControllerEvent::Timeout(id.into()));
+        let _ = self.event_tx.send(ControllerEvent::Timeout(id.into()));
         self
     }
 

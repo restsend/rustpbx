@@ -471,47 +471,48 @@ async fn active_call_stats(state: &ConsoleState, limit: usize) -> (usize, Vec<Ac
     let mut active_count = 0;
     // 2. Proxy Calls (including Wholesale)
     if let Ok(guard) = state.sip_server.read()
-        && let Some(server) = guard.as_ref() {
-            active_count += server.active_call_registry.count();
-            let proxy_calls = server.active_call_registry.list_recent(limit);
-            for call in proxy_calls {
-                let status = call.status.to_string();
-                // Capitalize status
-                let status = if !status.is_empty() {
-                    let mut c = status.chars();
-                    match c.next() {
-                        None => String::new(),
-                        Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
-                    }
-                } else {
-                    status
-                };
+        && let Some(server) = guard.as_ref()
+    {
+        active_count += server.active_call_registry.count();
+        let proxy_calls = server.active_call_registry.list_recent(limit);
+        for call in proxy_calls {
+            let status = call.status.to_string();
+            // Capitalize status
+            let status = if !status.is_empty() {
+                let mut c = status.chars();
+                match c.next() {
+                    None => String::new(),
+                    Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+                }
+            } else {
+                status
+            };
 
-                let start_time = call.started_at;
-                let started_at = start_time.format("%H:%M").to_string();
-                let duration_secs = if let Some(answered_at) = call.answered_at {
-                    (Utc::now() - answered_at).num_seconds().max(0)
-                } else {
-                    (Utc::now() - start_time).num_seconds().max(0)
-                };
+            let start_time = call.started_at;
+            let started_at = start_time.format("%H:%M").to_string();
+            let duration_secs = if let Some(answered_at) = call.answered_at {
+                (Utc::now() - answered_at).num_seconds().max(0)
+            } else {
+                (Utc::now() - start_time).num_seconds().max(0)
+            };
 
-                previews.push(ActiveCallPreview {
-                    session_id: call.session_id.clone(),
-                    caller: call
-                        .caller
-                        .clone()
-                        .unwrap_or_else(|| call.session_id.clone()),
-                    callee: call
-                        .callee
-                        .clone()
-                        .unwrap_or_else(|| call.direction.clone()),
-                    status,
-                    started_at,
-                    duration: format_duration(duration_secs),
-                    started_at_ts: start_time,
-                });
-            }
+            previews.push(ActiveCallPreview {
+                session_id: call.session_id.clone(),
+                caller: call
+                    .caller
+                    .clone()
+                    .unwrap_or_else(|| call.session_id.clone()),
+                callee: call
+                    .callee
+                    .clone()
+                    .unwrap_or_else(|| call.direction.clone()),
+                status,
+                started_at,
+                duration: format_duration(duration_secs),
+                started_at_ts: start_time,
+            });
         }
+    }
 
     // Sort and limit
     previews.sort_by_key(|b| std::cmp::Reverse(b.started_at_ts));

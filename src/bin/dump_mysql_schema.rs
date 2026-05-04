@@ -173,9 +173,9 @@ fn main() {
         );
         print!(
             "{}",
-            build_sql(&schema.create_table_from_entity(
-                models::wholesale_agent::tenant_discount::Entity
-            ))
+            build_sql(
+                &schema.create_table_from_entity(models::wholesale_agent::tenant_discount::Entity)
+            )
         );
     }
 

@@ -108,12 +108,8 @@ async fn check_bind_targets(
         }
 
         let result = match target.kind {
-            SocketKind::Tcp => TcpListener::bind(target.addr)
-                .await
-                .map(drop),
-            SocketKind::Udp => UdpSocket::bind(target.addr)
-                .await
-                .map(drop),
+            SocketKind::Tcp => TcpListener::bind(target.addr).await.map(drop),
+            SocketKind::Udp => UdpSocket::bind(target.addr).await.map(drop),
         };
 
         if let Err(err) = result {

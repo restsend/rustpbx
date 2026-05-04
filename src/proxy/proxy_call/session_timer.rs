@@ -397,20 +397,21 @@ pub fn apply_session_timer_headers(
     headers: &rsipstack::sip::Headers,
 ) -> Result<()> {
     if let Some(se_value) = get_header_value(headers, HEADER_SESSION_EXPIRES)
-        && let Some((interval, refresher)) = parse_session_expires(&se_value) {
-            if interval < timer.min_se {
-                return Err(anyhow!(
-                    "Session-Expires too small: {} < {}",
-                    interval.as_secs(),
-                    timer.min_se.as_secs()
-                ));
-            }
-
-            timer.session_interval = interval;
-            if let Some(new_refresher) = refresher {
-                timer.refresher = new_refresher;
-            }
+        && let Some((interval, refresher)) = parse_session_expires(&se_value)
+    {
+        if interval < timer.min_se {
+            return Err(anyhow!(
+                "Session-Expires too small: {} < {}",
+                interval.as_secs(),
+                timer.min_se.as_secs()
+            ));
         }
+
+        timer.session_interval = interval;
+        if let Some(new_refresher) = refresher {
+            timer.refresher = new_refresher;
+        }
+    }
 
     Ok(())
 }
@@ -485,7 +486,9 @@ pub fn build_session_timer_headers(
     )
 }
 
-pub fn build_session_timer_response_headers(timer: &SessionTimerState) -> Vec<rsipstack::sip::Header> {
+pub fn build_session_timer_response_headers(
+    timer: &SessionTimerState,
+) -> Vec<rsipstack::sip::Header> {
     vec![rsipstack::sip::Header::Other(
         HEADER_SESSION_EXPIRES.to_string(),
         timer.get_session_expires_value(),

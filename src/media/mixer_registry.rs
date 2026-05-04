@@ -316,16 +316,16 @@ impl MixerRegistry {
                     .participants
                     .iter_mut()
                     .find(|p| p.session_id == session_id)
-                {
-                    participant.muted = muted;
-                    info!(
-                        mixer_id = %mixer_id,
-                        session_id = %session_id,
-                        muted = muted,
-                        "Participant mute state updated"
-                    );
-                    return true;
-                }
+            {
+                participant.muted = muted;
+                info!(
+                    mixer_id = %mixer_id,
+                    session_id = %session_id,
+                    muted = muted,
+                    "Participant mute state updated"
+                );
+                return true;
+            }
         }
 
         warn!(

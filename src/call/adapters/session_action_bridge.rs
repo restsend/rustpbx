@@ -61,13 +61,11 @@ pub fn call_command_to_session_action(cmd: CallCommand) -> Result<SessionAction>
         CallCommand::Reject { leg_id: _, reason } => {
             // Reject maps to Hangup with appropriate code
             Ok(SessionAction::Hangup {
-                reason: reason
-                    .as_deref()
-                    .map(|r| match r.to_lowercase().as_str() {
-                        "busy" => CallRecordHangupReason::Failed,
-                        "declined" | "rejected" => CallRecordHangupReason::Rejected,
-                        _ => CallRecordHangupReason::BySystem,
-                    }),
+                reason: reason.as_deref().map(|r| match r.to_lowercase().as_str() {
+                    "busy" => CallRecordHangupReason::Failed,
+                    "declined" | "rejected" => CallRecordHangupReason::Rejected,
+                    _ => CallRecordHangupReason::BySystem,
+                }),
                 code: Some(603), // Decline
                 initiator: Some("reject".to_string()),
             })

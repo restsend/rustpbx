@@ -241,37 +241,38 @@ async fn match_invite_impl(
 
         // Check Route Policy (using rewritten numbers)
         if let Some(policy) = &rule.policy
-            && let Some(guard) = &routing_state.policy_guard {
-                let current_caller = option.caller.user().unwrap_or_default();
-                let current_callee = option.callee.user().unwrap_or_default();
+            && let Some(guard) = &routing_state.policy_guard
+        {
+            let current_caller = option.caller.user().unwrap_or_default();
+            let current_callee = option.callee.user().unwrap_or_default();
 
-                if let PolicyCheckStatus::Rejected(rejection) = guard
-                    .check_policy(
-                        &rule.name,
-                        policy,
-                        current_caller,
-                        current_callee,
-                        origin_country,
-                    )
-                    .await?
-                {
-                    let reason = rejection.to_string();
-                    info!(
-                        "Call rejected by route policy: {} reason: {}",
-                        rule.name, reason
-                    );
-                    if let Some(trace) = &mut trace {
-                        trace.abort = Some(RouteAbortTrace {
-                            code: rsipstack::sip::StatusCode::Forbidden.into(),
-                            reason: Some(reason.clone()),
-                        });
-                    }
-                    return Ok(RouteResult::Abort(
-                        rsipstack::sip::StatusCode::Forbidden,
-                        Some(reason),
-                    ));
+            if let PolicyCheckStatus::Rejected(rejection) = guard
+                .check_policy(
+                    &rule.name,
+                    policy,
+                    current_caller,
+                    current_callee,
+                    origin_country,
+                )
+                .await?
+            {
+                let reason = rejection.to_string();
+                info!(
+                    "Call rejected by route policy: {} reason: {}",
+                    rule.name, reason
+                );
+                if let Some(trace) = &mut trace {
+                    trace.abort = Some(RouteAbortTrace {
+                        code: rsipstack::sip::StatusCode::Forbidden.into(),
+                        reason: Some(reason.clone()),
+                    });
                 }
+                return Ok(RouteResult::Abort(
+                    rsipstack::sip::StatusCode::Forbidden,
+                    Some(reason),
+                ));
             }
+        }
 
         let hints = if !rule.codecs.is_empty() || rule.disable_ice_servers.is_some() {
             let mut hints = DialplanHints::default();
@@ -327,67 +328,69 @@ async fn match_invite_impl(
             }
             ActionType::Forward => {
                 if let Some(dest_config) = &rule.action.dest
-                    && mode == MatchMode::Execute {
-                        let selected_trunk = select_trunk(
-                            dest_config,
-                            &rule.action.select,
-                            &rule.action.hash_key,
-                            &option,
-                            routing_state.clone(),
-                            trunks,
-                        )?;
+                    && mode == MatchMode::Execute
+                {
+                    let selected_trunk = select_trunk(
+                        dest_config,
+                        &rule.action.select,
+                        &rule.action.hash_key,
+                        &option,
+                        routing_state.clone(),
+                        trunks,
+                    )?;
 
-                        if let Some(trace) = &mut trace {
-                            trace.selected_trunk = Some(selected_trunk.clone());
-                        }
-
-                        if let Some(trunk_config) = trunks
-                            .as_ref()
-                            .and_then(|trunks| trunks.get(&selected_trunk))
-                        {
-                            // Check Trunk Policy
-                            if let Some(policy) = &trunk_config.policy
-                                && let Some(guard) = &routing_state.policy_guard {
-                                    let current_caller = option.caller.user().unwrap_or_default();
-                                    let current_callee = option.callee.user().unwrap_or_default();
-
-                                    if let PolicyCheckStatus::Rejected(rejection) = guard
-                                        .check_policy(
-                                            &format!("trunk:{}", selected_trunk),
-                                            policy,
-                                            current_caller,
-                                            current_callee,
-                                            origin_country,
-                                        )
-                                        .await?
-                                    {
-                                        let reason = rejection.to_string();
-                                        info!(
-                                            "Call rejected by trunk policy: {} reason: {}",
-                                            selected_trunk, reason
-                                        );
-                                        if let Some(trace) = &mut trace {
-                                            trace.abort = Some(RouteAbortTrace {
-                                                code: rsipstack::sip::StatusCode::Forbidden.into(),
-                                                reason: Some(reason.clone()),
-                                            });
-                                        }
-                                        return Ok(RouteResult::Abort(
-                                            rsipstack::sip::StatusCode::Forbidden,
-                                            Some(reason),
-                                        ));
-                                    }
-                                }
-
-                            apply_trunk_config(&mut option, trunk_config)?;
-                            info!(
-                                "Selected trunk: {} for destination: {}",
-                                selected_trunk, trunk_config.dest
-                            );
-                        } else {
-                            info!("Trunk '{}' not found in configuration", selected_trunk);
-                        }
+                    if let Some(trace) = &mut trace {
+                        trace.selected_trunk = Some(selected_trunk.clone());
                     }
+
+                    if let Some(trunk_config) = trunks
+                        .as_ref()
+                        .and_then(|trunks| trunks.get(&selected_trunk))
+                    {
+                        // Check Trunk Policy
+                        if let Some(policy) = &trunk_config.policy
+                            && let Some(guard) = &routing_state.policy_guard
+                        {
+                            let current_caller = option.caller.user().unwrap_or_default();
+                            let current_callee = option.callee.user().unwrap_or_default();
+
+                            if let PolicyCheckStatus::Rejected(rejection) = guard
+                                .check_policy(
+                                    &format!("trunk:{}", selected_trunk),
+                                    policy,
+                                    current_caller,
+                                    current_callee,
+                                    origin_country,
+                                )
+                                .await?
+                            {
+                                let reason = rejection.to_string();
+                                info!(
+                                    "Call rejected by trunk policy: {} reason: {}",
+                                    selected_trunk, reason
+                                );
+                                if let Some(trace) = &mut trace {
+                                    trace.abort = Some(RouteAbortTrace {
+                                        code: rsipstack::sip::StatusCode::Forbidden.into(),
+                                        reason: Some(reason.clone()),
+                                    });
+                                }
+                                return Ok(RouteResult::Abort(
+                                    rsipstack::sip::StatusCode::Forbidden,
+                                    Some(reason),
+                                ));
+                            }
+                        }
+
+                        apply_trunk_config(&mut option, trunk_config)?;
+                        info!(
+                            "Selected trunk: {} for destination: {}",
+                            selected_trunk, trunk_config.dest
+                        );
+                    } else {
+                        info!("Trunk '{}' not found in configuration", selected_trunk);
+                    }
+                }
                 return Ok(RouteResult::Forward(option, hints));
             }
             ActionType::Queue => {
@@ -453,37 +456,38 @@ async fn match_invite_impl(
                         {
                             // Check Trunk Policy
                             if let Some(policy) = &trunk_config.policy
-                                && let Some(guard) = &routing_state.policy_guard {
-                                    let current_caller = option.caller.user().unwrap_or_default();
-                                    let current_callee = option.callee.user().unwrap_or_default();
+                                && let Some(guard) = &routing_state.policy_guard
+                            {
+                                let current_caller = option.caller.user().unwrap_or_default();
+                                let current_callee = option.callee.user().unwrap_or_default();
 
-                                    if let PolicyCheckStatus::Rejected(rejection) = guard
-                                        .check_policy(
-                                            &format!("trunk:{}", selected_trunk),
-                                            policy,
-                                            current_caller,
-                                            current_callee,
-                                            origin_country,
-                                        )
-                                        .await?
-                                    {
-                                        let reason = rejection.to_string();
-                                        info!(
-                                            "Call rejected by trunk policy: {} reason: {}",
-                                            selected_trunk, reason
-                                        );
-                                        if let Some(trace) = &mut trace {
-                                            trace.abort = Some(RouteAbortTrace {
-                                                code: rsipstack::sip::StatusCode::Forbidden.into(),
-                                                reason: Some(reason.clone()),
-                                            });
-                                        }
-                                        return Ok(RouteResult::Abort(
-                                            rsipstack::sip::StatusCode::Forbidden,
-                                            Some(reason),
-                                        ));
+                                if let PolicyCheckStatus::Rejected(rejection) = guard
+                                    .check_policy(
+                                        &format!("trunk:{}", selected_trunk),
+                                        policy,
+                                        current_caller,
+                                        current_callee,
+                                        origin_country,
+                                    )
+                                    .await?
+                                {
+                                    let reason = rejection.to_string();
+                                    info!(
+                                        "Call rejected by trunk policy: {} reason: {}",
+                                        selected_trunk, reason
+                                    );
+                                    if let Some(trace) = &mut trace {
+                                        trace.abort = Some(RouteAbortTrace {
+                                            code: rsipstack::sip::StatusCode::Forbidden.into(),
+                                            reason: Some(reason.clone()),
+                                        });
                                     }
+                                    return Ok(RouteResult::Abort(
+                                        rsipstack::sip::StatusCode::Forbidden,
+                                        Some(reason),
+                                    ));
                                 }
+                            }
                             apply_trunk_config(&mut option, trunk_config)?;
                         }
                     }
@@ -532,39 +536,45 @@ fn matches_rule(rule: &crate::proxy::routing::RouteRule, ctx: &MatchContext) -> 
 
     // Check from.user
     if let Some(pattern) = &conditions.from_user
-        && !matches_pattern(pattern, ctx.caller_user)? {
-            return Ok(false);
-        }
+        && !matches_pattern(pattern, ctx.caller_user)?
+    {
+        return Ok(false);
+    }
 
     // Check from.host
     if let Some(pattern) = &conditions.from_host
-        && !matches_pattern(pattern, &ctx.caller_host.to_string())? {
-            return Ok(false);
-        }
+        && !matches_pattern(pattern, &ctx.caller_host.to_string())?
+    {
+        return Ok(false);
+    }
 
     // Check to.user
     if let Some(pattern) = &conditions.to_user
-        && !matches_pattern(pattern, ctx.callee_user)? {
-            return Ok(false);
-        }
+        && !matches_pattern(pattern, ctx.callee_user)?
+    {
+        return Ok(false);
+    }
 
     // Check to.host
     if let Some(pattern) = &conditions.to_host
-        && !matches_pattern(pattern, &ctx.callee_host.to_string())? {
-            return Ok(false);
-        }
+        && !matches_pattern(pattern, &ctx.callee_host.to_string())?
+    {
+        return Ok(false);
+    }
 
     // Check request_uri.user
     if let Some(pattern) = &conditions.request_uri_user
-        && !matches_pattern(pattern, ctx.request_user)? {
-            return Ok(false);
-        }
+        && !matches_pattern(pattern, ctx.request_user)?
+    {
+        return Ok(false);
+    }
 
     // Check request_uri.host
     if let Some(pattern) = &conditions.request_uri_host
-        && !matches_pattern(pattern, &ctx.request_host.to_string())? {
-            return Ok(false);
-        }
+        && !matches_pattern(pattern, &ctx.request_host.to_string())?
+    {
+        return Ok(false);
+    }
 
     // Check compatibility fields
     if let Some(pattern) = &conditions.caller {
@@ -673,9 +683,10 @@ fn collect_match_captures(
 
     for (header_key, pattern) in &conditions.headers {
         if let Some(header_name) = header_key.strip_prefix("header.")
-            && let Some(value) = get_header_value(ctx.origin, header_name) {
-                collect_field_capture(&mut captures, header_key, Some(pattern.as_str()), &value)?;
-            }
+            && let Some(value) = get_header_value(ctx.origin, header_name)
+        {
+            collect_field_capture(&mut captures, header_key, Some(pattern.as_str()), &value)?;
+        }
     }
 
     Ok(captures)
@@ -688,9 +699,10 @@ fn collect_field_capture(
     value: &str,
 ) -> Result<()> {
     if let Some(pattern) = pattern
-        && let Some(groups) = extract_regex_captures(pattern, value)? {
-            captures.insert(key.to_string(), groups);
-        }
+        && let Some(groups) = extract_regex_captures(pattern, value)?
+    {
+        captures.insert(key.to_string(), groups);
+    }
     Ok(())
 }
 
@@ -938,25 +950,28 @@ fn extract_capture_group(original: &str, group_num: usize) -> Option<String> {
 
     for (pattern_str, positions) in &patterns {
         if let Ok(regex) = Regex::new(pattern_str)
-            && let Some(captures) = regex.captures(original) {
-                if group_num <= captures.len() && group_num > 0
-                    && let Some(capture) = captures.get(group_num) {
-                        return Some(capture.as_str().to_string());
-                    }
-                // Fallback for simple position-based extraction
-                if !positions.is_empty() && group_num == 1 {
-                    let start_pos = positions[0];
-                    if original.len() > start_pos {
-                        // Extract digits from this position onward
-                        let substr = &original[start_pos..];
-                        let digits: String =
-                            substr.chars().take_while(|c| c.is_ascii_digit()).collect();
-                        if !digits.is_empty() {
-                            return Some(digits);
-                        }
+            && let Some(captures) = regex.captures(original)
+        {
+            if group_num <= captures.len()
+                && group_num > 0
+                && let Some(capture) = captures.get(group_num)
+            {
+                return Some(capture.as_str().to_string());
+            }
+            // Fallback for simple position-based extraction
+            if !positions.is_empty() && group_num == 1 {
+                let start_pos = positions[0];
+                if original.len() > start_pos {
+                    // Extract digits from this position onward
+                    let substr = &original[start_pos..];
+                    let digits: String =
+                        substr.chars().take_while(|c| c.is_ascii_digit()).collect();
+                    if !digits.is_empty() {
+                        return Some(digits);
                     }
                 }
             }
+        }
     }
 
     None

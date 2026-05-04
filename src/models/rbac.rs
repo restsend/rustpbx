@@ -130,9 +130,15 @@ pub const SYSTEM_ROLES: &[(&str, &str)] = &[
     #[cfg(feature = "addon-ivr-editor")]
     ("ivr_editor", "IVR flow editor"),
     #[cfg(feature = "addon-cc")]
-    ("cc_supervisor", "Contact Center Supervisor - can monitor agents and view reports"),
+    (
+        "cc_supervisor",
+        "Contact Center Supervisor - can monitor agents and view reports",
+    ),
     #[cfg(feature = "addon-cc")]
-    ("cc_manager", "Contact Center Manager - can manage agents, skill groups, and monitor"),
+    (
+        "cc_manager",
+        "Contact Center Manager - can manage agents, skill groups, and monitor",
+    ),
     #[cfg(feature = "addon-wholesale")]
     ("wholesale_admin", "Wholesale tenant and billing manager"),
     #[cfg(feature = "addon-wholesale")]

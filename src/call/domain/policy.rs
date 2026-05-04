@@ -159,7 +159,6 @@ pub enum RingbackPolicy {
     },
 }
 
-
 /// Media source for playback
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]

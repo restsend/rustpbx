@@ -70,9 +70,10 @@ impl ConferenceRoom {
     /// Add a participant to the conference
     pub fn add_participant(&mut self, leg_id: LegId) -> Result<()> {
         if let Some(max) = self.max_participants
-            && self.participants.len() >= max {
-                return Err(anyhow!("Conference is at maximum capacity"));
-            }
+            && self.participants.len() >= max
+        {
+            return Err(anyhow!("Conference is at maximum capacity"));
+        }
 
         if self.participants.contains_key(&leg_id) {
             return Err(anyhow!("Leg {} already in conference", leg_id));
@@ -141,20 +142,20 @@ impl ConferenceRoom {
     }
 }
 
-    /// Audio channels for a conference participant
-    /// Note: Only input_tx is cloneable; output_rx must be accessed via get_participant_output_rx
-    #[derive(Clone)]
-    pub struct ParticipantChannels {
-        /// Channel to send audio to the conference (from participant)
-        pub input_tx: mpsc::Sender<AudioFrame>,
-    }
+/// Audio channels for a conference participant
+/// Note: Only input_tx is cloneable; output_rx must be accessed via get_participant_output_rx
+#[derive(Clone)]
+pub struct ParticipantChannels {
+    /// Channel to send audio to the conference (from participant)
+    pub input_tx: mpsc::Sender<AudioFrame>,
+}
 
-    impl ParticipantChannels {
-        /// Create a new participant channels pair with only input_tx
-        pub fn new(input_tx: mpsc::Sender<AudioFrame>) -> Self {
-            Self { input_tx }
-        }
+impl ParticipantChannels {
+    /// Create a new participant channels pair with only input_tx
+    pub fn new(input_tx: mpsc::Sender<AudioFrame>) -> Self {
+        Self { input_tx }
     }
+}
 
 /// Global conference manager with in-server audio mixing
 #[derive(Clone)]
@@ -252,13 +253,14 @@ impl ConferenceManager {
         {
             let leg_map = self.leg_to_conference.read().await;
             if let Some(existing_conf) = leg_map.get(&leg_id)
-                && existing_conf != conf_id {
-                    return Err(anyhow!(
-                        "Leg {} is already in conference {}",
-                        leg_id,
-                        existing_conf.0
-                    ));
-                }
+                && existing_conf != conf_id
+            {
+                return Err(anyhow!(
+                    "Leg {} is already in conference {}",
+                    leg_id,
+                    existing_conf.0
+                ));
+            }
         }
 
         // Add to conference room
@@ -278,7 +280,9 @@ impl ConferenceManager {
                 .get(conf_id)
                 .ok_or_else(|| anyhow!("Audio mixer not found for conference {}", conf_id.0))?;
 
-            mixer.add_participant(leg_id.clone(), CodecType::PCMU).await?
+            mixer
+                .add_participant(leg_id.clone(), CodecType::PCMU)
+                .await?
         };
 
         let channels = ParticipantChannels::new(input_tx);
@@ -391,7 +395,10 @@ impl ConferenceManager {
     /// Get participant output receiver for mixed audio (to participant)
     /// Returns the output_rx for a leg, removing it from internal storage.
     /// Caller is responsible for polling this receiver to receive mixed audio.
-    pub async fn take_participant_output_rx(&self, leg_id: &LegId) -> Option<mpsc::Receiver<AudioFrame>> {
+    pub async fn take_participant_output_rx(
+        &self,
+        leg_id: &LegId,
+    ) -> Option<mpsc::Receiver<AudioFrame>> {
         let mut participant_output_rxs = self.participant_output_rxs.write().await;
         participant_output_rxs.remove(leg_id)
     }
@@ -580,10 +587,12 @@ mod tests {
             .unwrap();
 
         // Add same participant again (should return error)
-        assert!(manager
-            .add_participant(&conf_id, leg_id.clone())
-            .await
-            .is_err());
+        assert!(
+            manager
+                .add_participant(&conf_id, leg_id.clone())
+                .await
+                .is_err()
+        );
 
         let conf = manager.get_conference(&conf_id).await.unwrap();
         assert_eq!(conf.participant_count(), 1);

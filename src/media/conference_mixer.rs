@@ -112,7 +112,10 @@ impl ConferenceAudioMixer {
         {
             let participants = self.participants.lock().await;
             if participants.contains_key(&leg_id) {
-                return Err(anyhow!("Participant {} already exists in conference", leg_id));
+                return Err(anyhow!(
+                    "Participant {} already exists in conference",
+                    leg_id
+                ));
             }
         }
 

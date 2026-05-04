@@ -26,8 +26,8 @@ use rustpbx::{
         active_call_registry::ActiveProxyCallRegistry,
         auth::AuthModule,
         call::CallModule,
-        routing::{RouteQueueConfig, RouteRule},
         registrar::RegistrarModule,
+        routing::{RouteQueueConfig, RouteRule},
         server::{SipServerBuilder, SipServerRef},
     },
     rwi::{
@@ -108,7 +108,12 @@ impl TestPbx {
             .register_module("registrar", |inner, config| {
                 Ok(Box::new(RegistrarModule::new(inner, config)))
             })
-            .register_module("auth", |inner, _config| Ok(Box::new(AuthModule::new(inner.clone(), inner.proxy_config.clone()))))
+            .register_module("auth", |inner, _config| {
+                Ok(Box::new(AuthModule::new(
+                    inner.clone(),
+                    inner.proxy_config.clone(),
+                )))
+            })
             .register_module("call", |inner, config| {
                 Ok(Box::new(CallModule::new(config, inner)))
             });
@@ -116,10 +121,7 @@ impl TestPbx {
             builder = builder.with_agent_registry(agent_registry);
         }
 
-        let sip_server = builder
-            .build()
-            .await
-            .expect("SipServer build failed");
+        let sip_server = builder.build().await.expect("SipServer build failed");
 
         let sip_server_ref: SipServerRef = sip_server.get_inner();
         let registry = sip_server_ref.active_call_registry.clone();

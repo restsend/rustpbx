@@ -62,22 +62,20 @@ impl AcmeAddon {
                 let addon_config_path = dir.join("acme.toml");
                 if addon_config_path.exists() {
                     match tokio::fs::read_to_string(&addon_config_path).await {
-                        Ok(content) => {
-                            match toml::from_str::<AcmeConfig>(&content) {
-                                Ok(acme_config) => {
-                                    let mut auto_renew = self.state.auto_renew_config.write().await;
-                                    *auto_renew = acme_config;
-                                    loaded = true;
-                                    tracing::info!(
-                                        "ACME config loaded from {}",
-                                        addon_config_path.display()
-                                    );
-                                }
-                                Err(e) => {
-                                    tracing::warn!("Failed to parse acme.toml: {}", e);
-                                }
+                        Ok(content) => match toml::from_str::<AcmeConfig>(&content) {
+                            Ok(acme_config) => {
+                                let mut auto_renew = self.state.auto_renew_config.write().await;
+                                *auto_renew = acme_config;
+                                loaded = true;
+                                tracing::info!(
+                                    "ACME config loaded from {}",
+                                    addon_config_path.display()
+                                );
                             }
-                        }
+                            Err(e) => {
+                                tracing::warn!("Failed to parse acme.toml: {}", e);
+                            }
+                        },
                         Err(e) => {
                             tracing::warn!("Failed to read acme.toml: {}", e);
                         }

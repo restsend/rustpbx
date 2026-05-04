@@ -6,14 +6,14 @@
 //! - Scenarios where persistence is not required
 
 use super::{AgentRecord, AgentRegistry, PresenceState, RoutingStrategy, select_best_agent};
+use async_trait::async_trait;
 use std::collections::HashMap;
 use std::time::Instant;
 use tokio::sync::RwLock;
 use tracing::info;
-use async_trait::async_trait;
 
 /// In-memory agent registry implementation
-/// 
+///
 /// All data is stored in memory and lost on restart.
 /// Suitable for single-node deployments and testing.
 pub struct MemoryRegistry {
@@ -152,8 +152,7 @@ impl AgentRegistry for MemoryRegistry {
         Ok(())
     }
 
-    async fn end_call(
-        &self, agent_id: &str, talk_time_secs: u64) -> anyhow::Result<()> {
+    async fn end_call(&self, agent_id: &str, talk_time_secs: u64) -> anyhow::Result<()> {
         let mut agents = self.agents.write().await;
         let agent = agents
             .get_mut(agent_id)
@@ -178,10 +177,7 @@ impl AgentRegistry for MemoryRegistry {
         Ok(())
     }
 
-    async fn find_available_agents(
-        &self,
-        required_skills: &[String],
-    ) -> Vec<AgentRecord> {
+    async fn find_available_agents(&self, required_skills: &[String]) -> Vec<AgentRecord> {
         let agents = self.agents.read().await;
         agents
             .values()
@@ -200,10 +196,10 @@ impl AgentRegistry for MemoryRegistry {
         select_best_agent(candidates, strategy, &mut rr_counter)
     }
 
-    async fn on_state_change(
-        &self, handler: Box<dyn Fn(&AgentRecord) + Send + Sync>) {
+    async fn on_state_change(&self, handler: Box<dyn Fn(&AgentRecord) + Send + Sync>) {
         let mut handlers = self.event_handlers.write().await;
-        let handler: Box<dyn Fn(&AgentRecord) + Send + Sync + 'static> = unsafe { std::mem::transmute(handler) };
+        let handler: Box<dyn Fn(&AgentRecord) + Send + Sync + 'static> =
+            unsafe { std::mem::transmute(handler) };
         handlers.push(handler);
     }
 

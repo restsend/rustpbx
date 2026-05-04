@@ -20,9 +20,10 @@ use tracing::{info, warn};
 
 fn is_secure_request(headers: &HeaderMap) -> bool {
     if let Some(proto) = headers.get("x-forwarded-proto")
-        && let Ok(proto_str) = proto.to_str() {
-            return proto_str.eq_ignore_ascii_case("https");
-        }
+        && let Ok(proto_str) = proto.to_str()
+    {
+        return proto_str.eq_ignore_ascii_case("https");
+    }
     false
 }
 

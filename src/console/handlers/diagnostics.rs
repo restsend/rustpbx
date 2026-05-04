@@ -251,14 +251,26 @@ async fn diagnostics_bootstrap(state: &Arc<ConsoleState>) -> JsonValue {
     let (ws_handler, ice_servers_path) = if let Some(app) = state.app_state() {
         let proxy_cfg = &app.config().proxy;
         (
-            proxy_cfg.ws_handler.clone().unwrap_or_else(|| "/ws".to_string()),
-            proxy_cfg.ice_servers_path.clone().unwrap_or_else(|| "/iceservers".to_string()),
+            proxy_cfg
+                .ws_handler
+                .clone()
+                .unwrap_or_else(|| "/ws".to_string()),
+            proxy_cfg
+                .ice_servers_path
+                .clone()
+                .unwrap_or_else(|| "/iceservers".to_string()),
         )
     } else if let Some(server) = state.sip_server() {
         let proxy_cfg = &server.proxy_config;
         (
-            proxy_cfg.ws_handler.clone().unwrap_or_else(|| "/ws".to_string()),
-            proxy_cfg.ice_servers_path.clone().unwrap_or_else(|| "/iceservers".to_string()),
+            proxy_cfg
+                .ws_handler
+                .clone()
+                .unwrap_or_else(|| "/ws".to_string()),
+            proxy_cfg
+                .ice_servers_path
+                .clone()
+                .unwrap_or_else(|| "/iceservers".to_string()),
         )
     } else {
         ("/ws".to_string(), "/iceservers".to_string())
@@ -360,9 +372,9 @@ fn resolve_preferred_host(config: Option<&Config>, proxy_cfg: &ProxyConfig, real
             .as_ref()
             .map(|value| value.trim())
             .filter(|value| !value.is_empty())
-        {
-            return external.to_string();
-        }
+    {
+        return external.to_string();
+    }
 
     let addr = proxy_cfg.addr.trim();
     if addr.is_empty() || addr == "0.0.0.0" || addr == "::" || addr == "[::]" || addr == "*" {
@@ -624,9 +636,10 @@ fn trunk_config_from_model(model: &sip_trunk::Model) -> Option<routing::TrunkCon
     }
 
     if let Some(backup) = backup_dest.as_ref()
-        && let Some(host) = extract_host_from_uri(backup) {
-            push_unique_string(&mut inbound_hosts, host);
-        }
+        && let Some(host) = extract_host_from_uri(backup)
+    {
+        push_unique_string(&mut inbound_hosts, host);
+    }
 
     let recording = model
         .metadata
@@ -716,19 +729,21 @@ pub async fn list_dialogs(
 
     for id in dialog_layer.all_dialog_ids() {
         if let Some(dialog) = dialog_layer.get_dialog_with(&id)
-            && let Some(summary) = summarize_dialog(&dialog) {
-                if let Some(ref call_id) = call_id_filter
-                    && summary.call_id != *call_id {
-                        continue;
-                    }
-
-                if items.len() >= limit {
-                    has_more = true;
-                    break;
-                }
-
-                items.push(summary);
+            && let Some(summary) = summarize_dialog(&dialog)
+        {
+            if let Some(ref call_id) = call_id_filter
+                && summary.call_id != *call_id
+            {
+                continue;
             }
+
+            if items.len() >= limit {
+                has_more = true;
+                break;
+            }
+
+            items.push(summary);
+        }
     }
 
     Json(DialogListResponse {
@@ -893,9 +908,10 @@ async fn test_trunk(
         }
 
         if let Some(backup) = &trunk.backup_dest
-            && routing::candidate_matches_ip(backup, ip).await {
-                matched_sources.push("backup_dest".to_string());
-            }
+            && routing::candidate_matches_ip(backup, ip).await
+        {
+            matched_sources.push("backup_dest".to_string());
+        }
 
         let matched = !matched_sources.is_empty();
         overall_match |= matched;
@@ -1674,7 +1690,10 @@ impl From<&crate::call::QueuePlan> for QueuePlanView {
             }
             crate::call::QueueFallbackAction::Queue { name } => {
                 if name.starts_with("skill-group:") {
-                    format!("skill-group: {}", name.strip_prefix("skill-group:").unwrap_or(name))
+                    format!(
+                        "skill-group: {}",
+                        name.strip_prefix("skill-group:").unwrap_or(name)
+                    )
                 } else {
                     format!("queue: {}", name)
                 }
@@ -1731,9 +1750,7 @@ fn build_diagnostics_request(
     );
 
     let mut base_headers = vec![
-        SipHeader::Via(
-            via.into(),
-        ),
+        SipHeader::Via(via.into()),
         SipHeader::From(
             format!("Diagnostics <{}>;tag={}", caller, from_tag)
                 .try_into()
@@ -1918,9 +1935,11 @@ fn default_host_for_probe(server: &SipServerRef, uri: &Uri) -> String {
 
 fn select_bind_ip(config_addr: &str, destination: &SocketAddr) -> IpAddr {
     if let Ok(ip) = config_addr.parse::<IpAddr>()
-        && !ip.is_unspecified() && ip.is_ipv4() == destination.is_ipv4() {
-            return ip;
-        }
+        && !ip.is_unspecified()
+        && ip.is_ipv4() == destination.is_ipv4()
+    {
+        return ip;
+    }
 
     if destination.is_ipv4() {
         IpAddr::V4(Ipv4Addr::UNSPECIFIED)
@@ -2071,9 +2090,10 @@ fn summarize_sip_response(raw: &str) -> SipResponseSummary {
         let mut parts = first_line.split_whitespace();
         if matches!(parts.next(), Some(proto) if proto.eq_ignore_ascii_case("SIP/2.0")) {
             if let Some(code_part) = parts.next()
-                && let Ok(code) = code_part.parse::<u16>() {
-                    summary.status_code = Some(code);
-                }
+                && let Ok(code) = code_part.parse::<u16>()
+            {
+                summary.status_code = Some(code);
+            }
             let reason = parts.collect::<Vec<_>>().join(" ");
             if !reason.is_empty() {
                 summary.reason = Some(reason);

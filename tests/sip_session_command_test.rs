@@ -6,9 +6,7 @@ mod rwi_integration_test;
 use rwi_integration_test::{RwiRequest, RwiTestClient};
 
 /// Test helper to create a test call and return its ID
-async fn create_test_call(
-    client: &mut RwiTestClient,
-) -> rwi_integration_test::TestResult<String> {
+async fn create_test_call(client: &mut RwiTestClient) -> rwi_integration_test::TestResult<String> {
     let call_id = format!("test-call-{}", uuid::Uuid::new_v4());
 
     // Originate a call
@@ -18,9 +16,10 @@ async fn create_test_call(
 
     // Extract call_id from response
     if let Some(data) = response.data
-        && let Some(id) = data.get("call_id").and_then(|v| v.as_str()) {
-            return Ok(id.to_string());
-        }
+        && let Some(id) = data.get("call_id").and_then(|v| v.as_str())
+    {
+        return Ok(id.to_string());
+    }
 
     // If we can't get the call_id from response, use the one we generated
     Ok(call_id)

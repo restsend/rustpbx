@@ -109,7 +109,9 @@ async fn test_registrar_unregister() {
         .lookup(&"sip:alice@rustpbx.com".try_into().expect("invalid uri"))
         .await;
 
-    if let Ok(v) = locations { assert!(v.is_empty(), "Expected no locations after unregister") }
+    if let Ok(v) = locations {
+        assert!(v.is_empty(), "Expected no locations after unregister")
+    }
 }
 
 #[tokio::test]

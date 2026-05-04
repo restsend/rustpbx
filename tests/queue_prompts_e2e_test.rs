@@ -141,7 +141,10 @@ async fn test_queue_prompts_hold_music() {
             }),
             strategy: RouteQueueStrategyConfig {
                 targets: vec![RouteQueueTargetConfig {
-                    uri: format!("sip:dummy@127.0.0.1:{}", portpicker::pick_unused_port().unwrap()),
+                    uri: format!(
+                        "sip:dummy@127.0.0.1:{}",
+                        portpicker::pick_unused_port().unwrap()
+                    ),
                     label: Some("Dummy".to_string()),
                 }],
                 ..Default::default()
@@ -214,10 +217,7 @@ async fn test_queue_prompts_hold_music() {
         "caller should have received RTP (hold music). Stats: {}",
         caller.rtp_stats_summary()
     );
-    tracing::info!(
-        "Hold music RTP OK — caller: {}",
-        caller.rtp_stats_summary()
-    );
+    tracing::info!("Hold music RTP OK — caller: {}", caller.rtp_stats_summary());
 
     // Clean up
     let (_, app_stop_json) = rwi_req("call.app_stop", serde_json::json!({"call_id": call_id}));

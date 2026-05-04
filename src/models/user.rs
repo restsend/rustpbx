@@ -90,9 +90,9 @@ impl Model {
                 .one(db)
                 .await
                 .with_context(|| format!("failed to lookup user by email: {}", email))?
-            {
-                user = Some(existing);
-            }
+        {
+            user = Some(existing);
+        }
 
         if let Some(user) = user {
             let mut model: ActiveModel = user.into();

@@ -31,9 +31,10 @@ impl Drop for TaskGuard {
     fn drop(&mut self) {
         if let Ok(mut metrics) = GLOBAL_TASK_METRICS.lock()
             && let Some(count) = metrics.get_mut(&self.loc)
-                && *count > 0 {
-                    *count -= 1;
-                }
+            && *count > 0
+        {
+            *count -= 1;
+        }
     }
 }
 

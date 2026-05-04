@@ -7,20 +7,20 @@
 //!
 //! All implementations share the same AgentRegistry trait for consistent behavior.
 
+use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use async_trait::async_trait;
 
 // Re-export submodules
-pub mod memory;
 pub mod db;
 pub mod http;
+pub mod memory;
 
 // Re-export types
-pub use memory::MemoryRegistry;
 pub use db::DbRegistry;
 pub use http::HttpRegistry;
+pub use memory::MemoryRegistry;
 
 // ===================================================================
 // Presence State Machine
@@ -153,8 +153,7 @@ pub type AgentEventHandler = Box<dyn Fn(&AgentRecord) + Send + Sync>;
 impl AgentRecord {
     /// Check if agent has capacity for new call
     pub fn has_capacity(&self) -> bool {
-        self.current_calls < self.max_concurrency
-            && self.presence.can_receive_calls()
+        self.current_calls < self.max_concurrency && self.presence.can_receive_calls()
     }
 
     /// Check if agent matches required skills
@@ -179,8 +178,7 @@ impl AgentRecord {
 // ===================================================================
 
 /// Agent selection strategy for call distribution
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RoutingStrategy {
     /// Longest Idle Time - agent idle longest gets call first
     #[default]
@@ -194,7 +192,6 @@ pub enum RoutingStrategy {
     /// External - use RWI or Webhook for decision
     External,
 }
-
 
 impl RoutingStrategy {
     pub fn as_str(&self) -> &'static str {
@@ -213,7 +210,7 @@ impl RoutingStrategy {
 // ===================================================================
 
 /// Core trait for agent registry implementations.
-/// 
+///
 /// This trait abstracts over different storage backends (memory, database, HTTP API)
 /// allowing the Queue and other components to work with any implementation.
 #[async_trait]
@@ -238,11 +235,8 @@ pub trait AgentRegistry: Send + Sync {
     async fn list_agents(&self) -> Vec<AgentRecord>;
 
     /// Update agent presence state
-    async fn update_presence(
-        &self,
-        agent_id: &str,
-        new_state: PresenceState,
-    ) -> anyhow::Result<()>;
+    async fn update_presence(&self, agent_id: &str, new_state: PresenceState)
+    -> anyhow::Result<()>;
 
     /// Increment call count when agent receives call
     async fn start_call(&self, agent_id: &str) -> anyhow::Result<()>;
@@ -251,10 +245,7 @@ pub trait AgentRegistry: Send + Sync {
     async fn end_call(&self, agent_id: &str, talk_time_secs: u64) -> anyhow::Result<()>;
 
     /// Find available agents matching criteria
-    async fn find_available_agents(
-        &self,
-        required_skills: &[String],
-    ) -> Vec<AgentRecord>;
+    async fn find_available_agents(&self, required_skills: &[String]) -> Vec<AgentRecord>;
 
     /// Select best agent using specified strategy
     async fn select_agent(
@@ -279,7 +270,7 @@ pub trait AgentRegistry: Send + Sync {
     /// This is a hook for addons (like CC) to implement custom routing logic.
     /// For example, a skill-group addon can resolve "skill-group:sales" to
     /// actual agent SIP URIs.
-    /// 
+    ///
     /// Returns empty Vec if the URI is not recognized or cannot be resolved.
     async fn resolve_target(&self, target_uri: &str) -> Vec<String>;
 
@@ -301,42 +292,57 @@ pub trait AgentRegistry: Send + Sync {
     }
 
     /// Check if state transition is valid
-    fn is_valid_transition(from: &PresenceState, to: &PresenceState) -> bool where Self: Sized {
+    fn is_valid_transition(from: &PresenceState, to: &PresenceState) -> bool
+    where
+        Self: Sized,
+    {
         match (from, to) {
             // Any state can go to Offline
             (_, PresenceState::Offline) => true,
-            
+
             // Can go to Available from any non-active state
-            (PresenceState::Away | PresenceState::Wrapup | PresenceState::Dnd | PresenceState::Custom(_), PresenceState::Available) => true,
-            
+            (
+                PresenceState::Away
+                | PresenceState::Wrapup
+                | PresenceState::Dnd
+                | PresenceState::Custom(_),
+                PresenceState::Available,
+            ) => true,
+
             // Can go to Ringing only from Available
             (PresenceState::Available, PresenceState::Ringing) => true,
-            
+
             // Can go to Busy only from Ringing
             (PresenceState::Ringing, PresenceState::Busy) => true,
-            
+
             // Can go to Wrapup only from Busy
             (PresenceState::Busy, PresenceState::Wrapup) => true,
-            
+
             // Can go to Away/Dnd from Available or Custom
-            (PresenceState::Available | PresenceState::Custom(_), PresenceState::Away | PresenceState::Dnd) => true,
-            
+            (
+                PresenceState::Available | PresenceState::Custom(_),
+                PresenceState::Away | PresenceState::Dnd,
+            ) => true,
+
             // Can go to any Custom state from Available, Away, Dnd, or Wrapup
-            (PresenceState::Available | PresenceState::Away | PresenceState::Dnd | PresenceState::Wrapup, PresenceState::Custom(_)) => true,
-            
+            (
+                PresenceState::Available
+                | PresenceState::Away
+                | PresenceState::Dnd
+                | PresenceState::Wrapup,
+                PresenceState::Custom(_),
+            ) => true,
+
             // Same state is valid (no-op)
             (a, b) if a == b => true,
-            
+
             // Everything else is invalid
             _ => false,
         }
     }
 
     /// Register event handler for agent state changes
-    async fn on_state_change(
-        &self,
-        handler: Box<dyn Fn(&AgentRecord) + Send + Sync>,
-    );
+    async fn on_state_change(&self, handler: Box<dyn Fn(&AgentRecord) + Send + Sync>);
 }
 
 /// Factory for creating registry instances
@@ -346,23 +352,25 @@ pub enum RegistryType {
     /// Database-backed registry (persistent)
     Db { connection_string: String },
     /// HTTP API registry (external system)
-    Http { base_url: String, api_key: Option<String> },
+    Http {
+        base_url: String,
+        api_key: Option<String>,
+    },
 }
 
 impl RegistryType {
     /// Create a registry instance based on configuration
     pub async fn create(&self) -> anyhow::Result<Arc<dyn AgentRegistry>> {
         match self {
-            RegistryType::Memory => {
-                Ok(Arc::new(MemoryRegistry::new()))
-            }
+            RegistryType::Memory => Ok(Arc::new(MemoryRegistry::new())),
             RegistryType::Db { connection_string } => {
                 let db = sea_orm::Database::connect(connection_string).await?;
                 Ok(Arc::new(DbRegistry::new(db)))
             }
-            RegistryType::Http { base_url, api_key } => {
-                Ok(Arc::new(HttpRegistry::new(base_url.clone(), api_key.clone())))
-            }
+            RegistryType::Http { base_url, api_key } => Ok(Arc::new(HttpRegistry::new(
+                base_url.clone(),
+                api_key.clone(),
+            ))),
         }
     }
 }
@@ -384,9 +392,7 @@ pub fn select_best_agent(
     match strategy {
         RoutingStrategy::LongestIdle => {
             // Sort by idle duration (longest first)
-            candidates.sort_by(|a, b| {
-                b.idle_duration().cmp(&a.idle_duration())
-            });
+            candidates.sort_by(|a, b| b.idle_duration().cmp(&a.idle_duration()));
             candidates.into_iter().next()
         }
         RoutingStrategy::RoundRobin => {
@@ -405,9 +411,7 @@ pub fn select_best_agent(
         }
         RoutingStrategy::LeastCalls => {
             // Sort by total calls handled (least first)
-            candidates.sort_by(|a, b| {
-                a.total_calls_handled.cmp(&b.total_calls_handled)
-            });
+            candidates.sort_by(|a, b| a.total_calls_handled.cmp(&b.total_calls_handled));
             candidates.into_iter().next()
         }
         RoutingStrategy::External => {
