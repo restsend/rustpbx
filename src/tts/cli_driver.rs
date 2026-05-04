@@ -1,11 +1,20 @@
 use super::CliTtsConfig;
 use anyhow::{Result, anyhow};
 
-pub async fn synthesize_cli(cfg: &CliTtsConfig, text: &str, output_path: &str) -> Result<()> {
+pub async fn synthesize_cli(
+    cfg: &CliTtsConfig,
+    text: &str,
+    voice: &str,
+    output_path: &str,
+) -> Result<()> {
     let args: Vec<String> = cfg
         .args
         .iter()
-        .map(|arg| arg.replace("{text}", text).replace("{output}", output_path))
+        .map(|arg| {
+            arg.replace("{text}", text)
+                .replace("{output}", output_path)
+                .replace("{voice}", voice)
+        })
         .collect();
 
     let output = tokio::process::Command::new(&cfg.command)

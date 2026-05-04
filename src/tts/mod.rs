@@ -143,7 +143,8 @@ impl TtsService {
                     Path::new(&cache_path).parent().unwrap_or(Path::new(".")),
                 )
                 .await?;
-                synthesize_cli(cfg, text, &cache_path).await?;
+                let voice_str = voice.unwrap_or("");
+                synthesize_cli(cfg, text, voice_str, &cache_path).await?;
                 Ok(cache_path)
             }
         }
