@@ -12,6 +12,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio_util::sync::CancellationToken;
 
+pub(crate) mod dtmf;
 pub(crate) mod media_peer;
 pub(crate) mod reporter;
 pub(crate) mod session_timer;

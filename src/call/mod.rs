@@ -1,7 +1,7 @@
 use crate::{
     config::{MediaProxyMode, RouteResult},
-    media::recorder::RecorderOption,
     media::negotiate::CodecSelectionStrategy,
+    media::recorder::RecorderOption,
 };
 use anyhow::Result;
 use audio_codec::CodecType;
@@ -27,7 +27,9 @@ pub mod queue_config;
 pub mod runtime;
 pub mod sip;
 pub mod user;
-pub use cookie::{CalleeDisplayName, CalleeOfflineMarker, TenantId, TransactionCookie, TrunkContext};
+pub use cookie::{
+    CalleeDisplayName, CalleeOfflineMarker, TenantId, TransactionCookie, TrunkContext,
+};
 pub use user::SipUser;
 
 pub struct RouteContext<'a> {
@@ -66,20 +68,20 @@ pub trait CallFailureHandler: Send + Sync {
 }
 
 /// Default hold audio that ships with config/sounds, relocated in Dockerfile to /app/sounds.
-pub const DEFAULT_QUEUE_HOLD_AUDIO: &str = "sounds/phone-calling.wav";
+pub const DEFAULT_QUEUE_HOLD_AUDIO: &str = "config/sounds/phone-calling.wav";
 /// Default prompt played when a queue cannot find an available agent.
-pub const DEFAULT_QUEUE_FAILURE_AUDIO: &str = "sounds/unavailable-phone.wav";
+pub const DEFAULT_QUEUE_FAILURE_AUDIO: &str = "config/sounds/unavailable-phone.wav";
 
 // --- Built-in voice prompts for queue events ---
 
-pub const DEFAULT_QUEUE_TRANSFER_PROMPT_ZH: &str = "sounds/queue-transfer-zh.wav";
-pub const DEFAULT_QUEUE_TRANSFER_PROMPT_EN: &str = "sounds/queue-transfer-en.wav";
-pub const DEFAULT_QUEUE_BUSY_PROMPT_ZH: &str = "sounds/queue-busy-zh.wav";
-pub const DEFAULT_QUEUE_BUSY_PROMPT_EN: &str = "sounds/queue-busy-en.wav";
-pub const DEFAULT_QUEUE_OFF_HOURS_PROMPT_ZH: &str = "sounds/queue-off-hours-zh.wav";
-pub const DEFAULT_QUEUE_OFF_HOURS_PROMPT_EN: &str = "sounds/queue-off-hours-en.wav";
-pub const DEFAULT_QUEUE_NO_ANSWER_PROMPT_ZH: &str = "sounds/queue-no-answer-zh.wav";
-pub const DEFAULT_QUEUE_NO_ANSWER_PROMPT_EN: &str = "sounds/queue-no-answer-en.wav";
+pub const DEFAULT_QUEUE_TRANSFER_PROMPT_ZH: &str = "config/sounds/queue-transfer-zh.wav";
+pub const DEFAULT_QUEUE_TRANSFER_PROMPT_EN: &str = "config/sounds/queue-transfer-en.wav";
+pub const DEFAULT_QUEUE_BUSY_PROMPT_ZH: &str = "config/sounds/queue-busy-zh.wav";
+pub const DEFAULT_QUEUE_BUSY_PROMPT_EN: &str = "config/sounds/queue-busy-en.wav";
+pub const DEFAULT_QUEUE_OFF_HOURS_PROMPT_ZH: &str = "config/sounds/queue-off-hours-zh.wav";
+pub const DEFAULT_QUEUE_OFF_HOURS_PROMPT_EN: &str = "config/sounds/queue-off-hours-en.wav";
+pub const DEFAULT_QUEUE_NO_ANSWER_PROMPT_ZH: &str = "config/sounds/queue-no-answer-zh.wav";
+pub const DEFAULT_QUEUE_NO_ANSWER_PROMPT_EN: &str = "config/sounds/queue-no-answer-en.wav";
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct VoicePrompts {
@@ -452,6 +454,11 @@ pub struct QueuePlan {
     pub no_trying_timeout: Option<Duration>,
     pub voice_prompts: Option<VoicePrompts>,
     pub queue_name: String,
+    /// Optional audio file to play when the queue fails, before executing the
+    /// fallback action (hangup, return to IVR, redirect, etc.).
+    /// This separates the "notification audio" from the "final action" so that
+    /// any fallback type can still play a prompt before acting.
+    pub failure_audio: Option<String>,
 }
 
 impl Default for QueuePlan {
@@ -478,6 +485,7 @@ impl Default for QueuePlan {
             no_trying_timeout: None,
             voice_prompts: None,
             queue_name: String::new(),
+            failure_audio: None,
         }
     }
 }

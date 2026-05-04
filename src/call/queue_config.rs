@@ -151,6 +151,13 @@ impl QueueConfig {
 
     /// Convert to runtime QueuePlan
     pub fn to_queue_plan(&self) -> Result<QueuePlan> {
+        let failure_audio = self
+            .voice_prompts
+            .as_ref()
+            .and_then(|prompts| prompts.busy_prompt.as_ref())
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+
         let plan = QueuePlan {
             accept_immediately: self.accept_immediately,
             passthrough_ringback: self.passthrough_ringback,
@@ -171,6 +178,7 @@ impl QueueConfig {
             no_trying_timeout: None,
             voice_prompts: self.voice_prompts.clone(),
             queue_name: self.name.clone().unwrap_or_default(),
+            failure_audio,
         };
 
         Ok(plan)
@@ -227,9 +235,10 @@ impl QueueConfig {
 
         // Validate hold music file if configured
         if let Some(hold) = &self.hold
-            && hold.audio_file.is_empty() {
-                return Err(anyhow!("Hold music audio_file cannot be empty"));
-            }
+            && hold.audio_file.is_empty()
+        {
+            return Err(anyhow!("Hold music audio_file cannot be empty"));
+        }
 
         // Validate fallback
         if let Some(fallback) = &self.fallback {

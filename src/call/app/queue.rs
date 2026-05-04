@@ -202,6 +202,7 @@ impl QueueConfig {
             no_trying_timeout: None,
             voice_prompts: self.voice_prompts.clone(),
             queue_name: self.name.clone(),
+            failure_audio: None,
         }
     }
 }

@@ -21,8 +21,7 @@ pub mod matcher;
 #[cfg(test)]
 mod tests;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[derive(Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum ConfigOrigin {
     #[default]
     Embedded,
@@ -38,7 +37,6 @@ impl ConfigOrigin {
         Self::File(path.into())
     }
 }
-
 
 /// Single trunk configuration
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -134,9 +132,10 @@ impl TrunkConfig {
         }
 
         if let Some(backup) = &self.backup_dest
-            && candidate_matches(backup, addr).await {
-                return true;
-            }
+            && candidate_matches(backup, addr).await
+        {
+            return true;
+        }
 
         false
     }
@@ -209,9 +208,10 @@ pub fn build_source_trunk(
     direction: &DialDirection,
 ) -> Option<SourceTrunk> {
     if let Some(trunk_direction) = config.direction
-        && !trunk_direction.allows(direction) {
-            return None;
-        }
+        && !trunk_direction.allows(direction)
+    {
+        return None;
+    }
 
     Some(SourceTrunk {
         name,
@@ -337,7 +337,6 @@ pub enum RouteDirection {
     Inbound,
     Outbound,
 }
-
 
 impl RouteDirection {
     pub fn matches(&self, direction: &DialDirection) -> bool {
@@ -563,7 +562,6 @@ impl QueueDialMode {
     }
 }
 
-
 impl RouteQueueHoldConfig {
     fn default_loop() -> bool {
         true
@@ -583,6 +581,13 @@ pub struct RouteQueueFallbackConfig {
 
 impl RouteQueueConfig {
     pub fn to_queue_plan(&self) -> Result<crate::call::QueuePlan> {
+        let failure_audio = self
+            .voice_prompts
+            .as_ref()
+            .and_then(|prompts| prompts.busy_prompt.as_ref())
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+
         let mut plan = crate::call::QueuePlan {
             accept_immediately: self.accept_immediately,
             passthrough_ringback: self.passthrough_ringback && self.accept_immediately,
@@ -592,6 +597,7 @@ impl RouteQueueConfig {
                 .as_ref()
                 .map(|value| value.trim().to_string())
                 .filter(|value| !value.is_empty()),
+            failure_audio,
             ..Default::default()
         };
         if let Some(hold) = &self.hold {
@@ -609,9 +615,10 @@ impl RouteQueueConfig {
             plan.dial_strategy = Some(strategy);
         }
         if let Some(timeout) = self.strategy.wait_timeout_secs
-            && timeout > 0 {
-                plan.ring_timeout = Some(Duration::from_secs(timeout as u64));
-            }
+            && timeout > 0
+        {
+            plan.ring_timeout = Some(Duration::from_secs(timeout as u64));
+        }
         plan.voice_prompts = self.voice_prompts.clone();
         plan.queue_name = self.name.clone().unwrap_or_default();
         Ok(plan)
@@ -628,15 +635,19 @@ impl RouteQueueConfig {
             if uri_text.is_empty() {
                 continue;
             }
-            
+
             // Handle skill-group targets (serialized as uri: "skill-group:{id}")
             if uri_text.starts_with("skill-group:") {
-                let skill_group_id = uri_text.strip_prefix("skill-group:").unwrap_or(uri_text).trim();
+                let skill_group_id = uri_text
+                    .strip_prefix("skill-group:")
+                    .unwrap_or(uri_text)
+                    .trim();
                 if !skill_group_id.is_empty() {
                     // Create a special location for skill group that will be resolved at runtime
                     let location = Location {
-                        aor: Uri::try_from(format!("skill-group:{}", skill_group_id))
-                            .map_err(|err| anyhow!("invalid skill group uri '{}': {}", uri_text, err))?,
+                        aor: Uri::try_from(format!("skill-group:{}", skill_group_id)).map_err(
+                            |err| anyhow!("invalid skill group uri '{}': {}", uri_text, err),
+                        )?,
                         contact_raw: Some(uri_text.to_string()),
                         ..Default::default()
                     };
@@ -644,7 +655,7 @@ impl RouteQueueConfig {
                 }
                 continue;
             }
-            
+
             let uri = Uri::try_from(uri_text)
                 .map_err(|err| anyhow!("invalid queue target uri '{}': {}", uri_text, err))?;
             let location = Location {
@@ -680,7 +691,7 @@ impl RouteQueueFallbackConfig {
                 name: queue.to_string(),
             });
         }
-        
+
         // Check direct skill_group_ref field (stored as skill-group:{id} in queue_ref)
         if let Some(skill_group_id) = self
             .skill_group_ref
@@ -811,9 +822,12 @@ async fn host_matches(host: &str, addr: &IpAddr) -> bool {
 
 fn split_host_port(input: &str) -> Option<(&str, &str)> {
     if let Some(end) = input.find(']')
-        && input.starts_with('[') && input.len() > end + 1 && input[end + 1..].starts_with(':') {
-            return Some((&input[1..end], &input[end + 2..]));
-        }
+        && input.starts_with('[')
+        && input.len() > end + 1
+        && input[end + 1..].starts_with(':')
+    {
+        return Some((&input[1..end], &input[end + 2..]));
+    }
 
     if let Some(idx) = input.rfind(':') {
         if input[..idx].contains(':') {

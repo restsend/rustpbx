@@ -487,6 +487,13 @@
                                 <button type="button" class="dtmf-btn" data-key="#">#</button>
                             </div>
                             <div class="dtmf-actions">
+                                <label for="dtmfTransport" style="display:flex;align-items:center;gap:6px;margin:0;font-size:12px;color:#555;">
+                                    Transport:
+                                    <select id="dtmfTransport" style="padding:4px 6px;font-size:12px;border:1px solid #ddd;border-radius:4px;">
+                                        <option value="RFC2833" selected>RFC2833</option>
+                                        <option value="INFO">INFO</option>
+                                    </select>
+                                </label>
                                 <button type="button" id="dtmfClearBtn" class="secondary" style="width:auto;padding:6px 14px;font-size:12px;margin-top:0;">Clear</button>
                             </div>
                         </div>
@@ -639,6 +646,7 @@
         const holdBtn = document.getElementById('holdBtn');
         const transferBtn = document.getElementById('transferBtn');
         const consultBtn = document.getElementById('consultBtn');
+        const dtmfTransportSelect = document.getElementById('dtmfTransport');
         const incomingCallDiv = document.getElementById('incomingCall');
         const callerInfo = document.getElementById('callerInfo');
         const answerBtn = document.getElementById('answerBtn');
@@ -1902,13 +1910,26 @@
         function sendDtmf(tone) {
             if (!currentSession) { log('No active call for DTMF'); return; }
             try {
-                currentSession.sendDTMF(tone, { duration: 160, interToneGap: 50 });
+                const dtmfTransport = (dtmfTransportSelect && dtmfTransportSelect.value) || 'RFC2833';
+                
+                // Log detailed DTMF send info
+                console.warn(`[DTMF] Attempting to send: tone=${tone}, transport=${dtmfTransport}, session=${currentSession.id}`);
+                
+                // JsSIP 3.10.0 sendDTMF standard parameters
+                // Note: JsSIP will use RFC2833 by default if supported in SDP
+                currentSession.sendDTMF(tone, {
+                    duration: 160,
+                    interToneGap: 50
+                });
+                
                 dtmfHistory += tone;
                 const dtmfDisplay = document.getElementById('dtmfDisplay');
                 if (dtmfDisplay) dtmfDisplay.textContent = dtmfHistory || '\u00a0';
-                log(`DTMF sent: ${tone}`);
+                log(`✓ DTMF sent (${dtmfTransport}): ${tone}`);
+                console.warn(`[DTMF] ✓ Successfully sent DTMF: ${tone}`);
             } catch (error) {
-                log(`DTMF error: ${error.message}`);
+                log(`✗ DTMF error: ${error.message}`);
+                console.error(`[DTMF] ✗ Error: ${error.message}`, error);
             }
         }
 

@@ -608,6 +608,28 @@ fn test_queue_fallback_to_named_queue() {
 }
 
 #[test]
+fn test_queue_busy_prompt_maps_to_failure_audio() {
+    let queue_cfg = RouteQueueConfig {
+        voice_prompts: Some(crate::call::VoicePrompts {
+            transfer_prompt: Some("config/sounds/queue-transfer-zh.wav".to_string()),
+            busy_prompt: Some("config/sounds/queue-busy-zh.wav".to_string()),
+            off_hours_prompt: None,
+            no_answer_prompt: None,
+        }),
+        ..RouteQueueConfig::default()
+    };
+
+    let plan = queue_cfg
+        .to_queue_plan()
+        .expect("queue config should convert to plan");
+
+    assert_eq!(
+        plan.failure_audio.as_deref(),
+        Some("config/sounds/queue-busy-zh.wav")
+    );
+}
+
+#[test]
 fn test_queue_plan_preserves_missing_hold_section() {
     let queue_cfg = RouteQueueConfig {
         hold: None,
@@ -684,7 +706,10 @@ fn test_queue_strategy_builds_skill_group_targets() {
             assert_eq!(targets.len(), 2);
             assert_eq!(targets[0].aor.to_string(), "sip:agent1@pbx.example");
             assert_eq!(targets[1].aor.to_string(), "skill-group:support_l1");
-            assert_eq!(targets[1].contact_raw, Some("skill-group:support_l1".to_string()));
+            assert_eq!(
+                targets[1].contact_raw,
+                Some("skill-group:support_l1".to_string())
+            );
         }
         other => panic!("unexpected strategy: {:?}", other),
     }

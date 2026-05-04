@@ -36,6 +36,7 @@ use crate::media::negotiate::{CodecInfo, MediaNegotiator};
 use crate::media::recorder::Recorder;
 use crate::media::{FileTrack, RtpTrackBuilder, Track};
 use crate::proxy::proxy_call::{
+    dtmf::RtpDtmfDetector,
     media_peer::{MediaPeer, VoiceEnginePeer},
     reporter::CallReporter,
     session_timer::{
@@ -73,6 +74,11 @@ use tokio_util::{
 };
 use tracing::{debug, error, info, warn};
 
+mod conference;
+mod queue;
+mod supervisor;
+mod transfer;
+
 #[derive(Debug)]
 enum TimerAction {
     Refresh,
@@ -95,40 +101,6 @@ enum DialogSide {
 struct CallerIngressMonitor {
     cancel_token: CancellationToken,
     task: JoinHandle<()>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct RtpDtmfEventKey {
-    digit_code: u8,
-    rtp_timestamp: u32,
-}
-
-#[derive(Debug, Default)]
-struct RtpDtmfDetector {
-    last_event: Option<RtpDtmfEventKey>,
-}
-
-impl RtpDtmfDetector {
-    fn observe(&mut self, payload: &[u8], rtp_timestamp: u32) -> Option<char> {
-        if payload.len() < 4 {
-            return None;
-        }
-
-        let digit_code = payload[0];
-        let digit = crate::media::telephone_event::dtmf_code_to_char(digit_code)?;
-
-        let event = RtpDtmfEventKey {
-            digit_code,
-            rtp_timestamp,
-        };
-
-        if self.last_event == Some(event) {
-            return None;
-        }
-
-        self.last_event = Some(event);
-        Some(digit)
-    }
 }
 
 pub struct SipSession {
@@ -1083,7 +1055,16 @@ impl SipSession {
                     }
                 });
                 if is_dtmf {
+                    info!(
+                        session_id = %self.context.session_id,
+                        "✓ Received SIP INFO with DTMF (application/dtmf-relay content type)"
+                    );
                     let body = String::from_utf8_lossy(request.body());
+                    debug!(
+                        session_id = %self.context.session_id,
+                        body = %body,
+                        "INFO DTMF message body"
+                    );
                     for line in body.lines() {
                         let line = line.trim();
                         if line.to_lowercase().starts_with("signal=") {
@@ -1098,12 +1079,33 @@ impl SipSession {
                                     "leg_id": "caller",
                                     "digit": digit.chars().next().unwrap().to_string(),
                                 });
-                                if let Err(e) = self.app_runtime.inject_event(event) {
-                                    warn!(error = %e, "Failed to inject DTMF event");
+                                warn!(
+                                    session_id = %self.context.session_id,
+                                    digit = %digit,
+                                    "✓ Successfully detected DTMF digit from SIP INFO"
+                                );
+                                if let Err(e) = self.app_runtime.inject_event(event.clone()) {
+                                    warn!(
+                                        session_id = %self.context.session_id,
+                                        digit = %digit,
+                                        error = %e,
+                                        "Detected DTMF via INFO but failed to inject event"
+                                    );
+                                } else {
+                                    info!(
+                                        session_id = %self.context.session_id,
+                                        digit = %digit,
+                                        "✓ Successfully injected DTMF event from SIP INFO"
+                                    );
                                 }
                             }
                         }
                     }
+                } else {
+                    debug!(
+                        session_id = %self.context.session_id,
+                        "Received SIP INFO without DTMF content type"
+                    );
                 }
                 tx_handle
                     .respond(rsipstack::sip::StatusCode::OK, None, None)
@@ -1386,10 +1388,7 @@ impl SipSession {
         for (idx, target) in targets.iter().enumerate() {
             info!(index = idx, target = %target.aor, "Trying sequential target");
 
-            match self
-                .try_single_target(target, callee_state_rx, None, None)
-                .await
-            {
+            match self.try_single_target(target, callee_state_rx, None).await {
                 Ok(()) => {
                     info!(index = idx, "Sequential target succeeded");
                     return Ok(());
@@ -1410,137 +1409,12 @@ impl SipSession {
         callee_state_rx: &mut mpsc::UnboundedReceiver<DialogState>,
     ) -> Result<(), (StatusCode, Option<String>)> {
         if let Some(target) = targets.first() {
-            self.try_single_target(target, callee_state_rx, None, None)
-                .await
+            self.try_single_target(target, callee_state_rx, None).await
         } else {
             Err((
                 StatusCode::TemporarilyUnavailable,
                 Some("No targets to dial".to_string()),
             ))
-        }
-    }
-
-    async fn execute_queue(
-        &mut self,
-        plan: &crate::call::QueuePlan,
-        callee_state_rx: &mut mpsc::UnboundedReceiver<DialogState>,
-    ) -> Result<(), (StatusCode, Option<String>)> {
-        use crate::call::DialStrategy;
-
-        self.queue_name = Some(plan.queue_name.clone());
-
-        info!("Executing queue plan");
-
-        let agents = match &plan.dial_strategy {
-            Some(DialStrategy::Sequential(locations)) => locations.clone(),
-            Some(DialStrategy::Parallel(locations)) => locations.clone(),
-            None => {
-                warn!("No dial strategy in queue plan");
-                return Ok(());
-            }
-        };
-
-        if agents.is_empty() {
-            warn!("No agents configured in queue plan");
-            return Ok(());
-        }
-
-        let resolved_agents = self
-            .resolve_custom_targets(agents, plan.acd_policy.as_deref())
-            .await;
-
-        if resolved_agents.is_empty() {
-            warn!("No agents available after resolving queue targets");
-            return self.execute_queue_fallback(plan).await;
-        }
-
-        if plan.accept_immediately {
-            info!("Queue: answering call immediately");
-            let caller_answer = self.prepare_queue_early_answer(&resolved_agents).await;
-            if let Err(e) = self.accept_call(None, caller_answer, None).await {
-                warn!(error = %e, "Failed to answer call in queue");
-            }
-        }
-
-        let hold_handle = if let Some(ref hold) = plan.hold {
-            if let Some(ref audio_file) = hold.audio_file {
-                info!(file = %audio_file, "Queue: starting hold music");
-
-                match self
-                    .play_audio_file(
-                        audio_file,
-                        false,
-                        Self::QUEUE_HOLD_TRACK_ID,
-                        hold.loop_playback,
-                    )
-                    .await
-                {
-                    Ok(()) => {
-                        info!(track_id = %Self::QUEUE_HOLD_TRACK_ID, "Queue: hold music started");
-                        true
-                    }
-                    Err(error) => {
-                        warn!(
-                            error = %error,
-                            track_id = %Self::QUEUE_HOLD_TRACK_ID,
-                            "Queue: failed to start hold music"
-                        );
-                        false
-                    }
-                }
-            } else {
-                false
-            }
-        } else {
-            false
-        };
-
-        let result = match &plan.dial_strategy {
-            Some(DialStrategy::Sequential(_)) => {
-                self.dial_queue_sequential(
-                    &resolved_agents,
-                    plan.ring_timeout,
-                    callee_state_rx,
-                    plan.voice_prompts
-                        .as_ref()
-                        .and_then(|prompts| prompts.transfer_prompt.as_deref()),
-                )
-                .await
-            }
-            Some(DialStrategy::Parallel(_)) => {
-                self.dial_queue_parallel(
-                    &resolved_agents,
-                    plan.ring_timeout,
-                    callee_state_rx,
-                    plan.voice_prompts
-                        .as_ref()
-                        .and_then(|prompts| prompts.transfer_prompt.as_deref()),
-                )
-                .await
-            }
-            None => Ok(()),
-        };
-
-        if hold_handle {
-            info!("Queue: stopping hold music");
-            self.stop_playback_track(Self::QUEUE_HOLD_TRACK_ID, false)
-                .await;
-        }
-
-        if self.cancel_token.is_cancelled() || self.server_dialog.state().is_terminated() {
-            info!("Queue: caller ended, stopping queue execution");
-            return Ok(());
-        }
-
-        match result {
-            Ok(()) => {
-                info!("Queue: agent connected successfully");
-                Ok(())
-            }
-            Err(e) => {
-                warn!(error = ?e, "Queue: all agents failed, executing fallback");
-                self.execute_queue_fallback(plan).await
-            }
         }
     }
 
@@ -1981,275 +1855,11 @@ impl SipSession {
         resolved
     }
 
-    async fn dial_queue_sequential(
-        &mut self,
-        agents: &[crate::call::Location],
-        _ring_timeout: Option<Duration>,
-        callee_state_rx: &mut mpsc::UnboundedReceiver<DialogState>,
-        transfer_prompt: Option<&str>,
-    ) -> Result<(), (StatusCode, Option<String>)> {
-        let mut last_error = (
-            StatusCode::TemporarilyUnavailable,
-            Some("All agents unavailable".to_string()),
-        );
-
-        for (idx, agent) in agents.iter().enumerate() {
-            if self.cancel_token.is_cancelled() || self.server_dialog.state().is_terminated() {
-                info!("Queue: caller ended before next agent");
-                return Ok(());
-            }
-
-            info!(index = idx, agent = %agent.aor, "Queue: trying agent");
-
-            match self
-                .try_single_target(
-                    agent,
-                    callee_state_rx,
-                    Some(Self::QUEUE_HOLD_TRACK_ID),
-                    transfer_prompt,
-                )
-                .await
-            {
-                Ok(()) => {
-                    info!(index = idx, "Queue: agent connected");
-                    return Ok(());
-                }
-                Err(e) => {
-                    warn!(index = idx, error = ?e, "Queue: agent failed");
-                    last_error = e;
-                }
-            }
-        }
-
-        Err(last_error)
-    }
-
-    async fn dial_queue_parallel(
-        &mut self,
-        agents: &[crate::call::Location],
-        _ring_timeout: Option<Duration>,
-        callee_state_rx: &mut mpsc::UnboundedReceiver<DialogState>,
-        transfer_prompt: Option<&str>,
-    ) -> Result<(), (StatusCode, Option<String>)> {
-        if let Some(agent) = agents.first() {
-            info!(agent = %agent.aor, "Queue: trying parallel agent");
-            self.try_single_target(
-                agent,
-                callee_state_rx,
-                Some(Self::QUEUE_HOLD_TRACK_ID),
-                transfer_prompt,
-            )
-            .await
-        } else {
-            Err((
-                StatusCode::TemporarilyUnavailable,
-                Some("No agents available".to_string()),
-            ))
-        }
-    }
-
-    async fn play_queue_transfer_prompt_before_bridge(&mut self, transfer_prompt: Option<&str>) {
-        let Some(audio_file) = transfer_prompt
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        else {
-            debug!("Queue: no transfer prompt configured");
-            return;
-        };
-
-        info!(file = %audio_file, "Queue: playing transfer prompt before bridging agent audio");
-        match self
-            .play_audio_file(audio_file, true, "queue-transfer-prompt", false)
-            .await
-        {
-            Ok(()) => {
-                self.stop_playback_track("queue-transfer-prompt", false)
-                    .await;
-                info!(file = %audio_file, "Queue: transfer prompt completed");
-            }
-            Err(error) => {
-                warn!(
-                    error = %error,
-                    file = %audio_file,
-                    "Queue: failed to play transfer prompt before bridging agent audio"
-                );
-            }
-        }
-    }
-
-    async fn execute_queue_fallback(
-        &mut self,
-        plan: &crate::call::QueuePlan,
-    ) -> Result<(), (StatusCode, Option<String>)> {
-        use crate::call::{FailureAction, QueueFallbackAction, TransferEndpoint};
-
-        match &plan.fallback {
-            Some(QueueFallbackAction::Failure(FailureAction::Hangup { code, reason })) => {
-                info!(?code, ?reason, "Queue fallback - hangup");
-                Err((
-                    code.clone().unwrap_or(StatusCode::TemporarilyUnavailable),
-                    reason.clone(),
-                ))
-            }
-            Some(QueueFallbackAction::Failure(FailureAction::PlayThenHangup {
-                audio_file,
-                use_early_media: _,
-                status_code,
-                reason,
-            })) => {
-                info!(file = %audio_file, "Queue fallback - play then hangup");
-
-                self.prepare_queue_fallback_audio_media().await;
-
-                if let Err(e) = self
-                    .play_audio_file(audio_file, true, "caller", false)
-                    .await
-                {
-                    warn!(error = %e, "Failed to play fallback audio");
-                }
-                Err((status_code.clone(), reason.clone()))
-            }
-            Some(QueueFallbackAction::Failure(FailureAction::Transfer(target))) => {
-                info!(target = ?target, "Queue fallback - transfer");
-
-                match target {
-                    TransferEndpoint::Uri(uri) => {
-                        Box::pin(self.handle_blind_transfer(LegId::from("caller"), uri.clone()))
-                            .await
-                            .map_err(|e| {
-                                (
-                                    StatusCode::TemporarilyUnavailable,
-                                    Some(format!("Transfer failed: {}", e)),
-                                )
-                            })
-                    }
-                    TransferEndpoint::Queue(queue_name) => Box::pin(self.handle_queue_transfer(
-                        LegId::from("caller"),
-                        queue_name,
-                        None,
-                    ))
-                    .await
-                    .map_err(|e| {
-                        (
-                            StatusCode::TemporarilyUnavailable,
-                            Some(format!("Transfer failed: {}", e)),
-                        )
-                    }),
-                    TransferEndpoint::Ivr(ivr_name) => {
-                        info!(ivr = %ivr_name, "Queue fallback - transferring to IVR");
-                        self.start_ivr_app(ivr_name).await.map_err(|e| {
-                            (
-                                StatusCode::ServerInternalError,
-                                Some(format!("Failed to start IVR: {}", e)),
-                            )
-                        })?;
-                        Ok(())
-                    }
-                }
-            }
-            Some(QueueFallbackAction::Redirect { target }) => {
-                info!(target = %target, "Queue fallback - redirecting call");
-
-                // Current dialog API does not expose direct 302 + Contact helper.
-                // Use REFER-based transfer to approximate redirect behavior.
-                Box::pin(self.handle_blind_transfer(LegId::from("caller"), target.to_string()))
-                    .await
-                    .map_err(|e| {
-                        (
-                            StatusCode::TemporarilyUnavailable,
-                            Some(format!("Redirect failed: {}", e)),
-                        )
-                    })
-            }
-            Some(QueueFallbackAction::Queue { name }) => {
-                if name.starts_with("skill-group:") {
-                    let skill_group_id = name.strip_prefix("skill-group:").unwrap_or(name).trim();
-                    info!(skill_group = %skill_group_id, "Queue fallback - transfer to skill group");
-
-                    // Use AgentRegistry to resolve skill group to agents
-                    if let Some(registry) = self.server.agent_registry.clone() {
-                        let skill_group_uri = format!("skill-group:{}", skill_group_id);
-                        let agents = registry.resolve_target(&skill_group_uri).await;
-                        if !agents.is_empty() {
-                            info!(agents = ?agents, "Resolved skill group to agents");
-                            // Try to transfer to first available agent
-                            let target = agents[0].clone();
-                            Box::pin(self.handle_blind_transfer(LegId::from("caller"), target))
-                                .await
-                                .map_err(|e| {
-                                    (
-                                        StatusCode::TemporarilyUnavailable,
-                                        Some(format!("Transfer failed: {}", e)),
-                                    )
-                                })
-                        } else {
-                            warn!(skill_group = %skill_group_id, "No agents found for this skill group");
-                            Err((
-                                StatusCode::TemporarilyUnavailable,
-                                Some(format!(
-                                    "No agents available for skill group {}",
-                                    skill_group_id
-                                )),
-                            ))
-                        }
-                    } else {
-                        warn!("No agent registry available for skill group resolution");
-                        Err((
-                            StatusCode::TemporarilyUnavailable,
-                            Some("Agent registry not available".to_string()),
-                        ))
-                    }
-                } else {
-                    info!(queue = %name, "Queue fallback - transfer to another queue");
-                    // Re-enqueue to another queue by starting QueueApp with new plan
-                    match Box::pin(self.handle_queue_transfer(LegId::from("caller"), name, None))
-                        .await
-                    {
-                        Ok(_) => {
-                            info!(queue = %name, "Queue fallback - re-enqueue succeeded");
-                            Ok(())
-                        }
-                        Err(e) => {
-                            warn!(queue = %name, error = %e, "Queue fallback - re-enqueue operation failed");
-                            Err((
-                                StatusCode::TemporarilyUnavailable,
-                                Some(format!("Re-enqueue failed: {}", e)),
-                            ))
-                        }
-                    }
-                }
-            }
-            None => {
-                info!("Queue fallback - default hangup with busy tone");
-                Err((
-                    StatusCode::BusyHere,
-                    Some("All agents unavailable".to_string()),
-                ))
-            }
-        }
-    }
-
-    async fn prepare_queue_fallback_audio_media(&mut self) {
-        if self.server_dialog.state().is_confirmed() {
-            let _ = self.ensure_caller_answer_sdp().await;
-            return;
-        }
-
-        let caller_answer = self.ensure_caller_answer_sdp().await;
-        if let Err(error) = self.accept_call(None, caller_answer, None).await {
-            warn!(
-                error = %error,
-                "Queue fallback: failed to prepare caller media before fallback audio"
-            );
-        }
-    }
-
     async fn try_single_target(
         &mut self,
         target: &crate::call::Location,
         callee_state_rx: &mut mpsc::UnboundedReceiver<DialogState>,
         stop_playback_on_answer: Option<&str>,
-        transfer_prompt_after_answer: Option<&str>,
     ) -> Result<(), (StatusCode, Option<String>)> {
         use rsipstack::dialog::dialog::DialogState;
         use rsipstack::dialog::invitation::InviteOption;
@@ -2584,9 +2194,6 @@ impl SipSession {
         )
         .await
         .map_err(|e| (StatusCode::ServerInternalError, Some(e.to_string())))?;
-
-        self.play_queue_transfer_prompt_before_bridge(transfer_prompt_after_answer)
-            .await;
 
         self.connected_callee_dialog_id = Some(dialog_id.clone());
         self.callee_dialogs.insert(dialog_id.clone(), ());
@@ -3299,13 +2906,29 @@ impl SipSession {
         }
 
         let Some(answer_sdp) = self.answer.as_deref() else {
+            warn!(
+                session_id = %self.context.session_id,
+                "Cannot start caller ingress monitor: no answer SDP available for DTMF detection"
+            );
             return;
         };
 
         let caller_profile = MediaNegotiator::extract_leg_profile(answer_sdp);
         let Some(dtmf_codec) = caller_profile.dtmf else {
+            warn!(
+                session_id = %self.context.session_id,
+                "Cannot start caller ingress monitor: no DTMF codec found in SDP. Available audio codec: {:?}",
+                caller_profile.audio.as_ref().map(|a| &a.codec)
+            );
             return;
         };
+        info!(
+            session_id = %self.context.session_id,
+            dtmf_codec = ?dtmf_codec.codec,
+            dtmf_payload_type = dtmf_codec.payload_type,
+            dtmf_clock_rate = dtmf_codec.clock_rate,
+            "Found DTMF codec in SDP, will start ingress monitor"
+        );
 
         let session_id = self.context.session_id.clone();
         let app_runtime = self.app_runtime.clone();
@@ -3381,25 +3004,64 @@ impl SipSession {
         let task = tokio::spawn(async move {
             let track = loop {
                 if let Some(track) = Self::find_audio_receiver_track(&caller_pc).await {
+                    info!(
+                        session_id = %session_id,
+                        "Found audio receiver track for DTMF monitoring"
+                    );
                     break track;
                 }
 
                 tokio::select! {
-                    _ = monitor_cancel.cancelled() => return,
+                    _ = monitor_cancel.cancelled() => {
+                        warn!(session_id = %session_id, "Ingress monitor cancelled while searching for audio track");
+                        return;
+                    }
                     _ = tokio::time::sleep(Duration::from_millis(100)) => {}
                 }
             };
 
             let mut detector = RtpDtmfDetector::default();
+            let mut frame_count = 0u64;
+            let mut dtmf_frames_count = 0u64;
 
             loop {
                 tokio::select! {
-                    _ = monitor_cancel.cancelled() => break,
+                    _ = monitor_cancel.cancelled() => {
+                        info!(
+                            session_id = %session_id,
+                            frame_count = frame_count,
+                            dtmf_frames_count = dtmf_frames_count,
+                            "Ingress monitor cancelled"
+                        );
+                        break;
+                    }
                     sample = track.recv() => {
                         match sample {
                             Ok(rustrtc::media::MediaSample::Audio(frame)) => {
-                                if frame.payload_type != Some(dtmf_payload_type) {
+                                frame_count += 1;
+                                if frame.payload_type.is_some() && frame.payload_type != Some(dtmf_payload_type) {
+                                    if frame_count % 100 == 0 {
+                                        debug!(
+                                            session_id = %session_id,
+                                            expected_payload_type = dtmf_payload_type,
+                                            frame_payload_type = ?frame.payload_type,
+                                            frame_count = frame_count,
+                                            "Received non-DTMF RTP frame (samples shown every 100 frames)"
+                                        );
+                                    }
                                     continue;
+                                }
+
+                                if frame.payload_type == Some(dtmf_payload_type) {
+                                    dtmf_frames_count += 1;
+                                    debug!(
+                                        session_id = %session_id,
+                                        payload_type = dtmf_payload_type,
+                                        data_len = frame.data.len(),
+                                        rtp_timestamp = frame.rtp_timestamp,
+                                        dtmf_frames_count = dtmf_frames_count,
+                                        "Received RTP DTMF frame"
+                                    );
                                 }
 
                                 let Some(digit) = detector.observe(&frame.data, frame.rtp_timestamp) else {
@@ -3413,26 +3075,34 @@ impl SipSession {
                                     "digit": digit.to_string(),
                                 });
 
+                                warn!(
+                                    session_id = %session_id,
+                                    digit = %digit,
+                                    "✓ Successfully detected DTMF digit from RFC2833 RTP frame"
+                                );
+
                                 if let Err(error) = app_runtime.inject_event(event) {
-                                    debug!(
+                                    warn!(
                                         session_id = %session_id,
                                         digit = %digit,
                                         error = %error,
-                                        "Caller ingress monitor observed RTP DTMF with no active app receiver"
+                                        "Detected DTMF but failed to inject event (no active app receiver?)"
                                     );
                                 } else {
-                                    debug!(
+                                    info!(
                                         session_id = %session_id,
                                         digit = %digit,
-                                        "Injected RTP DTMF from caller ingress monitor"
+                                        "✓ Successfully injected RTP DTMF from caller ingress monitor"
                                     );
                                 }
                             }
                             Ok(_) => {}
                             Err(error) => {
-                                debug!(
+                                warn!(
                                     session_id = %session_id,
                                     error = %error,
+                                    frame_count = frame_count,
+                                    dtmf_frames_count = dtmf_frames_count,
                                     "Caller ingress monitor stopped while reading inbound RTP"
                                 );
                                 break;
@@ -3443,10 +3113,11 @@ impl SipSession {
             }
         });
 
-        info!(
+        warn!(
             session_id = %self.context.session_id,
             payload_type = dtmf_payload_type,
-            "Started caller ingress monitor for RTP DTMF"
+            "✓ Started caller ingress monitor for RFC2833 RTP DTMF detection (payload type: {})",
+            dtmf_payload_type
         );
 
         self.caller_ingress_monitor = Some(CallerIngressMonitor { cancel_token, task });
@@ -6079,162 +5750,6 @@ impl SipSession {
         info!("All bridges stopped");
     }
 
-    /// Setup conference mixer for all active legs.
-    async fn setup_conference_mixer(&mut self) {
-        let conf_id_str = format!("conf-{}", self.id.0);
-        let conf_id = crate::call::runtime::ConferenceId::from(conf_id_str.as_str());
-
-        // Create conference if not exists
-        if self
-            .server
-            .conference_manager
-            .get_conference(&conf_id)
-            .await
-            .is_none()
-        {
-            if let Err(e) = self
-                .server
-                .conference_manager
-                .create_conference(conf_id.clone(), None)
-                .await
-            {
-                warn!("Failed to create conference: {}", e);
-                return;
-            }
-            info!(conf_id = %conf_id_str, "Conference created");
-        }
-
-        // Collect active leg IDs first to avoid borrow issues
-        let active_legs: Vec<(LegId, Option<Arc<dyn MediaPeer>>)> = self
-            .legs
-            .iter()
-            .filter(|(_, leg)| leg.is_active())
-            .map(|(id, _)| {
-                let peer = self.peers.get(id).cloned();
-                (id.clone(), peer)
-            })
-            .collect();
-
-        // Add all active legs as participants
-        for (leg_id, peer) in active_legs {
-            let participant_leg = LegId::new(format!("{}-{}", self.id.0, leg_id));
-
-            if let Err(e) = self
-                .server
-                .conference_manager
-                .add_participant(&conf_id, participant_leg.clone())
-                .await
-            {
-                warn!(%leg_id, "Failed to add participant: {}", e);
-                continue;
-            }
-
-            info!(%leg_id, "Added participant to conference");
-
-            // Start media bridge for this leg using its own peer if available
-            if let Some(peer) = peer {
-                if let Err(e) = self
-                    .start_conference_media_bridge_for_peer(&conf_id_str, &leg_id, &peer)
-                    .await
-                {
-                    warn!(%leg_id, "Failed to start conference media bridge for dynamic leg: {}", e);
-                }
-            } else {
-                // Fallback to legacy caller/callee peer for existing legs
-                if let Err(e) = self
-                    .start_conference_media_bridge(&conf_id_str, &leg_id)
-                    .await
-                {
-                    warn!(%leg_id, "Failed to start conference media bridge: {}", e);
-                }
-            }
-        }
-    }
-
-    /// Start conference media bridge for a specific peer (dynamic leg).
-    async fn start_conference_media_bridge_for_peer(
-        &mut self,
-        conf_id: &str,
-        leg_id: &LegId,
-        peer: &Arc<dyn MediaPeer>,
-    ) -> Result<crate::call::runtime::ConferenceBridgeHandle> {
-        use rustrtc::media::MediaSample;
-
-        // Get the first track from the peer and check if it has a sender
-        let tracks = peer.get_tracks().await;
-        let mut audio_sender = None;
-        for t in &tracks {
-            let guard = t.lock().await;
-            if let Some(sender) = guard.get_sender() {
-                audio_sender = Some(sender);
-                break;
-            }
-        }
-
-        // Create a channel to bridge between ConferenceMediaBridge and audio_sender
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<MediaSample>(100);
-
-        if let Some(sender) = audio_sender {
-            info!(
-                session_id = %self.id,
-                conf_id = %conf_id,
-                leg_id = %leg_id,
-                "Using existing track sender for conference media bridge"
-            );
-
-            // Spawn a forwarder task with cancellation support
-            let cancel_token = self.cancel_token.child_token();
-            let forwarder_handle = tokio::spawn(async move {
-                loop {
-                    tokio::select! {
-                        biased;
-                        _ = cancel_token.cancelled() => {
-                            break;
-                        }
-                        sample = rx.recv() => {
-                            match sample {
-                                Some(s) => {
-                                    if sender.send(s).await.is_err() {
-                                        break;
-                                    }
-                                }
-                                None => break,
-                            }
-                        }
-                    }
-                }
-            });
-            self.leg_tasks
-                .entry(leg_id.clone())
-                .or_default()
-                .push(forwarder_handle);
-        } else {
-            warn!(
-                session_id = %self.id,
-                conf_id = %conf_id,
-                leg_id = %leg_id,
-                "No track sender found, conference audio will not be sent to this leg"
-            );
-        }
-
-        // Create audio receiver for input from peer
-        let audio_receiver = self
-            .create_audio_receiver_from_peer(peer)
-            .await
-            .map_err(|e| anyhow!("Failed to create audio receiver for dynamic leg: {}", e))?;
-
-        // Start full-duplex media bridge
-        let bridge = crate::call::runtime::ConferenceMediaBridge::new(
-            self.server.conference_manager.clone(),
-        );
-        // Resolve per-leg codec from SDP
-        let leg_codec = self.leg_negotiated_codec(leg_id);
-        bridge
-            .start_bridge_full_duplex(conf_id, leg_id, tx, audio_receiver, leg_codec)
-            .await
-            .map_err(|e| anyhow!("Failed to start conference media bridge: {}", e))
-    }
-
     async fn setup_bridge(&mut self, leg_a: LegId, leg_b: LegId) -> bool {
         if self.legs.contains_key(&leg_a) && self.legs.contains_key(&leg_b) {
             self.bridge = BridgeConfig::bridge(leg_a, leg_b);
@@ -6293,1385 +5808,6 @@ impl SipSession {
             return SessionState::Ringing;
         }
         SessionState::Initializing
-    }
-
-    async fn handle_transfer(
-        &mut self,
-        leg_id: LegId,
-        target: String,
-        attended: bool,
-    ) -> Result<()> {
-        info!(%leg_id, %target, %attended, "Handling transfer");
-
-        if !self.legs.contains_key(&leg_id) {
-            return Err(anyhow!("Leg not found: {}", leg_id));
-        }
-
-        let leg = self.legs.get(&leg_id).unwrap();
-        if !matches!(leg.state, LegState::Connected | LegState::Hold) {
-            return Err(anyhow!(
-                "Cannot transfer leg {}: invalid state {:?}",
-                leg_id,
-                leg.state
-            ));
-        }
-
-        if attended {
-            if !target.is_empty() {
-                self.handle_replace_transfer(leg_id, target).await?;
-            } else {
-                self.update_leg_state(&leg_id, LegState::Hold);
-
-                info!(
-                    "Attended transfer initiated - consultation call should be created externally"
-                );
-
-                if let Some(ref reporter) = self.reporter {
-                    let _ = reporter;
-                }
-            }
-        } else {
-            self.handle_blind_transfer(leg_id, target).await?;
-        }
-
-        Ok(())
-    }
-
-    async fn handle_blind_transfer(&mut self, leg_id: LegId, target: String) -> Result<()> {
-        // Handle queue: prefix — start queue instead of sending REFER.
-        // The target may carry an optional ?return_ivr= parameter set by IVR
-        // so that when the queue exhausts all agents the call goes back to IVR.
-        if target.starts_with("queue:") {
-            let remainder = target.strip_prefix("queue:").unwrap_or(&target).trim();
-            let (queue_name, return_ivr) = if let Some(pos) = remainder.find("?return_ivr=") {
-                let q = remainder[..pos].trim();
-                let ivr = remainder[pos + "?return_ivr=".len()..].to_string();
-                (q, Some(ivr))
-            } else {
-                (remainder, None)
-            };
-            if !queue_name.is_empty() {
-                info!(
-                    %leg_id,
-                    queue = %queue_name,
-                    ?return_ivr,
-                    "Handling queue transfer"
-                );
-                return self
-                    .handle_queue_transfer(leg_id, queue_name, return_ivr)
-                    .await;
-            }
-        }
-
-        // Handle ivr: prefix — start an IVR application directly.
-        if target.starts_with("ivr:") {
-            let ivr_name = target.strip_prefix("ivr:").unwrap_or(&target).trim();
-            if !ivr_name.is_empty() {
-                info!(%leg_id, ivr = %ivr_name, "Handling ivr transfer by starting IvrApp");
-                return self.start_ivr_app(ivr_name).await;
-            }
-        }
-
-        let refer_to_str = if target.starts_with("sip:") || target.starts_with("tel:") {
-            target.clone()
-        } else {
-            format!("sip:{}", target)
-        };
-        let refer_to_uri = rsipstack::sip::Uri::try_from(refer_to_str.as_str())
-            .map_err(|e| anyhow!("Invalid transfer target URI: {}", e))?;
-
-        // When blind_transfer_use_refer is false (default), originate B-leg INVITE directly (B2BUA).
-        if !self.server.proxy_config.blind_transfer_use_refer {
-            info!(%leg_id, target = %refer_to_str, "Blind transfer via B-leg INVITE (B2BUA)");
-            let location = crate::call::Location {
-                aor: refer_to_uri,
-                ..Default::default()
-            };
-            let (_tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-            return self
-                .try_single_target(&location, &mut rx, None, None)
-                .await
-                .map_err(|(code, reason)| {
-                    anyhow!(
-                        "B-leg transfer failed: {:?} - {}",
-                        code,
-                        reason.unwrap_or_default()
-                    )
-                });
-        }
-
-        let referred_by = self
-            .context
-            .dialplan
-            .caller_contact
-            .clone()
-            .map(|c| c.to_string())
-            .unwrap_or_else(|| "sip:rustpbx@localhost".to_string());
-        let headers = vec![rsipstack::sip::Header::Other(
-            "Referred-By".to_string(),
-            format!("<{}>", referred_by),
-        )];
-
-        info!(%leg_id, target = %refer_to_str, "Sending REFER for blind transfer");
-
-        match self
-            .server_dialog
-            .refer(refer_to_uri, Some(headers), None)
-            .await
-        {
-            Ok(Some(response)) => {
-                let status = response.status_code.code();
-                info!(status = %status, "REFER response received");
-
-                match status {
-                    202 => {
-                        info!("REFER accepted (202), transfer in progress");
-                        self.update_leg_state(&leg_id, LegState::Ending);
-
-                        self.emit_transfer_event(&leg_id, "accepted", None, None)
-                            .await;
-                        self.emit_refer_event(
-                            status,
-                            None,
-                            crate::call::domain::ReferNotifyEventType::ReferResponse,
-                        )
-                        .await;
-                    }
-                    100..=199 => {
-                        info!("REFER received provisional response {}", status);
-                        self.emit_refer_event(
-                            status,
-                            None,
-                            crate::call::domain::ReferNotifyEventType::ReferResponse,
-                        )
-                        .await;
-                    }
-                    405 | 420 | 501 => {
-                        warn!(status = %status, "REFER not supported by peer, needs 3PCC fallback");
-                        self.emit_transfer_event(
-                            &leg_id,
-                            "failed",
-                            Some(status),
-                            Some("refer_not_supported"),
-                        )
-                        .await;
-                        self.emit_refer_event(
-                            status,
-                            Some("refer_not_supported".to_string()),
-                            crate::call::domain::ReferNotifyEventType::ReferResponse,
-                        )
-                        .await;
-                        return Err(anyhow!(
-                            "REFER not supported by peer ({}), needs 3PCC fallback",
-                            status
-                        ));
-                    }
-                    _ if status >= 400 => {
-                        warn!(status = %status, "REFER rejected");
-                        self.emit_transfer_event(
-                            &leg_id,
-                            "failed",
-                            Some(status),
-                            Some("refer_rejected"),
-                        )
-                        .await;
-                        self.emit_refer_event(
-                            status,
-                            Some("refer_rejected".to_string()),
-                            crate::call::domain::ReferNotifyEventType::ReferResponse,
-                        )
-                        .await;
-                        return Err(anyhow!("REFER rejected with status {}", status));
-                    }
-                    _ => {
-                        warn!(status = %status, "Unexpected REFER response");
-                        self.emit_transfer_event(
-                            &leg_id,
-                            "failed",
-                            Some(status),
-                            Some("unexpected_response"),
-                        )
-                        .await;
-                        self.emit_refer_event(
-                            status,
-                            Some("unexpected_response".to_string()),
-                            crate::call::domain::ReferNotifyEventType::ReferResponse,
-                        )
-                        .await;
-                        return Err(anyhow!("Unexpected REFER response: {}", status));
-                    }
-                }
-            }
-            Ok(None) => {
-                warn!("REFER timed out, no response received");
-                self.emit_transfer_event(&leg_id, "failed", None, Some("timeout"))
-                    .await;
-                self.emit_refer_event(
-                    408,
-                    Some("timeout".to_string()),
-                    crate::call::domain::ReferNotifyEventType::ReferResponse,
-                )
-                .await;
-                return Err(anyhow!("REFER timed out"));
-            }
-            Err(e) => {
-                warn!(error = %e, "Failed to send REFER");
-                self.emit_transfer_event(&leg_id, "failed", None, Some(&e.to_string()))
-                    .await;
-                self.emit_refer_event(
-                    500,
-                    Some(e.to_string()),
-                    crate::call::domain::ReferNotifyEventType::ReferResponse,
-                )
-                .await;
-                return Err(anyhow!("Failed to send REFER: {}", e));
-            }
-        }
-
-        info!(
-            "Blind transfer initiated - call will be transferred to {}",
-            target
-        );
-
-        Ok(())
-    }
-
-    /// Handle queue transfer by loading queue config and executing queue plan.
-    /// This is called when a transfer target starts with "queue:".
-    /// `return_ivr` — if set, the queue plan's fallback is overridden to return
-    /// the call to the given IVR when all agents are exhausted.
-    pub(crate) async fn handle_queue_transfer(
-        &mut self,
-        leg_id: LegId,
-        queue_name: &str,
-        return_ivr: Option<String>,
-    ) -> Result<()> {
-        info!(%leg_id, queue = %queue_name, ?return_ivr, "Starting queue transfer");
-
-        // Load queue configuration from data context
-        let queue_config = self
-            .server
-            .data_context
-            .resolve_queue_config(queue_name)
-            .map_err(|e| anyhow!("Failed to resolve queue config: {}", e))?;
-
-        let queue_config = match queue_config {
-            Some(config) => config,
-            None => {
-                return Err(anyhow!("Queue '{}' not found", queue_name));
-            }
-        };
-
-        // Convert to queue plan
-        let mut queue_plan = queue_config
-            .to_queue_plan()
-            .map_err(|e| anyhow!("Invalid queue config: {}", e))?;
-
-        // If return_ivr is specified, override fallback so the queue sends
-        // the caller back to the IVR when all agents are exhausted.
-        if let Some(ref ivr_name) = return_ivr {
-            info!(
-                queue = %queue_name,
-                ivr = %ivr_name,
-                "Queue transfer: will return to IVR on fallback"
-            );
-            let name = ivr_name.clone();
-            queue_plan.fallback = Some(crate::call::QueueFallbackAction::Failure(
-                crate::call::FailureAction::Transfer(crate::call::TransferEndpoint::Ivr(name)),
-            ));
-        }
-
-        // Execute queue plan
-        // Create a channel for callee state (not used in this context)
-        let (_tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-
-        match self.execute_queue(&queue_plan, &mut rx).await {
-            Ok(()) => {
-                info!(queue = %queue_name, "Queue transfer completed successfully");
-                Ok(())
-            }
-            Err((code, reason)) => {
-                warn!(
-                    queue = %queue_name,
-                    ?code,
-                    ?reason,
-                    "Queue transfer failed"
-                );
-                if self.server_dialog.state().is_confirmed() {
-                    self.last_error = Some((code.clone(), reason.clone()));
-                    self.hangup_reason
-                        .get_or_insert(CallRecordHangupReason::Failed);
-                    self.pending_hangup.insert(self.server_dialog.id());
-                    self.cancel_token.cancel();
-                    info!(
-                        queue = %queue_name,
-                        ?code,
-                        ?reason,
-                        "Queue transfer failed after caller was answered; hanging up caller dialog"
-                    );
-                    return Ok(());
-                }
-                Err(anyhow!("Queue transfer failed: {:?} - {:?}", code, reason))
-            }
-        }
-    }
-
-    /// Start an IVR application by name.
-    /// This is used by the queue fallback path when the fallback action
-    /// specifies `TransferEndpoint::Ivr`, and by `handle_blind_transfer`
-    /// when the transfer target has an `ivr:` prefix.
-    pub(crate) async fn start_ivr_app(&self, ivr_name: &str) -> Result<()> {
-        use crate::call::runtime::AppRuntimeError;
-
-        let ivr_file = format!("config/ivr/{}.toml", ivr_name);
-        info!(ivr = %ivr_name, file = %ivr_file, "Starting IVR application");
-
-        let params = Some(serde_json::json!({"file": ivr_file}));
-        match self
-            .app_runtime
-            .start_app("ivr", params.clone(), true)
-            .await
-        {
-            Ok(()) => {}
-            Err(AppRuntimeError::AlreadyRunning(_)) => {
-                warn!(
-                    ivr = %ivr_name,
-                    "IVR runtime still marked running, restarting app"
-                );
-
-                match self
-                    .app_runtime
-                    .stop_app(Some("restart ivr for queue fallback".to_string()))
-                    .await
-                {
-                    Ok(()) | Err(AppRuntimeError::NotRunning) => {}
-                    Err(stop_err) => {
-                        warn!(
-                            ivr = %ivr_name,
-                            error = ?stop_err,
-                            "Failed to stop existing app before IVR restart"
-                        );
-                    }
-                }
-
-                self.app_runtime
-                    .start_app("ivr", params, true)
-                    .await
-                    .map_err(|e| anyhow!("Failed to restart IVR '{}': {:?}", ivr_name, e))?;
-            }
-            Err(e) => {
-                return Err(anyhow!("Failed to start IVR '{}': {:?}", ivr_name, e));
-            }
-        }
-
-        Ok(())
-    }
-
-    fn build_replaces_header(&self) -> Option<String> {
-        let dialog_id = self.server_dialog.id();
-
-        let call_id = &dialog_id.call_id;
-        let local_tag = &dialog_id.local_tag;
-        let remote_tag = &dialog_id.remote_tag;
-
-        if remote_tag.is_empty() {
-            return None;
-        }
-
-        Some(format!(
-            "{};to-tag={};from-tag={}",
-            call_id, local_tag, remote_tag
-        ))
-    }
-
-    async fn handle_replace_transfer(&mut self, leg_id: LegId, target: String) -> Result<()> {
-        let replaces = self
-            .build_replaces_header()
-            .ok_or_else(|| anyhow!("Cannot build Replaces header for current dialog"))?;
-        let encoded_replaces = urlencoding::encode(&replaces).into_owned();
-
-        let refer_target = if target.contains('?') {
-            format!("{}&Replaces={}", target, encoded_replaces)
-        } else {
-            format!("{}?Replaces={}", target, encoded_replaces)
-        };
-
-        self.handle_blind_transfer(leg_id, refer_target).await
-    }
-
-    async fn emit_transfer_event(
-        &self,
-        leg_id: &LegId,
-        event_type: &str,
-        sip_status: Option<u16>,
-        reason: Option<&str>,
-    ) {
-        let event_data = serde_json::json!({
-            "session_id": self.id.0,
-            "leg_id": leg_id.to_string(),
-            "event": event_type,
-            "sip_status": sip_status,
-            "reason": reason,
-            "timestamp": chrono::Utc::now().to_rfc3339(),
-        });
-
-        info!(?event_data, "Transfer event emitted");
-    }
-
-    /// Emit a REFER-related event to all registered transfer controllers.
-    async fn emit_refer_event(
-        &self,
-        sip_status: u16,
-        reason: Option<String>,
-        event_type: crate::call::domain::ReferNotifyEventType,
-    ) {
-        let event = crate::call::domain::ReferNotifyEvent {
-            call_id: self.id.0.clone(),
-            sip_status,
-            reason,
-            event_type,
-        };
-        let subscribers = self.server.transfer_notify_subscribers.lock().await;
-        for tx in subscribers.iter() {
-            let _ = tx.send(event.clone());
-        }
-    }
-
-    async fn handle_transfer_complete(&mut self, consult_leg: LegId) -> Result<()> {
-        info!(%consult_leg, "Completing attended transfer");
-
-        if !self.legs.contains_key(&consult_leg) {
-            return Err(anyhow!("Consultation leg not found: {}", consult_leg));
-        }
-
-        let original_leg = self
-            .legs
-            .iter()
-            .find(|(_, leg)| leg.state == LegState::Hold)
-            .map(|(id, _)| id.clone());
-
-        if let Some(original_leg) = original_leg {
-            if self
-                .setup_bridge(original_leg.clone(), consult_leg.clone())
-                .await
-            {
-                self.update_leg_state(&original_leg, LegState::Connected);
-                self.update_leg_state(&consult_leg, LegState::Connected);
-                // Ensure the original leg is properly unheld after bridge
-                let _ = self.handle_unhold(original_leg.clone()).await;
-                info!("Attended transfer completed successfully");
-            } else {
-                return Err(anyhow!("Failed to setup bridge for transfer completion"));
-            }
-        } else {
-            return Err(anyhow!("No leg on hold found for transfer completion"));
-        }
-
-        Ok(())
-    }
-
-    async fn handle_transfer_cancel(&mut self, consult_leg: LegId) -> Result<()> {
-        info!(%consult_leg, "Canceling attended transfer");
-
-        if !self.legs.contains_key(&consult_leg) {
-            return Err(anyhow!("Consultation leg not found: {}", consult_leg));
-        }
-
-        self.update_leg_state(&consult_leg, LegState::Ending);
-
-        let original_leg = self
-            .legs
-            .iter()
-            .find(|(_, leg)| leg.state == LegState::Hold)
-            .map(|(id, _)| id.clone());
-
-        if let Some(original_leg) = original_leg {
-            self.update_leg_state(&original_leg, LegState::Connected);
-            // Ensure the original leg is properly unheld after cancel
-            let _ = self.handle_unhold(original_leg.clone()).await;
-            info!("Attended transfer canceled, original call resumed");
-        }
-
-        Ok(())
-    }
-
-    /// Handle cross-session transfer completion by migrating a leg into a conference.
-    ///
-    /// This is used in the BC -> ABC conference flow where leg_c from session2
-    /// needs to be migrated into a conference that also includes legs from session1.
-    ///
-    /// Flow:
-    /// 1. Locate the leg in from_session
-    /// 2. Add the leg's media to the target conference
-    /// 3. Mark the leg as migrated (don't remove from session yet - session will be cleaned up)
-    async fn handle_transfer_complete_cross_session(
-        &mut self,
-        from_session: String,
-        leg_id: LegId,
-        into_conference: String,
-    ) -> Result<()> {
-        info!(
-            from_session = %from_session,
-            leg_id = %leg_id,
-            into_conference = %into_conference,
-            "Handling cross-session transfer completion"
-        );
-
-        // Check if this is the from_session
-        if self.id.to_string() != from_session {
-            // This session is not the from_session, forward the command to the correct session
-            let registry = &self.server.active_call_registry;
-            if let Some(handle) = registry.get_handle(&from_session) {
-                let from_session_clone = from_session.clone();
-                handle
-                    .send_command(CallCommand::TransferCompleteCrossSession {
-                        from_session,
-                        leg_id,
-                        into_conference,
-                    })
-                    .map_err(|e| anyhow!("Failed to forward cross-session transfer: {}", e))?;
-                info!(
-                    "Forwarded cross-session transfer command to session {}",
-                    from_session_clone
-                );
-                return Ok(());
-            } else {
-                return Err(anyhow!(
-                    "from_session {} not found in registry",
-                    from_session
-                ));
-            }
-        }
-
-        // This is the from_session - find the leg
-        let leg = self
-            .legs
-            .get(&leg_id)
-            .ok_or_else(|| anyhow!("Leg {} not found in session {}", leg_id, from_session))?;
-
-        info!(
-            session_id = %self.id,
-            leg_id = %leg_id,
-            leg_state = ?leg.state,
-            "Found leg for cross-session migration"
-        );
-
-        // Get the conference manager from the server
-        let conference_manager = &self.server.conference_manager;
-        let conf_id = crate::call::runtime::ConferenceId::from(into_conference.as_str());
-
-        // Add the leg to the conference
-        conference_manager
-            .add_participant(&conf_id, LegId::new(format!("{}-{}", from_session, leg_id)))
-            .await
-            .map_err(|e| anyhow!("Failed to add leg to conference: {}", e))?;
-
-        info!(
-            session_id = %self.id,
-            leg_id = %leg_id,
-            conf_id = %into_conference,
-            "Successfully migrated leg into conference"
-        );
-
-        // Start conference media bridge for this leg
-        // This enables the leg to receive mixed audio from all conference participants
-        match self
-            .start_conference_media_bridge(&into_conference, &leg_id)
-            .await
-        {
-            Ok(handle) => {
-                info!(
-                    session_id = %self.id,
-                    leg_id = %leg_id,
-                    "Conference media bridge started"
-                );
-                self.conference_bridge.bridge_handle = Some(handle);
-                self.conference_bridge.conf_id = Some(into_conference);
-            }
-            Err(e) => {
-                warn!(
-                    session_id = %self.id,
-                    leg_id = %leg_id,
-                    error = %e,
-                    "Failed to start conference media bridge"
-                );
-            }
-        }
-
-        // Mark the leg as migrated - the session will be cleaned up separately
-        // (typically by BYE after confirming migration succeeded)
-        self.update_leg_state(&leg_id, LegState::Hold);
-
-        Ok(())
-    }
-
-    /// Create a conference audio track and start full-duplex media bridge.
-    ///
-    /// This creates a rustrtc sample track for output (mixed audio to participant),
-    /// and sets up an audio receiver for input (participant audio to mixer).
-    /// The bridge runs both forward and reverse loops for full-duplex communication.
-    async fn start_conference_media_bridge(
-        &mut self,
-        conf_id: &str,
-        leg_id: &LegId,
-    ) -> Result<crate::call::runtime::ConferenceBridgeHandle> {
-        use rustrtc::RtpCodecParameters;
-        use rustrtc::media::MediaKind;
-        use rustrtc::media::MediaSample;
-        use rustrtc::media::track::sample_track;
-
-        // Determine which peer to use based on leg_id
-        let is_callee = leg_id.0.ends_with("-callee") || leg_id.0 == "callee";
-        if !is_callee {
-            self.stop_caller_ingress_monitor().await;
-        }
-        let (peer, track_id) = if is_callee {
-            (self.callee_peer.clone(), Self::CALLEE_TRACK_ID)
-        } else {
-            (self.caller_peer.clone(), Self::CALLER_TRACK_ID)
-        };
-
-        // Create a sample track pair (sender -> track) for output
-        let (audio_sender, track, _feedback_rx) = sample_track(MediaKind::Audio, 100);
-
-        // Get the existing peer connection from the named RTP track.
-        // We search by track_id to avoid picking up ForwardingTrackHandle entries
-        // (which return None from get_peer_connection).  During REFER/transfer
-        // transitions the track may not be ready yet, so retry briefly.
-        let mut pc = None;
-        for attempt in 0..150 {
-            let tracks = peer.get_tracks().await;
-            // First try: look for the named RTP track
-            for t in &tracks {
-                let guard = t.lock().await;
-                if guard.id() == track_id {
-                    if let Some(found_pc) = guard.get_peer_connection().await {
-                        pc = Some(found_pc);
-                        break;
-                    }
-                }
-            }
-            if pc.is_some() {
-                break;
-            }
-            // Fallback: accept any track that has a peer connection (e.g. after re-INVITE)
-            for t in &tracks {
-                let guard = t.lock().await;
-                if let Some(found_pc) = guard.get_peer_connection().await {
-                    pc = Some(found_pc);
-                    break;
-                }
-            }
-            if pc.is_some() {
-                break;
-            }
-            if attempt % 25 == 0 {
-                let track_ids: Vec<_> = {
-                    let mut ids = Vec::new();
-                    for t in &tracks {
-                        ids.push(t.lock().await.id().to_string());
-                    }
-                    ids
-                };
-                tracing::debug!(
-                    session_id = %self.id,
-                    leg_id = %leg_id,
-                    wanted_track_id = %track_id,
-                    available_tracks = ?track_ids,
-                    attempt = attempt,
-                    "Waiting for peer connection on conference media bridge"
-                );
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-
-        let pc = pc.ok_or_else(|| {
-            anyhow!(
-                "No peer connection found for conference audio injection (leg={}, track={}, session={})",
-                leg_id,
-                track_id,
-                self.id
-            )
-        })?;
-
-        // Add the sample track to the existing peer connection with PCMU params
-        let params = RtpCodecParameters {
-            payload_type: 0, // PCMU
-            clock_rate: 8000,
-            channels: 1,
-        };
-
-        pc.add_track(track, params)
-            .map_err(|e| anyhow!("Failed to add conference track to peer connection: {}", e))?;
-
-        info!(
-            session_id = %self.id,
-            conf_id = %conf_id,
-            leg_id = %leg_id,
-            "Conference sample track added to existing peer connection"
-        );
-
-        // Create a channel to bridge between ConferenceMediaBridge and audio_sender
-        let (tx, mut rx) = tokio::sync::mpsc::channel::<MediaSample>(100);
-
-        // Spawn a forwarder task with cancellation support
-        let cancel_token = self.cancel_token.child_token();
-        let forwarder_handle = tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    biased;
-                    _ = cancel_token.cancelled() => {
-                        break;
-                    }
-                    sample = rx.recv() => {
-                        match sample {
-                            Some(s) => {
-                                if audio_sender.send(s).await.is_err() {
-                                    break;
-                                }
-                            }
-                            None => break,
-                        }
-                    }
-                }
-            }
-        });
-        self.leg_tasks
-            .entry(leg_id.clone())
-            .or_default()
-            .push(forwarder_handle);
-
-        // Create audio receiver for input from SIP track
-        let audio_receiver = if is_callee {
-            self.create_audio_receiver_from_peer(&peer).await
-        } else {
-            self.create_audio_receiver().await
-        }
-        .map_err(|e| anyhow!("Failed to create audio receiver: {}", e))?;
-
-        // Start full-duplex media bridge
-        let bridge = crate::call::runtime::ConferenceMediaBridge::new(
-            self.server.conference_manager.clone(),
-        );
-        // Resolve per-leg codec from SDP
-        let leg_codec = self.leg_negotiated_codec(leg_id);
-        bridge
-            .start_bridge_full_duplex(conf_id, leg_id, tx, audio_receiver, leg_codec)
-            .await
-            .map_err(|e| anyhow!("Failed to start conference media bridge: {}", e))
-    }
-
-    /// Create an audio receiver that reads decoded PCM from the session's media track.
-    ///
-    /// This is used to feed participant audio into the conference mixer.
-    /// Uses the same pattern as BridgePeer: reads MediaSample from track, decodes to PCM.
-    async fn create_audio_receiver(
-        &self,
-    ) -> Result<Box<dyn crate::call::runtime::conference_media_bridge::AudioReceiver>> {
-        // Get the caller's peer connection with a short retry loop for transfer transitions.
-        let mut pc = None;
-        for _ in 0..100 {
-            if let Some(found_pc) = self.get_caller_peer_connection().await {
-                pc = Some(found_pc);
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-
-        let pc = pc.ok_or_else(|| anyhow!("No peer connection found for conference input"))?;
-
-        // Create decoder based on negotiated codec
-        let decoder = self
-            .create_audio_decoder()
-            .ok_or_else(|| anyhow!("Failed to create audio decoder"))?;
-
-        Ok(Box::new(PeerConnectionAudioReceiver::new(pc, decoder)))
-    }
-
-    /// Create an audio receiver from a specific peer.
-    async fn create_audio_receiver_from_peer(
-        &self,
-        peer: &Arc<dyn MediaPeer>,
-    ) -> Result<Box<dyn crate::call::runtime::conference_media_bridge::AudioReceiver>> {
-        // Get peer connection from the given peer with retries during session setup.
-        // Iterate all tracks (not just first) to skip ForwardingTrackHandle entries
-        // which always return None from get_peer_connection().
-        let mut pc = None;
-        for _ in 0..150 {
-            let tracks = peer.get_tracks().await;
-            for t in &tracks {
-                let guard = t.lock().await;
-                if let Some(found_pc) = guard.get_peer_connection().await {
-                    pc = Some(found_pc);
-                    break;
-                }
-            }
-            if pc.is_some() {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-
-        let pc = pc.ok_or_else(|| anyhow!("No peer connection found for conference input"))?;
-
-        // Create decoder based on negotiated codec
-        let decoder = self
-            .create_audio_decoder()
-            .ok_or_else(|| anyhow!("Failed to create audio decoder"))?;
-
-        Ok(Box::new(PeerConnectionAudioReceiver::new(pc, decoder)))
-    }
-
-    /// Get the caller's peer connection
-    async fn get_caller_peer_connection(&self) -> Option<rustrtc::PeerConnection> {
-        // Try to get PC from caller_peer's first track
-        let tracks = self.caller_peer.get_tracks().await;
-        for t in tracks.iter() {
-            let guard = t.lock().await;
-            if let Some(pc) = guard.get_peer_connection().await {
-                return Some(pc);
-            }
-        }
-        None
-    }
-
-    /// Resolve the negotiated audio codec for a given leg.
-    ///
-    /// For "caller": reads from `self.answer` (caller-facing SDP answer).
-    /// For "callee": reads from `self.callee_answer_sdp`.
-    /// For dynamic legs: reads from `self.leg_answers` map (populated on LegConnected).
-    /// Falls back to PCMU if no codec can be determined.
-    fn leg_negotiated_codec(&self, leg_id: &LegId) -> audio_codec::CodecType {
-        use crate::media::negotiate::MediaNegotiator;
-
-        let sdp = self
-            .leg_answers
-            .get(leg_id)
-            .map(|s| s.as_str())
-            .or_else(|| {
-                if leg_id.as_str() == "caller" {
-                    self.answer.as_deref()
-                } else if leg_id.as_str() == "callee" {
-                    self.callee_answer_sdp.as_deref()
-                } else {
-                    None
-                }
-            });
-
-        match sdp.and_then(|s| MediaNegotiator::extract_leg_profile(s).audio) {
-            Some(audio) => {
-                info!(
-                    session_id = %self.id,
-                    leg_id = %leg_id,
-                    codec = ?audio.codec,
-                    "Resolved per-leg codec from SDP"
-                );
-                audio.codec
-            }
-            None => {
-                debug!(
-                    session_id = %self.id,
-                    leg_id = %leg_id,
-                    "No negotiated codec found, defaulting to PCMU"
-                );
-                audio_codec::CodecType::PCMU
-            }
-        }
-    }
-
-    /// Create audio decoder based on negotiated codec from answer SDP.
-    ///
-    /// Extracts the codec from the caller's answer SDP and creates the appropriate decoder.
-    /// Falls back to PCMU if no codec can be determined.
-    fn create_audio_decoder(&self) -> Option<Box<dyn audio_codec::Decoder>> {
-        use crate::media::negotiate::MediaNegotiator;
-        use audio_codec::create_decoder;
-
-        // Try to extract codec from caller's answer SDP
-        let codec = if let Some(ref answer_sdp) = self.answer {
-            let profile = MediaNegotiator::extract_leg_profile(answer_sdp);
-            if let Some(audio) = profile.audio {
-                info!(
-                    session_id = %self.id,
-                    codec = ?audio.codec,
-                    payload_type = audio.payload_type,
-                    "Using negotiated codec for conference decoder"
-                );
-                audio.codec
-            } else {
-                CodecType::PCMU
-            }
-        } else {
-            CodecType::PCMU
-        };
-
-        Some(create_decoder(codec))
-    }
-
-    /// Handle cross-session P2P bridge by creating a conference with both legs.
-    ///
-    /// This is called when a consult transfer completes and only A and C remain.
-    /// Instead of true P2P media bridging, we create a 2-party conference which
-    /// is functionally equivalent but reuses existing infrastructure.
-    async fn handle_bridge_cross_session(
-        &mut self,
-        session_a: String,
-        leg_a: LegId,
-        session_b: String,
-        leg_b: LegId,
-    ) -> Result<()> {
-        let current_session = self.id.to_string();
-
-        info!(
-            current_session = %current_session,
-            session_a = %session_a,
-            session_b = %session_b,
-            "Handling cross-session P2P bridge"
-        );
-
-        // Generate a deterministic conference ID
-        let conf_id = if session_a < session_b {
-            format!("p2p-bridge-{}-{}", session_a, session_b)
-        } else {
-            format!("p2p-bridge-{}-{}", session_b, session_a)
-        };
-        let conf_id_obj = crate::call::runtime::ConferenceId::from(conf_id.as_str());
-
-        // Check if this session is part of the bridge
-        let (my_session, my_leg, other_session, _other_leg) = if current_session == session_a {
-            (
-                session_a.clone(),
-                leg_a.clone(),
-                session_b.clone(),
-                leg_b.clone(),
-            )
-        } else if current_session == session_b {
-            (
-                session_b.clone(),
-                leg_b.clone(),
-                session_a.clone(),
-                leg_a.clone(),
-            )
-        } else {
-            // This session is not part of the bridge, forward to session_a
-            let registry = &self.server.active_call_registry;
-            if let Some(handle) = registry.get_handle(&session_a) {
-                let session_a_clone = session_a.clone();
-                handle
-                    .send_command(CallCommand::BridgeCrossSession {
-                        session_a,
-                        leg_a: leg_a.clone(),
-                        session_b,
-                        leg_b: leg_b.clone(),
-                    })
-                    .map_err(|e| anyhow!("Failed to forward BridgeCrossSession: {}", e))?;
-                info!(
-                    "Forwarded BridgeCrossSession to session_a {}",
-                    session_a_clone
-                );
-            }
-            return Ok(());
-        };
-
-        // Create conference if it doesn't exist (idempotent)
-        if self
-            .server
-            .conference_manager
-            .get_conference(&conf_id_obj)
-            .await
-            .is_none()
-        {
-            info!(conf_id = %conf_id, "Creating P2P bridge conference");
-            self.server
-                .conference_manager
-                .create_conference(conf_id_obj.clone(), None)
-                .await
-                .map_err(|e| anyhow!("Failed to create P2P conference: {}", e))?;
-        }
-
-        // Start conference media bridge for this leg.
-        // The bridge runtime adds the participant to the conference.
-        let participant_leg = LegId::new(format!("{}-{}", my_session, my_leg));
-        match self
-            .start_conference_media_bridge(&conf_id, &participant_leg)
-            .await
-        {
-            Ok(handle) => {
-                info!(
-                    session_id = %current_session,
-                    leg_id = %my_leg,
-                    "P2P conference media bridge started"
-                );
-                self.conference_bridge.bridge_handle = Some(handle);
-                self.conference_bridge.conf_id = Some(conf_id.clone());
-            }
-            Err(e) => {
-                warn!(
-                    session_id = %current_session,
-                    leg_id = %my_leg,
-                    error = %e,
-                    "Failed to start P2P conference media bridge"
-                );
-            }
-        }
-
-        // If this is session_a, notify session_b to also join
-        if current_session == session_a {
-            let registry = &self.server.active_call_registry;
-            if let Some(handle) = registry.get_handle(&other_session) {
-                let _ = handle.send_command(CallCommand::BridgeCrossSession {
-                    session_a: session_a.clone(),
-                    leg_a: leg_a.clone(),
-                    session_b: session_b.clone(),
-                    leg_b: leg_b.clone(),
-                });
-                info!(
-                    session_a = %session_a,
-                    session_b = %session_b,
-                    "Notified session_b to join P2P conference"
-                );
-            }
-        }
-
-        Ok(())
-    }
-
-    async fn handle_supervisor_listen(
-        &mut self,
-        supervisor_leg: LegId,
-        target_leg: LegId,
-        supervisor_session_id: Option<String>,
-    ) -> Result<()> {
-        // Cross-session supervisor: use conference-based mixing when supervisor is in a different session
-        if let Some(ref sup_session_id) = supervisor_session_id
-            && sup_session_id != &self.id.0
-        {
-            return self
-                .handle_cross_session_supervisor_listen(sup_session_id, target_leg)
-                .await;
-        }
-
-        // Same-session supervisor: use conference-based mixing
-        if !self.legs.contains_key(&supervisor_leg) {
-            return Err(anyhow!("Supervisor leg not found: {}", supervisor_leg));
-        }
-        let resolved_target_leg = self.resolve_supervisor_target(&target_leg)?;
-
-        let conf_id = format!("supervisor-{}-listen", self.id.0);
-        self.ensure_supervisor_conference(&conf_id).await?;
-
-        // Bridge target leg into conference (target audio → conference)
-        let target_participant_leg = LegId::new(format!("{}-{}", self.id.0, resolved_target_leg));
-        self.start_conference_media_bridge(&conf_id, &target_participant_leg)
-            .await?;
-
-        // Bridge supervisor leg into conference (conference mix → supervisor)
-        let supervisor_participant_leg = LegId::new(format!("{}-{}", self.id.0, supervisor_leg));
-        self.start_conference_media_bridge(&conf_id, &supervisor_participant_leg)
-            .await?;
-
-        self.conference_bridge.conf_id = Some(conf_id);
-
-        self.update_leg_state(&supervisor_leg, LegState::Connected);
-        info!(
-            session_id = %self.id,
-            supervisor = %supervisor_leg,
-            target = %resolved_target_leg,
-            "Supervisor listen mode activated via conference bridge"
-        );
-        Ok(())
-    }
-
-    /// Resolve supervisor target leg with fallback to callee/caller.
-    fn resolve_supervisor_target(&self, target_leg: &LegId) -> Result<LegId> {
-        if self.legs.contains_key(target_leg) {
-            Ok(target_leg.clone())
-        } else if self.legs.contains_key(&LegId::new("callee")) {
-            warn!(
-                session_id = %self.id,
-                requested_leg = %target_leg,
-                "Supervisor target leg not found, falling back to callee"
-            );
-            Ok(LegId::new("callee"))
-        } else if self.legs.contains_key(&LegId::new("caller")) {
-            warn!(
-                session_id = %self.id,
-                requested_leg = %target_leg,
-                "Supervisor target leg not found, falling back to caller"
-            );
-            Ok(LegId::new("caller"))
-        } else {
-            Err(anyhow!("Target leg not found: {}", target_leg))
-        }
-    }
-
-    /// Ensure a supervisor conference exists.
-    async fn ensure_supervisor_conference(&self, conf_id: &str) -> Result<()> {
-        let conf_id_obj = crate::call::runtime::ConferenceId::from(conf_id);
-        if self
-            .server
-            .conference_manager
-            .get_conference(&conf_id_obj)
-            .await
-            .is_none()
-        {
-            info!(conf_id = %conf_id, "Creating supervisor conference");
-            self.server
-                .conference_manager
-                .create_conference(conf_id_obj, Some(3))
-                .await
-                .map_err(|e| anyhow!("Failed to create supervisor conference: {}", e))?;
-        }
-        Ok(())
-    }
-
-    async fn handle_supervisor_whisper(
-        &mut self,
-        supervisor_leg: LegId,
-        target_leg: LegId,
-        _supervisor_session_id: Option<String>,
-    ) -> Result<()> {
-        if !self.legs.contains_key(&supervisor_leg) {
-            return Err(anyhow!("Supervisor leg not found: {}", supervisor_leg));
-        }
-        if !self.legs.contains_key(&target_leg) {
-            return Err(anyhow!("Target leg not found: {}", target_leg));
-        }
-
-        // Whisper = private 2-way between supervisor and target
-        let conf_id = format!("supervisor-{}-whisper", self.id.0);
-        self.ensure_supervisor_conference(&conf_id).await?;
-
-        let target_participant_leg = LegId::new(format!("{}-{}", self.id.0, target_leg));
-        self.start_conference_media_bridge(&conf_id, &target_participant_leg)
-            .await?;
-
-        let supervisor_participant_leg = LegId::new(format!("{}-{}", self.id.0, supervisor_leg));
-        self.start_conference_media_bridge(&conf_id, &supervisor_participant_leg)
-            .await?;
-
-        self.conference_bridge.conf_id = Some(conf_id);
-
-        self.update_leg_state(&supervisor_leg, LegState::Connected);
-        info!(
-            session_id = %self.id,
-            supervisor = %supervisor_leg,
-            target = %target_leg,
-            "Supervisor whisper mode activated via conference bridge"
-        );
-        Ok(())
-    }
-
-    async fn handle_supervisor_barge(
-        &mut self,
-        supervisor_leg: LegId,
-        target_leg: LegId,
-        _supervisor_session_id: Option<String>,
-    ) -> Result<()> {
-        if !self.legs.contains_key(&supervisor_leg) {
-            return Err(anyhow!("Supervisor leg not found: {}", supervisor_leg));
-        }
-        if !self.legs.contains_key(&target_leg) {
-            return Err(anyhow!("Target leg not found: {}", target_leg));
-        }
-
-        // Barge = full conference with all legs + supervisor
-        let conf_id = format!("supervisor-{}-barge", self.id.0);
-        self.ensure_supervisor_conference(&conf_id).await?;
-
-        // Collect leg IDs first to avoid borrow conflict
-        let leg_ids: Vec<LegId> = self.legs.keys().cloned().collect();
-
-        // Bridge all active legs into the conference
-        for leg_id in &leg_ids {
-            let participant_leg = LegId::new(format!("{}-{}", self.id.0, leg_id));
-            if let Err(e) = self
-                .start_conference_media_bridge(&conf_id, &participant_leg)
-                .await
-            {
-                warn!(%leg_id, error = %e, "Failed to bridge leg into barge conference");
-            }
-        }
-
-        // Bridge supervisor
-        let supervisor_participant_leg = LegId::new(format!("{}-{}", self.id.0, supervisor_leg));
-        self.start_conference_media_bridge(&conf_id, &supervisor_participant_leg)
-            .await?;
-
-        self.conference_bridge.conf_id = Some(conf_id);
-
-        self.update_leg_state(&supervisor_leg, LegState::Connected);
-        info!(
-            session_id = %self.id,
-            supervisor = %supervisor_leg,
-            target = %target_leg,
-            "Supervisor barge mode activated via conference bridge"
-        );
-        Ok(())
-    }
-    /// Creates a conference room and adds both the target leg and supervisor session.
-    async fn handle_cross_session_supervisor_listen(
-        &mut self,
-        supervisor_session_id: &str,
-        target_leg: LegId,
-    ) -> Result<()> {
-        let resolved_target_leg = if self.legs.contains_key(&target_leg) {
-            target_leg
-        } else if self.legs.contains_key(&LegId::new("callee")) {
-            warn!(
-                session_id = %self.id,
-                requested_leg = %target_leg,
-                "Cross-session supervisor listen target leg not found, falling back to callee"
-            );
-            LegId::new("callee")
-        } else if self.legs.contains_key(&LegId::new("caller")) {
-            warn!(
-                session_id = %self.id,
-                requested_leg = %target_leg,
-                "Cross-session supervisor listen target leg not found, falling back to caller"
-            );
-            LegId::new("caller")
-        } else {
-            return Err(anyhow!("Target leg not found: {}", target_leg));
-        };
-
-        // Generate a deterministic conference ID for supervisor monitoring
-        let conf_id = format!("supervisor-{}-{}", self.id.0, supervisor_session_id);
-        let conf_id_obj = crate::call::runtime::ConferenceId::from(conf_id.as_str());
-
-        // Create conference if it doesn't exist (idempotent)
-        if self
-            .server
-            .conference_manager
-            .get_conference(&conf_id_obj)
-            .await
-            .is_none()
-        {
-            info!(conf_id = %conf_id, "Creating supervisor conference");
-            self.server
-                .conference_manager
-                .create_conference(conf_id_obj.clone(), Some(3))
-                .await
-                .map_err(|e| anyhow!("Failed to create supervisor conference: {}", e))?;
-        }
-
-        // Start conference media bridge for target session on the resolved target leg.
-        let target_participant_leg = LegId::new(format!("{}-{}", self.id.0, resolved_target_leg));
-        match self
-            .start_conference_media_bridge(&conf_id, &target_participant_leg)
-            .await
-        {
-            Ok(handle) => {
-                info!(
-                    session_id = %self.id,
-                    leg_id = %resolved_target_leg,
-                    "Supervisor conference media bridge started for target"
-                );
-                self.conference_bridge.bridge_handle = Some(handle);
-                self.conference_bridge.conf_id = Some(conf_id.clone());
-            }
-            Err(e) => {
-                return Err(anyhow!(
-                    "Failed to start supervisor conference media bridge for target {}: {}",
-                    resolved_target_leg,
-                    e
-                ));
-            }
-        }
-
-        // Notify supervisor session to join the conference
-        let registry = &self.server.active_call_registry;
-        if let Some(handle) = registry.get_handle(supervisor_session_id) {
-            let join_cmd = CallCommand::JoinMixer {
-                mixer_id: conf_id.clone(),
-            };
-            handle
-                .send_command(join_cmd)
-                .map_err(|e| anyhow!("Failed to notify supervisor session: {}", e))?;
-            info!(
-                supervisor_session = %supervisor_session_id,
-                conf_id = %conf_id,
-                "Notified supervisor session to join conference"
-            );
-        } else {
-            return Err(anyhow!(
-                "Supervisor session {} not found",
-                supervisor_session_id
-            ));
-        }
-
-        info!(
-            session_id = %self.id,
-            supervisor_session = %supervisor_session_id,
-            conf_id = %conf_id,
-            "Cross-session supervisor listen activated via conference"
-        );
-        Ok(())
-    }
-
-    async fn handle_supervisor_takeover(
-        &mut self,
-        supervisor_leg: LegId,
-        target_leg: LegId,
-        _supervisor_session_id: Option<String>,
-    ) -> Result<()> {
-        if !self.legs.contains_key(&supervisor_leg) {
-            return Err(anyhow!("Supervisor leg not found: {}", supervisor_leg));
-        }
-        if !self.legs.contains_key(&target_leg) {
-            return Err(anyhow!("Target leg not found: {}", target_leg));
-        }
-
-        // Stop any existing supervisor mixer
-        if let Some(ref mixer) = self.supervisor_mixer.take() {
-            mixer.stop();
-            info!(session_id = %self.id, "Stopped existing supervisor mixer for takeover");
-        }
-
-        // Determine the remaining party (the one not being replaced)
-        let other_leg = if target_leg == LegId::new("caller") {
-            LegId::new("callee")
-        } else {
-            LegId::new("caller")
-        };
-
-        // Update bridge to connect supervisor with the remaining party
-        self.bridge = BridgeConfig::bridge(supervisor_leg.clone(), other_leg.clone());
-
-        // Mark target leg as ended and supervisor as connected
-        self.update_leg_state(&target_leg, LegState::Ending);
-        self.update_leg_state(&supervisor_leg, LegState::Connected);
-
-        info!(
-            session_id = %self.id,
-            supervisor = %supervisor_leg,
-            target = %target_leg,
-            other = %other_leg,
-            "Supervisor takeover activated"
-        );
-        Ok(())
-    }
-
-    async fn handle_supervisor_stop(&mut self, supervisor_leg: LegId) -> Result<()> {
-        if !self.legs.contains_key(&supervisor_leg) {
-            return Err(anyhow!("Supervisor leg not found: {}", supervisor_leg));
-        }
-
-        if let Some(ref mixer) = self.supervisor_mixer {
-            mixer.stop();
-            info!(
-                session_id = %self.id,
-                "Supervisor mixer stopped"
-            );
-        }
-
-        if self.legs.len() <= 2 {
-            self.supervisor_mixer = None;
-        }
-
-        self.update_leg_state(&supervisor_leg, LegState::Ended);
-        info!("Supervisor mode stopped");
-        Ok(())
     }
 
     async fn handle_play(
@@ -7834,149 +5970,6 @@ impl SipSession {
         for track_id in to_stop {
             self.stop_playback_track(&track_id, true).await;
         }
-        Ok(())
-    }
-
-    async fn handle_conference_create(
-        &mut self,
-        conf_id: String,
-        options: crate::call::domain::ConferenceOptions,
-    ) -> Result<()> {
-        info!(%conf_id, "Creating conference");
-
-        let max_participants = options.max_participants.map(|m| m as usize);
-        self.server
-            .conference_manager
-            .create_conference(conf_id.into(), max_participants)
-            .await?;
-
-        Ok(())
-    }
-
-    async fn handle_conference_add(&mut self, conf_id: String, leg_id: LegId) -> Result<()> {
-        info!(%conf_id, %leg_id, "Adding leg to conference");
-
-        if !self.legs.contains_key(&leg_id) {
-            return Err(anyhow!("Leg not found: {}", leg_id));
-        }
-
-        self.server
-            .conference_manager
-            .add_participant(&conf_id.into(), leg_id)
-            .await?;
-
-        Ok(())
-    }
-
-    async fn handle_conference_remove(&mut self, conf_id: String, leg_id: LegId) -> Result<()> {
-        info!(%conf_id, %leg_id, "Removing leg from conference");
-
-        self.server
-            .conference_manager
-            .remove_participant(&conf_id.into(), &leg_id)
-            .await?;
-
-        Ok(())
-    }
-
-    async fn handle_conference_mute(&mut self, conf_id: String, leg_id: LegId) -> Result<()> {
-        info!(%conf_id, %leg_id, "Muting leg in conference");
-
-        self.server
-            .conference_manager
-            .mute_participant(&conf_id.into(), &leg_id)
-            .await?;
-
-        Ok(())
-    }
-
-    async fn handle_conference_unmute(&mut self, conf_id: String, leg_id: LegId) -> Result<()> {
-        info!(%conf_id, %leg_id, "Unmuting leg in conference");
-
-        self.server
-            .conference_manager
-            .unmute_participant(&conf_id.into(), &leg_id)
-            .await?;
-
-        Ok(())
-    }
-
-    async fn handle_conference_destroy(&mut self, conf_id: String) -> Result<()> {
-        info!(%conf_id, "Destroying conference");
-
-        self.server
-            .conference_manager
-            .destroy_conference(&conf_id.into())
-            .await?;
-
-        Ok(())
-    }
-
-    async fn handle_join_mixer(&mut self, mixer_id: String) -> Result<()> {
-        info!(%mixer_id, "Joining mixer/conference");
-
-        let conf_id_obj = crate::call::runtime::ConferenceId::from(mixer_id.as_str());
-
-        // Ensure conference exists
-        if self
-            .server
-            .conference_manager
-            .get_conference(&conf_id_obj)
-            .await
-            .is_none()
-        {
-            return Err(anyhow!("Conference {} not found", mixer_id));
-        }
-
-        // Start conference media bridge for supervisor session.
-        // The bridge runtime adds the participant to the conference.
-        let participant_leg = LegId::new(format!("{}-callee", self.id.0));
-        match self
-            .start_conference_media_bridge(&mixer_id, &participant_leg)
-            .await
-        {
-            Ok(handle) => {
-                info!(
-                    session_id = %self.id,
-                    conf_id = %mixer_id,
-                    "Supervisor conference media bridge started"
-                );
-                self.conference_bridge.bridge_handle = Some(handle);
-                self.conference_bridge.conf_id = Some(mixer_id.clone());
-            }
-            Err(e) => {
-                warn!(
-                    session_id = %self.id,
-                    conf_id = %mixer_id,
-                    error = %e,
-                    "Failed to start supervisor conference media bridge"
-                );
-            }
-        }
-
-        Ok(())
-    }
-
-    async fn handle_leave_mixer(&mut self) -> Result<()> {
-        info!("Leaving mixer/conference");
-
-        if let Some(conf_id) = self.conference_bridge.conf_id.take() {
-            let conf_id_obj = crate::call::runtime::ConferenceId::from(conf_id.as_str());
-            let participant_leg = LegId::new(format!("{}-callee", self.id.0));
-
-            let _ = self
-                .server
-                .conference_manager
-                .remove_participant(&conf_id_obj, &participant_leg)
-                .await;
-
-            if let Some(ref handle) = self.conference_bridge.bridge_handle {
-                handle.stop();
-            }
-            self.conference_bridge.bridge_handle = None;
-            info!(session_id = %self.id, conf_id = %conf_id, "Left conference");
-        }
-
         Ok(())
     }
 
@@ -8769,6 +6762,110 @@ mod tests {
         assert_eq!(detector.observe(&[11, 0x00, 0x00, 0xa0], 2), Some('#'));
         assert_eq!(detector.observe(&[12, 0x00, 0x00, 0xa0], 3), Some('A'));
         assert_eq!(detector.observe(&[16, 0x00, 0x00, 0xa0], 4), None);
+    }
+
+    #[test]
+    fn test_rtp_dtmf_detector_receives_all_digits_0_to_9() {
+        let mut detector = RtpDtmfDetector::default();
+
+        // Test digits 0-9
+        for digit_code in 0..=9 {
+            let expected_digit = std::char::from_digit(digit_code as u32, 10).unwrap();
+            let result = detector.observe(&[digit_code, 0x00, 0x00, 0xa0], digit_code as u32);
+            assert_eq!(
+                result,
+                Some(expected_digit),
+                "Failed to receive DTMF digit {}: got {:?}",
+                digit_code,
+                result
+            );
+        }
+    }
+
+    #[test]
+    fn test_rtp_dtmf_detector_sequence_of_different_digits() {
+        let mut detector = RtpDtmfDetector::default();
+
+        // Simulate pressing 2-4-5-6 (queue transfer example)
+        let sequence = vec![
+            (2u8, 100u32, '2'),
+            (4u8, 200u32, '4'),
+            (5u8, 300u32, '5'),
+            (6u8, 400u32, '6'),
+        ];
+
+        for (digit_code, timestamp, expected_char) in sequence {
+            let result = detector.observe(&[digit_code, 0x00, 0x00, 0xa0], timestamp);
+            assert_eq!(
+                result,
+                Some(expected_char),
+                "Failed to receive DTMF sequence digit {}: got {:?}",
+                expected_char,
+                result
+            );
+        }
+    }
+
+    #[test]
+    fn test_rtp_dtmf_detector_handles_short_payload() {
+        let mut detector = RtpDtmfDetector::default();
+
+        // Test with insufficient data (< 4 bytes)
+        assert_eq!(detector.observe(&[1, 0x00], 100), None);
+        assert_eq!(detector.observe(&[1, 0x00, 0x00], 100), None);
+        assert_eq!(detector.observe(&[], 100), None);
+    }
+
+    #[test]
+    fn test_rtp_dtmf_detector_extended_tone_recognition() {
+        let mut detector = RtpDtmfDetector::default();
+
+        // Test all valid DTMF codes (0-15)
+        let expected_digits = vec![
+            ('0', 0u8),
+            ('1', 1u8),
+            ('2', 2u8),
+            ('3', 3u8),
+            ('4', 4u8),
+            ('5', 5u8),
+            ('6', 6u8),
+            ('7', 7u8),
+            ('8', 8u8),
+            ('9', 9u8),
+            ('*', 10u8),
+            ('#', 11u8),
+            ('A', 12u8),
+            ('B', 13u8),
+            ('C', 14u8),
+            ('D', 15u8),
+        ];
+
+        for (expected_digit, digit_code) in expected_digits {
+            let result = detector.observe(&[digit_code, 0x00, 0x00, 0xa0], digit_code as u32);
+            assert_eq!(
+                result,
+                Some(expected_digit),
+                "Failed to map DTMF code {} to digit {}: got {:?}",
+                digit_code,
+                expected_digit,
+                result
+            );
+        }
+    }
+
+    #[test]
+    fn test_rtp_dtmf_detector_rapidly_repeated_digit() {
+        let mut detector = RtpDtmfDetector::default();
+
+        // User pressing "2" multiple times rapidly
+        // First press should succeed
+        assert_eq!(detector.observe(&[2, 0x00, 0x00, 0xa0], 1000), Some('2'));
+        // Same timestamp = duplicate, should be filtered
+        assert_eq!(detector.observe(&[2, 0x80, 0x01, 0x40], 1000), None);
+        // New timestamp = new digit, should succeed
+        assert_eq!(detector.observe(&[2, 0x00, 0x00, 0xa0], 2000), Some('2'));
+        // Different digit on new timestamp
+        assert_eq!(detector.observe(&[4, 0x00, 0x00, 0xa0], 3000), Some('4'));
     }
 
     #[test]

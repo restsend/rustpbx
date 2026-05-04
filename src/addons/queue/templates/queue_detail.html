@@ -148,6 +148,389 @@ endblock %}
                 </div>
             </section>
 
+            <section class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5" x-show="activeTab === 'overview'"
+                x-cloak>
+                <div class="flex flex-col gap-1">
+                    <h2 class="text-sm font-semibold text-slate-900" x-text="tt('queue.section_hold')"></h2>
+                    <p class="text-sm text-slate-500" x-text="tt('queue.section_hold_desc')"></p>
+                </div>
+                <div class="mt-4 space-y-4">
+                    <label class="inline-flex items-center gap-2 text-sm font-medium text-slate-700">
+                        <input type="checkbox" class="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-400"
+                            x-model="holdEnabled">
+                        <span x-text="tt('queue.hold_enable_label')"></span>
+                    </label>
+                    <div class="grid gap-4 md:grid-cols-2" x-show="holdEnabled" x-cloak>
+                        <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                            <span x-text="tt('queue.hold_audio_file')"></span>
+                            <input type="text" x-model.trim="form.spec.hold.audio_file"
+                                class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                :placeholder="tt('queue.hold_audio_file_placeholder')">
+                        </label>
+                        <label class="inline-flex items-center gap-2 text-sm font-medium text-slate-700">
+                            <input type="checkbox"
+                                class="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-400"
+                                x-model="form.spec.hold.loop_playback">
+                            <span x-text="tt('queue.hold_loop')"></span>
+                        </label>
+                    </div>
+                </div>
+            </section>
+
+            <section class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5" x-show="activeTab === 'targets'"
+                x-cloak>
+                <div class="flex flex-col gap-1">
+                    <h2 class="text-sm font-semibold text-slate-900" x-text="tt('queue.section_targets')"></h2>
+                    <p class="text-sm text-slate-500" x-text="tt('queue.section_targets_desc')"></p>
+                </div>
+                <div class="mt-4 space-y-5">
+                    <div class="grid gap-4 md:grid-cols-2">
+                        <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                            <span x-text="tt('queue.field_dial_mode')"></span>
+                            <select x-model="form.spec.strategy.mode"
+                                class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                                <option value="sequential" x-text="tt('queue.dial_sequential')"></option>
+                                <option value="parallel" x-text="tt('queue.dial_parallel')"></option>
+                            </select>
+                        </label>
+                        <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                            <span x-text="tt('queue.field_ring_timeout')"></span>
+                            <input type="number" min="0" x-model.number="form.spec.strategy.wait_timeout_secs"
+                                class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                :placeholder="tt('queue.field_ring_timeout_placeholder')">
+                            <span class="text-xs font-normal text-slate-400"
+                                x-text="tt('queue.field_ring_timeout_hint')"></span>
+                        </label>
+                        <label class="md:col-span-2 flex flex-col gap-2 text-sm font-medium text-slate-700">
+                            <span x-text="tt('queue.field_acd_policy')"></span>
+                            <template x-if="acdPolicies.length">
+                                <select x-model="form.spec.acd_policy"
+                                    class="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                                    <option value="" x-text="tt('queue.field_acd_policy_placeholder')"></option>
+                                    <template x-for="policy in acdPolicies" :key="policy.name">
+                                        <option :value="policy.name" x-text="policy.name"></option>
+                                    </template>
+                                </select>
+                            </template>
+                            <template x-if="!acdPolicies.length">
+                                <input type="text" x-model.trim="form.spec.acd_policy"
+                                    class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                    :placeholder="tt('queue.field_acd_policy_placeholder')">
+                            </template>
+                            <span class="text-xs font-normal text-slate-400" x-text="tt('queue.field_acd_policy_hint')"></span>
+                        </label>
+                    </div>
+                    <div class="space-y-3">
+                        <div class="flex items-center justify-between">
+                            <h3 class="text-sm font-semibold text-slate-800" x-text="tt('queue.dial_targets_title')">
+                            </h3>
+                            <div class="flex items-center gap-2">
+                                <button type="button" @click="addStrategyTarget('sip')"
+                                    class="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-600 hover:bg-slate-50"
+                                    x-text="tt('queue.add_target')">
+                                </button>
+                                <button type="button" @click="addStrategyTarget('skill_group')"
+                                    x-show="skillGroups.length"
+                                    class="inline-flex items-center gap-2 rounded-lg border border-indigo-200 px-3 py-1.5 text-xs font-semibold text-indigo-600 hover:bg-indigo-50"
+                                    x-text="tt('queue.add_skill_group_target')">
+                                </button>
+                            </div>
+                        </div>
+                        <template x-if="!form.spec.strategy.targets.length">
+                            <p class="text-xs text-slate-400" x-text="tt('queue.no_targets')"></p>
+                        </template>
+                        <div class="space-y-3">
+                            <template x-for="(target, index) in form.spec.strategy.targets" :key="index">
+                                <div
+                                    class="grid gap-3 rounded-lg border border-slate-200 p-3"
+                                    :class="target.uri && target.uri.startsWith('skill-group:') ? 'md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto]' : 'md:grid-cols-[minmax(0,1.2fr)_minmax(0,1fr)_auto]'">
+                                    <!-- SIP Target -->
+                                    <template x-if="!target.uri || !target.uri.startsWith('skill-group:')">
+                                        <label
+                                            class="flex flex-col gap-1 text-xs font-semibold uppercase tracking-wide text-slate-500">
+                                            <span x-text="tt('queue.target_uri')"></span>
+                                            <input type="text" x-model.trim="target.uri"
+                                                class="rounded-lg border border-slate-200 px-3 py-2 text-sm font-normal text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                                :placeholder="tt('queue.target_uri_placeholder')">
+                                        </label>
+                                    </template>
+                                    <!-- Skill Group Target -->
+                                    <template x-if="target.uri && target.uri.startsWith('skill-group:')">
+                                        <label class="flex flex-col gap-1 text-xs font-semibold uppercase tracking-wide text-slate-500">
+                                            <span x-text="tt('queue.target_skill_group')"></span>
+                                            <select x-model="target.skill_group_id"
+                                                x-effect="target.skill_group_id && skillGroups.length ? $el.value = target.skill_group_id : ''"
+                                                @change="target.uri = 'skill-group:' + target.skill_group_id"
+                                                class="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                                                <option value="" x-text="tt('queue.skill_group_select_placeholder')"></option>
+                                                <template x-for="group in skillGroups" :key="group.skill_group_id">
+                                                    <option :value="group.skill_group_id" x-text="group.display_name || group.skill_group_id"></option>
+                                                </template>
+                                            </select>
+                                        </label>
+                                    </template>
+                                    <label
+                                        class="flex flex-col gap-1 text-xs font-semibold uppercase tracking-wide text-slate-500">
+                                        <span x-text="tt('queue.target_label')"></span>
+                                        <input type="text" x-model.trim="target.label"
+                                            class="rounded-lg border border-slate-200 px-3 py-2 text-sm font-normal text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                            :placeholder="tt('queue.target_label_placeholder')">
+                                    </label>
+                                    <div class="flex items-end justify-end">
+                                        <button type="button" @click="removeStrategyTarget(index)"
+                                            class="rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-500 hover:bg-slate-50"
+                                            x-text="tt('queue.remove_target')">
+                                        </button>
+                                    </div>
+                                </div>
+                            </template>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <section class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5" x-show="activeTab === 'fallback'"
+                x-cloak>
+                <div class="flex flex-col gap-1">
+                    <h2 class="text-sm font-semibold text-slate-900" x-text="tt('queue.section_fallback')"></h2>
+                    <p class="text-sm text-slate-500" x-text="tt('queue.section_fallback_desc')"></p>
+                </div>
+                <div class="mt-4 space-y-4">
+                    <div class="flex flex-wrap gap-3">
+                        <label class="inline-flex items-center gap-2 text-sm font-medium text-slate-700">
+                            <input type="radio" name="queue-fallback" value="none" x-model="fallbackMode"
+                                class="h-4 w-4 text-sky-600 focus:ring-sky-400">
+                            <span x-text="tt('queue.fallback_none')"></span>
+                        </label>
+                        <label class="inline-flex items-center gap-2 text-sm font-medium text-slate-700">
+                            <input type="radio" name="queue-fallback" value="redirect" x-model="fallbackMode"
+                                class="h-4 w-4 text-sky-600 focus:ring-sky-400">
+                            <span x-text="tt('queue.fallback_redirect_opt')"></span>
+                        </label>
+                        <label class="inline-flex items-center gap-2 text-sm font-medium text-slate-700">
+                            <input type="radio" name="queue-fallback" value="queue" x-model="fallbackMode"
+                                class="h-4 w-4 text-sky-600 focus:ring-sky-400">
+                            <span x-text="tt('queue.fallback_queue_opt')"></span>
+                        </label>
+                        <label class="inline-flex items-center gap-2 text-sm font-medium text-slate-700" x-show="skillGroups.length" x-cloak>
+                            <input type="radio" name="queue-fallback" value="skill_group" x-model="fallbackMode"
+                                class="h-4 w-4 text-sky-600 focus:ring-sky-400">
+                            <span x-text="tt('queue.fallback_skill_group_opt')"></span>
+                        </label>
+                        <label class="inline-flex items-center gap-2 text-sm font-medium text-slate-700">
+                            <input type="radio" name="queue-fallback" value="failure" x-model="fallbackMode"
+                                class="h-4 w-4 text-sky-600 focus:ring-sky-400">
+                            <span x-text="tt('queue.fallback_failure_opt')"></span>
+                        </label>
+                    </div>
+                    <div class="grid gap-4 md:grid-cols-2" x-show="fallbackMode === 'redirect'" x-cloak>
+                        <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                            <span x-text="tt('queue.fallback_redirect_label')"></span>
+                            <input type="text" x-model.trim="form.spec.fallback.redirect"
+                                class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                :placeholder="tt('queue.fallback_redirect_placeholder')">
+                        </label>
+                    </div>
+                    <div class="grid gap-4 md:grid-cols-2" x-show="fallbackMode === 'failure'" x-cloak>
+                        <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                            <span x-text="tt('queue.fallback_code_label')"></span>
+                            <input type="number" min="100" max="699" x-model.number="form.spec.fallback.failure_code"
+                                class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                :placeholder="tt('queue.fallback_code_placeholder')">
+                        </label>
+                        <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                            <span x-text="tt('queue.fallback_reason_label')"></span>
+                            <input type="text" x-model.trim="form.spec.fallback.failure_reason"
+                                class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                :placeholder="tt('queue.fallback_reason_placeholder')">
+                        </label>
+                        <label class="md:col-span-2 flex flex-col gap-2 text-sm font-medium text-slate-700">
+                            <span x-text="tt('queue.fallback_prompt_label')"></span>
+                            <input type="text" x-model.trim="form.spec.fallback.failure_prompt"
+                                class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                :placeholder="tt('queue.fallback_prompt_placeholder')">
+                            <span class="text-xs font-normal text-slate-400"
+                                x-text="tt('queue.fallback_prompt_hint')"></span>
+                        </label>
+                    </div>
+                    <div class="grid gap-4 md:grid-cols-2" x-show="fallbackMode === 'queue'" x-cloak>
+                        <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                            <span x-text="tt('queue.fallback_queue_label')"></span>
+                            <input type="text" x-model.trim="form.spec.fallback.queue_ref"
+                                class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                :placeholder="tt('queue.fallback_queue_placeholder')">
+                            <span class="text-xs font-normal text-slate-400"
+                                x-text="tt('queue.fallback_queue_hint')"></span>
+                        </label>
+                    </div>
+                    <div class="grid gap-4 md:grid-cols-2" x-show="fallbackMode === 'skill_group'" x-cloak>
+                        <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                            <span x-text="tt('queue.fallback_skill_group_label')"></span>
+                            <template x-if="skillGroups.length">
+                                                <select x-model="form.spec.fallback.skill_group_ref"
+                                                    x-effect="form.spec.fallback.skill_group_ref && skillGroups.length ? $el.value = form.spec.fallback.skill_group_ref : ''"
+                                                    class="rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                                                    <option value="" x-text="tt('queue.fallback_skill_group_placeholder')"></option>
+                                                    <template x-for="group in skillGroups" :key="group.skill_group_id">
+                                                        <option :value="group.skill_group_id" x-text="group.display_name || group.skill_group_id"></option>
+                                                    </template>
+                                                </select>
+                            </template>
+                            <template x-if="!skillGroups.length">
+                                <input type="text" x-model.trim="form.spec.fallback.skill_group_ref"
+                                    class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                    :placeholder="tt('queue.fallback_skill_group_placeholder')">
+                            </template>
+                            <span class="text-xs font-normal text-slate-400" x-text="tt('queue.fallback_skill_group_hint')"></span>
+                        </label>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Voice Prompts tab -->
+            <section class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5" x-show="activeTab === 'voice_prompts'" x-cloak>
+                <div class="flex flex-col gap-1">
+                    <h2 class="text-sm font-semibold text-slate-900" x-text="tt('queue.section_voice_prompts')"></h2>
+                    <p class="text-sm text-slate-500" x-text="tt('queue.section_voice_prompts_desc')"></p>
+                </div>
+                <div class="mt-6 space-y-6">
+                    <!-- Transfer prompt -->
+                    <div class="rounded-lg border border-slate-200 p-4">
+                        <h3 class="text-sm font-semibold text-slate-800" x-text="tt('queue.vp_transfer')"></h3>
+                        <p class="mt-1 text-xs text-slate-500" x-text="tt('queue.vp_transfer_desc')"></p>
+                        <div class="mt-3 grid gap-3 md:grid-cols-3">
+                            <select x-model="vpTransferType"
+                                class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                                <option value="none" x-text="tt('queue.vp_none')"></option>
+                                <option value="zh" x-text="tt('queue.vp_chinese')"></option>
+                                <option value="en" x-text="tt('queue.vp_english')"></option>
+                                <option value="custom" x-text="tt('queue.vp_custom')"></option>
+                            </select>
+                            <div class="flex items-center gap-2 md:col-span-2">
+                                <input type="text" x-show="vpTransferType === 'custom'" x-model.trim="vpTransferCustom"
+                                    class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                    :placeholder="tt('queue.vp_url_placeholder')">
+                                <button type="button" x-show="vpTransferType === 'custom' && vpTransferCustom.startsWith('http')"
+                                    @click="downloadAudio(vpTransferCustom, 'transfer')"
+                                    :disabled="downloadingTransfer"
+                                    class="inline-flex items-center gap-1 rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-600 hover:border-sky-300 hover:text-sky-700"
+                                    x-text="downloadingTransfer ? tt('queue.vp_downloading') : tt('queue.vp_download')">
+                                </button>
+                            </div>
+                        </div>
+                        <div class="mt-2 flex items-center gap-2">
+                            <button type="button" @click="previewAudio('transfer')"
+                                class="inline-flex items-center gap-1 rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-600 hover:border-indigo-300 hover:text-indigo-700"
+                                x-text="tt('queue.vp_preview')">
+                            </button>
+                            <span class="text-xs text-slate-400" x-text="vpTransferPath || ''"></span>
+                        </div>
+                    </div>
+
+                    <!-- Busy prompt -->
+                    <div class="rounded-lg border border-slate-200 p-4">
+                        <h3 class="text-sm font-semibold text-slate-800" x-text="tt('queue.vp_busy')"></h3>
+                        <p class="mt-1 text-xs text-slate-500" x-text="tt('queue.vp_busy_desc')"></p>
+                        <div class="mt-3 grid gap-3 md:grid-cols-3">
+                            <select x-model="vpBusyType"
+                                class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                                <option value="none" x-text="tt('queue.vp_none')"></option>
+                                <option value="zh" x-text="tt('queue.vp_chinese')"></option>
+                                <option value="en" x-text="tt('queue.vp_english')"></option>
+                                <option value="custom" x-text="tt('queue.vp_custom')"></option>
+                            </select>
+                            <div class="flex items-center gap-2 md:col-span-2">
+                                <input type="text" x-show="vpBusyType === 'custom'" x-model.trim="vpBusyCustom"
+                                    class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                    :placeholder="tt('queue.vp_url_placeholder')">
+                                <button type="button" x-show="vpBusyType === 'custom' && vpBusyCustom.startsWith('http')"
+                                    @click="downloadAudio(vpBusyCustom, 'busy')"
+                                    :disabled="downloadingBusy"
+                                    class="inline-flex items-center gap-1 rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-600 hover:border-sky-300 hover:text-sky-700"
+                                    x-text="downloadingBusy ? tt('queue.vp_downloading') : tt('queue.vp_download')">
+                                </button>
+                            </div>
+                        </div>
+                        <div class="mt-2 flex items-center gap-2">
+                            <button type="button" @click="previewAudio('busy')"
+                                class="inline-flex items-center gap-1 rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-600 hover:border-indigo-300 hover:text-indigo-700"
+                                x-text="tt('queue.vp_preview')">
+                            </button>
+                            <span class="text-xs text-slate-400" x-text="vpBusyPath || ''"></span>
+                        </div>
+                    </div>
+
+                    <!-- Off-hours prompt -->
+                    <div class="rounded-lg border border-slate-200 p-4">
+                        <h3 class="text-sm font-semibold text-slate-800" x-text="tt('queue.vp_off_hours')"></h3>
+                        <p class="mt-1 text-xs text-slate-500" x-text="tt('queue.vp_off_hours_desc')"></p>
+                        <div class="mt-3 grid gap-3 md:grid-cols-3">
+                            <select x-model="vpOffHoursType"
+                                class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                                <option value="none" x-text="tt('queue.vp_none')"></option>
+                                <option value="zh" x-text="tt('queue.vp_chinese')"></option>
+                                <option value="en" x-text="tt('queue.vp_english')"></option>
+                                <option value="custom" x-text="tt('queue.vp_custom')"></option>
+                            </select>
+                            <div class="flex items-center gap-2 md:col-span-2">
+                                <input type="text" x-show="vpOffHoursType === 'custom'" x-model.trim="vpOffHoursCustom"
+                                    class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                    :placeholder="tt('queue.vp_url_placeholder')">
+                                <button type="button" x-show="vpOffHoursType === 'custom' && vpOffHoursCustom.startsWith('http')"
+                                    @click="downloadAudio(vpOffHoursCustom, 'offhours')"
+                                    :disabled="downloadingOffHours"
+                                    class="inline-flex items-center gap-1 rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-600 hover:border-sky-300 hover:text-sky-700"
+                                    x-text="downloadingOffHours ? tt('queue.vp_downloading') : tt('queue.vp_download')">
+                                </button>
+                            </div>
+                        </div>
+                        <div class="mt-2 flex items-center gap-2">
+                            <button type="button" @click="previewAudio('offhours')"
+                                class="inline-flex items-center gap-1 rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-600 hover:border-indigo-300 hover:text-indigo-700"
+                                x-text="tt('queue.vp_preview')">
+                            </button>
+                            <span class="text-xs text-slate-400" x-text="vpOffHoursPath || ''"></span>
+                        </div>
+                    </div>
+
+                    <!-- No-answer prompt -->
+                    <div class="rounded-lg border border-slate-200 p-4">
+                        <h3 class="text-sm font-semibold text-slate-800" x-text="tt('queue.vp_no_answer')"></h3>
+                        <p class="mt-1 text-xs text-slate-500" x-text="tt('queue.vp_no_answer_desc')"></p>
+                        <div class="mt-3 grid gap-3 md:grid-cols-3">
+                            <select x-model="vpNoAnswerType"
+                                class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                                <option value="none" x-text="tt('queue.vp_none')"></option>
+                                <option value="zh" x-text="tt('queue.vp_chinese')"></option>
+                                <option value="en" x-text="tt('queue.vp_english')"></option>
+                                <option value="custom" x-text="tt('queue.vp_custom')"></option>
+                            </select>
+                            <div class="flex items-center gap-2 md:col-span-2">
+                                <input type="text" x-show="vpNoAnswerType === 'custom'" x-model.trim="vpNoAnswerCustom"
+                                    class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                    :placeholder="tt('queue.vp_url_placeholder')">
+                                <button type="button" x-show="vpNoAnswerType === 'custom' && vpNoAnswerCustom.startsWith('http')"
+                                    @click="downloadAudio(vpNoAnswerCustom, 'noanswer')"
+                                    :disabled="downloadingNoAnswer"
+                                    class="inline-flex items-center gap-1 rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-600 hover:border-sky-300 hover:text-sky-700"
+                                    x-text="downloadingNoAnswer ? tt('queue.vp_downloading') : tt('queue.vp_download')">
+                                </button>
+                            </div>
+                        </div>
+                        <div class="mt-2 flex items-center gap-2">
+                            <button type="button" @click="previewAudio('noanswer')"
+                                class="inline-flex items-center gap-1 rounded-lg border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-600 hover:border-indigo-300 hover:text-indigo-700"
+                                x-text="tt('queue.vp_preview')">
+                            </button>
+                            <span class="text-xs text-slate-400" x-text="vpNoAnswerPath || ''"></span>
+                        </div>
+                    </div>
+
+                    <!-- Preview audio element (hidden) -->
+                    <audio x-ref="audioPreview" controls class="hidden"></audio>
+                </div>
+            </section>
+
             <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                 <p class="text-xs text-slate-400" x-text="tt('queue.save_hint')"></p>
                 <div class="flex items-center gap-3">
@@ -361,10 +744,10 @@ endblock %}
                 return val != null ? String(val) : key;
             },
             VP_PATHS: {
-                transfer: { zh: 'sounds/queue-transfer-zh.wav', en: 'sounds/queue-transfer-en.wav' },
-                busy: { zh: 'sounds/queue-busy-zh.wav', en: 'sounds/queue-busy-en.wav' },
-                offhours: { zh: 'sounds/queue-off-hours-zh.wav', en: 'sounds/queue-off-hours-en.wav' },
-                noanswer: { zh: 'sounds/queue-no-answer-zh.wav', en: 'sounds/queue-no-answer-en.wav' },
+                transfer: { zh: 'config/sounds/queue-transfer-zh.wav', en: 'config/sounds/queue-transfer-en.wav' },
+                busy: { zh: 'config/sounds/queue-busy-zh.wav', en: 'config/sounds/queue-busy-en.wav' },
+                offhours: { zh: 'config/sounds/queue-off-hours-zh.wav', en: 'config/sounds/queue-off-hours-en.wav' },
+                noanswer: { zh: 'config/sounds/queue-no-answer-zh.wav', en: 'config/sounds/queue-no-answer-en.wav' },
             },
             vpTypeFor(path) {
                 if (!path) return 'none';
