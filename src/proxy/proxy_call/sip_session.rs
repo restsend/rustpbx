@@ -1244,7 +1244,9 @@ impl SipSession {
 
                     let hook_handled = if !self.server_dialog.state().is_terminated() {
                         let agent_id = self.connected_callee.clone().unwrap_or_default();
-                        let queue_name = self.queue_name.clone().unwrap_or_default();
+                        let queue_name = self.app_runtime.get_queue_name()
+                            .or_else(|| self.queue_name.clone())
+                            .unwrap_or_default();
                         invoke_post_call_hook(
                             &self.context.session_id,
                             &self.context.original_caller,

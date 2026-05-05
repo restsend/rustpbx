@@ -590,12 +590,14 @@ impl CallApp for QueueApp {
     async fn on_enter(
         &mut self,
         ctrl: &mut CallController,
-        _ctx: &ApplicationContext,
+        ctx: &ApplicationContext,
     ) -> anyhow::Result<AppAction> {
         let queue_id = self.config.name.clone();
         info!(queue = %queue_id, "Queue: entering queue application");
         self.state = QueueState::Answering;
         self.enqueued_at = Some(Instant::now());
+
+        ctx.set_queue_name(&queue_id).await;
 
         // Record call offered
         self.update_stats(&queue_id, |stats| {

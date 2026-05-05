@@ -262,6 +262,10 @@ impl AppRuntime for DefaultAppRuntime {
     fn app_descriptor(&self, app_name: &str) -> Option<AppDescriptor> {
         Some(self.get_descriptor(app_name))
     }
+
+    fn get_queue_name(&self) -> Option<String> {
+        self.context.queue_name.try_read().ok()?.clone()
+    }
 }
 
 /// Parse a JSON event into a ControllerEvent

@@ -82,6 +82,9 @@ pub struct ApplicationContext {
     /// Session-level variables shared across chained applications.
     pub session_vars: Arc<RwLock<HashMap<String, String>>>,
 
+    /// Queue name set by QueueApp — used by post-call hooks (e.g., CSAT survey).
+    pub queue_name: Arc<RwLock<Option<String>>>,
+
     /// Database connection (SeaORM).
     pub db: DatabaseConnection,
 
@@ -100,6 +103,7 @@ impl ApplicationContext {
     pub fn new(db: DatabaseConnection, call_info: CallInfo, config: Arc<Config>) -> Self {
         Self {
             session_vars: Arc::new(RwLock::new(HashMap::new())),
+            queue_name: Arc::new(RwLock::new(None)),
             db,
             http_client: reqwest::Client::new(),
             call_info,
@@ -117,6 +121,11 @@ impl ApplicationContext {
     pub async fn get_var(&self, key: &str) -> Option<String> {
         let vars = self.session_vars.read().await;
         vars.get(key).cloned()
+    }
+
+    /// Set the queue name for this session (called by QueueApp on enter).
+    pub async fn set_queue_name(&self, name: impl Into<String>) {
+        *self.queue_name.write().await = Some(name.into());
     }
 }
 

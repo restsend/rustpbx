@@ -300,6 +300,10 @@ pub trait AppRuntime: Send + Sync {
 
     /// Get the application descriptor for a given app name
     fn app_descriptor(&self, app_name: &str) -> Option<AppDescriptor>;
+
+    fn get_queue_name(&self) -> Option<String> {
+        None
+    }
 }
 
 /// Application factory trait - creates AppRuntime instances
