@@ -4,7 +4,9 @@ use std::{collections::HashMap, fs, path::Path};
 
 use crate::{
     addons::queue::models as queue, addons::queue::services::utils as queue_utils,
+    call::DEFAULT_QUEUE_HOLD_AUDIO,
     config::ProxyConfig,
+    proxy::routing::{RouteQueueConfig, RouteQueueHoldConfig},
 };
 
 pub struct QueueExporter {
@@ -37,6 +39,7 @@ impl QueueExporter {
             let key = queue_utils::queue_entry_key(&entry);
             let mut queue_config = entry.queue;
             queue_config.name = Some(entry.name);
+            normalize_queue_audio_paths(&mut queue_config);
             queues_map.insert(key, queue_config);
         }
 
@@ -66,4 +69,39 @@ fn ensure_queue_dir(dir: &Path) -> Result<()> {
             .with_context(|| format!("failed to create queue dir {}", dir.display()))?;
     }
     Ok(())
+}
+
+fn normalize_queue_audio_paths(queue_config: &mut RouteQueueConfig) {
+    match queue_config.hold.as_mut() {
+        Some(hold) => normalize_optional_audio_path(&mut hold.audio_file),
+        None => {
+            queue_config.hold = Some(RouteQueueHoldConfig {
+                audio_file: Some(normalize_packaged_audio_path(DEFAULT_QUEUE_HOLD_AUDIO)),
+                loop_playback: true,
+            });
+        }
+    }
+
+    if let Some(fallback) = queue_config.fallback.as_mut() {
+        normalize_optional_audio_path(&mut fallback.failure_prompt);
+    }
+
+    if let Some(prompts) = queue_config.voice_prompts.as_mut() {
+        normalize_optional_audio_path(&mut prompts.transfer_prompt);
+        normalize_optional_audio_path(&mut prompts.busy_prompt);
+        normalize_optional_audio_path(&mut prompts.off_hours_prompt);
+        normalize_optional_audio_path(&mut prompts.no_answer_prompt);
+    }
+}
+
+fn normalize_optional_audio_path(path: &mut Option<String>) {
+    if let Some(value) = path.as_mut() {
+        *value = normalize_packaged_audio_path(value);
+    }
+}
+
+fn normalize_packaged_audio_path(path: &str) -> String {
+    path.strip_prefix("config/sounds/")
+        .map(|file| format!("sounds/{file}"))
+        .unwrap_or_else(|| path.to_string())
 }
