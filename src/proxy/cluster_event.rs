@@ -73,6 +73,7 @@ enum ClusterMessageBody {
 struct ClusterLocatorMessage {
     event: String,
     aor: String,
+    registered_aor: Option<String>,
     contact_raw: Option<String>,
     expires: u32,
     destination: Option<String>,
@@ -81,9 +82,14 @@ struct ClusterLocatorMessage {
 impl ClusterLocatorMessage {
     fn to_event(&self) -> Option<LocatorEvent> {
         let aor: Uri = self.aor.parse().ok()?;
+        let registered_aor = self
+            .registered_aor
+            .as_deref()
+            .and_then(|value| value.parse().ok());
         let loc = Location {
             aor,
             expires: self.expires,
+            registered_aor,
             contact_raw: self.contact_raw.clone(),
             destination: None, // not needed for presence/CC logic
             ..Default::default()
@@ -134,6 +140,7 @@ impl From<&LocatorEvent> for ClusterLocatorMessage {
                 ClusterLocatorMessage {
                     event: event.to_string(),
                     aor: loc.aor.to_string(),
+                    registered_aor: loc.registered_aor.as_ref().map(|aor| aor.to_string()),
                     contact_raw: loc.contact_raw.clone(),
                     expires: loc.expires,
                     destination: loc.destination.as_ref().map(|d| d.to_string()),
@@ -144,6 +151,7 @@ impl From<&LocatorEvent> for ClusterLocatorMessage {
                 ClusterLocatorMessage {
                     event: "unregistered".to_string(),
                     aor: loc.aor.to_string(),
+                    registered_aor: loc.registered_aor.as_ref().map(|aor| aor.to_string()),
                     contact_raw: loc.contact_raw.clone(),
                     expires: loc.expires,
                     destination: loc.destination.as_ref().map(|d| d.to_string()),
@@ -549,6 +557,7 @@ mod tests {
         let msg = ClusterLocatorMessage {
             event: "registered".to_string(),
             aor: "sip:1001@pbx.local".to_string(),
+            registered_aor: Some("sip:1001@pbx.local".to_string()),
             contact_raw: Some("sip:1001@10.0.0.1:5060".to_string()),
             expires: 3600,
             destination: Some("10.0.0.1:5060".to_string()),
@@ -563,6 +572,7 @@ mod tests {
             ClusterMessageBody::Locator(m) => {
                 assert_eq!(m.event, "registered");
                 assert_eq!(m.aor, "sip:1001@pbx.local");
+                assert_eq!(m.registered_aor.as_deref(), Some("sip:1001@pbx.local"));
                 assert_eq!(m.contact_raw.as_deref(), Some("sip:1001@10.0.0.1:5060"));
                 assert_eq!(m.expires, 3600);
                 assert_eq!(m.destination.as_deref(), Some("10.0.0.1:5060"));
@@ -576,6 +586,7 @@ mod tests {
         let msg = ClusterLocatorMessage {
             event: "unregistered".to_string(),
             aor: "sip:2001@pbx.local".to_string(),
+            registered_aor: None,
             contact_raw: None,
             expires: 0,
             destination: None,
@@ -589,6 +600,7 @@ mod tests {
             ClusterMessageBody::Locator(m) => {
                 assert_eq!(m.event, "unregistered");
                 assert_eq!(m.aor, "sip:2001@pbx.local");
+                assert_eq!(m.registered_aor, None);
                 assert_eq!(m.contact_raw, None);
                 assert_eq!(m.expires, 0);
                 assert_eq!(m.destination, None);
@@ -602,6 +614,7 @@ mod tests {
         let msg = ClusterLocatorMessage {
             event: "registered".to_string(),
             aor: "sip:test@x".to_string(),
+            registered_aor: None,
             contact_raw: None,
             expires: 60,
             destination: None,
@@ -617,6 +630,7 @@ mod tests {
         let msg = ClusterLocatorMessage {
             event: "registered".to_string(),
             aor: "sip:1001@pbx.local".to_string(),
+            registered_aor: Some("sip:1001@pbx.local".to_string()),
             contact_raw: Some("sip:1001@10.0.0.1:5060".to_string()),
             expires: 3600,
             destination: None,
@@ -625,6 +639,10 @@ mod tests {
         match event {
             LocatorEvent::Registered(loc) => {
                 assert_eq!(loc.aor.to_string(), "sip:1001@pbx.local");
+                assert_eq!(
+                    loc.registered_aor.as_ref().map(|uri| uri.to_string()).as_deref(),
+                    Some("sip:1001@pbx.local")
+                );
                 assert_eq!(loc.expires, 3600);
                 assert_eq!(loc.contact_raw.unwrap(), "sip:1001@10.0.0.1:5060");
             }
@@ -637,6 +655,7 @@ mod tests {
         let msg = ClusterLocatorMessage {
             event: "unregistered".to_string(),
             aor: "sip:2001@pbx.local".to_string(),
+            registered_aor: None,
             contact_raw: None,
             expires: 0,
             destination: None,
@@ -650,6 +669,7 @@ mod tests {
         let msg = ClusterLocatorMessage {
             event: "unknown_event".to_string(),
             aor: "sip:test@x".to_string(),
+            registered_aor: None,
             contact_raw: None,
             expires: 0,
             destination: None,
@@ -667,6 +687,7 @@ mod tests {
         let msg = ClusterLocatorMessage {
             event: "registered".to_string(),
             aor: String::new(),
+            registered_aor: None,
             contact_raw: None,
             expires: 0,
             destination: None,
@@ -817,9 +838,11 @@ mod tests {
     #[test]
     fn test_locator_event_to_message_registered() {
         let aor: Uri = "sip:1001@pbx.local".parse().unwrap();
+        let registered_aor: Uri = "sip:1001@example.com".parse().unwrap();
         let loc = Location {
             aor: aor.clone(),
             expires: 3600,
+            registered_aor: Some(registered_aor),
             contact_raw: Some("sip:1001@10.0.0.1".to_string()),
             destination: None,
             ..Default::default()
@@ -828,6 +851,7 @@ mod tests {
         let msg = ClusterLocatorMessage::from(&event);
         assert_eq!(msg.event, "registered");
         assert_eq!(msg.aor, "sip:1001@pbx.local");
+        assert_eq!(msg.registered_aor.as_deref(), Some("sip:1001@example.com"));
         assert_eq!(msg.expires, 3600);
         assert_eq!(msg.contact_raw.as_deref(), Some("sip:1001@10.0.0.1"));
     }
@@ -853,9 +877,11 @@ mod tests {
     #[test]
     fn test_locator_event_offline_to_message() {
         let aor: Uri = "sip:3001@pbx.local".parse().unwrap();
+        let registered_aor: Uri = "sip:3001@example.com".parse().unwrap();
         let loc = Location {
             aor: aor.clone(),
             expires: 0,
+            registered_aor: Some(registered_aor),
             contact_raw: Some("sip:3001@10.0.0.3".to_string()),
             destination: None,
             ..Default::default()
@@ -863,6 +889,7 @@ mod tests {
         let event = LocatorEvent::Offline(vec![loc]);
         let msg = ClusterLocatorMessage::from(&event);
         assert_eq!(msg.event, "unregistered");
+        assert_eq!(msg.registered_aor.as_deref(), Some("sip:3001@example.com"));
         assert_eq!(msg.contact_raw.as_deref(), Some("sip:3001@10.0.0.3"));
     }
 
@@ -1101,9 +1128,11 @@ mod tests {
     #[test]
     fn test_locator_event_full_round_trip() {
         let aor: Uri = "sip:1001@pbx.local".parse().unwrap();
+        let registered_aor: Uri = "sip:1001@example.com".parse().unwrap();
         let original_loc = Location {
             aor: aor.clone(),
             expires: 3600,
+            registered_aor: Some(registered_aor),
             contact_raw: Some("sip:1001@10.0.0.1:5060;transport=udp".to_string()),
             destination: None,
             ..Default::default()
@@ -1126,6 +1155,10 @@ mod tests {
         assert!(matches!(reconstructed, LocatorEvent::Registered(_)));
         if let LocatorEvent::Registered(loc) = reconstructed {
             assert_eq!(loc.aor, aor);
+            assert_eq!(
+                loc.registered_aor.as_ref().map(|uri| uri.to_string()).as_deref(),
+                Some("sip:1001@example.com")
+            );
             assert_eq!(loc.expires, 3600);
             assert_eq!(
                 loc.contact_raw.as_deref(),
@@ -1179,6 +1212,7 @@ mod tests {
         let msg = ClusterLocatorMessage {
             event: String::new(),
             aor: String::new(),
+            registered_aor: None,
             contact_raw: Some(String::new()),
             expires: 0,
             destination: None,
