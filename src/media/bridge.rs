@@ -197,7 +197,7 @@ type DtmfHandler = Arc<dyn Fn(char) + Send + Sync + 'static>;
 #[derive(Clone)]
 struct BridgeDtmfSink {
     endpoint: BridgeEndpoint,
-    payload_type: u8,
+    payload_types: Vec<u8>,
     handler: DtmfHandler,
 }
 
@@ -671,20 +671,31 @@ impl BridgePeer {
     pub fn set_dtmf_sink(
         &self,
         endpoint: BridgeEndpoint,
-        payload_type: u8,
+        mut payload_types: Vec<u8>,
         handler: Arc<dyn Fn(char) + Send + Sync + 'static>,
     ) {
+        payload_types.sort_unstable();
+        payload_types.dedup();
+        if payload_types.is_empty() {
+            warn!(
+                bridge_id = %self.id,
+                endpoint = ?endpoint,
+                "Bridge DTMF sink install skipped: no payload types provided"
+            );
+            return;
+        }
+
         let mut sink = self.dtmf_sink.write();
         *sink = Some(BridgeDtmfSink {
             endpoint,
-            payload_type,
+            payload_types: payload_types.clone(),
             handler,
         });
 
         debug!(
             bridge_id = %self.id,
             endpoint = ?endpoint,
-            payload_type,
+            payload_types = ?payload_types,
             "Bridge DTMF sink installed"
         );
     }
@@ -1387,7 +1398,8 @@ impl BridgePeer {
                                             .as_ref()
                                             .filter(|s| s.endpoint == path.source_endpoint())
                                             .map_or(false, |s| {
-                                                a.payload_type == Some(s.payload_type)
+                                                a.payload_type
+                                                    .is_some_and(|pt| s.payload_types.contains(&pt))
                                             });
                                         if is_dtmf {
                                             return None;
@@ -1543,11 +1555,24 @@ impl BridgePeer {
         let MediaSample::Audio(frame) = sample else {
             return;
         };
-        if frame.payload_type != Some(sink.payload_type) {
+
+        let Some(frame_pt) = frame.payload_type else {
+            return;
+        };
+
+        if !sink.payload_types.contains(&frame_pt) {
             return;
         }
 
+        debug!(
+            rtp_ts = frame.rtp_timestamp,
+            data_len = frame.data.len(),
+            first_byte = frame.data.first().copied().unwrap_or(0),
+            "DTMF observe: PT matched, calling detector"
+        );
+
         if let Some(digit) = detector.observe(&frame.data, frame.rtp_timestamp) {
+            debug!(digit = %digit, "DTMF observe: digit detected via RFC2833");
             (sink.handler)(digit);
         }
     }

@@ -2975,9 +2975,21 @@ impl SipSession {
             "Found DTMF codec in SDP, will start ingress monitor"
         );
 
+        let dtmf_payload_types: Vec<u8> = {
+            let mut pts: Vec<u8> = MediaNegotiator::extract_dtmf_codecs(answer_sdp)
+                .into_iter()
+                .map(|c| c.payload_type)
+                .collect();
+            if pts.is_empty() {
+                pts.push(dtmf_codec.payload_type);
+            }
+            pts.sort_unstable();
+            pts.dedup();
+            pts
+        };
+
         let session_id = self.context.session_id.clone();
         let app_runtime = self.app_runtime.clone();
-        let dtmf_payload_type = dtmf_codec.payload_type;
         let caller_leg_id = "caller".to_string();
 
         if self.caller_answer_uses_media_bridge {
@@ -2992,7 +3004,7 @@ impl SipSession {
             let caller_leg = caller_leg_id.clone();
             bridge.set_dtmf_sink(
                 endpoint,
-                dtmf_payload_type,
+                dtmf_payload_types.clone(),
                 Arc::new(move |digit| {
                     let event = serde_json::json!({
                         "type": "dtmf",
@@ -3020,7 +3032,7 @@ impl SipSession {
             info!(
                 session_id = %self.context.session_id,
                 endpoint = ?endpoint,
-                payload_type = dtmf_payload_type,
+                payload_types = ?dtmf_payload_types,
                 "Installed caller bridge DTMF sink"
             );
             return;
@@ -3046,6 +3058,7 @@ impl SipSession {
         let cancel_token = self.cancel_token.child_token();
         let monitor_cancel = cancel_token.clone();
 
+        let dtmf_payload_types_for_task = dtmf_payload_types.clone();
         let task = tokio::spawn(async move {
             let track = loop {
                 if let Some(track) = Self::find_audio_receiver_track(&caller_pc).await {
@@ -3084,11 +3097,11 @@ impl SipSession {
                         match sample {
                             Ok(rustrtc::media::MediaSample::Audio(frame)) => {
                                 frame_count += 1;
-                                if frame.payload_type.is_some() && frame.payload_type != Some(dtmf_payload_type) {
+                                if frame.payload_type.is_some() && !dtmf_payload_types_for_task.contains(&frame.payload_type.unwrap()) {
                                     if frame_count % 100 == 0 {
                                         debug!(
                                             session_id = %session_id,
-                                            expected_payload_type = dtmf_payload_type,
+                                            expected_payload_types = ?dtmf_payload_types_for_task,
                                             frame_payload_type = ?frame.payload_type,
                                             frame_count = frame_count,
                                             "Received non-DTMF RTP frame (samples shown every 100 frames)"
@@ -3097,11 +3110,11 @@ impl SipSession {
                                     continue;
                                 }
 
-                                if frame.payload_type == Some(dtmf_payload_type) {
+                                if frame.payload_type.is_some() && dtmf_payload_types_for_task.contains(&frame.payload_type.unwrap()) {
                                     dtmf_frames_count += 1;
                                     debug!(
                                         session_id = %session_id,
-                                        payload_type = dtmf_payload_type,
+                                        payload_type = ?frame.payload_type,
                                         data_len = frame.data.len(),
                                         rtp_timestamp = frame.rtp_timestamp,
                                         dtmf_frames_count = dtmf_frames_count,
@@ -3160,9 +3173,8 @@ impl SipSession {
 
         warn!(
             session_id = %self.context.session_id,
-            payload_type = dtmf_payload_type,
-            "✓ Started caller ingress monitor for RFC2833 RTP DTMF detection (payload type: {})",
-            dtmf_payload_type
+            payload_types = ?dtmf_payload_types,
+            "✓ Started caller ingress monitor for RFC2833 RTP DTMF detection"
         );
 
         self.caller_ingress_monitor = Some(CallerIngressMonitor { cancel_token, task });

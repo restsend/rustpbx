@@ -1907,26 +1907,110 @@
             });
         }
 
-        function sendDtmf(tone) {
+        function sdpHasTelephoneEvent(sdp) {
+            if (!sdp || typeof sdp !== 'string') return false;
+            return /a=rtpmap:\d+\s+telephone-event\/\d+/i.test(sdp);
+        }
+
+        async function sendDtmfRfc2833Verified(session, tone) {
+            const pc = session && session.connection;
+            if (!pc) throw new Error('No RTCPeerConnection available');
+
+            const localSdp = (pc.localDescription && pc.localDescription.sdp) || '';
+            const remoteSdp = (pc.remoteDescription && pc.remoteDescription.sdp) || '';
+            const localHasTelEvent = sdpHasTelephoneEvent(localSdp);
+            const remoteHasTelEvent = sdpHasTelephoneEvent(remoteSdp);
+            if (!localHasTelEvent || !remoteHasTelEvent) {
+                throw new Error(`SDP telephone-event not fully negotiated (local=${localHasTelEvent}, remote=${remoteHasTelEvent})`);
+            }
+
+            const audioSender = pc.getSenders().find(s => s.track && s.track.kind === 'audio');
+            if (!audioSender) throw new Error('No audio sender found');
+
+            const dtmfSender = audioSender.dtmf;
+            if (!dtmfSender) throw new Error('RTCDTMFSender not available on this sender');
+            if (!dtmfSender.canInsertDTMF) throw new Error('RTCDTMFSender cannot insert DTMF currently');
+
+            await new Promise((resolve, reject) => {
+                let settled = false;
+                const originalOnToneChange = dtmfSender.ontonechange;
+                const timer = setTimeout(() => {
+                    if (settled) return;
+                    settled = true;
+                    dtmfSender.ontonechange = originalOnToneChange;
+                    reject(new Error('No tonechange confirmation from RTCDTMFSender'));
+                }, 1200);
+
+                dtmfSender.ontonechange = (event) => {
+                    try {
+                        if (typeof originalOnToneChange === 'function') originalOnToneChange(event);
+                    } catch (e) {}
+
+                    if (!settled && event && event.tone === tone) {
+                        settled = true;
+                        clearTimeout(timer);
+                        dtmfSender.ontonechange = originalOnToneChange;
+                        resolve();
+                    }
+                };
+
+                try {
+                    dtmfSender.insertDTMF(tone, 160, 50);
+                } catch (err) {
+                    if (settled) return;
+                    settled = true;
+                    clearTimeout(timer);
+                    dtmfSender.ontonechange = originalOnToneChange;
+                    reject(err);
+                }
+            });
+        }
+
+        function sendDtmfInfo(session, tone) {
+            session.sendDTMF(tone, {
+                duration: 160,
+                interToneGap: 50
+            });
+        }
+
+        function shouldFallbackToInfo(error) {
+            const msg = (error && error.message ? error.message : '').toLowerCase();
+            return (
+                msg.includes('sdp telephone-event not fully negotiated') ||
+                msg.includes('rtcdtmfsender not available') ||
+                msg.includes('rtcdtmfsender cannot insert dtmf')
+            );
+        }
+
+        async function sendDtmf(tone) {
             if (!currentSession) { log('No active call for DTMF'); return; }
             try {
-                const dtmfTransport = (dtmfTransportSelect && dtmfTransportSelect.value) || 'RFC2833';
-                
-                // Log detailed DTMF send info
-                console.warn(`[DTMF] Attempting to send: tone=${tone}, transport=${dtmfTransport}, session=${currentSession.id}`);
-                
-                // JsSIP 3.10.0 sendDTMF standard parameters
-                // Note: JsSIP will use RFC2833 by default if supported in SDP
-                currentSession.sendDTMF(tone, {
-                    duration: 160,
-                    interToneGap: 50
-                });
-                
+                const preferredTransport = (dtmfTransportSelect && dtmfTransportSelect.value) || 'RFC2833';
+                let usedTransport = preferredTransport;
+                console.warn(`[DTMF] Attempting to send: tone=${tone}, transport=${preferredTransport}, session=${currentSession.id}`);
+
+                if (preferredTransport === 'RFC2833') {
+                    try {
+                        await sendDtmfRfc2833Verified(currentSession, tone);
+                    } catch (rfcError) {
+                        if (shouldFallbackToInfo(rfcError)) {
+                            console.warn(`[DTMF] RFC2833 unsupported, fallback to INFO: ${rfcError.message}`);
+                            log(`! RFC2833 unsupported (${rfcError.message}), fallback to INFO`);
+                            sendDtmfInfo(currentSession, tone);
+                            usedTransport = 'INFO(fallback)';
+                        } else {
+                            throw rfcError;
+                        }
+                    }
+                } else {
+                    sendDtmfInfo(currentSession, tone);
+                }
+
                 dtmfHistory += tone;
                 const dtmfDisplay = document.getElementById('dtmfDisplay');
                 if (dtmfDisplay) dtmfDisplay.textContent = dtmfHistory || '\u00a0';
-                log(`✓ DTMF sent (${dtmfTransport}): ${tone}`);
-                console.warn(`[DTMF] ✓ Successfully sent DTMF: ${tone}`);
+                log(`✓ DTMF sent (${usedTransport}): ${tone}`);
+                console.warn(`[DTMF] ✓ Successfully sent DTMF: ${tone}, used=${usedTransport}`);
             } catch (error) {
                 log(`✗ DTMF error: ${error.message}`);
                 console.error(`[DTMF] ✗ Error: ${error.message}`, error);
