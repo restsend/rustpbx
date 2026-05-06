@@ -97,7 +97,7 @@ fn resolve_unhandled_targets(
         // alternative routing before rejecting.
         Ok(DialStrategy::Sequential(vec![]))
     } else {
-        Ok(DialStrategy::Sequential(locs))
+        Ok(DialStrategy::Sequential(locs.into_iter().take(1).collect()))
     }
 }
 

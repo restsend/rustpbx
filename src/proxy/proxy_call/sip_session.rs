@@ -1842,7 +1842,9 @@ impl SipSession {
                         resolved_count = locations.len(),
                         "Resolved queue target through locator"
                     );
-                    resolved.extend(locations);
+                    if let Some(location) = locations.into_iter().next() {
+                        resolved.push(location);
+                    }
                 }
                 Ok(_) => resolved.push(location),
                 Err(error) => {
