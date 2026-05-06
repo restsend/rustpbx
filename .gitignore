@@ -52,6 +52,7 @@ config/rate_decks/*.toml
 config/recordings/
 config/ivr/
 config/sounds/
+config/cc/
 *.bak
 *.jsonl
 config.toml.dev
