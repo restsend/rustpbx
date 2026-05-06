@@ -40,16 +40,10 @@ pub struct ForwardingTrack {
     current_egress_profile: Mutex<Option<NegotiatedLegProfile>>,
     transcoder: Mutex<Option<Transcoder>>,
     audio_mapping: Mutex<Option<AudioMapping>>,
-    /// Timestamp rewriting for audio frames (when audio clock rates differ)
     audio_timing: Mutex<Option<RtpTiming>>,
-    /// Timestamp rewriting for DTMF frames (when DTMF clock rates differ)
     dtmf_timing: Mutex<Option<RtpTiming>>,
-    /// Issue #171: recording is dispatched via a bounded channel to a
-    /// dedicated task so that codec decoding and disk I/O never block the
-    /// RTP forwarding hot path.  The channel is intentionally bounded;
-    /// if the recorder task falls behind (e.g. disk pressure) we drop
-    /// the sample rather than accumulate unbounded memory.
     recorder_tx: Option<mpsc::Sender<(Leg, MediaSample)>>,
+    sipflow_tx: Option<mpsc::Sender<(Leg, MediaSample)>>,
     recorder_leg: Leg,
     dtmf_mapping: Mutex<Option<DtmfMapping>>,
 }
@@ -60,10 +54,13 @@ pub struct ForwardingTrackHandle {
 }
 
 impl ForwardingTrack {
+    pub const DEFAULT_SIPFLOW_CHANNEL_CAPACITY: usize = 256;
+
     pub fn new(
         track_id: String,
         inner: Arc<dyn MediaStreamTrack>,
         recorder_tx: Option<mpsc::Sender<(Leg, MediaSample)>>,
+        sipflow_tx: Option<mpsc::Sender<(Leg, MediaSample)>>,
         recorder_leg: Leg,
         ingress_profile: NegotiatedLegProfile,
         egress_profile: NegotiatedLegProfile,
@@ -80,6 +77,7 @@ impl ForwardingTrack {
             audio_timing: Mutex::new(None),
             dtmf_timing: Mutex::new(None),
             recorder_tx,
+            sipflow_tx,
             recorder_leg,
             dtmf_mapping: Mutex::new(None),
         }
@@ -257,6 +255,11 @@ impl MediaStreamTrack for ForwardingTrack {
                 let _ = tx.try_send((self.recorder_leg, sample.clone()));
             }
 
+            // SipFlow RTP recording: non-blocking tee, drops if consumer falls behind.
+            if let Some(tx) = &self.sipflow_tx {
+                let _ = tx.try_send((self.recorder_leg, sample.clone()));
+            }
+
             if let MediaSample::Audio(ref frame) = sample {
                 let matched_dtmf = dtmf_mapping
                     .as_ref()
@@ -420,6 +423,7 @@ mod tests {
             "test".to_string(),
             track,
             Some(tx),
+            None, // no sipflow channel
             Leg::A,
             NegotiatedLegProfile::default(),
             NegotiatedLegProfile::default(),
@@ -450,6 +454,7 @@ mod tests {
             "test-no-rec".to_string(),
             track,
             None, // no recorder channel
+            None, // no sipflow channel
             Leg::B,
             NegotiatedLegProfile::default(),
             NegotiatedLegProfile::default(),
@@ -461,5 +466,94 @@ mod tests {
             .expect("recv error");
 
         assert!(matches!(result, MediaSample::Audio(_)));
+    }
+
+    /// Verify sipflow_tx receives a copy of each forwarded sample without
+    /// blocking the hot path and without interfering with the recorder_tx.
+    #[tokio::test]
+    async fn sipflow_tx_receives_sample() {
+        let (sf_tx, mut sf_rx) = mpsc::channel::<(Leg, MediaSample)>(256);
+        let sample = audio_sample(0 /* PCMU */);
+        let track = OneShotTrack::new(sample.clone());
+
+        let ft = ForwardingTrack::new(
+            "test-sipflow".to_string(),
+            track,
+            None, // no recorder channel
+            Some(sf_tx),
+            Leg::A,
+            NegotiatedLegProfile::default(),
+            NegotiatedLegProfile::default(),
+        );
+
+        let result = tokio::time::timeout(std::time::Duration::from_millis(100), ft.recv())
+            .await
+            .expect("recv timed out")
+            .expect("recv error");
+
+        // Hot path returns the sample unchanged.
+        assert!(matches!(result, MediaSample::Audio(_)));
+
+        // sipflow channel must also have received the sample.
+        let (leg, _sf_sample) = sf_rx.try_recv().expect("sample must be in sipflow channel");
+        assert_eq!(leg, Leg::A);
+    }
+
+    /// Both recorder_tx AND sipflow_tx can be active simultaneously; each
+    /// must receive its own copy of the sample.
+    #[tokio::test]
+    async fn both_recorder_and_sipflow_receive_sample() {
+        let (rec_tx, mut rec_rx) = mpsc::channel::<(Leg, MediaSample)>(256);
+        let (sf_tx, mut sf_rx) = mpsc::channel::<(Leg, MediaSample)>(256);
+        let sample = audio_sample(0 /* PCMU */);
+        let track = OneShotTrack::new(sample.clone());
+
+        let ft = ForwardingTrack::new(
+            "test-both".to_string(),
+            track,
+            Some(rec_tx),
+            Some(sf_tx),
+            Leg::B,
+            NegotiatedLegProfile::default(),
+            NegotiatedLegProfile::default(),
+        );
+
+        let result = tokio::time::timeout(std::time::Duration::from_millis(100), ft.recv())
+            .await
+            .expect("recv timed out")
+            .expect("recv error");
+
+        assert!(matches!(result, MediaSample::Audio(_)));
+
+        let (rec_leg, _) = rec_rx
+            .try_recv()
+            .expect("recorder channel must have sample");
+        let (sf_leg, _) = sf_rx.try_recv().expect("sipflow channel must have sample");
+        assert_eq!(rec_leg, Leg::B);
+        assert_eq!(sf_leg, Leg::B);
+    }
+
+    #[tokio::test]
+    async fn sipflow_full_channel_does_not_block() {
+        let (sf_tx, _sf_rx) = mpsc::channel::<(Leg, MediaSample)>(1);
+
+        let _ = sf_tx.try_send((Leg::A, audio_sample(0)));
+
+        let track = OneShotTrack::new(audio_sample(0));
+        let ft = ForwardingTrack::new(
+            "test-full".to_string(),
+            track,
+            None,
+            Some(sf_tx),
+            Leg::A,
+            NegotiatedLegProfile::default(),
+            NegotiatedLegProfile::default(),
+        );
+
+        let result = tokio::time::timeout(std::time::Duration::from_millis(100), ft.recv())
+            .await
+            .expect("recv must not block when sipflow channel is full");
+
+        assert!(result.is_ok());
     }
 }

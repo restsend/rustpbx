@@ -1244,7 +1244,9 @@ impl SipSession {
 
                     let hook_handled = if !self.server_dialog.state().is_terminated() {
                         let agent_id = self.connected_callee.clone().unwrap_or_default();
-                        let queue_name = self.app_runtime.get_queue_name()
+                        let queue_name = self
+                            .app_runtime
+                            .get_queue_name()
                             .or_else(|| self.queue_name.clone())
                             .unwrap_or_default();
                         invoke_post_call_hook(
@@ -2820,6 +2822,45 @@ impl SipSession {
 
         let shared_recorder = self.recorder.clone();
 
+        const SIPFLOW_CHANNEL_CAPACITY: usize =
+            crate::media::forwarding_track::ForwardingTrack::DEFAULT_SIPFLOW_CHANNEL_CAPACITY;
+        let (caller_sipflow_tx, callee_sipflow_tx) =
+            if let Some(backend) = self.server.sip_flow.as_ref().and_then(|sf| sf.backend()) {
+                use crate::sipflow::{SipFlowItem, SipFlowMsgType};
+                use tokio::sync::mpsc;
+
+                let (tx, mut rx) = mpsc::channel::<(
+                    crate::media::recorder::Leg,
+                    rustrtc::media::frame::MediaSample,
+                )>(SIPFLOW_CHANNEL_CAPACITY);
+
+                let call_id = self.context.session_id.clone();
+                tokio::spawn(async move {
+                    while let Some((leg, sample)) = rx.recv().await {
+                        if let rustrtc::media::frame::MediaSample::Audio(ref frame) = sample {
+                            if let Some(ref rtp_packet) = frame.raw_packet {
+                                if let Ok(rtp_bytes) = rtp_packet.marshal() {
+                                    let item = SipFlowItem {
+                                        timestamp: frame.rtp_timestamp as u64,
+                                        seq: frame.sequence_number.unwrap_or(0) as u64,
+                                        msg_type: SipFlowMsgType::Rtp,
+                                        src_addr: format!("{leg:?}"),
+                                        dst_addr: "bridge".to_string(),
+                                        payload: bytes::Bytes::from(rtp_bytes),
+                                    };
+                                    let _ = backend.record(&call_id, item);
+                                }
+                            }
+                        }
+                    }
+                });
+
+                // Clone the sender so both legs can enqueue into the same drain task.
+                (Some(tx.clone()), Some(tx))
+            } else {
+                (None, None)
+            };
+
         match Self::wire_with_forwarding_track(
             Self::CALLER_FORWARDING_TRACK_ID,
             &caller_pc,
@@ -2828,6 +2869,7 @@ impl SipSession {
             callee_profile.clone(),
             shared_recorder.clone(),
             Leg::A,
+            caller_sipflow_tx,
             session_id,
             "caller→callee",
         ) {
@@ -2855,6 +2897,7 @@ impl SipSession {
             caller_profile,
             shared_recorder,
             Leg::B,
+            callee_sipflow_tx,
             session_id,
             "callee→caller",
         ) {
@@ -3183,6 +3226,12 @@ impl SipSession {
         egress_profile: crate::media::negotiate::NegotiatedLegProfile,
         recorder: Arc<RwLock<Option<crate::media::recorder::Recorder>>>,
         leg: crate::media::recorder::Leg,
+        sipflow_tx: Option<
+            tokio::sync::mpsc::Sender<(
+                crate::media::recorder::Leg,
+                rustrtc::media::frame::MediaSample,
+            )>,
+        >,
         session_id: &str,
         direction: &str,
     ) -> Result<Arc<crate::media::forwarding_track::ForwardingTrack>> {
@@ -3249,6 +3298,7 @@ impl SipSession {
             track_id.to_string(),
             receiver_track,
             Some(recorder_tx),
+            sipflow_tx,
             leg,
             ingress_profile,
             egress_profile,
