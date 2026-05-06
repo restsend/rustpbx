@@ -1987,7 +1987,11 @@ impl SipSession {
             caller: caller.clone(),
             content_type,
             offer,
-            destination: target.destination.clone(),
+            destination: if route_via_home_proxy {
+                None
+            } else {
+                target.destination.clone()
+            },
             contact: contact_uri,
             credential: target.credential.clone(),
             headers: Some(headers),
