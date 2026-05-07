@@ -1,6 +1,6 @@
 [package]
 name = "rustpbx"
-version = "0.4.2"
+version = "0.4.3"
 edition = "2024"
 default-run = "rustpbx"
 authors = ["jinti<shenjindi@fourz.cn>"]
@@ -98,12 +98,9 @@ serde = { version = "1", features = ["derive"] }
 glob = "0.3.3"
 serde_json = "1"
 thiserror = "2"
-tokio = { version = "1.52.1", features = ["full", "tracing", "test-util"] }
+tokio = { version = "1.52.2", features = ["full", "tracing", "test-util"] }
 parking_lot = "0.12"
 dashmap = "6"
-tokio-tungstenite = { version = "0.29.0", features = [
-    "rustls-tls-native-roots",
-] }
 tokio-util = "0.7.18"
 tracing = "0.1.43"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
@@ -116,9 +113,9 @@ toml_edit = { version = "0.25.11", features = ["serde"] }
 rand = "0.10.1"
 chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = "0.10.4"
-rsipstack = "0.5.9"
+rsipstack = "0.5.10"
 #rsipstack = { path = "../rsipstack" }
-audio-codec = { version = "=0.3.30", default-features = false }
+audio-codec = { version = "0.3.33", default-features = false }
 #rustrtc = { path = "../rustrtc" }
 rustrtc = "0.3.52"
 reqwest = { version = "0.13", features = [
@@ -134,7 +131,6 @@ reqwest = { version = "0.13", features = [
 base64 = "0.22.1"
 hmac = "0.13.0"
 sha2 = "0.11.0"
-hex = "0.4.3"
 dotenvy = "0.15.7"
 md-5 = "0.11.0"
 once_cell = "1.21.4"
@@ -163,7 +159,7 @@ sea-orm-migration = { version = "1.1.20", features = [
 argon2 = { version = "0.5.3", features = ["password-hash"] }
 object_store = { version = "0.13.2", features = ["aws", "azure", "gcp"] }
 humantime = "2.3.0"
-serde_with = "3.18.0"
+serde_with = "3.19.0"
 async-compression = { version = "0.4", features = [
     "tokio",
     "gzip",
@@ -171,9 +167,9 @@ async-compression = { version = "0.4", features = [
 flate2 = { version = "1", optional = true }
 console-subscriber = "0.5.0"
 crossbeam-channel = "0.5"
-lru = "0.17.0"
+lru = "0.18.0"
 metrics = "0.24"
-metrics-exporter-prometheus = { version = "0.18.1", optional = true }
+metrics-exporter-prometheus = { version = "0.18.3", optional = true }
 # OTel stack — only pulled in for the commercial `addon-telemetry` feature.
 opentelemetry = { version = "0.31.0", optional = true }
 opentelemetry-otlp = { version = "0.31.1", features = [
@@ -186,7 +182,7 @@ opentelemetry_sdk = { version = "0.31.0", features = [
 ], optional = true }
 tracing-opentelemetry = { version = "0.32", optional = true }
 phonenumber = "0.3.9"
-tower-http = { version = "0.6.8", features = [
+tower-http = { version = "0.6.10", features = [
     "fs",
     "cors",
     "compression-gzip",
@@ -194,7 +190,7 @@ tower-http = { version = "0.6.8", features = [
 rcgen = "0.14.7"
 axum-server = { version = "0.8.0", features = ["tls-rustls"] }
 csv = "1.4.0"
-quick-xml = { version = "0.39.2", features = ["serialize"] }
+quick-xml = { version = "0.39.3", features = ["serialize"] }
 zstd = "0.13"
 hound = "3.5"
 minimp3 = "0.6.1"
