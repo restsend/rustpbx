@@ -160,7 +160,8 @@ impl TransportInspectorLocator {
 impl TransportEventInspector for TransportInspectorLocator {
     async fn handle(&self, event: TransportEvent) -> Option<TransportEvent> {
         if let TransportEvent::Closed(conn) = &event {
-            match self.locator.unregister_with_address(conn.get_addr()).await {
+            let addr = conn.get_remote_addr().unwrap_or_else(|| conn.get_addr());
+            match self.locator.unregister_with_address(addr).await {
                 Ok(Some(removed)) => {
                     if !removed.is_empty() {
                         self.locator_events

@@ -620,10 +620,19 @@ impl SipServerBuilder {
         // Create cluster event hub for inter-node sync
         let cluster_peer_ips: Vec<IpAddr> = self.cluster_peers.iter().map(|p| p.ip()).collect();
         let cluster_event_hub: Option<Arc<ClusterEventHub>> = if !self.cluster_peers.is_empty() {
+            let local_cluster_ip = rtp_config
+                .external_ip
+                .as_deref()
+                .unwrap_or(&config.addr)
+                .parse::<IpAddr>()
+                .map_err(|e| anyhow!("failed to parse cluster local ip address: {}", e))?;
+            let local_cluster_port = config.udp_port.unwrap_or(5060);
+            let local_cluster_addr = SocketAddr::new(local_cluster_ip, local_cluster_port);
             Some(Arc::new(ClusterEventHub::new(
                 locator_events.clone(),
                 presence_manager.clone(),
                 endpoint.inner.clone(),
+                local_cluster_addr,
                 self.cluster_peers.clone(),
             )))
         } else {
