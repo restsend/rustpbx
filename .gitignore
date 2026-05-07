@@ -69,3 +69,11 @@ config/voicemail.toml
 config.toml.test
 docs/qrcode.png
 docs/rustpbx-product-brief.zh.html
+src/addons/wholesale
+src/addons/cc
+src/addons/endpoint_manager 
+src/addons/enterprise_auth 
+src/addons/ivr_editor 
+src/addons/jsonrpc_router 
+src/addons/telemetry 
+src/addons/voicemail 
