@@ -10,6 +10,24 @@ repository = "https://github.com/restsend/rustpbx"
 readme = "README.md"
 keywords = ["sip", "voip", "telephony", "pbx", "webrtc"]
 categories = ["network-programming", "multimedia"]
+exclude = [
+    "src/addons/cc",
+    "src/addons/cc/**",
+    "src/addons/wholesale",
+    "src/addons/wholesale/**",
+    "src/addons/endpoint_manager",
+    "src/addons/endpoint_manager/**",
+    "src/addons/enterprise_auth",
+    "src/addons/enterprise_auth/**",
+    "src/addons/ivr_editor",
+    "src/addons/ivr_editor/**",
+    "src/addons/jsonrpc_router",
+    "src/addons/jsonrpc_router/**",
+    "src/addons/telemetry",
+    "src/addons/telemetry/**",
+    "src/addons/voicemail",
+    "src/addons/voicemail/**",
+]
 
 [features]
 opus = ["audio-codec/opus"]
