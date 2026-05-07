@@ -15,7 +15,7 @@ use rsipstack::sip::headers::{ProxyAuthenticate, WwwAuthenticate};
 use rsipstack::sip::prelude::{HeadersExt, ToTypedHeader};
 use rsipstack::sip::typed::Authorization;
 use rsipstack::transaction::transaction::Transaction;
-use rsipstack::transport::{SipAddr, SipConnection};
+use rsipstack::transport::SipAddr;
 use std::net::IpAddr;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
@@ -189,15 +189,9 @@ impl AuthModule {
 
     /// Get the source address from the transaction
     fn get_source_addr(&self, tx: &Transaction) -> Option<SipAddr> {
-        tx.original
-            .via_header()
-            .ok()
-            .and_then(|via| SipConnection::parse_target_from_via(via).ok())
-            .map(|(transport, addr)| SipAddr {
-                r#type: Some(transport),
-                addr,
-            })
-            .or_else(|| tx.connection.as_ref().map(|conn| conn.get_addr().clone()))
+        tx.connection
+            .as_ref()
+            .and_then(|conn| conn.get_remote_addr().cloned())
     }
 
     /// Extract cache key (call_id, from_tag) from a transaction.

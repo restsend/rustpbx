@@ -17,7 +17,7 @@ use rsipstack::sip::Param;
 use rsipstack::sip::headers::typed::CSeq;
 use rsipstack::sip::headers::{CallId, ContentType};
 use rsipstack::sip::typed::{From as FromHeader, To as ToHeader, Via};
-use rsipstack::sip::{Header, Method, Request, Uri, Version};
+use rsipstack::sip::{Header, Method, Request, SipMessage, Uri, Version};
 use rsipstack::transaction::endpoint::EndpointInnerRef;
 use rsipstack::transaction::key::{TransactionKey, TransactionRole};
 use rsipstack::transaction::transaction::Transaction;
@@ -25,6 +25,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
@@ -179,6 +180,7 @@ pub struct ClusterEventHub {
     locator_events: tokio::sync::broadcast::Sender<LocatorEvent>,
     presence_manager: Arc<PresenceManager>,
     endpoint_inner: EndpointInnerRef,
+    local_sip_addr: SocketAddr,
     peers: Vec<SocketAddr>,
     handlers: RwLock<Vec<Arc<dyn ClusterEventHandler>>>,
 }
@@ -188,12 +190,14 @@ impl ClusterEventHub {
         locator_events: tokio::sync::broadcast::Sender<LocatorEvent>,
         presence_manager: Arc<PresenceManager>,
         endpoint_inner: EndpointInnerRef,
+        local_sip_addr: SocketAddr,
         peers: Vec<SocketAddr>,
     ) -> Self {
         Self {
             locator_events,
             presence_manager,
             endpoint_inner,
+            local_sip_addr,
             peers,
             handlers: RwLock::new(Vec::new()),
         }
@@ -349,11 +353,14 @@ impl ClusterEventHub {
             .unwrap_or("tag")
             .to_string();
 
-        let via = Via::parse(&format!("SIP/2.0/UDP {}:5060;branch={}", peer.ip(), branch))
-            .map_err(|e| anyhow!("invalid via: {}", e))?;
+        let via = Via::parse(&format!(
+            "SIP/2.0/UDP {};branch={}",
+            self.local_sip_addr, branch
+        ))
+        .map_err(|e| anyhow!("invalid via: {}", e))?;
         let from = FromHeader {
             display_name: None,
-            uri: format!("sip:cluster@{}", peer.ip()).parse()?,
+            uri: format!("sip:cluster@{}", self.local_sip_addr).parse()?,
             params: vec![Param::Tag(rsipstack::sip::uri::Tag::new(&tag))],
         };
         let to = ToHeader {
@@ -387,6 +394,13 @@ impl ClusterEventHub {
         let mut tx = Transaction::new_client(key, request, self.endpoint_inner.clone(), None);
         tx.send().await?;
         debug!("cluster MESSAGE sent to {}", peer);
+        match tokio::time::timeout(Duration::from_millis(200), tx.receive()).await {
+            Ok(Some(SipMessage::Response(resp))) => {
+                debug!(status = %resp.status_code, peer = %peer, "cluster MESSAGE response received");
+            }
+            Ok(_) => {}
+            Err(_) => debug!("timed out waiting for cluster MESSAGE response from {}", peer),
+        }
         Ok(())
     }
 }
@@ -414,7 +428,7 @@ impl ClusterEventModule {
     }
 
     fn extract_source_ip(tx: &Transaction) -> Option<IpAddr> {
-        let addr = tx.connection.as_ref()?.get_addr();
+        let addr = tx.connection.as_ref()?.get_remote_addr()?;
         let ip: IpAddr = addr.addr.host.clone().try_into().ok()?;
         Some(ip)
     }
@@ -990,6 +1004,7 @@ mod tests {
             locator_tx,
             presence_manager,
             endpoint.inner.clone(),
+            "127.0.0.1:5060".parse().unwrap(),
             vec![],
         ))
     }
