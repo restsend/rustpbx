@@ -1798,8 +1798,8 @@ action = { type = "transfer", target = "100" }
         path.to_string_lossy().to_string()
     }
 
-    /// Start real FileTrack playback for a PlayPrompt command and wire its
-    /// completion back into the MockCallStack event channel.
+    /// Start real FileTrack playback for a PlayPrompt command and emit its
+    /// completion into the MockCallStack event channel.
     ///
     /// Returns the FileTrack handle (for later stop/inspection if needed).
     async fn wire_real_playback(
@@ -1807,26 +1807,23 @@ action = { type = "transfer", target = "100" }
         stack: &MockCallStack,
     ) -> crate::media::FileTrack {
         use crate::call::app::ControllerEvent;
-        use crate::media::FileTrack;
+        use crate::media::{FileTrack, PlaybackEndReason};
         use audio_codec::CodecType;
 
+        let tx = stack.event_sender();
         let track = FileTrack::new("e2e-track".to_string())
             .with_path(audio_file.to_string())
             .with_loop(false)
-            .with_codec_preference(vec![CodecType::PCMU]);
+            .with_codec_preference(vec![CodecType::PCMU])
+            .with_on_end(std::sync::Arc::new(move |reason| {
+                let _ = tx.send(ControllerEvent::AudioComplete {
+                    track_id: "default".to_string(),
+                    interrupted: matches!(reason, PlaybackEndReason::Interrupted),
+                });
+            }));
 
         let _ = track.local_description().await;
         track.start_playback().await.expect("start_playback");
-
-        let tx = stack.event_sender();
-        let t = track.clone();
-        crate::utils::spawn(async move {
-            t.wait_for_completion().await;
-            let _ = tx.send(ControllerEvent::AudioComplete {
-                track_id: "default".to_string(),
-                interrupted: false,
-            });
-        });
 
         track
     }
@@ -1858,11 +1855,11 @@ action = { type = "transfer", target = "100" }
     // ── E2E: real FileTrack completion drives IVR AudioComplete ──────────────
 
     /// End-to-end integration test: a real `FileTrack` playing a real WAV file
-    /// fires `completion_notify` which is bridged to `MockCallStack::audio_complete()`
+    /// fires on_end, which emits `MockCallStack::audio_complete()`
     /// — verifying the full pipeline:
     ///
     ///   IVR emits PlayPrompt → FileTrack starts playback → WAV exhausted →
-    ///   completion_notify → AudioComplete injected → IVR advances state
+    ///   on_end → AudioComplete injected → IVR advances state
     #[tokio::test]
     async fn test_ivr_real_file_playback_drives_audio_complete() {
         use tokio::fs;
