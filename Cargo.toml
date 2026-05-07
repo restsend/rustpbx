@@ -1,6 +1,6 @@
 [package]
 name = "rustpbx"
-version = "0.4.1"
+version = "0.4.2"
 edition = "2024"
 default-run = "rustpbx"
 authors = ["jinti<shenjindi@fourz.cn>"]
