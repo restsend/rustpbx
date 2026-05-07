@@ -558,6 +558,8 @@ impl Locator for DbLocator {
         let mut models = Entity::find()
             .filter(Column::Aor.eq(&target_aor))
             .order_by_desc(Column::LastModified)
+            .order_by_desc(Column::UpdatedAt)
+            .order_by_desc(Column::Id)
             .all(&self.db)
             .await
             .map_err(|e| anyhow::anyhow!("Database error on lookup by aor: {}", e))?;
@@ -566,6 +568,8 @@ impl Locator for DbLocator {
             models = Entity::find()
                 .filter(Column::Aor.contains(uri.host().to_string().as_str()))
                 .order_by_desc(Column::LastModified)
+                .order_by_desc(Column::UpdatedAt)
+                .order_by_desc(Column::Id)
                 .all(&self.db)
                 .await
                 .map_err(|e| anyhow::anyhow!("Database error on lookup by invalid host: {}", e))?;
@@ -586,6 +590,8 @@ impl Locator for DbLocator {
                     .filter(Column::Username.eq(&username_key))
                     .filter(Column::Realm.eq(&realm_key))
                     .order_by_desc(Column::LastModified)
+                    .order_by_desc(Column::UpdatedAt)
+                    .order_by_desc(Column::Id)
                     .all(&self.db)
                     .await
                     .map_err(|e| anyhow::anyhow!("Database error on lookup: {}", e))?;
@@ -596,6 +602,8 @@ impl Locator for DbLocator {
                     models = Entity::find()
                         .filter(Column::Username.eq(&username_key))
                         .order_by_desc(Column::LastModified)
+                        .order_by_desc(Column::UpdatedAt)
+                        .order_by_desc(Column::Id)
                         .all(&self.db)
                         .await
                         .map_err(|e| anyhow::anyhow!("Database error on username lookup: {}", e))?;

@@ -96,8 +96,12 @@ impl AppEventLoop {
                     Some(ControllerEvent::DtmfReceived(digit)) => {
                         self.app.on_dtmf(digit, &mut self.controller, &self.context).await
                     }
-                    Some(ControllerEvent::AudioComplete { track_id, .. }) => {
-                        self.app.on_audio_complete(track_id, &mut self.controller, &self.context).await
+                    Some(ControllerEvent::AudioComplete { track_id, interrupted }) => {
+                        if interrupted {
+                            Ok(AppAction::Continue)
+                        } else {
+                            self.app.on_audio_complete(track_id, &mut self.controller, &self.context).await
+                        }
                     }
                     Some(ControllerEvent::RecordingComplete(info)) => {
                         self.app.on_record_complete(info, &mut self.controller, &self.context).await
