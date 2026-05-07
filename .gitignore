@@ -57,10 +57,10 @@ config/cc/
 *.jsonl
 config.toml.dev
 *.log
-rustpbx.toml
 .DS_Store
 *.raw
 *.db
+*.toml
 /archive/
 /storage/
 *.md
