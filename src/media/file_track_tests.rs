@@ -179,7 +179,7 @@ async fn test_file_track_playback_starts() {
 
 // ── real playback completion (file-exhausted path) ────────────────────────────
 
-/// A short WAV file (160 samples = 20 ms at 8 kHz) must fire completion_notify
+/// A short WAV file (160 samples = 20 ms at 8 kHz) must fire on_end
 /// within a reasonable time once start_playback() is called.
 #[tokio::test]
 async fn test_file_track_playback_completion_accurate() {
@@ -190,10 +190,14 @@ async fn test_file_track_playback_completion_accurate() {
         .await
         .unwrap();
 
+    let (end_tx, mut end_rx) = tokio::sync::mpsc::unbounded_channel();
     let track = FileTrack::new("completion-accurate".to_string())
         .with_path(test_file.to_string_lossy().to_string())
         .with_loop(false)
-        .with_codec_preference(vec![CodecType::PCMU]);
+        .with_codec_preference(vec![CodecType::PCMU])
+        .with_on_end(std::sync::Arc::new(move |reason| {
+            let _ = end_tx.send(reason);
+        }));
 
     let _ = track.local_description().await;
     track.start_playback().await.unwrap();
@@ -202,13 +206,13 @@ async fn test_file_track_playback_completion_accurate() {
     // fires every 20 ms, so it should finish in ≤ 40 ms in practice).
     let result = tokio::time::timeout(
         tokio::time::Duration::from_secs(2),
-        track.wait_for_completion(),
+        end_rx.recv(),
     )
     .await;
 
     assert!(
-        result.is_ok(),
-        "Playback completion notify must fire when the file is exhausted (not after a fixed sleep)"
+        matches!(result, Ok(Some(PlaybackEndReason::Completed))),
+        "Playback on_end must fire Completed when the file is exhausted (not after a fixed sleep)"
     );
 
     let _ = fs::remove_file(&test_file).await;
@@ -223,9 +227,13 @@ async fn test_file_track_playback_completion() {
         .await
         .unwrap();
 
+    let (end_tx, mut end_rx) = tokio::sync::mpsc::unbounded_channel();
     let track = FileTrack::new("completion-test".to_string())
         .with_path(test_file.to_string_lossy().to_string())
-        .with_loop(false);
+        .with_loop(false)
+        .with_on_end(std::sync::Arc::new(move |reason| {
+            let _ = end_tx.send(reason);
+        }));
 
     let _ = track.local_description().await;
     track.start_playback().await.unwrap();
@@ -234,18 +242,21 @@ async fn test_file_track_playback_completion() {
     // immediately returns 0, triggering completion.
     let completion = tokio::time::timeout(
         tokio::time::Duration::from_millis(500),
-        track.wait_for_completion(),
+        end_rx.recv(),
     )
     .await;
 
-    assert!(completion.is_ok(), "Playback should complete");
+    assert!(
+        matches!(completion, Ok(Some(PlaybackEndReason::Completed))),
+        "Playback should complete"
+    );
 
     let _ = fs::remove_file(&test_file).await;
 }
 
 // ── cancel stops playback ─────────────────────────────────────────────────────
 
-/// Cancelling a looping track via stop() must fire completion_notify quickly.
+/// Cancelling a looping track via stop() must fire on_end quickly.
 #[tokio::test]
 async fn test_file_track_cancel_stops_rtp() {
     let temp_dir = std::env::temp_dir();
@@ -256,11 +267,15 @@ async fn test_file_track_cancel_stops_rtp() {
         .unwrap();
 
     let cancel_token = CancellationToken::new();
+    let (end_tx, mut end_rx) = tokio::sync::mpsc::unbounded_channel();
     let track = FileTrack::new("cancel-rtp".to_string())
         .with_path(test_file.to_string_lossy().to_string())
         .with_loop(true) // loop forever unless stopped
         .with_cancel_token(cancel_token.clone())
-        .with_codec_preference(vec![CodecType::PCMU]);
+        .with_codec_preference(vec![CodecType::PCMU])
+        .with_on_end(std::sync::Arc::new(move |reason| {
+            let _ = end_tx.send(reason);
+        }));
 
     let _ = track.local_description().await;
     track.start_playback().await.unwrap();
@@ -269,16 +284,16 @@ async fn test_file_track_cancel_stops_rtp() {
     tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
     track.stop().await;
 
-    // completion_notify must fire promptly after cancellation.
+    // on_end must fire promptly after cancellation.
     let result = tokio::time::timeout(
         tokio::time::Duration::from_millis(500),
-        track.wait_for_completion(),
+        end_rx.recv(),
     )
     .await;
 
     assert!(
-        result.is_ok(),
-        "completion_notify must fire after stop() cancels the playback task"
+        matches!(result, Ok(Some(PlaybackEndReason::Interrupted))),
+        "on_end must fire Interrupted after stop() cancels the playback task"
     );
 
     let _ = fs::remove_file(&test_file).await;
@@ -349,12 +364,11 @@ a=rtpmap:0 PCMU/8000
 
 // ── e2e: FileTrack completion drives AudioComplete event ─────────────────────
 
-/// End-to-end test: verify that a real `FileTrack` playback completion fires
-/// `completion_notify`, which can be wired to a `ControllerEvent::AudioComplete`
-/// channel — the exact pipeline used by `play_audio_file()` in the session layer.
+/// End-to-end test: verify that a real `FileTrack` playback completion can fire
+/// the `ControllerEvent::AudioComplete` event through its on_end callback.
 ///
 /// This test exercises:
-///   WAV file → AudioSourceManager → RTP loop → completion_notify → channel event
+///   WAV file → AudioSourceManager → RTP loop → on_end → channel event
 ///
 /// Without this test, only the stub behaviour (sleep 100ms) was covered.
 #[tokio::test]
@@ -369,37 +383,20 @@ async fn test_file_track_completion_drives_audio_complete_event() {
         .await
         .unwrap();
 
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel::<ControllerEvent>();
     let track = FileTrack::new("e2e-audio-complete".to_string())
         .with_path(test_file.to_string_lossy().to_string())
         .with_loop(false)
-        .with_codec_preference(vec![CodecType::PCMU]);
+        .with_codec_preference(vec![CodecType::PCMU])
+        .with_on_end(std::sync::Arc::new(move |reason| {
+            let _ = event_tx.send(ControllerEvent::AudioComplete {
+                track_id: "default".to_string(),
+                interrupted: matches!(reason, PlaybackEndReason::Interrupted),
+            });
+        }));
 
     let _ = track.local_description().await;
     track.start_playback().await.unwrap();
-
-    // Wire completion_notify → ControllerEvent channel (mirrors play_audio_file()).
-    let (event_tx, mut event_rx) = mpsc::unbounded_channel::<ControllerEvent>();
-    let completion_notify = track.completion_notify.clone();
-    let cancel = CancellationToken::new();
-    let cancel_child = cancel.child_token();
-    let fp = test_file.to_string_lossy().to_string();
-    crate::utils::spawn(async move {
-        tokio::select! {
-            _ = completion_notify.notified() => {
-                let _ = event_tx.send(ControllerEvent::AudioComplete {
-                    track_id: "default".to_string(),
-                    interrupted: false,
-                });
-            }
-            _ = cancel_child.cancelled() => {
-                let _ = event_tx.send(ControllerEvent::AudioComplete {
-                    track_id: "default".to_string(),
-                    interrupted: true,
-                });
-            }
-        }
-        drop(fp);
-    });
 
     // Allow 2 s — the 20 ms file should complete within ~40 ms.
     let event = tokio::time::timeout(tokio::time::Duration::from_secs(2), event_rx.recv())
@@ -421,7 +418,6 @@ async fn test_file_track_completion_drives_audio_complete_event() {
         other => panic!("unexpected event: {:?}", other),
     }
 
-    cancel.cancel();
     let _ = fs::remove_file(&test_file).await;
 }
 
@@ -440,57 +436,44 @@ async fn test_file_track_stop_drives_interrupted_audio_complete() {
         .await
         .unwrap();
 
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel::<ControllerEvent>();
     let cancel_token = CancellationToken::new();
     let track = FileTrack::new("e2e-interrupted".to_string())
         .with_path(test_file.to_string_lossy().to_string())
         .with_loop(true)
         .with_cancel_token(cancel_token.clone())
-        .with_codec_preference(vec![CodecType::PCMU]);
+        .with_codec_preference(vec![CodecType::PCMU])
+        .with_on_end(std::sync::Arc::new(move |reason| {
+            let _ = event_tx.send(ControllerEvent::AudioComplete {
+                track_id: "default".to_string(),
+                interrupted: matches!(reason, PlaybackEndReason::Interrupted),
+            });
+        }));
 
     let _ = track.local_description().await;
     track.start_playback().await.unwrap();
-
-    // Wire completion_notify → channel (mirrors play_audio_file()).
-    let (event_tx, mut event_rx) = mpsc::unbounded_channel::<ControllerEvent>();
-    let completion_notify = track.completion_notify.clone();
-    let session_cancel = CancellationToken::new();
-    let session_child = session_cancel.child_token();
-    crate::utils::spawn(async move {
-        tokio::select! {
-            _ = completion_notify.notified() => {
-                // File exhausted or track stopped — send non-interrupted.
-                let _ = event_tx.send(ControllerEvent::AudioComplete {
-                    track_id: "default".to_string(),
-                    interrupted: false,
-                });
-            }
-            _ = session_child.cancelled() => {
-                let _ = event_tx.send(ControllerEvent::AudioComplete {
-                    track_id: "default".to_string(),
-                    interrupted: true,
-                });
-            }
-        }
-    });
 
     // Let it play a few frames, then stop the track (simulates session teardown).
     tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
     track.stop().await;
 
-    // completion_notify fires → watcher sends AudioComplete (interrupted=false
-    // in this wiring, since we chose notify over session cancel).
     let event = tokio::time::timeout(tokio::time::Duration::from_millis(500), event_rx.recv())
         .await
         .expect("AudioComplete must arrive within 500 ms after stop()")
         .expect("channel must not be closed");
 
     assert!(
-        matches!(event, ControllerEvent::AudioComplete { .. }),
-        "Expected AudioComplete after stop(), got: {:?}",
+        matches!(
+            event,
+            ControllerEvent::AudioComplete {
+                interrupted: true,
+                ..
+            }
+        ),
+        "Expected interrupted AudioComplete after stop(), got: {:?}",
         event
     );
 
-    session_cancel.cancel();
     let _ = fs::remove_file(&test_file).await;
 }
 
@@ -670,7 +653,7 @@ async fn test_start_playback_on_external_pc_delivers_rtp() {
 }
 
 /// Verify that `start_playback_on(None)` still works (backward compatibility) —
-/// frames go into the FileTrack's own PC; completion_notify still fires.
+/// frames go into the FileTrack's own PC; on_end still fires.
 #[tokio::test]
 async fn test_start_playback_on_none_backward_compatible() {
     let temp_dir = std::env::temp_dir();
@@ -679,10 +662,14 @@ async fn test_start_playback_on_none_backward_compatible() {
         .await
         .unwrap();
 
+    let (end_tx, mut end_rx) = tokio::sync::mpsc::unbounded_channel();
     let track = FileTrack::new("compat-test".to_string())
         .with_path(test_file.to_string_lossy().to_string())
         .with_loop(false)
-        .with_codec_preference(vec![CodecType::PCMU]);
+        .with_codec_preference(vec![CodecType::PCMU])
+        .with_on_end(std::sync::Arc::new(move |reason| {
+            let _ = end_tx.send(reason);
+        }));
 
     let _ = track.local_description().await;
 
@@ -692,13 +679,13 @@ async fn test_start_playback_on_none_backward_compatible() {
 
     let result = tokio::time::timeout(
         tokio::time::Duration::from_secs(2),
-        track.wait_for_completion(),
+        end_rx.recv(),
     )
     .await;
 
     assert!(
-        result.is_ok(),
-        "start_playback_on(None) must fire completion_notify just like start_playback()"
+        matches!(result, Ok(Some(PlaybackEndReason::Completed))),
+        "start_playback_on(None) must fire on_end just like start_playback()"
     );
 
     let _ = fs::remove_file(&test_file).await;
