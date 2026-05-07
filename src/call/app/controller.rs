@@ -186,7 +186,7 @@ impl CallController {
             source: MediaSource::File { path: path.clone() },
             options: Some(PlayOptions {
                 loop_playback,
-                await_completion: true,
+                await_completion: false,
                 interrupt_on_dtmf: interruptible,
                 track_id: Some(track_id.clone()),
                 send_progress: false,

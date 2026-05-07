@@ -713,12 +713,14 @@ impl BridgePeer {
 
         let source = track.create_playback_source()?;
         let mut state = self.output_state(endpoint).lock().await;
-        state.file_source = Some(source);
+        let old_source = state.file_source.replace(source);
         state.mode = BRIDGE_OUTPUT_FILE;
         state.active_rtp_offset = None;
         state.active_seq_offset = None;
         self.output_mode(endpoint)
             .store(BRIDGE_OUTPUT_FILE, Ordering::Release);
+        drop(state);
+        drop(old_source);
 
         info!(
             bridge_id = %self.id,
@@ -744,12 +746,14 @@ impl BridgePeer {
             .with_codec_info(codec_info);
         let source = track.create_playback_source()?;
         let mut state = self.output_state(endpoint).lock().await;
-        state.file_source = Some(source);
+        let old_source = state.file_source.replace(source);
         state.mode = BRIDGE_OUTPUT_FILE;
         state.active_rtp_offset = None;
         state.active_seq_offset = None;
         self.output_mode(endpoint)
             .store(BRIDGE_OUTPUT_FILE, Ordering::Release);
+        drop(state);
+        drop(old_source);
 
         info!(
             bridge_id = %self.id,
@@ -762,9 +766,11 @@ impl BridgePeer {
     pub async fn replace_output_with_peer(&self, endpoint: BridgeEndpoint) {
         let mut state = self.output_state(endpoint).lock().await;
         state.mode = BRIDGE_OUTPUT_PEER;
-        state.file_source = None;
+        let old_source = state.file_source.take();
         self.output_mode(endpoint)
             .store(BRIDGE_OUTPUT_PEER, Ordering::Release);
+        drop(state);
+        drop(old_source);
         info!(
             bridge_id = %self.id,
             endpoint = ?endpoint,
@@ -775,8 +781,11 @@ impl BridgePeer {
     pub async fn mute_output(&self, endpoint: BridgeEndpoint) {
         let mut state = self.output_state(endpoint).lock().await;
         state.mode = BRIDGE_OUTPUT_MUTED;
+        let old_source = state.file_source.take();
         self.output_mode(endpoint)
             .store(BRIDGE_OUTPUT_MUTED, Ordering::Release);
+        drop(state);
+        drop(old_source);
         info!(
             bridge_id = %self.id,
             endpoint = ?endpoint,

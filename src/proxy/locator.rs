@@ -97,26 +97,36 @@ impl DialogTargetLocator {
 impl TargetLocator for DialogTargetLocator {
     async fn locate(&self, uri: &rsipstack::sip::Uri) -> Result<SipAddr, rsipstack::Error> {
         if let Ok(locs) = self.locator.lookup(uri).await
-            && let Some(loc) = locs.first()
+            && !locs.is_empty()
         {
-            if self.cluster_enabled
-                && loc.registered_aor.as_ref() == Some(uri)
-                && let Some(home_proxy) = &loc.home_proxy
-            {
-                if self.is_local_home_proxy(home_proxy)
-                    && let Some(dest) = &loc.destination
-                {
-                    debug!(%uri, %dest, %home_proxy, "Located local registered AOR target via destination");
-                    return Ok(dest.clone());
-                }
+            if let Some(loc) = locs.iter().find(|loc| {
+                self.cluster_enabled
+                    && loc.home_proxy.as_ref().is_some_and(|home_proxy| {
+                        loc.registered_aor.as_ref().is_some_and(|registered_aor| {
+                            registered_aor == uri
+                                || (registered_aor.user() == uri.user()
+                                    && uri.host_with_port == home_proxy.addr)
+                        })
+                    })
+            }) {
+                if let Some(home_proxy) = &loc.home_proxy {
+                    if self.is_local_home_proxy(home_proxy)
+                        && let Some(dest) = &loc.destination
+                    {
+                        debug!(%uri, %dest, %home_proxy, "Located local registered AOR target via destination");
+                        return Ok(dest.clone());
+                    }
 
-                debug!(%uri, dest = %home_proxy, "Located registered AOR target via home proxy");
-                return Ok(home_proxy.clone());
+                    debug!(%uri, dest = %home_proxy, "Located registered AOR target via home proxy");
+                    return Ok(home_proxy.clone());
+                }
             }
 
-            if let Some(dest) = &loc.destination {
-                debug!(%uri, %dest, "Located target for dialog");
-                return Ok(dest.clone());
+            if let Some(loc) = locs.first() {
+                if let Some(dest) = &loc.destination {
+                    debug!(%uri, %dest, "Located target for dialog");
+                    return Ok(dest.clone());
+                }
             }
         }
         SipAddr::try_from(uri).map_err(|e| {
@@ -726,7 +736,8 @@ mod tests {
     #[tokio::test]
     async fn dialog_target_locator_routes_registered_aor_via_home_proxy() {
         let locator = MemoryLocator::new();
-        let uri: rsipstack::sip::Uri = "sip:alice@rustpbx.com".try_into().unwrap();
+        let registered_aor: rsipstack::sip::Uri = "sip:alice@10.0.0.1".try_into().unwrap();
+        let target_uri: rsipstack::sip::Uri = "sip:alice@10.0.0.1:5060".try_into().unwrap();
 
         let destination = SipAddr {
             r#type: Some(Transport::Udp),
@@ -741,13 +752,13 @@ mod tests {
         locator
             .register(
                 "alice",
-                Some("rustpbx.com"),
+                Some("10.0.0.1"),
                 Location {
-                    aor: uri.clone(),
+                    aor: registered_aor.clone(),
                     expires: 3600,
                     destination: Some(destination.clone()),
                     home_proxy: Some(home_proxy.clone()),
-                    registered_aor: Some(uri.clone()),
+                    registered_aor: Some(registered_aor),
                     last_modified: Some(Instant::now()),
                     ..Default::default()
                 },
@@ -756,7 +767,7 @@ mod tests {
             .unwrap();
 
         let target_locator = DialogTargetLocator::new(Arc::new(Box::new(locator)), vec![], true);
-        let result = target_locator.locate(&uri).await.unwrap();
+        let result = target_locator.locate(&target_uri).await.unwrap();
         assert_eq!(
             result, home_proxy,
             "DialogTargetLocator should route registered AOR via home_proxy"

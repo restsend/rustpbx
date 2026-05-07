@@ -45,7 +45,6 @@ impl SipSession {
         if resolved_agents.is_empty() {
             warn!("No agents available after resolving queue targets");
 
-            self.prepare_queue_fallback_audio_media().await;
             self.play_queue_transfer_prompt_before_bridge(transfer_prompt)
                 .await;
 
@@ -54,7 +53,7 @@ impl SipSession {
 
         if plan.accept_immediately {
             info!("Queue: answering call immediately");
-            let caller_answer = self.prepare_queue_early_answer(&resolved_agents).await;
+            let caller_answer = self.prepare_app_caller_media_bridge().await;
             if let Err(e) = self.accept_call(None, caller_answer, None).await {
                 warn!(error = %e, "Failed to answer call in queue");
             }
@@ -67,6 +66,7 @@ impl SipSession {
             if let Some(ref audio_file) = hold.audio_file {
                 info!(file = %audio_file, "Queue: starting hold music");
 
+                self.prepare_queue_playback_media().await;
                 match self
                     .play_audio_file(
                         audio_file,
@@ -76,7 +76,7 @@ impl SipSession {
                     )
                     .await
                 {
-                    Ok(()) => {
+                    Ok(_) => {
                         info!(track_id = %Self::QUEUE_HOLD_TRACK_ID, "Queue: hold music started");
                         true
                     }
@@ -199,21 +199,12 @@ impl SipSession {
         };
 
         info!(file = %audio_file, "Queue: playing transfer prompt before bridging agent audio");
+        self.prepare_queue_playback_media().await;
         match self
             .play_audio_file(audio_file, true, "queue-transfer-prompt", false)
             .await
         {
-            Ok(()) => {
-                let maybe_track = self.playback_tracks.get("queue-transfer-prompt").cloned();
-                let cancel = self.cancel_token.clone();
-                if let Some(track) = maybe_track {
-                    tokio::select! {
-                        _ = track.wait_for_completion() => {}
-                        _ = cancel.cancelled() => {}
-                    }
-                }
-                self.stop_playback_track("queue-transfer-prompt", false)
-                    .await;
+            Ok(_) => {
                 info!(file = %audio_file, "Queue: transfer prompt completed");
             }
             Err(error) => {
@@ -241,21 +232,19 @@ impl SipSession {
                 _ => None,
             });
 
+        let wait_for_failure_audio = matches!(
+            plan.fallback,
+            Some(QueueFallbackAction::Failure(_))
+        );
         if let Some(ref audio_file) = pre_action_audio {
-            self.prepare_queue_fallback_audio_media().await;
-            if let Err(e) = self
-                .play_audio_file(audio_file, true, "caller", false)
+            self.prepare_queue_playback_media().await;
+            match self
+                .play_audio_file(audio_file, wait_for_failure_audio, "caller", false)
                 .await
             {
-                warn!(error = %e, "Failed to play queue failure audio");
-            } else {
-                let maybe_track = self.playback_tracks.get("caller").cloned();
-                let cancel = self.cancel_token.clone();
-                if let Some(track) = maybe_track {
-                    tokio::select! {
-                        _ = track.wait_for_completion() => {}
-                        _ = cancel.cancelled() => {}
-                    }
+                Ok(()) => {}
+                Err(e) => {
+                    warn!(error = %e, "Failed to play queue failure audio");
                 }
             }
         }
@@ -391,17 +380,19 @@ impl SipSession {
         }
     }
 
-    pub(super) async fn prepare_queue_fallback_audio_media(&mut self) {
+    pub(super) async fn prepare_queue_playback_media(&mut self) {
         if self.server_dialog.state().is_confirmed() {
-            let _ = self.ensure_caller_answer_sdp().await;
+            if !self.caller_answer_uses_media_bridge {
+                warn!("Queue playback: caller leg is already answered without media bridge");
+            }
             return;
         }
 
-        let caller_answer = self.ensure_caller_answer_sdp().await;
+        let caller_answer = self.prepare_app_caller_media_bridge().await;
         if let Err(error) = self.accept_call(None, caller_answer, None).await {
             warn!(
                 error = %error,
-                "Queue fallback: failed to prepare caller media before fallback audio"
+                "Queue playback: failed to prepare caller media before audio"
             );
         }
     }
