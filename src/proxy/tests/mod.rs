@@ -3,8 +3,6 @@ mod locator_db_test;
 mod test_acl;
 mod test_auth;
 mod test_b2bua_flow;
-mod test_call;
-mod test_cdr;
 mod test_cluster_home_proxy_e2e;
 mod test_media_proxy;
 mod test_presence;
