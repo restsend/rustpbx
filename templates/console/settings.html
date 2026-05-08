@@ -452,6 +452,9 @@
                             <option :value="500">500</option>
                             <option :value="1000">1000</option>
                             <option :value="2000">2000</option>
+                            <option :value="3000">3000</option>
+                            <option :value="4000">4000</option>
+                            <option :value="5000">5000</option>
                         </select>
                     </label>
                     <button type="button" @click="refreshLogs()" :disabled="logViewer.loading"
@@ -480,6 +483,9 @@
                         class="flex items-center justify-between border-b border-slate-800 px-3 py-2 text-[11px] font-semibold uppercase tracking-wide text-slate-300">
                         <span x-text="tt('settings_page.logs_output') || 'Log output'"></span>
                         <span class="font-mono normal-case" x-text="`${(logViewer.lines || []).length} lines`"></span>
+                        <button type="button" @click="copyLogs()"
+                            class="ml-2 rounded border border-slate-700 px-2 py-0.5 font-mono normal-case text-slate-400 transition hover:bg-slate-800 hover:text-slate-200"
+                            x-text="logViewer.copied ? (tt('common.copied') || 'Copied!') : (tt('common.copy') || 'Copy')"></button>
                     </div>
                     <div class="max-h-[28rem] overflow-auto p-3 font-mono text-[11px] leading-5 text-slate-100"
                         x-ref="logOutput">
@@ -2733,6 +2739,7 @@
                 path: '',
                 nextPosition: 0,
                 truncated: false,
+                copied: false,
             },
             directory: { departments: [], users: [], pending_invites: [] },
             selectedStorageProfile: '',
@@ -4484,6 +4491,26 @@
                 this.logViewer.message = '';
                 this.logViewer.truncated = false;
             },
+            async copyLogs() {
+                const text = (this.logViewer.lines || []).join('\n');
+                if (!text) return;
+                try {
+                    await navigator.clipboard.writeText(text);
+                    this.logViewer.copied = true;
+                    setTimeout(() => { this.logViewer.copied = false; }, 2000);
+                } catch {
+                    const ta = document.createElement('textarea');
+                    ta.value = text;
+                    ta.style.position = 'fixed';
+                    ta.style.left = '-9999px';
+                    document.body.appendChild(ta);
+                    ta.select();
+                    document.execCommand('copy');
+                    document.body.removeChild(ta);
+                    this.logViewer.copied = true;
+                    setTimeout(() => { this.logViewer.copied = false; }, 2000);
+                }
+            },
             async initLogsTab() {
                 if (!this.currentUser?.is_superuser) {
                     return;
@@ -4498,7 +4525,7 @@
                 if (!Number.isFinite(parsed) || parsed <= 0) {
                     this.logViewer.limit = 200;
                 } else {
-                    this.logViewer.limit = Math.min(Math.max(Math.floor(parsed), 1), 2000);
+                    this.logViewer.limit = Math.min(Math.max(Math.floor(parsed), 1), 5000);
                 }
                 this.refreshLogs();
             },
@@ -4591,7 +4618,7 @@
                         this.logViewer.lines = incoming;
                     } else if (incoming.length) {
                         this.logViewer.lines = [...(this.logViewer.lines || []), ...incoming];
-                        const maxLines = Math.min(Math.max(Number(this.logViewer.limit) || 200, 1), 2000);
+                        const maxLines = Math.min(Math.max(Number(this.logViewer.limit) || 200, 1), 5000);
                         if (this.logViewer.lines.length > maxLines) {
                             this.logViewer.lines = this.logViewer.lines.slice(-maxLines);
                         }
