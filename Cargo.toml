@@ -39,7 +39,7 @@ addon-endpoint-manager = []
 addon-enterprise-auth = ["dep:ldap3", "flate2", "dep:ring"]
 addon-transcript = []
 addon-voicemail = ["dep:url"]
-addon-ivr-editor = []
+addon-ivr-editor = ["dep:hex"]
 addon-jsonrpc-router = ["dep:minijinja", "dep:evalexpr"]
 addon-cc = []
 addon-observability = ["metrics-exporter-prometheus"]
@@ -57,7 +57,7 @@ commerce = [
     "addon-ivr-editor",
     "addon-telemetry",
 ]
-wholesale = ["addon-wholesale"]
+wholesale = ["addon-wholesale", "dep:hex"]
 contact-center = [
     "addon-cc",
     "addon-endpoint-manager",
@@ -114,6 +114,7 @@ rand = "0.10.1"
 chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = "0.10.4"
 rsipstack = "0.5.10"
+hex = { version = "0.4.3", optional = true }
 #rsipstack = { path = "../rsipstack" }
 audio-codec = { version = "0.3.33", default-features = false }
 #rustrtc = { path = "../rustrtc" }
