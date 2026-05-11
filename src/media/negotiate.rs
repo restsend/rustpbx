@@ -98,7 +98,7 @@ pub struct NegotiatedLegProfile {
 /// Media negotiator for SDP parsing and codec selection
 pub struct MediaNegotiator;
 
-/// Strategy for selecting codecs when the target endpoint is WebRTC.
+/// Strategy for selecting codecs when a generated offer can be anchored by the PBX.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CodecSelectionStrategy {
@@ -106,8 +106,10 @@ pub enum CodecSelectionStrategy {
     /// that the target transport supports. No additional codecs are added.
     #[default]
     Performance,
-    /// Prefer quality: prioritize codecs by audio quality regardless of
-    /// whether transcoding is required. Order: Opus > G729 > G722 > G711.
+    /// Prefer quality: add PBX-supported codecs allowed by policy, then
+    /// prioritize by quality. If the far leg picks an added codec, the bridge
+    /// can use a different codec on each leg and transcode between them.
+    /// Order: Opus > G729 > G722 > G711.
     Quality,
 }
 
@@ -480,61 +482,139 @@ impl MediaNegotiator {
         format!("{:?}/{}/{}", codec.codec, codec.clock_rate, codec.channels)
     }
 
-    /// Restrict an already-generated caller-facing SDP answer to the subset of
-    /// caller codecs that also appear in the callee's answer.
+    /// Restrict generated SDP to the subset of codecs that also appear in a
+    /// reference SDP, and mirror the reference media directions.
     ///
-    /// The generated answer stays the source of truth for WebRTC-specific SDP,
-    /// ICE, DTLS, and candidates. Filtering is done by codec identity using
-    /// the generated caller answer order, while preserving caller-leg payload
-    /// types already chosen by create_answer().
-    pub fn restrict_answer_to_callee_accepted_codecs(
-        answer_sdp: &str,
-        callee_answer_sdp: &str,
+    /// The generated SDP stays the source of truth for WebRTC-specific SDP, ICE,
+    /// DTLS, and candidates. Filtering is done by codec identity using the
+    /// generated SDP order, while preserving payload types already chosen by the
+    /// local PeerConnection.
+    ///
+    /// `filter_audio_to_reference=true` is for pass-through/performance mode:
+    /// both legs must share one audio codec. `false` is for transcoding mode:
+    /// keep the local leg's generated audio codecs and let each leg negotiate
+    /// independently.
+    pub fn restrict_sdp_to_reference_codecs(
+        sdp_type: SdpType,
+        sdp: &str,
+        reference_sdp_type: SdpType,
+        reference_sdp: &str,
+        filter_audio_to_reference: bool,
     ) -> Option<String> {
-        let caller_answer_codecs = Self::extract_codec_params(answer_sdp);
-        let callee_answer_codecs = Self::extract_codec_params(callee_answer_sdp);
+        let mut desc = SessionDescription::parse(sdp_type, sdp).ok()?;
+        let reference_desc = SessionDescription::parse(reference_sdp_type, reference_sdp).ok()?;
+        let source_codecs = Self::extract_codec_params(sdp);
+        let reference_codecs = Self::extract_codec_params(reference_sdp);
+        let source_video_caps = desc.to_video_capabilities();
+        let reference_video_caps = reference_desc.to_video_capabilities();
 
-        let accepted_by_callee: HashSet<String> = callee_answer_codecs
-            .audio
-            .iter()
-            .chain(callee_answer_codecs.dtmf.iter())
-            .map(Self::codec_signature)
-            .collect();
-        if accepted_by_callee.is_empty() {
-            return None;
-        }
-
-        let mut allowed_pts = Vec::new();
-        let mut seen_pts = HashSet::new();
-        for codec in caller_answer_codecs
-            .audio
-            .iter()
-            .chain(caller_answer_codecs.dtmf.iter())
-        {
-            let signature = Self::codec_signature(codec);
-            if accepted_by_callee.contains(&signature) && seen_pts.insert(codec.payload_type) {
-                allowed_pts.push(codec.payload_type);
-            }
-        }
-        if allowed_pts.is_empty() {
-            return None;
-        }
-
-        let mut desc = SessionDescription::parse(SdpType::Answer, answer_sdp).ok()?;
-        let audio_section = desc
+        if let Some(audio_section) = desc
             .media_sections
             .iter_mut()
-            .find(|section| section.kind == MediaKind::Audio)?;
+            .find(|section| section.kind == MediaKind::Audio)
+        {
+            if let Some(reference_audio) = reference_desc
+                .media_sections
+                .iter()
+                .find(|section| section.kind == MediaKind::Audio)
+            {
+                audio_section.direction = reference_audio.direction;
+            }
 
-        audio_section.formats = allowed_pts.iter().map(|pt| pt.to_string()).collect();
-        audio_section
-            .attributes
-            .retain(|attr| match attr.key.as_str() {
-                "rtpmap" | "fmtp" | "rtcp-fb" => {
-                    Self::attr_payload_type(attr).is_none_or(|pt| allowed_pts.contains(&pt))
+            let accepted_by_reference: HashSet<String> = reference_codecs
+                .audio
+                .iter()
+                .chain(reference_codecs.dtmf.iter())
+                .map(Self::codec_signature)
+                .collect();
+
+            if filter_audio_to_reference && !accepted_by_reference.is_empty() {
+                let mut allowed_pts = Vec::new();
+                let mut seen_pts = HashSet::new();
+                for codec in source_codecs
+                    .audio
+                    .iter()
+                    .chain(source_codecs.dtmf.iter())
+                {
+                    let signature = Self::codec_signature(codec);
+                    if accepted_by_reference.contains(&signature)
+                        && seen_pts.insert(codec.payload_type)
+                    {
+                        allowed_pts.push(codec.payload_type);
+                    }
                 }
-                _ => true,
-            });
+                if allowed_pts.is_empty() {
+                    return None;
+                }
+
+                audio_section.formats = allowed_pts.iter().map(|pt| pt.to_string()).collect();
+                audio_section
+                    .attributes
+                    .retain(|attr| match attr.key.as_str() {
+                        "rtpmap" | "fmtp" | "rtcp-fb" => {
+                            Self::attr_payload_type(attr).is_none_or(|pt| allowed_pts.contains(&pt))
+                        }
+                        _ => true,
+                    });
+            }
+        }
+
+        if let Some(reference_video) = reference_desc
+            .media_sections
+            .iter()
+            .find(|section| section.kind == MediaKind::Video)
+            && let Some(video_section) = desc
+                .media_sections
+                .iter_mut()
+                .find(|section| section.kind == MediaKind::Video)
+        {
+            let accepted_by_reference: HashSet<(String, u32)> = reference_video_caps
+                .iter()
+                .map(|cap| (cap.codec_name.to_ascii_uppercase(), cap.clock_rate))
+                .collect();
+
+            if !accepted_by_reference.is_empty() {
+                video_section.direction = reference_video.direction;
+
+                let mut allowed_pts = Vec::new();
+                let mut seen_pts = HashSet::new();
+                for cap in &source_video_caps {
+                    let signature = (cap.codec_name.to_ascii_uppercase(), cap.clock_rate);
+                    if accepted_by_reference.contains(&signature) && seen_pts.insert(cap.payload_type)
+                    {
+                        allowed_pts.push(cap.payload_type);
+                    }
+                }
+
+                let allowed_video_pts: HashSet<u8> = allowed_pts.into_iter().collect();
+                if allowed_video_pts.is_empty() {
+                    return None;
+                }
+
+                video_section.formats.retain(|pt| {
+                    pt.parse::<u8>()
+                        .is_ok_and(|pt| allowed_video_pts.contains(&pt))
+                });
+                video_section.attributes.retain(|attr| match attr.key.as_str() {
+                    "rtpmap" | "fmtp" => {
+                        Self::attr_payload_type(attr).is_none_or(|pt| allowed_video_pts.contains(&pt))
+                    }
+                    "rtcp-fb" => {
+                        let pt = attr
+                            .value
+                            .as_deref()
+                            .and_then(|value| value.split_whitespace().next());
+                        pt.is_none_or(|pt| {
+                            pt == "*"
+                                || pt
+                                    .parse::<u8>()
+                                    .is_ok_and(|pt| allowed_video_pts.contains(&pt))
+                        })
+                    }
+                    _ => true,
+                });
+            }
+        }
 
         Some(desc.to_sdp_string())
     }
@@ -1456,7 +1536,7 @@ a=rtpmap:101 telephone-event/8000\r\n";
     }
 
     #[test]
-    fn test_restrict_answer_to_callee_accepted_codecs_preserves_caller_payload_types() {
+    fn test_restrict_sdp_to_reference_codecs_preserves_caller_payload_types() {
         let answer_sdp = "v=0\r\n\
 o=- 1 1 IN IP4 127.0.0.1\r\n\
 s=-\r\n\
@@ -1472,7 +1552,21 @@ a=rtpmap:0 PCMU/8000\r\n\
 a=rtpmap:110 telephone-event/48000\r\n\
 a=fmtp:110 0-16\r\n\
 a=rtpmap:126 telephone-event/8000\r\n\
-a=fmtp:126 0-16\r\n";
+a=fmtp:126 0-16\r\n\
+m=video 9 UDP/TLS/RTP/SAVPF 96 97 103 104\r\n\
+c=IN IP4 0.0.0.0\r\n\
+a=mid:1\r\n\
+a=sendrecv\r\n\
+a=rtcp-mux\r\n\
+a=rtpmap:96 VP8/90000\r\n\
+a=rtcp-fb:96 nack pli\r\n\
+a=rtpmap:97 rtx/90000\r\n\
+a=fmtp:97 apt=96\r\n\
+a=rtpmap:103 H264/90000\r\n\
+a=fmtp:103 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42001f\r\n\
+a=rtcp-fb:103 nack pli\r\n\
+a=rtpmap:104 rtx/90000\r\n\
+a=fmtp:104 apt=103\r\n";
 
         let callee_answer = "v=0\r\n\
 o=- 1 1 IN IP4 127.0.0.1\r\n\
@@ -1484,11 +1578,22 @@ a=rtpmap:111 opus/48000/2\r\n\
 a=fmtp:111 useinbandfec=1\r\n\
 a=rtpmap:0 PCMU/8000\r\n\
 a=rtpmap:101 telephone-event/8000\r\n\
-a=fmtp:101 0-16\r\n";
+a=fmtp:101 0-16\r\n\
+m=video 50035 RTP/AVP 103\r\n\
+c=IN IP4 127.0.0.1\r\n\
+a=recvonly\r\n\
+a=rtpmap:103 H264/90000\r\n\
+a=fmtp:103 profile-level-id=42801F; packetization-mode=1\r\n";
 
         let filtered =
-            MediaNegotiator::restrict_answer_to_callee_accepted_codecs(answer_sdp, callee_answer)
-                .unwrap();
+            MediaNegotiator::restrict_sdp_to_reference_codecs(
+                SdpType::Answer,
+                answer_sdp,
+                SdpType::Answer,
+                callee_answer,
+                true,
+            )
+            .unwrap();
 
         assert!(filtered.contains("m=audio 9 UDP/TLS/RTP/SAVPF 96 0 126"));
         assert!(filtered.contains("a=rtpmap:96 opus/48000/2"));
@@ -1496,6 +1601,114 @@ a=fmtp:101 0-16\r\n";
         assert!(filtered.contains("a=rtpmap:126 telephone-event/8000"));
         assert!(!filtered.contains("a=rtpmap:110 telephone-event/48000"));
         assert!(!filtered.contains("a=rtpmap:101 telephone-event/8000"));
+        assert!(filtered.contains("m=video 9 UDP/TLS/RTP/SAVPF 103"));
+        assert!(filtered.contains("a=recvonly"));
+        assert!(filtered.contains("a=rtpmap:103 H264/90000"));
+        assert!(filtered.contains(
+            "a=fmtp:103 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42001f"
+        ));
+        assert!(!filtered.contains("a=rtpmap:96 VP8/90000"));
+        assert!(!filtered.contains("a=rtpmap:97 rtx/90000"));
+        assert!(!filtered.contains("profile-level-id=42801F"));
+    }
+
+    #[test]
+    fn test_restrict_answer_preserves_rtp_video_attributes_for_rtp_caller() {
+        let answer_sdp = "v=0\r\n\
+o=- 1 1 IN IP4 127.0.0.1\r\n\
+s=-\r\n\
+c=IN IP4 127.0.0.1\r\n\
+t=0 0\r\n\
+m=audio 18238 RTP/AVP 96 0 8 9 101 97\r\n\
+a=sendrecv\r\n\
+a=rtpmap:96 opus/48000/2\r\n\
+a=rtpmap:0 PCMU/8000\r\n\
+a=rtpmap:8 PCMA/8000\r\n\
+a=rtpmap:9 G722/8000\r\n\
+a=rtpmap:101 telephone-event/48000\r\n\
+a=rtpmap:97 telephone-event/8000\r\n\
+m=video 16756 RTP/AVP 96\r\n\
+a=sendrecv\r\n\
+a=rtpmap:96 H264/90000\r\n\
+a=fmtp:96 profile-level-id=42801F\r\n\
+a=rtcp-fb:96 nack pli\r\n";
+
+        let callee_answer = "v=0\r\n\
+o=- 1 1 IN IP4 127.0.0.1\r\n\
+s=-\r\n\
+t=0 0\r\n\
+a=group:BUNDLE 0 1\r\n\
+m=audio 50013 UDP/TLS/RTP/SAVPF 96 0 8 9 101 97\r\n\
+c=IN IP4 192.168.139.3\r\n\
+a=mid:0\r\n\
+a=rtcp-mux\r\n\
+a=rtpmap:96 opus/48000/2\r\n\
+m=video 9 UDP/TLS/RTP/SAVPF 96\r\n\
+c=IN IP4 0.0.0.0\r\n\
+a=mid:1\r\n\
+a=rtcp-mux\r\n\
+a=rtpmap:96 H264/90000\r\n\
+a=rtcp-fb:96 ccm fir\r\n\
+a=rtcp-fb:96 nack pli\r\n\
+a=fmtp:96 level-asymmetry-allowed=1;packetization-mode=0;profile-level-id=42001f\r\n";
+
+        let filtered =
+            MediaNegotiator::restrict_sdp_to_reference_codecs(
+                SdpType::Answer,
+                answer_sdp,
+                SdpType::Answer,
+                callee_answer,
+                true,
+            )
+            .unwrap();
+
+        assert!(filtered.contains("m=video 16756 RTP/AVP 96"));
+        assert!(filtered.contains("a=rtpmap:96 H264/90000"));
+        assert!(filtered.contains("a=fmtp:96 profile-level-id=42801F"));
+        assert!(!filtered.contains("profile-level-id=42001f"));
+    }
+
+    #[test]
+    fn test_restrict_sdp_to_reference_codecs_can_keep_transcoded_audio() {
+        let answer_sdp = "v=0\r\n\
+o=- 1 1 IN IP4 127.0.0.1\r\n\
+s=-\r\n\
+t=0 0\r\n\
+m=audio 9 UDP/TLS/RTP/SAVPF 111 9 0 8 126\r\n\
+c=IN IP4 0.0.0.0\r\n\
+a=mid:0\r\n\
+a=sendrecv\r\n\
+a=rtcp-mux\r\n\
+a=rtpmap:111 opus/48000/2\r\n\
+a=rtpmap:9 G722/8000\r\n\
+a=rtpmap:0 PCMU/8000\r\n\
+a=rtpmap:8 PCMA/8000\r\n\
+a=rtpmap:126 telephone-event/8000\r\n\
+a=fmtp:126 0-16\r\n";
+
+        let callee_answer = "v=0\r\n\
+o=- 1 1 IN IP4 127.0.0.1\r\n\
+s=-\r\n\
+t=0 0\r\n\
+m=audio 55277 RTP/AVP 18 126\r\n\
+c=IN IP4 127.0.0.1\r\n\
+a=sendrecv\r\n\
+a=rtpmap:18 G729/8000\r\n\
+a=fmtp:18 annexb=yes\r\n\
+a=rtpmap:126 telephone-event/8000\r\n";
+
+        let filtered = MediaNegotiator::restrict_sdp_to_reference_codecs(
+            SdpType::Answer,
+            answer_sdp,
+            SdpType::Answer,
+            callee_answer,
+            false,
+        )
+        .unwrap();
+
+        assert!(filtered.contains("m=audio 9 UDP/TLS/RTP/SAVPF 111 9 0 8 126"));
+        assert!(filtered.contains("a=rtpmap:111 opus/48000/2"));
+        assert!(filtered.contains("a=rtpmap:126 telephone-event/8000"));
     }
 
     /// to_audio_capability converts all known codecs
