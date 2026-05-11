@@ -93,6 +93,9 @@ type = "extension"
 enabled = true
 auto_start = true
 
+# When [sipflow] is enabled, SipFlow owns RTP recording and this live recorder is disabled.
+# Configure [sipflow.upload] below when SipFlow recordings should be uploaded after calls.
+
 [callrecord]
 type = "local"
 root = "./config/cdr"
@@ -109,6 +112,16 @@ root = "./config/cdr"
 # flush_count = 1000
 # flush_interval_secs = 5
 # id_cache_size = 8192
+#
+# [sipflow.upload]
+# type = "s3"
+# vendor = "aws"
+# bucket = "my-recordings"
+# region = "us-east-1"
+# access_key = "AKID"
+# secret_key = "SECRET"
+# endpoint = "https://s3.amazonaws.com"
+# root = "recordings"
 
 # Remote
 # type = "remote"

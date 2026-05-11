@@ -78,8 +78,9 @@ impl CallRecordHook for SipFlowUploadHook {
                 .await
                 .map(|_| {
                     format!(
-                        "{}/{}",
+                        "{}/{}/{}",
                         endpoint.trim_end_matches('/'),
+                        bucket.trim_matches('/'),
                         full_key.trim_start_matches('/')
                     )
                 })

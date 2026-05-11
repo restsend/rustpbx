@@ -471,8 +471,6 @@ impl StorageManager {
         end_dt: DateTime<Local>,
     ) -> Result<Vec<(i32, String, usize)>> {
         let mut results = std::collections::HashMap::new();
-        let start_ts = Self::datetime_to_storage_ts(start_dt);
-        let end_ts = Self::datetime_to_storage_ts(end_dt);
         let folders = self.get_folders_in_range(start_dt, end_dt);
 
         for dir in folders {
@@ -489,14 +487,10 @@ impl StorageManager {
                 "SELECT m.leg, m.src, COUNT(*) as count 
                  FROM media_msgs m
                  JOIN call_meta c ON m.call_id = c.id
-                  WHERE c.callid = ?
-                  AND m.timestamp >= ?
-                  AND m.timestamp <= ?
+                 WHERE c.callid = ?
                  GROUP BY m.leg, m.src",
             )
             .bind(callid)
-            .bind(start_ts)
-            .bind(end_ts)
             .fetch_all(&mut conn)
             .await?;
 
@@ -522,8 +516,6 @@ impl StorageManager {
         end_dt: DateTime<Local>,
     ) -> Result<Vec<(i32, u64, Vec<u8>)>> {
         let mut results = Vec::new();
-        let start_ts = Self::datetime_to_storage_ts(start_dt);
-        let end_ts = Self::datetime_to_storage_ts(end_dt);
         let folders = self.get_folders_in_range(start_dt, end_dt);
 
         for dir in folders {
@@ -543,13 +535,9 @@ impl StorageManager {
                  FROM media_msgs s
                  JOIN call_meta c ON s.call_id = c.id
                  WHERE c.callid = ?
-                  AND s.timestamp >= ?
-                  AND s.timestamp <= ?
                  ORDER BY s.timestamp ASC",
             )
             .bind(callid)
-            .bind(start_ts)
-            .bind(end_ts)
             .fetch_all(&mut conn)
             .await?;
 
@@ -742,7 +730,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_query_media_and_stats_respect_time_range() {
+    async fn test_query_media_and_stats_use_call_id_within_selected_folders() {
         let dir = tempfile::tempdir().expect("tempdir");
         let mut storage = StorageManager::new(dir.path(), 1000, 3600, 128, SipFlowSubdirs::None);
 
@@ -795,9 +783,15 @@ mod tests {
             .query_media(call_id, start, end)
             .await
             .expect("query media");
-        assert_eq!(packets.len(), 1, "expected only one media packet");
-        assert_eq!(packets[0].1, t1, "expected middle packet only");
-        assert_eq!(packets[0].2, p1.to_vec(), "payload should match t1 packet");
+        assert_eq!(
+            packets.len(),
+            3,
+            "expected all media packets for the call id in the selected folder"
+        );
+        assert_eq!(packets[0].1, t0);
+        assert_eq!(packets[1].1, t1);
+        assert_eq!(packets[2].1, t2);
+        assert_eq!(packets[1].2, p1.to_vec(), "payload should match t1 packet");
 
         let stats = storage
             .query_media_stats(
@@ -810,6 +804,6 @@ mod tests {
 
         assert_eq!(stats.len(), 1, "expected one (leg,src) stats row");
         assert_eq!(stats[0].0, 0);
-        assert_eq!(stats[0].2, 1, "expected count=1 in narrow time range");
+        assert_eq!(stats[0].2, 3, "expected all packets for the call id");
     }
 }

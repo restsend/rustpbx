@@ -1261,11 +1261,15 @@ fn build_recording_payload(
         .map(|value| value.trim())
         .filter(|value| !value.is_empty());
 
+    let local_endpoint = state.url_for(&format!("/call-records/{}/recording", record.id));
+    let mut fallback_url = None;
+
     let url = if let Some(raw_value) = raw {
         if raw_value.starts_with("http://") || raw_value.starts_with("https://") {
+            fallback_url = Some(local_endpoint.clone());
             raw_value.to_string()
         } else {
-            state.url_for(&format!("/call-records/{}/recording", record.id))
+            local_endpoint.clone()
         }
     } else if let Some(fallback) = inline_recording_url {
         fallback.to_string()
@@ -1282,6 +1286,7 @@ fn build_recording_payload(
 
     Some(json!({
         "url": url,
+        "fallback_url": fallback_url,
         "duration_secs": record.recording_duration_secs,
     }))
 }

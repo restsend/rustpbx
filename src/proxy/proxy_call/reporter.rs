@@ -172,7 +172,7 @@ impl CallReporter {
 
         let recording_path_for_db = recorder.first().map(|media| media.path.clone());
 
-        let details = CallDetails {
+        let mut details = CallDetails {
             direction,
             status,
             from_number,
@@ -193,6 +193,34 @@ impl CallReporter {
                 .cloned(),
             ..Default::default()
         };
+
+        if details.recording_url.is_none()
+            && let Some(crate::config::SipFlowConfig::Local {
+                upload:
+                    Some(crate::config::SipFlowUploadConfig::S3 {
+                        bucket,
+                        endpoint,
+                        root,
+                        ..
+                    }),
+                ..
+            }) = self.server.sipflow_config.as_ref()
+        {
+            let date_prefix = start_time.format("%Y%m%d").to_string();
+            let key = format!("{}/{}.wav", date_prefix, self.context.session_id);
+            let full_key = if root.is_empty() {
+                key
+            } else {
+                format!("{}/{}", root.trim_end_matches('/'), key)
+            };
+            details.recording_url = Some(format!(
+                "{}/{}/{}",
+                endpoint.trim_end_matches('/'),
+                bucket.trim_matches('/'),
+                full_key.trim_start_matches('/')
+            ));
+            details.recording_duration_secs = Some((now - start_time).num_seconds().max(0) as i32);
+        }
 
         let record = CallRecord {
             call_id: self.context.session_id.clone(),
