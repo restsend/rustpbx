@@ -113,12 +113,12 @@ toml_edit = { version = "0.25.11", features = ["serde"] }
 rand = "0.10.1"
 chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = "0.10.4"
-rsipstack = "0.5.10"
+rsipstack = "0.5.11"
 hex = { version = "0.4.3", optional = true }
 #rsipstack = { path = "../rsipstack" }
 audio-codec = { version = "0.3.33", default-features = false }
 #rustrtc = { path = "../rustrtc" }
-rustrtc = "0.3.52"
+rustrtc = "0.3.54"
 reqwest = { version = "0.13", features = [
     "json",
     "stream",
