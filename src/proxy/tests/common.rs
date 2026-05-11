@@ -88,7 +88,7 @@ pub async fn create_test_server_with_config(
         endpoint,
         dialog_layer,
         dialplan_inspectors: Vec::new(),
-        create_route_invite: None,
+        create_route_invites: Vec::new(),
         ignore_out_of_dialog_request: true,
         locator_events: Some(locator_events_tx),
         sipflow_config: None,
@@ -108,6 +108,8 @@ pub async fn create_test_server_with_config(
         transfer_notify_subscribers: Arc::new(tokio::sync::Mutex::new(Vec::new())),
         cluster_event_hub: None,
         cluster_peer_ips: vec![],
+        media_policy: Arc::new(crate::call::DefaultMediaPolicy),
+        trunk_health: None,
     });
 
     // Add test users

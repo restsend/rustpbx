@@ -35,6 +35,26 @@ pub trait SipFlowBackend: Send + Sync {
         start_time: DateTime<Local>,
         end_time: DateTime<Local>,
     ) -> Result<Vec<u8>>;
+
+    /// Query media with an optional leg filter.
+    ///
+    /// `stream_leg` maps logical stream selectors to legacy stored leg ids:
+    /// - `Some(0)`: caller/A-leg only
+    /// - `Some(1)`: callee/B-leg only
+    /// - `None`: mixed/all available legs
+    ///
+    /// Default implementation keeps backward compatibility by delegating to
+    /// `query_media` (mixed behavior) when backend-specific filtering is not implemented.
+    async fn query_media_stream(
+        &self,
+        call_id: &str,
+        start_time: DateTime<Local>,
+        end_time: DateTime<Local>,
+        stream_leg: Option<i32>,
+    ) -> Result<Vec<u8>> {
+        let _ = stream_leg;
+        self.query_media(call_id, start_time, end_time).await
+    }
 }
 
 /// Create backend from configuration
@@ -59,6 +79,7 @@ pub fn create_backend(config: &SipFlowConfig) -> Result<Box<dyn SipFlowBackend>>
             udp_addr,
             http_addr,
             timeout_secs,
+            ..
         } => remote::RemoteBackend::new(udp_addr.clone(), http_addr.clone(), *timeout_secs)
             .map(|b| Box::new(b) as Box<dyn SipFlowBackend>),
     }

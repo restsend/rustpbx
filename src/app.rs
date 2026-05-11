@@ -279,11 +279,12 @@ impl AppStateBuilder {
                     .ok()
             });
 
-        // The upload hook is wired in when [sipflow.upload] is configured.
+        // The upload hook is wired in when [sipflow.upload] is configured
+        // for either Local or Remote backend.
         let sipflow_upload_config: Option<crate::config::SipFlowUploadConfig> =
             config.sipflow.as_ref().and_then(|s| match s {
                 crate::config::SipFlowConfig::Local { upload, .. } => upload.clone(),
-                _ => None,
+                crate::config::SipFlowConfig::Remote { upload, .. } => upload.clone(),
             });
         let recording_upload_policy = config
             .recording
@@ -329,12 +330,14 @@ impl AppStateBuilder {
             }
 
             // Attach the SipFlow upload hook if configured.
+            // Upload runs in a background task so it never blocks the call flow.
             if let (Some(backend), Some(upload_cfg)) =
                 (sipflow_backend_arc.as_ref(), sipflow_upload_config.as_ref())
             {
                 builder = builder.with_hook(Box::new(SipFlowUploadHook {
                     backend: backend.clone(),
                     upload_config: upload_cfg.clone(),
+                    db: Some(db_conn.clone()),
                 }));
             }
 
@@ -437,6 +440,19 @@ impl AppStateBuilder {
 
                 // Apply addon proxy server hooks (including CC addon's AgentRegistry registration)
                 builder = addon_registry.apply_proxy_server_hooks(builder, core.clone());
+
+                // Register emergency routing inspector (core feature)
+                if let Some(ref emg) = config.proxy.emergency {
+                    builder = builder.with_dialplan_inspector(Box::new(
+                        crate::proxy::emergency::EmergencyInspector::new(Some(emg.clone())),
+                    ));
+                }
+
+                // Register number pool inspector for least-used DID assignment
+                builder = builder.with_dialplan_inspector(Box::new(
+                    crate::proxy::number_pool::NumberPoolInspector::default(),
+                ));
+
                 builder.build().await
             }
         }?;

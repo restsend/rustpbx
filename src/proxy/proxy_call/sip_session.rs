@@ -642,6 +642,7 @@ impl SipSession {
             // they require playback/injection capabilities.
             MediaProxyMode::Auto | MediaProxyMode::Nat => app_or_queue_flow,
             MediaProxyMode::None => false,
+            _ => false,
         }
     }
 

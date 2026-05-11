@@ -81,6 +81,7 @@ async fn get_settings(
                     udp_addr,
                     http_addr,
                     timeout_secs,
+                    ..
                 } => (
                     "remote",
                     json!({

@@ -385,6 +385,14 @@ async fn build_settings_payload(state: &ConsoleState) -> JsonValue {
             "locator_webhook": config.proxy.locator_webhook.clone(),
             "http_router": config.proxy.http_router.clone(),
             "realms": config.proxy.realms.clone().unwrap_or_default(),
+            "dos_enabled": config.proxy.dos_enabled,
+            "dos_max_cps_per_ip": config.proxy.dos_max_cps_per_ip,
+            "dos_max_concurrent_per_ip": config.proxy.dos_max_concurrent_per_ip,
+            "dos_scan_probe_threshold": config.proxy.dos_scan_probe_threshold,
+            "dos_scan_block_duration_secs": config.proxy.dos_scan_block_duration_secs,
+            "uri_max_length": config.proxy.uri_max_length,
+            "uri_reject_malformed": config.proxy.uri_reject_malformed,
+            "emergency": config.proxy.emergency.clone(),
             "stats": proxy_stats_value.clone(),
         });
 
@@ -1526,6 +1534,24 @@ pub(crate) struct RecordingPolicyPayload {
 pub(crate) struct SecuritySettingsPayload {
     #[serde(default)]
     acl_rules: Option<Option<String>>,
+    // DoS protection
+    dos_enabled: Option<bool>,
+    dos_max_cps_per_ip: Option<u32>,
+    dos_max_concurrent_per_ip: Option<u32>,
+    dos_scan_probe_threshold: Option<u32>,
+    dos_scan_block_duration_secs: Option<u64>,
+    // URI normalization
+    uri_max_length: Option<usize>,
+    uri_reject_malformed: Option<bool>,
+    // Emergency routing
+    emergency: Option<Option<EmergencySettingsPayload>>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub(crate) struct EmergencySettingsPayload {
+    enabled: bool,
+    numbers: Vec<String>,
+    emergency_trunk: String,
 }
 
 pub(crate) async fn update_platform_settings(
@@ -2069,6 +2095,62 @@ pub(crate) async fn update_security_settings(
         modified = true;
     }
 
+    // DoS protection
+    if let Some(val) = payload.dos_enabled {
+        let table = ensure_table_mut(&mut doc, "proxy");
+        table["dos_enabled"] = value(val);
+        modified = true;
+    }
+    if let Some(val) = payload.dos_max_cps_per_ip {
+        let table = ensure_table_mut(&mut doc, "proxy");
+        table["dos_max_cps_per_ip"] = value(val as i64);
+        modified = true;
+    }
+    if let Some(val) = payload.dos_max_concurrent_per_ip {
+        let table = ensure_table_mut(&mut doc, "proxy");
+        table["dos_max_concurrent_per_ip"] = value(val as i64);
+        modified = true;
+    }
+    if let Some(val) = payload.dos_scan_probe_threshold {
+        let table = ensure_table_mut(&mut doc, "proxy");
+        table["dos_scan_probe_threshold"] = value(val as i64);
+        modified = true;
+    }
+    if let Some(val) = payload.dos_scan_block_duration_secs {
+        let table = ensure_table_mut(&mut doc, "proxy");
+        table["dos_scan_block_duration_secs"] = value(val as i64);
+        modified = true;
+    }
+
+    // URI normalization
+    if let Some(val) = payload.uri_max_length {
+        let table = ensure_table_mut(&mut doc, "proxy");
+        table["uri_max_length"] = value(val as i64);
+        modified = true;
+    }
+    if let Some(val) = payload.uri_reject_malformed {
+        let table = ensure_table_mut(&mut doc, "proxy");
+        table["uri_reject_malformed"] = value(val);
+        modified = true;
+    }
+
+    // Emergency routing
+    if let Some(emg_opt) = payload.emergency {
+        let table = ensure_table_mut(&mut doc, "proxy");
+        match emg_opt {
+            Some(cfg) => {
+                let toml_s = toml::to_string(&cfg).unwrap_or_default();
+                if let Ok(emg_doc) = toml_s.parse::<DocumentMut>() {
+                    table["emergency"] = emg_doc.as_item().clone();
+                }
+            }
+            None => {
+                table.remove("emergency");
+            }
+        }
+        modified = true;
+    }
+
     let doc_text = doc.to_string();
     let config = match parse_config_from_str(&doc_text) {
         Ok(cfg) => cfg,
@@ -2587,7 +2669,7 @@ async fn reload_routes_console(app: &crate::app::AppStateInner, _node: &str) -> 
 }
 
 const LOG_DEFAULT_LIMIT: usize = 200;
-const LOG_MAX_LIMIT: usize = 2000;
+const LOG_MAX_LIMIT: usize = 5000;
 
 struct FollowReadResult {
     lines: Vec<String>,

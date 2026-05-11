@@ -490,7 +490,7 @@ async fn test_guest_call_allowed_extension() {
         endpoint,
         dialog_layer,
         dialplan_inspectors: Vec::new(),
-        create_route_invite: None,
+        create_route_invites: Vec::new(),
         ignore_out_of_dialog_request: true,
         locator_events: None,
         sipflow_config: None,
@@ -510,6 +510,8 @@ async fn test_guest_call_allowed_extension() {
         transfer_notify_subscribers: Arc::new(tokio::sync::Mutex::new(Vec::new())),
         cluster_event_hub: None,
         cluster_peer_ips: vec![],
+        media_policy: Arc::new(crate::call::DefaultMediaPolicy),
+        trunk_health: None,
     });
 
     let module = AuthModule::new(server_inner.clone(), server_inner.proxy_config.clone());

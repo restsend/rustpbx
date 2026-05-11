@@ -264,6 +264,59 @@ impl SipFlowBackend for LocalBackend {
 
         Ok(result)
     }
+
+    async fn query_media_stream(
+        &self,
+        call_id: &str,
+        start_time: DateTime<Local>,
+        end_time: DateTime<Local>,
+        stream_leg: Option<i32>,
+    ) -> Result<Vec<u8>> {
+        let call_id = call_id.to_string();
+        let root = self.root.clone();
+        let subdirs = self.subdirs.clone();
+
+        let result = tokio::task::spawn(async move {
+            let mut storage = StorageManager::new(&PathBuf::from(&root), 1000, 5, 1024, subdirs);
+
+            // Query media packets directly by call_id and optionally filter by leg.
+            let mut packets = storage.query_media(&call_id, start_time, end_time).await?;
+            if let Some(leg) = stream_leg {
+                packets.retain(|(packet_leg, _, _)| *packet_leg == leg);
+            }
+
+            if packets.is_empty() {
+                return Ok(Vec::new());
+            }
+
+            let media_stats = storage
+                .query_media_stats(&call_id, start_time, end_time)
+                .await
+                .unwrap_or_default();
+            let mut leg_sources = std::collections::HashMap::<i32, Vec<String>>::new();
+            for (leg, src, _) in media_stats {
+                if stream_leg.is_none_or(|selected| selected == leg) {
+                    leg_sources.entry(leg).or_default().push(src);
+                }
+            }
+
+            let flow = storage
+                .query_flow_in_range(start_time, end_time)
+                .await
+                .unwrap_or_default();
+            let payload_map = build_payload_type_map(&flow);
+            let leg_payload_map = build_payload_type_map_by_leg(&flow, &leg_sources);
+            generate_wav_from_packets_with_leg_map_ex(
+                &packets,
+                &payload_map,
+                &leg_payload_map,
+                true,
+            )
+        })
+        .await??;
+
+        Ok(result)
+    }
 }
 
 impl Drop for LocalBackend {

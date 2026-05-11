@@ -5,9 +5,16 @@ use anyhow::Result;
 use async_trait::async_trait;
 use rsipstack::sip::prelude::HeadersExt;
 use rsipstack::{transaction::transaction::Transaction, transport::SipConnection};
-use std::{collections::HashSet, net::IpAddr, str::FromStr, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    net::IpAddr,
+    str::FromStr,
+    sync::Arc,
+    time::{Duration, Instant},
+};
+use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 #[derive(Debug, Clone)]
 struct IpNetwork {
@@ -101,12 +108,19 @@ impl AclRule {
     }
 }
 
+struct DosPerIpData {
+    recent: Vec<Instant>,
+    concurrent: usize,
+    blocked_until: Option<Instant>,
+}
+
 struct AclModuleInner {
     config: Arc<ProxyConfig>,
     server: Option<SipServerRef>,
     ua_white_list: HashSet<String>,
     ua_black_list: HashSet<String>,
     fallback_rules: Vec<String>,
+    dos_data: Arc<RwLock<HashMap<IpAddr, DosPerIpData>>>,
 }
 
 #[derive(Clone)]
@@ -140,12 +154,99 @@ impl AclModule {
                 ua_white_list,
                 ua_black_list,
                 fallback_rules,
+                dos_data: Arc::new(RwLock::new(HashMap::new())),
             }),
         }
     }
 
     pub fn new(config: Arc<ProxyConfig>) -> Self {
         Self::with_server(config, None)
+    }
+
+    // ── DoS protection helpers ─────────────────────────────────────
+
+    fn extract_ip(tx: &Transaction) -> Option<IpAddr> {
+        let via = tx.original.via_header().ok()?;
+        let (_, target) = SipConnection::parse_target_from_via(via).ok()?;
+        target.host.try_into().ok()
+    }
+
+    async fn dos_check_and_track(&self, ip: IpAddr) -> Result<()> {
+        let cfg = &self.inner.config;
+        let now = Instant::now();
+        let mut map = self.inner.dos_data.write().await;
+        let entry = map.entry(ip).or_insert_with(|| DosPerIpData {
+            recent: Vec::new(),
+            concurrent: 0,
+            blocked_until: None,
+        });
+
+        if let Some(until) = entry.blocked_until {
+            if now < until {
+                return Err(anyhow::anyhow!("IP blocked until {:?}", until));
+            }
+            entry.recent.clear();
+            entry.concurrent = 0;
+            entry.blocked_until = None;
+        }
+
+        let window = now - Duration::from_secs(1);
+        entry.recent.retain(|t| *t > window);
+
+        if entry.recent.len() >= cfg.dos_max_cps_per_ip as usize {
+            entry.blocked_until = Some(now + Duration::from_secs(cfg.dos_scan_block_duration_secs));
+            return Err(anyhow::anyhow!("CPS limit exceeded"));
+        }
+
+        if entry.concurrent >= cfg.dos_max_concurrent_per_ip as usize {
+            return Err(anyhow::anyhow!("Concurrent limit exceeded"));
+        }
+
+        if entry.recent.len() >= cfg.dos_scan_probe_threshold as usize {
+            entry.blocked_until = Some(now + Duration::from_secs(cfg.dos_scan_block_duration_secs));
+            return Err(anyhow::anyhow!("Scan detected"));
+        }
+
+        entry.recent.push(now);
+        entry.concurrent += 1;
+        Ok(())
+    }
+
+    async fn dos_release(&self, ip: IpAddr) {
+        if let Some(entry) = self.inner.dos_data.write().await.get_mut(&ip) {
+            entry.concurrent = entry.concurrent.saturating_sub(1);
+        }
+    }
+
+    // ── URI normalization check ────────────────────────────────────
+
+    fn check_uri_normalization(&self, tx: &Transaction) -> Result<()> {
+        let cfg = &self.inner.config;
+        if !cfg.uri_reject_malformed {
+            return Ok(());
+        }
+
+        let from = match tx.original.from_header() {
+            Ok(f) => f,
+            Err(e) => {
+                warn!("Normalization: missing/malformed From: {}", e);
+                return Err(anyhow::anyhow!("malformed From header"));
+            }
+        };
+
+        match from.uri() {
+            Ok(uri) => {
+                if uri.to_string().len() > cfg.uri_max_length {
+                    warn!("Normalization: From URI too long");
+                    return Err(anyhow::anyhow!("From URI too long"));
+                }
+            }
+            Err(e) => {
+                warn!("Normalization: malformed From URI: {}", e);
+                return Err(anyhow::anyhow!("malformed From URI"));
+            }
+        }
+        Ok(())
     }
 
     pub async fn is_from_trunk_context(&self, addr: &IpAddr) -> Option<TrunkContext> {
@@ -157,6 +258,7 @@ impl AclModule {
                         id: trunk.id,
                         name: name.clone(),
                         tenant_id: None,
+                        did_numbers: trunk.did_numbers.clone(),
                     });
                 }
             }
@@ -176,6 +278,7 @@ impl AclModule {
                     id: trunk.id,
                     name,
                     tenant_id: None,
+                    did_numbers: trunk.did_numbers.clone(),
                 });
             }
         }
@@ -291,6 +394,7 @@ impl ProxyModule for AclModule {
         tx: &mut Transaction,
         cookie: TransactionCookie,
     ) -> Result<ProxyAction> {
+        // 1. User-Agent check
         match tx.original.user_agent_header() {
             Some(ua_header) => {
                 let ua = ua_header.value();
@@ -305,7 +409,6 @@ impl ProxyModule for AclModule {
                 }
             }
             None => {
-                // No User-Agent header, treat as denied if whitelist is not empty
                 if !self.inner.ua_white_list.is_empty() {
                     info!(
                         method = tx.original.method().to_string(),
@@ -317,6 +420,22 @@ impl ProxyModule for AclModule {
             }
         }
 
+        // 2. URI normalization check (safety)
+        if let Err(_e) = self.check_uri_normalization(tx) {
+            return Ok(ProxyAction::Abort);
+        }
+
+        // 3. DoS protection (per-IP rate limiting, applies to all sources)
+        if self.inner.config.dos_enabled {
+            if let Some(ip) = Self::extract_ip(tx) {
+                if let Err(e) = self.dos_check_and_track(ip).await {
+                    warn!("DoS blocked {}: {}", ip, e);
+                    return Ok(ProxyAction::Abort);
+                }
+            }
+        }
+
+        // 4. IP ACL check (allow/deny with trunk bypass)
         let via = tx.original.via_header()?;
         let (_, target) =
             SipConnection::parse_target_from_via(via).map_err(|e| anyhow::anyhow!("{}", e))?;
@@ -342,6 +461,15 @@ impl ProxyModule for AclModule {
         );
         cookie.mark_as_spam(crate::call::cookie::SpamResult::IpBlacklist);
         Ok(ProxyAction::Abort)
+    }
+
+    async fn on_transaction_end(&self, tx: &mut Transaction) -> Result<()> {
+        if self.inner.config.dos_enabled {
+            if let Some(ip) = Self::extract_ip(tx) {
+                self.dos_release(ip).await;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -378,24 +506,37 @@ mod tests {
         })
     }
 
+    fn create_dos_config(
+        dos_enabled: bool,
+        max_cps: u32,
+        max_concurrent: u32,
+        scan_threshold: u32,
+        block_secs: u64,
+    ) -> Arc<ProxyConfig> {
+        Arc::new(ProxyConfig {
+            dos_enabled,
+            dos_max_cps_per_ip: max_cps,
+            dos_max_concurrent_per_ip: max_concurrent,
+            dos_scan_probe_threshold: scan_threshold,
+            dos_scan_block_duration_secs: block_secs,
+            ..Default::default()
+        })
+    }
+
     #[test]
     fn test_parse_network() {
-        // Test IPv4
         let (net, prefix) = parse_network("192.168.1.0/24").unwrap();
         assert_eq!(net, IpAddr::V4(Ipv4Addr::new(192, 168, 1, 0)));
         assert_eq!(prefix, 24);
 
-        // Test IPv4 without mask
         let (net, prefix) = parse_network("192.168.1.1").unwrap();
         assert_eq!(net, IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1)));
         assert_eq!(prefix, 32);
 
-        // Test IPv6
         let (net, prefix) = parse_network("2001:db8::/32").unwrap();
         assert_eq!(net, IpAddr::V6(Ipv6Addr::from_str("2001:db8::").unwrap()));
         assert_eq!(prefix, 32);
 
-        // Test IPv6 without mask
         let (net, prefix) = parse_network("2001:db8::1").unwrap();
         assert_eq!(net, IpAddr::V6(Ipv6Addr::from_str("2001:db8::1").unwrap()));
         assert_eq!(prefix, 128);
@@ -412,27 +553,91 @@ mod tests {
 
         let acl = AclModule::new(config);
 
-        // Test allowed IPs
         assert!(acl.is_ip_allowed(&"192.168.1.1".parse().unwrap()).await);
         assert!(acl.is_ip_allowed(&"10.2.3.4".parse().unwrap()).await);
-
-        // Test denied IPs
-        assert!(!acl.is_ip_allowed(&"192.168.1.100".parse().unwrap()).await); // Explicitly denied
-        assert!(!acl.is_ip_allowed(&"172.16.1.1".parse().unwrap()).await); // Denied by default
+        assert!(!acl.is_ip_allowed(&"192.168.1.100".parse().unwrap()).await);
+        assert!(!acl.is_ip_allowed(&"172.16.1.1".parse().unwrap()).await);
     }
 
     #[tokio::test]
     async fn test_default_rules() {
-        // Test with None (no ACL rules configured)
         let config = Arc::new(ProxyConfig {
             acl_rules: None,
             ..Default::default()
         });
         let acl = AclModule::new(config);
 
-        // Test with default rules (allow all, deny all)
-        // The first rule "allow all" matches all IPs, so they should be allowed
         assert!(acl.is_ip_allowed(&"192.168.1.1".parse().unwrap()).await);
         assert!(acl.is_ip_allowed(&"10.0.0.1".parse().unwrap()).await);
+    }
+
+    // ── DoS protection unit tests ─────────────────────────────
+
+    #[tokio::test]
+    async fn test_dos_cps_limit() {
+        let config = create_dos_config(true, 3, 100, 100, 60);
+        let acl = AclModule::new(config);
+        let ip: IpAddr = "10.0.0.1".parse().unwrap();
+
+        for _ in 0..3 {
+            assert!(acl.dos_check_and_track(ip).await.is_ok());
+        }
+        assert!(acl.dos_check_and_track(ip).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_dos_concurrent_limit_and_release() {
+        let config = create_dos_config(true, 100, 2, 100, 60);
+        let acl = AclModule::new(config);
+        let ip: IpAddr = "10.0.0.2".parse().unwrap();
+
+        assert!(acl.dos_check_and_track(ip).await.is_ok());
+        assert!(acl.dos_check_and_track(ip).await.is_ok());
+        assert!(acl.dos_check_and_track(ip).await.is_err());
+
+        acl.dos_release(ip).await;
+        assert!(acl.dos_check_and_track(ip).await.is_ok());
+        assert!(acl.dos_check_and_track(ip).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_dos_scan_detection() {
+        let config = create_dos_config(true, 100, 100, 3, 60);
+        let acl = AclModule::new(config);
+        let ip: IpAddr = "10.0.0.3".parse().unwrap();
+
+        // First 3 requests pass (recent.len() grows: 0→1, 1→2, 2→3)
+        assert!(acl.dos_check_and_track(ip).await.is_ok());
+        assert!(acl.dos_check_and_track(ip).await.is_ok());
+        assert!(acl.dos_check_and_track(ip).await.is_ok());
+        // 4th: recent.len() == 3 >= threshold(3) → scan detected
+        assert!(acl.dos_check_and_track(ip).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_dos_block_clears_after_window() {
+        let config = create_dos_config(true, 1, 100, 100, 1); // 1 second block
+        let acl = AclModule::new(config);
+        let ip: IpAddr = "10.0.0.4".parse().unwrap();
+
+        assert!(acl.dos_check_and_track(ip).await.is_ok());
+        assert!(acl.dos_check_and_track(ip).await.is_err());
+
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        // Block should have expired, window reset
+        assert!(acl.dos_check_and_track(ip).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn test_dos_independent_per_ip() {
+        let config = create_dos_config(true, 1, 100, 100, 60);
+        let acl = AclModule::new(config);
+        let ip1: IpAddr = "10.0.0.5".parse().unwrap();
+        let ip2: IpAddr = "10.0.0.6".parse().unwrap();
+
+        assert!(acl.dos_check_and_track(ip1).await.is_ok());
+        assert!(acl.dos_check_and_track(ip1).await.is_err()); // ip1 blocked
+
+        assert!(acl.dos_check_and_track(ip2).await.is_ok()); // ip2 still allowed
     }
 }

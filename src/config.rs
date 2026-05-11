@@ -532,6 +532,8 @@ pub enum SipFlowConfig {
         http_addr: String,
         #[serde(default = "default_sipflow_timeout")]
         timeout_secs: u64,
+        #[serde(default)]
+        upload: Option<SipFlowUploadConfig>,
     },
 }
 
@@ -564,6 +566,8 @@ pub enum MediaProxyMode {
     Nat,
     /// Do not handle media proxy
     None,
+    /// Bypass: rewrite SDP but let RTP flow directly between endpoints
+    Bypass,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -694,7 +698,56 @@ pub struct ProxyConfig {
     /// `quality`: prefer Opus > G729 > G722 > G711 (may require transcoding).
     #[serde(default)]
     pub codec_strategy: CodecSelectionStrategy,
+
+    // ── DoS protection (per-IP rate limiting) ─────────────────────
+    #[serde(default)]
+    pub dos_enabled: bool,
+    #[serde(default = "default_dos_max_cps")]
+    pub dos_max_cps_per_ip: u32,
+    #[serde(default = "default_dos_max_concurrent")]
+    pub dos_max_concurrent_per_ip: u32,
+    #[serde(default = "default_dos_scan_threshold")]
+    pub dos_scan_probe_threshold: u32,
+    #[serde(default = "default_dos_scan_block_secs")]
+    pub dos_scan_block_duration_secs: u64,
+
+    // ── URI normalization ────────────────────────────────────────
+    #[serde(default = "default_uri_max_length")]
+    pub uri_max_length: usize,
+    #[serde(default)]
+    pub uri_reject_malformed: bool,
+
+    // ── Emergency number routing ──────────────────────────────────
+    #[serde(default)]
+    pub emergency: Option<EmergencyConfig>,
 }
+
+/// Emergency number routing configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct EmergencyConfig {
+    pub enabled: bool,
+    #[serde(default = "default_emergency_numbers")]
+    pub numbers: Vec<String>,
+    pub emergency_trunk: String,
+}
+
+fn default_emergency_numbers() -> Vec<String> {
+    vec![
+        "110".to_string(),
+        "119".to_string(),
+        "120".to_string(),
+        "122".to_string(),
+        "911".to_string(),
+        "999".to_string(),
+    ]
+}
+
+fn default_dos_max_cps() -> u32 { 100 }
+fn default_dos_max_concurrent() -> u32 { 500 }
+fn default_dos_scan_threshold() -> u32 { 50 }
+fn default_dos_scan_block_secs() -> u64 { 600 }
+fn default_uri_max_length() -> usize { 256 }
 
 fn default_auth_cache_size() -> usize {
     10000
@@ -748,6 +801,10 @@ pub struct DialplanHints {
     pub allow_codecs: Option<Vec<String>>,
     pub extensions: http::Extensions,
     pub disable_ice_servers: Option<bool>,
+    /// Media mode override from trunk config
+    pub media_mode: Option<MediaProxyMode>,
+    /// Video policy from trunk config
+    pub video_policy: Option<crate::proxy::routing::VideoPolicy>,
 }
 
 impl std::fmt::Debug for DialplanHints {
@@ -758,6 +815,8 @@ impl std::fmt::Debug for DialplanHints {
             .field("max_duration", &self.max_duration)
             .field("enable_sipflow", &self.enable_sipflow)
             .field("disable_ice_servers", &self.disable_ice_servers)
+            .field("media_mode", &self.media_mode)
+            .field("video_policy", &self.video_policy)
             .finish()
     }
 }
@@ -950,6 +1009,14 @@ impl Default for ProxyConfig {
             dialog_auth_cache: default_dialog_auth_cache(),
             blind_transfer_use_refer: false,
             codec_strategy: CodecSelectionStrategy::default(),
+            dos_enabled: false,
+            dos_max_cps_per_ip: default_dos_max_cps(),
+            dos_max_concurrent_per_ip: default_dos_max_concurrent(),
+            dos_scan_probe_threshold: default_dos_scan_threshold(),
+            dos_scan_block_duration_secs: default_dos_scan_block_secs(),
+            uri_max_length: default_uri_max_length(),
+            uri_reject_malformed: false,
+            emergency: None,
         }
     }
 }

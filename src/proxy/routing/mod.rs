@@ -81,8 +81,94 @@ pub struct TrunkConfig {
     pub register_extra_headers: Option<std::collections::HashMap<String, String>>,
     #[serde(default = "default_rewrite_hostport")]
     pub rewrite_hostport: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call_id_mode: Option<CallIdMode>,
+
+    // SBC Health Check
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub health_check_enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub health_check_interval_secs: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub health_check_probe_count: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub health_check_fallback_trunk: Option<String>,
+
+    // SBC CAC
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cac_policy: Option<CacPolicy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub overflow_threshold: Option<u32>,
+
+    // SBC Header Manipulation
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub header_rules: Option<Vec<HeaderRule>>,
+
+    // SBC Media
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_mode: Option<MediaMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub video_policy: Option<VideoPolicy>,
+
     #[serde(skip)]
     pub origin: ConfigOrigin,
+
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub did_numbers: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum CacPolicy {
+    Lossy,
+    Reject,
+    Overflow,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum MediaMode {
+    None,
+    Bypass,
+    Auto,
+    ForceTranscode,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum VideoPolicy {
+    PassThrough,
+    Strip,
+    Transcode,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct HeaderRule {
+    pub action: HeaderAction,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub match_caller_prefix: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub match_callee_prefix: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum HeaderAction {
+    Add,
+    Remove,
+    Set,
+    Rename,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum CallIdMode {
+    Transparent,
+    Rewrite,
 }
 
 fn default_rewrite_hostport() -> bool {
@@ -114,6 +200,17 @@ impl Default for TrunkConfig {
             register_expires: None,
             register_extra_headers: None,
             rewrite_hostport: true,
+            call_id_mode: None,
+            health_check_enabled: None,
+            health_check_interval_secs: None,
+            health_check_probe_count: None,
+            health_check_fallback_trunk: None,
+            cac_policy: None,
+            overflow_threshold: None,
+            header_rules: None,
+            media_mode: None,
+            video_policy: None,
+            did_numbers: Vec::new(),
             origin: ConfigOrigin::embedded(),
         }
     }

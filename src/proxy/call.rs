@@ -709,7 +709,13 @@ impl CallModule {
             if let Some(bypass) = hints.bypass_media
                 && bypass
             {
-                dialplan.media.proxy_mode = crate::config::MediaProxyMode::None;
+                dialplan.media.proxy_mode = crate::config::MediaProxyMode::Bypass;
+            }
+            if let Some(media_mode) = hints.media_mode {
+                dialplan.media.proxy_mode = media_mode;
+            }
+            if let Some(video_policy) = hints.video_policy {
+                dialplan.media.video_policy = Some(video_policy);
             }
             if let Some(max_duration) = hints.max_duration {
                 dialplan.max_call_duration = Some(max_duration);
@@ -1007,8 +1013,11 @@ impl CallModule {
         let trunk_context = cookie.get_extension::<TrunkContext>();
         let source_trunk_hint = trunk_context.as_ref().map(|c| c.name.clone());
 
-        let route_invite: Box<dyn RouteInvite> =
-            if let Some(f) = self.inner.server.create_route_invite.as_ref() {
+        let route_invite: Box<dyn RouteInvite> = {
+            let mut fns = self.inner.server.create_route_invites.iter();
+            if let Some(f) = fns.next() {
+                // First custom RouteInvite is used; the chain is:
+                // custom wraps default via its own logic
                 f(
                     self.inner.server.clone(),
                     self.inner.config.clone(),
@@ -1025,7 +1034,8 @@ impl CallModule {
                     data_context: self.inner.server.data_context.clone(),
                     source_trunk_hint,
                 })
-            };
+            }
+        };
 
         let dialplan = if let Some(resolver) = self.inner.server.call_router.as_ref() {
             resolver
@@ -2481,6 +2491,7 @@ mod tests {
             id: Some(1),
             name: "wholesale-trunk".to_string(),
             tenant_id: Some(100),
+            did_numbers: vec![],
         });
 
         let dialplan = module

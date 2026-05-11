@@ -40,8 +40,8 @@ addon-enterprise-auth = ["dep:ldap3", "flate2", "dep:ring"]
 addon-transcript = []
 addon-voicemail = ["dep:url"]
 addon-ivr-editor = ["dep:hex"]
-addon-jsonrpc-router = ["dep:minijinja", "dep:evalexpr"]
 addon-cc = []
+addon-sbc = ["dep:minijinja", "dep:evalexpr"]
 addon-observability = ["metrics-exporter-prometheus"]
 addon-telemetry = [
     "addon-observability",

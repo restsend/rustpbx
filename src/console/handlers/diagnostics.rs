@@ -677,6 +677,17 @@ fn trunk_config_from_model(model: &sip_trunk::Model) -> Option<routing::TrunkCon
             .as_ref()
             .and_then(|v| serde_json::from_value(v.clone()).ok()),
         rewrite_hostport: model.rewrite_hostport,
+        call_id_mode: None,
+        health_check_enabled: None,
+        health_check_interval_secs: None,
+        health_check_probe_count: None,
+        health_check_fallback_trunk: None,
+        cac_policy: None,
+        overflow_threshold: None,
+        header_rules: None,
+        media_mode: None,
+        video_policy: None,
+        did_numbers: vec![],
     })
 }
 

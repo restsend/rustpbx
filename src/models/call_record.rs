@@ -163,6 +163,30 @@ pub async fn persist_call_record(
     Ok(())
 }
 
+/// Update the recording URL and duration for a call record after it has been
+/// inserted. This is used by the async upload hook which runs in the background
+/// so it does not block the call flow.
+pub async fn update_recording_url(
+    db: &DatabaseConnection,
+    call_id: &str,
+    recording_url: &str,
+    duration_secs: i32,
+) -> anyhow::Result<()> {
+    use sea_orm::EntityTrait;
+    let record = Entity::find()
+        .filter(Column::CallId.eq(call_id))
+        .one(db)
+        .await?;
+    if let Some(record) = record {
+        let mut active: ActiveModel = record.into();
+        active.recording_url = Set(Some(recording_url.to_string()));
+        active.recording_duration_secs = Set(Some(duration_secs));
+        active.updated_at = Set(chrono::Utc::now());
+        Entity::update(active).exec(db).await?;
+    }
+    Ok(())
+}
+
 pub fn extract_sip_username(input: &str) -> Option<String> {
     let trimmed = input.trim();
     if trimmed.is_empty() {

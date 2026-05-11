@@ -68,7 +68,7 @@ pub struct SipServerInner {
     pub callrecord_sender: Option<CallRecordSender>,
     pub endpoint: Endpoint,
     pub dialog_layer: Arc<DialogLayer>,
-    pub create_route_invite: Option<FnCreateRouteInvite>,
+    pub create_route_invites: Vec<FnCreateRouteInvite>,
     pub ignore_out_of_dialog_request: bool,
     pub locator_events: Option<LocatorEventSender>,
     pub sipflow_config: Option<SipFlowConfig>,
@@ -92,6 +92,10 @@ pub struct SipServerInner {
     pub cluster_event_hub: Option<Arc<ClusterEventHub>>,
     /// SIP peer IPs for cluster auth bypass.
     pub cluster_peer_ips: Vec<IpAddr>,
+    /// Media policy for deciding when to anchor media.
+    pub media_policy: Arc<dyn crate::call::MediaPolicy>,
+    /// Trunk health check states (populated by trunk_health background loop).
+    pub trunk_health: Option<crate::proxy::trunk_health::HealthStateMap>,
 }
 
 pub type SipServerRef = Arc<SipServerInner>;
@@ -114,7 +118,7 @@ pub struct SipServerBuilder {
     callrecord_sender: Option<CallRecordSender>,
     message_inspectors: Vec<Box<dyn MessageInspector>>,
     dialplan_inspectors: Vec<Box<dyn DialplanInspector>>,
-    create_route_invite: Option<FnCreateRouteInvite>,
+    create_route_invites: Vec<FnCreateRouteInvite>,
     database: Option<DatabaseConnection>,
     data_context: Option<Arc<ProxyDataContext>>,
     ignore_out_of_dialog_request: bool,
@@ -135,6 +139,10 @@ pub struct SipServerBuilder {
     skip_migrate: bool,
     /// Cluster peer SocketAddrs for inter-node sync (derived from Config.cluster).
     cluster_peers: Vec<SocketAddr>,
+    /// Media policy for deciding when to anchor media.
+    media_policy: Option<Arc<dyn crate::call::MediaPolicy>>,
+    /// Trunk health check states (shared map populated by background loop).
+    trunk_health: Option<crate::proxy::trunk_health::HealthStateMap>,
 }
 
 impl SipServerBuilder {
@@ -151,7 +159,7 @@ impl SipServerBuilder {
             callrecord_sender: None,
             message_inspectors: Vec::new(),
             dialplan_inspectors: Vec::new(),
-            create_route_invite: None,
+            create_route_invites: Vec::new(),
             database: None,
             data_context: None,
             ignore_out_of_dialog_request: true,
@@ -167,7 +175,19 @@ impl SipServerBuilder {
             agent_registry: None,
             skip_migrate: false,
             cluster_peers: Vec::new(),
+            media_policy: None,
+            trunk_health: None,
         }
+    }
+
+    pub fn with_trunk_health(mut self, health: crate::proxy::trunk_health::HealthStateMap) -> Self {
+        self.trunk_health = Some(health);
+        self
+    }
+
+    pub fn with_media_policy(mut self, policy: Arc<dyn crate::call::MediaPolicy>) -> Self {
+        self.media_policy = Some(policy);
+        self
     }
 
     pub fn with_cluster_peers(mut self, peers: Vec<SocketAddr>) -> Self {
@@ -232,7 +252,7 @@ impl SipServerBuilder {
     }
 
     pub fn with_create_route_invite(mut self, f: FnCreateRouteInvite) -> Self {
-        self.create_route_invite = Some(f);
+        self.create_route_invites.push(f);
         self
     }
 
@@ -593,8 +613,8 @@ impl SipServerBuilder {
 
         let database = self.database.clone();
 
-        let data_context = if let Some(context) = self.data_context {
-            context
+        let data_context = if let Some(ref context) = self.data_context {
+            context.clone()
         } else {
             Arc::new(
                 ProxyDataContext::new(self.config.clone(), database.clone())
@@ -659,7 +679,7 @@ impl SipServerBuilder {
             endpoint,
             dialog_layer,
             dialplan_inspectors: self.dialplan_inspectors,
-            create_route_invite: self.create_route_invite,
+            create_route_invites: self.create_route_invites,
             ignore_out_of_dialog_request: self.ignore_out_of_dialog_request,
             locator_events: Some(locator_events),
             sipflow_config: self.sipflow_config.clone(),
@@ -679,6 +699,10 @@ impl SipServerBuilder {
             transfer_notify_subscribers: Arc::new(tokio::sync::Mutex::new(Vec::new())),
             cluster_event_hub,
             cluster_peer_ips,
+            media_policy: self
+                .media_policy
+                .unwrap_or_else(|| Arc::new(crate::call::DefaultMediaPolicy)),
+            trunk_health: self.trunk_health.clone(),
         });
 
         let inner_weak = Arc::downgrade(&inner);
@@ -762,6 +786,28 @@ impl SipServerBuilder {
                     .join(",")
             );
         }
+        // ── Trunk health check ──────────────────────────────────────
+        if let Some(ref dc) = self.data_context {
+            let health_states: crate::proxy::trunk_health::HealthStateMap =
+                Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
+            let local_sip = format!(
+                "{}:{}",
+                self.config.addr,
+                self.config.udp_port.unwrap_or(5060),
+            );
+            let ep = inner.endpoint.inner.clone();
+            let dc = dc.clone();
+            crate::proxy::trunk_health::spawn_health_loop(
+                move || dc.trunks_snapshot(),
+                health_states.clone(),
+                ep,
+                local_sip,
+                30u64,
+                inner.cancel_token.clone(),
+            );
+            self.trunk_health = Some(health_states);
+        }
+
         advertised_methods
             .set(allow_methods.clone())
             .map_err(|_| anyhow!("advertised SIP methods already initialized"))?;

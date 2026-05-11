@@ -193,10 +193,10 @@ pub mod transcript;
 #[cfg(feature = "addon-wholesale")]
 pub mod wholesale;
 
+#[cfg(feature = "addon-sbc")]
+pub mod sbc;
 #[cfg(feature = "addon-cc")]
 pub mod cc;
-#[cfg(feature = "addon-jsonrpc-router")]
-pub mod jsonrpc_router;
 pub mod queue;
 
 #[cfg(feature = "addon-endpoint-manager")]

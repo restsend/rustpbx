@@ -1452,7 +1452,7 @@
                                 </p>
                             </div>
                         </div>
-                        <form class="mt-4 space-y-4" @submit.prevent="saveSecuritySettings">
+                        <form class="mt-4 space-y-6" @submit.prevent="saveSecuritySettings">
                             <div>
                                 <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400"
                                     x-text="t.settings_page?.acl_title || 'ACL rules'"></label>
@@ -1461,6 +1461,84 @@
                                     placeholder="allow all&#10;deny all"></textarea>
                                 <p class="mt-1 text-xs text-slate-400">One rule per line, matching the ACL syntax.</p>
                             </div>
+
+                            <hr class="border-slate-200">
+
+                            <div>
+                                <h3 class="text-sm font-semibold text-slate-800 mb-3">DoS Protection</h3>
+                                <div class="grid gap-3 sm:grid-cols-2">
+                                    <label class="flex items-center gap-2 text-sm text-slate-700">
+                                        <input type="checkbox" x-model="securityDraft.dos_enabled" :disabled="securityProcessing"
+                                            class="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-500">
+                                        <span>Enable per-IP rate limiting</span>
+                                    </label>
+                                    <div>
+                                        <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Max CPS per IP</label>
+                                        <input type="number" min="0" x-model.number="securityDraft.dos_max_cps_per_ip" :disabled="securityProcessing"
+                                            class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                                    </div>
+                                    <div>
+                                        <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Max concurrent calls per IP</label>
+                                        <input type="number" min="0" x-model.number="securityDraft.dos_max_concurrent_per_ip" :disabled="securityProcessing"
+                                            class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                                    </div>
+                                    <div>
+                                        <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Scan probe threshold</label>
+                                        <input type="number" min="0" x-model.number="securityDraft.dos_scan_probe_threshold" :disabled="securityProcessing"
+                                            class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                                    </div>
+                                    <div>
+                                        <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Scan block duration (seconds)</label>
+                                        <input type="number" min="0" x-model.number="securityDraft.dos_scan_block_duration_secs" :disabled="securityProcessing"
+                                            class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                                    </div>
+                                </div>
+                            </div>
+
+                            <hr class="border-slate-200">
+
+                            <div>
+                                <h3 class="text-sm font-semibold text-slate-800 mb-3">URI Normalization</h3>
+                                <div class="grid gap-3 sm:grid-cols-2">
+                                    <label class="flex items-center gap-2 text-sm text-slate-700">
+                                        <input type="checkbox" x-model="securityDraft.uri_reject_malformed" :disabled="securityProcessing"
+                                            class="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-500">
+                                        <span>Reject malformed or missing From URIs</span>
+                                    </label>
+                                    <div>
+                                        <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Max From URI length</label>
+                                        <input type="number" min="1" x-model.number="securityDraft.uri_max_length" :disabled="securityProcessing"
+                                            class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                                    </div>
+                                </div>
+                            </div>
+
+                            <hr class="border-slate-200">
+
+                            <div>
+                                <h3 class="text-sm font-semibold text-slate-800 mb-3">Emergency Routing</h3>
+                                <div class="grid gap-3 sm:grid-cols-2">
+                                    <label class="flex items-center gap-2 text-sm text-slate-700">
+                                        <input type="checkbox" x-model="securityDraft.emergency_enabled" :disabled="securityProcessing"
+                                            class="h-4 w-4 rounded border-slate-300 text-sky-600 focus:ring-sky-500">
+                                        <span>Enable emergency number routing</span>
+                                    </label>
+                                    <div>
+                                        <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Emergency numbers</label>
+                                        <input type="text" x-model="securityDraft.emergency_numbers" :disabled="securityProcessing"
+                                            class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                            placeholder="911, 999, 110">
+                                        <p class="mt-1 text-xs text-slate-400">Comma-separated list of emergency numbers.</p>
+                                    </div>
+                                    <div class="sm:col-span-2">
+                                        <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Emergency trunk URI</label>
+                                        <input type="text" x-model="securityDraft.emergency_trunk" :disabled="securityProcessing"
+                                            class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                            placeholder="sip:emergency_trunk@pbx.company.com">
+                                    </div>
+                                </div>
+                            </div>
+
                             <div
                                 class="flex items-center justify-between gap-2 border-t border-slate-200 pt-3 text-xs text-slate-500">
                                 <span>{{ "settings_page.restart_required_apply" | t }}</span>
@@ -2683,6 +2761,16 @@
             sipflowSettings: { backend_type: 'none', config: {} },
             securityDraft: {
                 acl_rules: '',
+                dos_enabled: false,
+                dos_max_cps_per_ip: 100,
+                dos_max_concurrent_per_ip: 500,
+                dos_scan_probe_threshold: 50,
+                dos_scan_block_duration_secs: 600,
+                uri_max_length: 256,
+                uri_reject_malformed: false,
+                emergency_enabled: false,
+                emergency_numbers: '',
+                emergency_trunk: '',
             },
             securityProcessing: false,
             aclReloading: false,
@@ -5276,6 +5364,18 @@
             },
             initSecurityDraft() {
                 this.securityDraft.acl_rules = this.formatAclRules(this.acl.active_rules || []);
+                const p = this.proxyConfig || {};
+                const emg = p.emergency || {};
+                this.securityDraft.dos_enabled = p.dos_enabled ?? false;
+                this.securityDraft.dos_max_cps_per_ip = p.dos_max_cps_per_ip ?? 100;
+                this.securityDraft.dos_max_concurrent_per_ip = p.dos_max_concurrent_per_ip ?? 500;
+                this.securityDraft.dos_scan_probe_threshold = p.dos_scan_probe_threshold ?? 50;
+                this.securityDraft.dos_scan_block_duration_secs = p.dos_scan_block_duration_secs ?? 600;
+                this.securityDraft.uri_max_length = p.uri_max_length ?? 256;
+                this.securityDraft.uri_reject_malformed = p.uri_reject_malformed ?? false;
+                this.securityDraft.emergency_enabled = emg.enabled ?? false;
+                this.securityDraft.emergency_numbers = Array.isArray(emg.numbers) ? emg.numbers.join(', ') : '';
+                this.securityDraft.emergency_trunk = emg.emergency_trunk || '';
             },
             resetSecurityDraft() {
                 this.initSecurityDraft();
@@ -5286,6 +5386,18 @@
                 }
                 const body = {
                     acl_rules: this.normalizeMultilineList(this.securityDraft.acl_rules),
+                    dos_enabled: this.securityDraft.dos_enabled,
+                    dos_max_cps_per_ip: Number(this.securityDraft.dos_max_cps_per_ip),
+                    dos_max_concurrent_per_ip: Number(this.securityDraft.dos_max_concurrent_per_ip),
+                    dos_scan_probe_threshold: Number(this.securityDraft.dos_scan_probe_threshold),
+                    dos_scan_block_duration_secs: Number(this.securityDraft.dos_scan_block_duration_secs),
+                    uri_max_length: Number(this.securityDraft.uri_max_length),
+                    uri_reject_malformed: this.securityDraft.uri_reject_malformed,
+                    emergency: {
+                        enabled: this.securityDraft.emergency_enabled,
+                        numbers: (this.securityDraft.emergency_numbers || '').split(',').map(s => s.trim()).filter(Boolean),
+                        emergency_trunk: this.securityDraft.emergency_trunk || '',
+                    },
                 };
                 this.securityProcessing = true;
                 try {

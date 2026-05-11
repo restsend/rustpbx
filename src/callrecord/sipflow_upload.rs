@@ -1,21 +1,10 @@
-//! `SipFlowUploadHook` – uploads the WAV recording produced by SipFlow to S3 or
-//! an HTTP endpoint after each call completes.
-//!
-//! The hook is inserted into the `CallRecordManager` hook chain when
-//! `[sipflow.upload]` is present in the configuration.  It:
-//!
-//! 1. Calls `backend.flush()` so the local SipFlow SQLite database is up-to-date.
-//! 2. Calls `backend.query_media()` to reconstruct a WAV from captured RTP.
-//! 3. Uploads the WAV bytes to the configured S3 bucket or HTTP endpoint.
-//! 4. Sets `record.details.recording_url` and `recording_duration_secs` in the
-//!    mutable `CallRecord` so that `DatabaseHook` (which runs next) persists them.
-
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
 use anyhow::Result;
 use async_trait::async_trait;
 use bytes::Bytes;
-use chrono::{Local, TimeZone};
+use chrono::{DateTime, Local, TimeZone};
+use sea_orm::DatabaseConnection;
 use tracing::{info, warn};
 
 use crate::{
@@ -27,87 +16,115 @@ use crate::{
 pub struct SipFlowUploadHook {
     pub backend: Arc<dyn SipFlowBackend>,
     pub upload_config: SipFlowUploadConfig,
+    pub db: Option<DatabaseConnection>,
 }
 
 #[async_trait]
 impl CallRecordHook for SipFlowUploadHook {
     async fn on_record_completed(&self, record: &mut CallRecord) -> anyhow::Result<()> {
-        // Flush the SipFlow batch so all RTP packets are in the SQLite file.
-        if let Err(e) = self.backend.flush().await {
-            warn!(call_id = %record.call_id, "SipFlowUploadHook: flush failed: {e}");
-        }
-
+        let backend = self.backend.clone();
+        let upload_config = self.upload_config.clone();
+        let db = self.db.clone();
+        let call_id = record.call_id.clone();
         let start = Local.from_utc_datetime(&record.start_time.naive_utc());
         let end = Local.from_utc_datetime(&record.end_time.naive_utc());
-
-        let wav_bytes = match self.backend.query_media(&record.call_id, start, end).await {
-            Ok(b) => b,
-            Err(e) => {
-                warn!(call_id = %record.call_id, "SipFlowUploadHook: query_media failed: {e}");
-                return Ok(());
-            }
-        };
-
-        if wav_bytes.is_empty() {
-            return Ok(());
-        }
-
-        // Path inside the storage target: YYYYMMDD/<call_id>.wav
+        let duration_secs = (record.end_time - record.start_time).num_seconds() as i32;
         let date_prefix = record.start_time.format("%Y%m%d").to_string();
-        let key = format!("{}/{}.wav", date_prefix, &record.call_id);
 
-        let wav_len = wav_bytes.len();
-        let url_result = match &self.upload_config {
-            SipFlowUploadConfig::S3 {
-                vendor,
-                bucket,
-                region,
-                access_key,
-                secret_key,
-                endpoint,
-                root,
-            } => {
-                let full_key = if root.is_empty() {
-                    key.clone()
-                } else {
-                    format!("{}/{}", root.trim_end_matches('/'), key)
-                };
-                upload_s3(
-                    vendor, bucket, region, access_key, secret_key, endpoint, &full_key, wav_bytes,
-                )
-                .await
-                .map(|_| {
-                    format!(
-                        "{}/{}/{}",
-                        endpoint.trim_end_matches('/'),
-                        bucket.trim_matches('/'),
-                        full_key.trim_start_matches('/')
-                    )
-                })
-            }
-            SipFlowUploadConfig::Http { url, headers } => {
-                upload_http(url, headers.as_ref(), &record.call_id, wav_bytes).await
-            }
-        };
-
-        match url_result {
-            Ok(url) => {
-                info!(
-                    call_id = %record.call_id,
-                    url,
-                    bytes = wav_len,
-                    "SipFlowUploadHook: recording uploaded"
-                );
-                let duration_secs = (record.end_time - record.start_time).num_seconds() as i32;
-                record.details.recording_url = Some(url);
-                record.details.recording_duration_secs = Some(duration_secs);
-            }
-            Err(e) => {
-                warn!(call_id = %record.call_id, "SipFlowUploadHook: upload failed: {e}");
-            }
-        }
+        tokio::spawn(async move {
+            crate::callrecord::sipflow_upload::do_upload(
+                backend, upload_config, db, &call_id, start, end, duration_secs, &date_prefix,
+            )
+            .await;
+        });
 
         Ok(())
+    }
+}
+
+async fn do_upload(
+    backend: Arc<dyn SipFlowBackend>,
+    upload_config: SipFlowUploadConfig,
+    db: Option<DatabaseConnection>,
+    call_id: &str,
+    start: DateTime<Local>,
+    end: DateTime<Local>,
+    duration_secs: i32,
+    date_prefix: &str,
+) {
+    // Flush the SipFlow batch so all RTP packets are in the SQLite file.
+    if let Err(e) = backend.flush().await {
+        warn!(call_id, "SipFlowUploadHook: flush failed: {e}");
+    }
+
+    let wav_bytes = match backend.query_media(call_id, start, end).await {
+        Ok(b) => b,
+        Err(e) => {
+            warn!(call_id, "SipFlowUploadHook: query_media failed: {e}");
+            return;
+        }
+    };
+
+    if wav_bytes.is_empty() {
+        return;
+    }
+
+    // Path inside the storage target: YYYYMMDD/<call_id>.wav
+    let key = format!("{}/{}.wav", date_prefix, call_id);
+
+    let wav_len = wav_bytes.len();
+    let url_result = match &upload_config {
+        SipFlowUploadConfig::S3 {
+            vendor,
+            bucket,
+            region,
+            access_key,
+            secret_key,
+            endpoint,
+            root,
+        } => {
+            let full_key = if root.is_empty() {
+                key.clone()
+            } else {
+                format!("{}/{}", root.trim_end_matches('/'), key)
+            };
+            upload_s3(
+                vendor, bucket, region, access_key, secret_key, endpoint, &full_key, wav_bytes,
+            )
+            .await
+            .map(|_| {
+                format!(
+                    "{}/{}",
+                    endpoint.trim_end_matches('/'),
+                    full_key.trim_start_matches('/')
+                )
+            })
+        }
+        SipFlowUploadConfig::Http { url, headers } => {
+            upload_http(url, headers.as_ref(), call_id, wav_bytes).await
+        }
+    };
+
+    match url_result {
+        Ok(url) => {
+            info!(
+                call_id,
+                url,
+                bytes = wav_len,
+                "SipFlowUploadHook: recording uploaded"
+            );
+            if let Some(ref db) = db {
+                if let Err(e) =
+                    crate::models::call_record::update_recording_url(db, call_id, &url, duration_secs)
+                        .await
+                {
+                    warn!(call_id, "SipFlowUploadHook: failed to update recording_url: {e}");
+                }
+            }
+        }
+        Err(e) => {
+            warn!(call_id, "SipFlowUploadHook: upload failed: {e}");
+        }
     }
 }
 
@@ -140,7 +157,7 @@ async fn upload_s3(
 
 async fn upload_http(
     url: &str,
-    headers: Option<&HashMap<String, String>>,
+    headers: Option<&std::collections::HashMap<String, String>>,
     call_id: &str,
     data: Vec<u8>,
 ) -> Result<String> {
@@ -245,7 +262,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_hook_skips_empty_media() {
+    async fn test_hook_returns_immediately() {
         let flush_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let hook = SipFlowUploadHook {
             backend: Arc::new(MockBackend {
@@ -256,41 +273,24 @@ mod tests {
                 url: "http://localhost:9999/upload".to_string(),
                 headers: None,
             },
+            db: None,
         };
         let mut record = make_record();
+        // Hook returns immediately without blocking
+        let start = std::time::Instant::now();
         hook.on_record_completed(&mut record).await.unwrap();
-        // Flush was called even though media is empty
-        assert_eq!(flush_count.load(std::sync::atomic::Ordering::Relaxed), 1);
-        // URL was not set because media was empty
+        let elapsed = start.elapsed();
+        // Should return in well under 100ms (no actual work done synchronously)
+        assert!(elapsed.as_millis() < 100, "hook blocked for {elapsed:?}");
+        // URL should NOT be set (the background task would set it later)
         assert!(record.details.recording_url.is_none());
-    }
-
-    #[tokio::test]
-    async fn test_hook_calls_flush_before_query() {
-        let flush_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        // Minimal valid WAV bytes (header only, 44 bytes)
-        let fake_wav = b"RIFF$\x00\x00\x00WAVEfmt \x10\x00\x00\x00\x01\x00\x01\x00\x80\x3e\x00\x00\x00\x7d\x00\x00\x02\x00\x10\x00data\x00\x00\x00\x00".to_vec();
-        let hook = SipFlowUploadHook {
-            backend: Arc::new(MockBackend {
-                media: fake_wav,
-                flush_count: flush_count.clone(),
-            }),
-            upload_config: SipFlowUploadConfig::Http {
-                // Use a non-existent URL; upload will fail but flush must have run first.
-                url: "http://127.0.0.1:1".to_string(),
-                headers: None,
-            },
-        };
-        let mut record = make_record();
-        // Hook should not return an error even if upload fails (it only warns)
-        hook.on_record_completed(&mut record).await.unwrap();
-        // flush() must have been called exactly once
+        // Give background task time to run, then check flush was called
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         assert_eq!(flush_count.load(std::sync::atomic::Ordering::Relaxed), 1);
     }
 
     #[test]
     fn test_upload_config_parse_s3() {
-        // Parse SipFlowConfig directly (avoids needing the full Config with [proxy])
         let toml_str = r#"
 type = "local"
 root = "/var/sipflow"
@@ -349,6 +349,33 @@ url = "https://example.com/recordings"
     }
 
     #[test]
+    fn test_upload_config_parse_remote_http() {
+        let toml_str = r#"
+type = "remote"
+udp_addr = "127.0.0.1:3000"
+http_addr = "http://127.0.0.1:3001"
+
+[upload]
+type = "http"
+url = "https://example.com/recordings"
+"#;
+        let cfg: crate::config::SipFlowConfig =
+            toml::from_str(toml_str).expect("should parse remote sipflow with upload");
+        match cfg {
+            crate::config::SipFlowConfig::Remote { upload, .. } => {
+                let upload = upload.expect("upload should be set");
+                match upload {
+                    SipFlowUploadConfig::Http { url, .. } => {
+                        assert_eq!(url, "https://example.com/recordings");
+                    }
+                    _ => panic!("expected Http variant"),
+                }
+            }
+            _ => panic!("expected Remote sipflow config"),
+        }
+    }
+
+    #[test]
     fn test_sipflow_config_default_no_upload() {
         let toml_str = r#"
 type = "local"
@@ -361,6 +388,23 @@ root = "/var/sipflow"
                 assert!(upload.is_none(), "upload should default to None");
             }
             _ => panic!("expected Local sipflow config"),
+        }
+    }
+
+    #[test]
+    fn test_sipflow_remote_config_default_no_upload() {
+        let toml_str = r#"
+type = "remote"
+udp_addr = "127.0.0.1:3000"
+http_addr = "http://127.0.0.1:3001"
+"#;
+        let cfg: crate::config::SipFlowConfig =
+            toml::from_str(toml_str).expect("should parse remote sipflow without upload");
+        match cfg {
+            crate::config::SipFlowConfig::Remote { upload, .. } => {
+                assert!(upload.is_none(), "upload should default to None");
+            }
+            _ => panic!("expected Remote sipflow config"),
         }
     }
 }

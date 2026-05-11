@@ -2,6 +2,7 @@ use crate::{
     config::{MediaProxyMode, RouteResult},
     media::negotiate::CodecSelectionStrategy,
     media::recorder::RecorderOption,
+    proxy::routing::VideoPolicy,
 };
 use anyhow::Result;
 use audio_codec::CodecType;
@@ -695,6 +696,8 @@ pub struct MediaConfig {
     /// Performance (default): avoid transcoding, keep caller's codecs only.
     /// Quality: prefer Opus > G729 > G722 > G711 (may transcode).
     pub codec_strategy: CodecSelectionStrategy,
+    /// Video policy: pass-through or strip video from SDP
+    pub video_policy: Option<VideoPolicy>,
 }
 
 impl Default for MediaConfig {
@@ -715,7 +718,13 @@ impl MediaConfig {
             ice_servers: None,
             enable_latching: true,
             codec_strategy: CodecSelectionStrategy::default(),
+            video_policy: None,
         }
+    }
+
+    pub fn with_video_policy(mut self, policy: Option<VideoPolicy>) -> Self {
+        self.video_policy = policy;
+        self
     }
 
     pub fn with_proxy_mode(mut self, mode: MediaProxyMode) -> Self {
@@ -1066,6 +1075,37 @@ impl Dialplan {
             None
         } else {
             Some(headers)
+        }
+    }
+}
+
+/// Determines whether media should be anchored (go through the media proxy)
+/// for a given dialplan. Each addon can provide its own policy.
+pub trait MediaPolicy: Send + Sync {
+    fn requires_anchored(&self, dialplan: &Dialplan, mode: &MediaProxyMode) -> bool;
+}
+
+/// Default media policy used when no addon overrides it.
+/// Logic:
+/// - Recording always anchors media
+/// - App/Queue flows anchor media in Auto/NAT mode
+/// - All mode always anchors
+/// - None mode never anchors
+pub struct DefaultMediaPolicy;
+
+impl MediaPolicy for DefaultMediaPolicy {
+    fn requires_anchored(&self, dialplan: &Dialplan, mode: &MediaProxyMode) -> bool {
+        if dialplan.recording.enabled {
+            return true;
+        }
+        let app_or_queue = matches!(
+            dialplan.flow,
+            DialplanFlow::Application { .. } | DialplanFlow::Queue { .. }
+        );
+        match mode {
+            MediaProxyMode::All => true,
+            MediaProxyMode::Auto | MediaProxyMode::Nat => app_or_queue,
+            MediaProxyMode::None | MediaProxyMode::Bypass => false,
         }
     }
 }

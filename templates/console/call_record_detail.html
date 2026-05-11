@@ -231,6 +231,18 @@
                                         }}</p>
                                 </div>
                                 <div class="flex flex-wrap items-center gap-2">
+                                    <template x-if="record.recording && record.recording.supports_streams">
+                                    <label class="inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs font-semibold text-slate-600">
+                                        <span>Stream</span>
+                                        <select
+                                            class="rounded border border-slate-200 bg-white px-2 py-1 text-xs text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                            x-model="playbackStream" @change="onRecordingStreamChange()">
+                                            <template x-for="option in playbackStreamOptions" :key="option.value">
+                                                <option :value="option.value" x-text="option.label"></option>
+                                            </template>
+                                        </select>
+                                    </label>
+                                    </template>
                                     <button type="button"
                                         class="inline-flex items-center gap-2 rounded-lg bg-slate-900 px-3 py-2 text-sm font-semibold text-white transition hover:bg-slate-800 focus:outline-none focus:ring-2 focus:ring-sky-300 disabled:cursor-not-allowed disabled:opacity-60"
                                         :disabled="!waveformReady" @click="toggleWaveformPlayback()">
@@ -254,7 +266,7 @@
                                         </svg>
                                         {{ "call_record_detail.btn_stop" | t }}
                                     </button>
-                                    <a :href="actions.download_recording || record.recording.url"
+                                    <a :href="recordingPlaybackUrl()"
                                         class="inline-flex items-center gap-2 rounded-lg border border-slate-200 px-3 py-2 text-sm font-semibold text-slate-700 transition hover:border-sky-300 hover:text-sky-700"
                                         target="_blank" rel="noopener">
                                         <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor"
@@ -312,7 +324,7 @@
                                 </div>
                             </div>
                             <audio x-ref="waveformFallbackAudio" class="sr-only" controls preload="none"
-                                :src="recordingPlaybackUrl()" @error="switchFallbackAudioSource($event)"></audio>
+                                :src="recordingPlaybackUrl()"></audio>
                         </div>
                     </template>
                     <template x-if="!record.recording || !record.recording.url">
@@ -836,6 +848,12 @@
             waveformOriginalBuffer: null,
             waveformSourceUrl: '',
             waveformTriedFallback: false,
+            playbackStream: 'A',
+            playbackStreamOptions: [
+                { value: 'A', label: 'Caller (A)' },
+                { value: 'B', label: 'Callee (B)' },
+                { value: 'mixed', label: 'Mixed' },
+            ],
             async addTag() {
                 const value = (this.tagInput || '').trim();
                 if (!value) {
@@ -1796,6 +1814,37 @@
                     this.$refs.waveformCanvas.innerHTML = '';
                 }
                 this.waveformOriginalBuffer = null;
+            },
+            recordingPlaybackUrl() {
+                if (!this.record || !this.record.recording || !this.record.recording.url) {
+                    return '';
+                }
+                const base = this.record.recording.url;
+                const selected = this.normalizePlaybackStream(this.playbackStream);
+                const stream = selected || 'A';
+                const separator = base.includes('?') ? '&' : '?';
+                return `${base}${separator}stream=${encodeURIComponent(stream)}`;
+            },
+            normalizePlaybackStream(value) {
+                const normalized = String(value || '').trim().toLowerCase();
+                if (normalized === 'a' || normalized === 'caller') {
+                    return 'A';
+                }
+                if (normalized === 'b' || normalized === 'callee') {
+                    return 'B';
+                }
+                if (normalized === 'mixed') {
+                    return 'mixed';
+                }
+                return 'A';
+            },
+            onRecordingStreamChange() {
+                this.playbackStream = this.normalizePlaybackStream(this.playbackStream);
+                this.stopWaveform();
+                this.destroyWaveform();
+                if (this.record && this.record.recording && this.record.recording.url) {
+                    this.$nextTick(() => this.prepareWaveform());
+                }
             },
             toggleWaveformPlayback() {
                 if (!this.waveSurfer && !this.waveformLoading && this.record && this.record.recording && this.record.recording.url) {
