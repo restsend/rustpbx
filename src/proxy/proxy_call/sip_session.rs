@@ -32,7 +32,7 @@ use crate::callrecord::{CallRecordHangupMessage, CallRecordHangupReason, CallRec
 use crate::config::MediaProxyMode;
 use crate::media::bridge::{BridgeEndpoint, BridgePeerBuilder};
 use crate::media::mixer::MediaMixer;
-use crate::media::negotiate::{CodecInfo, MediaNegotiator};
+use crate::media::negotiate::{CodecInfo, CodecSelectionStrategy, MediaNegotiator};
 use crate::media::recorder::Recorder;
 use crate::media::{FileTrack, PlaybackEndReason, RtpTrackBuilder, Track};
 use crate::proxy::proxy_call::{
@@ -766,6 +766,413 @@ impl SipSession {
         Ok((status, answer_sdp))
     }
 
+    async fn relay_bridged_dialog_offer(
+        &mut self,
+        side: DialogSide,
+        method: rsipstack::sip::Method,
+        offer_sdp: &str,
+    ) -> Result<(StatusCode, Option<String>)> {
+        let source_desc = rustrtc::SessionDescription::parse(rustrtc::SdpType::Offer, offer_sdp)
+            .map_err(|e| anyhow!("Failed to parse bridged dialog offer SDP: {}", e))?;
+        let source_is_webrtc = match side {
+            DialogSide::Caller => self.is_caller_webrtc(),
+            DialogSide::Callee => self.is_callee_webrtc(),
+        };
+        let target_side = match side {
+            DialogSide::Caller => DialogSide::Callee,
+            DialogSide::Callee => DialogSide::Caller,
+        };
+        let target_is_webrtc = match target_side {
+            DialogSide::Caller => self.is_caller_webrtc(),
+            DialogSide::Callee => self.is_callee_webrtc(),
+        };
+
+        if source_is_webrtc == target_is_webrtc {
+            return self.relay_signaling_only_offer(side, method, offer_sdp).await;
+        }
+
+        let offer_has_video = source_desc
+            .media_sections
+            .iter()
+            .any(|section| section.kind == rustrtc::MediaKind::Video);
+        let offer_video_direction = source_desc
+            .media_sections
+            .iter()
+            .find(|section| section.kind == rustrtc::MediaKind::Video)
+            .map(|section| {
+                if section.port == 0 {
+                    rustrtc::Direction::Inactive
+                } else {
+                    section.direction
+                }
+            });
+        let offer_video_active = offer_video_direction
+            .map(|direction| direction != rustrtc::Direction::Inactive)
+            .unwrap_or(false);
+        let source_video_caps: Vec<_> = source_desc
+            .media_sections
+            .iter()
+            .filter(|section| {
+                section.kind == rustrtc::MediaKind::Video
+                    && section.port != 0
+                    && section.direction != rustrtc::Direction::Inactive
+            })
+            .flat_map(|section| section.to_video_capabilities())
+            .filter(|cap| !cap.codec_name.eq_ignore_ascii_case("unknown"))
+            .collect();
+        let has_audio = source_desc
+            .media_sections
+            .iter()
+            .any(|section| section.kind == rustrtc::MediaKind::Audio);
+        let offer_audio_direction = source_desc
+            .media_sections
+            .iter()
+            .find(|section| section.kind == rustrtc::MediaKind::Audio)
+            .map(|section| section.direction);
+        let apply_source_video_caps = |sdp_type, sdp: &str, context: &str| -> Result<String> {
+            let mut desc = rustrtc::SessionDescription::parse(sdp_type, sdp)
+                .map_err(|e| anyhow!("Failed to parse {} SDP: {}", context, e))?;
+            if let Some(video_section) = desc
+                .media_sections
+                .iter_mut()
+                .find(|section| section.kind == rustrtc::MediaKind::Video)
+            {
+                video_section.formats = source_video_caps
+                    .iter()
+                    .map(|cap| cap.payload_type.to_string())
+                    .collect();
+                video_section.attributes.retain(|attr| {
+                    !matches!(attr.key.as_str(), "rtpmap" | "fmtp" | "rtcp-fb")
+                });
+                for cap in &source_video_caps {
+                    video_section.attributes.push(rustrtc::Attribute::new(
+                        "rtpmap",
+                        Some(format!(
+                            "{} {}/{}",
+                            cap.payload_type, cap.codec_name, cap.clock_rate
+                        )),
+                    ));
+                    if let Some(fmtp) = &cap.fmtp {
+                        video_section.attributes.push(rustrtc::Attribute::new(
+                            "fmtp",
+                            Some(format!("{} {}", cap.payload_type, fmtp)),
+                        ));
+                    }
+                    for fb in &cap.rtcp_fbs {
+                        video_section.attributes.push(rustrtc::Attribute::new(
+                            "rtcp-fb",
+                            Some(format!("{} {}", cap.payload_type, fb)),
+                        ));
+                    }
+                }
+            }
+            Ok(desc.to_sdp_string())
+        };
+
+        let (target_pc, source_pc) = {
+            let bridge = self
+                .media_bridge
+                .as_ref()
+                .ok_or_else(|| anyhow!("No media bridge available for dialog offer"))?;
+
+            if offer_video_active && !bridge.has_video().await {
+                let video_codec = source_video_caps
+                    .first()
+                    .ok_or_else(|| anyhow!("Video re-INVITE offer has no video codec"))?;
+                bridge
+                    .add_video_track(video_codec.payload_type, video_codec.clock_rate)
+                    .await?;
+            }
+
+            let target_pc = if target_is_webrtc {
+                bridge.webrtc_pc().clone()
+            } else {
+                bridge.rtp_pc().clone()
+            };
+            let source_pc = if source_is_webrtc {
+                bridge.webrtc_pc().clone()
+            } else {
+                bridge.rtp_pc().clone()
+            };
+            (target_pc, source_pc)
+        };
+
+        let target_transceivers = target_pc.get_transceivers();
+        let previously_had_video = self.leg_has_video.values().any(|has_video| *has_video);
+        let mut used_transceivers = HashSet::new();
+        for source_section in &source_desc.media_sections {
+            if let Some((idx, transceiver)) = target_transceivers
+                .iter()
+                .enumerate()
+                .find(|(idx, transceiver)| {
+                    !used_transceivers.contains(idx) && transceiver.kind() == source_section.kind
+                })
+            {
+                used_transceivers.insert(idx);
+                let direction = if source_section.port == 0 {
+                    rustrtc::Direction::Inactive
+                } else {
+                    source_section.direction
+                };
+                let target_direction = if target_is_webrtc
+                    && previously_had_video
+                    && source_section.kind == rustrtc::MediaKind::Video
+                    && direction == rustrtc::Direction::Inactive
+                {
+                    // Keep the browser receiver negotiated while the RTP leg
+                    // temporarily disables video.
+                    rustrtc::Direction::SendOnly
+                } else {
+                    direction
+                };
+                transceiver.set_direction(target_direction.into());
+            }
+        }
+
+        let target_offer = target_pc
+            .create_offer()
+            .await
+            .map_err(|e| anyhow!("Failed to create bridged dialog offer: {}", e))?;
+        let mut target_offer_sdp = target_offer.to_sdp_string();
+        if offer_has_video && !source_video_caps.is_empty() {
+            target_offer_sdp = apply_source_video_caps(
+                rustrtc::SdpType::Offer,
+                &target_offer_sdp,
+                "bridged local offer",
+            )?;
+        }
+        let filter_audio_to_reference =
+            self.context.dialplan.media.codec_strategy != CodecSelectionStrategy::Quality;
+        if let Some(filtered) = MediaNegotiator::restrict_sdp_to_reference_codecs(
+            rustrtc::SdpType::Offer,
+            &target_offer_sdp,
+            rustrtc::SdpType::Offer,
+            offer_sdp,
+            filter_audio_to_reference,
+        ) {
+            target_offer_sdp = filtered;
+        }
+        let target_offer_desc =
+            rustrtc::SessionDescription::parse(rustrtc::SdpType::Offer, &target_offer_sdp)
+                .map_err(|e| anyhow!("Failed to parse bridged local offer SDP: {}", e))?;
+        target_pc
+            .set_local_description(target_offer_desc)
+            .map_err(|e| anyhow!("Failed to set bridged local offer SDP: {}", e))?;
+        if target_is_webrtc {
+            target_pc.wait_for_gathering_complete().await;
+        }
+        let target_offer_sdp = target_pc
+            .local_description()
+            .map(|desc| desc.to_sdp_string())
+            .ok_or_else(|| anyhow!("Bridge target side has no local offer"))?;
+
+        let headers = vec![rsipstack::sip::Header::ContentType(
+            "application/sdp".into(),
+        )];
+        let response_result = self
+            .send_mid_dialog_request_to_side(
+                target_side,
+                method.clone(),
+                headers.clone(),
+                Some(target_offer_sdp.as_bytes().to_vec()),
+            )
+            .await;
+
+        let response = match response_result {
+            Ok(Some(response))
+                if response.status_code.kind()
+                    == rsipstack::sip::status_code::StatusCodeKind::Successful
+                    || method != rsipstack::sip::Method::Update =>
+            {
+                response
+            }
+            Ok(Some(response)) => {
+                warn!(
+                    session_id = %self.context.session_id,
+                    target_side = ?target_side,
+                    status = %response.status_code,
+                    "Bridged UPDATE was rejected; retrying as re-INVITE"
+                );
+                self.send_mid_dialog_request_to_side(
+                    target_side,
+                    rsipstack::sip::Method::Invite,
+                    headers,
+                    Some(target_offer_sdp.as_bytes().to_vec()),
+                )
+                .await?
+                .ok_or_else(|| anyhow!("Bridged re-INVITE timed out"))?
+            }
+            Ok(None) if method == rsipstack::sip::Method::Update => {
+                warn!(
+                    session_id = %self.context.session_id,
+                    target_side = ?target_side,
+                    "Bridged UPDATE timed out; retrying as re-INVITE"
+                );
+                self.send_mid_dialog_request_to_side(
+                    target_side,
+                    rsipstack::sip::Method::Invite,
+                    headers,
+                    Some(target_offer_sdp.as_bytes().to_vec()),
+                )
+                .await?
+                .ok_or_else(|| anyhow!("Bridged re-INVITE timed out"))?
+            }
+            Ok(None) => return Err(anyhow!("{} timed out", method)),
+            Err(error) if method == rsipstack::sip::Method::Update => {
+                warn!(
+                    session_id = %self.context.session_id,
+                    target_side = ?target_side,
+                    error = %error,
+                    "Bridged UPDATE failed; retrying as re-INVITE"
+                );
+                self.send_mid_dialog_request_to_side(
+                    target_side,
+                    rsipstack::sip::Method::Invite,
+                    headers,
+                    Some(target_offer_sdp.as_bytes().to_vec()),
+                )
+                .await?
+                .ok_or_else(|| anyhow!("Bridged re-INVITE timed out"))?
+            }
+            Err(error) => return Err(error),
+        };
+
+        let status = response.status_code.clone();
+        if status.kind() != rsipstack::sip::status_code::StatusCodeKind::Successful {
+            return Ok((status, None));
+        }
+        if response.body().is_empty() {
+            return Err(anyhow!("Bridged dialog offer answer had no SDP"));
+        }
+
+        let target_answer_sdp = String::from_utf8_lossy(response.body()).to_string();
+        let target_answer =
+            rustrtc::SessionDescription::parse(rustrtc::SdpType::Answer, &target_answer_sdp)
+                .map_err(|e| anyhow!("Failed to parse bridged target answer SDP: {}", e))?;
+        target_pc
+            .set_remote_description(target_answer)
+            .await
+            .map_err(|e| anyhow!("Failed to set bridged target answer SDP: {}", e))?;
+
+        let source_offer =
+            rustrtc::SessionDescription::parse(rustrtc::SdpType::Offer, offer_sdp)
+                .map_err(|e| anyhow!("Failed to parse bridged source offer SDP: {}", e))?;
+        source_pc
+            .set_remote_description(source_offer)
+            .await
+            .map_err(|e| anyhow!("Failed to apply bridged source offer SDP: {}", e))?;
+        let source_answer = source_pc
+            .create_answer()
+            .await
+            .map_err(|e| anyhow!("Failed to create bridged source answer SDP: {}", e))?;
+        let mut source_answer_sdp = source_answer.to_sdp_string();
+        if offer_has_video && !source_video_caps.is_empty() {
+            source_answer_sdp = apply_source_video_caps(
+                rustrtc::SdpType::Answer,
+                &source_answer_sdp,
+                "bridged source answer",
+            )?;
+        }
+        if let Some(filtered) = MediaNegotiator::restrict_sdp_to_reference_codecs(
+            rustrtc::SdpType::Answer,
+            &source_answer_sdp,
+            rustrtc::SdpType::Answer,
+            &target_answer_sdp,
+            filter_audio_to_reference,
+        ) {
+            source_answer_sdp = filtered;
+        }
+        let source_answer =
+            rustrtc::SessionDescription::parse(rustrtc::SdpType::Answer, &source_answer_sdp)
+                .map_err(|e| anyhow!("Failed to parse bridged source answer SDP: {}", e))?;
+        source_pc
+            .set_local_description(source_answer)
+            .map_err(|e| anyhow!("Failed to set bridged source answer SDP: {}", e))?;
+        if source_is_webrtc {
+            source_pc.wait_for_gathering_complete().await;
+        }
+        let source_answer_sdp = source_pc
+            .local_description()
+            .map(|desc| desc.to_sdp_string())
+            .ok_or_else(|| anyhow!("Bridge source side has no local answer"))?;
+
+        if let Some(bridge) = &self.media_bridge
+            && let Ok(desc) =
+                rustrtc::SessionDescription::parse(rustrtc::SdpType::Answer, &source_answer_sdp)
+            && let Some(video) = desc.to_video_capabilities().first()
+        {
+            bridge
+                .set_video_sender_params(rustrtc::RtpCodecParameters {
+                    payload_type: video.payload_type,
+                    clock_rate: video.clock_rate,
+                    channels: 0,
+                })
+                .await;
+        }
+
+        match side {
+            DialogSide::Caller => {
+                self.caller_offer = Some(offer_sdp.to_string());
+                self.callee_offer = Some(target_offer_sdp);
+                self.callee_answer_sdp = Some(target_answer_sdp.clone());
+                self.answer = Some(source_answer_sdp.clone());
+                if has_audio {
+                    self.update_leg_state(
+                        &LegId::from("caller"),
+                        if Self::is_hold_direction(offer_audio_direction.unwrap_or_default()) {
+                            LegState::Hold
+                        } else {
+                            LegState::Connected
+                        },
+                    );
+                }
+            }
+            DialogSide::Callee => {
+                self.callee_offer = Some(source_answer_sdp.clone());
+                self.callee_answer_sdp = Some(source_answer_sdp.clone());
+                if has_audio {
+                    self.update_leg_state(
+                        &LegId::from("callee"),
+                        if Self::is_hold_direction(offer_audio_direction.unwrap_or_default()) {
+                            LegState::Hold
+                        } else {
+                            LegState::Connected
+                        },
+                    );
+                }
+            }
+        }
+
+        if offer_video_direction.is_some() && (previously_had_video || offer_video_active) {
+            let source_leg_id = match side {
+                DialogSide::Caller => LegId::from("caller"),
+                DialogSide::Callee => LegId::from("callee"),
+            };
+            let target_leg_id = match side {
+                DialogSide::Caller => LegId::from("callee"),
+                DialogSide::Callee => LegId::from("caller"),
+            };
+            self.leg_has_video.insert(source_leg_id, true);
+            self.leg_has_video.insert(target_leg_id, true);
+        }
+        self.caller_answer_uses_media_bridge = true;
+        self.callee_offer_uses_media_bridge = true;
+
+        let caller_sdp = match side {
+            DialogSide::Caller => source_answer_sdp.as_str(),
+            DialogSide::Callee => target_answer_sdp.as_str(),
+        };
+        let callee_sdp = match side {
+            DialogSide::Caller => target_answer_sdp.as_str(),
+            DialogSide::Callee => source_answer_sdp.as_str(),
+        };
+        self.configure_media_bridge_transcoders(Some(caller_sdp), Some(callee_sdp));
+        self.start_media_bridge_forwarding().await;
+        self.update_snapshot_cache();
+
+        Ok((status, Some(source_answer_sdp)))
+    }
+
     pub async fn process(
         &mut self,
         mut state_rx: mpsc::UnboundedReceiver<DialogState>,
@@ -975,6 +1382,14 @@ impl SipSession {
 
         let body = if update_result.is_ok() && !request.body.is_empty() {
             let offer_sdp = String::from_utf8_lossy(&request.body).to_string();
+            let bridged_video_offer = self.media_bridge.is_some()
+                && rustrtc::SessionDescription::parse(rustrtc::SdpType::Offer, &offer_sdp)
+                    .map(|desc| {
+                        desc.media_sections
+                            .iter()
+                            .any(|section| section.kind == rustrtc::MediaKind::Video)
+                    })
+                    .unwrap_or(false);
             let answer_result = if self.bypasses_local_media() {
                 self.relay_signaling_only_offer(side, request.method.clone(), &offer_sdp)
                     .await
@@ -982,6 +1397,16 @@ impl SipSession {
                         (
                             rsipstack::sip::StatusCode::ServerInternalError,
                             "Failed to relay signaling-only dialog offer",
+                            e,
+                        )
+                    })
+            } else if bridged_video_offer {
+                self.relay_bridged_dialog_offer(side, request.method.clone(), &offer_sdp)
+                    .await
+                    .map_err(|e| {
+                        (
+                            rsipstack::sip::StatusCode::NotAcceptableHere,
+                            "Failed to relay bridged video dialog offer",
                             e,
                         )
                     })
@@ -1051,25 +1476,29 @@ impl SipSession {
             }
             DialogState::Info(_, request, tx_handle) => {
                 // Parse inbound SIP INFO for DTMF (application/dtmf-relay)
-                let is_dtmf = request.headers.iter().any(|h| {
+                let content_type = request.headers.iter().find_map(|h| {
                     if let rsipstack::sip::Header::ContentType(ct) = h {
-                        ct.value().to_lowercase().contains("application/dtmf-relay")
+                        Some(ct.value().to_lowercase())
                     } else {
-                        false
+                        None
                     }
                 });
+                let is_dtmf = content_type
+                    .as_deref()
+                    .is_some_and(|ct| ct.contains("application/dtmf-relay"));
+                let body_text = String::from_utf8_lossy(request.body());
+
                 if is_dtmf {
                     info!(
                         session_id = %self.context.session_id,
                         "✓ Received SIP INFO with DTMF (application/dtmf-relay content type)"
                     );
-                    let body = String::from_utf8_lossy(request.body());
                     debug!(
                         session_id = %self.context.session_id,
-                        body = %body,
+                        body = %body_text,
                         "INFO DTMF message body"
                     );
-                    for line in body.lines() {
+                    for line in body_text.lines() {
                         let line = line.trim();
                         if line.to_lowercase().starts_with("signal=") {
                             let digit = line
@@ -2279,6 +2708,14 @@ impl SipSession {
 
                     // 1. Set callee's RTP answer on bridge's RTP side
                     if let Ok(desc) = SessionDescription::parse(SdpType::Answer, sdp) {
+                        let selected_video_params =
+                            desc.to_video_capabilities()
+                                .first()
+                                .map(|cap| rustrtc::RtpCodecParameters {
+                                    payload_type: cap.payload_type,
+                                    clock_rate: cap.clock_rate,
+                                    channels: 0,
+                                });
                         let rtp_pc = bridge.rtp_pc();
                         // If we already negotiated early media, the RTP peer is in Stable state.
                         // To apply a new answer we must re-offer: create offer -> set local -> set remote.
@@ -2297,6 +2734,9 @@ impl SipSession {
                         }
                         if let Err(e) = rtp_pc.set_remote_description(desc).await {
                             warn!(session_id = %self.context.session_id, error = %e, "Failed to set bridge RTP remote description");
+                        }
+                        if let Some(params) = selected_video_params {
+                            bridge.set_video_sender_params(params).await;
                         }
                     }
 
@@ -2354,9 +2794,14 @@ impl SipSession {
                                                         .local_description()
                                                         .map(|d| d.to_sdp_string())
                                                         .map(|answer_sdp| {
-                                                            MediaNegotiator::restrict_answer_to_callee_accepted_codecs(
+                                                            let filter_audio_to_reference = self.context.dialplan.media.codec_strategy
+                                                                != CodecSelectionStrategy::Quality;
+                                                            MediaNegotiator::restrict_sdp_to_reference_codecs(
+                                                                SdpType::Answer,
                                                                 &answer_sdp,
+                                                                SdpType::Answer,
                                                                 sdp,
+                                                                filter_audio_to_reference,
                                                             )
                                                             .unwrap_or(answer_sdp)
                                                         })
@@ -2426,7 +2871,19 @@ impl SipSession {
                                                 let rtp_sdp = bridge
                                                     .rtp_pc()
                                                     .local_description()
-                                                    .map(|d| d.to_sdp_string());
+                                                    .map(|d| d.to_sdp_string())
+                                                    .map(|answer_sdp| {
+                                                        let filter_audio_to_reference = self.context.dialplan.media.codec_strategy
+                                                            != CodecSelectionStrategy::Quality;
+                                                        MediaNegotiator::restrict_sdp_to_reference_codecs(
+                                                            SdpType::Answer,
+                                                            &answer_sdp,
+                                                            SdpType::Answer,
+                                                            sdp,
+                                                            filter_audio_to_reference,
+                                                        )
+                                                        .unwrap_or(answer_sdp)
+                                                    });
                                                 debug!(session_id = %self.context.session_id, sdp = ?rtp_sdp, "Bridge: RTP answer SDP (sent to RTP caller)");
                                                 rtp_sdp.or_else(|| callee_sdp.clone())
                                             }
@@ -3496,53 +3953,9 @@ impl SipSession {
                                 codecs = ?caller_video_caps.iter().map(|c| format!("{}@{}", c.codec_name, c.payload_type)).collect::<Vec<_>>(),
                                 "Video capabilities configured from caller SDP"
                             );
-                            let webrtc_video_caps: Vec<rustrtc::config::VideoCapability> =
-                                caller_video_caps
-                                    .iter()
-                                    .map(|cap| {
-                                        if cap.codec_name.eq_ignore_ascii_case("H264") {
-                                            let mut c = cap.clone();
-                                            // Inject packetization-mode=1 if not already present
-                                            let fmtp = cap.fmtp.as_deref().unwrap_or("");
-                                            if !fmtp.contains("packetization-mode") {
-                                                let new_fmtp = if fmtp.is_empty() {
-                                                    "packetization-mode=1".to_string()
-                                                } else {
-                                                    format!("{};packetization-mode=1", fmtp)
-                                                };
-                                                c.fmtp = Some(new_fmtp);
-                                            }
-                                            c
-                                        } else {
-                                            cap.clone()
-                                        }
-                                    })
-                                    .collect();
-
-                            let rtp_video_caps: Vec<rustrtc::config::VideoCapability> =
-                                caller_video_caps
-                                    .iter()
-                                    .map(|cap| {
-                                        if cap.codec_name.eq_ignore_ascii_case("H264") {
-                                            let mut c = cap.clone();
-                                            let fmtp = cap.fmtp.as_deref().unwrap_or("");
-                                            if !fmtp.contains("packetization-mode") {
-                                                let new_fmtp = if fmtp.is_empty() {
-                                                    "packetization-mode=1".to_string()
-                                                } else {
-                                                    format!("{};packetization-mode=1", fmtp)
-                                                };
-                                                c.fmtp = Some(new_fmtp);
-                                            }
-                                            c
-                                        } else {
-                                            cap.clone()
-                                        }
-                                    })
-                                    .collect();
                             bridge_builder = bridge_builder
-                                .with_webrtc_video_capabilities(webrtc_video_caps)
-                                .with_rtp_video_capabilities(rtp_video_caps);
+                                .with_webrtc_video_capabilities(caller_video_caps.clone())
+                                .with_rtp_video_capabilities(caller_video_caps);
                         }
                     }
                     Err(e) => {
@@ -4010,17 +4423,27 @@ impl SipSession {
         // Detect video addition: if the offer contains video but the current
         // session doesn't have video for this leg, dynamically add video tracks
         // to the bridge PCs.
-        let offer_has_video = parsed
+        let offer_video_section = parsed
             .media_sections
             .iter()
-            .any(|s| s.kind == rustrtc::MediaKind::Video);
+            .find(|s| s.kind == rustrtc::MediaKind::Video);
+        let offer_video_direction = offer_video_section.map(|section| {
+            if section.port == 0 {
+                rustrtc::Direction::Inactive
+            } else {
+                section.direction
+            }
+        });
+        let offer_video_active = offer_video_direction
+            .map(|direction| direction != rustrtc::Direction::Inactive)
+            .unwrap_or(false);
         let leg_key = match side {
             DialogSide::Caller => LegId::from("caller"),
             DialogSide::Callee => LegId::from("callee"),
         };
         let had_video = self.leg_has_video.get(&leg_key).copied().unwrap_or(false);
 
-        if offer_has_video && !had_video {
+        if offer_video_active && !had_video {
             // Video being added — extract first video codec PT/clock from the offer
             use crate::media::negotiate::MediaNegotiator;
             let extracted = MediaNegotiator::extract_codec_params(offer_sdp);
@@ -4057,8 +4480,6 @@ impl SipSession {
                         },
                     );
                 }
-                self.leg_has_video
-                    .insert(LegId::from("caller"), offer_has_video);
             }
             DialogSide::Callee => {
                 self.callee_offer = Some(answer_sdp.clone());
@@ -4073,9 +4494,10 @@ impl SipSession {
                         },
                     );
                 }
-                self.leg_has_video
-                    .insert(LegId::from("callee"), offer_has_video);
             }
+        }
+        if offer_video_direction.is_some() && (had_video || offer_video_active) {
+            self.leg_has_video.insert(leg_key, true);
         }
 
         self.update_anchored_forwarding_from_sdp(side, &answer_sdp)
@@ -6945,9 +7367,7 @@ mod tests {
 
         assert!(SipSession::route_via_home_proxy(
             &target,
-            &local_addrs,
-            true
-        ));
+            &local_addrs));
     }
 
     #[test]
@@ -6974,9 +7394,7 @@ mod tests {
 
         assert!(!SipSession::route_via_home_proxy(
             &target,
-            &local_addrs,
-            true
-        ));
+            &local_addrs));
     }
 
     #[test]
