@@ -324,15 +324,42 @@ async fn stream_call_recording(
         let start_time = (call_time - chrono::Duration::hours(1)).with_timezone(&chrono::Local);
         let end_time = (call_time + chrono::Duration::hours(2)).with_timezone(&chrono::Local);
 
+        if let Err(err) = backend.flush().await {
+            warn!(
+                call_id = %record.call_id,
+                "failed to flush SipFlow backend before recording query: {}",
+                err
+            );
+        }
+
         if let Ok(audio_data) = backend
             .query_media(&record.call_id, start_time, end_time)
             .await
             && !audio_data.is_empty()
         {
+            // SipFlow can briefly generate a one-frame silent WAV before media is flushed.
+            // Treat that as not ready so the same local endpoint can work on a later page load.
+            let data_size = audio_data
+                .get(40..44)
+                .and_then(|bytes| bytes.try_into().ok())
+                .map(u32::from_le_bytes)
+                .unwrap_or(0);
+            if record.duration_secs > 1 && data_size <= 1280 {
+                return Response::builder()
+                    .status(StatusCode::NOT_FOUND)
+                    .header(http::header::CACHE_CONTROL, "no-store")
+                    .header(http::header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({ "message": "Recording is not ready" }).to_string(),
+                    ))
+                    .unwrap_or_else(|_| StatusCode::NOT_FOUND.into_response());
+            }
+
             return Response::builder()
                 .status(StatusCode::OK)
                 .header(http::header::CONTENT_TYPE, "audio/wav")
                 .header(http::header::CONTENT_LENGTH, audio_data.len())
+                .header(http::header::CACHE_CONTROL, "no-store")
                 .header(
                     http::header::CONTENT_DISPOSITION,
                     "inline; filename=\"recording.wav\"",
@@ -344,6 +371,7 @@ async fn stream_call_recording(
 
     (
         StatusCode::NOT_FOUND,
+        [(http::header::CACHE_CONTROL, "no-store")],
         Json(json!({ "message": "Recording not found" })),
     )
         .into_response()
