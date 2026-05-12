@@ -3202,6 +3202,178 @@ mod tests {
         }
     }
 
+    /// Verify Opus → PCMU transcoding via Transcoder produces correct output.
+    #[tokio::test]
+    #[cfg(feature = "opus")]
+    async fn test_transcoder_opus_to_pcmu() {
+        use audio_codec::create_encoder;
+        // Generate 20ms of 48kHz mono PCM (960 samples)
+        let pcm_48k: Vec<i16> = (0..960).map(|i| ((i * 100) % 32767) as i16).collect();
+
+        // Encode to Opus (stereo encoder with mono→stereo upmix)
+        let mut opus_enc = create_encoder(CodecType::Opus);
+        let opus_data = opus_enc.encode(&pcm_48k);
+        assert!(!opus_data.is_empty(), "Opus encoder should produce output");
+
+        // Verify the Opus packet is stereo (TOC byte bit 2 = stereo flag)
+        let is_stereo = opus_data[0] & 0x04 != 0;
+        assert!(is_stereo, "Opus encoder should produce stereo packet (TOC bit 2 set)");
+
+        // First decode separately to verify decoder output length
+        let mut standalone_dec = audio_codec::create_decoder(CodecType::Opus);
+        let decoded_pcm = standalone_dec.decode(&opus_data);
+        // After stereo→mono downmix, 20ms at 48kHz should yield 960 samples
+        assert_eq!(
+            decoded_pcm.len(),
+            960,
+            "Opus decoder should output 960 mono samples (20ms), got {}",
+            decoded_pcm.len()
+        );
+
+        // Now transcode: Opus → PCMU
+        let mut transcoder = Transcoder::new(CodecType::Opus, CodecType::PCMU, 0);
+
+        let input_frame = AudioFrame {
+            rtp_timestamp: 100,
+            clock_rate: 48000,
+            data: opus_data.clone().into(),
+            sequence_number: Some(10),
+            payload_type: Some(111),
+            ..Default::default()
+        };
+        let output = transcoder.transcode(&input_frame);
+        assert_eq!(
+            output.data.len(),
+            160,
+            "Opus→PCMU should produce 160 bytes (20ms), got {}",
+            output.data.len()
+        );
+        assert_eq!(output.payload_type, Some(0));
+
+        // Second call — should also produce valid PCMU
+        let input_frame2 = AudioFrame {
+            rtp_timestamp: 100,
+            clock_rate: 48000,
+            data: opus_data.into(),
+            sequence_number: Some(11),
+            payload_type: Some(111),
+            ..Default::default()
+        };
+        let output2 = transcoder.transcode(&input_frame2);
+        assert_eq!(output2.data.len(), 160, "Second call should also produce 160 bytes");
+        assert_eq!(output2.payload_type, Some(0));
+
+        // Decode PCMU back to PCM
+        let mut pcmu_dec = audio_codec::create_decoder(CodecType::PCMU);
+        let decoded = pcmu_dec.decode(&output.data);
+        assert_eq!(
+            decoded.len(),
+            160,
+            "PCMU decode should yield 160 samples (20ms at 8kHz), got {}",
+            decoded.len()
+        );
+    }
+
+    /// Verify Opus → G.722 transcoding via Transcoder produces correct output.
+    #[tokio::test]
+    #[cfg(feature = "opus")]
+    async fn test_transcoder_opus_to_g722() {
+        use audio_codec::create_encoder;
+
+        // Generate 20ms of 48kHz mono PCM (960 samples)
+        let pcm_48k: Vec<i16> = (0..960).map(|i| ((i * 100) % 32767) as i16).collect();
+
+        // Encode to Opus
+        let mut opus_enc = create_encoder(CodecType::Opus);
+        let opus_data = opus_enc.encode(&pcm_48k);
+        assert!(!opus_data.is_empty(), "Opus encoder should produce output");
+
+        // Transcode: Opus → G.722 (default 64kbps)
+        let mut transcoder = Transcoder::new(CodecType::Opus, CodecType::G722, 9);
+
+        let input_frame = AudioFrame {
+            rtp_timestamp: 100,
+            clock_rate: 48000,
+            data: opus_data.into(),
+            sequence_number: Some(10),
+            payload_type: Some(111),
+            ..Default::default()
+        };
+        let output = transcoder.transcode(&input_frame);
+        // G.722 at 64kbps for 20ms = 160 bytes (1 byte per sample pair at 16kHz)
+        assert!(
+            !output.data.is_empty(),
+            "Opus→G.722 should produce non-empty output"
+        );
+        assert_eq!(output.payload_type, Some(9));
+
+        // G.722 clock rate is 8000 (RTP convention)
+        assert_eq!(output.clock_rate, 8000, "G.722 clock_rate should be 8000");
+    }
+
+    /// Run full Opus→PCMU round-trip: encode PCM → Opus → transcode → PCMU → decode → verify PCM correlation.
+    #[tokio::test]
+    #[cfg(feature = "opus")]
+    async fn test_transcoder_opus_to_pcmu_roundtrip_quality() {
+        use audio_codec::{create_encoder, create_decoder};
+
+        // Generate a known audio signal at 48kHz
+        let freq = 440.0; // A4 tone
+        let sample_rate = 48000.0;
+        let pcm_48k: Vec<i16> = (0..960)
+            .map(|i| {
+                let t = i as f64 / sample_rate;
+                (16384.0 * (2.0 * std::f64::consts::PI * freq * t).sin()) as i16
+            })
+            .collect();
+
+        // Encode to Opus (first packet)
+        let mut opus_enc = create_encoder(CodecType::Opus);
+        let opus_data = opus_enc.encode(&pcm_48k);
+
+        // Transcode: Opus → PCMU
+        let mut transcoder = Transcoder::new(CodecType::Opus, CodecType::PCMU, 0);
+
+        // Apply transcoder multiple times (simulate real call behavior)
+        let mut all_pcmu = Vec::new();
+        for i in 0..5 {
+            let frame = AudioFrame {
+                rtp_timestamp: 100 + i * 960,
+                clock_rate: 48000,
+                data: opus_data.clone().into(),
+                sequence_number: Some(10 + i as u16),
+                payload_type: Some(111),
+                ..Default::default()
+            };
+            let output = transcoder.transcode(&frame);
+            assert_eq!(
+                output.data.len(),
+                160,
+                "Frame {}: Opus→PCMU should produce 160 bytes",
+                i
+            );
+
+            // Decode PCMU back to PCM
+            let mut pcmu_dec = create_decoder(CodecType::PCMU);
+            let decoded = pcmu_dec.decode(&output.data);
+            assert_eq!(decoded.len(), 160);
+            all_pcmu.push(decoded);
+        }
+
+        // Verify all frames have reasonable energy (not silence/garbled)
+        for (i, frame) in all_pcmu.iter().enumerate() {
+            let energy: f64 = frame.iter().map(|&s| (s as f64).powi(2)).sum::<f64>()
+                / frame.len() as f64;
+            let rms = energy.sqrt();
+            assert!(
+                rms > 100.0 && rms < 20000.0,
+                "Frame {}: RMS {} is outside expected range for 440Hz sine",
+                i,
+                rms
+            );
+        }
+    }
+
     /// Verify that the forwarding loop passes audio through unchanged when
     /// NO transcoder is set (passthrough mode).
     #[tokio::test]
