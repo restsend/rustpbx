@@ -91,6 +91,7 @@ pub async fn create_test_server_with_config(
         create_route_invite: None,
         ignore_out_of_dialog_request: true,
         locator_events: Some(locator_events_tx),
+        sipflow_config: None,
         sip_flow: None,
         active_call_registry: Arc::new(ActiveProxyCallRegistry::new()),
         frequency_limiter: None,

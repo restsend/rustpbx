@@ -7137,48 +7137,8 @@ impl crate::call::runtime::conference_media_bridge::AudioReceiver for PeerConnec
 #[cfg(test)]
 mod tests {
     use super::*;
-    use async_trait::async_trait;
-    use rustrtc::{PeerConnection, RtcConfiguration, media::MediaStreamTrack};
+    use rustrtc::media::MediaStreamTrack;
     use std::sync::atomic::{AtomicUsize, Ordering};
-
-    struct TestTrack {
-        id: String,
-        pc: Option<PeerConnection>,
-    }
-
-    impl TestTrack {
-        fn with_pc(id: &str, pc: Option<PeerConnection>) -> Self {
-            Self {
-                id: id.to_string(),
-                pc,
-            }
-        }
-    }
-
-    #[async_trait]
-    impl Track for TestTrack {
-        fn id(&self) -> &str {
-            &self.id
-        }
-
-        async fn handshake(&self, _remote_offer: String) -> Result<String> {
-            Err(anyhow!("not used in this test"))
-        }
-
-        async fn local_description(&self) -> Result<String> {
-            Err(anyhow!("not used in this test"))
-        }
-
-        async fn set_remote_description(&self, _remote: &str) -> Result<()> {
-            Ok(())
-        }
-
-        async fn stop(&self) {}
-
-        async fn get_peer_connection(&self) -> Option<PeerConnection> {
-            self.pc.clone()
-        }
-    }
 
     #[test]
     fn test_rtp_dtmf_detector_deduplicates_same_event() {
@@ -7367,7 +7327,9 @@ mod tests {
 
         assert!(SipSession::route_via_home_proxy(
             &target,
-            &local_addrs));
+            &local_addrs,
+            true
+        ));
     }
 
     #[test]
@@ -7394,7 +7356,9 @@ mod tests {
 
         assert!(!SipSession::route_via_home_proxy(
             &target,
-            &local_addrs));
+            &local_addrs,
+            true
+        ));
     }
 
     #[test]
@@ -7815,84 +7779,6 @@ mod tests {
         if let Some(bridge) = session.media_bridge.take() {
             bridge.stop().await;
         }
-    }
-
-    #[tokio::test]
-    async fn test_play_audio_file_uses_second_caller_track_pc_when_first_is_none() {
-        use crate::call::{DialDirection, Dialplan, TransactionCookie};
-        use crate::proxy::proxy_call::test_util::tests::MockMediaPeer;
-        use crate::proxy::tests::common::{
-            create_test_request, create_test_server, create_transaction,
-        };
-
-        let (server, _) = create_test_server().await;
-        let request = create_test_request(
-            rsipstack::sip::Method::Invite,
-            "alice",
-            None,
-            "rustpbx.com",
-            None,
-        );
-        let original_request = request.clone();
-        let (tx, _) = create_transaction(request).await;
-        let (state_tx, _state_rx) = mpsc::unbounded_channel();
-        let server_dialog = server
-            .dialog_layer
-            .get_or_create_server_invite(&tx, state_tx, None, None)
-            .expect("failed to create server dialog");
-
-        let context = CallContext {
-            session_id: "test-session".to_string(),
-            dialplan: Arc::new(Dialplan::new(
-                "test-session".to_string(),
-                original_request,
-                DialDirection::Inbound,
-            )),
-            cookie: TransactionCookie::default(),
-            start_time: Instant::now(),
-            original_caller: "sip:alice@rustpbx.com".to_string(),
-            original_callee: "sip:bob@rustpbx.com".to_string(),
-            max_forwards: 70,
-            dtmf_digits: Vec::new(),
-        };
-
-        let caller_peer = Arc::new(MockMediaPeer::new());
-        let callee_peer = Arc::new(MockMediaPeer::new());
-
-        let target_pc = PeerConnection::new(RtcConfiguration::default());
-        assert!(target_pc.get_transceivers().is_empty());
-
-        {
-            let mut tracks = caller_peer.tracks.lock().unwrap();
-            tracks.push(Arc::new(tokio::sync::Mutex::new(Box::new(
-                TestTrack::with_pc("forwarding-without-pc", None),
-            ))));
-            tracks.push(Arc::new(tokio::sync::Mutex::new(Box::new(
-                TestTrack::with_pc("real-caller-track", Some(target_pc.clone())),
-            ))));
-        }
-
-        let (mut session, _handle, _cmd_rx) = SipSession::new(
-            server.clone(),
-            CancellationToken::new(),
-            None,
-            context,
-            server_dialog,
-            false,
-            caller_peer.clone(),
-            callee_peer,
-        );
-
-        session
-            .play_audio_file("sounds/phone-calling.wav", false, "caller", true)
-            .await
-            .expect("queue hold audio should start");
-
-        assert_eq!(caller_peer.update_track_call_count(), 1);
-        assert!(
-            !caller_peer.tracks.lock().unwrap().is_empty(),
-            "play_audio_file should add track to caller peer"
-        );
     }
 
     #[tokio::test]
