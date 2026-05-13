@@ -135,6 +135,7 @@ impl LegStats {
 struct VideoForwardingTrack {
     id: String,
     inner: Arc<dyn MediaStreamTrack>,
+    payload_type: Arc<AtomicU8>,
 }
 
 #[async_trait::async_trait]
@@ -160,8 +161,7 @@ impl MediaStreamTrack for VideoForwardingTrack {
             if matches!(frame.payload_type, Some(pt) if pt < 96) {
                 continue;
             }
-            frame.payload_type = None;
-            frame.sequence_number = None;
+            frame.payload_type = Some(self.payload_type.load(Ordering::Relaxed));
             frame.header_extension = None;
             frame.raw_packet = None;
             frame.csrcs.clear();
@@ -333,6 +333,9 @@ pub struct BridgePeer {
     /// RtpSender handles for video — used to subscribe to PLI/FIR RTCP feedback
     webrtc_video_sender: AsyncMutex<Option<Arc<RtpSender>>>,
     rtp_video_sender: AsyncMutex<Option<Arc<RtpSender>>>,
+    /// Target payload type stamped by rustpbx onto pass-through video RTP.
+    webrtc_video_payload_type: Arc<AtomicU8>,
+    rtp_video_payload_type: Arc<AtomicU8>,
     /// Per-direction media forwarding stats (cumulative)
     webrtc_to_rtp_stats: Arc<LegStats>,
     rtp_to_webrtc_stats: Arc<LegStats>,
@@ -395,6 +398,8 @@ impl BridgePeer {
             rtp_video_codec: None,
             webrtc_video_sender: AsyncMutex::new(None),
             rtp_video_sender: AsyncMutex::new(None),
+            webrtc_video_payload_type: Arc::new(AtomicU8::new(96)),
+            rtp_video_payload_type: Arc::new(AtomicU8::new(96)),
             webrtc_to_rtp_stats: LegStats::new(),
             rtp_to_webrtc_stats: LegStats::new(),
             peers: Arc::new(AsyncMutex::new(std::collections::HashMap::new())),
@@ -449,6 +454,8 @@ impl BridgePeer {
 
         // Setup video senders if video codecs are configured
         if let Some(ref webrtc_video_params) = self.webrtc_video_codec {
+            self.webrtc_video_payload_type
+                .store(webrtc_video_params.payload_type, Ordering::Relaxed);
             let (webrtc_video_tx, webrtc_video_track, _) =
                 rustrtc::media::track::sample_track(MediaKind::Video, 100);
             if let Ok(sender) = self
@@ -464,6 +471,8 @@ impl BridgePeer {
         }
 
         if let Some(ref rtp_video_params) = self.rtp_video_codec {
+            self.rtp_video_payload_type
+                .store(rtp_video_params.payload_type, Ordering::Relaxed);
             let (rtp_video_tx, rtp_video_track, _) =
                 rustrtc::media::track::sample_track(MediaKind::Video, 100);
             if let Ok(sender) = self
@@ -488,6 +497,11 @@ impl BridgePeer {
             clock_rate,
             channels: 0,
         };
+
+        self.webrtc_video_payload_type
+            .store(params.payload_type, Ordering::Relaxed);
+        self.rtp_video_payload_type
+            .store(params.payload_type, Ordering::Relaxed);
 
         // WebRTC side
         if self.webrtc_video_send.lock().await.is_none() {
@@ -519,21 +533,34 @@ impl BridgePeer {
         self.webrtc_video_send.lock().await.is_some() && self.rtp_video_send.lock().await.is_some()
     }
 
-    /// Update already-created video senders after the callee answer selects
-    /// the pass-through video payload type.
-    pub async fn set_video_sender_params(&self, params: RtpCodecParameters) {
-        if let Some(sender) = self.webrtc_video_sender.lock().await.as_ref() {
-            sender.set_params(params.clone());
+    /// Update target payload types stamped onto pass-through video frames.
+    pub fn set_video_payload_types(
+        &self,
+        webrtc_params: Option<RtpCodecParameters>,
+        rtp_params: Option<RtpCodecParameters>,
+    ) {
+        if let Some(params) = webrtc_params.as_ref() {
+            self.webrtc_video_payload_type
+                .store(params.payload_type, Ordering::Relaxed);
+            debug!(
+                bridge_id = %self.id,
+                side = "webrtc",
+                pt = params.payload_type,
+                clock_rate = params.clock_rate,
+                "Video pass-through payload type updated"
+            );
         }
-        if let Some(sender) = self.rtp_video_sender.lock().await.as_ref() {
-            sender.set_params(params.clone());
+        if let Some(params) = rtp_params.as_ref() {
+            self.rtp_video_payload_type
+                .store(params.payload_type, Ordering::Relaxed);
+            debug!(
+                bridge_id = %self.id,
+                side = "rtp",
+                pt = params.payload_type,
+                clock_rate = params.clock_rate,
+                "Video pass-through payload type updated"
+            );
         }
-        debug!(
-            bridge_id = %self.id,
-            pt = params.payload_type,
-            clock_rate = params.clock_rate,
-            "Video sender params updated from callee answer"
-        );
     }
 
     /// Setup the bridge with codec parameters.
@@ -1103,6 +1130,8 @@ impl BridgePeer {
         let webrtc_to_rtp_timing = Arc::clone(&self.webrtc_to_rtp_timing);
         let rtp_to_webrtc_transcoder = Arc::clone(&self.rtp_to_webrtc_transcoder);
         let rtp_to_webrtc_timing = Arc::clone(&self.rtp_to_webrtc_timing);
+        let webrtc_video_payload_type = Arc::clone(&self.webrtc_video_payload_type);
+        let rtp_video_payload_type = Arc::clone(&self.rtp_video_payload_type);
 
         tokio::spawn(async move {
             // Create fused receivers for both directions
@@ -1149,6 +1178,7 @@ impl BridgePeer {
                                                     Arc::new(VideoForwardingTrack {
                                                         id: format!("{}-webrtc-to-rtp-video", bridge_id),
                                                         inner: track.clone(),
+                                                        payload_type: Arc::clone(&rtp_video_payload_type),
                                                     });
                                                 let sender = rustrtc::RtpSender::builder(
                                                     forwarding_track,
@@ -1259,6 +1289,7 @@ impl BridgePeer {
                                                     Arc::new(VideoForwardingTrack {
                                                         id: format!("{}-rtp-to-webrtc-video", bridge_id),
                                                         inner: track.clone(),
+                                                        payload_type: Arc::clone(&webrtc_video_payload_type),
                                                     });
                                                 let sender = rustrtc::RtpSender::builder(
                                                     forwarding_track,

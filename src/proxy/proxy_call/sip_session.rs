@@ -939,7 +939,7 @@ impl SipSession {
             .await
             .map_err(|e| anyhow!("Failed to create bridged dialog offer: {}", e))?;
         let mut target_offer_sdp = target_offer.to_sdp_string();
-        if offer_has_video && !source_video_caps.is_empty() {
+        if offer_has_video && !source_video_caps.is_empty() && !target_is_webrtc {
             target_offer_sdp = apply_source_video_caps(
                 rustrtc::SdpType::Offer,
                 &target_offer_sdp,
@@ -1053,6 +1053,26 @@ impl SipSession {
         let target_answer =
             rustrtc::SessionDescription::parse(rustrtc::SdpType::Answer, &target_answer_sdp)
                 .map_err(|e| anyhow!("Failed to parse bridged target answer SDP: {}", e))?;
+        let target_video_active = target_answer
+            .media_sections
+            .iter()
+            .any(|section| {
+                section.kind == rustrtc::MediaKind::Video
+                    && section.port != 0
+                    && section.direction != rustrtc::Direction::Inactive
+            });
+        let target_video_params = target_video_active
+            .then(|| {
+                target_answer
+                    .to_video_capabilities()
+                    .first()
+                    .map(|video| rustrtc::RtpCodecParameters {
+                        payload_type: video.payload_type,
+                        clock_rate: video.clock_rate,
+                        channels: 0,
+                    })
+            })
+            .flatten();
         target_pc
             .set_remote_description(target_answer)
             .await
@@ -1086,9 +1106,43 @@ impl SipSession {
         ) {
             source_answer_sdp = filtered;
         }
+        if offer_has_video && !target_video_active {
+            let mut desc =
+                rustrtc::SessionDescription::parse(rustrtc::SdpType::Answer, &source_answer_sdp)
+                    .map_err(|e| anyhow!("Failed to parse bridged source answer SDP: {}", e))?;
+            if let Some(video_section) = desc
+                .media_sections
+                .iter_mut()
+                .find(|section| section.kind == rustrtc::MediaKind::Video)
+            {
+                video_section.port = 0;
+                video_section.direction = rustrtc::Direction::Inactive;
+            }
+            source_answer_sdp = desc.to_sdp_string();
+        }
         let source_answer =
             rustrtc::SessionDescription::parse(rustrtc::SdpType::Answer, &source_answer_sdp)
                 .map_err(|e| anyhow!("Failed to parse bridged source answer SDP: {}", e))?;
+        let source_video_active = source_answer
+            .media_sections
+            .iter()
+            .any(|section| {
+                section.kind == rustrtc::MediaKind::Video
+                    && section.port != 0
+                    && section.direction != rustrtc::Direction::Inactive
+            });
+        let source_video_params = source_video_active
+            .then(|| {
+                source_answer
+                    .to_video_capabilities()
+                    .first()
+                    .map(|video| rustrtc::RtpCodecParameters {
+                        payload_type: video.payload_type,
+                        clock_rate: video.clock_rate,
+                        channels: 0,
+                    })
+            })
+            .flatten();
         source_pc
             .set_local_description(source_answer)
             .map_err(|e| anyhow!("Failed to set bridged source answer SDP: {}", e))?;
@@ -1100,18 +1154,14 @@ impl SipSession {
             .map(|desc| desc.to_sdp_string())
             .ok_or_else(|| anyhow!("Bridge source side has no local answer"))?;
 
-        if let Some(bridge) = &self.media_bridge
-            && let Ok(desc) =
-                rustrtc::SessionDescription::parse(rustrtc::SdpType::Answer, &source_answer_sdp)
-            && let Some(video) = desc.to_video_capabilities().first()
-        {
+        if let Some(bridge) = &self.media_bridge {
+            let (webrtc_video_params, rtp_video_params) = if target_is_webrtc {
+                (target_video_params, source_video_params)
+            } else {
+                (source_video_params, target_video_params)
+            };
             bridge
-                .set_video_sender_params(rustrtc::RtpCodecParameters {
-                    payload_type: video.payload_type,
-                    clock_rate: video.clock_rate,
-                    channels: 0,
-                })
-                .await;
+                .set_video_payload_types(webrtc_video_params, rtp_video_params);
         }
 
         match side {
@@ -2759,7 +2809,8 @@ impl SipSession {
                             warn!(session_id = %self.context.session_id, error = %e, "Failed to set bridge RTP remote description");
                         }
                         if let Some(params) = selected_video_params {
-                            bridge.set_video_sender_params(params).await;
+                            bridge
+                                .set_video_payload_types(Some(params.clone()), Some(params));
                         }
                     }
 
