@@ -104,12 +104,12 @@ pub struct MediaNegotiator;
 pub enum CodecSelectionStrategy {
     /// Avoid transcoding: keep only codecs the caller already offers
     /// that the target transport supports. No additional codecs are added.
-    #[default]
     Performance,
     /// Prefer quality: add PBX-supported codecs allowed by policy, then
     /// prioritize by quality. If the far leg picks an added codec, the bridge
     /// can use a different codec on each leg and transcode between them.
     /// Order: Opus > G729 > G722 > G711.
+    #[default]
     Quality,
 }
 
@@ -531,11 +531,7 @@ impl MediaNegotiator {
             if filter_audio_to_reference && !accepted_by_reference.is_empty() {
                 let mut allowed_pts = Vec::new();
                 let mut seen_pts = HashSet::new();
-                for codec in source_codecs
-                    .audio
-                    .iter()
-                    .chain(source_codecs.dtmf.iter())
-                {
+                for codec in source_codecs.audio.iter().chain(source_codecs.dtmf.iter()) {
                     let signature = Self::codec_signature(codec);
                     if accepted_by_reference.contains(&signature)
                         && seen_pts.insert(codec.payload_type)
@@ -580,7 +576,8 @@ impl MediaNegotiator {
                 let mut seen_pts = HashSet::new();
                 for cap in &source_video_caps {
                     let signature = (cap.codec_name.to_ascii_uppercase(), cap.clock_rate);
-                    if accepted_by_reference.contains(&signature) && seen_pts.insert(cap.payload_type)
+                    if accepted_by_reference.contains(&signature)
+                        && seen_pts.insert(cap.payload_type)
                     {
                         allowed_pts.push(cap.payload_type);
                     }
@@ -595,24 +592,25 @@ impl MediaNegotiator {
                     pt.parse::<u8>()
                         .is_ok_and(|pt| allowed_video_pts.contains(&pt))
                 });
-                video_section.attributes.retain(|attr| match attr.key.as_str() {
-                    "rtpmap" | "fmtp" => {
-                        Self::attr_payload_type(attr).is_none_or(|pt| allowed_video_pts.contains(&pt))
-                    }
-                    "rtcp-fb" => {
-                        let pt = attr
-                            .value
-                            .as_deref()
-                            .and_then(|value| value.split_whitespace().next());
-                        pt.is_none_or(|pt| {
-                            pt == "*"
-                                || pt
-                                    .parse::<u8>()
-                                    .is_ok_and(|pt| allowed_video_pts.contains(&pt))
-                        })
-                    }
-                    _ => true,
-                });
+                video_section
+                    .attributes
+                    .retain(|attr| match attr.key.as_str() {
+                        "rtpmap" | "fmtp" => Self::attr_payload_type(attr)
+                            .is_none_or(|pt| allowed_video_pts.contains(&pt)),
+                        "rtcp-fb" => {
+                            let pt = attr
+                                .value
+                                .as_deref()
+                                .and_then(|value| value.split_whitespace().next());
+                            pt.is_none_or(|pt| {
+                                pt == "*"
+                                    || pt
+                                        .parse::<u8>()
+                                        .is_ok_and(|pt| allowed_video_pts.contains(&pt))
+                            })
+                        }
+                        _ => true,
+                    });
             }
         }
 
@@ -1585,15 +1583,14 @@ a=recvonly\r\n\
 a=rtpmap:103 H264/90000\r\n\
 a=fmtp:103 profile-level-id=42801F; packetization-mode=1\r\n";
 
-        let filtered =
-            MediaNegotiator::restrict_sdp_to_reference_codecs(
-                SdpType::Answer,
-                answer_sdp,
-                SdpType::Answer,
-                callee_answer,
-                true,
-            )
-            .unwrap();
+        let filtered = MediaNegotiator::restrict_sdp_to_reference_codecs(
+            SdpType::Answer,
+            answer_sdp,
+            SdpType::Answer,
+            callee_answer,
+            true,
+        )
+        .unwrap();
 
         assert!(filtered.contains("m=audio 9 UDP/TLS/RTP/SAVPF 96 0 126"));
         assert!(filtered.contains("a=rtpmap:96 opus/48000/2"));
@@ -1652,15 +1649,14 @@ a=rtcp-fb:96 ccm fir\r\n\
 a=rtcp-fb:96 nack pli\r\n\
 a=fmtp:96 level-asymmetry-allowed=1;packetization-mode=0;profile-level-id=42001f\r\n";
 
-        let filtered =
-            MediaNegotiator::restrict_sdp_to_reference_codecs(
-                SdpType::Answer,
-                answer_sdp,
-                SdpType::Answer,
-                callee_answer,
-                true,
-            )
-            .unwrap();
+        let filtered = MediaNegotiator::restrict_sdp_to_reference_codecs(
+            SdpType::Answer,
+            answer_sdp,
+            SdpType::Answer,
+            callee_answer,
+            true,
+        )
+        .unwrap();
 
         assert!(filtered.contains("m=video 16756 RTP/AVP 96"));
         assert!(filtered.contains("a=rtpmap:96 H264/90000"));
