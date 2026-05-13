@@ -1738,14 +1738,15 @@ impl SipSession {
                     };
 
                     if let Some(code) = code {
-                        warn!(
-                            ?code,
-                            ?reason_str,
-                            "Callee rejected call, propagating error to caller"
+                        info!(
+                            session_id = %self.context.session_id,
+                            status_code = code.code(),
+                            reason_text = %code.text(),
+                            "Callee rejected the call"
                         );
                         self.last_error = Some((code.clone(), reason_str.clone()));
                         if let Err(e) = self.server_dialog.reject(code.into(), reason_str) {
-                            warn!(error = %e, "Failed to send rejection response to caller");
+                            warn!(session_id = %self.context.session_id, error = %e, "Failed to send rejection response to caller");
                         }
                     }
                 }
