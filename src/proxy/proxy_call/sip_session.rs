@@ -789,7 +789,9 @@ impl SipSession {
         };
 
         if source_is_webrtc == target_is_webrtc {
-            return self.relay_signaling_only_offer(side, method, offer_sdp).await;
+            return self
+                .relay_signaling_only_offer(side, method, offer_sdp)
+                .await;
         }
 
         let offer_has_video = source_desc
@@ -842,9 +844,9 @@ impl SipSession {
                     .iter()
                     .map(|cap| cap.payload_type.to_string())
                     .collect();
-                video_section.attributes.retain(|attr| {
-                    !matches!(attr.key.as_str(), "rtpmap" | "fmtp" | "rtcp-fb")
-                });
+                video_section
+                    .attributes
+                    .retain(|attr| !matches!(attr.key.as_str(), "rtpmap" | "fmtp" | "rtcp-fb"));
                 for cap in &source_video_caps {
                     video_section.attributes.push(rustrtc::Attribute::new(
                         "rtpmap",
@@ -902,12 +904,14 @@ impl SipSession {
         let previously_had_video = self.leg_has_video.values().any(|has_video| *has_video);
         let mut used_transceivers = HashSet::new();
         for source_section in &source_desc.media_sections {
-            if let Some((idx, transceiver)) = target_transceivers
-                .iter()
-                .enumerate()
-                .find(|(idx, transceiver)| {
-                    !used_transceivers.contains(idx) && transceiver.kind() == source_section.kind
-                })
+            if let Some((idx, transceiver)) =
+                target_transceivers
+                    .iter()
+                    .enumerate()
+                    .find(|(idx, transceiver)| {
+                        !used_transceivers.contains(idx)
+                            && transceiver.kind() == source_section.kind
+                    })
             {
                 used_transceivers.insert(idx);
                 let direction = if source_section.port == 0 {
@@ -1643,7 +1647,9 @@ impl SipSession {
                 self.update_refresh_disabled.remove(&terminated_dialog_id);
                 // The remote BYE already terminated this leg; remove it before dropping
                 // its guard so guard cleanup does not send a second BYE back.
-                self.server.dialog_layer.remove_dialog(&terminated_dialog_id);
+                self.server
+                    .dialog_layer
+                    .remove_dialog(&terminated_dialog_id);
                 self.callee_guards
                     .retain(|guard| guard.id() != &terminated_dialog_id);
 
@@ -2710,18 +2716,54 @@ impl SipSession {
                     // 1. Set callee's RTP answer on bridge's RTP side
                     if let Ok(desc) = SessionDescription::parse(SdpType::Answer, sdp) {
                         let selected_video_params =
-                            desc.to_video_capabilities()
-                                .first()
-                                .map(|cap| rustrtc::RtpCodecParameters {
+                            desc.to_video_capabilities().first().map(|cap| {
+                                rustrtc::RtpCodecParameters {
                                     payload_type: cap.payload_type,
                                     clock_rate: cap.clock_rate,
                                     channels: 0,
-                                });
+                                }
+                            });
                         let rtp_pc = bridge.rtp_pc();
-                        // If we already negotiated early media, the RTP peer is in Stable state.
-                        // To apply a new answer we must re-offer: create offer -> set local -> set remote.
-                        if rtp_pc.remote_description().is_some() {
-                            debug!(session_id = %self.context.session_id, "Bridge: Re-negotiating RTP side for changed callee answer");
+                        // If we already negotiated early media (183), the RTP peer is in Stable
+                        // state.  Only re-offer when the SDP session-version actually changed;
+                        // if the version is identical the callee sent the same SDP in 200 OK as
+                        // in 183 (common with CCP/PSTN gateways).
+                        //
+                        // We must skip BOTH create_offer() AND set_remote_description() in that
+                        // case:
+                        //   - create_offer() would allocate a new local RTP port (P2), while the
+                        //     remote keeps sending to our original INVITE port (P1) → SSRC latch
+                        //     never fires on P2 → rtp_to_webrtc_pps=0.
+                        //   - set_remote_description(Answer) requires SignalingState::HaveLocalOffer;
+                        //     skipping create_offer() leaves the state as Stable, so the call
+                        //     would return InvalidState anyway.
+                        //   - The SDP content is identical, so nothing needs to be updated.
+                        let should_renegotiate = if let Some(prev_desc) =
+                            rtp_pc.remote_description()
+                        {
+                            let prev_version = prev_desc.session.origin.session_version;
+                            let new_version = desc.session.origin.session_version;
+                            if prev_version != new_version {
+                                debug!(
+                                    session_id = %self.context.session_id,
+                                    prev_version,
+                                    new_version,
+                                    "Bridge: RTP SDP version changed, will re-negotiate"
+                                );
+                                true
+                            } else {
+                                debug!(
+                                    session_id = %self.context.session_id,
+                                    version = new_version,
+                                    "Bridge: Skipping RTP re-negotiate — callee SDP version unchanged (183 == 200 OK)"
+                                );
+                                false
+                            }
+                        } else {
+                            true // first time, no previous description
+                        };
+
+                        if should_renegotiate {
                             match rtp_pc.create_offer().await {
                                 Ok(offer) => {
                                     if let Err(e) = rtp_pc.set_local_description(offer) {
@@ -2732,9 +2774,9 @@ impl SipSession {
                                     warn!(session_id = %self.context.session_id, error = %e, "Failed to create bridge RTP re-offer");
                                 }
                             }
-                        }
-                        if let Err(e) = rtp_pc.set_remote_description(desc).await {
-                            warn!(session_id = %self.context.session_id, error = %e, "Failed to set bridge RTP remote description");
+                            if let Err(e) = rtp_pc.set_remote_description(desc).await {
+                                warn!(session_id = %self.context.session_id, error = %e, "Failed to set bridge RTP remote description");
+                            }
                         }
                         if let Some(params) = selected_video_params {
                             bridge.set_video_sender_params(params).await;

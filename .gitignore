@@ -77,3 +77,4 @@ src/addons/ivr_editor
 src/addons/jsonrpc_router 
 src/addons/telemetry 
 src/addons/voicemail 
+*.sh
