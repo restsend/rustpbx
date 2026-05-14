@@ -1,4 +1,3 @@
-use crate::media::negotiate::CodecSelectionStrategy;
 use crate::rwi::auth::RwiConfig;
 use crate::{
     call::{CallRecordingConfig, DialDirection, QueuePlan, user::SipUser},
@@ -693,13 +692,7 @@ pub struct ProxyConfig {
     pub dialog_auth_cache: Option<AuthCacheConfig>,
     #[serde(default)]
     pub blind_transfer_use_refer: bool,
-    /// Codec selection strategy for WebRTC endpoints.
-    /// `performance` (default): avoid transcoding, keep caller's codecs only.
-    /// `quality`: prefer Opus > G729 > G722 > G711 (may require transcoding).
-    #[serde(default)]
-    pub codec_strategy: CodecSelectionStrategy,
 
-    // ── DoS protection (per-IP rate limiting) ─────────────────────
     #[serde(default)]
     pub dos_enabled: bool,
     #[serde(default = "default_dos_max_cps")]
@@ -711,13 +704,11 @@ pub struct ProxyConfig {
     #[serde(default = "default_dos_scan_block_secs")]
     pub dos_scan_block_duration_secs: u64,
 
-    // ── URI normalization ────────────────────────────────────────
     #[serde(default = "default_uri_max_length")]
     pub uri_max_length: usize,
     #[serde(default)]
     pub uri_reject_malformed: bool,
 
-    // ── Emergency number routing ──────────────────────────────────
     #[serde(default)]
     pub emergency: Option<EmergencyConfig>,
 }
@@ -743,11 +734,21 @@ fn default_emergency_numbers() -> Vec<String> {
     ]
 }
 
-fn default_dos_max_cps() -> u32 { 100 }
-fn default_dos_max_concurrent() -> u32 { 500 }
-fn default_dos_scan_threshold() -> u32 { 50 }
-fn default_dos_scan_block_secs() -> u64 { 600 }
-fn default_uri_max_length() -> usize { 256 }
+fn default_dos_max_cps() -> u32 {
+    100
+}
+fn default_dos_max_concurrent() -> u32 {
+    500
+}
+fn default_dos_scan_threshold() -> u32 {
+    50
+}
+fn default_dos_scan_block_secs() -> u64 {
+    600
+}
+fn default_uri_max_length() -> usize {
+    256
+}
 
 fn default_auth_cache_size() -> usize {
     10000
@@ -1008,7 +1009,6 @@ impl Default for ProxyConfig {
             passthrough_failure: true,
             dialog_auth_cache: default_dialog_auth_cache(),
             blind_transfer_use_refer: false,
-            codec_strategy: CodecSelectionStrategy::default(),
             dos_enabled: false,
             dos_max_cps_per_ip: default_dos_max_cps(),
             dos_max_concurrent_per_ip: default_dos_max_concurrent(),

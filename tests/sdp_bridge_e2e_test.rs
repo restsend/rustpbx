@@ -9,7 +9,7 @@
 //! (e.g., G729 on WebRTC side) are correctly filtered.
 
 use audio_codec::CodecType;
-use rustpbx::media::negotiate::CodecSelectionStrategy;
+use rustpbx::media::negotiate::MediaNegotiator;
 use rustpbx::media::{RtpTrackBuilder, Track};
 use rustrtc::TransportMode;
 use rustrtc::sdp::{SdpType, SessionDescription};
@@ -316,7 +316,6 @@ async fn test_e2e_webrtc_caller_rtp_callee_pcmu_only_allow_codecs() {
         true,  // caller is WebRTC
         false, // callee is RTP
         &[CodecType::PCMU, CodecType::TelephoneEvent],
-        CodecSelectionStrategy::default(),
     );
 
     // Verify Opus is NOT in either side (not in allow_codecs)
@@ -474,7 +473,6 @@ async fn test_e2e_rtp_caller_g729_dropped_on_webrtc_side() {
         false, // caller is RTP
         true,  // callee is WebRTC
         &[CodecType::G729, CodecType::PCMU, CodecType::TelephoneEvent],
-        CodecSelectionStrategy::default(),
     );
 
     // G729 should be on caller (RTP) side but NOT on callee (WebRTC) side
@@ -627,7 +625,6 @@ async fn test_e2e_no_transcode_path_same_codec_on_both_sides() {
         true,  // caller is WebRTC
         false, // callee is RTP
         &[CodecType::Opus, CodecType::PCMU, CodecType::TelephoneEvent],
-        CodecSelectionStrategy::default(),
     );
 
     // Both sides should have Opus as first audio codec (no transcode)
@@ -687,7 +684,6 @@ async fn test_e2e_caller_payload_types_preserved() {
         false, // caller is RTP
         false, // callee is RTP
         &[CodecType::PCMU, CodecType::PCMA, CodecType::TelephoneEvent],
-        CodecSelectionStrategy::default(),
     );
 
     // Caller side should preserve PTs from caller SDP
@@ -763,7 +759,6 @@ a=rtpmap:101 telephone-event/8000\r\n";
             CodecType::PCMA,
             CodecType::TelephoneEvent,
         ],
-        CodecSelectionStrategy::default(),
     );
 
     // Callee side should follow allow_codecs order: G722, PCMU, PCMA, telephone-event

@@ -1,7 +1,6 @@
 use super::test_ua::{TestUa, TestUaConfig, TestUaEvent};
 use crate::call::user::SipUser;
 use crate::config::ProxyConfig;
-use crate::media::negotiate::CodecSelectionStrategy;
 use crate::proxy::{
     auth::AuthModule,
     call::CallModule,
@@ -262,7 +261,6 @@ async fn test_reinvite_audio_to_video_add_via_bridge() {
         false,
         true,
         &[],
-        CodecSelectionStrategy::default(),
     );
     let audio_caps: Vec<_> = codec_lists
         .caller_side

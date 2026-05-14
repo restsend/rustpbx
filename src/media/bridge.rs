@@ -2765,7 +2765,7 @@ mod tests {
     /// offers only PCMU and the SDP negotiation completes successfully.
     #[tokio::test]
     async fn test_bridge_e2e_webrtc_to_rtp_pcmu_only() {
-        use crate::media::negotiate::{CodecSelectionStrategy, MediaNegotiator};
+        use crate::media::negotiate::MediaNegotiator;
         // Create WebRTC caller offering Opus + PCMU
         let caller = RtpTrackBuilder::new("webrtc-caller-pcmu".to_string())
             .with_mode(TransportMode::WebRtc)
@@ -2781,7 +2781,6 @@ mod tests {
             true,  // caller is WebRTC
             false, // callee is RTP
             &[CodecType::PCMU, CodecType::TelephoneEvent],
-            CodecSelectionStrategy::default(),
         );
 
         // Build bridge with computed capabilities
@@ -2885,7 +2884,7 @@ mod tests {
     /// G729 is not in WebRTC supported set, so WebRTC callee side should only have PCMU.
     #[tokio::test]
     async fn test_bridge_e2e_rtp_to_webrtc_g729_dropped() {
-        use crate::media::negotiate::{CodecSelectionStrategy, MediaNegotiator};
+        use crate::media::negotiate::MediaNegotiator;
 
         // Create RTP caller offering G729 + PCMU
         let caller = RtpTrackBuilder::new("rtp-caller-g729".to_string())
@@ -2901,7 +2900,6 @@ mod tests {
             false, // caller is RTP
             true,  // callee is WebRTC
             &[CodecType::G729, CodecType::PCMU, CodecType::TelephoneEvent],
-            CodecSelectionStrategy::default(),
         );
 
         // G729 should be on caller side (RTP supports it) but NOT on callee side (WebRTC doesn't)

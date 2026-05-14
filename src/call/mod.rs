@@ -1,6 +1,5 @@
 use crate::{
     config::{MediaProxyMode, RouteResult},
-    media::negotiate::CodecSelectionStrategy,
     media::recorder::RecorderOption,
     proxy::routing::VideoPolicy,
 };
@@ -681,7 +680,7 @@ impl Default for FailureAction {
 }
 
 /// Media configuration for call control
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MediaConfig {
     /// Media proxy mode
     pub proxy_mode: MediaProxyMode,
@@ -692,10 +691,6 @@ pub struct MediaConfig {
     pub webrtc_port_end: Option<u16>,
     pub ice_servers: Option<Vec<IceServer>>,
     pub enable_latching: bool,
-    /// Codec selection strategy when target is WebRTC.
-    /// Performance (default): avoid transcoding, keep caller's codecs only.
-    /// Quality: prefer Opus > G729 > G722 > G711 (may transcode).
-    pub codec_strategy: CodecSelectionStrategy,
     /// Video policy: pass-through or strip video from SDP
     pub video_policy: Option<VideoPolicy>,
 }
@@ -717,7 +712,6 @@ impl MediaConfig {
             webrtc_port_end: None,
             ice_servers: None,
             enable_latching: true,
-            codec_strategy: CodecSelectionStrategy::default(),
             video_policy: None,
         }
     }
@@ -756,10 +750,6 @@ impl MediaConfig {
     }
     pub fn with_webrtc_end_port(mut self, end: Option<u16>) -> Self {
         self.webrtc_port_end = end;
-        self
-    }
-    pub fn with_codec_strategy(mut self, strategy: CodecSelectionStrategy) -> Self {
-        self.codec_strategy = strategy;
         self
     }
 }

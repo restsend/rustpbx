@@ -34,7 +34,7 @@
 //! **This test FAILS before the fix and PASSES after the fix.**
 
 use super::e2e_test_server::E2eTestServer;
-use super::rtp_utils::{RtpPacket, RtpReceiver, RtpSender, RtpStats, extract_media_endpoint};
+use super::rtp_utils::{RtpPacket, RtpReceiver, RtpSender, extract_media_endpoint};
 use super::test_ua::TestUaEvent;
 use crate::config::MediaProxyMode;
 use anyhow::Result;

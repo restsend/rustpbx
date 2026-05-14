@@ -32,7 +32,7 @@ use crate::callrecord::{CallRecordHangupMessage, CallRecordHangupReason, CallRec
 use crate::config::MediaProxyMode;
 use crate::media::bridge::{BridgeEndpoint, BridgePeerBuilder};
 use crate::media::mixer::MediaMixer;
-use crate::media::negotiate::{CodecInfo, CodecSelectionStrategy, MediaNegotiator};
+use crate::media::negotiate::{CodecInfo, MediaNegotiator};
 use crate::media::recorder::Recorder;
 use crate::media::{FileTrack, PlaybackEndReason, RtpTrackBuilder, Track};
 use crate::proxy::proxy_call::{
@@ -946,8 +946,7 @@ impl SipSession {
                 "bridged local offer",
             )?;
         }
-        let filter_audio_to_reference =
-            self.context.dialplan.media.codec_strategy != CodecSelectionStrategy::Quality;
+        let filter_audio_to_reference = false;
         if let Some(filtered) = MediaNegotiator::restrict_sdp_to_reference_codecs(
             rustrtc::SdpType::Offer,
             &target_offer_sdp,
@@ -1966,7 +1965,6 @@ impl SipSession {
             caller_is_webrtc,
             !caller_is_webrtc,
             allow_codecs,
-            self.context.dialplan.media.codec_strategy,
         );
         let webrtc_side_codecs = if caller_is_webrtc {
             &codec_lists.caller_side
@@ -2306,7 +2304,30 @@ impl SipSession {
 
         let callee_sdp = if self.bypasses_local_media() && caller_is_webrtc == callee_is_webrtc {
             self.callee_offer_uses_media_bridge = false;
-            self.caller_offer.clone()
+            let allow_codecs = &self.context.dialplan.allow_codecs;
+            let default_codecs = crate::media::negotiate::MediaNegotiator::default_rtp_codecs();
+            let is_restricted = allow_codecs.len() < default_codecs.len()
+                || allow_codecs.iter().any(|c| !default_codecs.contains(c))
+                || default_codecs.iter().any(|c| !allow_codecs.contains(c));
+
+            if is_restricted {
+                if let Some(ref caller_offer) = self.caller_offer {
+                    let new_codecs = crate::media::negotiate::MediaNegotiator::build_callee_codec_offer_with_allow(
+                        caller_offer,
+                        callee_is_webrtc,
+                        allow_codecs,
+                    );
+                    crate::media::negotiate::MediaNegotiator::rewrite_sdp_codec_list(
+                        caller_offer,
+                        &new_codecs,
+                    )
+                    .or_else(|| self.caller_offer.clone())
+                } else {
+                    self.caller_offer.clone()
+                }
+            } else {
+                self.caller_offer.clone()
+            }
         } else {
             self.create_callee_track(callee_is_webrtc).await.ok()
         };
@@ -2838,8 +2859,7 @@ impl SipSession {
                                                         .local_description()
                                                         .map(|d| d.to_sdp_string())
                                                         .map(|answer_sdp| {
-                                                            let filter_audio_to_reference = self.context.dialplan.media.codec_strategy
-                                                                != CodecSelectionStrategy::Quality;
+                                                            let filter_audio_to_reference = false;
                                                             MediaNegotiator::restrict_sdp_to_reference_codecs(
                                                                 SdpType::Answer,
                                                                 &answer_sdp,
@@ -2917,8 +2937,7 @@ impl SipSession {
                                                     .local_description()
                                                     .map(|d| d.to_sdp_string())
                                                     .map(|answer_sdp| {
-                                                        let filter_audio_to_reference = self.context.dialplan.media.codec_strategy
-                                                            != CodecSelectionStrategy::Quality;
+                                                        let filter_audio_to_reference = false;
                                                         MediaNegotiator::restrict_sdp_to_reference_codecs(
                                                             SdpType::Answer,
                                                             &answer_sdp,
@@ -3938,7 +3957,6 @@ impl SipSession {
                     caller_is_webrtc,
                     callee_is_webrtc,
                     allow_codecs,
-                    self.context.dialplan.media.codec_strategy,
                 );
 
                 let webrtc_side_codecs = if caller_is_webrtc {
@@ -4095,7 +4113,6 @@ impl SipSession {
                     caller_offer,
                     callee_is_webrtc,
                     &self.context.dialplan.allow_codecs,
-                    self.context.dialplan.media.codec_strategy,
                 );
                 if !codecs.is_empty() {
                     track_builder = track_builder.with_codec_info(codecs);
