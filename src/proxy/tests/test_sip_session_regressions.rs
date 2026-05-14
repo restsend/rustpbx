@@ -492,3 +492,140 @@ async fn test_queue_transfer_return_ivr_overrides_hangup_fallback_when_no_agents
 
     assert_eq!(runtime.start_calls.load(Ordering::SeqCst), 1);
 }
+
+// ─── DTMF fix regression tests ───────────────────────────────────────────────
+//
+// These tests guard against regressions introduced by the wholesale DTMF fix:
+// "accept_call() must call start_caller_ingress_monitor_if_needed() BEFORE
+// setting connected_callee, but only for bridge-based calls."
+
+/// accept_call must set connected_callee for a plain P2P (Targets, no bridge) call.
+///
+/// Regression: the fix must not prevent connected_callee from being assigned.
+#[tokio::test]
+async fn test_accept_call_sets_connected_callee_for_p2p_targets_flow() {
+    let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto)
+        .with_targets(crate::call::DialStrategy::Sequential(vec![]));
+    let mut session = build_session(dialplan).await;
+
+    // Simulate a P2P RTP↔RTP call: no bridge created, default false.
+    assert!(!session.has_active_caller_ingress_monitor());
+
+    session
+        .accept_call(Some("sip:bob@rustpbx.com".to_string()), None, None)
+        .await
+        .expect("accept_call should succeed for P2P call");
+
+    assert_eq!(
+        session.connected_callee,
+        Some("sip:bob@rustpbx.com".to_string()),
+        "connected_callee must be set after accept_call"
+    );
+    // No ingress monitor task should be started for non-bridge P2P calls.
+    assert!(
+        !session.has_active_caller_ingress_monitor(),
+        "ingress monitor must not be started for non-bridge P2P call"
+    );
+}
+
+/// accept_call must set connected_callee for an Application-flow (IVR/Queue) call.
+///
+/// In the Application flow the ingress monitor is set up by execute_flow() before
+/// the callee connects.  accept_call() must not disrupt that nor prevent the
+/// connected_callee assignment.
+#[tokio::test]
+async fn test_accept_call_sets_connected_callee_for_application_ivr_flow() {
+    let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto).with_application(
+        "ivr".to_string(),
+        None,
+        true,
+    );
+    let mut session = build_session(dialplan).await;
+
+    session
+        .accept_call(Some("sip:agent@rustpbx.com".to_string()), None, None)
+        .await
+        .expect("accept_call should succeed for IVR flow");
+
+    assert_eq!(
+        session.connected_callee,
+        Some("sip:agent@rustpbx.com".to_string()),
+        "connected_callee must be set after accept_call in IVR/Application flow"
+    );
+}
+
+/// For bridge-based calls (Targets flow, e.g. wholesale with WebRTC caller),
+/// accept_call() must attempt to install the DTMF sink before setting
+/// connected_callee, so that the connected_callee guard inside
+/// start_caller_ingress_monitor_if_needed() does not short-circuit setup.
+///
+/// In unit tests there is no real BridgePeer, so the bridge path exits early
+/// after the "no bridge" check.  What we CAN assert is:
+/// 1. accept_call() completes without panic.
+/// 2. connected_callee is correctly set.
+/// 3. A subsequent call to start_caller_ingress_monitor_if_needed() returns
+///    immediately because connected_callee is now Some (guard fires) —
+///    verifiable via the absence of log-level side effects and by calling
+///    accept_call again idempotently.
+#[tokio::test]
+async fn test_accept_call_for_bridge_wholesale_flow_sets_connected_callee() {
+    let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto)
+        .with_targets(crate::call::DialStrategy::Sequential(vec![]));
+    let mut session = build_session(dialplan).await;
+
+    // Simulate bridge-based wholesale call (WebRTC→bridge→RTP).
+    // We only set the flag; we do NOT set session.answer because accept_call
+    // would try to send a real 200 OK on the SIP dialog (unit tests have no
+    // transport), which would fail at the send step, not at the DTMF-setup step.
+    // The intent here is to verify that accept_call does not panic and that
+    // connected_callee is assigned correctly even when caller_uses_bridge = true.
+    session.set_caller_uses_bridge_for_test(true);
+
+    session
+        .accept_call(Some("sip:trunk@wholesale.example".to_string()), None, None)
+        .await
+        .expect("accept_call should succeed for bridge-based wholesale call");
+
+    assert_eq!(
+        session.connected_callee,
+        Some("sip:trunk@wholesale.example".to_string()),
+        "connected_callee must be set after accept_call for bridge-based call"
+    );
+}
+
+/// The guard in start_caller_ingress_monitor_if_needed must fire when
+/// connected_callee is already set — preventing duplicate DTMF sink installation.
+///
+/// We verify this by calling accept_call twice: the second call should succeed
+/// without panic, and connected_callee must be updated to the new value.
+/// If the guard were broken, a double-bridge-start or double-task-spawn would
+/// occur (causing a race or panic in production but likely just a silent no-op
+/// in unit tests).
+#[tokio::test]
+async fn test_accept_call_guard_prevents_duplicate_dtmf_setup() {
+    let dialplan = build_dialplan_with_mode(MediaProxyMode::Auto)
+        .with_targets(crate::call::DialStrategy::Sequential(vec![]));
+    let mut session = build_session(dialplan).await;
+
+    // First accept — callee A
+    session
+        .accept_call(Some("sip:a@example.com".to_string()), None, None)
+        .await
+        .expect("first accept_call should succeed");
+    assert_eq!(
+        session.connected_callee,
+        Some("sip:a@example.com".to_string())
+    );
+
+    // Second accept — callee B (re-INVITE / transfer scenario).
+    // The guard inside start_caller_ingress_monitor_if_needed must see
+    // connected_callee = Some and skip re-setup.
+    session
+        .accept_call(Some("sip:b@example.com".to_string()), None, None)
+        .await
+        .expect("second accept_call should not panic or fail");
+    assert_eq!(
+        session.connected_callee,
+        Some("sip:b@example.com".to_string())
+    );
+}

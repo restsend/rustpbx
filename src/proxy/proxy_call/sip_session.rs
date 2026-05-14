@@ -3668,7 +3668,6 @@ impl SipSession {
         }
     }
 
-    #[allow(dead_code)]
     async fn get_forwarding_track(
         peer: &Arc<dyn MediaPeer>,
         track_id: &str,
@@ -4245,6 +4244,10 @@ impl SipSession {
         );
 
         self.update_leg_state(&LegId::from("callee"), LegState::Connected);
+        if self.caller_answer_uses_media_bridge {
+            self.start_caller_ingress_monitor_if_needed().await;
+        }
+
         self.connected_callee = callee.clone();
 
         let mut timer_headers = vec![];
@@ -4343,8 +4346,6 @@ impl SipSession {
                 );
             }
         }
-
-        self.start_caller_ingress_monitor_if_needed().await;
 
         Ok(())
     }
@@ -7064,6 +7065,22 @@ impl Drop for SipSession {
         let _ = self.supervisor_mixer.take();
 
         debug!(session_id = %self.context.session_id, "SipSession drop complete");
+    }
+}
+
+#[cfg(test)]
+impl SipSession {
+    /// Test-only: set caller_answer_uses_media_bridge without going through the full
+    /// media-bridge setup codepath.
+    pub fn set_caller_uses_bridge_for_test(&mut self, value: bool) {
+        self.caller_answer_uses_media_bridge = value;
+    }
+
+    /// Test-only: returns true if a caller ingress monitor task is currently active.
+    pub fn has_active_caller_ingress_monitor(&self) -> bool {
+        self.caller_ingress_monitor
+            .as_ref()
+            .is_some_and(|m| !m.task.is_finished())
     }
 }
 
