@@ -117,10 +117,10 @@ chrono-tz = "0.10.4"
 rsipstack = "0.5.11"
 hex = { version = "0.4.3", optional = true }
 #rsipstack = { path = "../rsipstack" }
-audio-codec = "0.3.37"
+audio-codec = "0.3.38"
 #udio-codec = { path = "../audio-codec", default-features = false }
 #rustrtc = { path = "../rustrtc" }
-rustrtc = "0.3.58"
+rustrtc = "0.3.60"
 reqwest = { version = "0.13", features = [
     "json",
     "stream",

@@ -2523,6 +2523,7 @@ impl SipSession {
                                     .prepare_caller_answer_from_callee_sdp(
                                         Some(callee_sdp),
                                         false,
+                                        true,
                                     )
                                     .await;
 
@@ -2587,7 +2588,7 @@ impl SipSession {
             self.stop_playback_track(track_id, false).await;
         }
         let caller_answer = self
-            .prepare_caller_answer_from_callee_sdp(callee_sdp, false)
+            .prepare_caller_answer_from_callee_sdp(callee_sdp, false, false)
             .await;
 
         self.accept_call(
@@ -2638,6 +2639,7 @@ impl SipSession {
         &mut self,
         callee_sdp: Option<String>,
         force_regenerate: bool,
+        is_early_media: bool,
     ) -> Option<String> {
         let Some(callee_sdp_value) = callee_sdp else {
             return if self.early_media_sent {
@@ -2736,7 +2738,14 @@ impl SipSession {
                     use rustrtc::sdp::{SdpType, SessionDescription};
 
                     // 1. Set callee's RTP answer on bridge's RTP side
-                    if let Ok(desc) = SessionDescription::parse(SdpType::Answer, sdp) {
+                    // 183 early media → Pranswer (PC stays in HaveLocalOffer, media starts flowing)
+                    // 200 OK          → Answer   (PC moves to Stable)
+                    let rtp_sdp_type = if is_early_media {
+                        SdpType::Pranswer
+                    } else {
+                        SdpType::Answer
+                    };
+                    if let Ok(desc) = SessionDescription::parse(rtp_sdp_type, sdp) {
                         let selected_video_params =
                             desc.to_video_capabilities().first().map(|cap| {
                                 rustrtc::RtpCodecParameters {
@@ -2746,59 +2755,8 @@ impl SipSession {
                                 }
                             });
                         let rtp_pc = bridge.rtp_pc();
-                        // If we already negotiated early media (183), the RTP peer is in Stable
-                        // state.  Only re-offer when the SDP session-version actually changed;
-                        // if the version is identical the callee sent the same SDP in 200 OK as
-                        // in 183 (common with CCP/PSTN gateways).
-                        //
-                        // We must skip BOTH create_offer() AND set_remote_description() in that
-                        // case:
-                        //   - create_offer() would allocate a new local RTP port (P2), while the
-                        //     remote keeps sending to our original INVITE port (P1) → SSRC latch
-                        //     never fires on P2 → rtp_to_webrtc_pps=0.
-                        //   - set_remote_description(Answer) requires SignalingState::HaveLocalOffer;
-                        //     skipping create_offer() leaves the state as Stable, so the call
-                        //     would return InvalidState anyway.
-                        //   - The SDP content is identical, so nothing needs to be updated.
-                        let should_renegotiate = if let Some(prev_desc) =
-                            rtp_pc.remote_description()
-                        {
-                            let prev_version = prev_desc.session.origin.session_version;
-                            let new_version = desc.session.origin.session_version;
-                            if prev_version != new_version {
-                                debug!(
-                                    session_id = %self.context.session_id,
-                                    prev_version,
-                                    new_version,
-                                    "Bridge: RTP SDP version changed, will re-negotiate"
-                                );
-                                true
-                            } else {
-                                debug!(
-                                    session_id = %self.context.session_id,
-                                    version = new_version,
-                                    "Bridge: Skipping RTP re-negotiate — callee SDP version unchanged (183 == 200 OK)"
-                                );
-                                false
-                            }
-                        } else {
-                            true // first time, no previous description
-                        };
-
-                        if should_renegotiate {
-                            match rtp_pc.create_offer().await {
-                                Ok(offer) => {
-                                    if let Err(e) = rtp_pc.set_local_description(offer) {
-                                        warn!(session_id = %self.context.session_id, error = %e, "Failed to set bridge RTP local re-offer");
-                                    }
-                                }
-                                Err(e) => {
-                                    warn!(session_id = %self.context.session_id, error = %e, "Failed to create bridge RTP re-offer");
-                                }
-                            }
-                            if let Err(e) = rtp_pc.set_remote_description(desc).await {
-                                warn!(session_id = %self.context.session_id, error = %e, "Failed to set bridge RTP remote description");
-                            }
+                        if let Err(e) = rtp_pc.set_remote_description(desc).await {
+                            warn!(session_id = %self.context.session_id, error = %e, "Failed to set bridge RTP remote description");
                         }
                         if let Some(params) = selected_video_params {
                             bridge.set_video_sender_params(params).await;
@@ -2908,8 +2866,14 @@ impl SipSession {
                     use rustrtc::sdp::{SdpType, SessionDescription};
 
                     // 1. Set callee's WebRTC answer on bridge's WebRTC side
+                    // 183 early media → Pranswer; 200 OK → Answer
                     debug!(session_id = %self.context.session_id, sdp= %sdp, "Bridge: Setting WebRTC side remote from callee answer");
-                    if let Ok(desc) = SessionDescription::parse(SdpType::Answer, sdp)
+                    let webrtc_sdp_type = if is_early_media {
+                        SdpType::Pranswer
+                    } else {
+                        SdpType::Answer
+                    };
+                    if let Ok(desc) = SessionDescription::parse(webrtc_sdp_type, sdp)
                         && let Err(e) = bridge.webrtc_pc().set_remote_description(desc).await
                     {
                         warn!(session_id = %self.context.session_id, error = %e, "Failed to set bridge WebRTC remote description");
@@ -4630,7 +4594,7 @@ impl SipSession {
                         || self.media_bridge.is_some()
                     {
                         final_answer = self
-                            .prepare_caller_answer_from_callee_sdp(Some(answer_sdp), true)
+                            .prepare_caller_answer_from_callee_sdp(Some(answer_sdp), true, false)
                             .await;
                     } else {
                         final_answer = Some(answer_sdp.clone());
