@@ -85,6 +85,10 @@ pub struct SipServerInner {
     pub queue_manager: Arc<crate::call::runtime::QueueManager>,
     pub conference_manager: Arc<crate::call::runtime::ConferenceManager>,
     pub agent_registry: Option<Arc<dyn crate::call::app::agent_registry::AgentRegistry>>,
+    /// Optional hook for enriching resolved agent locations before dialing (e.g. injecting
+    /// CC / CRM headers for screen-pop).  Registered by the cc addon via proxy_server_hook.
+    pub queue_location_enricher:
+        Option<Arc<dyn crate::proxy::call::QueueLocationEnricher>>,
     /// Subscribers for REFER NOTIFY events from SipSession.
     pub transfer_notify_subscribers:
         Arc<tokio::sync::Mutex<Vec<crate::call::domain::ReferNotifyTx>>>,
@@ -136,6 +140,7 @@ pub struct SipServerBuilder {
     rwi_gateway: Option<Arc<tokio::sync::RwLock<crate::rwi::gateway::RwiGateway>>>,
     /// AgentRegistry for agent management and presence state.
     agent_registry: Option<Arc<dyn crate::call::app::agent_registry::AgentRegistry>>,
+    queue_location_enricher: Option<Arc<dyn crate::proxy::call::QueueLocationEnricher>>,
     skip_migrate: bool,
     /// Cluster peer SocketAddrs for inter-node sync (derived from Config.cluster).
     cluster_peers: Vec<SocketAddr>,
@@ -173,6 +178,7 @@ impl SipServerBuilder {
             addon_registry: None,
             rwi_gateway: None,
             agent_registry: None,
+            queue_location_enricher: None,
             skip_migrate: false,
             cluster_peers: Vec::new(),
             media_policy: None,
@@ -330,6 +336,14 @@ impl SipServerBuilder {
         registry: Arc<dyn crate::call::app::agent_registry::AgentRegistry>,
     ) -> Self {
         self.agent_registry = Some(registry);
+        self
+    }
+
+    pub fn with_queue_location_enricher(
+        mut self,
+        enricher: Arc<dyn crate::proxy::call::QueueLocationEnricher>,
+    ) -> Self {
+        self.queue_location_enricher = Some(enricher);
         self
     }
 
@@ -696,6 +710,7 @@ impl SipServerBuilder {
             queue_manager,
             conference_manager,
             agent_registry: self.agent_registry,
+            queue_location_enricher: self.queue_location_enricher,
             transfer_notify_subscribers: Arc::new(tokio::sync::Mutex::new(Vec::new())),
             cluster_event_hub,
             cluster_peer_ips,

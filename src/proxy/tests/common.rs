@@ -105,6 +105,7 @@ pub async fn create_test_server_with_config(
         queue_manager: Arc::new(crate::call::runtime::QueueManager::new()),
         conference_manager: Arc::new(crate::call::runtime::ConferenceManager::new()),
         agent_registry: None,
+        queue_location_enricher: None,
         transfer_notify_subscribers: Arc::new(tokio::sync::Mutex::new(Vec::new())),
         cluster_event_hub: None,
         cluster_peer_ips: vec![],
