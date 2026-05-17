@@ -289,6 +289,9 @@ impl AddonRegistry {
             if let Some(inspector) = addon.dialplan_inspector() {
                 builder = builder.with_dialplan_inspector(inspector);
             }
+            if let Some(enricher) = addon.queue_location_enricher() {
+                builder = builder.with_queue_location_enricher(enricher);
+            }
         }
         builder
     }

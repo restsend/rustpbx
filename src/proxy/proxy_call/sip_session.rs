@@ -1053,24 +1053,20 @@ impl SipSession {
         let target_answer =
             rustrtc::SessionDescription::parse(rustrtc::SdpType::Answer, &target_answer_sdp)
                 .map_err(|e| anyhow!("Failed to parse bridged target answer SDP: {}", e))?;
-        let target_video_active = target_answer
-            .media_sections
-            .iter()
-            .any(|section| {
-                section.kind == rustrtc::MediaKind::Video
-                    && section.port != 0
-                    && section.direction != rustrtc::Direction::Inactive
-            });
+        let target_video_active = target_answer.media_sections.iter().any(|section| {
+            section.kind == rustrtc::MediaKind::Video
+                && section.port != 0
+                && section.direction != rustrtc::Direction::Inactive
+        });
         let target_video_params = target_video_active
             .then(|| {
-                target_answer
-                    .to_video_capabilities()
-                    .first()
-                    .map(|video| rustrtc::RtpCodecParameters {
+                target_answer.to_video_capabilities().first().map(|video| {
+                    rustrtc::RtpCodecParameters {
                         payload_type: video.payload_type,
                         clock_rate: video.clock_rate,
                         channels: 0,
-                    })
+                    }
+                })
             })
             .flatten();
         target_pc
@@ -1123,24 +1119,20 @@ impl SipSession {
         let source_answer =
             rustrtc::SessionDescription::parse(rustrtc::SdpType::Answer, &source_answer_sdp)
                 .map_err(|e| anyhow!("Failed to parse bridged source answer SDP: {}", e))?;
-        let source_video_active = source_answer
-            .media_sections
-            .iter()
-            .any(|section| {
-                section.kind == rustrtc::MediaKind::Video
-                    && section.port != 0
-                    && section.direction != rustrtc::Direction::Inactive
-            });
+        let source_video_active = source_answer.media_sections.iter().any(|section| {
+            section.kind == rustrtc::MediaKind::Video
+                && section.port != 0
+                && section.direction != rustrtc::Direction::Inactive
+        });
         let source_video_params = source_video_active
             .then(|| {
-                source_answer
-                    .to_video_capabilities()
-                    .first()
-                    .map(|video| rustrtc::RtpCodecParameters {
+                source_answer.to_video_capabilities().first().map(|video| {
+                    rustrtc::RtpCodecParameters {
                         payload_type: video.payload_type,
                         clock_rate: video.clock_rate,
                         channels: 0,
-                    })
+                    }
+                })
             })
             .flatten();
         source_pc
@@ -1160,8 +1152,7 @@ impl SipSession {
             } else {
                 (source_video_params, target_video_params)
             };
-            bridge
-                .set_video_payload_types(webrtc_video_params, rtp_video_params);
+            bridge.set_video_payload_types(webrtc_video_params, rtp_video_params);
         }
 
         match side {
@@ -2333,6 +2324,11 @@ impl SipSession {
             ));
         }
 
+        // Inject custom headers from routing (e.g. X-CC-*, X-CRM-* for screen-pop)
+        if let Some(target_headers) = &target.headers {
+            headers.extend(target_headers.iter().cloned());
+        }
+
         let callee_is_webrtc = target.supports_webrtc;
         let caller_is_webrtc = self.is_caller_webrtc();
         self.leg_transport.insert(
@@ -2809,8 +2805,7 @@ impl SipSession {
                             warn!(session_id = %self.context.session_id, error = %e, "Failed to set bridge RTP remote description");
                         }
                         if let Some(params) = selected_video_params {
-                            bridge
-                                .set_video_payload_types(Some(params.clone()), Some(params));
+                            bridge.set_video_payload_types(Some(params.clone()), Some(params));
                         }
                     }
 

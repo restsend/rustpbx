@@ -151,6 +151,12 @@ pub trait Addon: Send + Sync {
         None
     }
 
+    fn queue_location_enricher(
+        &self,
+    ) -> Option<Arc<dyn crate::proxy::call::QueueLocationEnricher>> {
+        None
+    }
+
     /// Return database migrations for this addon.
     fn migrations(&self) -> Vec<Box<dyn sea_orm_migration::MigrationTrait>> {
         vec![]
@@ -193,11 +199,11 @@ pub mod transcript;
 #[cfg(feature = "addon-wholesale")]
 pub mod wholesale;
 
-#[cfg(feature = "addon-sbc")]
-pub mod sbc;
 #[cfg(feature = "addon-cc")]
 pub mod cc;
 pub mod queue;
+#[cfg(feature = "addon-sbc")]
+pub mod sbc;
 
 #[cfg(feature = "addon-endpoint-manager")]
 pub mod endpoint_manager;

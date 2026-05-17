@@ -125,6 +125,35 @@ pub trait DialplanInspector: Send + Sync {
     ) -> Result<Dialplan, RouteError>;
 }
 
+/// Context passed to [`QueueLocationEnricher::enrich`].
+pub struct QueueEnrichContext<'a> {
+    /// Proxy session identifier — suitable for CDR / screen-pop lookup.
+    pub session_id: &'a str,
+    /// Canonical queue key / name.
+    pub queue_name: &'a str,
+    /// Raw SIP headers from the *caller's* INVITE (e.g. `X-CRM-*`).
+    pub caller_headers: &'a [rsipstack::sip::Header],
+}
+
+/// Hook called by the queue executor after agent locations are resolved but
+/// *before* dialing begins, allowing addons to inject extra SIP headers
+/// (screen-pop context, CRM correlation IDs, etc.) into each target location.
+///
+/// The cc addon uses this to attach `X-CC-Call-Id`, `X-CC-Queue-Id`,
+/// `X-CC-Queue-Name` and any caller-supplied `X-CRM-*` headers so the
+/// outbound INVITE to the agent carries full screen-pop metadata.
+///
+/// # Default behaviour
+/// If no enricher is registered the locations are forwarded unchanged.
+#[async_trait::async_trait]
+pub trait QueueLocationEnricher: Send + Sync {
+    async fn enrich(
+        &self,
+        locations: Vec<crate::call::Location>,
+        ctx: &QueueEnrichContext<'_>,
+    ) -> Vec<crate::call::Location>;
+}
+
 pub struct DefaultRouteInvite {
     pub routing_state: Arc<RoutingState>,
     pub data_context: Arc<ProxyDataContext>,

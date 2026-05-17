@@ -37,6 +37,28 @@ impl SipSession {
             .resolve_custom_targets(agents, plan.acd_policy.as_deref())
             .await;
 
+        let resolved_agents = if let Some(enricher) = &self.server.queue_location_enricher {
+            let caller_headers: Vec<rsipstack::sip::Header> = self
+                .server_dialog
+                .initial_request()
+                .headers
+                .iter()
+                .cloned()
+                .collect();
+            enricher
+                .enrich(
+                    resolved_agents,
+                    &crate::proxy::call::QueueEnrichContext {
+                        session_id: &self.context.session_id.to_string(),
+                        queue_name: &plan.queue_name,
+                        caller_headers: &caller_headers,
+                    },
+                )
+                .await
+        } else {
+            resolved_agents
+        };
+
         let transfer_prompt = plan
             .voice_prompts
             .as_ref()
@@ -232,10 +254,7 @@ impl SipSession {
                 _ => None,
             });
 
-        let wait_for_failure_audio = matches!(
-            plan.fallback,
-            Some(QueueFallbackAction::Failure(_))
-        );
+        let wait_for_failure_audio = matches!(plan.fallback, Some(QueueFallbackAction::Failure(_)));
         if let Some(ref audio_file) = pre_action_audio {
             self.prepare_queue_playback_media().await;
             match self
@@ -395,5 +414,140 @@ impl SipSession {
                 "Queue playback: failed to prepare caller media before audio"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::proxy::call::{QueueEnrichContext, QueueLocationEnricher};
+
+    fn make_loc(aor: &str) -> crate::call::Location {
+        crate::call::Location {
+            aor: aor.parse().unwrap(),
+            ..Default::default()
+        }
+    }
+
+    fn header_val<'a>(loc: &'a crate::call::Location, name: &str) -> Option<&'a str> {
+        loc.headers.as_ref()?.iter().find_map(|h| {
+            if let rsipstack::sip::Header::Other(n, v) = h {
+                if n.eq_ignore_ascii_case(name) {
+                    return Some(v.as_str());
+                }
+            }
+            None
+        })
+    }
+
+    /// Minimal enricher that prepends a single `X-Test` header to every location.
+    struct TagEnricher(String);
+
+    #[async_trait::async_trait]
+    impl QueueLocationEnricher for TagEnricher {
+        async fn enrich(
+            &self,
+            mut locs: Vec<crate::call::Location>,
+            _ctx: &QueueEnrichContext<'_>,
+        ) -> Vec<crate::call::Location> {
+            for loc in &mut locs {
+                let hdrs = loc.headers.get_or_insert_with(Vec::new);
+                hdrs.push(rsipstack::sip::Header::Other(
+                    "X-Test".to_string(),
+                    self.0.clone(),
+                ));
+            }
+            locs
+        }
+    }
+
+    #[tokio::test]
+    async fn test_enricher_trait_basic() {
+        let enricher = TagEnricher("hello".into());
+        let locs = vec![make_loc("sip:a@pbx"), make_loc("sip:b@pbx")];
+        let ctx = QueueEnrichContext {
+            session_id: "s1",
+            queue_name: "q1",
+            caller_headers: &[],
+        };
+        let result = enricher.enrich(locs, &ctx).await;
+        assert_eq!(result.len(), 2);
+        assert_eq!(header_val(&result[0], "X-Test"), Some("hello"));
+        assert_eq!(header_val(&result[1], "X-Test"), Some("hello"));
+    }
+
+    #[tokio::test]
+    async fn test_enricher_context_fields_available() {
+        struct CtxEchoEnricher;
+
+        #[async_trait::async_trait]
+        impl QueueLocationEnricher for CtxEchoEnricher {
+            async fn enrich(
+                &self,
+                mut locs: Vec<crate::call::Location>,
+                ctx: &QueueEnrichContext<'_>,
+            ) -> Vec<crate::call::Location> {
+                for loc in &mut locs {
+                    let hdrs = loc.headers.get_or_insert_with(Vec::new);
+                    hdrs.push(rsipstack::sip::Header::Other(
+                        "X-Sid".into(),
+                        ctx.session_id.to_string(),
+                    ));
+                    hdrs.push(rsipstack::sip::Header::Other(
+                        "X-Queue".into(),
+                        ctx.queue_name.to_string(),
+                    ));
+                }
+                locs
+            }
+        }
+
+        let enricher = CtxEchoEnricher;
+        let ctx = QueueEnrichContext {
+            session_id: "session-abc",
+            queue_name: "my-queue",
+            caller_headers: &[],
+        };
+        let result = enricher.enrich(vec![make_loc("sip:x@pbx")], &ctx).await;
+        assert_eq!(header_val(&result[0], "X-Sid"), Some("session-abc"));
+        assert_eq!(header_val(&result[0], "X-Queue"), Some("my-queue"));
+    }
+
+    #[tokio::test]
+    async fn test_caller_headers_accessible() {
+        struct CrmForwarder;
+
+        #[async_trait::async_trait]
+        impl QueueLocationEnricher for CrmForwarder {
+            async fn enrich(
+                &self,
+                mut locs: Vec<crate::call::Location>,
+                ctx: &QueueEnrichContext<'_>,
+            ) -> Vec<crate::call::Location> {
+                let crm: Vec<_> = ctx
+                    .caller_headers
+                    .iter()
+                    .filter(|h| matches!(h, rsipstack::sip::Header::Other(n, _) if n.starts_with("X-CRM-")))
+                    .cloned()
+                    .collect();
+                for loc in &mut locs {
+                    loc.headers
+                        .get_or_insert_with(Vec::new)
+                        .extend(crm.iter().cloned());
+                }
+                locs
+            }
+        }
+
+        let caller_headers = vec![rsipstack::sip::Header::Other(
+            "X-CRM-Order".into(),
+            "ORD-99".into(),
+        )];
+        let ctx = QueueEnrichContext {
+            session_id: "s2",
+            queue_name: "sales",
+            caller_headers: &caller_headers,
+        };
+        let result = CrmForwarder.enrich(vec![make_loc("sip:c@pbx")], &ctx).await;
+        assert_eq!(header_val(&result[0], "X-CRM-Order"), Some("ORD-99"));
     }
 }
