@@ -269,8 +269,8 @@ async fn test_reinvite_audio_to_video_add_via_bridge() {
         .collect();
 
     let bridge = crate::media::bridge::BridgePeerBuilder::new("test-bridge-video".to_string())
-        .with_webrtc_audio_capabilities(audio_caps.clone())
-        .with_rtp_audio_capabilities(audio_caps)
+        .with_caller_audio_capabilities(audio_caps.clone())
+        .with_callee_audio_capabilities(audio_caps)
         .build();
     bridge.setup_bridge().await.unwrap();
 
@@ -290,7 +290,7 @@ async fn test_reinvite_audio_to_video_add_via_bridge() {
     // plain RTP and does NOT require ICE/DTLS). The RTP PC should produce
     // an answer with video after add_video_track.
     let reinvite_offer = "v=0\r\no=- 123 456 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\nm=video 10002 RTP/AVP 96\r\na=rtpmap:96 H264/90000\r\na=fmtp:96 packetization-mode=1\r\n";
-    let pc = bridge.rtp_pc();
+    let pc = bridge.callee_pc();
     let offer = SessionDescription::parse(SdpType::Offer, reinvite_offer).unwrap();
     pc.set_remote_description(offer).await.unwrap();
     let answer = pc.create_answer().await.unwrap();

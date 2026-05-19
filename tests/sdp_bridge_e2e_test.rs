@@ -57,8 +57,8 @@ async fn test_e2e_webrtc_caller_to_rtp_callee_via_bridge() {
     bridge.setup_bridge().await.unwrap();
 
     // Only create offer on callee-facing RTP side
-    let rtp_offer = bridge.rtp_pc().create_offer().await.unwrap();
-    bridge.rtp_pc().set_local_description(rtp_offer).unwrap();
+    let rtp_offer = bridge.callee_pc().create_offer().await.unwrap();
+    bridge.callee_pc().set_local_description(rtp_offer).unwrap();
     bridge.start_bridge().await;
 
     // 2. Simulate WebRTC caller (JsSIP) generating INVITE offer
@@ -74,7 +74,7 @@ async fn test_e2e_webrtc_caller_to_rtp_callee_via_bridge() {
     );
 
     // 3. Bridge sends its RTP offer to the callee
-    let bridge_rtp_sdp = bridge.rtp_pc().local_description().unwrap().to_sdp_string();
+    let bridge_rtp_sdp = bridge.callee_pc().local_description().unwrap().to_sdp_string();
     assert!(
         bridge_rtp_sdp.contains("RTP/AVP"),
         "Bridge to callee must be plain RTP"
@@ -95,7 +95,7 @@ async fn test_e2e_webrtc_caller_to_rtp_callee_via_bridge() {
     // 5. Bridge sets callee's answer on its RTP side
     let callee_desc = SessionDescription::parse(SdpType::Answer, &callee_answer).unwrap();
     bridge
-        .rtp_pc()
+        .callee_pc()
         .set_remote_description(callee_desc)
         .await
         .unwrap();
@@ -103,19 +103,19 @@ async fn test_e2e_webrtc_caller_to_rtp_callee_via_bridge() {
     // 6. Bridge sets caller's WebRTC offer and creates real answer
     let caller_desc = SessionDescription::parse(SdpType::Offer, &caller_offer).unwrap();
     bridge
-        .webrtc_pc()
+        .caller_pc()
         .set_remote_description(caller_desc)
         .await
         .unwrap();
 
-    let bridge_answer = bridge.webrtc_pc().create_answer().await.unwrap();
+    let bridge_answer = bridge.caller_pc().create_answer().await.unwrap();
     bridge
-        .webrtc_pc()
+        .caller_pc()
         .set_local_description(bridge_answer)
         .unwrap();
 
     let answer_sdp = bridge
-        .webrtc_pc()
+        .caller_pc()
         .local_description()
         .unwrap()
         .to_sdp_string();
@@ -150,9 +150,9 @@ async fn test_e2e_webrtc_caller_to_rtp_callee_via_bridge() {
     caller.set_remote_description(&answer_sdp).await.unwrap();
 
     // Verify full connectivity
-    assert!(bridge.rtp_pc().remote_description().is_some());
-    assert!(bridge.webrtc_pc().local_description().is_some());
-    assert!(bridge.webrtc_pc().remote_description().is_some());
+    assert!(bridge.callee_pc().remote_description().is_some());
+    assert!(bridge.caller_pc().local_description().is_some());
+    assert!(bridge.caller_pc().remote_description().is_some());
 
     // Cleanup
     bridge.stop().await;
@@ -174,9 +174,9 @@ async fn test_e2e_rtp_caller_to_webrtc_callee_via_bridge() {
     bridge.setup_bridge().await.unwrap();
 
     // Only create offer on callee-facing WebRTC side
-    let webrtc_offer = bridge.webrtc_pc().create_offer().await.unwrap();
+    let webrtc_offer = bridge.caller_pc().create_offer().await.unwrap();
     bridge
-        .webrtc_pc()
+        .caller_pc()
         .set_local_description(webrtc_offer)
         .unwrap();
     bridge.start_bridge().await;
@@ -191,7 +191,7 @@ async fn test_e2e_rtp_caller_to_webrtc_callee_via_bridge() {
 
     // 3. Bridge sends its WebRTC offer to the callee
     let bridge_webrtc_sdp = bridge
-        .webrtc_pc()
+        .caller_pc()
         .local_description()
         .unwrap()
         .to_sdp_string();
@@ -215,7 +215,7 @@ async fn test_e2e_rtp_caller_to_webrtc_callee_via_bridge() {
     // 5. Bridge sets callee's answer on its WebRTC side
     let callee_desc = SessionDescription::parse(SdpType::Answer, &callee_answer).unwrap();
     bridge
-        .webrtc_pc()
+        .caller_pc()
         .set_remote_description(callee_desc)
         .await
         .unwrap();
@@ -223,18 +223,18 @@ async fn test_e2e_rtp_caller_to_webrtc_callee_via_bridge() {
     // 6. Bridge sets caller's RTP offer and creates real answer
     let caller_desc = SessionDescription::parse(SdpType::Offer, &caller_offer).unwrap();
     bridge
-        .rtp_pc()
+        .callee_pc()
         .set_remote_description(caller_desc)
         .await
         .unwrap();
 
-    let bridge_answer = bridge.rtp_pc().create_answer().await.unwrap();
+    let bridge_answer = bridge.callee_pc().create_answer().await.unwrap();
     bridge
-        .rtp_pc()
+        .callee_pc()
         .set_local_description(bridge_answer)
         .unwrap();
 
-    let answer_sdp = bridge.rtp_pc().local_description().unwrap().to_sdp_string();
+    let answer_sdp = bridge.callee_pc().local_description().unwrap().to_sdp_string();
 
     // 7. Verify the answer is plain RTP (no WebRTC artifacts)
     assert!(answer_sdp.contains("RTP/AVP"), "Answer must be plain RTP");
@@ -251,9 +251,9 @@ async fn test_e2e_rtp_caller_to_webrtc_callee_via_bridge() {
     caller.set_remote_description(&answer_sdp).await.unwrap();
 
     // Verify full connectivity
-    assert!(bridge.rtp_pc().remote_description().is_some());
-    assert!(bridge.rtp_pc().local_description().is_some());
-    assert!(bridge.webrtc_pc().remote_description().is_some());
+    assert!(bridge.callee_pc().remote_description().is_some());
+    assert!(bridge.callee_pc().local_description().is_some());
+    assert!(bridge.caller_pc().remote_description().is_some());
 
     // Cleanup
     bridge.stop().await;
@@ -369,18 +369,18 @@ async fn test_e2e_webrtc_caller_rtp_callee_pcmu_only_allow_codecs() {
 
     let bridge = BridgePeerBuilder::new("e2e-pcmu-only".to_string())
         .with_rtp_port_range(port_base, port_base + 100)
-        .with_webrtc_audio_capabilities(webrtc_caps)
-        .with_rtp_audio_capabilities(rtp_caps)
+        .with_caller_audio_capabilities(webrtc_caps)
+        .with_callee_audio_capabilities(rtp_caps)
         .with_sender_codecs(webrtc_sender, rtp_sender)
         .build();
 
     bridge.setup_bridge().await.unwrap();
 
     // 4. RTP side creates offer for callee
-    let rtp_offer = bridge.rtp_pc().create_offer().await.unwrap();
-    bridge.rtp_pc().set_local_description(rtp_offer).unwrap();
+    let rtp_offer = bridge.callee_pc().create_offer().await.unwrap();
+    bridge.callee_pc().set_local_description(rtp_offer).unwrap();
 
-    let bridge_rtp_sdp = bridge.rtp_pc().local_description().unwrap().to_sdp_string();
+    let bridge_rtp_sdp = bridge.callee_pc().local_description().unwrap().to_sdp_string();
     assert!(
         bridge_rtp_sdp.contains("PCMU/8000"),
         "RTP side must offer PCMU"
@@ -397,7 +397,7 @@ async fn test_e2e_webrtc_caller_rtp_callee_pcmu_only_allow_codecs() {
 
     let callee_desc = SessionDescription::parse(SdpType::Answer, &callee_answer).unwrap();
     bridge
-        .rtp_pc()
+        .callee_pc()
         .set_remote_description(callee_desc)
         .await
         .unwrap();
@@ -405,16 +405,16 @@ async fn test_e2e_webrtc_caller_rtp_callee_pcmu_only_allow_codecs() {
     // 6. Bridge answers WebRTC caller
     let caller_desc = SessionDescription::parse(SdpType::Offer, &caller_offer).unwrap();
     bridge
-        .webrtc_pc()
+        .caller_pc()
         .set_remote_description(caller_desc)
         .await
         .unwrap();
 
-    let answer = bridge.webrtc_pc().create_answer().await.unwrap();
-    bridge.webrtc_pc().set_local_description(answer).unwrap();
+    let answer = bridge.caller_pc().create_answer().await.unwrap();
+    bridge.caller_pc().set_local_description(answer).unwrap();
 
     let answer_sdp = bridge
-        .webrtc_pc()
+        .caller_pc()
         .local_description()
         .unwrap()
         .to_sdp_string();
@@ -432,8 +432,8 @@ async fn test_e2e_webrtc_caller_rtp_callee_pcmu_only_allow_codecs() {
     caller.set_remote_description(&answer_sdp).await.unwrap();
 
     // Verify connectivity
-    assert!(bridge.rtp_pc().remote_description().is_some());
-    assert!(bridge.webrtc_pc().remote_description().is_some());
+    assert!(bridge.callee_pc().remote_description().is_some());
+    assert!(bridge.caller_pc().remote_description().is_some());
 
     bridge.stop().await;
 }
@@ -518,22 +518,22 @@ async fn test_e2e_rtp_caller_g729_dropped_on_webrtc_side() {
 
     let bridge = BridgePeerBuilder::new("e2e-g729-drop".to_string())
         .with_rtp_port_range(port_base, port_base + 100)
-        .with_webrtc_audio_capabilities(webrtc_caps)
-        .with_rtp_audio_capabilities(rtp_caps)
+        .with_caller_audio_capabilities(webrtc_caps)
+        .with_callee_audio_capabilities(rtp_caps)
         .with_sender_codecs(webrtc_sender, rtp_sender)
         .build();
 
     bridge.setup_bridge().await.unwrap();
 
     // 4. WebRTC callee side creates offer
-    let webrtc_offer = bridge.webrtc_pc().create_offer().await.unwrap();
+    let webrtc_offer = bridge.caller_pc().create_offer().await.unwrap();
     bridge
-        .webrtc_pc()
+        .caller_pc()
         .set_local_description(webrtc_offer)
         .unwrap();
 
     let bridge_webrtc_sdp = bridge
-        .webrtc_pc()
+        .caller_pc()
         .local_description()
         .unwrap()
         .to_sdp_string();
@@ -556,7 +556,7 @@ async fn test_e2e_rtp_caller_g729_dropped_on_webrtc_side() {
 
     let callee_desc = SessionDescription::parse(SdpType::Answer, &callee_answer).unwrap();
     bridge
-        .webrtc_pc()
+        .caller_pc()
         .set_remote_description(callee_desc)
         .await
         .unwrap();
@@ -564,15 +564,15 @@ async fn test_e2e_rtp_caller_g729_dropped_on_webrtc_side() {
     // 6. Bridge answers RTP caller
     let caller_desc = SessionDescription::parse(SdpType::Offer, &caller_offer).unwrap();
     bridge
-        .rtp_pc()
+        .callee_pc()
         .set_remote_description(caller_desc)
         .await
         .unwrap();
 
-    let rtp_answer = bridge.rtp_pc().create_answer().await.unwrap();
-    bridge.rtp_pc().set_local_description(rtp_answer).unwrap();
+    let rtp_answer = bridge.callee_pc().create_answer().await.unwrap();
+    bridge.callee_pc().set_local_description(rtp_answer).unwrap();
 
-    let rtp_answer_sdp = bridge.rtp_pc().local_description().unwrap().to_sdp_string();
+    let rtp_answer_sdp = bridge.callee_pc().local_description().unwrap().to_sdp_string();
     assert!(
         rtp_answer_sdp.contains("RTP/AVP"),
         "RTP answer must be plain RTP"
@@ -589,8 +589,8 @@ async fn test_e2e_rtp_caller_g729_dropped_on_webrtc_side() {
         .unwrap();
 
     // Verify connectivity
-    assert!(bridge.rtp_pc().remote_description().is_some());
-    assert!(bridge.webrtc_pc().remote_description().is_some());
+    assert!(bridge.callee_pc().remote_description().is_some());
+    assert!(bridge.caller_pc().remote_description().is_some());
 
     bridge.stop().await;
 }
@@ -802,8 +802,8 @@ async fn test_e2e_early_media_then_200_ok_address_change() {
     bridge.setup_bridge().await.unwrap();
 
     // 2. RTP side creates initial offer for callee
-    let rtp_offer = bridge.rtp_pc().create_offer().await.unwrap();
-    bridge.rtp_pc().set_local_description(rtp_offer).unwrap();
+    let rtp_offer = bridge.callee_pc().create_offer().await.unwrap();
+    bridge.callee_pc().set_local_description(rtp_offer).unwrap();
     bridge.start_bridge().await;
 
     // 3. Simulate 183 early media answer from callee
@@ -818,7 +818,7 @@ async fn test_e2e_early_media_then_200_ok_address_change() {
 
     let desc_183 = SessionDescription::parse(SdpType::Answer, callee_answer_183).unwrap();
     bridge
-        .rtp_pc()
+        .callee_pc()
         .set_remote_description(desc_183)
         .await
         .unwrap();
@@ -828,18 +828,18 @@ async fn test_e2e_early_media_then_200_ok_address_change() {
     let caller_offer = caller.local_description().await.unwrap();
     let caller_desc = SessionDescription::parse(SdpType::Offer, &caller_offer).unwrap();
     bridge
-        .webrtc_pc()
+        .caller_pc()
         .set_remote_description(caller_desc.clone())
         .await
         .unwrap();
-    let webrtc_answer = bridge.webrtc_pc().create_answer().await.unwrap();
+    let webrtc_answer = bridge.caller_pc().create_answer().await.unwrap();
     bridge
-        .webrtc_pc()
+        .caller_pc()
         .set_local_description(webrtc_answer)
         .unwrap();
 
     // Verify initial RTP remote address
-    let initial_pair = bridge.rtp_pc().ice_transport().get_selected_pair().await;
+    let initial_pair = bridge.callee_pc().ice_transport().get_selected_pair().await;
     assert!(
         initial_pair.is_some(),
         "RTP side should have selected pair after 183"
@@ -854,7 +854,7 @@ async fn test_e2e_early_media_then_200_ok_address_change() {
     );
 
     // Remember transceiver count to ensure no new tracks are created
-    let initial_transceiver_count = bridge.rtp_pc().get_transceivers().len();
+    let initial_transceiver_count = bridge.callee_pc().get_transceivers().len();
 
     // 5. Simulate 200 OK with changed callee address (same codec, different c=/port)
     let callee_answer_200 = "v=0\r\n\
@@ -867,29 +867,29 @@ async fn test_e2e_early_media_then_200_ok_address_change() {
         a=sendrecv\r\n";
 
     // 6. Re-negotiate RTP side: create re-offer -> set local -> set remote with new answer
-    let rtp_reoffer = bridge.rtp_pc().create_offer().await.unwrap();
-    bridge.rtp_pc().set_local_description(rtp_reoffer).unwrap();
+    let rtp_reoffer = bridge.callee_pc().create_offer().await.unwrap();
+    bridge.callee_pc().set_local_description(rtp_reoffer).unwrap();
     let desc_200 = SessionDescription::parse(SdpType::Answer, callee_answer_200).unwrap();
     bridge
-        .rtp_pc()
+        .callee_pc()
         .set_remote_description(desc_200)
         .await
         .unwrap();
 
     // 7. Re-create WebRTC answer for caller (mimics sip_session.rs flow)
     bridge
-        .webrtc_pc()
+        .caller_pc()
         .set_remote_description(caller_desc)
         .await
         .unwrap();
-    let webrtc_answer_200 = bridge.webrtc_pc().create_answer().await.unwrap();
+    let webrtc_answer_200 = bridge.caller_pc().create_answer().await.unwrap();
     bridge
-        .webrtc_pc()
+        .caller_pc()
         .set_local_description(webrtc_answer_200)
         .unwrap();
 
     // 8. Verify RTP remote address updated to 200 OK values
-    let updated_pair = bridge.rtp_pc().ice_transport().get_selected_pair().await;
+    let updated_pair = bridge.callee_pc().ice_transport().get_selected_pair().await;
     assert!(
         updated_pair.is_some(),
         "RTP side should still have selected pair after 200 OK"
@@ -905,7 +905,7 @@ async fn test_e2e_early_media_then_200_ok_address_change() {
 
     // 9. Verify no new transceivers were created (no new tracks)
     assert_eq!(
-        bridge.rtp_pc().get_transceivers().len(),
+        bridge.callee_pc().get_transceivers().len(),
         initial_transceiver_count,
         "Re-negotiation must not create new transceivers/tracks"
     );
@@ -949,11 +949,11 @@ async fn test_e2e_early_media_then_200_ok_same_sdp_rtp_flow_continues() {
     bridge.setup_bridge().await.unwrap();
 
     // 2. RTP side creates initial offer for callee
-    let rtp_offer = bridge.rtp_pc().create_offer().await.unwrap();
-    bridge.rtp_pc().set_local_description(rtp_offer).unwrap();
+    let rtp_offer = bridge.callee_pc().create_offer().await.unwrap();
+    bridge.callee_pc().set_local_description(rtp_offer).unwrap();
 
     let bridge_rtp_addr =
-        parse_rtp_audio_addr(&bridge.rtp_pc().local_description().unwrap().to_sdp_string())
+        parse_rtp_audio_addr(&bridge.callee_pc().local_description().unwrap().to_sdp_string())
             .expect("Bridge RTP address should be present");
 
     // 3. Simulate 183 early media answer from callee
@@ -968,13 +968,13 @@ async fn test_e2e_early_media_then_200_ok_same_sdp_rtp_flow_continues() {
 
     let desc_183 = SessionDescription::parse(SdpType::Answer, callee_answer_183).unwrap();
     bridge
-        .rtp_pc()
+        .callee_pc()
         .set_remote_description(desc_183)
         .await
         .unwrap();
 
     // 4. Spawn a receiver task that waits for the RTP track and counts samples
-    let rtp_pc = bridge.rtp_pc().clone();
+    let rtp_pc = bridge.callee_pc().clone();
     let recv_handle = tokio::spawn(async move {
         let track = loop {
             let rx = rtp_pc.recv();
@@ -1044,11 +1044,11 @@ async fn test_e2e_early_media_then_200_ok_same_sdp_rtp_flow_continues() {
         a=sendrecv\r\n";
 
     // Re-negotiate RTP side exactly as sip_session.rs does
-    let rtp_reoffer = bridge.rtp_pc().create_offer().await.unwrap();
-    bridge.rtp_pc().set_local_description(rtp_reoffer).unwrap();
+    let rtp_reoffer = bridge.callee_pc().create_offer().await.unwrap();
+    bridge.callee_pc().set_local_description(rtp_reoffer).unwrap();
     let desc_200 = SessionDescription::parse(SdpType::Answer, callee_answer_200).unwrap();
     bridge
-        .rtp_pc()
+        .callee_pc()
         .set_remote_description(desc_200)
         .await
         .unwrap();
