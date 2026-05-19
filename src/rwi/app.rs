@@ -392,6 +392,7 @@ mod tests {
         gw.subscribe(
             &session_id,
             vec!["context1".to_string(), "context2".to_string()],
+            None,
         )
         .await;
 
@@ -458,7 +459,7 @@ mod tests {
             let session = gw.create_session(identity);
             let sid = session.read().await.id.clone();
             gw.set_session_event_sender(&sid, sub_tx);
-            gw.subscribe(&sid, vec!["my-ctx".to_string()]).await;
+            gw.subscribe(&sid, vec!["my-ctx".to_string()], None).await;
         }
 
         let app = RwiApp::new("my-ctx".to_string(), None, gateway.clone());
@@ -500,7 +501,7 @@ mod tests {
             let session = gw.create_session(identity);
             let sid = session.read().await.id.clone();
             gw.set_session_event_sender(&sid, tx);
-            gw.subscribe(&sid, vec!["dual-ctx".to_string()]).await;
+            gw.subscribe(&sid, vec!["dual-ctx".to_string()], None).await;
             sid
         };
 
@@ -700,7 +701,7 @@ mod tests {
             let session = gw.create_session(identity);
             let sid = session.read().await.id.clone();
             gw.set_session_event_sender(&sid, event_tx);
-            gw.subscribe(&sid, vec!["ctx-anon".to_string()]).await;
+            gw.subscribe(&sid, vec!["ctx-anon".to_string()], None).await;
         }
 
         let app = RwiApp::new("ctx-anon".to_string(), None, gateway.clone());

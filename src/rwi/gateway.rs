@@ -42,6 +42,12 @@ pub struct RwiGateway {
     event_cache: Mutex<EventCacheState>,
     max_cache_size: usize,
     max_cache_age_secs: u64,
+    /// Per-call DTMF taps for active DtmfCollect operations.
+    dtmf_taps: Mutex<HashMap<CallId, tokio::sync::mpsc::UnboundedSender<(Option<String>, char)>>>,
+    /// Per-call channel variables (key/value store).
+    call_vars: HashMap<CallId, HashMap<String, String>>,
+    /// Per-session event type filter; if set, only events whose type name is in the set are delivered.
+    session_event_filters: HashMap<SessionId, HashSet<String>>,
 }
 
 #[derive(Debug)]
@@ -80,6 +86,9 @@ impl RwiGateway {
             }),
             max_cache_size,
             max_cache_age_secs,
+            dtmf_taps: Mutex::new(HashMap::new()),
+            call_vars: HashMap::new(),
+            session_event_filters: HashMap::new(),
         }
     }
 
@@ -103,6 +112,7 @@ impl RwiGateway {
 
     pub async fn remove_session(&mut self, session_id: &SessionId) {
         self.session_event_senders.remove(session_id);
+        self.session_event_filters.remove(session_id);
         if let Some(session) = self.sessions.remove(session_id) {
             let session = session.read().await;
             for ctx in &session.subscribed_contexts {
@@ -119,7 +129,12 @@ impl RwiGateway {
         }
     }
 
-    pub async fn subscribe(&mut self, session_id: &SessionId, contexts: Vec<Context>) -> bool {
+    pub async fn subscribe(
+        &mut self,
+        session_id: &SessionId,
+        contexts: Vec<Context>,
+        events: Option<Vec<String>>,
+    ) -> bool {
         if let Some(session) = self.sessions.get(session_id) {
             let mut session = session.write().await;
             session.subscribe(contexts.clone());
@@ -128,6 +143,17 @@ impl RwiGateway {
                     .entry(ctx)
                     .or_default()
                     .insert(session_id.clone());
+            }
+            // Store event type filter if provided
+            match events {
+                Some(ev) if !ev.is_empty() => {
+                    self.session_event_filters
+                        .insert(session_id.clone(), ev.into_iter().collect());
+                }
+                _ => {
+                    // No filter (or empty list) means receive all events
+                    self.session_event_filters.remove(session_id);
+                }
             }
             true
         } else {
@@ -266,12 +292,45 @@ impl RwiGateway {
     }
 
     /// Send an event to a single session by session_id.
+    /// If the session has an event type filter, events not matching the filter are dropped.
     pub fn send_event_to_session(&self, session_id: &SessionId, event: &RwiEvent) {
         if let Some(sender) = self.session_event_senders.get(session_id)
             && let Ok(value) = serde_json::to_value(event)
         {
+            // Check per-session event type filter
+            if let Some(filter) = self.session_event_filters.get(session_id) {
+                // serde renders enum as {"event_type_name": ...} — get the outer key
+                let event_type = value
+                    .as_object()
+                    .and_then(|o| o.keys().next().map(|k| k.as_str()));
+                if let Some(et) = event_type {
+                    if !filter.contains(et) {
+                        return;
+                    }
+                }
+            }
             let _ = sender.send(value);
         }
+    }
+
+    /// Set a channel variable for the given call.
+    pub fn set_call_var(&mut self, call_id: &CallId, key: String, value: String) {
+        self.call_vars
+            .entry(call_id.clone())
+            .or_default()
+            .insert(key, value);
+    }
+
+    /// Get a channel variable for the given call. Returns `None` if not set.
+    pub fn get_call_var(&self, call_id: &CallId, key: &str) -> Option<String> {
+        self.call_vars
+            .get(call_id)
+            .and_then(|vars| vars.get(key).cloned())
+    }
+
+    /// Remove all channel variables for the given call (call hangup cleanup).
+    pub fn remove_call_vars(&mut self, call_id: &CallId) {
+        self.call_vars.remove(call_id);
     }
 
     /// Get current timestamp in seconds
@@ -380,12 +439,41 @@ impl RwiGateway {
     /// Send an event to the owner of a call_id (if any).
     /// Also caches the event for session resumption.
     pub fn send_event_to_call_owner(&self, call_id: &CallId, event: &RwiEvent) {
+        // Feed DTMF digits to any active DtmfCollect tap for this call.
+        if let RwiEvent::Dtmf { digit, leg_id, .. } = event {
+            if let Some(digit_char) = digit.chars().next() {
+                if let Ok(taps) = self.dtmf_taps.lock() {
+                    if let Some(tx) = taps.get(call_id) {
+                        let _ = tx.send((leg_id.clone(), digit_char));
+                    }
+                }
+            }
+        }
+
         // Cache the event first
         let _sequence = self.cache_event(call_id, event);
 
         // Send to owner
         if let Some(owner_id) = self.call_ownership.get(call_id) {
             self.send_event_to_session(owner_id, event);
+        }
+    }
+
+    /// Register a DTMF tap for an active DtmfCollect on `call_id`.
+    pub fn add_dtmf_tap(
+        &self,
+        call_id: CallId,
+        tx: tokio::sync::mpsc::UnboundedSender<(Option<String>, char)>,
+    ) {
+        if let Ok(mut taps) = self.dtmf_taps.lock() {
+            taps.insert(call_id, tx);
+        }
+    }
+
+    /// Remove the DTMF tap for `call_id` (called when collection completes).
+    pub fn remove_dtmf_tap(&self, call_id: &CallId) {
+        if let Ok(mut taps) = self.dtmf_taps.lock() {
+            taps.remove(call_id);
         }
     }
 
@@ -507,7 +595,7 @@ mod tests {
         let session_id = session.read().await.id.clone();
 
         let contexts = vec!["context1".to_string(), "context2".to_string()];
-        gateway.subscribe(&session_id, contexts.clone()).await;
+        gateway.subscribe(&session_id, contexts.clone(), None).await;
 
         assert_eq!(
             gateway.get_sessions_subscribed_to_context("context1"),
@@ -644,12 +732,13 @@ mod tests {
         let session2_id = session2.read().await.id.clone();
 
         gateway
-            .subscribe(&session1_id, vec!["context1".to_string()])
+            .subscribe(&session1_id, vec!["context1".to_string()], None)
             .await;
         gateway
             .subscribe(
                 &session2_id,
                 vec!["context1".to_string(), "context2".to_string()],
+                None,
             )
             .await;
 
@@ -671,7 +760,7 @@ mod tests {
         let session_id = session.read().await.id.clone();
 
         gateway
-            .subscribe(&session_id, vec!["context1".to_string()])
+            .subscribe(&session_id, vec!["context1".to_string()], None)
             .await;
 
         assert_eq!(
@@ -780,8 +869,8 @@ mod tests {
         gateway.set_session_event_sender(&s1_id, tx1);
         gateway.set_session_event_sender(&s2_id, tx2);
 
-        gateway.subscribe(&s1_id, vec!["ctx".into()]).await;
-        gateway.subscribe(&s2_id, vec!["ctx".into()]).await;
+        gateway.subscribe(&s1_id, vec!["ctx".into()], None).await;
+        gateway.subscribe(&s2_id, vec!["ctx".into()], None).await;
 
         let event = RwiEvent::CallRinging {
             call_id: "c1".into(),
@@ -943,5 +1032,265 @@ mod tests {
             conf_id: "conf1".into(),
         };
         assert_eq!(event4.call_id(), None);
+    }
+
+    // ── call_vars tests ───────────────────────────────────────────────────
+
+    #[test]
+    fn test_set_and_get_call_var() {
+        let mut gateway = RwiGateway::new();
+        let call_id = "call-001".to_string();
+
+        // Getting a non-existent var returns None
+        assert_eq!(gateway.get_call_var(&call_id, "mykey"), None);
+
+        // Set a var and get it back
+        gateway.set_call_var(&call_id, "mykey".to_string(), "myvalue".to_string());
+        assert_eq!(
+            gateway.get_call_var(&call_id, "mykey"),
+            Some("myvalue".to_string())
+        );
+    }
+
+    #[test]
+    fn test_set_var_overwrites() {
+        let mut gateway = RwiGateway::new();
+        let call_id = "call-002".to_string();
+
+        gateway.set_call_var(&call_id, "k".to_string(), "v1".to_string());
+        gateway.set_call_var(&call_id, "k".to_string(), "v2".to_string());
+        assert_eq!(gateway.get_call_var(&call_id, "k"), Some("v2".to_string()));
+    }
+
+    #[test]
+    fn test_vars_are_per_call() {
+        let mut gateway = RwiGateway::new();
+        gateway.set_call_var(&"call-a".to_string(), "x".to_string(), "1".to_string());
+        gateway.set_call_var(&"call-b".to_string(), "x".to_string(), "2".to_string());
+
+        assert_eq!(
+            gateway.get_call_var(&"call-a".to_string(), "x"),
+            Some("1".to_string())
+        );
+        assert_eq!(
+            gateway.get_call_var(&"call-b".to_string(), "x"),
+            Some("2".to_string())
+        );
+    }
+
+    #[test]
+    fn test_remove_call_vars() {
+        let mut gateway = RwiGateway::new();
+        let call_id = "call-003".to_string();
+
+        gateway.set_call_var(&call_id, "k".to_string(), "v".to_string());
+        gateway.remove_call_vars(&call_id);
+        assert_eq!(gateway.get_call_var(&call_id, "k"), None);
+    }
+
+    // ── event filter tests ────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_event_filter_allows_matching_events() {
+        let mut gateway = RwiGateway::new();
+        let identity = create_test_identity();
+        let session = gateway.create_session(identity);
+        let session_id = session.read().await.id.clone();
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        gateway.set_session_event_sender(&session_id, tx);
+
+        // Subscribe with filter for "call_ringing" only
+        gateway
+            .subscribe(
+                &session_id,
+                vec!["ctx".to_string()],
+                Some(vec!["call_ringing".to_string()]),
+            )
+            .await;
+
+        // This event should be delivered (type matches filter)
+        gateway.send_event_to_session(
+            &session_id,
+            &RwiEvent::CallRinging {
+                call_id: "c1".into(),
+            },
+        );
+        assert!(rx.try_recv().is_ok(), "call_ringing should pass filter");
+
+        // This event should be dropped (type not in filter)
+        gateway.send_event_to_session(
+            &session_id,
+            &RwiEvent::CallAnswered {
+                call_id: "c1".into(),
+            },
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "call_answered should be filtered out"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_event_filter_none_allows_all() {
+        let mut gateway = RwiGateway::new();
+        let identity = create_test_identity();
+        let session = gateway.create_session(identity);
+        let session_id = session.read().await.id.clone();
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        gateway.set_session_event_sender(&session_id, tx);
+
+        // Subscribe without filter
+        gateway
+            .subscribe(&session_id, vec!["ctx".to_string()], None)
+            .await;
+
+        gateway.send_event_to_session(
+            &session_id,
+            &RwiEvent::CallRinging {
+                call_id: "c1".into(),
+            },
+        );
+        gateway.send_event_to_session(
+            &session_id,
+            &RwiEvent::CallAnswered {
+                call_id: "c1".into(),
+            },
+        );
+        gateway.send_event_to_session(
+            &session_id,
+            &RwiEvent::CallHangup {
+                call_id: "c1".into(),
+                reason: None,
+                sip_status: None,
+            },
+        );
+
+        assert!(rx.try_recv().is_ok(), "event 1 should arrive");
+        assert!(rx.try_recv().is_ok(), "event 2 should arrive");
+        assert!(rx.try_recv().is_ok(), "event 3 should arrive");
+    }
+
+    #[tokio::test]
+    async fn test_event_filter_multi_type() {
+        let mut gateway = RwiGateway::new();
+        let identity = create_test_identity();
+        let session = gateway.create_session(identity);
+        let session_id = session.read().await.id.clone();
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        gateway.set_session_event_sender(&session_id, tx);
+
+        // Subscribe filtering for two event types
+        gateway
+            .subscribe(
+                &session_id,
+                vec!["ctx".to_string()],
+                Some(vec!["call_ringing".to_string(), "call_hangup".to_string()]),
+            )
+            .await;
+
+        gateway.send_event_to_session(
+            &session_id,
+            &RwiEvent::CallRinging {
+                call_id: "c1".into(),
+            },
+        );
+        gateway.send_event_to_session(
+            &session_id,
+            &RwiEvent::CallAnswered {
+                call_id: "c1".into(),
+            },
+        );
+        gateway.send_event_to_session(
+            &session_id,
+            &RwiEvent::CallHangup {
+                call_id: "c1".into(),
+                reason: None,
+                sip_status: None,
+            },
+        );
+
+        let e1 = rx.try_recv().expect("call_ringing should arrive");
+        let e3 = rx.try_recv().expect("call_hangup should arrive");
+        assert!(rx.try_recv().is_err(), "no more events expected");
+
+        let s1 = serde_json::to_string(&e1).unwrap();
+        let s3 = serde_json::to_string(&e3).unwrap();
+        assert!(
+            s1.contains("call_ringing"),
+            "first should be call_ringing: {s1}"
+        );
+        assert!(
+            s3.contains("call_hangup"),
+            "second should be call_hangup: {s3}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_event_filter_cleared_on_resubscribe_without_filter() {
+        let mut gateway = RwiGateway::new();
+        let identity = create_test_identity();
+        let session = gateway.create_session(identity);
+        let session_id = session.read().await.id.clone();
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        gateway.set_session_event_sender(&session_id, tx);
+
+        // First subscribe with a filter
+        gateway
+            .subscribe(
+                &session_id,
+                vec!["ctx".to_string()],
+                Some(vec!["call_ringing".to_string()]),
+            )
+            .await;
+
+        // Re-subscribe without filter — should clear the filter
+        gateway
+            .subscribe(&session_id, vec!["ctx".to_string()], None)
+            .await;
+
+        // Now all events should pass
+        gateway.send_event_to_session(
+            &session_id,
+            &RwiEvent::CallAnswered {
+                call_id: "c1".into(),
+            },
+        );
+        assert!(
+            rx.try_recv().is_ok(),
+            "filter should be cleared after resubscribe with no events"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_event_filter_removed_on_session_removal() {
+        let mut gateway = RwiGateway::new();
+        let identity = create_test_identity();
+        let session = gateway.create_session(identity);
+        let session_id = session.read().await.id.clone();
+
+        let (tx, _rx) = mpsc::unbounded_channel();
+        gateway.set_session_event_sender(&session_id, tx);
+        gateway
+            .subscribe(
+                &session_id,
+                vec!["ctx".to_string()],
+                Some(vec!["call_ringing".to_string()]),
+            )
+            .await;
+
+        assert!(
+            gateway.session_event_filters.contains_key(&session_id),
+            "filter should be stored"
+        );
+
+        gateway.remove_session(&session_id).await;
+        assert!(
+            !gateway.session_event_filters.contains_key(&session_id),
+            "filter should be removed with session"
+        );
     }
 }

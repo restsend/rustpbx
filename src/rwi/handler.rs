@@ -268,9 +268,9 @@ async fn handle_text_message(
     };
 
     match &command {
-        RwiCommandPayload::Subscribe { contexts } => {
+        RwiCommandPayload::Subscribe { contexts, events } => {
             let mut gw = gateway.write().await;
-            gw.subscribe(&session_id.to_string(), contexts.clone())
+            gw.subscribe(&session_id.to_string(), contexts.clone(), events.clone())
                 .await;
         }
         RwiCommandPayload::Unsubscribe { contexts } => {
@@ -370,6 +370,16 @@ fn build_command_result_event(
                         "consultation_call_id": consultation_call_id
                     });
                 }
+                CommandResult::ConsultInitiated {
+                    call_id: orig,
+                    consultation_call_id,
+                } => {
+                    event["status"] = serde_json::json!("success");
+                    event["data"] = serde_json::json!({
+                        "call_id": orig,
+                        "consultation_call_id": consultation_call_id
+                    });
+                }
                 CommandResult::ConferenceCreated { conf_id } => {
                     event["status"] = serde_json::json!("success");
                     event["data"] = serde_json::json!({ "conf_id": conf_id });
@@ -419,6 +429,10 @@ fn build_command_result_event(
                         "current_sequence": current_sequence,
                         "events": events,
                     });
+                }
+                CommandResult::CallVar { key, value } => {
+                    event["status"] = serde_json::json!("success");
+                    event["data"] = serde_json::json!({ "key": key, "value": value });
                 }
             }
             event
@@ -580,6 +594,8 @@ fn extract_call_id(cmd: &RwiCommandPayload) -> Option<String> {
         RwiCommandPayload::CallHold { call_id, .. } => Some(call_id.clone()),
         RwiCommandPayload::CallUnhold { call_id } => Some(call_id.clone()),
         RwiCommandPayload::SetRingbackSource { target_call_id, .. } => Some(target_call_id.clone()),
+        RwiCommandPayload::SetVar { call_id, .. } => Some(call_id.clone()),
+        RwiCommandPayload::GetVar { call_id, .. } => Some(call_id.clone()),
         RwiCommandPayload::MediaPlay(r) => Some(r.call_id.clone()),
         RwiCommandPayload::MediaStop { call_id, .. } => Some(call_id.clone()),
         RwiCommandPayload::MediaStreamStart(r) => Some(r.call_id.clone()),
@@ -587,6 +603,7 @@ fn extract_call_id(cmd: &RwiCommandPayload) -> Option<String> {
         RwiCommandPayload::MediaInjectStart(r) => Some(r.call_id.clone()),
         RwiCommandPayload::MediaInjectStop { call_id } => Some(call_id.clone()),
         RwiCommandPayload::CallSendDtmf { call_id, .. } => Some(call_id.clone()),
+        RwiCommandPayload::DtmfCollect(r) => Some(r.call_id.clone()),
         RwiCommandPayload::RecordStart(r) => Some(r.call_id.clone()),
         RwiCommandPayload::RecordPause { call_id } => Some(call_id.clone()),
         RwiCommandPayload::RecordResume { call_id } => Some(call_id.clone()),

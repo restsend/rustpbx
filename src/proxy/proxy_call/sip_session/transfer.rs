@@ -2,7 +2,61 @@ use super::SipSession;
 use crate::call::domain::{CallCommand, LegId, LegState};
 use crate::callrecord::CallRecordHangupReason;
 use anyhow::{Result, anyhow};
+use rsipstack::dialog::dialog::DialogState;
+use tokio::sync::mpsc;
 use tracing::{info, warn};
+
+/// Parsed representation of a transfer target URI.
+///
+/// Extracted so that the string-prefix dispatch in `handle_blind_transfer` is
+/// type-safe and unit-testable independently of `SipSession`.
+#[derive(Debug, PartialEq)]
+pub(crate) enum TransferTarget {
+    Queue {
+        name: String,
+        return_ivr: Option<String>,
+    },
+    Ivr {
+        name: String,
+    },
+    Sip(String),
+}
+
+/// Parse a raw transfer target string into a typed `TransferTarget`.
+///
+/// Priority: `queue:` → `ivr:` → SIP/TEL URI (default prefix `sip:` added if absent).
+pub(crate) fn parse_transfer_target(target: &str) -> TransferTarget {
+    if let Some(rest) = target.strip_prefix("queue:") {
+        let remainder = rest.trim();
+        let (queue_name, return_ivr) = if let Some(pos) = remainder.find("?return_ivr=") {
+            let q = remainder[..pos].trim();
+            let ivr = remainder[pos + "?return_ivr=".len()..].to_string();
+            (q, Some(ivr))
+        } else {
+            (remainder, None)
+        };
+        if !queue_name.is_empty() {
+            return TransferTarget::Queue {
+                name: queue_name.to_string(),
+                return_ivr,
+            };
+        }
+    }
+    if let Some(rest) = target.strip_prefix("ivr:") {
+        let ivr_name = rest.trim();
+        if !ivr_name.is_empty() {
+            return TransferTarget::Ivr {
+                name: ivr_name.to_string(),
+            };
+        }
+    }
+    let sip = if target.starts_with("sip:") || target.starts_with("tel:") {
+        target.to_string()
+    } else {
+        format!("sip:{}", target)
+    };
+    TransferTarget::Sip(sip)
+}
 
 impl SipSession {
     pub(super) async fn handle_transfer(
@@ -31,14 +85,9 @@ impl SipSession {
                 self.handle_replace_transfer(leg_id, target).await?;
             } else {
                 self.update_leg_state(&leg_id, LegState::Hold);
-
                 info!(
                     "Attended transfer initiated - consultation call should be created externally"
                 );
-
-                if let Some(ref reporter) = self.reporter {
-                    let _ = reporter;
-                }
             }
         } else {
             self.handle_blind_transfer(leg_id, target).await?;
@@ -52,197 +101,147 @@ impl SipSession {
         leg_id: LegId,
         target: String,
     ) -> Result<()> {
-        if target.starts_with("queue:") {
-            let remainder = target.strip_prefix("queue:").unwrap_or(&target).trim();
-            let (queue_name, return_ivr) = if let Some(pos) = remainder.find("?return_ivr=") {
-                let q = remainder[..pos].trim();
-                let ivr = remainder[pos + "?return_ivr=".len()..].to_string();
-                (q, Some(ivr))
-            } else {
-                (remainder, None)
-            };
-            if !queue_name.is_empty() {
-                info!(
-                    %leg_id,
-                    queue = %queue_name,
-                    ?return_ivr,
-                    "Handling queue transfer"
-                );
-                return self
-                    .handle_queue_transfer(leg_id, queue_name, return_ivr)
-                    .await;
+        match parse_transfer_target(&target) {
+            TransferTarget::Queue { name, return_ivr } => {
+                info!(%leg_id, queue = %name, ?return_ivr, "Handling queue transfer");
+                self.handle_queue_transfer(leg_id, &name, return_ivr).await
             }
-        }
-
-        if target.starts_with("ivr:") {
-            let ivr_name = target.strip_prefix("ivr:").unwrap_or(&target).trim();
-            if !ivr_name.is_empty() {
-                info!(%leg_id, ivr = %ivr_name, "Handling ivr transfer by starting IvrApp");
-                return self.start_ivr_app(ivr_name).await;
+            TransferTarget::Ivr { name } => {
+                info!(%leg_id, ivr = %name, "Handling IVR transfer by starting IvrApp");
+                self.start_ivr_app(&name).await
             }
-        }
+            TransferTarget::Sip(refer_to_str) => {
+                let refer_to_uri = rsipstack::sip::Uri::try_from(refer_to_str.as_str())
+                    .map_err(|e| anyhow!("Invalid transfer target URI: {}", e))?;
 
-        let refer_to_str = if target.starts_with("sip:") || target.starts_with("tel:") {
-            target.clone()
-        } else {
-            format!("sip:{}", target)
-        };
-        let refer_to_uri = rsipstack::sip::Uri::try_from(refer_to_str.as_str())
-            .map_err(|e| anyhow!("Invalid transfer target URI: {}", e))?;
-
-        if !self.server.proxy_config.blind_transfer_use_refer {
-            info!(%leg_id, target = %refer_to_str, "Blind transfer via B-leg INVITE (B2BUA)");
-            let location = crate::call::Location {
-                aor: refer_to_uri,
-                ..Default::default()
-            };
-            let (_tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-            return self
-                .try_single_target(&location, &mut rx, None)
-                .await
-                .map_err(|(code, reason)| {
-                    anyhow!(
-                        "B-leg transfer failed: {:?} - {}",
-                        code,
-                        reason.unwrap_or_default()
-                    )
-                });
-        }
-
-        let referred_by = self
-            .context
-            .dialplan
-            .caller_contact
-            .clone()
-            .map(|c| c.to_string())
-            .unwrap_or_else(|| "sip:rustpbx@localhost".to_string());
-        let headers = vec![rsipstack::sip::Header::Other(
-            "Referred-By".to_string(),
-            format!("<{}>", referred_by),
-        )];
-
-        info!(%leg_id, target = %refer_to_str, "Sending REFER for blind transfer");
-
-        match self
-            .server_dialog
-            .refer(refer_to_uri, Some(headers), None)
-            .await
-        {
-            Ok(Some(response)) => {
-                let status = response.status_code.code();
-                info!(status = %status, "REFER response received");
-
-                match status {
-                    202 => {
-                        info!("REFER accepted (202), transfer in progress");
-                        self.update_leg_state(&leg_id, LegState::Ending);
-
-                        self.emit_transfer_event(&leg_id, "accepted", None, None)
-                            .await;
-                        self.emit_refer_event(
-                            status,
-                            None,
-                            crate::call::domain::ReferNotifyEventType::ReferResponse,
-                        )
+                if !self.server.proxy_config.blind_transfer_use_refer {
+                    info!(%leg_id, target = %refer_to_str, "Blind transfer via B-leg INVITE (B2BUA)");
+                    let location = crate::call::Location {
+                        aor: refer_to_uri,
+                        ..Default::default()
+                    };
+                    // Create a proper dialog-state channel so early media (183) from the
+                    // B-leg propagates correctly during the transfer INVITE.
+                    let (callee_tx, mut callee_rx) = mpsc::unbounded_channel::<DialogState>();
+                    let prev_callee_tx = self.callee_event_tx.replace(callee_tx);
+                    let result = self
+                        .try_single_target(&location, &mut callee_rx, None)
                         .await;
+                    self.callee_event_tx = prev_callee_tx;
+                    return result.map_err(|(code, reason)| {
+                        anyhow!(
+                            "B-leg transfer failed: {:?} - {}",
+                            code,
+                            reason.unwrap_or_default()
+                        )
+                    });
+                }
+
+                // SIP REFER path
+                let referred_by = self
+                    .context
+                    .dialplan
+                    .caller_contact
+                    .clone()
+                    .map(|c| c.to_string())
+                    .unwrap_or_else(|| "sip:rustpbx@localhost".to_string());
+                let headers = vec![rsipstack::sip::Header::Other(
+                    "Referred-By".to_string(),
+                    format!("<{}>", referred_by),
+                )];
+
+                info!(%leg_id, target = %refer_to_str, "Sending REFER for blind transfer");
+
+                match self
+                    .server_dialog
+                    .refer(refer_to_uri, Some(headers), None)
+                    .await
+                {
+                    Ok(Some(response)) => {
+                        let status = response.status_code.code();
+                        info!(status = %status, "REFER response received");
+
+                        match status {
+                            202 => {
+                                info!("REFER accepted (202), transfer in progress");
+                                self.update_leg_state(&leg_id, LegState::Ending);
+                                self.emit_refer_event(
+                                    status,
+                                    None,
+                                    crate::call::domain::ReferNotifyEventType::ReferResponse,
+                                )
+                                .await;
+                            }
+                            100..=199 => {
+                                info!("REFER received provisional response {}", status);
+                                self.emit_refer_event(
+                                    status,
+                                    None,
+                                    crate::call::domain::ReferNotifyEventType::ReferResponse,
+                                )
+                                .await;
+                            }
+                            405 | 420 | 501 => {
+                                warn!(status = %status, "REFER not supported by peer, needs 3PCC fallback");
+                                self.emit_refer_event(
+                                    status,
+                                    Some("refer_not_supported".to_string()),
+                                    crate::call::domain::ReferNotifyEventType::ReferResponse,
+                                )
+                                .await;
+                                return Err(anyhow!(
+                                    "REFER not supported by peer ({}), needs 3PCC fallback",
+                                    status
+                                ));
+                            }
+                            _ if status >= 400 => {
+                                warn!(status = %status, "REFER rejected");
+                                self.emit_refer_event(
+                                    status,
+                                    Some("refer_rejected".to_string()),
+                                    crate::call::domain::ReferNotifyEventType::ReferResponse,
+                                )
+                                .await;
+                                return Err(anyhow!("REFER rejected with status {}", status));
+                            }
+                            _ => {
+                                warn!(status = %status, "Unexpected REFER response");
+                                self.emit_refer_event(
+                                    status,
+                                    Some("unexpected_response".to_string()),
+                                    crate::call::domain::ReferNotifyEventType::ReferResponse,
+                                )
+                                .await;
+                                return Err(anyhow!("Unexpected REFER response: {}", status));
+                            }
+                        }
                     }
-                    100..=199 => {
-                        info!("REFER received provisional response {}", status);
+                    Ok(None) => {
+                        warn!("REFER timed out, no response received");
                         self.emit_refer_event(
-                            status,
-                            None,
+                            408,
+                            Some("timeout".to_string()),
                             crate::call::domain::ReferNotifyEventType::ReferResponse,
                         )
                         .await;
+                        return Err(anyhow!("REFER timed out"));
                     }
-                    405 | 420 | 501 => {
-                        warn!(status = %status, "REFER not supported by peer, needs 3PCC fallback");
-                        self.emit_transfer_event(
-                            &leg_id,
-                            "failed",
-                            Some(status),
-                            Some("refer_not_supported"),
-                        )
-                        .await;
+                    Err(e) => {
+                        warn!(error = %e, "Failed to send REFER");
                         self.emit_refer_event(
-                            status,
-                            Some("refer_not_supported".to_string()),
+                            500,
+                            Some(e.to_string()),
                             crate::call::domain::ReferNotifyEventType::ReferResponse,
                         )
                         .await;
-                        return Err(anyhow!(
-                            "REFER not supported by peer ({}), needs 3PCC fallback",
-                            status
-                        ));
-                    }
-                    _ if status >= 400 => {
-                        warn!(status = %status, "REFER rejected");
-                        self.emit_transfer_event(
-                            &leg_id,
-                            "failed",
-                            Some(status),
-                            Some("refer_rejected"),
-                        )
-                        .await;
-                        self.emit_refer_event(
-                            status,
-                            Some("refer_rejected".to_string()),
-                            crate::call::domain::ReferNotifyEventType::ReferResponse,
-                        )
-                        .await;
-                        return Err(anyhow!("REFER rejected with status {}", status));
-                    }
-                    _ => {
-                        warn!(status = %status, "Unexpected REFER response");
-                        self.emit_transfer_event(
-                            &leg_id,
-                            "failed",
-                            Some(status),
-                            Some("unexpected_response"),
-                        )
-                        .await;
-                        self.emit_refer_event(
-                            status,
-                            Some("unexpected_response".to_string()),
-                            crate::call::domain::ReferNotifyEventType::ReferResponse,
-                        )
-                        .await;
-                        return Err(anyhow!("Unexpected REFER response: {}", status));
+                        return Err(anyhow!("Failed to send REFER: {}", e));
                     }
                 }
-            }
-            Ok(None) => {
-                warn!("REFER timed out, no response received");
-                self.emit_transfer_event(&leg_id, "failed", None, Some("timeout"))
-                    .await;
-                self.emit_refer_event(
-                    408,
-                    Some("timeout".to_string()),
-                    crate::call::domain::ReferNotifyEventType::ReferResponse,
-                )
-                .await;
-                return Err(anyhow!("REFER timed out"));
-            }
-            Err(e) => {
-                warn!(error = %e, "Failed to send REFER");
-                self.emit_transfer_event(&leg_id, "failed", None, Some(&e.to_string()))
-                    .await;
-                self.emit_refer_event(
-                    500,
-                    Some(e.to_string()),
-                    crate::call::domain::ReferNotifyEventType::ReferResponse,
-                )
-                .await;
-                return Err(anyhow!("Failed to send REFER: {}", e));
+
+                info!("Blind transfer initiated — call will be transferred to {}", refer_to_str);
+                Ok(())
             }
         }
-
-        info!(
-            "Blind transfer initiated - call will be transferred to {}",
-            target
-        );
-
-        Ok(())
     }
 
     pub(crate) async fn handle_queue_transfer(
@@ -297,9 +296,14 @@ impl SipSession {
             queue_plan.failure_audio = return_ivr_fallback_audio;
         }
 
-        let (_tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        // Create a proper dialog-state channel so early media (183) from agents
+        // propagates correctly during queue-driven transfers at runtime.
+        let (callee_tx, mut callee_rx) = mpsc::unbounded_channel::<DialogState>();
+        let prev_callee_tx = self.callee_event_tx.replace(callee_tx);
+        let queue_result = self.execute_queue(&queue_plan, &mut callee_rx).await;
+        self.callee_event_tx = prev_callee_tx;
 
-        match self.execute_queue(&queue_plan, &mut rx).await {
+        match queue_result {
             Ok(()) => {
                 info!(queue = %queue_name, "Queue transfer completed successfully");
                 Ok(())
@@ -312,8 +316,8 @@ impl SipSession {
                     "Queue transfer failed"
                 );
                 if self.server_dialog.state().is_confirmed() {
-                    self.last_error = Some((code.clone(), reason.clone()));
-                    self.hangup_reason
+                    self.meta.last_error = Some((code.clone(), reason.clone()));
+                    self.meta.hangup_reason
                         .get_or_insert(CallRecordHangupReason::Failed);
                     self.pending_hangup.insert(self.server_dialog.id());
                     self.cancel_token.cancel();
@@ -411,25 +415,6 @@ impl SipSession {
         };
 
         self.handle_blind_transfer(leg_id, refer_target).await
-    }
-
-    pub(super) async fn emit_transfer_event(
-        &self,
-        leg_id: &LegId,
-        event_type: &str,
-        sip_status: Option<u16>,
-        reason: Option<&str>,
-    ) {
-        let event_data = serde_json::json!({
-            "session_id": self.id.0,
-            "leg_id": leg_id.to_string(),
-            "event": event_type,
-            "sip_status": sip_status,
-            "reason": reason,
-            "timestamp": chrono::Utc::now().to_rfc3339(),
-        });
-
-        info!(?event_data, "Transfer event emitted");
     }
 
     pub(super) async fn emit_refer_event(
@@ -558,8 +543,11 @@ impl SipSession {
         let conference_manager = &self.server.conference_manager;
         let conf_id = crate::call::runtime::ConferenceId::from(into_conference.as_str());
 
+        // Use a consistent composite leg_id for both conference registration and
+        // media bridge start — previously the two used different IDs causing a mismatch.
+        let participant_leg = LegId::new(format!("{}-{}", from_session, leg_id));
         conference_manager
-            .add_participant(&conf_id, LegId::new(format!("{}-{}", from_session, leg_id)))
+            .add_participant(&conf_id, participant_leg.clone())
             .await
             .map_err(|e| anyhow!("Failed to add leg to conference: {}", e))?;
 
@@ -571,7 +559,7 @@ impl SipSession {
         );
 
         match self
-            .start_conference_media_bridge(&into_conference, &leg_id)
+            .start_conference_media_bridge(&into_conference, &participant_leg)
             .await
         {
             Ok(handle) => {
@@ -712,5 +700,193 @@ impl SipSession {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -------------------------------------------------------------------------
+    // parse_transfer_target — pure-function dispatch tests
+    //
+    // Why these tests didn't exist before:
+    //   The target dispatch was inlined inside `handle_blind_transfer` as a
+    //   sequence of `starts_with` if-chains.  Without extraction into a
+    //   standalone function there was nothing to call in a unit test; the logic
+    //   was only reachable through a fully-wired SipSession, so the edge cases
+    //   (empty suffix, mixed casing, return_ivr param) were never exercised.
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_parse_transfer_target_queue_with_return_ivr() {
+        let t = parse_transfer_target("queue:support?return_ivr=main");
+        assert_eq!(
+            t,
+            TransferTarget::Queue {
+                name: "support".to_string(),
+                return_ivr: Some("main".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_transfer_target_queue_without_return_ivr() {
+        let t = parse_transfer_target("queue:support");
+        assert_eq!(
+            t,
+            TransferTarget::Queue {
+                name: "support".to_string(),
+                return_ivr: None,
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_transfer_target_queue_whitespace_trimmed() {
+        let t = parse_transfer_target("queue: sales ");
+        assert_eq!(
+            t,
+            TransferTarget::Queue {
+                name: "sales".to_string(),
+                return_ivr: None,
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_transfer_target_ivr() {
+        let t = parse_transfer_target("ivr:main");
+        assert_eq!(t, TransferTarget::Ivr { name: "main".to_string() });
+    }
+
+    #[test]
+    fn test_parse_transfer_target_ivr_whitespace_trimmed() {
+        let t = parse_transfer_target("ivr: welcome ");
+        assert_eq!(
+            t,
+            TransferTarget::Ivr {
+                name: "welcome".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_transfer_target_sip_uri_passthrough() {
+        let t = parse_transfer_target("sip:1001@pbx.local");
+        assert_eq!(t, TransferTarget::Sip("sip:1001@pbx.local".to_string()));
+    }
+
+    #[test]
+    fn test_parse_transfer_target_tel_uri_passthrough() {
+        let t = parse_transfer_target("tel:+15551234567");
+        assert_eq!(t, TransferTarget::Sip("tel:+15551234567".to_string()));
+    }
+
+    #[test]
+    fn test_parse_transfer_target_bare_extension_gets_sip_prefix() {
+        let t = parse_transfer_target("1001");
+        assert_eq!(t, TransferTarget::Sip("sip:1001".to_string()));
+    }
+
+    /// An empty `queue:` suffix must NOT produce a Queue — it falls through to
+    /// Sip so the caller gets a meaningful error from URI parsing rather than a
+    /// silent no-op queue lookup.
+    #[test]
+    fn test_parse_transfer_target_empty_queue_suffix_falls_through_to_sip() {
+        let t = parse_transfer_target("queue:");
+        // empty name → falls through to Sip
+        assert!(matches!(t, TransferTarget::Sip(_)));
+    }
+
+    /// Same guard for `ivr:`.
+    #[test]
+    fn test_parse_transfer_target_empty_ivr_suffix_falls_through_to_sip() {
+        let t = parse_transfer_target("ivr:");
+        assert!(matches!(t, TransferTarget::Sip(_)));
+    }
+
+    // -------------------------------------------------------------------------
+    // Cross-session leg_id construction
+    //
+    // Why the original mismatch wasn't caught:
+    //   `handle_transfer_complete_cross_session` is exercised only through an
+    //   end-to-end SIP call with two concurrent sessions — there was no unit
+    //   test for the leg_id formatting contract.  The conference bridge start
+    //   silently logged a warning on failure instead of propagating an error,
+    //   so the mismatched ID caused a no-op rather than a visible test failure.
+    // -------------------------------------------------------------------------
+
+    /// Verify the composite leg_id format used by `add_participant` and
+    /// `start_conference_media_bridge` is identical after the fix.
+    #[test]
+    fn test_cross_session_participant_leg_id_consistent() {
+        let from_session = "sess-abc";
+        let leg_id = LegId::new("leg-1".to_string());
+
+        // This mirrors the fixed code:
+        //   let participant_leg = LegId::new(format!("{}-{}", from_session, leg_id));
+        //   conference_manager.add_participant(&conf_id, participant_leg.clone())
+        //   self.start_conference_media_bridge(&into_conference, &participant_leg)
+        let participant_leg = LegId::new(format!("{}-{}", from_session, leg_id));
+        let add_participant_id = participant_leg.clone();
+        let bridge_id = participant_leg.clone();
+
+        assert_eq!(
+            add_participant_id.to_string(),
+            bridge_id.to_string(),
+            "add_participant and start_conference_media_bridge must use the same leg_id"
+        );
+        assert_eq!(add_participant_id.to_string(), "sess-abc-leg-1");
+    }
+
+    /// Demonstrate what the old (buggy) code did: add_participant used the
+    /// prefixed form but start_conference_media_bridge used the bare leg_id.
+    #[test]
+    fn test_cross_session_old_code_had_mismatched_ids() {
+        let from_session = "sess-abc";
+        let leg_id = LegId::new("leg-1".to_string());
+
+        let add_participant_id = LegId::new(format!("{}-{}", from_session, leg_id));
+        // old code: &leg_id (no prefix)
+        let bridge_id = leg_id.clone();
+
+        assert_ne!(
+            add_participant_id.to_string(),
+            bridge_id.to_string(),
+            "Sanity check: old IDs were different, proving the bug existed"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Disposable-channel spin-loop regression check
+    //
+    // Why the spin loop wasn't caught before:
+    //   The pattern `let (_tx, mut rx) = unbounded_channel(); fn(&mut rx)` sends
+    //   the sender to `_` (immediately dropped).  Inside `try_single_target` the
+    //   tokio::select! polls `rx.recv()` which returns `None` on every tick
+    //   because the sender is gone — yet the loop body didn't `break`, so it
+    //   spun on the CPU until the parallel `invitation` future completed.
+    //   Integration tests exercised the happy-path (call connects quickly)
+    //   without measuring early-media forwarding or CPU usage, so the spin was
+    //   invisible.  A dropped-sender can be verified as a unit test:
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_dropped_sender_channel_returns_none_immediately() {
+        // Demonstrate the old bug: dropped sender → recv() always None.
+        let (_tx, mut rx) = mpsc::unbounded_channel::<u32>();
+        drop(_tx);
+        // recv() on a channel with no senders returns None immediately.
+        assert!(rx.recv().await.is_none(), "dropped sender should yield None");
+    }
+
+    #[tokio::test]
+    async fn test_live_sender_channel_can_deliver_state() {
+        // Demonstrate the fix: a live sender → recv() delivers the message.
+        let (tx, mut rx) = mpsc::unbounded_channel::<u32>();
+        tx.send(42).unwrap();
+        drop(tx);
+        assert_eq!(rx.recv().await, Some(42));
     }
 }

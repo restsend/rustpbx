@@ -646,7 +646,7 @@ pub struct ProxyConfig {
     pub locator_webhook: Option<LocatorWebhookConfig>,
     #[serde(default)]
     pub media_proxy: MediaProxyMode,
-    pub codecs: Option<Vec<String>>,
+    pub audio_codecs: Option<Vec<String>>,
     #[serde(default)]
     pub frequency_limiter: Option<String>,
     #[serde(default)]
@@ -688,6 +688,8 @@ pub struct ProxyConfig {
     pub addons: Option<Vec<String>>,
     #[serde(default = "default_passthrough_failure")]
     pub passthrough_failure: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub video_codecs: Option<Vec<String>>,
     #[serde(default = "default_dialog_auth_cache")]
     pub dialog_auth_cache: Option<AuthCacheConfig>,
     #[serde(default)]
@@ -983,7 +985,7 @@ impl Default for ProxyConfig {
             locator: LocatorConfig::default(),
             locator_webhook: None,
             media_proxy: MediaProxyMode::default(),
-            codecs: None,
+            audio_codecs: None,
             frequency_limiter: None,
             realms: Some(vec![]),
             ws_handler: None,
@@ -1007,6 +1009,7 @@ impl Default for ProxyConfig {
             sip_flow_max_items: None,
             addons: None,
             passthrough_failure: true,
+            video_codecs: None,
             dialog_auth_cache: default_dialog_auth_cache(),
             blind_transfer_use_refer: false,
             dos_enabled: false,

@@ -155,6 +155,20 @@ pub enum CallCommand {
         digits: String,
     },
 
+    /// Collect DTMF digits from a leg and fire a dtmf_collected / dtmf_collect_timeout event.
+    DtmfCollect {
+        /// Target leg to collect from (None = caller)
+        leg_id: Option<LegId>,
+        /// Minimum digits required before a timeout fires a collected event
+        min_digits: u32,
+        /// Maximum digits to collect (stops immediately when reached)
+        max_digits: u32,
+        /// Inter-digit / overall timeout in milliseconds
+        timeout_ms: u64,
+        /// Optional terminator digit (not included in result)
+        terminator: Option<char>,
+    },
+
     /// Start recording
     StartRecording {
         /// Recording configuration

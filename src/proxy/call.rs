@@ -764,7 +764,7 @@ impl CallModule {
                 if !allow_codecs.is_empty() {
                     dialplan.allow_codecs = allow_codecs;
                 }
-            } else if let Some(codecs) = &self.inner.config.codecs {
+            } else if let Some(codecs) = &self.inner.config.audio_codecs {
                 let mut allow_codecs = Vec::new();
                 for codec_name in codecs {
                     if let Ok(codec) = CodecType::try_from(codec_name.as_str()) {
@@ -776,7 +776,7 @@ impl CallModule {
                 }
             }
             dialplan.extensions = std::mem::take(&mut hints.extensions);
-        } else if let Some(codecs) = &self.inner.config.codecs {
+        } else if let Some(codecs) = &self.inner.config.audio_codecs {
             let mut allow_codecs = Vec::new();
             for codec_name in codecs {
                 if let Ok(codec) = CodecType::try_from(codec_name.as_str()) {

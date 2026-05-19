@@ -258,7 +258,8 @@ pub fn call_command_to_session_action(cmd: CallCommand) -> Result<SessionAction>
         | CallCommand::SendSipOptionsPing
         | CallCommand::StartApp { .. }
         | CallCommand::StopApp { .. }
-        | CallCommand::InjectAppEvent { .. } => {
+        | CallCommand::InjectAppEvent { .. }
+        | CallCommand::DtmfCollect { .. } => {
             Err(AdapterError::NotSupported(format!("{:?}", cmd)).into())
         }
 

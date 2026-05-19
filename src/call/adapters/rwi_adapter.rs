@@ -45,6 +45,8 @@ pub fn rwi_to_call_command(
         RwiCommandPayload::Subscribe { .. }
         | RwiCommandPayload::Unsubscribe { .. }
         | RwiCommandPayload::ListCalls
+        | RwiCommandPayload::SetVar { .. }
+        | RwiCommandPayload::GetVar { .. }
         | RwiCommandPayload::AttachCall { .. }
         | RwiCommandPayload::DetachCall { .. }
         | RwiCommandPayload::SipMessage { .. }
@@ -65,7 +67,8 @@ pub fn rwi_to_call_command(
         | RwiCommandPayload::LegRemove { .. }
         | RwiCommandPayload::AppStart { .. }
         | RwiCommandPayload::AppStop { .. }
-        | RwiCommandPayload::AppChain { .. } => {
+        | RwiCommandPayload::AppChain { .. }
+        | RwiCommandPayload::DtmfCollect(_) => {
             Err(AdapterError::NotSupported("session management command".to_string()).into())
         }
 
@@ -511,6 +514,7 @@ mod tests {
     fn test_unsupported_command() {
         let payload = RwiCommandPayload::Subscribe {
             contexts: vec!["all".to_string()],
+            events: None,
         };
         let result = rwi_to_call_command(payload, None);
         assert!(result.is_err());

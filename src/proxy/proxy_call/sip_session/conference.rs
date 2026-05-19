@@ -36,7 +36,7 @@ impl SipSession {
             .iter()
             .filter(|(_, leg)| leg.is_active())
             .map(|(id, _)| {
-                let peer = self.peers.get(id).cloned();
+                let peer = self.legs.peers.get(id).cloned();
                 (id.clone(), peer)
             })
             .collect();
@@ -123,7 +123,7 @@ impl SipSession {
                     }
                 }
             });
-            self.leg_tasks
+            self.legs.tasks
                 .entry(leg_id.clone())
                 .or_default()
                 .push(forwarder_handle);
@@ -166,9 +166,9 @@ impl SipSession {
             self.stop_caller_ingress_monitor().await;
         }
         let (peer, track_id) = if is_callee {
-            (self.callee_peer.clone(), Self::CALLEE_TRACK_ID)
+            (self.callee_peer().clone(), Self::CALLEE_TRACK_ID)
         } else {
-            (self.caller_peer.clone(), Self::CALLER_TRACK_ID)
+            (self.caller_peer().clone(), Self::CALLER_TRACK_ID)
         };
 
         let (audio_sender, track, _feedback_rx) = sample_track(MediaKind::Audio, 100);
@@ -266,7 +266,7 @@ impl SipSession {
                 }
             }
         });
-        self.leg_tasks
+        self.legs.tasks
             .entry(leg_id.clone())
             .or_default()
             .push(forwarder_handle);
@@ -343,7 +343,7 @@ impl SipSession {
     }
 
     pub(super) async fn get_caller_peer_connection(&self) -> Option<rustrtc::PeerConnection> {
-        let tracks = self.caller_peer.get_tracks().await;
+        let tracks = self.caller_peer().get_tracks().await;
         for t in tracks.iter() {
             let guard = t.lock().await;
             if let Some(pc) = guard.get_peer_connection().await {
@@ -357,14 +357,13 @@ impl SipSession {
         use crate::media::negotiate::MediaNegotiator;
 
         let sdp = self
-            .leg_answers
-            .get(leg_id)
-            .map(|s| s.as_str())
+            .legs
+            .get_answer(leg_id)
             .or_else(|| {
                 if leg_id.as_str() == "caller" {
-                    self.answer.as_deref()
+                    self.media.answer.as_deref()
                 } else if leg_id.as_str() == "callee" {
-                    self.callee_answer_sdp.as_deref()
+                    self.media.callee_answer_sdp.as_deref()
                 } else {
                     None
                 }
@@ -395,7 +394,7 @@ impl SipSession {
         use crate::media::negotiate::MediaNegotiator;
         use audio_codec::create_decoder;
 
-        let codec = if let Some(ref answer_sdp) = self.answer {
+        let codec = if let Some(ref answer_sdp) = self.media.answer {
             let profile = MediaNegotiator::extract_leg_profile(answer_sdp);
             if let Some(audio) = profile.audio {
                 info!(
