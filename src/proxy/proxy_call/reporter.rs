@@ -195,6 +195,7 @@ impl CallReporter {
         };
 
         if details.recording_url.is_none()
+            && self.server.proxy_config.recording.is_none()
             && let Some(crate::config::SipFlowConfig::Local {
                 upload:
                     Some(crate::config::SipFlowUploadConfig::S3 {
