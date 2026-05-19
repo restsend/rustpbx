@@ -289,7 +289,7 @@ impl AppStateBuilder {
         let recording_upload_policy = config
             .recording
             .as_ref()
-            .filter(|policy| policy.uploads_recording() && sipflow_backend_arc.is_none())
+            .filter(|policy| policy.uploads_recording())
             .cloned();
 
         let callrecord_formatter = if let Some(formatter) = self.callrecord_formatter {

@@ -3503,7 +3503,9 @@ impl SipSession {
         const SIPFLOW_CHANNEL_CAPACITY: usize =
             crate::media::forwarding_track::ForwardingTrack::DEFAULT_SIPFLOW_CHANNEL_CAPACITY;
         let (caller_sipflow_tx, callee_sipflow_tx) =
-            if let Some(backend) = self.server.sip_flow.as_ref().and_then(|sf| sf.backend()) {
+            if self.server.proxy_config.recording.is_none()
+                && let Some(backend) = self.server.sip_flow.as_ref().and_then(|sf| sf.backend())
+            {
                 use crate::sipflow::{SipFlowItem, SipFlowMsgType};
                 use tokio::sync::mpsc;
 
@@ -5008,7 +5010,7 @@ impl SipSession {
         _max_duration: Option<Duration>,
         beep: bool,
     ) -> Result<()> {
-        if self.server.sip_flow.is_some() {
+        if self.server.sip_flow.is_some() && !self.context.dialplan.recording.enabled {
             return Err(anyhow!(
                 "Live recording is disabled when SipFlow is enabled"
             ));
