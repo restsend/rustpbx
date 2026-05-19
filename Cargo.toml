@@ -120,7 +120,7 @@ hex = { version = "0.4.3", optional = true }
 audio-codec = "0.3.38"
 #udio-codec = { path = "../audio-codec", default-features = false }
 #rustrtc = { path = "../rustrtc" }
-rustrtc = "0.3.61"
+rustrtc = "0.3.62"
 reqwest = { version = "0.13", features = [
     "json",
     "stream",

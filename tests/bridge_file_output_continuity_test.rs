@@ -57,12 +57,12 @@ async fn test_bridge_file_output_preserves_rtp_continuity_across_replacement() {
     };
 
     bridge
-        .replace_output_with_file(BridgeEndpoint::Rtp, &mk_track("a", &file_a))
+        .replace_output_with_file(BridgeEndpoint::Callee, &mk_track("a", &file_a))
         .await
         .unwrap();
 
     let rtp_track = bridge
-        .get_rtp_track()
+        .get_callee_track()
         .await
         .expect("bridge RTP output track should exist");
 
@@ -78,7 +78,7 @@ async fn test_bridge_file_output_preserves_rtp_continuity_across_replacement() {
 
     tokio::time::sleep(std::time::Duration::from_millis(80)).await;
     bridge
-        .replace_output_with_file(BridgeEndpoint::Rtp, &mk_track("b", &file_b))
+        .replace_output_with_file(BridgeEndpoint::Callee, &mk_track("b", &file_b))
         .await
         .unwrap();
 

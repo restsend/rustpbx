@@ -24,8 +24,8 @@
 //! bridge.start_bridge().await;
 //!
 //! // Access PeerConnections for SDP negotiation
-//! let webrtc_pc = bridge.webrtc_pc();
-//! let rtp_pc = bridge.rtp_pc();
+//! let caller_pc = bridge.caller_pc();
+//! let callee_pc = bridge.callee_pc();
 //!
 //! // ... perform SDP negotiation on both sides ...
 //!
@@ -104,8 +104,8 @@ pub struct PeerEntry {
 /// new code should use PeerId-based APIs.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BridgeEndpoint {
-    WebRtc,
-    Rtp,
+    Caller,
+    Callee,
 }
 
 /// Per-direction statistics for a media bridge leg.
@@ -177,22 +177,22 @@ impl MediaStreamTrack for VideoForwardingTrack {
 /// Transport kind for one bridge leg endpoint.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum LegTransport {
-    WebRtc,
-    Rtp,
+    Caller,
+    Callee,
 }
 
 impl LegTransport {
     const fn as_str(self) -> &'static str {
         match self {
-            Self::WebRtc => "WebRTC",
-            Self::Rtp => "RTP",
+            Self::Caller => "Caller",
+            Self::Callee => "Callee",
         }
     }
 
     const fn endpoint(self) -> BridgeEndpoint {
         match self {
-            Self::WebRtc => BridgeEndpoint::WebRtc,
-            Self::Rtp => BridgeEndpoint::Rtp,
+            Self::Caller => BridgeEndpoint::Caller,
+            Self::Callee => BridgeEndpoint::Callee,
         }
     }
 }
@@ -213,11 +213,11 @@ impl ForwardPath {
         self.from.endpoint()
     }
 
-    /// Strip WebRTC-only fields when forwarding into a plain RTP pipeline.
-    const fn should_strip_webrtc_audio_metadata(self) -> bool {
+    /// Strip WebRTC-only header extensions when forwarding from caller (WebRTC) to callee (RTP) leg.
+    const fn should_strip_caller_audio_metadata(self) -> bool {
         matches!(
             (self.from, self.to),
-            (LegTransport::WebRtc, LegTransport::Rtp)
+            (LegTransport::Caller, LegTransport::Callee)
         )
     }
 }
@@ -286,59 +286,62 @@ fn frame_ticks_20ms(clock_rate: u32) -> u32 {
 
 /// BridgePeer manages PeerConnections to bridge media between endpoints.
 ///
-/// Supports N peers (2+). For the common 2-peer WebRTC↔RTP case,
-/// fast-path fields (`webrtc_pc`, `rtp_pc`, etc.) are kept as aliases.
+/// Supports N peers (2+). For the common 2-peer caller↔callee case,
+/// fast-path fields (`caller_pc`, `callee_pc`, etc.) are kept as aliases.
 /// Identifies which side of the bridge to operate on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BridgeSide {
-    WebRtc,
-    Rtp,
+    Caller,
+    Callee,
 }
 
 pub struct BridgePeer {
     id: String,
-    /// WebRTC side PeerConnection (SRTP/DTLS) — fast-path alias for peers["webrtc"]
-    webrtc_pc: PeerConnection,
-    /// RTP side PeerConnection (plain RTP) — fast-path alias for peers["rtp"]
-    rtp_pc: PeerConnection,
+    /// Caller-side PeerConnection — fast-path alias for peers["caller"]
+    caller_pc: PeerConnection,
+    /// Callee-side PeerConnection (plain RTP) — fast-path alias for peers["callee"]
+    callee_pc: PeerConnection,
     /// Bridge task handles
     bridge_tasks: AsyncMutex<Vec<tokio::task::JoinHandle<()>>>,
     /// Cancellation token
     cancel_token: CancellationToken,
     forwarding_started: AtomicBool,
+    /// Gate that blocks caller→callee audio until the call is confirmed (200 OK).
+    /// Starts closed (false); opened by open_caller_gate() on 200 OK / re-INVITE.
+    caller_gate: Arc<AtomicBool>,
     /// Shared recorder for call recording (written by both bridge directions)
     recorder: Option<Arc<parking_lot::RwLock<Option<Recorder>>>>,
     dtmf_sink: Arc<parking_lot::RwLock<Option<BridgeDtmfSink>>>,
     /// Audio sender channels for forwarding — fast-path aliases
-    webrtc_send: Arc<AsyncMutex<Option<MediaSender>>>,
-    rtp_send: Arc<AsyncMutex<Option<MediaSender>>>,
+    caller_send: Arc<AsyncMutex<Option<MediaSender>>>,
+    callee_send: Arc<AsyncMutex<Option<MediaSender>>>,
     /// Output state (mode + file source) — both fields protected by a single Mutex.
-    webrtc_output_state: Arc<AsyncMutex<OutputState>>,
-    rtp_output_state: Arc<AsyncMutex<OutputState>>,
+    caller_output_state: Arc<AsyncMutex<OutputState>>,
+    callee_output_state: Arc<AsyncMutex<OutputState>>,
     /// Fast-path mode check for bidirectional forwarder (atomic, no source needed).
-    webrtc_output_mode: Arc<AtomicU8>,
-    rtp_output_mode: Arc<AtomicU8>,
+    caller_output_mode: Arc<AtomicU8>,
+    callee_output_mode: Arc<AtomicU8>,
     /// Video sender channels for forwarding
-    webrtc_video_send: Arc<AsyncMutex<Option<MediaSender>>>,
-    rtp_video_send: Arc<AsyncMutex<Option<MediaSender>>>,
+    caller_video_send: Arc<AsyncMutex<Option<MediaSender>>>,
+    callee_video_send: Arc<AsyncMutex<Option<MediaSender>>>,
     /// Stored sample tracks for test-mode direct forwarding
-    webrtc_track: AsyncMutex<Option<Arc<SampleStreamTrack>>>,
-    rtp_track: AsyncMutex<Option<Arc<SampleStreamTrack>>>,
+    caller_track: AsyncMutex<Option<Arc<SampleStreamTrack>>>,
+    callee_track: AsyncMutex<Option<Arc<SampleStreamTrack>>>,
     /// Sender codec parameters (set by builder, used by setup_bridge)
-    webrtc_sender_codec: Option<RtpCodecParameters>,
-    rtp_sender_codec: Option<RtpCodecParameters>,
+    caller_sender_codec: Option<RtpCodecParameters>,
+    callee_sender_codec: Option<RtpCodecParameters>,
     /// Video codec parameters (set by builder, used by setup_bridge)
-    webrtc_video_codec: Option<RtpCodecParameters>,
-    rtp_video_codec: Option<RtpCodecParameters>,
+    caller_video_codec: Option<RtpCodecParameters>,
+    callee_video_codec: Option<RtpCodecParameters>,
     /// RtpSender handles for video — used to subscribe to PLI/FIR RTCP feedback
-    webrtc_video_sender: AsyncMutex<Option<Arc<RtpSender>>>,
-    rtp_video_sender: AsyncMutex<Option<Arc<RtpSender>>>,
+    caller_video_sender: AsyncMutex<Option<Arc<RtpSender>>>,
+    callee_video_sender: AsyncMutex<Option<Arc<RtpSender>>>,
     /// Target payload type stamped by rustpbx onto pass-through video RTP.
-    webrtc_video_payload_type: Arc<AtomicU8>,
-    rtp_video_payload_type: Arc<AtomicU8>,
+    caller_video_payload_type: Arc<AtomicU8>,
+    callee_video_payload_type: Arc<AtomicU8>,
     /// Per-direction media forwarding stats (cumulative)
-    webrtc_to_rtp_stats: Arc<LegStats>,
-    rtp_to_webrtc_stats: Arc<LegStats>,
+    caller_to_callee_stats: Arc<LegStats>,
+    callee_to_caller_stats: Arc<LegStats>,
 
     /// N-peer: all peers indexed by PeerId (includes "webrtc"/"rtp" for fast path)
     peers: Arc<AsyncMutex<std::collections::HashMap<PeerId, PeerEntry>>>,
@@ -347,30 +350,31 @@ pub struct BridgePeer {
 
     /// Optional transcoder for RTP→WebRTC direction (e.g. G.729→PCMU).
     /// Set dynamically via set_transcoder() when caller and callee codecs differ.
-    rtp_to_webrtc_transcoder: Arc<parking_lot::RwLock<Option<Transcoder>>>,
+    callee_to_caller_transcoder: Arc<parking_lot::RwLock<Option<Transcoder>>>,
     /// Optional RTP timestamp/sequence rewriter for RTP→WebRTC direction.
-    rtp_to_webrtc_timing: Arc<parking_lot::RwLock<Option<RtpTiming>>>,
+    callee_to_caller_timing: Arc<parking_lot::RwLock<Option<RtpTiming>>>,
     /// Optional transcoder for WebRTC→RTP direction (e.g. PCMU→G.729).
-    webrtc_to_rtp_transcoder: Arc<parking_lot::RwLock<Option<Transcoder>>>,
+    caller_to_callee_transcoder: Arc<parking_lot::RwLock<Option<Transcoder>>>,
     /// Optional RTP timestamp/sequence rewriter for WebRTC→RTP direction.
-    webrtc_to_rtp_timing: Arc<parking_lot::RwLock<Option<RtpTiming>>>,
+    caller_to_callee_timing: Arc<parking_lot::RwLock<Option<RtpTiming>>>,
 }
 
 impl BridgePeer {
     /// Create a new bridge peer with given WebRTC and RTP PeerConnections
-    pub fn new(id: String, webrtc_pc: PeerConnection, rtp_pc: PeerConnection) -> Self {
+    pub fn new(id: String, caller_pc: PeerConnection, callee_pc: PeerConnection) -> Self {
         Self {
             id,
-            webrtc_pc,
-            rtp_pc,
+            caller_pc,
+            callee_pc,
             bridge_tasks: AsyncMutex::new(Vec::new()),
             cancel_token: CancellationToken::new(),
             forwarding_started: AtomicBool::new(false),
+            caller_gate: Arc::new(AtomicBool::new(false)),
             recorder: None,
             dtmf_sink: Arc::new(parking_lot::RwLock::new(None)),
-            webrtc_send: Arc::new(AsyncMutex::new(None)),
-            rtp_send: Arc::new(AsyncMutex::new(None)),
-            webrtc_output_state: Arc::new(AsyncMutex::new(OutputState {
+            caller_send: Arc::new(AsyncMutex::new(None)),
+            callee_send: Arc::new(AsyncMutex::new(None)),
+            caller_output_state: Arc::new(AsyncMutex::new(OutputState {
                 mode: BRIDGE_OUTPUT_PEER,
                 file_source: None,
                 next_rtp_timestamp: None,
@@ -378,7 +382,7 @@ impl BridgePeer {
                 active_rtp_offset: None,
                 active_seq_offset: None,
             })),
-            rtp_output_state: Arc::new(AsyncMutex::new(OutputState {
+            callee_output_state: Arc::new(AsyncMutex::new(OutputState {
                 mode: BRIDGE_OUTPUT_PEER,
                 file_source: None,
                 next_rtp_timestamp: None,
@@ -386,103 +390,111 @@ impl BridgePeer {
                 active_rtp_offset: None,
                 active_seq_offset: None,
             })),
-            webrtc_output_mode: Arc::new(AtomicU8::new(BRIDGE_OUTPUT_PEER)),
-            rtp_output_mode: Arc::new(AtomicU8::new(BRIDGE_OUTPUT_PEER)),
-            webrtc_video_send: Arc::new(AsyncMutex::new(None)),
-            rtp_video_send: Arc::new(AsyncMutex::new(None)),
-            webrtc_track: AsyncMutex::new(None),
-            rtp_track: AsyncMutex::new(None),
-            webrtc_sender_codec: None,
-            rtp_sender_codec: None,
-            webrtc_video_codec: None,
-            rtp_video_codec: None,
-            webrtc_video_sender: AsyncMutex::new(None),
-            rtp_video_sender: AsyncMutex::new(None),
-            webrtc_video_payload_type: Arc::new(AtomicU8::new(96)),
-            rtp_video_payload_type: Arc::new(AtomicU8::new(96)),
-            webrtc_to_rtp_stats: LegStats::new(),
-            rtp_to_webrtc_stats: LegStats::new(),
+            caller_output_mode: Arc::new(AtomicU8::new(BRIDGE_OUTPUT_PEER)),
+            callee_output_mode: Arc::new(AtomicU8::new(BRIDGE_OUTPUT_PEER)),
+            caller_video_send: Arc::new(AsyncMutex::new(None)),
+            callee_video_send: Arc::new(AsyncMutex::new(None)),
+            caller_track: AsyncMutex::new(None),
+            callee_track: AsyncMutex::new(None),
+            caller_sender_codec: None,
+            callee_sender_codec: None,
+            caller_video_codec: None,
+            callee_video_codec: None,
+            caller_video_sender: AsyncMutex::new(None),
+            callee_video_sender: AsyncMutex::new(None),
+            caller_video_payload_type: Arc::new(AtomicU8::new(96)),
+            callee_video_payload_type: Arc::new(AtomicU8::new(96)),
+            caller_to_callee_stats: LegStats::new(),
+            callee_to_caller_stats: LegStats::new(),
             peers: Arc::new(AsyncMutex::new(std::collections::HashMap::new())),
             routes: Arc::new(AsyncMutex::new(std::collections::HashMap::new())),
-            rtp_to_webrtc_transcoder: Arc::new(parking_lot::RwLock::new(None)),
-            rtp_to_webrtc_timing: Arc::new(parking_lot::RwLock::new(None)),
-            webrtc_to_rtp_transcoder: Arc::new(parking_lot::RwLock::new(None)),
-            webrtc_to_rtp_timing: Arc::new(parking_lot::RwLock::new(None)),
+            callee_to_caller_transcoder: Arc::new(parking_lot::RwLock::new(None)),
+            callee_to_caller_timing: Arc::new(parking_lot::RwLock::new(None)),
+            caller_to_callee_transcoder: Arc::new(parking_lot::RwLock::new(None)),
+            caller_to_callee_timing: Arc::new(parking_lot::RwLock::new(None)),
         }
+    }
+
+    /// Allow WebRTC→RTP forwarding. Call this when the callee answers (200 OK) or on
+    /// re-INVITE, NOT on 183 early media. This prevents sending WebRTC audio to a SIP
+    /// endpoint that may not be ready to receive it yet.
+    pub fn open_caller_gate(&self) {
+        self.caller_gate.store(true, Ordering::Release);
     }
 
     /// Setup the bridge by adding sample tracks to both sides for forwarding
     ///
-    /// `webrtc_params`: Codec parameters for the WebRTC-side track (e.g. Opus 48kHz)
-    /// `rtp_params`: Codec parameters for the RTP-side track (e.g. PCMU 8kHz or Opus 48kHz)
+    /// `caller_params`: Codec parameters for the caller-side track (e.g. Opus 48kHz)
+    /// `callee_params`: Codec parameters for the callee-side track (e.g. PCMU 8kHz or Opus 48kHz)
     pub async fn setup_bridge_with_codecs(
         &self,
-        webrtc_params: RtpCodecParameters,
-        rtp_params: RtpCodecParameters,
+        caller_params: RtpCodecParameters,
+        callee_params: RtpCodecParameters,
     ) -> Result<()> {
-        // Setup WebRTC side: create sample track and register with PC
-        let (webrtc_tx, webrtc_track, _) =
+        // Setup caller side: create sample track and register with PC
+        let (caller_tx, caller_track, _) =
             rustrtc::media::track::sample_track(MediaKind::Audio, 100);
 
-        *self.webrtc_track.lock().await = Some(webrtc_track.clone());
-        let _ = self.webrtc_pc().add_track(webrtc_track, webrtc_params);
-        *self.webrtc_send.lock().await = Some(webrtc_tx);
+        *self.caller_track.lock().await = Some(caller_track.clone());
+        let _ = self.caller_pc().add_track(caller_track, caller_params);
+        *self.caller_send.lock().await = Some(caller_tx);
 
-        // Setup RTP side: create sample track and register with PC
-        let (rtp_tx, rtp_track, _) = rustrtc::media::track::sample_track(MediaKind::Audio, 100);
+        // Setup callee side: create sample track and register with PC
+        let (callee_tx, callee_track, _) =
+            rustrtc::media::track::sample_track(MediaKind::Audio, 100);
 
-        *self.rtp_track.lock().await = Some(rtp_track.clone());
-        let _ = self.rtp_pc().add_track(rtp_track, rtp_params);
-        *self.rtp_send.lock().await = Some(rtp_tx);
+        *self.callee_track.lock().await = Some(callee_track.clone());
+        let _ = self.callee_pc().add_track(callee_track, callee_params);
+        *self.callee_send.lock().await = Some(callee_tx);
 
         let mut tasks = self.bridge_tasks.lock().await;
         tasks.push(Self::spawn_file_output_clock(
             self.id.clone(),
-            BridgeEndpoint::WebRtc,
-            self.webrtc_send.lock().await.clone(),
-            Arc::clone(&self.webrtc_output_state),
+            BridgeEndpoint::Caller,
+            self.caller_send.lock().await.clone(),
+            Arc::clone(&self.caller_output_state),
             self.cancel_token.clone(),
         ));
         tasks.push(Self::spawn_file_output_clock(
             self.id.clone(),
-            BridgeEndpoint::Rtp,
-            self.rtp_send.lock().await.clone(),
-            Arc::clone(&self.rtp_output_state),
+            BridgeEndpoint::Callee,
+            self.callee_send.lock().await.clone(),
+            Arc::clone(&self.callee_output_state),
             self.cancel_token.clone(),
         ));
         drop(tasks);
 
         // Setup video senders if video codecs are configured
-        if let Some(ref webrtc_video_params) = self.webrtc_video_codec {
-            self.webrtc_video_payload_type
-                .store(webrtc_video_params.payload_type, Ordering::Relaxed);
-            let (webrtc_video_tx, webrtc_video_track, _) =
+        if let Some(ref caller_video_params) = self.caller_video_codec {
+            self.caller_video_payload_type
+                .store(caller_video_params.payload_type, Ordering::Relaxed);
+            let (caller_video_tx, caller_video_track, _) =
                 rustrtc::media::track::sample_track(MediaKind::Video, 100);
             if let Ok(sender) = self
-                .webrtc_pc()
-                .add_track(webrtc_video_track, webrtc_video_params.clone())
+                .caller_pc()
+                .add_track(caller_video_track, caller_video_params.clone())
             {
-                *self.webrtc_video_sender.lock().await = Some(sender);
+                *self.caller_video_sender.lock().await = Some(sender);
             }
-            *self.webrtc_video_send.lock().await = Some(webrtc_video_tx);
-            debug!(bridge_id = %self.id, pt = webrtc_video_params.payload_type, clock_rate = webrtc_video_params.clock_rate, "WebRTC video sender setup complete");
+            *self.caller_video_send.lock().await = Some(caller_video_tx);
+            debug!(bridge_id = %self.id, pt = caller_video_params.payload_type, clock_rate = caller_video_params.clock_rate, "Caller video sender setup complete");
         } else {
-            debug!(bridge_id = %self.id, "WebRTC video sender NOT configured (no video codec)");
+            debug!(bridge_id = %self.id, "Caller video sender NOT configured (no video codec)");
         }
 
-        if let Some(ref rtp_video_params) = self.rtp_video_codec {
-            self.rtp_video_payload_type
-                .store(rtp_video_params.payload_type, Ordering::Relaxed);
-            let (rtp_video_tx, rtp_video_track, _) =
+        if let Some(ref callee_video_params) = self.callee_video_codec {
+            self.callee_video_payload_type
+                .store(callee_video_params.payload_type, Ordering::Relaxed);
+            let (callee_video_tx, callee_video_track, _) =
                 rustrtc::media::track::sample_track(MediaKind::Video, 100);
             if let Ok(sender) = self
-                .rtp_pc()
-                .add_track(rtp_video_track, rtp_video_params.clone())
+                .callee_pc()
+                .add_track(callee_video_track, callee_video_params.clone())
             {
-                *self.rtp_video_sender.lock().await = Some(sender);
+                *self.callee_video_sender.lock().await = Some(sender);
             }
-            *self.rtp_video_send.lock().await = Some(rtp_video_tx);
-            debug!(bridge_id = %self.id, pt = rtp_video_params.payload_type, clock_rate = rtp_video_params.clock_rate, "RTP video sender setup complete");
+            *self.callee_video_send.lock().await = Some(callee_video_tx);
+            debug!(bridge_id = %self.id, pt = callee_video_params.payload_type, clock_rate = callee_video_params.clock_rate, "Callee video sender setup complete");
         }
         Ok(())
     }
@@ -498,25 +510,25 @@ impl BridgePeer {
             channels: 0,
         };
 
-        self.webrtc_video_payload_type
+        self.caller_video_payload_type
             .store(params.payload_type, Ordering::Relaxed);
-        self.rtp_video_payload_type
+        self.callee_video_payload_type
             .store(params.payload_type, Ordering::Relaxed);
 
-        // WebRTC side
-        if self.webrtc_video_send.lock().await.is_none() {
+        // Caller side
+        if self.caller_video_send.lock().await.is_none() {
             let (tx, track, _) = rustrtc::media::track::sample_track(MediaKind::Video, 100);
-            let sender = self.webrtc_pc().add_track(track, params.clone())?;
-            *self.webrtc_video_sender.lock().await = Some(sender);
-            *self.webrtc_video_send.lock().await = Some(tx);
+            let sender = self.caller_pc().add_track(track, params.clone())?;
+            *self.caller_video_sender.lock().await = Some(sender);
+            *self.caller_video_send.lock().await = Some(tx);
         }
 
-        // RTP side
-        if self.rtp_video_send.lock().await.is_none() {
+        // Callee side
+        if self.callee_video_send.lock().await.is_none() {
             let (tx, track, _) = rustrtc::media::track::sample_track(MediaKind::Video, 100);
-            let sender = self.rtp_pc().add_track(track, params)?;
-            *self.rtp_video_sender.lock().await = Some(sender);
-            *self.rtp_video_send.lock().await = Some(tx);
+            let sender = self.callee_pc().add_track(track, params)?;
+            *self.callee_video_sender.lock().await = Some(sender);
+            *self.callee_video_send.lock().await = Some(tx);
         }
 
         debug!(
@@ -530,32 +542,33 @@ impl BridgePeer {
 
     /// Check whether video senders have been configured on this bridge.
     pub async fn has_video(&self) -> bool {
-        self.webrtc_video_send.lock().await.is_some() && self.rtp_video_send.lock().await.is_some()
+        self.caller_video_send.lock().await.is_some()
+            && self.callee_video_send.lock().await.is_some()
     }
 
     /// Update target payload types stamped onto pass-through video frames.
     pub fn set_video_payload_types(
         &self,
-        webrtc_params: Option<RtpCodecParameters>,
-        rtp_params: Option<RtpCodecParameters>,
+        caller_params: Option<RtpCodecParameters>,
+        callee_params: Option<RtpCodecParameters>,
     ) {
-        if let Some(params) = webrtc_params.as_ref() {
-            self.webrtc_video_payload_type
+        if let Some(params) = caller_params.as_ref() {
+            self.caller_video_payload_type
                 .store(params.payload_type, Ordering::Relaxed);
             debug!(
                 bridge_id = %self.id,
-                side = "webrtc",
+                side = "caller",
                 pt = params.payload_type,
                 clock_rate = params.clock_rate,
                 "Video pass-through payload type updated"
             );
         }
-        if let Some(params) = rtp_params.as_ref() {
-            self.rtp_video_payload_type
+        if let Some(params) = callee_params.as_ref() {
+            self.callee_video_payload_type
                 .store(params.payload_type, Ordering::Relaxed);
             debug!(
                 bridge_id = %self.id,
-                side = "rtp",
+                side = "callee",
                 pt = params.payload_type,
                 clock_rate = params.clock_rate,
                 "Video pass-through payload type updated"
@@ -566,20 +579,23 @@ impl BridgePeer {
     /// Setup the bridge with codec parameters.
     /// Uses sender codecs from builder if set, otherwise falls back to defaults.
     pub async fn setup_bridge(&self) -> Result<()> {
-        let webrtc_params = self
-            .webrtc_sender_codec
+        let caller_params = self
+            .caller_sender_codec
             .clone()
             .unwrap_or(RtpCodecParameters {
                 payload_type: 111,
                 clock_rate: 48000,
                 channels: 2,
             });
-        let rtp_params = self.rtp_sender_codec.clone().unwrap_or(RtpCodecParameters {
-            payload_type: 0,
-            clock_rate: 8000,
-            channels: 1,
-        });
-        self.setup_bridge_with_codecs(webrtc_params, rtp_params)
+        let callee_params = self
+            .callee_sender_codec
+            .clone()
+            .unwrap_or(RtpCodecParameters {
+                payload_type: 0,
+                clock_rate: 8000,
+                channels: 1,
+            });
+        self.setup_bridge_with_codecs(caller_params, callee_params)
             .await
     }
 
@@ -596,10 +612,12 @@ impl BridgePeer {
 
         // Spawn a 5-second periodic stats logger for all bridge legs
         let stats_task = {
-            let w2r = Arc::clone(&self.webrtc_to_rtp_stats);
-            let r2w = Arc::clone(&self.rtp_to_webrtc_stats);
+            let w2r = Arc::clone(&self.caller_to_callee_stats);
+            let r2w = Arc::clone(&self.callee_to_caller_stats);
             let bridge_id = self.id.clone();
             let cancel = self.cancel_token.clone();
+            let caller_pc = self.caller_pc.clone();
+            let callee_pc = self.callee_pc.clone();
             tokio::spawn(async move {
                 let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
                 interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -636,16 +654,28 @@ impl BridgePeer {
 
                             info!(
                                 bridge_id = %bridge_id,
-                                webrtc_to_rtp_pps   = dw_pkts,
-                                webrtc_to_rtp_kbps  = dw_bytes * 8 / 5 / 1000,
-                                webrtc_to_rtp_loss  = format!("{:.2}%", w_loss_pct),
-                                webrtc_to_rtp_drop  = w_drop,
-                                rtp_to_webrtc_pps   = dr_pkts,
-                                rtp_to_webrtc_kbps  = dr_bytes * 8 / 5 / 1000,
-                                rtp_to_webrtc_loss  = format!("{:.2}%", r_loss_pct),
-                                rtp_to_webrtc_drop  = r_drop,
+                                caller_to_callee_pps   = dw_pkts,
+                                caller_to_callee_kbps  = dw_bytes * 8 / 5 / 1000,
+                                caller_to_callee_loss  = format!("{:.2}%", w_loss_pct),
+                                caller_to_callee_drop  = w_drop,
+                                callee_to_caller_pps   = dr_pkts,
+                                callee_to_caller_kbps  = dr_bytes * 8 / 5 / 1000,
+                                callee_to_caller_loss  = format!("{:.2}%", r_loss_pct),
+                                callee_to_caller_drop  = r_drop,
                                 "Bridge leg stats [5s]"
                             );
+
+                            // Dump UDP transport stats from IceConn via StatsProvider
+                            if let Ok(report) = caller_pc.get_transport_stats().await {
+                                for entry in &report.entries {
+                                    debug!(bridge_id = %bridge_id, role = "caller", %entry, "Transport stats");
+                                }
+                            }
+                            if let Ok(report) = callee_pc.get_transport_stats().await {
+                                for entry in &report.entries {
+                                    debug!(bridge_id = %bridge_id, role = "callee", %entry, "Transport stats");
+                                }
+                            }
 
                             (prev_w_pkts, prev_w_lost, prev_w_bytes) = (w_pkts, w_lost, w_bytes);
                             (prev_r_pkts, prev_r_lost, prev_r_bytes) = (r_pkts, r_lost, r_bytes);
@@ -662,13 +692,13 @@ impl BridgePeer {
     }
 
     /// Get the WebRTC-side sender (for test injection)
-    pub async fn get_webrtc_sender(&self) -> Option<MediaSender> {
-        self.webrtc_send.lock().await.clone()
+    pub async fn get_caller_sender(&self) -> Option<MediaSender> {
+        self.caller_send.lock().await.clone()
     }
 
     /// Get the RTP-side sender (for test injection)
-    pub async fn get_rtp_sender(&self) -> Option<MediaSender> {
-        self.rtp_send.lock().await.clone()
+    pub async fn get_callee_sender(&self) -> Option<MediaSender> {
+        self.callee_send.lock().await.clone()
     }
 
     pub fn set_dtmf_sink(
@@ -709,8 +739,8 @@ impl BridgePeer {
         track: &crate::media::FileTrack,
     ) -> Result<()> {
         match endpoint {
-            BridgeEndpoint::WebRtc => self.get_webrtc_sender().await,
-            BridgeEndpoint::Rtp => self.get_rtp_sender().await,
+            BridgeEndpoint::Caller => self.get_caller_sender().await,
+            BridgeEndpoint::Callee => self.get_callee_sender().await,
         }
         .ok_or_else(|| anyhow::anyhow!("bridge {:?} output sender is not ready", endpoint))?;
 
@@ -739,8 +769,8 @@ impl BridgePeer {
         codec_info: crate::media::negotiate::CodecInfo,
     ) -> Result<()> {
         match endpoint {
-            BridgeEndpoint::WebRtc => self.get_webrtc_sender().await,
-            BridgeEndpoint::Rtp => self.get_rtp_sender().await,
+            BridgeEndpoint::Caller => self.get_caller_sender().await,
+            BridgeEndpoint::Callee => self.get_callee_sender().await,
         }
         .ok_or_else(|| anyhow::anyhow!("bridge {:?} output sender is not ready", endpoint))?;
 
@@ -843,8 +873,8 @@ impl BridgePeer {
     /// Configure a transcoder for media flowing out of the given endpoint.
     ///
     /// `from_endpoint` is the source side of the direction to transcode:
-    /// - `BridgeEndpoint::Rtp` – transcode media received from the RTP side before sending to WebRTC
-    /// - `BridgeEndpoint::WebRtc` – transcode media received from the WebRTC side before sending to RTP
+    /// - `BridgeEndpoint::Callee` – transcode media received from the callee side before sending to caller
+    /// - `BridgeEndpoint::Caller` – transcode media received from the caller side before sending to callee
     ///
     /// When the ingress and egress codecs differ (e.g. caller=G.729, agent=PCMU),
     /// this inserts a decode–resample–encode pipeline so both sides hear intelligible audio.
@@ -856,8 +886,14 @@ impl BridgePeer {
         target_pt: u8,
     ) {
         let (transcoder_slot, timing_slot) = match from_endpoint {
-            BridgeEndpoint::Rtp => (&self.rtp_to_webrtc_transcoder, &self.rtp_to_webrtc_timing),
-            BridgeEndpoint::WebRtc => (&self.webrtc_to_rtp_transcoder, &self.webrtc_to_rtp_timing),
+            BridgeEndpoint::Callee => (
+                &self.callee_to_caller_transcoder,
+                &self.callee_to_caller_timing,
+            ),
+            BridgeEndpoint::Caller => (
+                &self.caller_to_callee_transcoder,
+                &self.caller_to_callee_timing,
+            ),
         };
         let source_cr = source.clock_rate();
         let target_cr = target.clock_rate();
@@ -879,8 +915,14 @@ impl BridgePeer {
     /// Remove the transcoder for a given direction.
     pub fn clear_transcoder(&self, from_endpoint: BridgeEndpoint) {
         let (transcoder_slot, timing_slot) = match from_endpoint {
-            BridgeEndpoint::Rtp => (&self.rtp_to_webrtc_transcoder, &self.rtp_to_webrtc_timing),
-            BridgeEndpoint::WebRtc => (&self.webrtc_to_rtp_transcoder, &self.webrtc_to_rtp_timing),
+            BridgeEndpoint::Callee => (
+                &self.callee_to_caller_transcoder,
+                &self.callee_to_caller_timing,
+            ),
+            BridgeEndpoint::Caller => (
+                &self.caller_to_callee_transcoder,
+                &self.caller_to_callee_timing,
+            ),
         };
         *transcoder_slot.write() = None;
         *timing_slot.write() = None;
@@ -888,15 +930,15 @@ impl BridgePeer {
 
     fn output_state(&self, endpoint: BridgeEndpoint) -> &Arc<AsyncMutex<OutputState>> {
         match endpoint {
-            BridgeEndpoint::WebRtc => &self.webrtc_output_state,
-            BridgeEndpoint::Rtp => &self.rtp_output_state,
+            BridgeEndpoint::Caller => &self.caller_output_state,
+            BridgeEndpoint::Callee => &self.callee_output_state,
         }
     }
 
     fn output_mode(&self, endpoint: BridgeEndpoint) -> &Arc<AtomicU8> {
         match endpoint {
-            BridgeEndpoint::WebRtc => &self.webrtc_output_mode,
-            BridgeEndpoint::Rtp => &self.rtp_output_mode,
+            BridgeEndpoint::Caller => &self.caller_output_mode,
+            BridgeEndpoint::Callee => &self.callee_output_mode,
         }
     }
 
@@ -1104,39 +1146,40 @@ impl BridgePeer {
         })
     }
 
-    pub async fn get_webrtc_track(&self) -> Option<Arc<SampleStreamTrack>> {
-        self.webrtc_track.lock().await.clone()
+    pub async fn get_caller_track(&self) -> Option<Arc<SampleStreamTrack>> {
+        self.caller_track.lock().await.clone()
     }
 
     /// Get the RTP-side track (for test consumption)
-    pub async fn get_rtp_track(&self) -> Option<Arc<SampleStreamTrack>> {
-        self.rtp_track.lock().await.clone()
+    pub async fn get_callee_track(&self) -> Option<Arc<SampleStreamTrack>> {
+        self.callee_track.lock().await.clone()
     }
 
     fn spawn_bidirectional_forwarder(&self) -> tokio::task::JoinHandle<()> {
-        let webrtc_pc = self.webrtc_pc.clone();
-        let rtp_pc = self.rtp_pc.clone();
-        let rtp_send = Arc::downgrade(&self.rtp_send);
-        let webrtc_send = Arc::downgrade(&self.webrtc_send);
-        let rtp_output_mode = Arc::clone(&self.rtp_output_mode);
-        let webrtc_output_mode = Arc::clone(&self.webrtc_output_mode);
+        let caller_pc = self.caller_pc.clone();
+        let callee_pc = self.callee_pc.clone();
+        let callee_send = Arc::downgrade(&self.callee_send);
+        let caller_send = Arc::downgrade(&self.caller_send);
+        let callee_output_mode = Arc::clone(&self.callee_output_mode);
+        let caller_output_mode = Arc::clone(&self.caller_output_mode);
         let cancel_token = self.cancel_token.clone();
         let bridge_id = self.id.clone();
-        let w2r_stats = Arc::clone(&self.webrtc_to_rtp_stats);
-        let r2w_stats = Arc::clone(&self.rtp_to_webrtc_stats);
+        let w2r_stats = Arc::clone(&self.caller_to_callee_stats);
+        let r2w_stats = Arc::clone(&self.callee_to_caller_stats);
         let recorder = self.recorder.clone();
         let dtmf_sink = Arc::clone(&self.dtmf_sink);
-        let webrtc_to_rtp_transcoder = Arc::clone(&self.webrtc_to_rtp_transcoder);
-        let webrtc_to_rtp_timing = Arc::clone(&self.webrtc_to_rtp_timing);
-        let rtp_to_webrtc_transcoder = Arc::clone(&self.rtp_to_webrtc_transcoder);
-        let rtp_to_webrtc_timing = Arc::clone(&self.rtp_to_webrtc_timing);
-        let webrtc_video_payload_type = Arc::clone(&self.webrtc_video_payload_type);
-        let rtp_video_payload_type = Arc::clone(&self.rtp_video_payload_type);
+        let caller_to_callee_transcoder = Arc::clone(&self.caller_to_callee_transcoder);
+        let caller_to_callee_timing = Arc::clone(&self.caller_to_callee_timing);
+        let callee_to_caller_transcoder = Arc::clone(&self.callee_to_caller_transcoder);
+        let callee_to_caller_timing = Arc::clone(&self.callee_to_caller_timing);
+        let caller_video_payload_type = Arc::clone(&self.caller_video_payload_type);
+        let callee_video_payload_type = Arc::clone(&self.callee_video_payload_type);
+        let caller_gate = Arc::clone(&self.caller_gate);
 
         tokio::spawn(async move {
             // Create fused receivers for both directions
-            let mut webrtc_recv = Box::pin(webrtc_pc.recv());
-            let mut rtp_recv = Box::pin(rtp_pc.recv());
+            let mut caller_recv = Box::pin(caller_pc.recv());
+            let mut callee_recv = Box::pin(callee_pc.recv());
 
             loop {
                 tokio::select! {
@@ -1144,8 +1187,8 @@ impl BridgePeer {
                         debug!(bridge_id = %bridge_id, "Bidirectional forwarder cancelled");
                         break;
                     }
-                    // Handle WebRTC -> RTP direction
-                    event = &mut webrtc_recv => {
+                    // Handle Caller -> Callee direction
+                    event = &mut caller_recv => {
                         match event {
                             Some(PeerConnectionEvent::Track(transceiver)) => {
                                 if let Some(receiver) = transceiver.receiver() {
@@ -1158,7 +1201,7 @@ impl BridgePeer {
                                         .collect::<Vec<_>>();
                                     info!(
                                         bridge_id = %bridge_id,
-                                        direction = "WebRTC->RTP",
+                                        direction = "Caller->Callee",
                                         transceiver_id = transceiver.id(),
                                         kind = ?transceiver.kind(),
                                         mid = ?transceiver.mid(),
@@ -1168,7 +1211,7 @@ impl BridgePeer {
                                         "Bridge received track event"
                                     );
                                     let sender = if is_video {
-                                        let target_transceiver = rtp_pc
+                                        let target_transceiver = callee_pc
                                             .get_transceivers()
                                             .into_iter()
                                             .find(|t| t.kind() == rustrtc::MediaKind::Video);
@@ -1176,9 +1219,9 @@ impl BridgePeer {
                                             if let Some(existing_sender) = target_transceiver.sender() {
                                                 let forwarding_track: Arc<dyn MediaStreamTrack> =
                                                     Arc::new(VideoForwardingTrack {
-                                                        id: format!("{}-webrtc-to-rtp-video", bridge_id),
+                                                        id: format!("{}-caller-to-callee-video", bridge_id),
                                                         inner: track.clone(),
-                                                        payload_type: Arc::clone(&rtp_video_payload_type),
+                                                        payload_type: Arc::clone(&callee_video_payload_type),
                                                     });
                                                 let sender = rustrtc::RtpSender::builder(
                                                     forwarding_track,
@@ -1193,70 +1236,71 @@ impl BridgePeer {
                                                     sender,
                                                     track.clone(),
                                                     cancel_token.clone(),
-                                                    "RTP PLI -> WebRTC source",
+                                                    "Callee PLI -> Caller source",
                                                 );
                                                 if let Err(e) = track.request_key_frame().await {
                                                     debug!(
                                                         bridge_id = %bridge_id,
                                                         source_track = %track.id(),
                                                         error = %e,
-                                                        "Initial WebRTC video keyframe request failed"
+                                                        "Initial Caller video keyframe request failed"
                                                     );
                                                 }
                                                 debug!(
                                                     bridge_id = %bridge_id,
                                                     source_track = %track.id(),
                                                     target_ssrc = existing_sender.ssrc(),
-                                                    "Wired WebRTC->RTP video forwarding track"
+                                                    "Wired Caller->Callee video forwarding track"
                                                 );
                                             } else {
-                                                warn!(bridge_id = %bridge_id, "RTP video transceiver has no sender for forwarding track");
+                                                warn!(bridge_id = %bridge_id, "Callee video transceiver has no sender for forwarding track");
                                             }
                                         } else {
-                                            warn!(bridge_id = %bridge_id, "RTP video transceiver not found for forwarding track");
+                                            warn!(bridge_id = %bridge_id, "Callee video transceiver not found for forwarding track");
                                         }
-                                        webrtc_recv = Box::pin(webrtc_pc.recv());
+                                        caller_recv = Box::pin(caller_pc.recv());
                                         continue;
                                     } else {
-                                        rtp_send.clone()
+                                        callee_send.clone()
                                     };
                                     Self::forward_track_to_sender(
                                         bridge_id.clone(),
                                         track,
                                         sender,
-                                        Arc::clone(&rtp_output_mode),
+                                        Arc::clone(&callee_output_mode),
                                         cancel_token.clone(),
-                                        ForwardPath::new(LegTransport::WebRtc, LegTransport::Rtp),
+                                        ForwardPath::new(LegTransport::Caller, LegTransport::Callee),
                                         Arc::clone(&w2r_stats),
                                         if !is_video { recorder.clone() } else { None },
                                         if !is_video { Some(RecLeg::A) } else { None },
                                         Arc::clone(&dtmf_sink),
-                                        Some(Arc::clone(&webrtc_to_rtp_transcoder)),
-                                        Some(Arc::clone(&webrtc_to_rtp_timing)),
+                                        Some(Arc::clone(&caller_to_callee_transcoder)),
+                                        Some(Arc::clone(&caller_to_callee_timing)),
+                                        Some(Arc::clone(&caller_gate)),
                                     ).await;
                                 } else {
                                     warn!(
                                         bridge_id = %bridge_id,
-                                        direction = "WebRTC->RTP",
+                                        direction = "Caller->Callee",
                                         transceiver_id = transceiver.id(),
                                         kind = ?transceiver.kind(),
                                         mid = ?transceiver.mid(),
                                         "Bridge received track event without receiver"
                                     );
                                 }
-                                webrtc_recv = Box::pin(webrtc_pc.recv());
+                                caller_recv = Box::pin(caller_pc.recv());
                             }
                             Some(_) => {
-                                webrtc_recv = Box::pin(webrtc_pc.recv());
+                                caller_recv = Box::pin(caller_pc.recv());
                             }
                             None => {
-                                debug!(bridge_id = %bridge_id, "WebRTC PeerConnection closed");
+                                debug!(bridge_id = %bridge_id, "Caller PeerConnection closed");
                                 break;
                             }
                         }
                     }
-                    // Handle RTP -> WebRTC direction
-                    event = &mut rtp_recv => {
+                    // Handle Callee -> Caller direction
+                    event = &mut callee_recv => {
                         match event {
                             Some(PeerConnectionEvent::Track(transceiver)) => {
                                 if let Some(receiver) = transceiver.receiver() {
@@ -1269,7 +1313,7 @@ impl BridgePeer {
                                         .collect::<Vec<_>>();
                                     info!(
                                         bridge_id = %bridge_id,
-                                        direction = "RTP->WebRTC",
+                                        direction = "Callee->Caller",
                                         transceiver_id = transceiver.id(),
                                         kind = ?transceiver.kind(),
                                         mid = ?transceiver.mid(),
@@ -1279,7 +1323,7 @@ impl BridgePeer {
                                         "Bridge received track event"
                                     );
                                     let sender = if is_video {
-                                        let target_transceiver = webrtc_pc
+                                        let target_transceiver = caller_pc
                                             .get_transceivers()
                                             .into_iter()
                                             .find(|t| t.kind() == rustrtc::MediaKind::Video);
@@ -1287,9 +1331,9 @@ impl BridgePeer {
                                             if let Some(existing_sender) = target_transceiver.sender() {
                                                 let forwarding_track: Arc<dyn MediaStreamTrack> =
                                                     Arc::new(VideoForwardingTrack {
-                                                        id: format!("{}-rtp-to-webrtc-video", bridge_id),
+                                                        id: format!("{}-callee-to-caller-video", bridge_id),
                                                         inner: track.clone(),
-                                                        payload_type: Arc::clone(&webrtc_video_payload_type),
+                                                        payload_type: Arc::clone(&caller_video_payload_type),
                                                     });
                                                 let sender = rustrtc::RtpSender::builder(
                                                     forwarding_track,
@@ -1304,64 +1348,65 @@ impl BridgePeer {
                                                     sender,
                                                     track.clone(),
                                                     cancel_token.clone(),
-                                                    "WebRTC PLI -> RTP source",
+                                                    "Caller PLI -> Callee source",
                                                 );
                                                 if let Err(e) = track.request_key_frame().await {
                                                     debug!(
                                                         bridge_id = %bridge_id,
                                                         source_track = %track.id(),
                                                         error = %e,
-                                                        "Initial RTP video keyframe request failed"
+                                                        "Initial Callee video keyframe request failed"
                                                     );
                                                 }
                                                 debug!(
                                                     bridge_id = %bridge_id,
                                                     source_track = %track.id(),
                                                     target_ssrc = existing_sender.ssrc(),
-                                                    "Wired RTP->WebRTC video forwarding track"
+                                                    "Wired Callee->Caller video forwarding track"
                                                 );
                                             } else {
-                                                warn!(bridge_id = %bridge_id, "WebRTC video transceiver has no sender for forwarding track");
+                                                warn!(bridge_id = %bridge_id, "Caller video transceiver has no sender for forwarding track");
                                             }
                                         } else {
-                                            warn!(bridge_id = %bridge_id, "WebRTC video transceiver not found for forwarding track");
+                                            warn!(bridge_id = %bridge_id, "Caller video transceiver not found for forwarding track");
                                         }
-                                        rtp_recv = Box::pin(rtp_pc.recv());
+                                        callee_recv = Box::pin(callee_pc.recv());
                                         continue;
                                     } else {
-                                        webrtc_send.clone()
+                                        caller_send.clone()
                                     };
                                     Self::forward_track_to_sender(
                                         bridge_id.clone(),
                                         track,
                                         sender,
-                                        Arc::clone(&webrtc_output_mode),
+                                        Arc::clone(&caller_output_mode),
                                         cancel_token.clone(),
-                                        ForwardPath::new(LegTransport::Rtp, LegTransport::WebRtc),
+                                        ForwardPath::new(LegTransport::Callee, LegTransport::Caller),
                                         Arc::clone(&r2w_stats),
                                         if !is_video { recorder.clone() } else { None },
                                         if !is_video { Some(RecLeg::B) } else { None },
                                         Arc::clone(&dtmf_sink),
-                                        Some(Arc::clone(&rtp_to_webrtc_transcoder)),
-                                        Some(Arc::clone(&rtp_to_webrtc_timing)),
+                                        Some(Arc::clone(&callee_to_caller_transcoder)),
+                                        Some(Arc::clone(&callee_to_caller_timing)),
+                                        None, // Callee→Caller is always allowed
                                     ).await;
                                 } else {
                                     warn!(
                                         bridge_id = %bridge_id,
-                                        direction = "RTP->WebRTC",
+                                        direction = "Callee->Caller",
                                         transceiver_id = transceiver.id(),
                                         kind = ?transceiver.kind(),
                                         mid = ?transceiver.mid(),
                                         "Bridge received track event without receiver"
                                     );
                                 }
-                                rtp_recv = Box::pin(rtp_pc.recv());
+                                callee_recv = Box::pin(callee_pc.recv());
                             }
                             Some(_) => {
-                                rtp_recv = Box::pin(rtp_pc.recv());
+                                callee_recv = Box::pin(callee_pc.recv());
                             }
                             None => {
-                                debug!(bridge_id = %bridge_id, "RTP PeerConnection closed");
+                                debug!(bridge_id = %bridge_id, "Callee PeerConnection closed");
                                 break;
                             }
                         }
@@ -1385,6 +1430,7 @@ impl BridgePeer {
         dtmf_sink: Arc<parking_lot::RwLock<Option<BridgeDtmfSink>>>,
         transcoder: Option<Arc<parking_lot::RwLock<Option<Transcoder>>>>,
         transcoder_timing: Option<Arc<parking_lot::RwLock<Option<RtpTiming>>>>,
+        gate: Option<Arc<AtomicBool>>,
     ) {
         // Get the sender channel from weak pointer
         let sender = if let Some(strong) = sender_weak.upgrade() {
@@ -1456,6 +1502,12 @@ impl BridgePeer {
                                 }
                                 continue;
                             }
+                            // Gate: block forwarding until explicitly opened (e.g. on 200 OK).
+                            if let Some(ref g) = gate {
+                                if !g.load(Ordering::Acquire) {
+                                    continue; // early media — caller audio not yet forwarded to callee
+                                }
+                            }
                             if packet_count == 1 {
                                 debug!(bridge_id = %bridge_id, direction = %path, kind = ?sample.kind(), "First media sample forwarded");
                             }
@@ -1486,7 +1538,7 @@ impl BridgePeer {
                             //    extension bytes, potentially rejecting packets (black screen).
                             let samples_to_send: Vec<MediaSample> = match sample {
                                 MediaSample::Audio(mut a) => {
-                                    if path.should_strip_webrtc_audio_metadata() {
+                                    if path.should_strip_caller_audio_metadata() {
                                         a.header_extension = None;
                                         a.raw_packet = None;
                                         a.marker = false;
@@ -1568,7 +1620,7 @@ impl BridgePeer {
                                             v.csrcs.clear();
                                             if matches!(
                                                 (path.from, path.to),
-                                                (LegTransport::WebRtc, LegTransport::Rtp)
+                                                (LegTransport::Caller, LegTransport::Callee)
                                             ) {
                                                 v.sequence_number = None;
                                             }
@@ -1707,6 +1759,7 @@ impl BridgePeer {
         dtmf_sink: Arc<parking_lot::RwLock<Option<BridgeDtmfSink>>>,
         transcoder: Option<Arc<parking_lot::RwLock<Option<Transcoder>>>>,
         transcoder_timing: Option<Arc<parking_lot::RwLock<Option<RtpTiming>>>>,
+        gate: Option<Arc<AtomicBool>>,
     ) {
         tokio::spawn(async move {
             Self::run_forward_loop(
@@ -1722,27 +1775,28 @@ impl BridgePeer {
                 dtmf_sink,
                 transcoder,
                 transcoder_timing,
+                gate,
             )
             .await;
         });
     }
 
     /// Get the WebRTC PeerConnection
-    pub fn webrtc_pc(&self) -> &PeerConnection {
-        &self.webrtc_pc
+    pub fn caller_pc(&self) -> &PeerConnection {
+        &self.caller_pc
     }
 
     /// Get the RTP PeerConnection
-    pub fn rtp_pc(&self) -> &PeerConnection {
-        &self.rtp_pc
+    pub fn callee_pc(&self) -> &PeerConnection {
+        &self.callee_pc
     }
 
     /// Stop the bridge (async — waits for forwarding tasks to finish)
     pub async fn stop(&self) {
         debug!(bridge_id = %self.id, "Stopping bridge");
         self.cancel_token.cancel();
-        self.webrtc_pc.close();
-        self.rtp_pc.close();
+        self.caller_pc.close();
+        self.callee_pc.close();
 
         // Wait for tasks to complete
         let mut tasks = self.bridge_tasks.lock().await;
@@ -1755,8 +1809,8 @@ impl BridgePeer {
     /// Used by Drop — forwarding tasks will exit on their own via cancel_token.
     fn close_sync(&self) {
         self.cancel_token.cancel();
-        self.webrtc_pc.close();
-        self.rtp_pc.close();
+        self.caller_pc.close();
+        self.callee_pc.close();
     }
 }
 
@@ -1770,18 +1824,18 @@ impl Drop for BridgePeer {
 /// Builder for creating BridgePeer instances
 pub struct BridgePeerBuilder {
     bridge_id: String,
-    webrtc_config: Option<rustrtc::RtcConfiguration>,
-    rtp_config: Option<rustrtc::RtcConfiguration>,
+    caller_config: Option<rustrtc::RtcConfiguration>,
+    callee_config: Option<rustrtc::RtcConfiguration>,
     rtp_port_range: (u16, u16),
     enable_latching: bool,
     external_ip: Option<String>,
     bind_ip: Option<String>,
-    webrtc_audio_capabilities: Option<Vec<rustrtc::config::AudioCapability>>,
-    rtp_audio_capabilities: Option<Vec<rustrtc::config::AudioCapability>>,
-    webrtc_video_capabilities: Option<Vec<rustrtc::config::VideoCapability>>,
-    rtp_video_capabilities: Option<Vec<rustrtc::config::VideoCapability>>,
-    webrtc_sender_codec: Option<RtpCodecParameters>,
-    rtp_sender_codec: Option<RtpCodecParameters>,
+    caller_audio_capabilities: Option<Vec<rustrtc::config::AudioCapability>>,
+    callee_audio_capabilities: Option<Vec<rustrtc::config::AudioCapability>>,
+    caller_video_capabilities: Option<Vec<rustrtc::config::VideoCapability>>,
+    callee_video_capabilities: Option<Vec<rustrtc::config::VideoCapability>>,
+    caller_sender_codec: Option<RtpCodecParameters>,
+    callee_sender_codec: Option<RtpCodecParameters>,
     rtp_sdp_compatibility: rustrtc::config::SdpCompatibilityMode,
     ice_servers: Vec<IceServer>,
     recorder: Option<Arc<parking_lot::RwLock<Option<Recorder>>>>,
@@ -1791,31 +1845,31 @@ impl BridgePeerBuilder {
     pub fn new(bridge_id: String) -> Self {
         Self {
             bridge_id,
-            webrtc_config: None,
-            rtp_config: None,
+            caller_config: None,
+            callee_config: None,
             rtp_port_range: (20000, 30000),
             enable_latching: false,
             external_ip: None,
             bind_ip: None,
-            webrtc_audio_capabilities: None,
-            rtp_audio_capabilities: None,
-            webrtc_video_capabilities: None,
-            rtp_video_capabilities: None,
-            webrtc_sender_codec: None,
-            rtp_sender_codec: None,
+            caller_audio_capabilities: None,
+            callee_audio_capabilities: None,
+            caller_video_capabilities: None,
+            callee_video_capabilities: None,
+            caller_sender_codec: None,
+            callee_sender_codec: None,
             rtp_sdp_compatibility: rustrtc::config::SdpCompatibilityMode::LegacySip,
             ice_servers: Vec::new(),
             recorder: None,
         }
     }
 
-    pub fn with_webrtc_config(mut self, config: rustrtc::RtcConfiguration) -> Self {
-        self.webrtc_config = Some(config);
+    pub fn with_caller_config(mut self, config: rustrtc::RtcConfiguration) -> Self {
+        self.caller_config = Some(config);
         self
     }
 
-    pub fn with_rtp_config(mut self, config: rustrtc::RtcConfiguration) -> Self {
-        self.rtp_config = Some(config);
+    pub fn with_callee_config(mut self, config: rustrtc::RtcConfiguration) -> Self {
+        self.callee_config = Some(config);
         self
     }
 
@@ -1846,41 +1900,41 @@ impl BridgePeerBuilder {
 
     /// Set audio capabilities for the WebRTC side PeerConnection.
     /// Controls which codecs appear in SDP offers/answers.
-    pub fn with_webrtc_audio_capabilities(
+    pub fn with_caller_audio_capabilities(
         mut self,
         caps: Vec<rustrtc::config::AudioCapability>,
     ) -> Self {
-        self.webrtc_audio_capabilities = Some(caps);
+        self.caller_audio_capabilities = Some(caps);
         self
     }
 
-    /// Set audio capabilities for the RTP side PeerConnection.
+    /// Set audio capabilities for the callee-side PeerConnection.
     /// Controls which codecs appear in SDP offers/answers.
-    pub fn with_rtp_audio_capabilities(
+    pub fn with_callee_audio_capabilities(
         mut self,
         caps: Vec<rustrtc::config::AudioCapability>,
     ) -> Self {
-        self.rtp_audio_capabilities = Some(caps);
+        self.callee_audio_capabilities = Some(caps);
         self
     }
 
     /// Set video capabilities for the WebRTC side PeerConnection.
     /// Controls which video codecs appear in SDP offers/answers.
-    pub fn with_webrtc_video_capabilities(
+    pub fn with_caller_video_capabilities(
         mut self,
         caps: Vec<rustrtc::config::VideoCapability>,
     ) -> Self {
-        self.webrtc_video_capabilities = Some(caps);
+        self.caller_video_capabilities = Some(caps);
         self
     }
 
-    /// Set video capabilities for the RTP side PeerConnection.
+    /// Set video capabilities for the callee-side PeerConnection.
     /// Controls which video codecs appear in SDP offers/answers.
-    pub fn with_rtp_video_capabilities(
+    pub fn with_callee_video_capabilities(
         mut self,
         caps: Vec<rustrtc::config::VideoCapability>,
     ) -> Self {
-        self.rtp_video_capabilities = Some(caps);
+        self.callee_video_capabilities = Some(caps);
         self
     }
 
@@ -1888,11 +1942,11 @@ impl BridgePeerBuilder {
     /// These are used by the sample track (RtpSender) on each side.
     pub fn with_sender_codecs(
         mut self,
-        webrtc: RtpCodecParameters,
-        rtp: RtpCodecParameters,
+        caller: RtpCodecParameters,
+        callee: RtpCodecParameters,
     ) -> Self {
-        self.webrtc_sender_codec = Some(webrtc);
-        self.rtp_sender_codec = Some(rtp);
+        self.caller_sender_codec = Some(caller);
+        self.callee_sender_codec = Some(callee);
         self
     }
 
@@ -1948,41 +2002,41 @@ impl BridgePeerBuilder {
     pub fn build(self) -> Arc<BridgePeer> {
         // Always include default video capabilities in bridge PCs so that
         // re-INVITE video renegotiation works. The video sender tracks are
-        // created lazily by setup_bridge_with_codecs (when webrtc_video_codec
+        // created lazily by setup_bridge_with_codecs (when caller_video_codec
         // is Some) or dynamically by add_video_track().
-        let webrtc_video = Self::resolve_video_caps(&self.webrtc_video_capabilities);
-        let rtp_video = Self::resolve_video_caps(&self.rtp_video_capabilities);
+        let caller_video = Self::resolve_video_caps(&self.caller_video_capabilities);
+        let callee_video = Self::resolve_video_caps(&self.callee_video_capabilities);
 
-        let webrtc_media_caps =
-            self.webrtc_audio_capabilities
+        let caller_media_caps =
+            self.caller_audio_capabilities
                 .map(|audio| rustrtc::config::MediaCapabilities {
                     audio,
-                    video: webrtc_video,
+                    video: caller_video,
                     application: None,
                 });
 
-        let webrtc_config = self
-            .webrtc_config
+        let caller_config = self
+            .caller_config
             .unwrap_or_else(|| rustrtc::RtcConfiguration {
                 transport_mode: TransportMode::WebRtc,
                 external_ip: self.external_ip.clone(),
-                media_capabilities: webrtc_media_caps,
+                media_capabilities: caller_media_caps,
                 ssrc_start: rand::random::<u32>(),
                 sdp_compatibility: rustrtc::config::SdpCompatibilityMode::Standard,
                 ice_servers: self.ice_servers,
                 ..Default::default()
             });
 
-        let rtp_media_caps =
-            self.rtp_audio_capabilities
+        let callee_media_caps =
+            self.callee_audio_capabilities
                 .map(|audio| rustrtc::config::MediaCapabilities {
                     audio,
-                    video: rtp_video,
+                    video: callee_video,
                     application: None,
                 });
 
-        let rtp_config = self
-            .rtp_config
+        let callee_config = self
+            .callee_config
             .unwrap_or_else(|| rustrtc::RtcConfiguration {
                 transport_mode: TransportMode::Rtp,
                 rtp_start_port: Some(self.rtp_port_range.0),
@@ -1990,23 +2044,28 @@ impl BridgePeerBuilder {
                 enable_latching: self.enable_latching,
                 external_ip: self.external_ip,
                 bind_ip: self.bind_ip,
-                media_capabilities: rtp_media_caps,
+                media_capabilities: callee_media_caps,
                 ssrc_start: rand::random::<u32>(),
                 sdp_compatibility: self.rtp_sdp_compatibility,
                 ..Default::default()
             });
 
-        let webrtc_pc = PeerConnection::new(webrtc_config);
-        let rtp_pc = PeerConnection::new(rtp_config);
+        let mut caller_config = caller_config;
+        caller_config.label = Some(format!("{}-caller", self.bridge_id));
+        let mut callee_config = callee_config;
+        callee_config.label = Some(format!("{}-callee", self.bridge_id));
 
-        let mut bridge = BridgePeer::new(self.bridge_id, webrtc_pc, rtp_pc);
-        bridge.webrtc_sender_codec = self.webrtc_sender_codec;
-        bridge.rtp_sender_codec = self.rtp_sender_codec;
+        let caller_pc = PeerConnection::new(caller_config);
+        let callee_pc = PeerConnection::new(callee_config);
+
+        let mut bridge = BridgePeer::new(self.bridge_id, caller_pc, callee_pc);
+        bridge.caller_sender_codec = self.caller_sender_codec;
+        bridge.callee_sender_codec = self.callee_sender_codec;
         bridge.recorder = self.recorder;
 
         // Store video codec params for setup_bridge to create video senders
-        bridge.webrtc_video_codec = self
-            .webrtc_video_capabilities
+        bridge.caller_video_codec = self
+            .caller_video_capabilities
             .as_ref()
             .and_then(|caps| caps.first())
             .map(|cap| RtpCodecParameters {
@@ -2014,8 +2073,8 @@ impl BridgePeerBuilder {
                 clock_rate: cap.clock_rate,
                 channels: 0,
             });
-        bridge.rtp_video_codec = self
-            .rtp_video_capabilities
+        bridge.callee_video_codec = self
+            .callee_video_capabilities
             .as_ref()
             .and_then(|caps| caps.first())
             .map(|cap| RtpCodecParameters {
@@ -2068,21 +2127,21 @@ mod tests {
         bridge.setup_bridge().await.unwrap();
 
         // Generate offers for both PCs
-        let webrtc_offer = bridge.webrtc_pc().create_offer().await;
-        let rtp_offer = bridge.rtp_pc().create_offer().await;
+        let webrtc_offer = bridge.caller_pc().create_offer().await;
+        let rtp_offer = bridge.callee_pc().create_offer().await;
 
         assert!(webrtc_offer.is_ok(), "WebRTC should create offer");
         assert!(rtp_offer.is_ok(), "RTP should create offer");
 
         // Set local descriptions
         let _ = bridge
-            .webrtc_pc()
+            .caller_pc()
             .set_local_description(webrtc_offer.unwrap());
-        let _ = bridge.rtp_pc().set_local_description(rtp_offer.unwrap());
+        let _ = bridge.callee_pc().set_local_description(rtp_offer.unwrap());
 
         // Verify both PCs have local descriptions
-        let webrtc_local = bridge.webrtc_pc().local_description();
-        let rtp_local = bridge.rtp_pc().local_description();
+        let webrtc_local = bridge.caller_pc().local_description();
+        let rtp_local = bridge.callee_pc().local_description();
 
         assert!(
             webrtc_local.is_some(),
@@ -2126,9 +2185,9 @@ mod tests {
         bridge.setup_bridge().await.unwrap();
 
         // Create offer on RTP side
-        let bridge_rtp_offer = bridge.rtp_pc().create_offer().await.unwrap();
+        let bridge_rtp_offer = bridge.callee_pc().create_offer().await.unwrap();
         bridge
-            .rtp_pc()
+            .callee_pc()
             .set_local_description(bridge_rtp_offer)
             .unwrap();
 
@@ -2140,21 +2199,25 @@ mod tests {
             .build();
 
         // Get bridge's RTP offer SDP and have callee handshake with it
-        let bridge_rtp_sdp = bridge.rtp_pc().local_description().unwrap().to_sdp_string();
+        let bridge_rtp_sdp = bridge
+            .callee_pc()
+            .local_description()
+            .unwrap()
+            .to_sdp_string();
         let callee_answer = rtp_callee.handshake(bridge_rtp_sdp).await.unwrap();
 
         // Bridge RTP side sets remote description from callee
         let rtp_leg_desc = SessionDescription::parse(SdpType::Answer, &callee_answer).unwrap();
         bridge
-            .rtp_pc()
+            .callee_pc()
             .set_remote_description(rtp_leg_desc)
             .await
             .unwrap();
 
         // Setup WebRTC side for completeness
-        let bridge_webrtc_offer = bridge.webrtc_pc().create_offer().await.unwrap();
+        let bridge_webrtc_offer = bridge.caller_pc().create_offer().await.unwrap();
         bridge
-            .webrtc_pc()
+            .caller_pc()
             .set_local_description(bridge_webrtc_offer)
             .unwrap();
 
@@ -2162,21 +2225,21 @@ mod tests {
         bridge.start_bridge().await;
 
         // Verify bridge is properly configured
-        let webrtc_pc = bridge.webrtc_pc();
-        let rtp_pc = bridge.rtp_pc();
+        let caller_pc = bridge.caller_pc();
+        let callee_pc = bridge.callee_pc();
 
         // Both should have local descriptions
         assert!(
-            webrtc_pc.local_description().is_some(),
-            "WebRTC should have local description"
+            caller_pc.local_description().is_some(),
+            "Caller should have local description"
         );
         assert!(
-            rtp_pc.local_description().is_some(),
-            "RTP should have local description"
+            callee_pc.local_description().is_some(),
+            "Callee should have local description"
         );
         assert!(
-            rtp_pc.remote_description().is_some(),
-            "RTP should have remote description"
+            callee_pc.remote_description().is_some(),
+            "Callee should have remote description"
         );
 
         // Clean up
@@ -2205,13 +2268,13 @@ mod tests {
             });
 
         bridge
-            .replace_output_with_file(BridgeEndpoint::Rtp, &track)
+            .replace_output_with_file(BridgeEndpoint::Callee, &track)
             .await
             .unwrap();
         drop(track);
 
         let rtp_track = bridge
-            .get_rtp_track()
+            .get_callee_track()
             .await
             .expect("bridge RTP output track should exist");
         let mut frame_count = 0;
@@ -2247,21 +2310,25 @@ mod tests {
         bridge.setup_bridge().await.unwrap();
 
         // Generate offers
-        let webrtc_offer = bridge.webrtc_pc().create_offer().await.unwrap();
-        let rtp_offer = bridge.rtp_pc().create_offer().await.unwrap();
+        let webrtc_offer = bridge.caller_pc().create_offer().await.unwrap();
+        let rtp_offer = bridge.callee_pc().create_offer().await.unwrap();
 
         bridge
-            .webrtc_pc()
+            .caller_pc()
             .set_local_description(webrtc_offer)
             .unwrap();
-        bridge.rtp_pc().set_local_description(rtp_offer).unwrap();
+        bridge.callee_pc().set_local_description(rtp_offer).unwrap();
 
         let webrtc_sdp = bridge
-            .webrtc_pc()
+            .caller_pc()
             .local_description()
             .unwrap()
             .to_sdp_string();
-        let rtp_sdp = bridge.rtp_pc().local_description().unwrap().to_sdp_string();
+        let rtp_sdp = bridge
+            .callee_pc()
+            .local_description()
+            .unwrap()
+            .to_sdp_string();
 
         // Verify format differences
         // WebRTC should have ICE/DTLS attributes
@@ -2310,20 +2377,20 @@ mod tests {
         bridge.setup_bridge().await.unwrap();
 
         // Step 4: Generate offers for bridge sides
-        let bridge_webrtc_offer = bridge.webrtc_pc().create_offer().await.unwrap();
-        let bridge_rtp_offer = bridge.rtp_pc().create_offer().await.unwrap();
+        let bridge_webrtc_offer = bridge.caller_pc().create_offer().await.unwrap();
+        let bridge_rtp_offer = bridge.callee_pc().create_offer().await.unwrap();
         bridge
-            .webrtc_pc()
+            .caller_pc()
             .set_local_description(bridge_webrtc_offer.clone())
             .unwrap();
         bridge
-            .rtp_pc()
+            .callee_pc()
             .set_local_description(bridge_rtp_offer.clone())
             .unwrap();
 
         // Step 5: Bridge WebRTC side SDP (would be sent to WebRTC caller)
         let webrtc_sdp = bridge
-            .webrtc_pc()
+            .caller_pc()
             .local_description()
             .unwrap()
             .to_sdp_string();
@@ -2334,7 +2401,11 @@ mod tests {
         );
 
         // Step 6: Bridge RTP side SDP (would be sent to RTP callee, possibly converted)
-        let rtp_sdp = bridge.rtp_pc().local_description().unwrap().to_sdp_string();
+        let rtp_sdp = bridge
+            .callee_pc()
+            .local_description()
+            .unwrap()
+            .to_sdp_string();
         assert!(rtp_sdp.contains("RTP/AVP"), "RTP side should use AVP");
         assert!(
             !rtp_sdp.contains("fingerprint"),
@@ -2347,7 +2418,7 @@ mod tests {
         // Step 8: Bridge RTP side sets remote description from callee
         let callee_desc = SessionDescription::parse(SdpType::Answer, &rtp_callee_answer).unwrap();
         bridge
-            .rtp_pc()
+            .callee_pc()
             .set_remote_description(callee_desc)
             .await
             .unwrap();
@@ -2357,15 +2428,15 @@ mod tests {
 
         // Verify connections are established
         assert!(
-            bridge.webrtc_pc().local_description().is_some(),
+            bridge.caller_pc().local_description().is_some(),
             "WebRTC should have local description"
         );
         assert!(
-            bridge.rtp_pc().local_description().is_some(),
+            bridge.callee_pc().local_description().is_some(),
             "RTP should have local description"
         );
         assert!(
-            bridge.rtp_pc().remote_description().is_some(),
+            bridge.callee_pc().remote_description().is_some(),
             "RTP should have remote description from callee"
         );
         // Clean up
@@ -2384,8 +2455,8 @@ mod tests {
         bridge.setup_bridge().await.unwrap();
 
         // Only create offer on RTP side (callee-facing)
-        let rtp_offer = bridge.rtp_pc().create_offer().await.unwrap();
-        bridge.rtp_pc().set_local_description(rtp_offer).unwrap();
+        let rtp_offer = bridge.callee_pc().create_offer().await.unwrap();
+        bridge.callee_pc().set_local_description(rtp_offer).unwrap();
 
         // Step 2: Create a WebRTC caller that generates an offer
         let webrtc_caller = RtpTrackBuilder::new("webrtc-caller".to_string())
@@ -2407,16 +2478,16 @@ mod tests {
         // Step 3: Bridge's WebRTC PC answers the caller's offer
         let caller_desc = SessionDescription::parse(SdpType::Offer, &caller_offer).unwrap();
         bridge
-            .webrtc_pc()
+            .caller_pc()
             .set_remote_description(caller_desc)
             .await
             .unwrap();
 
-        let answer = bridge.webrtc_pc().create_answer().await.unwrap();
-        bridge.webrtc_pc().set_local_description(answer).unwrap();
+        let answer = bridge.caller_pc().create_answer().await.unwrap();
+        bridge.caller_pc().set_local_description(answer).unwrap();
 
         let answer_sdp = bridge
-            .webrtc_pc()
+            .caller_pc()
             .local_description()
             .unwrap()
             .to_sdp_string();
@@ -2465,8 +2536,8 @@ mod tests {
         bridge.setup_bridge().await.unwrap();
 
         // Only create offer on RTP side (faces the callee)
-        let rtp_offer = bridge.rtp_pc().create_offer().await.unwrap();
-        bridge.rtp_pc().set_local_description(rtp_offer).unwrap();
+        let rtp_offer = bridge.callee_pc().create_offer().await.unwrap();
+        bridge.callee_pc().set_local_description(rtp_offer).unwrap();
         bridge.start_bridge().await;
 
         // Step 2: Create WebRTC caller (simulates JsSIP)
@@ -2485,7 +2556,11 @@ mod tests {
             .build();
 
         // Step 4: Send bridge's RTP offer to callee → get callee's answer
-        let bridge_rtp_sdp = bridge.rtp_pc().local_description().unwrap().to_sdp_string();
+        let bridge_rtp_sdp = bridge
+            .callee_pc()
+            .local_description()
+            .unwrap()
+            .to_sdp_string();
         assert!(
             bridge_rtp_sdp.contains("RTP/AVP"),
             "Bridge RTP offer should be plain RTP"
@@ -2496,7 +2571,7 @@ mod tests {
         // Step 5: Set callee's answer on bridge's RTP side
         let callee_desc = SessionDescription::parse(SdpType::Answer, &callee_answer).unwrap();
         bridge
-            .rtp_pc()
+            .callee_pc()
             .set_remote_description(callee_desc)
             .await
             .unwrap();
@@ -2504,16 +2579,16 @@ mod tests {
         // Step 6: Set caller's offer on bridge's WebRTC side and create answer
         let caller_desc = SessionDescription::parse(SdpType::Offer, &caller_offer).unwrap();
         bridge
-            .webrtc_pc()
+            .caller_pc()
             .set_remote_description(caller_desc)
             .await
             .unwrap();
 
-        let answer = bridge.webrtc_pc().create_answer().await.unwrap();
-        bridge.webrtc_pc().set_local_description(answer).unwrap();
+        let answer = bridge.caller_pc().create_answer().await.unwrap();
+        bridge.caller_pc().set_local_description(answer).unwrap();
 
         let answer_sdp = bridge
-            .webrtc_pc()
+            .caller_pc()
             .local_description()
             .unwrap()
             .to_sdp_string();
@@ -2549,15 +2624,15 @@ mod tests {
 
         // Verify both sides are fully connected
         assert!(
-            bridge.rtp_pc().remote_description().is_some(),
+            bridge.callee_pc().remote_description().is_some(),
             "RTP side should have remote"
         );
         assert!(
-            bridge.webrtc_pc().local_description().is_some(),
+            bridge.caller_pc().local_description().is_some(),
             "WebRTC side should have local"
         );
         assert!(
-            bridge.webrtc_pc().remote_description().is_some(),
+            bridge.caller_pc().remote_description().is_some(),
             "WebRTC side should have remote"
         );
 
@@ -2575,9 +2650,9 @@ mod tests {
         bridge.setup_bridge().await.unwrap();
 
         // Only create offer on WebRTC side (faces the callee)
-        let webrtc_offer = bridge.webrtc_pc().create_offer().await.unwrap();
+        let webrtc_offer = bridge.caller_pc().create_offer().await.unwrap();
         bridge
-            .webrtc_pc()
+            .caller_pc()
             .set_local_description(webrtc_offer)
             .unwrap();
         bridge.start_bridge().await;
@@ -2599,7 +2674,7 @@ mod tests {
 
         // Step 4: Send bridge's WebRTC offer to callee → get callee's answer
         let bridge_webrtc_sdp = bridge
-            .webrtc_pc()
+            .caller_pc()
             .local_description()
             .unwrap()
             .to_sdp_string();
@@ -2613,7 +2688,7 @@ mod tests {
         // Step 5: Set callee's answer on bridge's WebRTC side
         let callee_desc = SessionDescription::parse(SdpType::Answer, &callee_answer).unwrap();
         bridge
-            .webrtc_pc()
+            .caller_pc()
             .set_remote_description(callee_desc)
             .await
             .unwrap();
@@ -2621,15 +2696,19 @@ mod tests {
         // Step 6: Set caller's RTP offer on bridge's RTP side and create answer
         let caller_desc = SessionDescription::parse(SdpType::Offer, &caller_offer).unwrap();
         bridge
-            .rtp_pc()
+            .callee_pc()
             .set_remote_description(caller_desc)
             .await
             .unwrap();
 
-        let answer = bridge.rtp_pc().create_answer().await.unwrap();
-        bridge.rtp_pc().set_local_description(answer).unwrap();
+        let answer = bridge.callee_pc().create_answer().await.unwrap();
+        bridge.callee_pc().set_local_description(answer).unwrap();
 
-        let answer_sdp = bridge.rtp_pc().local_description().unwrap().to_sdp_string();
+        let answer_sdp = bridge
+            .callee_pc()
+            .local_description()
+            .unwrap()
+            .to_sdp_string();
 
         // Step 7: Verify the answer is plain RTP
         assert!(answer_sdp.contains("RTP/AVP"), "Answer must be plain RTP");
@@ -2650,15 +2729,15 @@ mod tests {
 
         // Verify both sides are fully connected
         assert!(
-            bridge.rtp_pc().remote_description().is_some(),
+            bridge.callee_pc().remote_description().is_some(),
             "RTP side should have remote"
         );
         assert!(
-            bridge.rtp_pc().local_description().is_some(),
+            bridge.callee_pc().local_description().is_some(),
             "RTP side should have local"
         );
         assert!(
-            bridge.webrtc_pc().remote_description().is_some(),
+            bridge.caller_pc().remote_description().is_some(),
             "WebRTC side should have remote"
         );
 
@@ -2675,7 +2754,7 @@ mod tests {
 
         let bridge = BridgePeerBuilder::new("codec-test-rtp".to_string())
             .with_rtp_port_range(32000, 32100)
-            .with_rtp_audio_capabilities(vec![
+            .with_callee_audio_capabilities(vec![
                 AudioCapability::pcmu(),
                 AudioCapability::pcma(),
                 AudioCapability::telephone_event(),
@@ -2684,10 +2763,14 @@ mod tests {
 
         bridge.setup_bridge().await.unwrap();
 
-        let rtp_offer = bridge.rtp_pc().create_offer().await.unwrap();
-        bridge.rtp_pc().set_local_description(rtp_offer).unwrap();
+        let rtp_offer = bridge.callee_pc().create_offer().await.unwrap();
+        bridge.callee_pc().set_local_description(rtp_offer).unwrap();
 
-        let rtp_sdp = bridge.rtp_pc().local_description().unwrap().to_sdp_string();
+        let rtp_sdp = bridge
+            .callee_pc()
+            .local_description()
+            .unwrap()
+            .to_sdp_string();
 
         // Must have PCMU and PCMA
         assert!(rtp_sdp.contains("PCMU/8000"), "RTP SDP must contain PCMU");
@@ -2709,7 +2792,7 @@ mod tests {
 
         let bridge = BridgePeerBuilder::new("codec-test-webrtc".to_string())
             .with_rtp_port_range(33000, 33100)
-            .with_webrtc_audio_capabilities(vec![
+            .with_caller_audio_capabilities(vec![
                 AudioCapability::opus(),
                 AudioCapability::pcmu(),
                 AudioCapability::telephone_event(),
@@ -2718,14 +2801,14 @@ mod tests {
 
         bridge.setup_bridge().await.unwrap();
 
-        let webrtc_offer = bridge.webrtc_pc().create_offer().await.unwrap();
+        let webrtc_offer = bridge.caller_pc().create_offer().await.unwrap();
         bridge
-            .webrtc_pc()
+            .caller_pc()
             .set_local_description(webrtc_offer)
             .unwrap();
 
         let webrtc_sdp = bridge
-            .webrtc_pc()
+            .caller_pc()
             .local_description()
             .unwrap()
             .to_sdp_string();
@@ -2755,7 +2838,7 @@ mod tests {
 
         let bridge = BridgePeerBuilder::new("sender-codec-test".to_string())
             .with_rtp_port_range(34000, 34100)
-            .with_rtp_audio_capabilities(vec![
+            .with_callee_audio_capabilities(vec![
                 AudioCapability::pcmu(),
                 AudioCapability::pcma(),
                 AudioCapability::telephone_event(),
@@ -2778,9 +2861,13 @@ mod tests {
         bridge.setup_bridge().await.unwrap();
 
         // Both sides should still create valid SDP
-        let rtp_offer = bridge.rtp_pc().create_offer().await.unwrap();
-        bridge.rtp_pc().set_local_description(rtp_offer).unwrap();
-        let rtp_sdp = bridge.rtp_pc().local_description().unwrap().to_sdp_string();
+        let rtp_offer = bridge.callee_pc().create_offer().await.unwrap();
+        bridge.callee_pc().set_local_description(rtp_offer).unwrap();
+        let rtp_sdp = bridge
+            .callee_pc()
+            .local_description()
+            .unwrap()
+            .to_sdp_string();
 
         assert!(rtp_sdp.contains("RTP/AVP"), "RTP SDP must be plain RTP");
         assert!(
@@ -2826,13 +2913,13 @@ mod tests {
             .filter_map(|c| c.to_audio_capability())
             .collect();
 
-        let webrtc_sender = codec_lists
+        let caller_sender = codec_lists
             .caller_side
             .iter()
             .find(|c| !c.is_dtmf())
             .map(|c| c.to_params())
             .unwrap();
-        let rtp_sender = codec_lists
+        let callee_sender = codec_lists
             .callee_side
             .iter()
             .find(|c| !c.is_dtmf())
@@ -2841,18 +2928,22 @@ mod tests {
 
         let bridge = BridgePeerBuilder::new("e2e-pcmu-only".to_string())
             .with_rtp_port_range(35100, 35200)
-            .with_webrtc_audio_capabilities(webrtc_caps)
-            .with_rtp_audio_capabilities(rtp_caps)
-            .with_sender_codecs(webrtc_sender, rtp_sender)
+            .with_caller_audio_capabilities(webrtc_caps)
+            .with_callee_audio_capabilities(rtp_caps)
+            .with_sender_codecs(caller_sender, callee_sender)
             .build();
 
         bridge.setup_bridge().await.unwrap();
 
         // RTP side offers to callee
-        let rtp_offer = bridge.rtp_pc().create_offer().await.unwrap();
-        bridge.rtp_pc().set_local_description(rtp_offer).unwrap();
+        let rtp_offer = bridge.callee_pc().create_offer().await.unwrap();
+        bridge.callee_pc().set_local_description(rtp_offer).unwrap();
 
-        let bridge_rtp_sdp = bridge.rtp_pc().local_description().unwrap().to_sdp_string();
+        let bridge_rtp_sdp = bridge
+            .callee_pc()
+            .local_description()
+            .unwrap()
+            .to_sdp_string();
         assert!(
             bridge_rtp_sdp.contains("PCMU/8000"),
             "RTP side must offer PCMU"
@@ -2874,7 +2965,7 @@ mod tests {
         // Set callee answer on bridge RTP side
         let callee_desc = SessionDescription::parse(SdpType::Answer, &callee_answer).unwrap();
         bridge
-            .rtp_pc()
+            .callee_pc()
             .set_remote_description(callee_desc)
             .await
             .unwrap();
@@ -2882,16 +2973,16 @@ mod tests {
         // WebRTC side answers caller
         let caller_desc = SessionDescription::parse(SdpType::Offer, &caller_offer).unwrap();
         bridge
-            .webrtc_pc()
+            .caller_pc()
             .set_remote_description(caller_desc)
             .await
             .unwrap();
 
-        let answer = bridge.webrtc_pc().create_answer().await.unwrap();
-        bridge.webrtc_pc().set_local_description(answer).unwrap();
+        let answer = bridge.caller_pc().create_answer().await.unwrap();
+        bridge.caller_pc().set_local_description(answer).unwrap();
 
         let answer_sdp = bridge
-            .webrtc_pc()
+            .caller_pc()
             .local_description()
             .unwrap()
             .to_sdp_string();
@@ -2960,14 +3051,14 @@ mod tests {
             .filter_map(|c| c.to_audio_capability())
             .collect();
 
-        // RTP side sender: first non-DTMF from caller side
-        let rtp_sender = codec_lists
+        // Callee side sender: first non-DTMF from caller side
+        let callee_sender = codec_lists
             .caller_side
             .iter()
             .find(|c| !c.is_dtmf())
             .map(|c| c.to_params())
             .unwrap();
-        let webrtc_sender = codec_lists
+        let caller_sender = codec_lists
             .callee_side
             .iter()
             .find(|c| !c.is_dtmf())
@@ -2976,22 +3067,22 @@ mod tests {
 
         let bridge = BridgePeerBuilder::new("e2e-g729-drop".to_string())
             .with_rtp_port_range(36100, 36200)
-            .with_webrtc_audio_capabilities(webrtc_caps)
-            .with_rtp_audio_capabilities(rtp_caps)
-            .with_sender_codecs(webrtc_sender, rtp_sender)
+            .with_caller_audio_capabilities(webrtc_caps)
+            .with_callee_audio_capabilities(rtp_caps)
+            .with_sender_codecs(caller_sender, callee_sender)
             .build();
 
         bridge.setup_bridge().await.unwrap();
 
         // WebRTC callee side creates offer
-        let webrtc_offer = bridge.webrtc_pc().create_offer().await.unwrap();
+        let webrtc_offer = bridge.caller_pc().create_offer().await.unwrap();
         bridge
-            .webrtc_pc()
+            .caller_pc()
             .set_local_description(webrtc_offer)
             .unwrap();
 
         let bridge_webrtc_sdp = bridge
-            .webrtc_pc()
+            .caller_pc()
             .local_description()
             .unwrap()
             .to_sdp_string();
@@ -3014,7 +3105,7 @@ mod tests {
 
         let callee_desc = SessionDescription::parse(SdpType::Answer, &callee_answer).unwrap();
         bridge
-            .webrtc_pc()
+            .caller_pc()
             .set_remote_description(callee_desc)
             .await
             .unwrap();
@@ -3022,15 +3113,22 @@ mod tests {
         // RTP side answers caller
         let caller_desc = SessionDescription::parse(SdpType::Offer, &caller_offer).unwrap();
         bridge
-            .rtp_pc()
+            .callee_pc()
             .set_remote_description(caller_desc)
             .await
             .unwrap();
 
-        let rtp_answer = bridge.rtp_pc().create_answer().await.unwrap();
-        bridge.rtp_pc().set_local_description(rtp_answer).unwrap();
+        let rtp_answer = bridge.callee_pc().create_answer().await.unwrap();
+        bridge
+            .callee_pc()
+            .set_local_description(rtp_answer)
+            .unwrap();
 
-        let rtp_answer_sdp = bridge.rtp_pc().local_description().unwrap().to_sdp_string();
+        let rtp_answer_sdp = bridge
+            .callee_pc()
+            .local_description()
+            .unwrap()
+            .to_sdp_string();
         assert!(
             rtp_answer_sdp.contains("RTP/AVP"),
             "RTP answer must be plain RTP"
@@ -3088,37 +3186,37 @@ mod tests {
             .build();
 
         // Initially both directions are None
-        assert!(bridge.rtp_to_webrtc_transcoder.read().is_none());
-        assert!(bridge.webrtc_to_rtp_transcoder.read().is_none());
+        assert!(bridge.callee_to_caller_transcoder.read().is_none());
+        assert!(bridge.caller_to_callee_transcoder.read().is_none());
 
         // Set RTP→WebRTC transcoder (G.729→PCMU)
-        bridge.set_transcoder(BridgeEndpoint::Rtp, CodecType::G729, CodecType::PCMU, 0);
+        bridge.set_transcoder(BridgeEndpoint::Callee, CodecType::G729, CodecType::PCMU, 0);
         assert!(
-            bridge.rtp_to_webrtc_transcoder.read().is_some(),
+            bridge.callee_to_caller_transcoder.read().is_some(),
             "RTP→WebRTC transcoder should be set"
         );
 
         // Set WebRTC→RTP transcoder (PCMU→G.729)
-        bridge.set_transcoder(BridgeEndpoint::WebRtc, CodecType::PCMU, CodecType::G729, 18);
+        bridge.set_transcoder(BridgeEndpoint::Caller, CodecType::PCMU, CodecType::G729, 18);
         assert!(
-            bridge.webrtc_to_rtp_transcoder.read().is_some(),
+            bridge.caller_to_callee_transcoder.read().is_some(),
             "WebRTC→RTP transcoder should be set"
         );
 
         // Clear RTP→WebRTC
-        bridge.clear_transcoder(BridgeEndpoint::Rtp);
+        bridge.clear_transcoder(BridgeEndpoint::Callee);
         assert!(
-            bridge.rtp_to_webrtc_transcoder.read().is_none(),
+            bridge.callee_to_caller_transcoder.read().is_none(),
             "RTP→WebRTC should be cleared"
         );
         assert!(
-            bridge.webrtc_to_rtp_transcoder.read().is_some(),
+            bridge.caller_to_callee_transcoder.read().is_some(),
             "WebRTC→RTP should still be set"
         );
 
         // Clear all
-        bridge.clear_transcoder(BridgeEndpoint::WebRtc);
-        assert!(bridge.webrtc_to_rtp_transcoder.read().is_none());
+        bridge.clear_transcoder(BridgeEndpoint::Caller);
+        assert!(bridge.caller_to_callee_transcoder.read().is_none());
     }
 
     /// Verify that the bridge's forwarding loop applies a Transcoder when
@@ -3185,13 +3283,14 @@ mod tests {
                     sw,
                     Arc::new(AtomicU8::new(BRIDGE_OUTPUT_PEER)),
                     c,
-                    ForwardPath::new(LegTransport::Rtp, LegTransport::WebRtc),
+                    ForwardPath::new(LegTransport::Callee, LegTransport::Caller),
                     st,
                     None, // no recorder
                     None, // no recorder leg
                     ds,
                     tr,
                     ti,
+                    None, // no gate
                 )
                 .await;
             })
@@ -3246,7 +3345,10 @@ mod tests {
 
         // Verify the Opus packet is stereo (TOC byte bit 2 = stereo flag)
         let is_stereo = opus_data[0] & 0x04 != 0;
-        assert!(is_stereo, "Opus encoder should produce stereo packet (TOC bit 2 set)");
+        assert!(
+            is_stereo,
+            "Opus encoder should produce stereo packet (TOC bit 2 set)"
+        );
 
         // First decode separately to verify decoder output length
         let mut standalone_dec = audio_codec::create_decoder(CodecType::Opus);
@@ -3289,7 +3391,11 @@ mod tests {
             ..Default::default()
         };
         let output2 = transcoder.transcode(&input_frame2);
-        assert_eq!(output2.data.len(), 160, "Second call should also produce 160 bytes");
+        assert_eq!(
+            output2.data.len(),
+            160,
+            "Second call should also produce 160 bytes"
+        );
         assert_eq!(output2.payload_type, Some(0));
 
         // Decode PCMU back to PCM
@@ -3344,7 +3450,7 @@ mod tests {
     #[tokio::test]
     #[cfg(feature = "opus")]
     async fn test_transcoder_opus_to_pcmu_roundtrip_quality() {
-        use audio_codec::{create_encoder, create_decoder};
+        use audio_codec::{create_decoder, create_encoder};
 
         // Generate a known audio signal at 48kHz
         let freq = 440.0; // A4 tone
@@ -3391,8 +3497,8 @@ mod tests {
 
         // Verify all frames have reasonable energy (not silence/garbled)
         for (i, frame) in all_pcmu.iter().enumerate() {
-            let energy: f64 = frame.iter().map(|&s| (s as f64).powi(2)).sum::<f64>()
-                / frame.len() as f64;
+            let energy: f64 =
+                frame.iter().map(|&s| (s as f64).powi(2)).sum::<f64>() / frame.len() as f64;
             let rms = energy.sqrt();
             assert!(
                 rms > 100.0 && rms < 20000.0,
@@ -3448,13 +3554,14 @@ mod tests {
                     sw,
                     Arc::new(AtomicU8::new(BRIDGE_OUTPUT_PEER)),
                     c,
-                    ForwardPath::new(LegTransport::Rtp, LegTransport::WebRtc),
+                    ForwardPath::new(LegTransport::Callee, LegTransport::Caller),
                     st,
                     None,
                     None,
                     ds,
                     None, // no transcoder
                     None, // no timing
+                    None, // no gate
                 )
                 .await;
             })

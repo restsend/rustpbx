@@ -772,14 +772,14 @@ impl SipSession {
             }
 
             let target_pc = if target_is_webrtc {
-                bridge.webrtc_pc().clone()
+                bridge.caller_pc().clone()
             } else {
-                bridge.rtp_pc().clone()
+                bridge.callee_pc().clone()
             };
             let source_pc = if source_is_webrtc {
-                bridge.webrtc_pc().clone()
+                bridge.caller_pc().clone()
             } else {
-                bridge.rtp_pc().clone()
+                bridge.callee_pc().clone()
             };
             (target_pc, source_pc)
         };
@@ -925,6 +925,10 @@ impl SipSession {
         };
         self.configure_media_bridge_transcoders(Some(caller_sdp), Some(callee_sdp));
         self.start_media_bridge_forwarding().await;
+        // Re-INVITE is always a confirmed, in-progress call — open the gate.
+        if let Some(ref bridge) = self.media.media_bridge {
+            bridge.open_caller_gate();
+        }
         self.update_snapshot_cache();
 
         Ok((status, Some(source_answer_sdp)))
@@ -2182,41 +2186,41 @@ impl SipSession {
             !caller_is_webrtc,
             allow_codecs,
         );
-        let webrtc_side_codecs = if caller_is_webrtc {
+        let caller_leg_codecs = if caller_is_webrtc {
             &codec_lists.caller_side
         } else {
             &codec_lists.callee_side
         };
-        let rtp_side_codecs = if caller_is_webrtc {
+        let callee_leg_codecs = if caller_is_webrtc {
             &codec_lists.callee_side
         } else {
             &codec_lists.caller_side
         };
 
-        let webrtc_caps: Vec<_> = webrtc_side_codecs
+        let caller_caps: Vec<_> = caller_leg_codecs
             .iter()
             .filter_map(|codec| codec.to_audio_capability())
             .collect();
-        let rtp_caps: Vec<_> = rtp_side_codecs
+        let callee_caps: Vec<_> = callee_leg_codecs
             .iter()
             .filter_map(|codec| codec.to_audio_capability())
             .collect();
-        if !webrtc_caps.is_empty() || !rtp_caps.is_empty() {
+        if !caller_caps.is_empty() || !callee_caps.is_empty() {
             bridge_builder = bridge_builder
-                .with_webrtc_audio_capabilities(webrtc_caps)
-                .with_rtp_audio_capabilities(rtp_caps);
+                .with_caller_audio_capabilities(caller_caps)
+                .with_callee_audio_capabilities(callee_caps);
         }
 
-        let webrtc_sender = webrtc_side_codecs
+        let caller_sender = caller_leg_codecs
             .iter()
             .find(|codec| !codec.is_dtmf())
             .map(|codec| codec.to_params());
-        let rtp_sender = rtp_side_codecs
+        let callee_sender = callee_leg_codecs
             .iter()
             .find(|codec| !codec.is_dtmf())
             .map(|codec| codec.to_params());
-        if let (Some(webrtc_sender), Some(rtp_sender)) = (webrtc_sender, rtp_sender) {
-            bridge_builder = bridge_builder.with_sender_codecs(webrtc_sender, rtp_sender);
+        if let (Some(caller_sender), Some(callee_sender)) = (caller_sender, callee_sender) {
+            bridge_builder = bridge_builder.with_sender_codecs(caller_sender, callee_sender);
         }
 
         if self.context.dialplan.recording.enabled {
@@ -2281,9 +2285,9 @@ impl SipSession {
             .ok_or_else(|| anyhow!("No media bridge available for caller answer"))?;
 
         let pc = if self.is_caller_webrtc() {
-            bridge.webrtc_pc().clone()
+            bridge.caller_pc().clone()
         } else {
-            bridge.rtp_pc().clone()
+            bridge.callee_pc().clone()
         };
 
         if let Some(local_description) = pc.local_description() {
@@ -2923,6 +2927,10 @@ impl SipSession {
                         Some(&callee_sdp_value),
                     );
                     self.start_media_bridge_forwarding().await;
+                    // Dialog is confirmed at this point — open the gate.
+                    if let Some(ref bridge) = self.media.media_bridge {
+                        bridge.open_caller_gate();
+                    }
                 }
                 Err(error) => {
                     warn!(
@@ -3091,6 +3099,14 @@ impl SipSession {
 
         if self.media.media_bridge.is_some() && self.media.caller_answer_uses_media_bridge {
             self.start_media_bridge_forwarding().await;
+            // Only allow WebRTC→RTP forwarding once the callee has confirmed the call (200 OK).
+            // During 183 early media the gate stays closed to avoid sending WebRTC audio to a
+            // SIP endpoint that is still ringing / not yet ready to receive it.
+            if !is_early_media {
+                if let Some(ref bridge) = self.media.media_bridge {
+                    bridge.open_caller_gate();
+                }
+            }
         }
 
         caller_answer
@@ -3126,8 +3142,8 @@ impl SipSession {
                             clock_rate: cap.clock_rate,
                             channels: 0,
                         });
-                let rtp_pc = bridge.rtp_pc();
-                if let Err(e) = rtp_pc.set_remote_description(desc).await {
+                let callee_pc = bridge.callee_pc();
+                if let Err(e) = callee_pc.set_remote_description(desc).await {
                     warn!(session_id = %self.context.session_id, error = %e, "Failed to set bridge RTP remote description");
                 }
                 if let Some(params) = selected_video_params {
@@ -3136,9 +3152,9 @@ impl SipSession {
             }
 
             // Log post-negotiation RTP pair and payload map for diagnostics
-            if let Some(pair) = bridge.rtp_pc().ice_transport().get_selected_pair().await {
+            if let Some(pair) = bridge.callee_pc().ice_transport().get_selected_pair().await {
                 let payload_map = bridge
-                    .rtp_pc()
+                    .callee_pc()
                     .get_transceivers()
                     .iter()
                     .find(|t| t.kind() == rustrtc::MediaKind::Audio)
@@ -3167,22 +3183,22 @@ impl SipSession {
                 debug!(session_id = %self.context.session_id, "Bridge: Creating WebRTC answer from caller offer");
                 match SessionDescription::parse(SdpType::Offer, caller_offer) {
                     Ok(caller_desc) => {
-                        match bridge.webrtc_pc().set_remote_description(caller_desc).await {
+                        match bridge.caller_pc().set_remote_description(caller_desc).await {
                             Ok(_) => {
-                                match bridge.webrtc_pc().create_answer().await {
+                                match bridge.caller_pc().create_answer().await {
                                     Ok(answer) => {
                                         if let Err(e) =
-                                            bridge.webrtc_pc().set_local_description(answer)
+                                            bridge.caller_pc().set_local_description(answer)
                                         {
                                             warn!(session_id = %self.context.session_id, error = %e, "Failed to set bridge WebRTC local description");
                                             Some(callee_sdp.to_string())
                                         } else {
                                             // Wait for ICE gathering to complete so the SDP
                                             // contains real candidates (not 0.0.0.0:9)
-                                            bridge.webrtc_pc().wait_for_gathering_complete().await;
+                                            bridge.caller_pc().wait_for_gathering_complete().await;
                                             debug!(session_id = %self.context.session_id, "Bridge: WebRTC answer created with ICE candidates");
                                             bridge
-                                                .webrtc_pc()
+                                                .caller_pc()
                                                 .local_description()
                                                 .map(|d| d.to_sdp_string())
                                                 .map(|answer_sdp| {
@@ -3249,7 +3265,7 @@ impl SipSession {
                 SdpType::Answer
             };
             if let Ok(desc) = SessionDescription::parse(webrtc_sdp_type, sdp)
-                && let Err(e) = bridge.webrtc_pc().set_remote_description(desc).await
+                && let Err(e) = bridge.caller_pc().set_remote_description(desc).await
             {
                 warn!(session_id = %self.context.session_id, error = %e, "Failed to set bridge WebRTC remote description");
             }
@@ -3262,15 +3278,16 @@ impl SipSession {
                 // when the first packet arrives, handling both send and receive.
                 match SessionDescription::parse(SdpType::Offer, caller_offer) {
                     Ok(caller_desc) => {
-                        match bridge.rtp_pc().set_remote_description(caller_desc).await {
-                            Ok(_) => match bridge.rtp_pc().create_answer().await {
+                        match bridge.callee_pc().set_remote_description(caller_desc).await {
+                            Ok(_) => match bridge.callee_pc().create_answer().await {
                                 Ok(answer) => {
-                                    if let Err(e) = bridge.rtp_pc().set_local_description(answer) {
+                                    if let Err(e) = bridge.callee_pc().set_local_description(answer)
+                                    {
                                         warn!(session_id = %self.context.session_id, error = %e, "Failed to set bridge RTP local description");
                                         Some(callee_sdp.to_string())
                                     } else {
                                         let rtp_sdp = bridge
-                                            .rtp_pc()
+                                            .callee_pc()
                                             .local_description()
                                             .map(|d| d.to_sdp_string())
                                             .map(|answer_sdp| {
@@ -3379,14 +3396,14 @@ impl SipSession {
 
         if let Some(ref bridge) = self.media.media_bridge {
             let caller_pc = if self.is_caller_webrtc() {
-                bridge.webrtc_pc()
+                bridge.caller_pc()
             } else {
-                bridge.rtp_pc()
+                bridge.callee_pc()
             };
             let callee_pc = if self.is_callee_webrtc() {
-                bridge.webrtc_pc()
+                bridge.caller_pc()
             } else {
-                bridge.rtp_pc()
+                bridge.callee_pc()
             };
 
             if caller_pc.local_description().is_none()
@@ -3438,8 +3455,8 @@ impl SipSession {
     /// Resolve bridge endpoint for a leg from leg_transport.
     fn leg_bridge_endpoint(&self, leg_id: &LegId) -> BridgeEndpoint {
         match self.legs.get_transport(leg_id) {
-            Some(rustrtc::TransportMode::WebRtc) => BridgeEndpoint::WebRtc,
-            _ => BridgeEndpoint::Rtp,
+            Some(rustrtc::TransportMode::WebRtc) => BridgeEndpoint::Caller,
+            _ => BridgeEndpoint::Callee,
         }
     }
 
@@ -3463,8 +3480,8 @@ impl SipSession {
                 return;
             };
             match self.leg_bridge_endpoint(&LegId::from("caller")) {
-                BridgeEndpoint::WebRtc => Some(bridge.webrtc_pc().clone()),
-                BridgeEndpoint::Rtp => Some(bridge.rtp_pc().clone()),
+                BridgeEndpoint::Caller => Some(bridge.caller_pc().clone()),
+                BridgeEndpoint::Callee => Some(bridge.callee_pc().clone()),
             }
         } else {
             Self::get_peer_pc(self.caller_peer(), Self::CALLER_TRACK_ID).await
@@ -4022,9 +4039,9 @@ impl SipSession {
         callee_is_webrtc: bool,
     ) -> Result<String> {
         let pc = if callee_is_webrtc {
-            bridge.webrtc_pc().clone()
+            bridge.caller_pc().clone()
         } else {
-            bridge.rtp_pc().clone()
+            bridge.callee_pc().clone()
         };
 
         if let Some(local_description) = pc.local_description() {
@@ -4048,9 +4065,9 @@ impl SipSession {
         };
 
         let pc = if self.is_callee_webrtc() {
-            bridge.webrtc_pc().clone()
+            bridge.caller_pc().clone()
         } else {
-            bridge.rtp_pc().clone()
+            bridge.callee_pc().clone()
         };
 
         if let Some(remote_description) = pc.remote_description() {
@@ -4164,41 +4181,42 @@ impl SipSession {
                     allow_codecs,
                 );
 
-                let webrtc_side_codecs = if caller_is_webrtc {
+                let caller_leg_codecs = if caller_is_webrtc {
                     &codec_lists.caller_side
                 } else {
                     &codec_lists.callee_side
                 };
-                let rtp_side_codecs = if caller_is_webrtc {
+                let callee_leg_codecs = if caller_is_webrtc {
                     &codec_lists.callee_side
                 } else {
                     &codec_lists.caller_side
                 };
 
-                let webrtc_caps: Vec<_> = webrtc_side_codecs
+                let caller_caps: Vec<_> = caller_leg_codecs
                     .iter()
                     .filter_map(|c| c.to_audio_capability())
                     .collect();
-                let rtp_caps: Vec<_> = rtp_side_codecs
+                let callee_caps: Vec<_> = callee_leg_codecs
                     .iter()
                     .filter_map(|c| c.to_audio_capability())
                     .collect();
 
                 bridge_builder = bridge_builder
-                    .with_webrtc_audio_capabilities(webrtc_caps.clone())
-                    .with_rtp_audio_capabilities(rtp_caps);
+                    .with_caller_audio_capabilities(caller_caps.clone())
+                    .with_callee_audio_capabilities(callee_caps);
 
-                let webrtc_sender = webrtc_side_codecs
+                let caller_sender = caller_leg_codecs
                     .iter()
                     .find(|c| !c.is_dtmf())
                     .map(|c| c.to_params());
-                let rtp_sender = rtp_side_codecs
+                let callee_sender = callee_leg_codecs
                     .iter()
                     .find(|c| !c.is_dtmf())
                     .map(|c| c.to_params());
 
-                if let (Some(webrtc_sender), Some(rtp_sender)) = (webrtc_sender, rtp_sender) {
-                    bridge_builder = bridge_builder.with_sender_codecs(webrtc_sender, rtp_sender);
+                if let (Some(caller_sender), Some(callee_sender)) = (caller_sender, callee_sender) {
+                    bridge_builder =
+                        bridge_builder.with_sender_codecs(caller_sender, callee_sender);
                 }
 
                 debug!(
@@ -4220,8 +4238,8 @@ impl SipSession {
                                 "Video capabilities configured from caller SDP"
                             );
                             bridge_builder = bridge_builder
-                                .with_webrtc_video_capabilities(caller_video_caps.clone())
-                                .with_rtp_video_capabilities(caller_video_caps);
+                                .with_caller_video_capabilities(caller_video_caps.clone())
+                                .with_callee_video_capabilities(caller_video_caps);
                         }
                     }
                     Err(e) => {
@@ -4232,11 +4250,11 @@ impl SipSession {
                 debug!(
                     session_id = %self.id,
                     common_codecs = ?codec_lists.common.iter().filter(|c| !c.is_dtmf()).map(|c| format!("{:?}", c.codec)).collect::<Vec<_>>(),
-                    webrtc_codecs = ?webrtc_side_codecs
+                    caller_codecs = ?caller_leg_codecs
                         .iter()
                         .map(|c| format!("{:?}", c.codec))
                         .collect::<Vec<_>>(),
-                    rtp_codecs = ?rtp_side_codecs
+                    callee_codecs = ?callee_leg_codecs
                         .iter()
                         .map(|c| format!("{:?}", c.codec))
                         .collect::<Vec<_>>(),
@@ -4254,31 +4272,31 @@ impl SipSession {
             bridge.setup_bridge().await?;
 
             if callee_is_webrtc {
-                let offer = bridge.webrtc_pc().create_offer().await?;
+                let offer = bridge.caller_pc().create_offer().await?;
                 let offer_sdp = offer.to_sdp_string();
                 debug!(session_id = %self.id, sdp = %offer_sdp, "Bridge WebRTC offer SDP");
-                bridge.webrtc_pc().set_local_description(offer)?;
+                bridge.caller_pc().set_local_description(offer)?;
                 // Wait for ICE gathering so SDP contains real candidates
-                bridge.webrtc_pc().wait_for_gathering_complete().await;
+                bridge.caller_pc().wait_for_gathering_complete().await;
             } else {
-                let offer = bridge.rtp_pc().create_offer().await?;
+                let offer = bridge.callee_pc().create_offer().await?;
                 let offer_sdp = offer.to_sdp_string();
                 debug!(session_id = %self.id, sdp = %offer_sdp, "Bridge RTP offer SDP");
-                bridge.rtp_pc().set_local_description(offer)?;
+                bridge.callee_pc().set_local_description(offer)?;
             }
 
             self.media.media_bridge = Some(bridge.clone());
 
             if callee_is_webrtc {
                 let sdp = bridge
-                    .webrtc_pc()
+                    .caller_pc()
                     .local_description()
                     .ok_or_else(|| anyhow!("No WebRTC local description"))?
                     .to_sdp_string();
                 Ok(sdp)
             } else {
                 let sdp = bridge
-                    .rtp_pc()
+                    .callee_pc()
                     .local_description()
                     .ok_or_else(|| anyhow!("No RTP local description"))?
                     .to_sdp_string();
@@ -4600,9 +4618,9 @@ impl SipSession {
             };
 
             return Some(if leg_is_webrtc {
-                bridge.webrtc_pc().clone()
+                bridge.caller_pc().clone()
             } else {
-                bridge.rtp_pc().clone()
+                bridge.callee_pc().clone()
             });
         }
 
@@ -6891,8 +6909,8 @@ impl SipSession {
         let mut seq: u16 = rand::random();
 
         let sender = match endpoint {
-            crate::media::bridge::BridgeEndpoint::WebRtc => bridge.get_webrtc_sender().await,
-            crate::media::bridge::BridgeEndpoint::Rtp => bridge.get_rtp_sender().await,
+            crate::media::bridge::BridgeEndpoint::Caller => bridge.get_caller_sender().await,
+            crate::media::bridge::BridgeEndpoint::Callee => bridge.get_callee_sender().await,
         };
         let Some(sender) = sender else {
             return;
@@ -8007,7 +8025,7 @@ mod tests {
             .expect("media bridge should exist")
             .clone();
         let rtp_track = bridge
-            .get_rtp_track()
+            .get_callee_track()
             .await
             .expect("RTP bridge output track should exist");
         let silence_sample = tokio::time::timeout(Duration::from_millis(100), rtp_track.recv())
@@ -8125,7 +8143,7 @@ mod tests {
             .expect("media bridge should exist")
             .clone();
         let webrtc_track = bridge
-            .get_webrtc_track()
+            .get_caller_track()
             .await
             .expect("WebRTC bridge output track should exist");
         let silence_sample = tokio::time::timeout(Duration::from_millis(100), webrtc_track.recv())
