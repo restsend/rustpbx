@@ -21,6 +21,15 @@ Control when calls are recorded. Can be set at top-level `[recording]` or per-pr
 
 `[recording]` controls the live WAV recorder. When enabled, the recorder always writes a local WAV first. Set `type = "http"` or `type = "s3"` only to upload that local WAV after the call completes.
 
+Recording configuration has priority over SipFlow RTP recording. If a top-level `[recording]` or per-proxy `[proxy.recording]` section is configured, it owns the recording decision:
+
+- `enabled = true`: use the live WAV recorder and optional `[recording]` upload.
+- `enabled = false`: do not record RTP media.
+- SipFlow SIP message capture still works when `[sipflow]` is enabled.
+- SipFlow RTP capture and `[sipflow.upload]` recording export are disabled for that call.
+
+Only omit the recording section entirely when you want `[sipflow.upload]` to act as the recording source.
+
 ```toml
 # Top-level recording config (applies to all proxies unless overridden)
 [recording]
@@ -80,7 +89,7 @@ endpoint = "http://minio:9000"
 root = "recordings"
 ```
 
-If `[sipflow]` is active, RustPBX disables the live WAV recorder for the call so SIP+RTP capture is not duplicated. Use SipFlow export/upload for media in that mode.
+When `[recording] type = "http"` or `type = "s3"` is used, the CDR may be written before the media upload finishes. The database `recording_url` is updated after the upload succeeds. The local CDR JSON keeps the local recorder path in `recordingUrl` and the recorder metadata in `recorder[]`.
 
 ## CDR Storage (`[callrecord]`)
 Configure where post-call CDR JSON is stored or sent. This does not control recording media upload.

@@ -1,6 +1,6 @@
 # SipFlow
 
-SipFlow is the unified SIP + RTP recording subsystem built into RustPBX. It captures every call's SIP signalling messages and bi-directional RTP media into a compact on-disk store, then exposes an HTTP API for querying call flows and replaying recordings by Call-ID.
+SipFlow is the SIP flow capture subsystem built into RustPBX. It captures call SIP signalling messages into a compact on-disk store and can also capture bi-directional RTP media when no explicit recording policy is configured. The console and HTTP API use this data to query call flows and, when media capture is enabled, replay recordings by Call-ID.
 
 See [docs/sipflow.md](../sipflow.md) for the full deployment guide (architecture diagrams, systemd unit, storage sizing, and API reference).
 
@@ -68,9 +68,22 @@ Start the standalone server:
 
 ---
 
-## Optional: Upload to Object Storage
+## Recording Priority
 
-The local backend can asynchronously upload completed files to S3-compatible storage or an HTTP endpoint.
+SipFlow SIP message capture is independent from call recording. If `[sipflow]` is enabled, RustPBX continues to store SIP messages for the caller and callee Call-IDs.
+
+RTP media capture follows the recording policy:
+
+- If `[recording]` or `[proxy.recording]` is configured, that policy has priority. SipFlow RTP capture is disabled, even when `enabled = false`.
+- If `[recording] enabled = true`, the live WAV recorder handles media recording and optional upload.
+- If `[recording] enabled = false`, no RTP recording is produced.
+- If no recording section is configured, SipFlow can capture RTP media and `[sipflow.upload]` can export the generated WAV after the call.
+
+## Optional: Upload SipFlow Media
+
+When no recording section is configured, the local backend can asynchronously export the captured SipFlow media as a WAV and upload it to S3-compatible storage or an HTTP endpoint.
+
+For S3 uploads, RustPBX can pre-compute the final object URL and place it in the call record before the slower media upload finishes. The object may not be readable until the upload completes. After a successful upload, the same `recording_url` is updated with the final URL and duration.
 
 ### S3
 
@@ -99,7 +112,7 @@ url = "https://archive.example.com/upload"
 
 ## Enabling SipFlow
 
-SipFlow recording is enabled by configuring the `[sipflow]` backend. It is independent from `[callrecord]`, which only controls CDR JSON storage.
+SipFlow capture is enabled by configuring the `[sipflow]` backend. It is independent from `[callrecord]`, which only controls CDR JSON storage.
 
 ```toml
 [sipflow]
@@ -108,9 +121,7 @@ root = "./config/sipflow"
 subdirs = "daily"
 ```
 
-When SipFlow is active, each CDR entry in the console can display a **SIP Flow** tab with the signalling ladder and an audio player.
-
-SipFlow captures RTP media itself. When a SipFlow backend is active, RustPBX disables the live WAV recorder configured by `[recording]` for that call to avoid duplicate media recording. Use `[sipflow.upload]` to export SipFlow-generated WAV media after call completion.
+When SipFlow is active, each CDR entry in the console can display a **SIP Flow** tab with the signalling ladder. The audio player is available only when the active recording policy produced media, either through `[recording]` or through SipFlow RTP capture when no recording section exists.
 
 ---
 
