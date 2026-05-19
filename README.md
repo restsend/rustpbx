@@ -70,7 +70,7 @@ RustPBX breaks the closed architecture of traditional PBX systems by exposing th
 - **Queue / ACD** — Sequential or parallel agent ringing, hold music, priority scheduling
 
 ### Recording & Analytics
-- **SipFlow Recording** — Unified SIP+RTP capture; hourly files with on-demand playback (no file-handle exhaustion)
+- **SipFlow Capture** — SIP ladder capture plus optional RTP recording when no explicit recording policy is configured
 - **Transcript** — Post-call transcription via local SenseVoice (offline, no cloud dependency)
 - **CDR Webhooks** — Push call detail records + recordings to your system on hangup
 

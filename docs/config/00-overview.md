@@ -46,4 +46,4 @@ license = "key-123"
 | 05 | [Trunks & Queues](05-trunks-queues.md) | SIP trunks, call queues |
 | 06 | [Media & Recording](06-media-recording.md) | RTP proxy, codecs, call recording, CDR |
 | 07 | [Addons, Console & Storage](07-addons-admin-storage.md) | Web console, AMI, blob storage |
-| 08 | [SipFlow](08-sipflow.md) | SIP+RTP flow recording, query API |
+| 08 | [SipFlow](08-sipflow.md) | SIP flow capture, optional RTP recording, query API |
