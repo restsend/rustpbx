@@ -14,8 +14,8 @@ use crate::proxy::server::SipServerRef;
 use crate::rwi::gateway::RwiGateway;
 use crate::rwi::proto::RwiEvent;
 use crate::rwi::session::{
-    ConferenceCreateRequest, OriginateRequest, ParallelOriginateRequest, QueueEnqueueRequest,
-    RecordStartRequest, RwiCommandPayload, SupervisorMode,
+    ConferenceCreateRequest, DtmfCollectRequest, OriginateRequest, ParallelOriginateRequest,
+    QueueEnqueueRequest, RecordStartRequest, RwiCommandPayload, SupervisorMode,
 };
 use crate::rwi::transfer::TransferController;
 use futures::FutureExt;
@@ -645,6 +645,34 @@ impl RwiCommandProcessor {
                     .handle_transfer_cancel(consultation_call_id.clone())
                     .await;
             }
+            RwiCommandPayload::ConsultInitiate { call_id, target } => {
+                return self
+                    .consult_initiate(call_id.clone(), target.clone())
+                    .await;
+            }
+            RwiCommandPayload::ConsultMerge {
+                call_id,
+                consultation_call_id,
+            } => {
+                return self
+                    .consult_merge(call_id.clone(), consultation_call_id.clone())
+                    .await;
+            }
+            RwiCommandPayload::ConsultComplete {
+                call_id,
+                consultation_call_id,
+            } => {
+                return self
+                    .consult_complete(call_id.clone(), consultation_call_id.clone())
+                    .await;
+            }
+            RwiCommandPayload::ConsultCancel {
+                consultation_call_id,
+            } => {
+                return self
+                    .consult_cancel(consultation_call_id.clone())
+                    .await;
+            }
             _ => {}
         }
 
@@ -743,6 +771,20 @@ impl RwiCommandProcessor {
                 return Ok(CommandResult::Success);
             }
 
+            RwiCommandPayload::SetVar { call_id, key, value } => {
+                let mut gw = self.gateway.write().await;
+                gw.set_call_var(call_id, key.clone(), value.clone());
+                return Ok(CommandResult::Success);
+            }
+            RwiCommandPayload::GetVar { call_id, key } => {
+                let gw = self.gateway.read().await;
+                let value = gw.get_call_var(call_id, key);
+                return Ok(CommandResult::CallVar {
+                    key: key.clone(),
+                    value,
+                });
+            }
+
             RwiCommandPayload::SipMessage {
                 call_id,
                 content_type,
@@ -814,6 +856,10 @@ impl RwiCommandProcessor {
                 return self
                     .send_dtmf(call_id.clone(), leg_id.clone(), digits.clone())
                     .await;
+            }
+
+            RwiCommandPayload::DtmfCollect(req) => {
+                return self.dtmf_collect(req.clone()).await;
             }
 
             RwiCommandPayload::QueueEnqueue(req) => {
@@ -1241,14 +1287,9 @@ impl RwiCommandProcessor {
                                 CallCommand::JoinMixer { mixer_id } => {
                                     tracing::info!(%cmd_call_id, %mixer_id, "Joining conference from originate task");
                                     // Bridge the caller_peer to the conference
-                                    let conf_id_obj = crate::call::runtime::ConferenceId::from(mixer_id.as_str());
                                     let participant_leg = LegId::new(format!("{}-callee", cmd_call_id));
 
-                                    // Add participant to conference
-                                    if let Err(e) = cmd_conference_manager.add_participant(&conf_id_obj, participant_leg.clone()).await {
-                                        tracing::warn!(%cmd_call_id, %mixer_id, error = %e, "Failed to add participant to conference");
-                                        continue;
-                                    }
+                                    // start_bridge_full_duplex handles add_participant internally
 
                                     // Start conference media bridge
                                     let bridge = crate::call::runtime::ConferenceMediaBridge::new(cmd_conference_manager.clone());
@@ -2303,6 +2344,112 @@ impl RwiCommandProcessor {
                 digits,
             })
             .map_err(|e| CommandError::CommandFailed(e.to_string()))?;
+        Ok(CommandResult::Success)
+    }
+
+    async fn dtmf_collect(
+        &self,
+        req: DtmfCollectRequest,
+    ) -> Result<CommandResult, CommandError> {
+        if req.call_id.is_empty() {
+            return Err(CommandError::CallNotFound("call_id is required for DtmfCollect".into()));
+        }
+        // Verify the call exists.
+        let _ = self.get_handle(&req.call_id).await?;
+
+        let call_id = req.call_id.clone();
+        let leg_id = req.leg_id.clone().unwrap_or_else(|| "caller".to_string());
+        let min_digits = req.min_digits;
+        let max_digits = req.max_digits;
+        let timeout_ms = req.timeout_ms;
+        let terminator = req.terminator;
+
+        let (tap_tx, mut tap_rx) =
+            tokio::sync::mpsc::unbounded_channel::<(Option<String>, char)>();
+
+        // Register the tap in the gateway.
+        {
+            let gw = self.gateway.read().await;
+            gw.add_dtmf_tap(call_id.clone(), tap_tx);
+        }
+
+        let gateway = self.gateway.clone();
+
+        tokio::spawn(async move {
+            let deadline = tokio::time::Instant::now()
+                + tokio::time::Duration::from_millis(timeout_ms);
+            let mut collected = String::new();
+
+            loop {
+                let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+                if remaining.is_zero() {
+                    break;
+                }
+
+                match tokio::time::timeout(remaining, tap_rx.recv()).await {
+                    Ok(Some((incoming_leg, digit))) => {
+                        // Filter by leg_id if specified in the request.
+                        if let Some(ref filter) = req.leg_id {
+                            if incoming_leg.as_deref() != Some(filter.as_str()) {
+                                continue;
+                            }
+                        }
+
+                        // Handle terminator.
+                        if let Some(term) = terminator {
+                            if digit == term {
+                                if collected.len() >= min_digits as usize {
+                                    let event = RwiEvent::DtmfCollected {
+                                        call_id: call_id.clone(),
+                                        leg_id: leg_id.clone(),
+                                        digits: collected,
+                                    };
+                                    let gw = gateway.read().await;
+                                    gw.remove_dtmf_tap(&call_id);
+                                    gw.send_event_to_call_owner(&call_id, &event);
+                                }
+                                return;
+                            }
+                        }
+
+                        collected.push(digit);
+
+                        if collected.len() >= max_digits as usize {
+                            let event = RwiEvent::DtmfCollected {
+                                call_id: call_id.clone(),
+                                leg_id: leg_id.clone(),
+                                digits: collected,
+                            };
+                            let gw = gateway.read().await;
+                            gw.remove_dtmf_tap(&call_id);
+                            gw.send_event_to_call_owner(&call_id, &event);
+                            return;
+                        }
+                    }
+                    Ok(None) => break, // channel closed (call ended)
+                    Err(_) => break,   // timeout
+                }
+            }
+
+            // Timeout reached.
+            let gw = gateway.read().await;
+            gw.remove_dtmf_tap(&call_id);
+            if collected.len() >= min_digits as usize {
+                let event = RwiEvent::DtmfCollected {
+                    call_id: call_id.clone(),
+                    leg_id: leg_id.clone(),
+                    digits: collected,
+                };
+                gw.send_event_to_call_owner(&call_id, &event);
+            } else {
+                let event = RwiEvent::DtmfCollectionTimeout {
+                    call_id: call_id.clone(),
+                    leg_id: leg_id.clone(),
+                };
+                gw.send_event_to_call_owner(&call_id, &event);
+            }
+        });
+
         Ok(CommandResult::Success)
     }
 
@@ -3474,7 +3621,7 @@ impl RwiCommandProcessor {
             let _ = handle.send_command(CallCommand::SupervisorListen {
                 supervisor_leg: LegId::new(supervisor_call_id),
                 target_leg: LegId::new(target_call_id),
-                supervisor_session_id: None,
+                supervisor_session_id: Some(supervisor_call_id.to_string()),
             });
         }
 
@@ -3848,6 +3995,10 @@ pub enum CommandResult {
         original_call_id: String,
         consultation_call_id: String,
     },
+    ConsultInitiated {
+        call_id: String,
+        consultation_call_id: String,
+    },
     ConferenceCreated {
         conf_id: String,
     },
@@ -3880,6 +4031,10 @@ pub enum CommandResult {
         replayed_count: u64,
         current_sequence: u64,
         events: Vec<serde_json::Value>,
+    },
+    CallVar {
+        key: String,
+        value: Option<String>,
     },
 }
 
@@ -4048,6 +4203,112 @@ impl RwiCommandProcessor {
             Err(e) => Err(CommandError::CommandFailed(format!(
                 "Transfer cancel failed: {}",
                 e.as_str()
+            ))),
+        }
+    }
+
+    /// Initiate a consultation call: hold the original leg and originate a new outbound call.
+    async fn consult_initiate(
+        &self,
+        call_id: String,
+        target: String,
+    ) -> Result<CommandResult, CommandError> {
+        if self.call_registry.get_handle(&call_id).is_none() {
+            return Err(CommandError::CallNotFound(call_id));
+        }
+
+        let controller = self.transfer_controller.read().await;
+        let tx = controller
+            .initiate_attended_transfer(call_id.clone(), target.clone(), None)
+            .await
+            .map_err(|e| {
+                CommandError::CommandFailed(format!("Failed to initiate consultation: {:?}", e))
+            })?;
+
+        let consultation_call_id = tx
+            .consultation_call_id
+            .clone()
+            .unwrap_or_else(|| tx.transfer_id.clone());
+        drop(controller);
+
+        let req = OriginateRequest {
+            call_id: consultation_call_id.clone(),
+            destination: target,
+            caller_id: None,
+            timeout_secs: None,
+            hold_music: None,
+            hold_music_target: None,
+            ringback: None,
+            ringback_target: None,
+            extra_headers: Default::default(),
+        };
+        // Fire-and-forget: origination runs in a background task
+        let _ = self.originate_call(req).await;
+
+        Ok(CommandResult::ConsultInitiated {
+            call_id,
+            consultation_call_id,
+        })
+    }
+
+    /// Merge original and consultation calls into a 3-way conference.
+    async fn consult_merge(
+        &self,
+        call_id: String,
+        consultation_call_id: String,
+    ) -> Result<CommandResult, CommandError> {
+        self.get_handle(&call_id).await?;
+        self.get_handle(&consultation_call_id).await?;
+
+        let conf_id = call_id.clone();
+        let create_req = ConferenceCreateRequest {
+            conf_id: conf_id.clone(),
+            backend: "internal".to_string(),
+            max_members: None,
+            record: false,
+            mcu_uri: None,
+        };
+        // Ignore error if conference already exists
+        let _ = self.conference_create(create_req).await;
+        let _ = self.conference_add(&conf_id, &call_id).await;
+        let _ = self.conference_add(&conf_id, &consultation_call_id).await;
+
+        Ok(CommandResult::Success)
+    }
+
+    /// Complete the consultation: connect original caller directly to consultant.
+    async fn consult_complete(
+        &self,
+        call_id: String,
+        consultation_call_id: String,
+    ) -> Result<CommandResult, CommandError> {
+        let controller = self.transfer_controller.read().await;
+        match controller
+            .complete_attended_transfer(call_id, consultation_call_id)
+            .await
+        {
+            Ok(_tx) => Ok(CommandResult::Success),
+            Err(e) => Err(CommandError::CommandFailed(format!(
+                "Consult complete failed: {:?}",
+                e
+            ))),
+        }
+    }
+
+    /// Cancel the consultation: hang up the consultant and unhold the original caller.
+    async fn consult_cancel(
+        &self,
+        consultation_call_id: String,
+    ) -> Result<CommandResult, CommandError> {
+        let controller = self.transfer_controller.read().await;
+        match controller
+            .cancel_attended_transfer(consultation_call_id)
+            .await
+        {
+            Ok(_tx) => Ok(CommandResult::Success),
+            Err(e) => Err(CommandError::CommandFailed(format!(
+                "Consult cancel failed: {:?}",
+                e
             ))),
         }
     }
@@ -4378,6 +4639,7 @@ mod tests {
         let result = processor
             .process_command(RwiCommandPayload::Subscribe {
                 contexts: vec!["ctx1".into()],
+                events: None,
             })
             .await;
         assert!(result.is_ok());
@@ -4392,6 +4654,146 @@ mod tests {
             })
             .await;
         assert!(result.is_ok());
+    }
+
+    // ── call.set_var / call.get_var tests ─────────────────────────────────
+
+    #[tokio::test]
+    async fn test_set_var_returns_success() {
+        let (processor, _cm) = create_test_processor();
+        let result = processor
+            .process_command(RwiCommandPayload::SetVar {
+                call_id: "call-1".into(),
+                key: "greeting".into(),
+                value: "hello".into(),
+            })
+            .await;
+        assert!(matches!(result, Ok(CommandResult::Success)));
+    }
+
+    #[tokio::test]
+    async fn test_get_var_returns_value_after_set() {
+        let (processor, _cm) = create_test_processor();
+
+        processor
+            .process_command(RwiCommandPayload::SetVar {
+                call_id: "call-1".into(),
+                key: "lang".into(),
+                value: "en".into(),
+            })
+            .await
+            .unwrap();
+
+        let result = processor
+            .process_command(RwiCommandPayload::GetVar {
+                call_id: "call-1".into(),
+                key: "lang".into(),
+            })
+            .await
+            .unwrap();
+
+        assert!(
+            matches!(&result, CommandResult::CallVar { key, value } if key == "lang" && value.as_deref() == Some("en")),
+            "expected CallVar with value 'en', got: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_var_returns_none_for_missing_key() {
+        let (processor, _cm) = create_test_processor();
+
+        let result = processor
+            .process_command(RwiCommandPayload::GetVar {
+                call_id: "call-1".into(),
+                key: "nonexistent".into(),
+            })
+            .await
+            .unwrap();
+
+        assert!(
+            matches!(&result, CommandResult::CallVar { key, value } if key == "nonexistent" && value.is_none()),
+            "expected CallVar with None value, got: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_set_var_overwrites_existing() {
+        let (processor, _cm) = create_test_processor();
+
+        processor
+            .process_command(RwiCommandPayload::SetVar {
+                call_id: "call-1".into(),
+                key: "x".into(),
+                value: "first".into(),
+            })
+            .await
+            .unwrap();
+
+        processor
+            .process_command(RwiCommandPayload::SetVar {
+                call_id: "call-1".into(),
+                key: "x".into(),
+                value: "second".into(),
+            })
+            .await
+            .unwrap();
+
+        let result = processor
+            .process_command(RwiCommandPayload::GetVar {
+                call_id: "call-1".into(),
+                key: "x".into(),
+            })
+            .await
+            .unwrap();
+
+        assert!(
+            matches!(&result, CommandResult::CallVar { key, value } if key == "x" && value.as_deref() == Some("second")),
+            "expected overwritten value 'second', got: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_vars_are_isolated_per_call() {
+        let (processor, _cm) = create_test_processor();
+
+        processor
+            .process_command(RwiCommandPayload::SetVar {
+                call_id: "call-a".into(),
+                key: "k".into(),
+                value: "va".into(),
+            })
+            .await
+            .unwrap();
+        processor
+            .process_command(RwiCommandPayload::SetVar {
+                call_id: "call-b".into(),
+                key: "k".into(),
+                value: "vb".into(),
+            })
+            .await
+            .unwrap();
+
+        let ra = processor
+            .process_command(RwiCommandPayload::GetVar {
+                call_id: "call-a".into(),
+                key: "k".into(),
+            })
+            .await
+            .unwrap();
+        let rb = processor
+            .process_command(RwiCommandPayload::GetVar {
+                call_id: "call-b".into(),
+                key: "k".into(),
+            })
+            .await
+            .unwrap();
+
+        assert!(
+            matches!(&ra, CommandResult::CallVar { value, .. } if value.as_deref() == Some("va"))
+        );
+        assert!(
+            matches!(&rb, CommandResult::CallVar { value, .. } if value.as_deref() == Some("vb"))
+        );
     }
 
     #[tokio::test]

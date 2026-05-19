@@ -111,8 +111,8 @@ pub async fn create_test_server_with_config(
         cluster_peer_ips: vec![],
         media_policy: Arc::new(crate::call::DefaultMediaPolicy),
         trunk_health: None,
+        session_hooks: Arc::new(Vec::new()),
     });
-
     // Add test users
     let enabled_user = SipUser {
         id: 1,

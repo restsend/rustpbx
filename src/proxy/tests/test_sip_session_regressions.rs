@@ -517,7 +517,7 @@ async fn test_accept_call_sets_connected_callee_for_p2p_targets_flow() {
         .expect("accept_call should succeed for P2P call");
 
     assert_eq!(
-        session.connected_callee,
+        session.meta.connected_callee,
         Some("sip:bob@rustpbx.com".to_string()),
         "connected_callee must be set after accept_call"
     );
@@ -548,7 +548,7 @@ async fn test_accept_call_sets_connected_callee_for_application_ivr_flow() {
         .expect("accept_call should succeed for IVR flow");
 
     assert_eq!(
-        session.connected_callee,
+        session.meta.connected_callee,
         Some("sip:agent@rustpbx.com".to_string()),
         "connected_callee must be set after accept_call in IVR/Application flow"
     );
@@ -574,7 +574,7 @@ async fn test_accept_call_for_bridge_wholesale_flow_sets_connected_callee() {
     let mut session = build_session(dialplan).await;
 
     // Simulate bridge-based wholesale call (WebRTC→bridge→RTP).
-    // We only set the flag; we do NOT set session.answer because accept_call
+    // We only set the flag; we do NOT set session.media.answer because accept_call
     // would try to send a real 200 OK on the SIP dialog (unit tests have no
     // transport), which would fail at the send step, not at the DTMF-setup step.
     // The intent here is to verify that accept_call does not panic and that
@@ -587,7 +587,7 @@ async fn test_accept_call_for_bridge_wholesale_flow_sets_connected_callee() {
         .expect("accept_call should succeed for bridge-based wholesale call");
 
     assert_eq!(
-        session.connected_callee,
+        session.meta.connected_callee,
         Some("sip:trunk@wholesale.example".to_string()),
         "connected_callee must be set after accept_call for bridge-based call"
     );
@@ -613,7 +613,7 @@ async fn test_accept_call_guard_prevents_duplicate_dtmf_setup() {
         .await
         .expect("first accept_call should succeed");
     assert_eq!(
-        session.connected_callee,
+        session.meta.connected_callee,
         Some("sip:a@example.com".to_string())
     );
 
@@ -625,7 +625,7 @@ async fn test_accept_call_guard_prevents_duplicate_dtmf_setup() {
         .await
         .expect("second accept_call should not panic or fail");
     assert_eq!(
-        session.connected_callee,
+        session.meta.connected_callee,
         Some("sip:b@example.com".to_string())
     );
 }

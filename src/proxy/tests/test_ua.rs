@@ -70,6 +70,8 @@ pub enum TestUaEvent {
     CallUpdated(DialogId, rsipstack::sip::Method, Option<String>),
     /// Refer received with target URI
     Referred(DialogId, String),
+    /// SIP INFO with DTMF (application/dtmf-relay) received on this dialog
+    DtmfInfo(DialogId, String),
 }
 
 impl TestUa {
@@ -646,6 +648,37 @@ impl TestUa {
                         debug!("TestUa: Received Notify state for {}", id);
                         // Reply 200 OK to NOTIFY so the sender can proceed
                         tx_handle.reply(rsipstack::sip::StatusCode::OK).await.ok();
+                    }
+                    DialogState::Info(id, request, tx_handle) => {
+                        tx_handle.reply(rsipstack::sip::StatusCode::OK).await.ok();
+                        let is_dtmf = request.headers.iter().any(|h| {
+                            if let rsipstack::sip::Header::ContentType(ct) = h {
+                                ct.value().to_lowercase().contains("application/dtmf-relay")
+                            } else {
+                                false
+                            }
+                        });
+                        if is_dtmf {
+                            let body = String::from_utf8_lossy(request.body());
+                            for line in body.lines() {
+                                let line = line.trim();
+                                if line.to_lowercase().starts_with("signal=") {
+                                    let digit = line
+                                        .trim_start_matches(|c: char| !c.eq_ignore_ascii_case(&'s'))
+                                        .trim_start_matches("Signal=")
+                                        .trim_start_matches("signal=")
+                                        .trim()
+                                        .to_string();
+                                    if !digit.is_empty() {
+                                        debug!(
+                                            "TestUa: Received DTMF INFO digit '{}' on {}",
+                                            digit, id
+                                        );
+                                        events.push(TestUaEvent::DtmfInfo(id.clone(), digit));
+                                    }
+                                }
+                            }
+                        }
                     }
                     DialogState::Refer(id, request, tx_handle) => {
                         debug!("TestUa: Received Refer state for {}", id);

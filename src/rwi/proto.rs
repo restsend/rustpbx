@@ -503,6 +503,19 @@ pub enum RwiEvent {
         /// Leg that generated the DTMF
         leg_id: Option<String>,
     },
+    /// All requested DTMF digits have been collected (or timeout with ≥ min_digits).
+    DtmfCollected {
+        call_id: String,
+        /// Leg that provided the digits
+        leg_id: String,
+        /// Collected digit string (terminator excluded)
+        digits: String,
+    },
+    /// DtmfCollect timed out before the minimum number of digits was reached.
+    DtmfCollectionTimeout {
+        call_id: String,
+        leg_id: String,
+    },
     ConferenceCreated {
         conf_id: String,
     },
@@ -708,6 +721,8 @@ impl RwiEvent {
             RwiEvent::SipMessageReceived { call_id, .. } => Some(call_id),
             RwiEvent::SipNotifyReceived { call_id, .. } => Some(call_id),
             RwiEvent::Dtmf { call_id, .. } => Some(call_id),
+            RwiEvent::DtmfCollected { call_id, .. } => Some(call_id),
+            RwiEvent::DtmfCollectionTimeout { call_id, .. } => Some(call_id),
             RwiEvent::ConferenceMemberJoined { call_id, .. } => Some(call_id),
             RwiEvent::ConferenceMemberLeft { call_id, .. } => Some(call_id),
             RwiEvent::ConferenceMemberMuted { call_id, .. } => Some(call_id),

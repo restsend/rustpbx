@@ -87,8 +87,7 @@ pub struct SipServerInner {
     pub agent_registry: Option<Arc<dyn crate::call::app::agent_registry::AgentRegistry>>,
     /// Optional hook for enriching resolved agent locations before dialing (e.g. injecting
     /// CC / CRM headers for screen-pop).  Registered by the cc addon via proxy_server_hook.
-    pub queue_location_enricher:
-        Option<Arc<dyn crate::proxy::call::QueueLocationEnricher>>,
+    pub queue_location_enricher: Option<Arc<dyn crate::proxy::call::QueueLocationEnricher>>,
     /// Subscribers for REFER NOTIFY events from SipSession.
     pub transfer_notify_subscribers:
         Arc<tokio::sync::Mutex<Vec<crate::call::domain::ReferNotifyTx>>>,
@@ -100,6 +99,8 @@ pub struct SipServerInner {
     pub media_policy: Arc<dyn crate::call::MediaPolicy>,
     /// Trunk health check states (populated by trunk_health background loop).
     pub trunk_health: Option<crate::proxy::trunk_health::HealthStateMap>,
+    /// Session lifecycle hooks (connected, held, unheld, ended).
+    pub session_hooks: Arc<Vec<Arc<dyn crate::proxy::proxy_call::session_hooks::CallSessionHook>>>,
 }
 
 pub type SipServerRef = Arc<SipServerInner>;
@@ -148,6 +149,8 @@ pub struct SipServerBuilder {
     media_policy: Option<Arc<dyn crate::call::MediaPolicy>>,
     /// Trunk health check states (shared map populated by background loop).
     trunk_health: Option<crate::proxy::trunk_health::HealthStateMap>,
+    /// Session lifecycle hooks registered via [`SipServerBuilder::with_session_hook`].
+    session_hooks: Vec<Arc<dyn crate::proxy::proxy_call::session_hooks::CallSessionHook>>,
 }
 
 impl SipServerBuilder {
@@ -183,6 +186,7 @@ impl SipServerBuilder {
             cluster_peers: Vec::new(),
             media_policy: None,
             trunk_health: None,
+            session_hooks: Vec::new(),
         }
     }
 
@@ -344,6 +348,16 @@ impl SipServerBuilder {
         enricher: Arc<dyn crate::proxy::call::QueueLocationEnricher>,
     ) -> Self {
         self.queue_location_enricher = Some(enricher);
+        self
+    }
+
+    /// Register a session lifecycle hook. Multiple hooks can be added; they are
+    /// called in registration order.
+    pub fn with_session_hook(
+        mut self,
+        hook: Arc<dyn crate::proxy::proxy_call::session_hooks::CallSessionHook>,
+    ) -> Self {
+        self.session_hooks.push(hook);
         self
     }
 
@@ -718,6 +732,7 @@ impl SipServerBuilder {
                 .media_policy
                 .unwrap_or_else(|| Arc::new(crate::call::DefaultMediaPolicy)),
             trunk_health: self.trunk_health.clone(),
+            session_hooks: Arc::new(self.session_hooks),
         });
 
         let inner_weak = Arc::downgrade(&inner);

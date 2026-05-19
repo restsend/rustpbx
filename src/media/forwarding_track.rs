@@ -576,6 +576,7 @@ mod tests {
                 clock_rate: 8000,
                 channels: 1,
             }),
+            transport: rustrtc::TransportMode::Rtp,
         }
     }
 

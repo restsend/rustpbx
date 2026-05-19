@@ -88,11 +88,24 @@ pub struct NegotiatedCodec {
 
 /// Per-leg negotiated media profile extracted from an SDP answer.
 /// Contains the selected audio codec, video codec, and the selected DTMF entry for that answer.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct NegotiatedLegProfile {
     pub audio: Option<NegotiatedCodec>,
     pub video: Option<NegotiatedCodec>,
     pub dtmf: Option<NegotiatedCodec>,
+    /// Transport mode for this leg (RTP or WebRTC/SRTP).
+    pub transport: rustrtc::TransportMode,
+}
+
+impl Default for NegotiatedLegProfile {
+    fn default() -> Self {
+        Self {
+            audio: None,
+            video: None,
+            dtmf: None,
+            transport: rustrtc::TransportMode::Rtp,
+        }
+    }
 }
 
 /// Media negotiator for SDP parsing and codec selection
@@ -443,7 +456,7 @@ impl MediaNegotiator {
             }
         };
 
-        NegotiatedLegProfile { audio, video, dtmf }
+        NegotiatedLegProfile { audio, video, dtmf, transport: rustrtc::TransportMode::Rtp }
     }
 
     fn attr_payload_type(attr: &rustrtc::sdp::Attribute) -> Option<u8> {

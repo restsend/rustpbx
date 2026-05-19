@@ -173,7 +173,11 @@ impl SipSession {
         supervisor_session_id: &str,
         target_leg: LegId,
     ) -> Result<()> {
-        let resolved_target_leg = if self.legs.contains_key(&target_leg) {
+        // Ignore a target_leg that matches the session ID itself (this can happen
+        // when the caller passes the session ID as the target leg) and prefer the
+        // real "callee" or "caller" leg instead.
+        let target_is_session_id = target_leg.0 == self.id.0;
+        let resolved_target_leg = if !target_is_session_id && self.legs.contains_key(&target_leg) {
             target_leg
         } else if self.legs.contains_key(&LegId::new("callee")) {
             warn!(

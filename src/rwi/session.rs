@@ -49,9 +49,19 @@ pub struct RwiCommandMessage {
 pub enum RwiCommandPayload {
     Subscribe {
         contexts: Vec<String>,
+        events: Option<Vec<String>>,
     },
     Unsubscribe {
         contexts: Vec<String>,
+    },
+    SetVar {
+        call_id: String,
+        key: String,
+        value: String,
+    },
+    GetVar {
+        call_id: String,
+        key: String,
     },
     ListCalls,
     AttachCall {
@@ -134,6 +144,7 @@ pub enum RwiCommandPayload {
         leg_id: Option<String>,
         digits: String,
     },
+    DtmfCollect(DtmfCollectRequest),
     RecordStart(RecordStartRequest),
     RecordPause {
         call_id: String,
@@ -413,6 +424,37 @@ pub struct MediaInjectRequest {
     pub format: MediaFormat,
 }
 
+/// Request to collect DTMF digits from a call leg.
+#[derive(Debug, Clone, Deserialize)]
+pub struct DtmfCollectRequest {
+    #[serde(default)]
+    pub call_id: String,
+    /// Target leg (None = caller)
+    #[serde(default)]
+    pub leg_id: Option<String>,
+    /// Minimum digits before a timeout counts as a successful collection
+    #[serde(default = "default_min_digits")]
+    pub min_digits: u32,
+    /// Maximum digits to collect before stopping
+    #[serde(default = "default_max_digits")]
+    pub max_digits: u32,
+    /// Inter-digit / overall timeout in milliseconds
+    #[serde(default = "default_dtmf_timeout_ms")]
+    pub timeout_ms: u64,
+    /// Optional terminator digit (not included in result)
+    pub terminator: Option<char>,
+}
+
+fn default_min_digits() -> u32 {
+    1
+}
+fn default_max_digits() -> u32 {
+    16
+}
+fn default_dtmf_timeout_ms() -> u64 {
+    10_000
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct RecordStartRequest {
     #[serde(default)]
@@ -534,7 +576,11 @@ pub struct RwiRequest {
 #[serde(tag = "action", content = "params")]
 pub enum RwiRequestPayload {
     #[serde(rename = "session.subscribe", alias = "Subscribe")]
-    Subscribe { contexts: Option<Vec<String>> },
+    Subscribe {
+        contexts: Option<Vec<String>>,
+        #[serde(default)]
+        events: Option<Vec<String>>,
+    },
     #[serde(rename = "session.unsubscribe", alias = "Unsubscribe")]
     Unsubscribe { contexts: Option<Vec<String>> },
     #[serde(rename = "session.list_calls", alias = "ListCalls")]
@@ -607,6 +653,17 @@ pub enum RwiRequestPayload {
         target_call_id: Option<String>,
         source_call_id: Option<String>,
     },
+    #[serde(rename = "call.set_var")]
+    SetVar {
+        call_id: Option<String>,
+        key: Option<String>,
+        value: Option<String>,
+    },
+    #[serde(rename = "call.get_var")]
+    GetVar {
+        call_id: Option<String>,
+        key: Option<String>,
+    },
     #[serde(rename = "media.play", alias = "MediaPlay")]
     MediaPlay(MediaPlayRequest),
     #[serde(rename = "media.stop")]
@@ -628,6 +685,8 @@ pub enum RwiRequestPayload {
         leg_id: Option<String>,
         digits: Option<String>,
     },
+    #[serde(rename = "dtmf.collect")]
+    DtmfCollect(DtmfCollectRequest),
     #[serde(rename = "record.start")]
     RecordStart(RecordStartRequest),
     #[serde(rename = "record.pause")]
@@ -758,8 +817,9 @@ pub enum RwiRequestPayload {
 impl From<RwiRequest> for RwiCommandPayload {
     fn from(req: RwiRequest) -> Self {
         match req.payload {
-            RwiRequestPayload::Subscribe { contexts } => RwiCommandPayload::Subscribe {
+            RwiRequestPayload::Subscribe { contexts, events } => RwiCommandPayload::Subscribe {
                 contexts: contexts.unwrap_or_default(),
+                events,
             },
             RwiRequestPayload::Unsubscribe { contexts } => RwiCommandPayload::Unsubscribe {
                 contexts: contexts.unwrap_or_default(),
@@ -859,6 +919,19 @@ impl From<RwiRequest> for RwiCommandPayload {
                 target_call_id: target_call_id.unwrap_or_default(),
                 source_call_id: source_call_id.unwrap_or_default(),
             },
+            RwiRequestPayload::SetVar {
+                call_id,
+                key,
+                value,
+            } => RwiCommandPayload::SetVar {
+                call_id: call_id.unwrap_or_default(),
+                key: key.unwrap_or_default(),
+                value: value.unwrap_or_default(),
+            },
+            RwiRequestPayload::GetVar { call_id, key } => RwiCommandPayload::GetVar {
+                call_id: call_id.unwrap_or_default(),
+                key: key.unwrap_or_default(),
+            },
             RwiRequestPayload::MediaPlay(mut r) => {
                 if r.call_id.is_empty() {
                     r.call_id = Uuid::new_v4().to_string();
@@ -896,6 +969,7 @@ impl From<RwiRequest> for RwiCommandPayload {
                 leg_id,
                 digits: digits.unwrap_or_default(),
             },
+            RwiRequestPayload::DtmfCollect(r) => RwiCommandPayload::DtmfCollect(r),
             RwiRequestPayload::RecordStart(mut r) => {
                 if r.call_id.is_empty() {
                     r.call_id = Uuid::new_v4().to_string();

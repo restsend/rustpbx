@@ -513,6 +513,7 @@ async fn test_guest_call_allowed_extension() {
         cluster_peer_ips: vec![],
         media_policy: Arc::new(crate::call::DefaultMediaPolicy),
         trunk_health: None,
+        session_hooks: Arc::new(Vec::new()),
     });
 
     let module = AuthModule::new(server_inner.clone(), server_inner.proxy_config.clone());

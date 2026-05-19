@@ -89,6 +89,14 @@ users = [
 [[proxy.user_backends]]
 type = "extension"
 
+# Audio codec allowlist (e.g. PCMU, PCMA, G722, OPUS).
+# audio_codecs = ["pcma","pcmu","g722","opus"]
+
+# Video codec allowlist for re-INVITEs sent to RTP/PSTN/IMS trunks.
+# WebRTC-only codecs (VP8, VP9, AV1, …) and all rtcp-fb feedback attributes
+# are stripped automatically.  Defaults to ["H264"] when not set.
+# video_codecs = ["H264"]
+
 [recording]
 enabled = true
 auto_start = true
