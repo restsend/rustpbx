@@ -53,9 +53,12 @@ use rustrtc::{
     },
     rtp::RtcpPacket,
 };
-use std::sync::{
-    Arc,
-    atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering},
+use std::{
+    collections::HashMap,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering},
+    },
 };
 use tokio::sync::Mutex as AsyncMutex;
 use tokio_util::sync::CancellationToken;
@@ -136,6 +139,7 @@ struct VideoForwardingTrack {
     id: String,
     inner: Arc<dyn MediaStreamTrack>,
     payload_type: Arc<AtomicU8>,
+    payload_map: Arc<parking_lot::RwLock<HashMap<u8, u8>>>,
 }
 
 #[async_trait::async_trait]
@@ -161,7 +165,11 @@ impl MediaStreamTrack for VideoForwardingTrack {
             if matches!(frame.payload_type, Some(pt) if pt < 96) {
                 continue;
             }
-            frame.payload_type = Some(self.payload_type.load(Ordering::Relaxed));
+            let target_payload_type = frame
+                .payload_type
+                .and_then(|pt| self.payload_map.read().get(&pt).copied())
+                .unwrap_or_else(|| self.payload_type.load(Ordering::Relaxed));
+            frame.payload_type = Some(target_payload_type);
             frame.header_extension = None;
             frame.raw_packet = None;
             frame.csrcs.clear();
@@ -339,6 +347,9 @@ pub struct BridgePeer {
     /// Target payload type stamped by rustpbx onto pass-through video RTP.
     caller_video_payload_type: Arc<AtomicU8>,
     callee_video_payload_type: Arc<AtomicU8>,
+    /// Per-source-payload video remapping. Caller map targets WebRTC, callee map targets RTP.
+    caller_video_payload_map: Arc<parking_lot::RwLock<HashMap<u8, u8>>>,
+    callee_video_payload_map: Arc<parking_lot::RwLock<HashMap<u8, u8>>>,
     /// Per-direction media forwarding stats (cumulative)
     caller_to_callee_stats: Arc<LegStats>,
     callee_to_caller_stats: Arc<LegStats>,
@@ -404,6 +415,8 @@ impl BridgePeer {
             callee_video_sender: AsyncMutex::new(None),
             caller_video_payload_type: Arc::new(AtomicU8::new(96)),
             callee_video_payload_type: Arc::new(AtomicU8::new(96)),
+            caller_video_payload_map: Arc::new(parking_lot::RwLock::new(HashMap::new())),
+            callee_video_payload_map: Arc::new(parking_lot::RwLock::new(HashMap::new())),
             caller_to_callee_stats: LegStats::new(),
             callee_to_caller_stats: LegStats::new(),
             peers: Arc::new(AsyncMutex::new(std::collections::HashMap::new())),
@@ -574,6 +587,65 @@ impl BridgePeer {
                 "Video pass-through payload type updated"
             );
         }
+    }
+
+    fn video_payload_map_by_codec(
+        source_caps: &[rustrtc::VideoCapability],
+        target_caps: &[rustrtc::VideoCapability],
+    ) -> HashMap<u8, u8> {
+        let mut map = HashMap::new();
+        for source in source_caps {
+            if let Some(target) = target_caps.iter().find(|target| {
+                source.codec_name.eq_ignore_ascii_case(&target.codec_name)
+                    && source.clock_rate == target.clock_rate
+            }) {
+                map.entry(source.payload_type)
+                    .or_insert(target.payload_type);
+            }
+        }
+        map
+    }
+
+    /// Update pass-through video payload mappings by codec identity.
+    ///
+    /// The bridge does not transcode video, so payload type numbers must be translated
+    /// to the peer-local payload type for the same codec instead of copying a single
+    /// "first" payload type across both legs.
+    pub fn set_video_payload_maps(
+        &self,
+        webrtc_caps: &[rustrtc::VideoCapability],
+        rtp_caps: &[rustrtc::VideoCapability],
+    ) {
+        let rtp_to_webrtc = Self::video_payload_map_by_codec(rtp_caps, webrtc_caps);
+        let webrtc_to_rtp = Self::video_payload_map_by_codec(webrtc_caps, rtp_caps);
+
+        let caller_fallback = rtp_caps
+            .iter()
+            .find_map(|cap| rtp_to_webrtc.get(&cap.payload_type).copied());
+        let callee_fallback = webrtc_caps
+            .iter()
+            .find_map(|cap| webrtc_to_rtp.get(&cap.payload_type).copied());
+
+        if let Some(pt) = caller_fallback {
+            self.caller_video_payload_type.store(pt, Ordering::Relaxed);
+        }
+        if let Some(pt) = callee_fallback {
+            self.callee_video_payload_type.store(pt, Ordering::Relaxed);
+        }
+
+        *self.caller_video_payload_map.write() = rtp_to_webrtc;
+        *self.callee_video_payload_map.write() = webrtc_to_rtp;
+        let caller_map = self.caller_video_payload_map.read().clone();
+        let callee_map = self.callee_video_payload_map.read().clone();
+
+        debug!(
+            bridge_id = %self.id,
+            rtp_to_webrtc = ?caller_map,
+            webrtc_to_rtp = ?callee_map,
+            caller_fallback_pt = ?caller_fallback,
+            callee_fallback_pt = ?callee_fallback,
+            "Video pass-through payload maps updated"
+        );
     }
 
     /// Setup the bridge with codec parameters.
@@ -1174,6 +1246,8 @@ impl BridgePeer {
         let callee_to_caller_timing = Arc::clone(&self.callee_to_caller_timing);
         let caller_video_payload_type = Arc::clone(&self.caller_video_payload_type);
         let callee_video_payload_type = Arc::clone(&self.callee_video_payload_type);
+        let caller_video_payload_map = Arc::clone(&self.caller_video_payload_map);
+        let callee_video_payload_map = Arc::clone(&self.callee_video_payload_map);
         let caller_gate = Arc::clone(&self.caller_gate);
 
         tokio::spawn(async move {
@@ -1222,6 +1296,7 @@ impl BridgePeer {
                                                         id: format!("{}-caller-to-callee-video", bridge_id),
                                                         inner: track.clone(),
                                                         payload_type: Arc::clone(&callee_video_payload_type),
+                                                        payload_map: Arc::clone(&callee_video_payload_map),
                                                     });
                                                 let sender = rustrtc::RtpSender::builder(
                                                     forwarding_track,
@@ -1334,6 +1409,7 @@ impl BridgePeer {
                                                         id: format!("{}-callee-to-caller-video", bridge_id),
                                                         inner: track.clone(),
                                                         payload_type: Arc::clone(&caller_video_payload_type),
+                                                        payload_map: Arc::clone(&caller_video_payload_map),
                                                     });
                                                 let sender = rustrtc::RtpSender::builder(
                                                     forwarding_track,
@@ -2115,6 +2191,53 @@ mod tests {
             .finalize()
             .map_err(|e| anyhow::anyhow!("finalize: {e}"))?;
         Ok(())
+    }
+
+    #[test]
+    fn test_video_payload_map_matches_codec_identity_not_payload_number() {
+        let rtp_caps = vec![
+            rustrtc::config::VideoCapability {
+                payload_type: 96,
+                codec_name: "H264".to_string(),
+                clock_rate: 90000,
+                fmtp: Some("profile-level-id=42801F".to_string()),
+                rtcp_fbs: vec![],
+            },
+            rustrtc::config::VideoCapability {
+                payload_type: 97,
+                codec_name: "VP8".to_string(),
+                clock_rate: 90000,
+                fmtp: None,
+                rtcp_fbs: vec![],
+            },
+        ];
+        let webrtc_caps = vec![
+            rustrtc::config::VideoCapability {
+                payload_type: 96,
+                codec_name: "VP8".to_string(),
+                clock_rate: 90000,
+                fmtp: None,
+                rtcp_fbs: vec![],
+            },
+            rustrtc::config::VideoCapability {
+                payload_type: 103,
+                codec_name: "H264".to_string(),
+                clock_rate: 90000,
+                fmtp: Some(
+                    "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42001f"
+                        .to_string(),
+                ),
+                rtcp_fbs: vec![],
+            },
+        ];
+
+        let rtp_to_webrtc = BridgePeer::video_payload_map_by_codec(&rtp_caps, &webrtc_caps);
+        let webrtc_to_rtp = BridgePeer::video_payload_map_by_codec(&webrtc_caps, &rtp_caps);
+
+        assert_eq!(rtp_to_webrtc.get(&96), Some(&103));
+        assert_eq!(rtp_to_webrtc.get(&97), Some(&96));
+        assert_eq!(webrtc_to_rtp.get(&103), Some(&96));
+        assert_eq!(webrtc_to_rtp.get(&96), Some(&97));
     }
 
     #[tokio::test]
