@@ -826,29 +826,19 @@ impl SipSession {
         let target_answer =
             rustrtc::SessionDescription::parse(rustrtc::SdpType::Answer, &target_answer_sdp)
                 .map_err(|e| anyhow!("Failed to parse bridged target answer SDP: {}", e))?;
+        let target_video_caps = target_answer.to_video_capabilities();
         let target_video_active = target_answer.media_sections.iter().any(|section| {
             section.kind == rustrtc::MediaKind::Video
                 && section.port != 0
                 && section.direction != rustrtc::Direction::Inactive
         });
-        let target_video_params = target_video_active
-            .then(|| {
-                target_answer.to_video_capabilities().first().map(|video| {
-                    rustrtc::RtpCodecParameters {
-                        payload_type: video.payload_type,
-                        clock_rate: video.clock_rate,
-                        channels: 0,
-                    }
-                })
-            })
-            .flatten();
         target_pc
             .set_remote_description(target_answer)
             .await
             .map_err(|e| anyhow!("Failed to set bridged target answer SDP: {}", e))?;
 
         // Build the answer to return to the source side
-        let (source_answer_sdp, source_video_params) = Self::build_bridge_source_answer(
+        let (source_answer_sdp, _source_video_params) = Self::build_bridge_source_answer(
             &source_pc,
             offer_sdp,
             &target_answer_sdp,
@@ -861,12 +851,16 @@ impl SipSession {
 
         // Sync bridge video payload type mapping
         if let Some(bridge) = &self.media.media_bridge {
-            let (webrtc_video_params, rtp_video_params) = if target_is_webrtc {
-                (target_video_params, source_video_params)
+            let source_video_caps =
+                rustrtc::SessionDescription::parse(rustrtc::SdpType::Answer, &source_answer_sdp)
+                    .map(|desc| desc.to_video_capabilities())
+                    .unwrap_or_default();
+            let (webrtc_video_caps, rtp_video_caps) = if target_is_webrtc {
+                (target_video_caps.as_slice(), source_video_caps.as_slice())
             } else {
-                (source_video_params, target_video_params)
+                (source_video_caps.as_slice(), target_video_caps.as_slice())
             };
-            bridge.set_video_payload_types(webrtc_video_params, rtp_video_params);
+            bridge.set_video_payload_maps(webrtc_video_caps, rtp_video_caps);
         }
 
         // Update stored SDPs and leg hold/connected state
