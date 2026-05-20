@@ -19,12 +19,15 @@ pub(crate) enum TransferTarget {
     Ivr {
         name: String,
     },
+    Voicemail {
+        extension: String,
+    },
     Sip(String),
 }
 
 /// Parse a raw transfer target string into a typed `TransferTarget`.
 ///
-/// Priority: `queue:` → `ivr:` → SIP/TEL URI (default prefix `sip:` added if absent).
+/// Priority: `queue:` → `ivr:` → `voicemail:` → SIP/TEL URI (default prefix `sip:` added if absent).
 pub(crate) fn parse_transfer_target(target: &str) -> TransferTarget {
     if let Some(rest) = target.strip_prefix("queue:") {
         let remainder = rest.trim();
@@ -47,6 +50,14 @@ pub(crate) fn parse_transfer_target(target: &str) -> TransferTarget {
         if !ivr_name.is_empty() {
             return TransferTarget::Ivr {
                 name: ivr_name.to_string(),
+            };
+        }
+    }
+    if let Some(rest) = target.strip_prefix("voicemail:") {
+        let ext = rest.trim();
+        if !ext.is_empty() {
+            return TransferTarget::Voicemail {
+                extension: ext.to_string(),
             };
         }
     }
@@ -109,6 +120,10 @@ impl SipSession {
             TransferTarget::Ivr { name } => {
                 info!(%leg_id, ivr = %name, "Handling IVR transfer by starting IvrApp");
                 self.start_ivr_app(&name).await
+            }
+            TransferTarget::Voicemail { extension } => {
+                info!(%leg_id, %extension, "Handling voicemail transfer by starting VoicemailApp");
+                self.start_voicemail_app(&extension).await
             }
             TransferTarget::Sip(refer_to_str) => {
                 let refer_to_uri = rsipstack::sip::Uri::try_from(refer_to_str.as_str())
@@ -379,6 +394,50 @@ impl SipSession {
         }
 
         Ok(())
+    }
+
+    pub(crate) async fn start_voicemail_app(&self, extension: &str) -> Result<()> {
+        use crate::call::runtime::AppRuntimeError;
+
+        info!(extension = %extension, "Starting voicemail application");
+
+        let params = Some(serde_json::json!({
+            "extension": extension,
+        }));
+        match self
+            .app_runtime
+            .start_app("voicemail", params.clone(), true)
+            .await
+        {
+            Ok(()) => Ok(()),
+            Err(AppRuntimeError::AlreadyRunning(_)) => {
+                warn!(
+                    extension = %extension,
+                    "Voicemail runtime still marked running, restarting app"
+                );
+
+                match self
+                    .app_runtime
+                    .stop_app(Some("restart voicemail".to_string()))
+                    .await
+                {
+                    Ok(()) | Err(AppRuntimeError::NotRunning) => {}
+                    Err(stop_err) => {
+                        warn!(
+                            extension = %extension,
+                            error = ?stop_err,
+                            "Failed to stop existing app before voicemail restart"
+                        );
+                    }
+                }
+
+                self.app_runtime
+                    .start_app("voicemail", params, true)
+                    .await
+                    .map_err(|e| anyhow!("Failed to restart voicemail for '{}': {:?}", extension, e))
+            }
+            Err(e) => Err(anyhow!("Failed to start voicemail for '{}': {:?}", extension, e)),
+        }
     }
 
     pub(super) fn build_replaces_header(&self) -> Option<String> {
@@ -769,6 +828,34 @@ mod tests {
                 name: "welcome".to_string()
             }
         );
+    }
+
+    #[test]
+    fn test_parse_transfer_target_voicemail() {
+        let t = parse_transfer_target("voicemail:1001");
+        assert_eq!(
+            t,
+            TransferTarget::Voicemail {
+                extension: "1001".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_transfer_target_voicemail_whitespace_trimmed() {
+        let t = parse_transfer_target("voicemail: 2001 ");
+        assert_eq!(
+            t,
+            TransferTarget::Voicemail {
+                extension: "2001".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn test_parse_transfer_target_empty_voicemail_suffix_falls_through_to_sip() {
+        let t = parse_transfer_target("voicemail:");
+        assert!(matches!(t, TransferTarget::Sip(_)));
     }
 
     #[test]

@@ -53,6 +53,7 @@ config/recordings/
 config/ivr/
 config/sounds/
 config/cc/
+config/voicemail/
 *.bak
 *.jsonl
 config.toml.dev
