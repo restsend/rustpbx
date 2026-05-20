@@ -603,6 +603,64 @@ impl MediaNegotiator {
         Some(desc.to_sdp_string())
     }
 
+    pub fn sanitize_sdp_for_rtp_peer(
+        sdp_type: SdpType,
+        sdp: &str,
+        context: &str,
+    ) -> Result<String> {
+        let mut desc = SessionDescription::parse(sdp_type, sdp)
+            .map_err(|e| anyhow!("Failed to parse {} SDP: {}", context, e))?;
+
+        desc.session
+            .attributes
+            .retain(Self::keep_rtp_peer_session_attribute);
+        for section in &mut desc.media_sections {
+            section.mid.clear();
+            section
+                .attributes
+                .retain(Self::keep_rtp_peer_media_attribute);
+        }
+
+        Ok(desc.to_sdp_string())
+    }
+
+    fn keep_rtp_peer_session_attribute(attr: &Attribute) -> bool {
+        match attr.key.as_str() {
+            "group" => attr
+                .value
+                .as_deref()
+                .map(|value| !value.trim_start().starts_with("BUNDLE"))
+                .unwrap_or(true),
+            "msid-semantic" | "ice-lite" | "ice-ufrag" | "ice-pwd" | "ice-options"
+            | "fingerprint" | "setup" | "candidate" | "end-of-candidates" | "extmap" => false,
+            _ => true,
+        }
+    }
+
+    fn keep_rtp_peer_media_attribute(attr: &Attribute) -> bool {
+        !matches!(
+            attr.key.as_str(),
+            "mid"
+                | "msid"
+                | "bundle-only"
+                | "rtcp-mux"
+                | "rtcp-mux-only"
+                | "rtcp-rsize"
+                | "ice-ufrag"
+                | "ice-pwd"
+                | "ice-options"
+                | "fingerprint"
+                | "setup"
+                | "candidate"
+                | "end-of-candidates"
+                | "extmap"
+                | "rtcp-fb"
+                | "rid"
+                | "simulcast"
+                | "ssrc-group"
+        )
+    }
+
     /// Build codec list for callee offer in anchored media mode.
     ///
     /// Algorithm:
