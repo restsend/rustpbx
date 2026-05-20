@@ -128,6 +128,21 @@ default('RustPBX') }}{% endblock %}
                             </div>
                         </div>
                     </button>
+                    <button type="button" class="flex-1 rounded-md px-4 py-2 text-left transition sm:flex-none"
+                        :class="activeTab === 'media_option' ? 'bg-white text-sky-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'"
+                        :aria-selected="activeTab === 'media_option'" aria-controls="sip-trunk-tab-media-option"
+                        @click="activeTab = 'media_option'">
+                        <div class="flex items-center gap-2">
+                            <svg class="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8">
+                                <path stroke-linecap="round" stroke-linejoin="round" d="M15.75 5.25v13.5m-7.5-13.5v13.5M3 9h3m-3 3h3m-3 3h3m12-6h3m-3 3h3m-3 3h3M5.25 3h13.5A2.25 2.25 0 0121 5.25v13.5A2.25 2.25 0 0118.75 21H5.25A2.25 2.25 0 013 18.75V5.25A2.25 2.25 0 015.25 3z" />
+                            </svg>
+                            <div>
+                                <span class="text-sm">{{ "sip_trunk_detail.tab_media_option" | t }}</span>
+                                <span class="block text-[11px] font-normal text-slate-400">{{
+                                    "sip_trunk_detail.tab_media_option_desc" | t }}</span>
+                            </div>
+                        </div>
+                    </button>
                 </nav>
             </div>
 
@@ -189,6 +204,12 @@ default('RustPBX') }}{% endblock %}
                                 class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                                 placeholder="{{ "sip_trunk_detail.field_sip_server_placeholder" | t }}">
                         </label>
+                        <label class="md:col-span-2 flex flex-col gap-2 text-sm font-medium text-slate-700">
+                            {{ "sip_trunk_detail.field_allowed_ips" | t }}
+                            <textarea rows="4" x-model="form.allowed_ips"
+                                class="font-mono rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                placeholder="{{ "sip_trunk_detail.field_allowed_ips_placeholder" | t }}"></textarea>
+                        </label>
                         <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
                             {{ "sip_trunk_detail.field_outbound_proxy" | t }}
                             <input type="text" x-model.trim="form.outbound_proxy" maxlength="160"
@@ -219,30 +240,6 @@ default('RustPBX') }}{% endblock %}
                             class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                             placeholder="{{ "sip_trunk_detail.field_description_placeholder" | t }}"></textarea>
                     </label>
-                </section>
-
-                <section class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
-                    <h2 class="text-sm font-semibold text-slate-900">{{ "sip_trunk_detail.section_capacity" | t }}</h2>
-                    <div class="mt-4 grid gap-4 md:grid-cols-3">
-                        <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
-                            {{ "sip_trunk_detail.field_max_cps" | t }}
-                            <input type="number" min="0" step="1" x-model="form.max_cps"
-                                class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                placeholder="{{ "sip_trunk_detail.field_max_cps_placeholder" | t }}">
-                        </label>
-                        <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
-                            {{ "sip_trunk_detail.field_max_concurrent" | t }}
-                            <input type="number" min="0" step="1" x-model="form.max_concurrent"
-                                class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                placeholder="{{ "sip_trunk_detail.field_max_concurrent_placeholder" | t }}">
-                        </label>
-                        <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
-                            {{ "sip_trunk_detail.field_max_duration" | t }}
-                            <input type="number" min="0" step="1" x-model="form.max_call_duration"
-                                class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                placeholder="{{ "sip_trunk_detail.field_max_duration_placeholder" | t }}">
-                        </label>
-                    </div>
                 </section>
             </div>
 
@@ -293,17 +290,36 @@ default('RustPBX') }}{% endblock %}
                 </section>
 
                 <section class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
-                    <h2 class="text-sm font-semibold text-slate-900">{{ "sip_trunk_detail.section_acl" | t }}</h2>
-                    <div class="mt-4 grid gap-4 md:grid-cols-2">
+                    <h2 class="text-sm font-semibold text-slate-900">{{ "sip_trunk_detail.section_capacity" | t }}</h2>
+                    <div class="mt-4 grid gap-4 md:grid-cols-3">
                         <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
-                            {{ "sip_trunk_detail.field_allowed_ips" | t }}
-                            <textarea rows="6" x-model="form.allowed_ips"
-                                class="font-mono rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                placeholder="{{ "sip_trunk_detail.field_allowed_ips_placeholder" | t }}"></textarea>
+                            {{ "sip_trunk_detail.field_max_cps" | t }}
+                            <input type="number" min="0" step="1" x-model="form.max_cps"
+                                class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                placeholder="{{ "sip_trunk_detail.field_max_cps_placeholder" | t }}">
                         </label>
                         <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                            {{ "sip_trunk_detail.field_max_concurrent" | t }}
+                            <input type="number" min="0" step="1" x-model="form.max_concurrent"
+                                class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                placeholder="{{ "sip_trunk_detail.field_max_concurrent_placeholder" | t }}">
+                        </label>
+                        <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                            {{ "sip_trunk_detail.field_max_duration" | t }}
+                            <input type="number" min="0" step="1" x-model="form.max_call_duration"
+                                class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                placeholder="{{ "sip_trunk_detail.field_max_duration_placeholder" | t }}">
+                        </label>
+                    </div>
+                </section>
+
+                <section class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+                    <h2 class="text-sm font-semibold text-slate-900">{{ "sip_trunk_detail.section_did" | t }}</h2>
+                    <p class="mt-1 text-xs text-slate-500">{{ "sip_trunk_detail.section_did_desc" | t }}</p>
+                    <div class="mt-4">
+                        <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
                             {{ "sip_trunk_detail.field_did_numbers" | t }}
-                            <textarea rows="6" x-model="form.did_numbers"
+                            <textarea rows="4" x-model="form.did_numbers"
                                 class="font-mono rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                                 placeholder="{{ "sip_trunk_detail.field_did_numbers_placeholder" | t }}"></textarea>
                         </label>
@@ -402,6 +418,61 @@ default('RustPBX') }}{% endblock %}
                 </template>
             </div>
 
+            <div class="space-y-6" x-show="activeTab === 'media_option'" x-transition.opacity x-cloak
+                id="sip-trunk-tab-media-option" role="tabpanel" tabindex="0">
+                <section class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+                    <h2 class="text-sm font-semibold text-slate-900">{{ "sip_trunk_detail.section_media" | t }}</h2>
+                    <p class="mt-1 text-xs text-slate-500">{{ "sip_trunk_detail.section_media_desc" | t }}</p>
+                    <div class="mt-4 space-y-4">
+                        <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                            {{ "sip_trunk_detail.field_media_mode" | t }}
+                            <select x-model="form.media_mode"
+                                class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                                <option value="auto">Auto</option>
+                                <option value="bypass">Bypass</option>
+                                <option value="none">None</option>
+                                <option value="force_transcode">Force Transcode</option>
+                            </select>
+                        </label>
+                        <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                            {{ "sip_trunk_detail.field_video_policy" | t }}
+                            <select x-model="form.video_policy"
+                                class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                                <option value="">{{ "sip_trunk_detail.none" | t }}</option>
+                                <option value="pass_through">Pass Through</option>
+                                <option value="strip">Strip</option>
+                            </select>
+                        </label>
+                        <div class="flex items-center gap-2">
+                            <button type="button" @click="form.recording_enabled = !form.recording_enabled"
+                                class="inline-flex items-center gap-2 rounded-lg px-3 py-1 text-xs font-semibold ring-2 transition"
+                                :class="form.recording_enabled ? 'bg-emerald-50 text-emerald-600 ring-emerald-200' : 'bg-slate-100 text-slate-500 ring-slate-200'">
+                                <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6">
+                                    <path stroke-linecap="round" stroke-linejoin="round" d="M5 10l4 4 6-8" x-show="form.recording_enabled"></path>
+                                    <path stroke-linecap="round" stroke-linejoin="round" d="M6 6l8 8M6 14l8-8" x-show="!form.recording_enabled"></path>
+                                </svg>
+                                <span x-text="form.recording_enabled ? t.sip_trunk_detail?.status_enabled : t.sip_trunk_detail?.status_disabled"></span>
+                            </button>
+                            <span class="text-sm font-medium text-slate-700">{{ "sip_trunk_detail.field_recording" | t }}</span>
+                        </div>
+                        <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                            {{ "sip_trunk_detail.field_audio_codecs" | t }}
+                            <textarea rows="3" x-model="form.audio_codecs"
+                                class="font-mono rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                placeholder="PCMU&#10;PCMA&#10;G722"></textarea>
+                            <span class="text-xs font-normal text-slate-400">{{ "sip_trunk_detail.field_codecs_hint" | t }}</span>
+                        </label>
+                        <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                            {{ "sip_trunk_detail.field_video_codecs" | t }}
+                            <textarea rows="3" x-model="form.video_codecs"
+                                class="font-mono rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                placeholder="H264&#10;VP8&#10;VP9"></textarea>
+                            <span class="text-xs font-normal text-slate-400">{{ "sip_trunk_detail.field_codecs_hint" | t }}</span>
+                        </label>
+                    </div>
+                </section>
+            </div>
+
             <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
                 <p class="text-xs text-slate-400">{{ "sip_trunk_detail.save_hint" | t }}</p>
                 <div class="flex items-center gap-3">
@@ -473,6 +544,11 @@ default('RustPBX') }}{% endblock %}
                 register_enabled: false,
                 register_expires: '',
                 register_extra_headers: '',
+                recording_enabled: false,
+                media_mode: 'auto',
+                video_policy: '',
+                audio_codecs: '',
+                video_codecs: '',
             },
             regStatus: null,
             success: null,
@@ -533,6 +609,18 @@ default('RustPBX') }}{% endblock %}
                 this.form.register_enabled = model.register_enabled === true;
                 this.form.register_expires = model.register_expires != null ? String(model.register_expires) : '';
                 this.form.register_extra_headers = this.formatJson(model.register_extra_headers);
+                // Extract SBC settings from metadata
+                try {
+                    const meta = typeof model.metadata === 'string' ? JSON.parse(model.metadata) : (model.metadata || {});
+                    const sbc = meta.sbc || {};
+                    this.form.recording_enabled = sbc.recording_enabled === true;
+                    this.form.media_mode = sbc.media_mode || 'auto';
+                    this.form.video_policy = sbc.video_policy || '';
+                    this.form.audio_codecs = Array.isArray(sbc.audio_codecs) ? sbc.audio_codecs.join('\n') : '';
+                    this.form.video_codecs = Array.isArray(sbc.video_codecs) ? sbc.video_codecs.join('\n') : '';
+                } catch(e) {
+                    // ignore parse errors
+                }
                 if (this.form.register_enabled && this.mode === 'edit') {
                     this.loadRegStatus();
                 }
@@ -724,7 +812,40 @@ default('RustPBX') }}{% endblock %}
                 params.set('tags', this.form.tags.trim());
                 params.set('incoming_from_user_prefix', this.form.incoming_from_user_prefix.trim());
                 params.set('incoming_to_user_prefix', this.form.incoming_to_user_prefix.trim());
-                params.set('metadata', this.form.metadata.trim());
+                // Merge SBC settings into metadata
+                try {
+                    const meta = this.form.metadata.trim() ? JSON.parse(this.form.metadata.trim()) : {};
+                    if (!meta.sbc) meta.sbc = {};
+                    meta.sbc.recording_enabled = this.form.recording_enabled;
+                    if (this.form.media_mode && this.form.media_mode !== 'auto') {
+                        meta.sbc.media_mode = this.form.media_mode;
+                    } else {
+                        delete meta.sbc.media_mode;
+                    }
+                    if (this.form.video_policy) {
+                        meta.sbc.video_policy = this.form.video_policy;
+                    } else {
+                        delete meta.sbc.video_policy;
+                    }
+                    const audioCodecs = this.form.audio_codecs.split('\n').map(s => s.trim()).filter(s => s);
+                    const videoCodecs = this.form.video_codecs.split('\n').map(s => s.trim()).filter(s => s);
+                    if (audioCodecs.length) {
+                        meta.sbc.audio_codecs = audioCodecs;
+                    } else {
+                        delete meta.sbc.audio_codecs;
+                    }
+                    if (videoCodecs.length) {
+                        meta.sbc.video_codecs = videoCodecs;
+                    } else {
+                        delete meta.sbc.video_codecs;
+                    }
+                    if (!Object.keys(meta.sbc).length) {
+                        delete meta.sbc;
+                    }
+                    params.set('metadata', JSON.stringify(meta, null, 2));
+                } catch(e) {
+                    params.set('metadata', this.form.metadata.trim());
+                }
                 params.set('is_active', this.form.is_active ? 'true' : 'false');
                 params.set('register_enabled', this.form.register_enabled ? 'true' : 'false');
                 if (this.form.register_expires !== '' && this.form.register_expires != null) {

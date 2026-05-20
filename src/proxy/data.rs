@@ -870,7 +870,16 @@ pub fn sbc_config_from_metadata(meta: &serde_json::Value) -> TrunkConfig {
             .unwrap_or_default()
     };
 
-    let codecs = from_strs(sbc.and_then(|s| s.get("codecs")));
+    let codecs = {
+        let audio = from_strs(sbc.and_then(|s| s.get("audio_codecs")));
+        if !audio.is_empty() {
+            let mut all = audio;
+            all.extend(from_strs(sbc.and_then(|s| s.get("video_codecs"))));
+            all
+        } else {
+            from_strs(sbc.and_then(|s| s.get("codecs")))
+        }
+    };
     let recording = from_bool(sbc.and_then(|s| s.get("recording_enabled"))).map(|enabled| {
         let mut r = crate::config::RecordingPolicy::default();
         r.enabled = enabled;
@@ -884,6 +893,7 @@ pub fn sbc_config_from_metadata(meta: &serde_json::Value) -> TrunkConfig {
             _ => None,
         }),
         health_check_enabled: from_bool(sbc.and_then(|s| s.get("health_check_enabled"))),
+        health_check_per_ip: from_bool(sbc.and_then(|s| s.get("health_check_per_ip"))),
         health_check_interval_secs: sbc.and_then(|s| s.get("health_check_interval")).and_then(|v| v.as_u64()),
         health_check_probe_count: from_u64(sbc.and_then(|s| s.get("health_check_probe_count"))),
         health_check_fallback_trunk: from_str(sbc.and_then(|s| s.get("health_check_fallback_trunk"))),
@@ -985,6 +995,7 @@ fn convert_trunk(model: sip_trunk::Model) -> Option<(String, TrunkConfig)> {
             let sbc = sbc_config_from_metadata(meta);
             if sbc.call_id_mode.is_some() { trunk.call_id_mode = sbc.call_id_mode; }
             if sbc.health_check_enabled.is_some() { trunk.health_check_enabled = sbc.health_check_enabled; }
+            if sbc.health_check_per_ip.is_some() { trunk.health_check_per_ip = sbc.health_check_per_ip; }
             if sbc.health_check_interval_secs.is_some() { trunk.health_check_interval_secs = sbc.health_check_interval_secs; }
             if sbc.health_check_probe_count.is_some() { trunk.health_check_probe_count = sbc.health_check_probe_count; }
             if sbc.health_check_fallback_trunk.is_some() { trunk.health_check_fallback_trunk = sbc.health_check_fallback_trunk; }

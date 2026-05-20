@@ -493,6 +493,7 @@ pub struct RtpTrackBuilder {
     rtp_map: Vec<negotiate::CodecInfo>,
     video_capabilities: Vec<rustrtc::config::VideoCapability>,
     enable_latching: bool,
+    probation_max_packets: Option<u8>,
     ice_servers: Vec<IceServer>,
 }
 
@@ -507,6 +508,7 @@ impl RtpTrackBuilder {
             rtp_end_port: None,
             mode: TransportMode::Rtp,
             enable_latching: false,
+            probation_max_packets: None,
             ice_servers: Vec::new(),
             rtp_map: vec![
                 #[cfg(feature = "opus")]
@@ -564,6 +566,11 @@ impl RtpTrackBuilder {
 
     pub fn with_enable_latching(mut self, enable: bool) -> Self {
         self.enable_latching = enable;
+        self
+    }
+
+    pub fn with_probation_max_packets(mut self, max: Option<u8>) -> Self {
+        self.probation_max_packets = max;
         self
     }
 
@@ -627,6 +634,7 @@ impl RtpTrackBuilder {
             external_ip: self.external_ip,
             bind_ip,
             enable_latching: self.enable_latching,
+            probation_max_packets: self.probation_max_packets,
             media_capabilities: Some(rustrtc::config::MediaCapabilities {
                 audio: audio_capabilities,
                 video: self.video_capabilities.clone(),

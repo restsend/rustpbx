@@ -1904,6 +1904,7 @@ pub struct BridgePeerBuilder {
     callee_config: Option<rustrtc::RtcConfiguration>,
     rtp_port_range: (u16, u16),
     enable_latching: bool,
+    probation_max_packets: Option<u8>,
     external_ip: Option<String>,
     bind_ip: Option<String>,
     caller_audio_capabilities: Option<Vec<rustrtc::config::AudioCapability>>,
@@ -1925,6 +1926,7 @@ impl BridgePeerBuilder {
             callee_config: None,
             rtp_port_range: (20000, 30000),
             enable_latching: false,
+            probation_max_packets: None,
             external_ip: None,
             bind_ip: None,
             caller_audio_capabilities: None,
@@ -1956,6 +1958,11 @@ impl BridgePeerBuilder {
 
     pub fn with_enable_latching(mut self, enable: bool) -> Self {
         self.enable_latching = enable;
+        self
+    }
+
+    pub fn with_probation_max_packets(mut self, max: Option<u8>) -> Self {
+        self.probation_max_packets = max;
         self
     }
 
@@ -2118,6 +2125,7 @@ impl BridgePeerBuilder {
                 rtp_start_port: Some(self.rtp_port_range.0),
                 rtp_end_port: Some(self.rtp_port_range.1),
                 enable_latching: self.enable_latching,
+                probation_max_packets: self.probation_max_packets,
                 external_ip: self.external_ip,
                 bind_ip: self.bind_ip,
                 media_capabilities: callee_media_caps,

@@ -133,7 +133,12 @@ fn current_port_keys(config: &Config) -> HashSet<PortKey> {
         });
     }
 
-    insert_optional_port(&mut set, SocketKind::Udp, config.proxy.udp_port);
+    for port in config.proxy.all_udp_ports() {
+        set.insert(PortKey {
+            kind: SocketKind::Udp,
+            port,
+        });
+    }
     insert_optional_port(&mut set, SocketKind::Tcp, config.proxy.tcp_port);
     insert_optional_port(&mut set, SocketKind::Tcp, config.proxy.tls_port);
     insert_optional_port(&mut set, SocketKind::Tcp, config.proxy.ws_port);
@@ -161,13 +166,13 @@ fn bind_targets(config: &Config) -> (Vec<BindTarget>, Vec<PreflightIssue>) {
 
     match value_as_ip_addr("proxy.addr", &config.proxy.addr) {
         Ok(ip) => {
-            push_target(
-                &mut targets,
-                "proxy.udp_port",
-                ip,
-                config.proxy.udp_port,
-                SocketKind::Udp,
-            );
+            for port in config.proxy.all_udp_ports() {
+                targets.push(BindTarget {
+                    field: "proxy.udp_ports".to_string(),
+                    addr: SocketAddr::new(ip, port),
+                    kind: SocketKind::Udp,
+                });
+            }
             push_target(
                 &mut targets,
                 "proxy.tcp_port",

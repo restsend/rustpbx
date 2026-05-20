@@ -88,6 +88,8 @@ pub struct TrunkConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub health_check_enabled: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub health_check_per_ip: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub health_check_interval_secs: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub health_check_probe_count: Option<u32>,
@@ -202,6 +204,7 @@ impl Default for TrunkConfig {
             rewrite_hostport: true,
             call_id_mode: None,
             health_check_enabled: None,
+            health_check_per_ip: None,
             health_check_interval_secs: None,
             health_check_probe_count: None,
             health_check_fallback_trunk: None,

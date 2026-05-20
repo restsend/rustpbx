@@ -101,6 +101,12 @@ codec_strategy = "performance"
 # Enable NAT media latching (helps with RTP behind NAT, default: true)
 enable_latching = true
 
+# Maximum RTP packets to observe during latching probation before committing
+# to a candidate source address. Higher values improve stability on flaky
+# networks at the cost of slower latch convergence. (default: 6, only used
+# when enable_latching = true)
+latching_probation_max_packets = 6
+
 # Enable NAT fix for SIP signaling
 nat_fix = true
 ```

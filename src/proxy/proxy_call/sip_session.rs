@@ -2174,7 +2174,8 @@ impl SipSession {
         caller_is_webrtc: bool,
     ) -> Result<()> {
         let mut bridge_builder = BridgePeerBuilder::new(format!("{}-app-bridge", self.id))
-            .with_enable_latching(self.server.proxy_config.enable_latching);
+            .with_enable_latching(self.server.proxy_config.enable_latching)
+            .with_probation_max_packets(self.server.proxy_config.latching_probation_max_packets);
 
         if let (Some(start), Some(end)) = (
             self.server.rtp_config.start_port,
@@ -2186,7 +2187,8 @@ impl SipSession {
         if !caller_is_webrtc && caller_offer.contains("a=group:BUNDLE") {
             bridge_builder = bridge_builder
                 .with_rtp_sdp_compatibility(rustrtc::config::SdpCompatibilityMode::Standard)
-                .with_enable_latching(true);
+                .with_enable_latching(true)
+                .with_probation_max_packets(Some(6));
             info!(session_id = %self.id, "RTP caller offered BUNDLE, using Standard SDP mode + latching for app media bridge");
         }
 
@@ -3038,7 +3040,8 @@ impl SipSession {
 
                 let mut track_builder = RtpTrackBuilder::new(Self::CALLER_TRACK_ID.to_string())
                     .with_cancel_token(self.caller_peer().cancel_token())
-                    .with_enable_latching(self.server.proxy_config.enable_latching);
+                    .with_enable_latching(self.server.proxy_config.enable_latching)
+                    .with_probation_max_packets(self.server.proxy_config.latching_probation_max_packets);
 
                 if let Some(ref external_ip) = self.server.rtp_config.external_ip {
                     track_builder = track_builder.with_external_ip(external_ip.clone());
@@ -4164,7 +4167,8 @@ impl SipSession {
         if need_transport_bridge {
             self.media.callee_offer_uses_media_bridge = true;
             let mut bridge_builder = BridgePeerBuilder::new(format!("{}-bridge", self.id))
-                .with_enable_latching(self.server.proxy_config.enable_latching);
+                .with_enable_latching(self.server.proxy_config.enable_latching)
+                .with_probation_max_packets(self.server.proxy_config.latching_probation_max_packets);
             if let (Some(start), Some(end)) = (
                 self.server.rtp_config.start_port,
                 self.server.rtp_config.end_port,
@@ -4177,7 +4181,8 @@ impl SipSession {
             {
                 bridge_builder = bridge_builder
                     .with_rtp_sdp_compatibility(rustrtc::config::SdpCompatibilityMode::Standard)
-                    .with_enable_latching(true);
+                    .with_enable_latching(true)
+                    .with_probation_max_packets(Some(6));
                 info!(session_id = %self.id, "RTP caller offered BUNDLE, using Standard SDP mode + latching for RTP side");
             }
 
@@ -4327,7 +4332,8 @@ impl SipSession {
             self.media.callee_offer_uses_media_bridge = false;
             let mut track_builder = RtpTrackBuilder::new(track_id.clone())
                 .with_cancel_token(self.callee_peer().cancel_token())
-                .with_enable_latching(self.server.proxy_config.enable_latching);
+                .with_enable_latching(self.server.proxy_config.enable_latching)
+                .with_probation_max_packets(self.server.proxy_config.latching_probation_max_packets);
 
             if let Some(ref external_ip) = self.server.rtp_config.external_ip {
                 track_builder = track_builder.with_external_ip(external_ip.clone());
@@ -4433,7 +4439,8 @@ impl SipSession {
 
         let mut track_builder = RtpTrackBuilder::new(Self::CALLER_TRACK_ID.to_string())
             .with_cancel_token(self.caller_peer().cancel_token())
-            .with_enable_latching(self.server.proxy_config.enable_latching);
+            .with_enable_latching(self.server.proxy_config.enable_latching)
+            .with_probation_max_packets(self.server.proxy_config.latching_probation_max_packets);
 
         if let Some(ref external_ip) = self.server.rtp_config.external_ip {
             track_builder = track_builder.with_external_ip(external_ip.clone());
