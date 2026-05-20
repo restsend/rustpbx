@@ -127,6 +127,14 @@ impl ApplicationContext {
     pub async fn set_queue_name(&self, name: impl Into<String>) {
         *self.queue_name.write().await = Some(name.into());
     }
+
+    /// Get a usable database connection reference, or None if disconnected.
+    pub fn db_connection(&self) -> Option<&DatabaseConnection> {
+        match &self.db {
+            DatabaseConnection::Disconnected => None,
+            conn => Some(conn),
+        }
+    }
 }
 
 impl std::fmt::Debug for ApplicationContext {

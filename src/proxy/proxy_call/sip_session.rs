@@ -132,6 +132,8 @@ pub struct SipSession {
     pub reporter: Option<CallReporter>,
     pub recorder: Arc<RwLock<Option<Recorder>>>,
 
+    pub app_event_bridge: Arc<RwLock<Option<crate::proxy::proxy_call::state::SipSessionHandle>>>,
+
     pub conference_bridge: crate::call::runtime::SessionConferenceBridge,
 
     #[allow(dead_code)]
@@ -424,6 +426,7 @@ impl SipSession {
             callee_guards: Vec::new(),
             reporter: None,
             recorder: Arc::new(RwLock::new(None)),
+            app_event_bridge: app_event_bridge.clone(),
             conference_bridge: crate::call::runtime::SessionConferenceBridge::new(),
             cmd_tx: Some(cmd_tx.clone()),
         };
@@ -5088,14 +5091,28 @@ impl SipSession {
     pub async fn stop_recording(&mut self) -> Result<()> {
         if let Some((path, start_time)) = self.media.recording_state.take() {
             let duration = start_time.elapsed();
-            {
+            let file_size = {
                 let mut guard = self.recorder.write();
                 if let Some(ref mut r) = *guard {
                     let _ = r.finalize();
                 }
                 *guard = None;
+                std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0)
+            };
+            info!(path = %path, duration = ?duration, file_size, "Recording stopped");
+
+            let bridge = self.app_event_bridge.read();
+            if let Some(ref handle) = *bridge {
+                let _ = handle.send_app_event(
+                    crate::call::app::ControllerEvent::RecordingComplete(
+                        crate::call::app::RecordingInfo {
+                            path: path.clone(),
+                            duration,
+                            size_bytes: file_size,
+                        },
+                    ),
+                );
             }
-            info!(path = %path, duration = ?duration, "Recording stopped");
         }
         Ok(())
     }

@@ -66,7 +66,6 @@ impl CallApp for VoicemailApp {
     ) -> anyhow::Result<AppAction> {
         if self.state == VoicemailState::Greeting {
             self.state = VoicemailState::Recording;
-            // Use session_id as trace_id for full lifecycle tracking
             let path = format!(
                 "/tmp/voicemail_{}_{}.wav",
                 self.extension, ctx.call_info.session_id
