@@ -1423,8 +1423,12 @@ fn summarize_callrecord(config: Option<&CallRecordConfig>) -> Option<JsonValue> 
 
 fn build_port_list(proxy_cfg: &ProxyConfig) -> Vec<JsonValue> {
     let mut ports = Vec::new();
-    if let Some(port) = proxy_cfg.udp_port {
-        ports.push(json!({ "label": "UDP", "value": port }));
+    for (idx, port) in proxy_cfg.all_udp_ports().iter().enumerate() {
+        ports.push(json!({
+            "label": if idx == 0 { "UDP (primary)" } else { "UDP" },
+            "value": port,
+            "primary": idx == 0,
+        }));
     }
     if let Some(port) = proxy_cfg.tcp_port {
         ports.push(json!({ "label": "TCP", "value": port }));

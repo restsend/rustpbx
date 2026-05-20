@@ -418,7 +418,7 @@ impl SipServerBuilder {
                 None => None,
             };
 
-            if config.udp_port.is_none()
+            if config.all_udp_ports().is_empty()
                 && config.tcp_port.is_none()
                 && config.tls_port.is_none()
                 && config.ws_port.is_none()
@@ -428,7 +428,7 @@ impl SipServerBuilder {
                 ));
             }
 
-            if let Some(udp_port) = config.udp_port {
+            for udp_port in config.all_udp_ports() {
                 let local_addr = SocketAddr::new(local_addr, udp_port);
                 let external_addr = external_ip
                     .as_ref()

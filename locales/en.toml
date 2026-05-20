@@ -787,7 +787,7 @@ summary_updated = "Updated"
 tab_general = "General"
 tab_general_desc = "Identity, status, limits"
 tab_access = "Access"
-tab_access_desc = "Credentials, routing, ACLs"
+tab_access_desc = "Credentials, filters, capacity"
 tab_registration = "Registration"
 tab_registration_desc = "Outbound REGISTER"
 
@@ -825,6 +825,23 @@ field_max_concurrent = "Max concurrent calls"
 field_max_concurrent_placeholder = "e.g. 120"
 field_max_duration = "Max call duration (sec)"
 field_max_duration_placeholder = "e.g. 3600"
+
+# Media Option tab
+tab_media_option = "Media Option"
+tab_media_option_desc = "Media, codecs, recording"
+section_media = "Media Options"
+section_media_desc = "Configure media handling, recording, and codecs."
+field_media_mode = "Media mode"
+field_video_policy = "Video policy"
+field_recording = "Recording"
+field_audio_codecs = "Audio codecs (one per line)"
+field_video_codecs = "Video codecs (one per line)"
+field_codecs_hint = "Common: PCMU, PCMA, G722, G729, OPUS, H264, VP8"
+
+# DID numbers section
+section_did = "DID Numbers"
+section_did_desc = "Direct Inward Dialing numbers assigned to this trunk."
+none = "None"
 
 # Access / Authentication section
 section_auth = "Authentication & routing"

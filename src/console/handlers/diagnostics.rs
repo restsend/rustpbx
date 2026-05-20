@@ -419,13 +419,13 @@ fn build_transport_entries(host: &str, realm: &str, proxy_cfg: &ProxyConfig) -> 
     let host_uri = format_host_for_uri(host);
     let realm_uri = format_host_for_uri(realm);
 
-    if let Some(port) = proxy_cfg.udp_port {
+    for (idx, port) in proxy_cfg.all_udp_ports().iter().enumerate() {
         transports.push(json!({
             "protocol": "udp",
-            "label": "SIP UDP",
+            "label": if idx == 0 { "SIP UDP (primary)" } else { "SIP UDP" },
             "address": format!("{}:{}", host_uri, port),
             "port": port,
-            "example_uri": build_sip_example("sip", &realm_uri, port, 5060),
+            "example_uri": build_sip_example("sip", &realm_uri, *port, 5060),
         }));
     }
 
@@ -679,6 +679,7 @@ fn trunk_config_from_model(model: &sip_trunk::Model) -> Option<routing::TrunkCon
         rewrite_hostport: model.rewrite_hostport,
         call_id_mode: None,
         health_check_enabled: None,
+        health_check_per_ip: None,
         health_check_interval_secs: None,
         health_check_probe_count: None,
         health_check_fallback_trunk: None,

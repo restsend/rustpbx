@@ -253,8 +253,17 @@
                         <div class="flex items-baseline justify-between">
                             <span class="text-xs uppercase tracking-wide text-slate-400">{{ "settings_page.ports" | t
                                 }}</span>
-                            <span class="font-mono"
-                                x-text="(proxyConfig.ports || []).map(port => `${port.label}:${port.value}`).join(', ') || '—'"></span>
+                            <div class="text-right font-mono text-xs">
+                                <template x-for="(port, idx) in (proxyConfig.ports || [])" :key="'port-' + idx">
+                                    <div class="flex items-center gap-1 justify-end"
+                                        :class="port.primary ? 'font-semibold text-slate-900' : 'text-slate-500'">
+                                        <span x-show="port.primary" class="text-amber-500">⭐</span>
+                                        <span x-text="port.label ? port.label + ':' : ''"></span>
+                                        <span x-text="port.value"></span>
+                                    </div>
+                                </template>
+                                <span x-show="!(proxyConfig.ports || []).length">—</span>
+                            </div>
                         </div>
                         <div class="flex items-baseline justify-between">
                             <span class="text-xs uppercase tracking-wide text-slate-400">{{ "settings_page.modules" | t

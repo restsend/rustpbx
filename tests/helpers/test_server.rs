@@ -25,7 +25,7 @@ use rustpbx::{
     proxy::{
         active_call_registry::ActiveProxyCallRegistry,
         auth::AuthModule,
-        call::CallModule,
+        call::{CallModule, DialplanInspector},
         registrar::RegistrarModule,
         routing::{RouteQueueConfig, RouteRule},
         server::{SipServerBuilder, SipServerRef},
@@ -50,6 +50,8 @@ pub struct TestPbxInject {
     pub queues: Option<HashMap<String, RouteQueueConfig>>,
     /// Inject custom AgentRegistry (e.g. skill-group resolver).
     pub agent_registry: Option<Arc<dyn AgentRegistry>>,
+    /// Additional dialplan inspectors to register (e.g. SBC JSON-RPC).
+    pub dialplan_inspectors: Vec<Box<dyn DialplanInspector>>,
 }
 
 /// A running in-process PBX with a real SIP stack and an RWI WebSocket endpoint.
@@ -119,6 +121,9 @@ impl TestPbx {
             });
         if let Some(agent_registry) = inject.agent_registry {
             builder = builder.with_agent_registry(agent_registry);
+        }
+        for inspector in inject.dialplan_inspectors {
+            builder = builder.with_dialplan_inspector(inspector);
         }
 
         let sip_server = builder.build().await.expect("SipServer build failed");

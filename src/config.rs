@@ -84,6 +84,10 @@ fn default_enable_latching() -> bool {
     true
 }
 
+fn default_latching_probation_max_packets() -> Option<u8> {
+    Some(6)
+}
+
 fn default_generated_config_dir() -> String {
     "./config".to_string()
 }
@@ -628,6 +632,8 @@ pub struct ProxyConfig {
     pub ssl_private_key: Option<String>,
     pub ssl_certificate: Option<String>,
     pub udp_port: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub udp_ports: Option<Vec<u16>>,
     pub tcp_port: Option<u16>,
     pub tls_port: Option<u16>,
     pub ws_port: Option<u16>,
@@ -671,6 +677,8 @@ pub struct ProxyConfig {
     pub queues_files: Vec<String>,
     #[serde(default = "default_enable_latching")]
     pub enable_latching: bool,
+    #[serde(default = "default_latching_probation_max_packets")]
+    pub latching_probation_max_packets: Option<u8>,
     #[serde(default)]
     pub trunks: HashMap<String, TrunkConfig>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -938,6 +946,19 @@ impl ProxyConfig {
         self.generated_root_dir().join("acl")
     }
 
+    pub fn all_udp_ports(&self) -> Vec<u16> {
+        let primary = self.udp_port.unwrap_or(5060);
+        let mut ports = vec![primary];
+        if let Some(extra) = &self.udp_ports {
+            for p in extra {
+                if !ports.contains(p) {
+                    ports.push(*p);
+                }
+            }
+        }
+        ports
+    }
+
     pub fn ensure_recording_defaults(&mut self) -> bool {
         let mut fallback = false;
 
@@ -974,6 +995,7 @@ impl Default for ProxyConfig {
             ssl_private_key: None,
             ssl_certificate: None,
             udp_port: Some(5060),
+            udp_ports: None,
             tcp_port: None,
             tls_port: None,
             ws_port: None,
@@ -981,6 +1003,7 @@ impl Default for ProxyConfig {
             registrar_expires: Some(60),
             ensure_user: Some(true),
             enable_latching: true,
+            latching_probation_max_packets: default_latching_probation_max_packets(),
             user_backends: default_user_backends(),
             locator: LocatorConfig::default(),
             locator_webhook: None,
