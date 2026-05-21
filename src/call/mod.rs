@@ -1,5 +1,5 @@
 use crate::{
-    config::{MediaProxyMode, RouteResult},
+    config::{MediaProxyMode, RecordingPolicy, RouteResult},
     media::recorder::RecorderOption,
     proxy::routing::VideoPolicy,
 };
@@ -785,6 +785,8 @@ pub struct Dialplan {
     // Enhanced call control options
     /// Recording configuration
     pub recording: CallRecordingConfig,
+    /// Optional route/trunk-specific recording policy override.
+    pub recording_policy: Option<RecordingPolicy>,
     /// Ringback configuration
     pub ringback: RingbackConfig,
     /// Media configuration
@@ -850,6 +852,7 @@ impl Dialplan {
             flow: DialplanFlow::Targets(DialStrategy::Sequential(vec![])),
             max_ring_time: Duration::from_secs(60), // 60 seconds for ringback
             recording: CallRecordingConfig::default(),
+            recording_policy: None,
             ringback: RingbackConfig::default(),
             media: MediaConfig::default(),
             max_call_duration: Some(Duration::from_secs(3600)), // 1 hour

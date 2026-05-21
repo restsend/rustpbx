@@ -14,8 +14,8 @@ use tracing::info;
 
 use crate::{
     call::{DialDirection, RoutingState, policy::PolicyCheckStatus},
-    config::{DialplanHints, RouteResult},
-    proxy::routing::{ActionType, RouteQueueConfig, RouteRule, SourceTrunk, TrunkConfig},
+    config::{DialplanHints, MediaProxyMode, RouteResult},
+    proxy::routing::{ActionType, MediaMode, RouteQueueConfig, RouteRule, SourceTrunk, TrunkConfig},
 };
 
 #[derive(Debug, Default, Clone)]
@@ -144,9 +144,16 @@ async fn match_invite_impl(
     mut trace: Option<&mut RouteTrace>,
 ) -> Result<RouteResult> {
     let mut option = option;
+    let mut source_hints = None;
+    if let Some(trunk) =
+        source_trunk.and_then(|source| trunks.and_then(|trunks| trunks.get(&source.name)))
+    {
+        merge_trunk_media_hints(&mut source_hints, trunk);
+    }
+
     let routes = match routes {
         Some(routes) => routes,
-        None => return Ok(RouteResult::NotHandled(option, None)),
+        None => return Ok(RouteResult::NotHandled(option, source_hints)),
     };
 
     // Extract URI information early to avoid borrowing conflicts
@@ -274,16 +281,11 @@ async fn match_invite_impl(
             }
         }
 
-        let hints = if !rule.codecs.is_empty() || rule.disable_ice_servers.is_some() {
-            let mut hints = DialplanHints::default();
-            if !rule.codecs.is_empty() {
-                hints.allow_codecs = Some(rule.codecs.clone());
-            }
+        let mut hints = source_hints.clone();
+        if rule.disable_ice_servers.is_some() {
+            let hints = hints.get_or_insert_with(DialplanHints::default);
             hints.disable_ice_servers = rule.disable_ice_servers;
-            Some(hints)
-        } else {
-            None
-        };
+        }
 
         // Handle based on action type
         match rule.action.get_action_type() {
@@ -383,6 +385,7 @@ async fn match_invite_impl(
                         }
 
                         apply_trunk_config(&mut option, trunk_config)?;
+                        merge_trunk_media_hints(&mut hints, trunk_config);
                         info!(
                             "Selected trunk: {} for destination: {}",
                             selected_trunk, trunk_config.dest
@@ -390,6 +393,11 @@ async fn match_invite_impl(
                     } else {
                         info!("Trunk '{}' not found in configuration", selected_trunk);
                     }
+                }
+                if !rule.codecs.is_empty() {
+                    hints
+                        .get_or_insert_with(DialplanHints::default)
+                        .allow_codecs = Some(rule.codecs.clone());
                 }
                 return Ok(RouteResult::Forward(option, hints));
             }
@@ -489,10 +497,16 @@ async fn match_invite_impl(
                                 }
                             }
                             apply_trunk_config(&mut option, trunk_config)?;
+                            merge_trunk_media_hints(&mut hints, trunk_config);
                         }
                     }
                 }
 
+                if !rule.codecs.is_empty() {
+                    hints
+                        .get_or_insert_with(DialplanHints::default)
+                        .allow_codecs = Some(rule.codecs.clone());
+                }
                 return Ok(RouteResult::Queue {
                     option,
                     queue: queue_plan,
@@ -516,7 +530,7 @@ async fn match_invite_impl(
         }
     }
 
-    Ok(RouteResult::NotHandled(option, None))
+    Ok(RouteResult::NotHandled(option, source_hints))
 }
 
 /// Context for rule matching to reduce function arguments
@@ -1138,7 +1152,10 @@ fn select_trunk_weighted(
 }
 
 /// Apply trunk configuration
-pub(crate) fn apply_trunk_config(option: &mut InviteOption, trunk: &TrunkConfig) -> Result<()> {
+pub(crate) fn apply_trunk_config(
+    option: &mut InviteOption,
+    trunk: &TrunkConfig,
+) -> Result<()> {
     // Set destination
     let dest_uri: rsipstack::sip::Uri = trunk
         .dest
@@ -1198,4 +1215,40 @@ pub(crate) fn apply_trunk_config(option: &mut InviteOption, trunk: &TrunkConfig)
     }
 
     Ok(())
+}
+
+fn merge_trunk_media_hints(
+    hints: &mut Option<DialplanHints>,
+    trunk: &TrunkConfig,
+) {
+    if trunk.codec.is_empty()
+        && trunk.media_mode.is_none()
+        && trunk.video_policy.is_none()
+        && trunk.recording.is_none()
+    {
+        return;
+    }
+
+    let hints = hints.get_or_insert_with(DialplanHints::default);
+    if !trunk.codec.is_empty() {
+        hints.allow_codecs = Some(trunk.codec.clone());
+    }
+    if let Some(media_mode) = trunk.media_mode.clone() {
+        hints.media_mode = Some(trunk_media_mode_to_proxy_mode(media_mode));
+    }
+    if let Some(video_policy) = trunk.video_policy.clone() {
+        hints.video_policy = Some(video_policy);
+    }
+    if let Some(recording) = trunk.recording.clone() {
+        hints.recording = Some(recording);
+    }
+}
+
+fn trunk_media_mode_to_proxy_mode(mode: MediaMode) -> MediaProxyMode {
+    match mode {
+        MediaMode::None => MediaProxyMode::None,
+        MediaMode::Bypass => MediaProxyMode::Bypass,
+        MediaMode::Auto => MediaProxyMode::Auto,
+        MediaMode::ForceTranscode => MediaProxyMode::All,
+    }
 }

@@ -4,7 +4,7 @@ use crate::call::{
     CalleeDisplayName, CalleeOfflineMarker, DialDirection, DialStrategy, Dialplan, Location,
     MediaConfig, RouteInvite, RoutingState, SipUser, TransactionCookie, TrunkContext,
 };
-use crate::config::{ProxyConfig, RouteResult};
+use crate::config::{ProxyConfig, RecordingPolicy, RouteResult};
 use crate::media::{Track, recorder::RecorderOption};
 use crate::proxy::active_call_registry::{ActiveProxyCallEntry, ActiveProxyCallStatus};
 use crate::proxy::data::ProxyDataContext;
@@ -783,6 +783,10 @@ impl CallModule {
             .or(self.inner.config.audio_codecs.as_deref());
 
         if let Some(mut hints) = dialplan_hints {
+            if let Some(policy) = hints.recording.take() {
+                dialplan.recording = policy.new_recording_config();
+                dialplan.recording_policy = Some(policy);
+            }
             if let Some(enabled) = hints.enable_recording {
                 dialplan.recording.enabled = enabled;
             }
@@ -823,8 +827,13 @@ impl CallModule {
         Ok(dialplan)
     }
 
-    fn apply_recording_policy(&self, mut dialplan: Dialplan, caller: &SipUser) -> Dialplan {
-        let policy = match self.inner.config.recording.as_ref() {
+    fn apply_recording_policy(
+        &self,
+        mut dialplan: Dialplan,
+        caller: &SipUser,
+        recording_policy_override: Option<&RecordingPolicy>,
+    ) -> Dialplan {
+        let policy = match recording_policy_override.or(self.inner.config.recording.as_ref()) {
             Some(policy) if policy.enabled => policy,
             _ => return dialplan,
         };
@@ -1149,7 +1158,12 @@ impl CallModule {
             }
         }
 
-        let dialplan = self.apply_recording_policy(dialplan, caller);
+        let recording_policy_override = dialplan.recording_policy.clone();
+        let dialplan = self.apply_recording_policy(
+            dialplan,
+            caller,
+            recording_policy_override.as_ref(),
+        );
         Ok(dialplan)
     }
 

@@ -806,6 +806,7 @@ fn default_passthrough_failure() -> bool {
 #[derive(Default, Clone)]
 pub struct DialplanHints {
     pub enable_recording: Option<bool>,
+    pub recording: Option<RecordingPolicy>,
     pub bypass_media: Option<bool>,
     pub max_duration: Option<std::time::Duration>,
     pub enable_sipflow: Option<bool>,
@@ -822,6 +823,7 @@ impl std::fmt::Debug for DialplanHints {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DialplanHints")
             .field("enable_recording", &self.enable_recording)
+            .field("recording", &self.recording)
             .field("bypass_media", &self.bypass_media)
             .field("max_duration", &self.max_duration)
             .field("enable_sipflow", &self.enable_sipflow)
