@@ -3157,9 +3157,11 @@ impl SipSession {
             } else {
                 SdpType::Answer
             };
+            let mut rtp_video_caps = Vec::new();
             if let Ok(desc) = SessionDescription::parse(rtp_sdp_type, sdp) {
+                rtp_video_caps = desc.to_video_capabilities();
                 let selected_video_params =
-                    desc.to_video_capabilities()
+                    rtp_video_caps
                         .first()
                         .map(|cap| rustrtc::RtpCodecParameters {
                             payload_type: cap.payload_type,
@@ -3221,22 +3223,34 @@ impl SipSession {
                                             // contains real candidates (not 0.0.0.0:9)
                                             bridge.caller_pc().wait_for_gathering_complete().await;
                                             debug!(session_id = %self.context.session_id, "Bridge: WebRTC answer created with ICE candidates");
-                                            bridge
+                                            if let Some(answer_sdp) = bridge
                                                 .caller_pc()
                                                 .local_description()
                                                 .map(|d| d.to_sdp_string())
-                                                .map(|answer_sdp| {
-                                                    let filter_audio_to_reference = false;
-                                                    MediaNegotiator::restrict_sdp_to_reference_codecs(
-                                                        SdpType::Answer,
-                                                        &answer_sdp,
-                                                        SdpType::Answer,
-                                                        sdp,
-                                                        filter_audio_to_reference,
-                                                    )
-                                                    .unwrap_or(answer_sdp)
-                                                })
-                                                .or_else(|| Some(callee_sdp.to_string()))
+                                            {
+                                                let filter_audio_to_reference = false;
+                                                let answer_sdp = MediaNegotiator::restrict_sdp_to_reference_codecs(
+                                                    SdpType::Answer,
+                                                    &answer_sdp,
+                                                    SdpType::Answer,
+                                                    sdp,
+                                                    filter_audio_to_reference,
+                                                )
+                                                .unwrap_or(answer_sdp);
+                                                let webrtc_video_caps = SessionDescription::parse(
+                                                    SdpType::Answer,
+                                                    &answer_sdp,
+                                                )
+                                                .map(|desc| desc.to_video_capabilities())
+                                                .unwrap_or_default();
+                                                bridge.set_video_payload_maps(
+                                                    &webrtc_video_caps,
+                                                    &rtp_video_caps,
+                                                );
+                                                Some(answer_sdp)
+                                            } else {
+                                                Some(callee_sdp.to_string())
+                                            }
                                         }
                                     }
                                     Err(e) => {
@@ -3288,10 +3302,12 @@ impl SipSession {
             } else {
                 SdpType::Answer
             };
-            if let Ok(desc) = SessionDescription::parse(webrtc_sdp_type, sdp)
-                && let Err(e) = bridge.caller_pc().set_remote_description(desc).await
-            {
-                warn!(session_id = %self.context.session_id, error = %e, "Failed to set bridge WebRTC remote description");
+            let mut webrtc_video_caps = Vec::new();
+            if let Ok(desc) = SessionDescription::parse(webrtc_sdp_type, sdp) {
+                webrtc_video_caps = desc.to_video_capabilities();
+                if let Err(e) = bridge.caller_pc().set_remote_description(desc).await {
+                    warn!(session_id = %self.context.session_id, error = %e, "Failed to set bridge WebRTC remote description");
+                }
             }
 
             // 2. Set caller's RTP offer on bridge's RTP side and create answer
@@ -3325,6 +3341,18 @@ impl SipSession {
                                                 )
                                                 .unwrap_or(answer_sdp)
                                             });
+                                        if let Some(ref rtp_sdp) = rtp_sdp {
+                                            let rtp_video_caps = SessionDescription::parse(
+                                                SdpType::Answer,
+                                                rtp_sdp,
+                                            )
+                                            .map(|desc| desc.to_video_capabilities())
+                                            .unwrap_or_default();
+                                            bridge.set_video_payload_maps(
+                                                &webrtc_video_caps,
+                                                &rtp_video_caps,
+                                            );
+                                        }
                                         debug!(session_id = %self.context.session_id, sdp = ?rtp_sdp, "Bridge: RTP answer SDP (sent to RTP caller)");
                                         rtp_sdp.or_else(|| Some(callee_sdp.to_string()))
                                     }
@@ -3374,6 +3402,32 @@ impl SipSession {
         let caller_profile = MediaNegotiator::extract_leg_profile(caller_answer_sdp);
         let callee_profile = MediaNegotiator::extract_leg_profile(callee_answer_sdp);
 
+        let caller_endpoint = self.leg_bridge_endpoint(&LegId::from("caller"));
+        let callee_endpoint = self.leg_bridge_endpoint(&LegId::from("callee"));
+
+        match (&caller_profile.dtmf, &callee_profile.dtmf) {
+            (Some(caller_dtmf), Some(callee_dtmf)) => {
+                bridge.set_dtmf_mapping(
+                    caller_endpoint,
+                    caller_dtmf.payload_type,
+                    caller_dtmf.clock_rate,
+                    callee_dtmf.payload_type,
+                    callee_dtmf.clock_rate,
+                );
+                bridge.set_dtmf_mapping(
+                    callee_endpoint,
+                    callee_dtmf.payload_type,
+                    callee_dtmf.clock_rate,
+                    caller_dtmf.payload_type,
+                    caller_dtmf.clock_rate,
+                );
+            }
+            _ => {
+                bridge.clear_dtmf_mapping(caller_endpoint);
+                bridge.clear_dtmf_mapping(callee_endpoint);
+            }
+        }
+
         let (Some(caller_audio), Some(callee_audio)) =
             (&caller_profile.audio, &callee_profile.audio)
         else {
@@ -3381,8 +3435,8 @@ impl SipSession {
         };
 
         if caller_audio.codec == callee_audio.codec {
-            bridge.clear_transcoder(self.leg_bridge_endpoint(&LegId::from("caller")));
-            bridge.clear_transcoder(self.leg_bridge_endpoint(&LegId::from("callee")));
+            bridge.clear_transcoder(caller_endpoint);
+            bridge.clear_transcoder(callee_endpoint);
             debug!(
                 session_id = %self.context.session_id,
                 codec = ?caller_audio.codec,
@@ -3392,13 +3446,13 @@ impl SipSession {
         }
 
         bridge.set_transcoder(
-            self.leg_bridge_endpoint(&LegId::from("caller")),
+            caller_endpoint,
             caller_audio.codec,
             callee_audio.codec,
             callee_audio.payload_type,
         );
         bridge.set_transcoder(
-            self.leg_bridge_endpoint(&LegId::from("callee")),
+            callee_endpoint,
             callee_audio.codec,
             caller_audio.codec,
             caller_audio.payload_type,
@@ -4258,14 +4312,38 @@ impl SipSession {
                     Ok(caller_desc) => {
                         let caller_video_caps = caller_desc.to_video_capabilities();
                         if !caller_video_caps.is_empty() {
-                            info!(
-                                session_id = %self.id,
-                                codecs = ?caller_video_caps.iter().map(|c| format!("{}@{}", c.codec_name, c.payload_type)).collect::<Vec<_>>(),
-                                "Video capabilities configured from caller SDP"
-                            );
-                            bridge_builder = bridge_builder
-                                .with_caller_video_capabilities(caller_video_caps.clone())
-                                .with_callee_video_capabilities(caller_video_caps);
+                            let bridge_video_caps = if caller_is_webrtc != callee_is_webrtc {
+                                let allowed_video_codecs = self
+                                    .server
+                                    .proxy_config
+                                    .video_codecs
+                                    .as_deref()
+                                    .unwrap_or(&[]);
+                                Self::filter_video_caps_for_rtp(
+                                    &caller_video_caps,
+                                    allowed_video_codecs,
+                                )
+                            } else {
+                                caller_video_caps.clone()
+                            };
+
+                            if bridge_video_caps.is_empty() {
+                                warn!(
+                                    session_id = %self.id,
+                                    source_codecs = ?caller_video_caps.iter().map(|c| format!("{}@{}", c.codec_name, c.payload_type)).collect::<Vec<_>>(),
+                                    "Video capabilities skipped after RTP filtering"
+                                );
+                            } else {
+                                info!(
+                                    session_id = %self.id,
+                                    source_codecs = ?caller_video_caps.iter().map(|c| format!("{}@{}", c.codec_name, c.payload_type)).collect::<Vec<_>>(),
+                                    bridge_codecs = ?bridge_video_caps.iter().map(|c| format!("{}@{}", c.codec_name, c.payload_type)).collect::<Vec<_>>(),
+                                    "Video capabilities configured from caller SDP"
+                                );
+                                bridge_builder = bridge_builder
+                                    .with_caller_video_capabilities(bridge_video_caps.clone())
+                                    .with_callee_video_capabilities(bridge_video_caps);
+                            }
                         }
                     }
                     Err(e) => {
