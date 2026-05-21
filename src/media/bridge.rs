@@ -42,7 +42,7 @@
 //! 4. The bridge's RTP side connects to the SIP/RTP endpoint
 
 use crate::media::recorder::{Leg as RecLeg, Recorder};
-use crate::media::transcoder::{RtpTiming, Transcoder};
+use crate::media::transcoder::{RtpTiming, Transcoder, rewrite_dtmf_duration};
 use anyhow::Result;
 use audio_codec::CodecType as AudioCodecType;
 use rustrtc::{
@@ -245,6 +245,14 @@ struct BridgeDtmfSink {
     handler: DtmfHandler,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct BridgePayloadMapping {
+    source_pt: u8,
+    target_pt: u8,
+    source_clock_rate: u32,
+    target_clock_rate: u32,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct BridgeDtmfEventKey {
     digit_code: u8,
@@ -290,6 +298,14 @@ fn output_mode_name(mode: u8) -> &'static str {
 
 fn frame_ticks_20ms(clock_rate: u32) -> u32 {
     (clock_rate / 50).max(1)
+}
+
+fn scale_rtp_timestamp(rtp_timestamp: u32, source_rate: u32, target_rate: u32) -> u32 {
+    if source_rate == target_rate {
+        rtp_timestamp
+    } else {
+        (rtp_timestamp as u64 * target_rate as u64 / source_rate as u64) as u32
+    }
 }
 
 /// BridgePeer manages PeerConnections to bridge media between endpoints.
@@ -368,6 +384,10 @@ pub struct BridgePeer {
     caller_to_callee_transcoder: Arc<parking_lot::RwLock<Option<Transcoder>>>,
     /// Optional RTP timestamp/sequence rewriter for WebRTC→RTP direction.
     caller_to_callee_timing: Arc<parking_lot::RwLock<Option<RtpTiming>>>,
+    /// Optional telephone-event mapping for RTP→WebRTC direction.
+    callee_to_caller_dtmf_mapping: Arc<parking_lot::RwLock<Option<BridgePayloadMapping>>>,
+    /// Optional telephone-event mapping for WebRTC→RTP direction.
+    caller_to_callee_dtmf_mapping: Arc<parking_lot::RwLock<Option<BridgePayloadMapping>>>,
 }
 
 impl BridgePeer {
@@ -425,6 +445,8 @@ impl BridgePeer {
             callee_to_caller_timing: Arc::new(parking_lot::RwLock::new(None)),
             caller_to_callee_transcoder: Arc::new(parking_lot::RwLock::new(None)),
             caller_to_callee_timing: Arc::new(parking_lot::RwLock::new(None)),
+            callee_to_caller_dtmf_mapping: Arc::new(parking_lot::RwLock::new(None)),
+            caller_to_callee_dtmf_mapping: Arc::new(parking_lot::RwLock::new(None)),
         }
     }
 
@@ -1000,6 +1022,47 @@ impl BridgePeer {
         *timing_slot.write() = None;
     }
 
+    /// Configure telephone-event mapping for media received from one bridge endpoint.
+    pub fn set_dtmf_mapping(
+        &self,
+        from_endpoint: BridgeEndpoint,
+        source_pt: u8,
+        source_clock_rate: u32,
+        target_pt: u8,
+        target_clock_rate: u32,
+    ) {
+        let mapping_slot = match from_endpoint {
+            BridgeEndpoint::Callee => &self.callee_to_caller_dtmf_mapping,
+            BridgeEndpoint::Caller => &self.caller_to_callee_dtmf_mapping,
+        };
+
+        *mapping_slot.write() = Some(BridgePayloadMapping {
+            source_pt,
+            target_pt,
+            source_clock_rate,
+            target_clock_rate,
+        });
+
+        info!(
+            bridge_id = %self.id,
+            from = ?from_endpoint,
+            source_pt,
+            source_clock_rate,
+            target_pt,
+            target_clock_rate,
+            "Bridge DTMF mapping configured"
+        );
+    }
+
+    /// Remove telephone-event mapping for media received from one bridge endpoint.
+    pub fn clear_dtmf_mapping(&self, from_endpoint: BridgeEndpoint) {
+        let mapping_slot = match from_endpoint {
+            BridgeEndpoint::Callee => &self.callee_to_caller_dtmf_mapping,
+            BridgeEndpoint::Caller => &self.caller_to_callee_dtmf_mapping,
+        };
+        mapping_slot.write().take();
+    }
+
     fn output_state(&self, endpoint: BridgeEndpoint) -> &Arc<AsyncMutex<OutputState>> {
         match endpoint {
             BridgeEndpoint::Caller => &self.caller_output_state,
@@ -1244,6 +1307,8 @@ impl BridgePeer {
         let caller_to_callee_timing = Arc::clone(&self.caller_to_callee_timing);
         let callee_to_caller_transcoder = Arc::clone(&self.callee_to_caller_transcoder);
         let callee_to_caller_timing = Arc::clone(&self.callee_to_caller_timing);
+        let caller_to_callee_dtmf_mapping = Arc::clone(&self.caller_to_callee_dtmf_mapping);
+        let callee_to_caller_dtmf_mapping = Arc::clone(&self.callee_to_caller_dtmf_mapping);
         let caller_video_payload_type = Arc::clone(&self.caller_video_payload_type);
         let callee_video_payload_type = Arc::clone(&self.callee_video_payload_type);
         let caller_video_payload_map = Arc::clone(&self.caller_video_payload_map);
@@ -1351,6 +1416,7 @@ impl BridgePeer {
                                         Arc::clone(&dtmf_sink),
                                         Some(Arc::clone(&caller_to_callee_transcoder)),
                                         Some(Arc::clone(&caller_to_callee_timing)),
+                                        Some(Arc::clone(&caller_to_callee_dtmf_mapping)),
                                         Some(Arc::clone(&caller_gate)),
                                     ).await;
                                 } else {
@@ -1464,6 +1530,7 @@ impl BridgePeer {
                                         Arc::clone(&dtmf_sink),
                                         Some(Arc::clone(&callee_to_caller_transcoder)),
                                         Some(Arc::clone(&callee_to_caller_timing)),
+                                        Some(Arc::clone(&callee_to_caller_dtmf_mapping)),
                                         None, // Callee→Caller is always allowed
                                     ).await;
                                 } else {
@@ -1506,6 +1573,7 @@ impl BridgePeer {
         dtmf_sink: Arc<parking_lot::RwLock<Option<BridgeDtmfSink>>>,
         transcoder: Option<Arc<parking_lot::RwLock<Option<Transcoder>>>>,
         transcoder_timing: Option<Arc<parking_lot::RwLock<Option<RtpTiming>>>>,
+        dtmf_mapping: Option<Arc<parking_lot::RwLock<Option<BridgePayloadMapping>>>>,
         gate: Option<Arc<AtomicBool>>,
     ) {
         // Get the sender channel from weak pointer
@@ -1619,6 +1687,11 @@ impl BridgePeer {
                                         a.raw_packet = None;
                                         a.marker = false;
                                     }
+                                    let mapped_dtmf = Self::rewrite_dtmf_sample(
+                                        &mut a,
+                                        dtmf_mapping.as_deref(),
+                                        transcoder_timing.as_deref(),
+                                    );
                                     // Apply per-packet transcoding if the codec differs
                                     // between the ingress and egress legs.  The Transcoder is
                                     // set dynamically by sip_session when it detects a mismatch
@@ -1637,7 +1710,7 @@ impl BridgePeer {
                                                 a.payload_type
                                                     .is_some_and(|pt| s.payload_types.contains(&pt))
                                             });
-                                        if is_dtmf {
+                                        if mapped_dtmf || is_dtmf {
                                             return None;
                                         }
                                         let frame = AudioFrame {
@@ -1749,6 +1822,62 @@ impl BridgePeer {
         }
     }
 
+    fn rewrite_dtmf_sample(
+        frame: &mut AudioFrame,
+        mapping_slot: Option<&parking_lot::RwLock<Option<BridgePayloadMapping>>>,
+        timing_slot: Option<&parking_lot::RwLock<Option<RtpTiming>>>,
+    ) -> bool {
+        let Some(mapping_slot) = mapping_slot else {
+            return false;
+        };
+        let Some(mapping) = mapping_slot.read().clone() else {
+            return false;
+        };
+
+        if frame.payload_type != Some(mapping.source_pt) {
+            return false;
+        }
+
+        if mapping.source_clock_rate != mapping.target_clock_rate {
+            frame.data = rewrite_dtmf_duration(
+                &frame.data,
+                mapping.source_clock_rate,
+                mapping.target_clock_rate,
+            );
+        }
+
+        let used_shared_timing = if let Some(timing_slot) = timing_slot {
+            let mut guard = timing_slot.write();
+            if let Some(timing) = guard.as_mut() {
+                timing.rewrite(
+                    frame,
+                    mapping.source_clock_rate,
+                    mapping.target_clock_rate,
+                    mapping.target_pt,
+                );
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
+        if !used_shared_timing {
+            frame.payload_type = Some(mapping.target_pt);
+            frame.clock_rate = mapping.target_clock_rate;
+            if mapping.source_clock_rate != mapping.target_clock_rate {
+                frame.rtp_timestamp = scale_rtp_timestamp(
+                    frame.rtp_timestamp,
+                    mapping.source_clock_rate,
+                    mapping.target_clock_rate,
+                );
+            }
+        }
+
+        true
+    }
+
     fn observe_dtmf_sample(
         dtmf_sink: &Arc<parking_lot::RwLock<Option<BridgeDtmfSink>>>,
         endpoint: BridgeEndpoint,
@@ -1835,6 +1964,7 @@ impl BridgePeer {
         dtmf_sink: Arc<parking_lot::RwLock<Option<BridgeDtmfSink>>>,
         transcoder: Option<Arc<parking_lot::RwLock<Option<Transcoder>>>>,
         transcoder_timing: Option<Arc<parking_lot::RwLock<Option<RtpTiming>>>>,
+        dtmf_mapping: Option<Arc<parking_lot::RwLock<Option<BridgePayloadMapping>>>>,
         gate: Option<Arc<AtomicBool>>,
     ) {
         tokio::spawn(async move {
@@ -1851,6 +1981,7 @@ impl BridgePeer {
                 dtmf_sink,
                 transcoder,
                 transcoder_timing,
+                dtmf_mapping,
                 gate,
             )
             .await;
@@ -3421,6 +3552,7 @@ mod tests {
                     ds,
                     tr,
                     ti,
+                    None, // no DTMF mapping
                     None, // no gate
                 )
                 .await;
@@ -3459,6 +3591,149 @@ mod tests {
             }
             other => panic!("Expected a transcoded PCMU Audio frame, got {:?}", other),
         }
+    }
+
+    #[tokio::test]
+    async fn test_bridge_dtmf_mapping_rewrites_payload_type_and_clock_rate() {
+        use bytes::Bytes;
+        use rustrtc::media::track::sample_track;
+
+        let input_frame = AudioFrame {
+            rtp_timestamp: 48_000,
+            clock_rate: 48_000,
+            data: Bytes::from_static(&[0x05, 0x0A, 0x12, 0xC0]), // digit 5, 4800 ticks
+            sequence_number: Some(10),
+            payload_type: Some(110),
+            marker: true,
+            ..Default::default()
+        };
+
+        let mock_track: Arc<dyn MediaStreamTrack> = Arc::new(OneShotAudioTrack {
+            sample: tokio::sync::Mutex::new(Some(MediaSample::Audio(input_frame))),
+        });
+
+        let (output_tx, output_track, _) = sample_track(MediaKind::Audio, 10);
+        let sender_arc = Arc::new(AsyncMutex::new(Some(output_tx)));
+        let sender_weak = Arc::downgrade(&sender_arc);
+
+        let transcoder = Arc::new(parking_lot::RwLock::new(Some(Transcoder::new(
+            CodecType::PCMU,
+            CodecType::PCMA,
+            8,
+        ))));
+        let dtmf_mapping = Arc::new(parking_lot::RwLock::new(Some(BridgePayloadMapping {
+            source_pt: 110,
+            target_pt: 126,
+            source_clock_rate: 48_000,
+            target_clock_rate: 8_000,
+        })));
+
+        let cancel = CancellationToken::new();
+        let stats = LegStats::new();
+        let dtmf_sink = Arc::new(parking_lot::RwLock::new(None));
+
+        let task_handle = {
+            let c = cancel.clone();
+            let mt = mock_track.clone();
+            let sw = sender_weak.clone();
+            let st = stats;
+            let ds = dtmf_sink;
+            let tr = Some(transcoder);
+            let dm = Some(dtmf_mapping);
+            tokio::spawn(async move {
+                BridgePeer::run_forward_loop(
+                    "test-dtmf-mapping".to_string(),
+                    mt,
+                    sw,
+                    Arc::new(AtomicU8::new(BRIDGE_OUTPUT_PEER)),
+                    c,
+                    ForwardPath::new(LegTransport::Caller, LegTransport::Callee),
+                    st,
+                    None,
+                    None,
+                    ds,
+                    tr,
+                    None,
+                    dm,
+                    None,
+                )
+                .await;
+            })
+        };
+
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        cancel.cancel();
+        let _ = task_handle.await;
+
+        let captured =
+            tokio::time::timeout(std::time::Duration::from_secs(1), output_track.recv()).await;
+
+        match captured {
+            Ok(Ok(MediaSample::Audio(frame))) => {
+                assert_eq!(frame.payload_type, Some(126));
+                assert_eq!(frame.clock_rate, 8_000);
+                assert_eq!(frame.sequence_number, Some(10));
+                assert_eq!(frame.rtp_timestamp, 8_000);
+                assert_eq!(frame.data.as_ref(), &[0x05, 0x0A, 0x03, 0x20]);
+            }
+            other => panic!("Expected mapped DTMF Audio frame, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_bridge_dtmf_mapping_uses_shared_timing_when_available() {
+        use bytes::Bytes;
+
+        let dtmf_mapping = parking_lot::RwLock::new(Some(BridgePayloadMapping {
+            source_pt: 110,
+            target_pt: 126,
+            source_clock_rate: 48_000,
+            target_clock_rate: 8_000,
+        }));
+        let timing = parking_lot::RwLock::new(Some(RtpTiming::default()));
+
+        let mut first = AudioFrame {
+            rtp_timestamp: 48_000,
+            clock_rate: 48_000,
+            data: Bytes::from_static(&[0x05, 0x0A, 0x12, 0xC0]),
+            sequence_number: Some(10),
+            payload_type: Some(110),
+            ..Default::default()
+        };
+        let mut second = AudioFrame {
+            rtp_timestamp: 52_800,
+            clock_rate: 48_000,
+            data: Bytes::from_static(&[0x05, 0x0A, 0x12, 0xC0]),
+            sequence_number: Some(11),
+            payload_type: Some(110),
+            ..Default::default()
+        };
+
+        assert!(BridgePeer::rewrite_dtmf_sample(
+            &mut first,
+            Some(&dtmf_mapping),
+            Some(&timing),
+        ));
+        assert!(BridgePeer::rewrite_dtmf_sample(
+            &mut second,
+            Some(&dtmf_mapping),
+            Some(&timing),
+        ));
+
+        assert_eq!(first.payload_type, Some(126));
+        assert_eq!(first.clock_rate, 8_000);
+        assert_eq!(first.data.as_ref(), &[0x05, 0x0A, 0x03, 0x20]);
+        assert_eq!(second.payload_type, Some(126));
+        assert_eq!(second.clock_rate, 8_000);
+        assert_eq!(second.data.as_ref(), &[0x05, 0x0A, 0x03, 0x20]);
+        assert_eq!(second.rtp_timestamp.wrapping_sub(first.rtp_timestamp), 800);
+        assert_eq!(
+            second
+                .sequence_number
+                .expect("second sequence")
+                .wrapping_sub(first.sequence_number.expect("first sequence")),
+            1
+        );
     }
 
     /// Verify Opus → PCMU transcoding via Transcoder produces correct output.
@@ -3692,6 +3967,7 @@ mod tests {
                     ds,
                     None, // no transcoder
                     None, // no timing
+                    None, // no DTMF mapping
                     None, // no gate
                 )
                 .await;
