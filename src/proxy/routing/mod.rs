@@ -45,7 +45,12 @@ pub struct TrunkConfig {
     pub backup_dest: Option<String>,
     pub username: Option<String>,
     pub password: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        alias = "allow_codecs",
+        alias = "audio_codecs",
+        skip_serializing_if = "Vec::is_empty"
+    )]
     pub codec: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub disabled: Option<bool>,

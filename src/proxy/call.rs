@@ -350,6 +350,43 @@ fn resolve_callee_uri(origin: &rsipstack::sip::Request) -> Result<rsipstack::sip
         .map_err(anyhow::Error::from)
 }
 
+fn parse_allowed_codecs(codec_names: &[String]) -> Vec<CodecType> {
+    let mut allow_codecs = Vec::new();
+    for codec_name in codec_names {
+        let codec_name = codec_name.trim();
+        if codec_name.is_empty() {
+            continue;
+        }
+        match CodecType::try_from(codec_name) {
+            Ok(codec) if !allow_codecs.contains(&codec) => allow_codecs.push(codec),
+            Ok(_) => {}
+            Err(_) => warn!(codec = %codec_name, "Ignoring unsupported audio codec in allow list"),
+        }
+    }
+    allow_codecs
+}
+
+fn apply_allowed_codecs(
+    dialplan: &mut Dialplan,
+    preferred: Option<&[String]>,
+    fallback: Option<&[String]>,
+) {
+    if let Some(codec_names) = preferred {
+        let allow_codecs = parse_allowed_codecs(codec_names);
+        if !allow_codecs.is_empty() {
+            dialplan.allow_codecs = allow_codecs;
+            return;
+        }
+    }
+
+    if let Some(codec_names) = fallback {
+        let allow_codecs = parse_allowed_codecs(codec_names);
+        if !allow_codecs.is_empty() {
+            dialplan.allow_codecs = allow_codecs;
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct CallModuleInner {
     config: Arc<ProxyConfig>,
@@ -730,6 +767,21 @@ impl CallModule {
             dialplan = dialplan.with_targets(targets);
         }
 
+        let trunk_codecs = cookie
+            .get_extension::<TrunkContext>()
+            .and_then(|ctx| {
+                self.inner
+                    .server
+                    .data_context
+                    .trunks_snapshot()
+                    .get(&ctx.name)
+                    .map(|trunk| trunk.codec.clone())
+            })
+            .filter(|codecs| !codecs.is_empty());
+        let fallback_codecs = trunk_codecs
+            .as_deref()
+            .or(self.inner.config.audio_codecs.as_deref());
+
         if let Some(mut hints) = dialplan_hints {
             if let Some(enabled) = hints.enable_recording {
                 dialplan.recording.enabled = enabled;
@@ -754,38 +806,14 @@ impl CallModule {
             if hints.disable_ice_servers == Some(true) {
                 dialplan.media.ice_servers = None;
             }
-            if let Some(codecs) = hints.allow_codecs {
-                let mut allow_codecs = Vec::new();
-                for codec_name in codecs {
-                    if let Ok(codec) = CodecType::try_from(codec_name.as_str()) {
-                        allow_codecs.push(codec);
-                    }
-                }
-                if !allow_codecs.is_empty() {
-                    dialplan.allow_codecs = allow_codecs;
-                }
-            } else if let Some(codecs) = &self.inner.config.audio_codecs {
-                let mut allow_codecs = Vec::new();
-                for codec_name in codecs {
-                    if let Ok(codec) = CodecType::try_from(codec_name.as_str()) {
-                        allow_codecs.push(codec);
-                    }
-                }
-                if !allow_codecs.is_empty() {
-                    dialplan.allow_codecs = allow_codecs;
-                }
-            }
+            apply_allowed_codecs(
+                &mut dialplan,
+                hints.allow_codecs.as_deref(),
+                fallback_codecs,
+            );
             dialplan.extensions = std::mem::take(&mut hints.extensions);
-        } else if let Some(codecs) = &self.inner.config.audio_codecs {
-            let mut allow_codecs = Vec::new();
-            for codec_name in codecs {
-                if let Ok(codec) = CodecType::try_from(codec_name.as_str()) {
-                    allow_codecs.push(codec);
-                }
-            }
-            if !allow_codecs.is_empty() {
-                dialplan.allow_codecs = allow_codecs;
-            }
+        } else {
+            apply_allowed_codecs(&mut dialplan, None, fallback_codecs);
         }
 
         if callee_is_same_realm && internal_lookup_empty {
@@ -2198,7 +2226,7 @@ mod tests {
     use crate::call::Location;
     use crate::call::{DialDirection, RouteInvite, SipUser, TransactionCookie};
     use crate::config::RouteResult;
-    use crate::proxy::tests::common::create_test_server;
+    use crate::proxy::tests::common::{create_test_server, create_test_server_with_config};
     use async_trait::async_trait;
     use rsipstack::dialog::invitation::InviteOption;
 
@@ -2528,6 +2556,58 @@ mod tests {
             dialplan.extensions.get::<CalleeOfflineMarker>().is_some(),
             "offline marker should be set for same-realm locator-empty"
         );
+    }
+
+    #[tokio::test]
+    async fn default_resolve_applies_source_trunk_codecs_from_trunk_context() {
+        let mut proxy_config = ProxyConfig::default();
+        proxy_config.audio_codecs = Some(vec!["pcmu".to_string()]);
+        proxy_config.trunks.insert(
+            "inbound_192_168_3_7".to_string(),
+            TrunkConfig {
+                dest: "sip:192.168.3.7:5060".to_string(),
+                codec: vec!["pcma".to_string()],
+                direction: Some(crate::proxy::routing::TrunkDirection::Inbound),
+                inbound_hosts: vec!["192.168.3.7".to_string()],
+                ..Default::default()
+            },
+        );
+
+        let (server, config) = create_test_server_with_config(proxy_config).await;
+        let module = CallModule::new(config, server.clone());
+
+        let mut request = crate::proxy::tests::common::create_test_request(
+            rsipstack::sip::Method::Invite,
+            "charlie",
+            None,
+            "rustpbx.com",
+            None,
+        );
+        request.uri = rsipstack::sip::Uri::try_from("sip:alice@rustpbx.com").unwrap();
+        replace_to_header(
+            &mut request,
+            rsipstack::sip::Uri::try_from("sip:alice@rustpbx.com").unwrap(),
+        );
+
+        let caller = SipUser {
+            username: "charlie".to_string(),
+            realm: Some("rustpbx.com".to_string()),
+            ..Default::default()
+        };
+        let cookie = TransactionCookie::default();
+        cookie.insert_extension(TrunkContext {
+            id: None,
+            name: "inbound_192_168_3_7".to_string(),
+            tenant_id: None,
+            did_numbers: vec![],
+        });
+
+        let dialplan = module
+            .default_resolve(&request, Box::new(NotHandledRouteInvite), &caller, &cookie)
+            .await
+            .expect("same-realm trunk-originated call should resolve");
+
+        assert_eq!(dialplan.allow_codecs, vec![CodecType::PCMA]);
     }
 
     #[test]

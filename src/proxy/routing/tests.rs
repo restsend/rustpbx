@@ -380,6 +380,19 @@ async fn test_match_invite_exact_match() {
     }
 }
 
+#[test]
+fn test_trunk_config_accepts_allow_codecs_alias() {
+    let trunk: TrunkConfig = toml::from_str(
+        r#"
+        dest = "sip:gateway.rustpbx.com:5060"
+        allow_codecs = ["pcma", "pcmu"]
+        "#,
+    )
+    .expect("trunk config should parse allow_codecs");
+
+    assert_eq!(trunk.codec, vec!["pcma".to_string(), "pcmu".to_string()]);
+}
+
 #[tokio::test]
 async fn test_match_invite_regex_match() {
     let routing_state = Arc::new(RoutingState::new());
