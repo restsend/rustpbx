@@ -22,6 +22,10 @@ pub struct SipFlowUploadHook {
 #[async_trait]
 impl CallRecordHook for SipFlowUploadHook {
     async fn on_record_completed(&self, record: &mut CallRecord) -> anyhow::Result<()> {
+        if record.answer_time.is_none() {
+            return Ok(());
+        }
+
         let backend = self.backend.clone();
         let upload_config = self.upload_config.clone();
         let db = self.db.clone();
@@ -251,6 +255,7 @@ mod tests {
         let mut record = CallRecord::default();
         record.call_id = "test-call-id".to_string();
         record.start_time = now - chrono::Duration::seconds(30);
+        record.answer_time = Some(now - chrono::Duration::seconds(20));
         record.end_time = now;
         record.caller = "alice".to_string();
         record.callee = "bob".to_string();
