@@ -145,6 +145,10 @@ impl RecordingUploadHook {
 #[async_trait]
 impl CallRecordHook for RecordingUploadHook {
     async fn on_record_completed(&self, record: &mut CallRecord) -> anyhow::Result<()> {
+        if record.answer_time.is_none() {
+            return Ok(());
+        }
+
         if !self.policy.uploads_recording() {
             return Ok(());
         }
