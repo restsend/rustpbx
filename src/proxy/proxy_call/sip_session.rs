@@ -2380,14 +2380,34 @@ impl SipSession {
             Some("All targets failed".to_string()),
         );
         let total = targets.len() as u32;
+        let mut caller_end_check = tokio::time::interval(Duration::from_millis(100));
 
-        while let Some(join_result) = fork_set.next().await {
-            if self.cancel_token.is_cancelled() {
-                return Err((
-                    StatusCode::RequestTerminated,
-                    Some("Caller cancelled".to_string()),
-                ));
-            }
+        while !fork_set.is_empty() {
+            let join_result = tokio::select! {
+                _ = caller_end_check.tick() => {
+                    if self.server_dialog.state().is_terminated() {
+                        info!(
+                            session_id = %self.context.session_id,
+                            "Caller dialog terminated while parallel callee INVITEs were pending"
+                        );
+                        fork_cancel.cancel();
+                        self.cancel_token.cancel();
+                        return Err((
+                            StatusCode::RequestTerminated,
+                            Some("Caller cancelled".to_string()),
+                        ));
+                    }
+                    continue;
+                }
+                _ = self.cancel_token.cancelled() => {
+                    fork_cancel.cancel();
+                    return Err((
+                        StatusCode::RequestTerminated,
+                        Some("Caller cancelled".to_string()),
+                    ));
+                }
+                Some(join_result) = fork_set.next() => join_result,
+            };
 
             match join_result {
                 Ok(Some((winner_idx, Ok((dialog, response)), callee_uri))) => {
