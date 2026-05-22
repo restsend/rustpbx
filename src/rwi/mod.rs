@@ -16,6 +16,6 @@ pub use processor::*;
 pub use session::*;
 
 pub use proto::{
-    CallIncomingData, CallMetadata, IvrFlowContext, IvrNodeInfo, RecordingMetadata, RwiCommand,
-    RwiEvent,
+    CallIncomingData, CallMeta, CallMetaStore, CallMetadata, EventCallContext, IvrFlowContext,
+    IvrNodeInfo, RecordingMetadata, RwiCommand, RwiEvent,
 };

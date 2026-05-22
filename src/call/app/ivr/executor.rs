@@ -1,12 +1,10 @@
+use super::common::{self, ActionResult, SessionData, TerminalAction, WaitEvent};
+use super::config::{ActionNode, EntryAction};
+use super::provider::{ActionProvider, EndReason, ProviderContext, ProviderEvent, SessionContext};
+use super::trace::{IvrTraceCollector, IvrTraceEntry, IvrTraceSession};
 use crate::call::app::{
     AppAction, AppEvent, ApplicationContext, CallApp, CallAppType, CallController,
 };
-use super::common::{self, ActionResult, SessionData, TerminalAction, WaitEvent};
-use super::config::{ActionNode, EntryAction};
-use super::provider::{
-    ActionProvider, EndReason, ProviderContext, ProviderEvent, SessionContext,
-};
-use super::trace::{IvrTraceCollector, IvrTraceEntry, IvrTraceSession};
 use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -134,14 +132,25 @@ impl StepIvrApp {
 
     fn increment_total_steps(&self) {
         if let Some(t) = self.effective_trace() {
-            let sid = self.sess.variables.get("session_id").cloned().unwrap_or_default();
+            let sid = self
+                .sess
+                .variables
+                .get("session_id")
+                .cloned()
+                .unwrap_or_default();
             tokio::spawn(async move {
                 t.increment_steps(&sid).await;
             });
         }
     }
 
-    async fn record_session_start(&self, session_id: &str, caller: &str, callee: &str, direction: &str) {
+    async fn record_session_start(
+        &self,
+        session_id: &str,
+        caller: &str,
+        callee: &str,
+        direction: &str,
+    ) {
         if let Some(t) = self.effective_trace() {
             let sess = IvrTraceSession {
                 session_id: session_id.to_string(),
@@ -161,7 +170,12 @@ impl StepIvrApp {
     }
 
     async fn record_session_end(&self, status: &str) {
-        let session_id = self.sess.variables.get("session_id").cloned().unwrap_or_default();
+        let session_id = self
+            .sess
+            .variables
+            .get("session_id")
+            .cloned()
+            .unwrap_or_default();
         if let Some(t) = self.effective_trace() {
             let sid = session_id;
             let st = status.to_string();
@@ -200,7 +214,8 @@ impl StepIvrApp {
             EntryAction::JumpIvr { .. } => "JumpIvr",
             EntryAction::RouteToAgent { .. } => "RouteToAgent",
             EntryAction::VoipBridge { .. } => "VoipBridge",
-        }.to_string();
+        }
+        .to_string();
         let action_json = serde_json::to_string(&node).ok();
         let start = std::time::Instant::now();
         let result = self.execute_node(&node, ctrl, ctx).await;
@@ -213,9 +228,24 @@ impl StepIvrApp {
                         self.step_index += 1;
                         self.increment_total_steps();
                         self.record_trace(IvrTraceEntry {
-                            session_id: self.sess.variables.get("session_id").cloned().unwrap_or_default(),
-                            caller: self.sess.variables.get("caller").cloned().unwrap_or_default(),
-                            callee: self.sess.variables.get("callee").cloned().unwrap_or_default(),
+                            session_id: self
+                                .sess
+                                .variables
+                                .get("session_id")
+                                .cloned()
+                                .unwrap_or_default(),
+                            caller: self
+                                .sess
+                                .variables
+                                .get("caller")
+                                .cloned()
+                                .unwrap_or_default(),
+                            callee: self
+                                .sess
+                                .variables
+                                .get("callee")
+                                .cloned()
+                                .unwrap_or_default(),
                             timestamp: chrono::Utc::now(),
                             step_index: self.step_index,
                             event_type: "action_execute".to_string(),
@@ -228,8 +258,12 @@ impl StepIvrApp {
                             error: None,
                         });
                         match terminal {
-                            TerminalAction::Transfer(target) => (AppAction::Transfer(target), "terminal"),
-                            TerminalAction::Hangup { reason, code } => (AppAction::Hangup { reason, code }, "terminal"),
+                            TerminalAction::Transfer(target) => {
+                                (AppAction::Transfer(target), "terminal")
+                            }
+                            TerminalAction::Hangup { reason, code } => {
+                                (AppAction::Hangup { reason, code }, "terminal")
+                            }
                             TerminalAction::Exit => (AppAction::Exit, "terminal"),
                         }
                     }
@@ -237,17 +271,30 @@ impl StepIvrApp {
                         self.current_node = Some(next);
                         (AppAction::Continue, "chain_next")
                     }
-                    ActionResult::WaitFor(_) => {
-                        (AppAction::Continue, "continue")
-                    }
+                    ActionResult::WaitFor(_) => (AppAction::Continue, "continue"),
                 };
                 Ok(app_action)
             }
             Err(e) => {
                 self.record_trace(IvrTraceEntry {
-                    session_id: self.sess.variables.get("session_id").cloned().unwrap_or_default(),
-                    caller: self.sess.variables.get("caller").cloned().unwrap_or_default(),
-                    callee: self.sess.variables.get("callee").cloned().unwrap_or_default(),
+                    session_id: self
+                        .sess
+                        .variables
+                        .get("session_id")
+                        .cloned()
+                        .unwrap_or_default(),
+                    caller: self
+                        .sess
+                        .variables
+                        .get("caller")
+                        .cloned()
+                        .unwrap_or_default(),
+                    callee: self
+                        .sess
+                        .variables
+                        .get("callee")
+                        .cloned()
+                        .unwrap_or_default(),
                     timestamp: chrono::Utc::now(),
                     step_index: self.step_index,
                     event_type: "action_execute".to_string(),
@@ -266,10 +313,30 @@ impl StepIvrApp {
 
     async fn request_next(&self, event: Option<ProviderEvent>) -> anyhow::Result<ActionNode> {
         let ctx = ProviderContext {
-            session_id: self.sess.variables.get("session_id").cloned().unwrap_or_default(),
-            caller: self.sess.variables.get("caller").cloned().unwrap_or_default(),
-            callee: self.sess.variables.get("callee").cloned().unwrap_or_default(),
-            direction: self.sess.variables.get("direction").cloned().unwrap_or_default(),
+            session_id: self
+                .sess
+                .variables
+                .get("session_id")
+                .cloned()
+                .unwrap_or_default(),
+            caller: self
+                .sess
+                .variables
+                .get("caller")
+                .cloned()
+                .unwrap_or_default(),
+            callee: self
+                .sess
+                .variables
+                .get("callee")
+                .cloned()
+                .unwrap_or_default(),
+            direction: self
+                .sess
+                .variables
+                .get("direction")
+                .cloned()
+                .unwrap_or_default(),
             tenant_id: self.sess.variables.get("tenant_id").cloned(),
             ivr_id: self.sess.variables.get("ivr_id").cloned(),
             variables: self.sess.variables.clone(),
@@ -305,27 +372,48 @@ impl StepIvrApp {
                 EntryAction::JumpIvr { .. } => "JumpIvr",
                 EntryAction::RouteToAgent { .. } => "RouteToAgent",
                 EntryAction::VoipBridge { .. } => "VoipBridge",
-            }.to_string(),
+            }
+            .to_string(),
             Err(_) => "error".to_string(),
         };
-        let event_type = ctx.event.as_ref().map(|e| match e {
-            ProviderEvent::SessionStart => "session_start",
-            ProviderEvent::AudioComplete { .. } => "audio_complete",
-            ProviderEvent::Dtmf { .. } => "dtmf",
-            ProviderEvent::DtmfTimeout => "dtmf_timeout",
-            ProviderEvent::ApiResponse { .. } => "api_response",
-            ProviderEvent::PhoneCollected { .. } => "phone_collected",
-            ProviderEvent::RecordingComplete { .. } => "recording_complete",
-            ProviderEvent::InputVoice { .. } => "input_voice",
-            ProviderEvent::Error { .. } => "error",
-            ProviderEvent::DtmfMenuInvalid { .. } => "dtmf_menu_invalid",
-            ProviderEvent::DtmfMenuTimeout => "dtmf_menu_timeout",
-        }).unwrap_or("unknown").to_string();
+        let event_type = ctx
+            .event
+            .as_ref()
+            .map(|e| match e {
+                ProviderEvent::SessionStart => "session_start",
+                ProviderEvent::AudioComplete { .. } => "audio_complete",
+                ProviderEvent::Dtmf { .. } => "dtmf",
+                ProviderEvent::DtmfTimeout => "dtmf_timeout",
+                ProviderEvent::ApiResponse { .. } => "api_response",
+                ProviderEvent::PhoneCollected { .. } => "phone_collected",
+                ProviderEvent::RecordingComplete { .. } => "recording_complete",
+                ProviderEvent::InputVoice { .. } => "input_voice",
+                ProviderEvent::Error { .. } => "error",
+                ProviderEvent::DtmfMenuInvalid { .. } => "dtmf_menu_invalid",
+                ProviderEvent::DtmfMenuTimeout => "dtmf_menu_timeout",
+            })
+            .unwrap_or("unknown")
+            .to_string();
 
         let step_idx = self.step_index;
-        let ses_id = self.sess.variables.get("session_id").cloned().unwrap_or_default();
-        let caller = self.sess.variables.get("caller").cloned().unwrap_or_default();
-        let callee = self.sess.variables.get("callee").cloned().unwrap_or_default();
+        let ses_id = self
+            .sess
+            .variables
+            .get("session_id")
+            .cloned()
+            .unwrap_or_default();
+        let caller = self
+            .sess
+            .variables
+            .get("caller")
+            .cloned()
+            .unwrap_or_default();
+        let callee = self
+            .sess
+            .variables
+            .get("callee")
+            .cloned()
+            .unwrap_or_default();
         let ev_detail = match &ctx.event {
             Some(ProviderEvent::Dtmf { digit }) => Some(format!("digit={}", digit)),
             Some(ProviderEvent::ApiResponse { status, .. }) => Some(format!("status={}", status)),
@@ -336,17 +424,25 @@ impl StepIvrApp {
         match &result {
             Ok(node) => {
                 let action_json = serde_json::to_string(node).ok();
-                let result_kind = if node.next.is_some() { "continue" } else {
+                let result_kind = if node.next.is_some() {
+                    "continue"
+                } else {
                     match &node.action {
-                        EntryAction::Transfer { .. } | EntryAction::Hangup { .. } | EntryAction::PlayAndHangup { .. }
-                        | EntryAction::JumpIvr { .. } | EntryAction::RouteToAgent { .. } | EntryAction::VoipBridge { .. }
-                        | EntryAction::Queue { .. } | EntryAction::Voicemail { .. } => "terminal",
+                        EntryAction::Transfer { .. }
+                        | EntryAction::Hangup { .. }
+                        | EntryAction::PlayAndHangup { .. }
+                        | EntryAction::JumpIvr { .. }
+                        | EntryAction::RouteToAgent { .. }
+                        | EntryAction::VoipBridge { .. }
+                        | EntryAction::Queue { .. }
+                        | EntryAction::Voicemail { .. } => "terminal",
                         _ => "continue",
                     }
                 };
                 self.record_trace(IvrTraceEntry {
                     session_id: ses_id,
-                    caller, callee,
+                    caller,
+                    callee,
                     timestamp: chrono::Utc::now(),
                     step_index: step_idx,
                     event_type,
@@ -362,7 +458,8 @@ impl StepIvrApp {
             Err(e) => {
                 self.record_trace(IvrTraceEntry {
                     session_id: ses_id,
-                    caller, callee,
+                    caller,
+                    callee,
                     timestamp: chrono::Utc::now(),
                     step_index: step_idx,
                     event_type,
@@ -405,7 +502,14 @@ impl StepIvrApp {
         ctrl: &mut CallController,
         ctx: &ApplicationContext,
     ) -> anyhow::Result<ActionResult> {
-        let result = common::execute_action(&node.action, ctrl, ctx, &mut self.sess, self.tts_service.as_ref()).await?;
+        let result = common::execute_action(
+            &node.action,
+            ctrl,
+            ctx,
+            &mut self.sess,
+            self.tts_service.as_ref(),
+        )
+        .await?;
         if let ActionResult::WaitFor(WaitEvent::AudioComplete { .. }) = &result {
             if node.action.is_dtmf_menu() {
                 self.pending_menu = Some(self.build_pending_menu(&node.action));
@@ -543,7 +647,8 @@ impl CallApp for StepIvrApp {
             &context.call_info.caller,
             &context.call_info.callee,
             &context.call_info.direction,
-        ).await;
+        )
+        .await;
 
         self.current_node = Some(self.request_next(Some(ProviderEvent::SessionStart)).await?);
         self.__exec_node(ctrl, context).await
@@ -561,6 +666,9 @@ impl CallApp for StepIvrApp {
             self.interrupt_on_dtmf = false;
 
             if let Some(next) = self.handle_menu_dtmf(&digit) {
+                // Notify provider about local DTMF resolution so it stays
+                // informed about user input even without a round-trip.
+                self.provider.on_local_dtmf_match(&digit, &next).await;
                 self.current_node = Some(next);
                 return self.__exec_node(ctrl, context).await;
             }
@@ -607,10 +715,8 @@ impl CallApp for StepIvrApp {
         }
 
         self.current_node = Some(
-            self.request_next(Some(ProviderEvent::AudioComplete {
-                interrupted: false,
-            }))
-            .await?,
+            self.request_next(Some(ProviderEvent::AudioComplete { interrupted: false }))
+                .await?,
         );
         self.__exec_node(ctrl, context).await
     }
@@ -664,9 +770,8 @@ impl CallApp for StepIvrApp {
     async fn on_exit(&mut self, reason: crate::call::app::ExitReason) -> anyhow::Result<()> {
         let end_reason = match reason {
             crate::call::app::ExitReason::Normal => EndReason::Normal,
-            crate::call::app::ExitReason::Hangup | crate::call::app::ExitReason::RemoteHangup(_) => {
-                EndReason::Hangup
-            }
+            crate::call::app::ExitReason::Hangup
+            | crate::call::app::ExitReason::RemoteHangup(_) => EndReason::Hangup,
             crate::call::app::ExitReason::Transferred => EndReason::Transfer(String::new()),
             crate::call::app::ExitReason::Error(e) => EndReason::Error(e),
             _ => EndReason::Normal,
@@ -757,9 +862,11 @@ mod tests {
             .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
             .await;
         stack
-            .assert_cmd(200, "transfer", |c| {
-                matches!(c, CallCommand::Transfer { target, .. } if target == "2001")
-            })
+            .assert_cmd(
+                200,
+                "transfer",
+                |c| matches!(c, CallCommand::Transfer { target, .. } if target == "2001"),
+            )
             .await;
     }
 
@@ -778,17 +885,13 @@ mod tests {
             }),
         );
 
-        let mut stack = MockCallStack::run(
-            Box::new(mock_app(vec![node])),
-            "1001",
-            "2000",
-        );
+        let mut stack = MockCallStack::run(Box::new(mock_app(vec![node])), "1001", "2000");
         stack
             .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
             .await;
         stack
             .assert_cmd(200, "play", |c| {
-                    matches!(
+                matches!(
                     c,
                     CallCommand::Play {
                         source: crate::call::domain::MediaSource::File { path }, ..
@@ -800,9 +903,11 @@ mod tests {
         stack.audio_complete("ivr_prompt");
 
         stack
-            .assert_cmd(200, "transfer", |c| {
-                matches!(c, CallCommand::Transfer { target, .. } if target == "2001")
-            })
+            .assert_cmd(
+                200,
+                "transfer",
+                |c| matches!(c, CallCommand::Transfer { target, .. } if target == "2001"),
+            )
             .await;
     }
 
@@ -819,17 +924,14 @@ mod tests {
             target: "2001".into(),
         });
 
-        let mut stack = MockCallStack::run(
-            Box::new(mock_app(vec![prompt, transfer])),
-            "1001",
-            "2000",
-        );
+        let mut stack =
+            MockCallStack::run(Box::new(mock_app(vec![prompt, transfer])), "1001", "2000");
         stack
             .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
             .await;
         stack
             .assert_cmd(200, "play", |c| {
-                    matches!(
+                matches!(
                     c,
                     CallCommand::Play {
                         source: crate::call::domain::MediaSource::File { path }, ..
@@ -840,9 +942,11 @@ mod tests {
         stack.audio_complete("ivr_prompt");
 
         stack
-            .assert_cmd(200, "transfer", |c| {
-                matches!(c, CallCommand::Transfer { target, .. } if target == "2001")
-            })
+            .assert_cmd(
+                200,
+                "transfer",
+                |c| matches!(c, CallCommand::Transfer { target, .. } if target == "2001"),
+            )
             .await;
     }
 
@@ -875,11 +979,7 @@ mod tests {
             invalid_action: Some(Box::new(ActionNode::new(EntryAction::Repeat))),
         });
 
-        let mut stack = MockCallStack::run(
-            Box::new(mock_app(vec![menu])),
-            "1001",
-            "2000",
-        );
+        let mut stack = MockCallStack::run(Box::new(mock_app(vec![menu])), "1001", "2000");
         stack
             .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
             .await;
@@ -902,12 +1002,16 @@ mod tests {
 
         // DTMF triggers StopPlayback first, then Transfer
         stack
-            .assert_cmd(200, "stop", |c| matches!(c, CallCommand::StopPlayback { .. }))
+            .assert_cmd(200, "stop", |c| {
+                matches!(c, CallCommand::StopPlayback { .. })
+            })
             .await;
         stack
-            .assert_cmd(200, "transfer", |c| {
-                matches!(c, CallCommand::Transfer { target, .. } if target == "2001")
-            })
+            .assert_cmd(
+                200,
+                "transfer",
+                |c| matches!(c, CallCommand::Transfer { target, .. } if target == "2001"),
+            )
             .await;
     }
 
@@ -987,9 +1091,11 @@ mod tests {
             .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
             .await;
         stack
-            .assert_cmd(200, "transfer", |c| {
-                matches!(c, CallCommand::Transfer { target, .. } if target == "2001")
-            })
+            .assert_cmd(
+                200,
+                "transfer",
+                |c| matches!(c, CallCommand::Transfer { target, .. } if target == "2001"),
+            )
             .await;
 
         // Wait for async trace writes
@@ -1027,11 +1133,7 @@ mod tests {
             }),
         );
 
-        let mut stack = MockCallStack::run(
-            Box::new(mock_app(vec![node])),
-            "1001",
-            "2000",
-        );
+        let mut stack = MockCallStack::run(Box::new(mock_app(vec![node])), "1001", "2000");
         stack
             .assert_cmd(200, "accept", |c| matches!(c, CallCommand::Answer { .. }))
             .await;
@@ -1049,9 +1151,11 @@ mod tests {
         // After prompt completes, Transfer should fire WITHOUT provider call
         stack.audio_complete("ivr_prompt");
         stack
-            .assert_cmd(200, "transfer", |c| {
-                matches!(c, CallCommand::Transfer { target, .. } if target == "2001")
-            })
+            .assert_cmd(
+                200,
+                "transfer",
+                |c| matches!(c, CallCommand::Transfer { target, .. } if target == "2001"),
+            )
             .await;
     }
 
@@ -1085,7 +1189,7 @@ mod tests {
         let responses = Arc::new(Mutex::new(responses.into_iter()));
         let app = Router::new().route(
             "/ivr/step",
-            post(move |Json(body): Json<serde_json::Value>| {
+            post(move |Json(_body): Json<serde_json::Value>| {
                 let resp = {
                     let mut it = responses.lock().unwrap();
                     it.next().unwrap_or(serde_json::json!({"type": "hangup"}))
@@ -1119,7 +1223,7 @@ mod tests {
         let resp = serde_json::to_value(&entry).unwrap();
 
         let url = spawn_mock_provider(vec![resp]).await;
-        let mut app = StepIvrApp::new(&url);
+        let app = StepIvrApp::new(&url);
 
         let mut stack = MockCallStack::run(Box::new(app), "1001", "2000");
         stack
@@ -1138,9 +1242,11 @@ mod tests {
         // Audio complete triggers the next chain
         stack.audio_complete("ivr_prompt");
         stack
-            .assert_cmd(200, "transfer", |c| {
-                matches!(c, CallCommand::Transfer { target, .. } if target == "2001")
-            })
+            .assert_cmd(
+                200,
+                "transfer",
+                |c| matches!(c, CallCommand::Transfer { target, .. } if target == "2001"),
+            )
             .await;
     }
 
@@ -1150,9 +1256,12 @@ mod tests {
         use std::collections::HashMap;
 
         let mut entries = HashMap::new();
-        entries.insert("1".into(), ActionNode::new(EntryAction::Transfer {
-            target: "2001".into(),
-        }));
+        entries.insert(
+            "1".into(),
+            ActionNode::new(EntryAction::Transfer {
+                target: "2001".into(),
+            }),
+        );
 
         let menu_resp = ActionNode::new(EntryAction::DtmfMenu {
             greeting: Some("menu.wav".into()),
@@ -1166,11 +1275,9 @@ mod tests {
             invalid_action: Some(Box::new(ActionNode::new(EntryAction::Repeat))),
         });
 
-        let url = spawn_mock_provider(vec![
-            serde_json::to_value(&menu_resp).unwrap(),
-        ]).await;
+        let url = spawn_mock_provider(vec![serde_json::to_value(&menu_resp).unwrap()]).await;
 
-        let mut app = StepIvrApp::new(&url);
+        let app = StepIvrApp::new(&url);
 
         let mut stack = MockCallStack::run(Box::new(app), "1001", "2000");
         stack
@@ -1195,12 +1302,16 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(100));
         let _ = stack.drain_cmds();
         stack
-            .assert_cmd(500, "stop", |c| matches!(c, CallCommand::StopPlayback { .. }))
+            .assert_cmd(500, "stop", |c| {
+                matches!(c, CallCommand::StopPlayback { .. })
+            })
             .await;
         stack
-            .assert_cmd(500, "transfer", |c| {
-                matches!(c, CallCommand::Transfer { target, .. } if target == "2001")
-            })
+            .assert_cmd(
+                500,
+                "transfer",
+                |c| matches!(c, CallCommand::Transfer { target, .. } if target == "2001"),
+            )
             .await;
     }
 
@@ -1226,9 +1337,10 @@ mod tests {
         let url = spawn_mock_provider(vec![
             serde_json::to_value(&menu_resp).unwrap(),
             serde_json::to_value(&transfer_resp).unwrap(),
-        ]).await;
+        ])
+        .await;
 
-        let mut app = StepIvrApp::new(&url);
+        let app = StepIvrApp::new(&url);
 
         let mut stack = MockCallStack::run(Box::new(app), "1001", "2000");
         stack
@@ -1255,12 +1367,16 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(100));
         // After provider returns, StopPlayback + Transfer
         stack
-            .assert_cmd(500, "stop", |c| matches!(c, CallCommand::StopPlayback { .. }))
+            .assert_cmd(500, "stop", |c| {
+                matches!(c, CallCommand::StopPlayback { .. })
+            })
             .await;
         stack
-            .assert_cmd(500, "transfer", |c| {
-                matches!(c, CallCommand::Transfer { target, .. } if target == "2001")
-            })
+            .assert_cmd(
+                500,
+                "transfer",
+                |c| matches!(c, CallCommand::Transfer { target, .. } if target == "2001"),
+            )
             .await;
     }
 
@@ -1310,7 +1426,7 @@ mod tests {
         let url = start_python_provider(provider_port).await;
 
         // Create StepIvrApp with StepProvider → Python provider
-        let mut app = StepIvrApp::new(&url);
+        let app = StepIvrApp::new(&url);
 
         let mut stack = MockCallStack::run(Box::new(app), "1001", "2000");
 
@@ -1354,12 +1470,16 @@ mod tests {
 
         // Expected: StopPlayback (from dtmf handler) then Transfer
         stack
-            .assert_cmd(5000, "stop", |c| matches!(c, CallCommand::StopPlayback { .. }))
+            .assert_cmd(5000, "stop", |c| {
+                matches!(c, CallCommand::StopPlayback { .. })
+            })
             .await;
         stack
-            .assert_cmd(5000, "transfer:2001", |c| {
-                matches!(c, CallCommand::Transfer { target, .. } if target == "2001")
-            })
+            .assert_cmd(
+                5000,
+                "transfer:2001",
+                |c| matches!(c, CallCommand::Transfer { target, .. } if target == "2001"),
+            )
             .await;
     }
 
@@ -1403,10 +1523,14 @@ mod tests {
         };
 
         // 3. Start PBX with step-mode routing
-        let pbx = TestPbx::start_with_inject(sip_port, TestPbxInject {
-            routes: Some(vec![route]),
-            ..Default::default()
-        }).await;
+        let pbx = TestPbx::start_with_inject(
+            sip_port,
+            TestPbxInject {
+                routes: Some(vec![route]),
+                ..Default::default()
+            },
+        )
+        .await;
 
         let cancel = CancellationToken::new();
         let stats = Arc::new(CallStats::default());
@@ -1421,7 +1545,10 @@ mod tests {
                 ..Default::default()
             },
             SipBotConfig {
-                addr: Some(format!("127.0.0.1:{}", pick_unused_port().expect("no free port"))),
+                addr: Some(format!(
+                    "127.0.0.1:{}",
+                    pick_unused_port().expect("no free port")
+                )),
                 external_ip: None,
                 recorders: None,
                 accounts: vec![],
@@ -1430,7 +1557,7 @@ mod tests {
             false,
             cancel.clone(),
         );
-        caller.run_call(1, 1).await;
+        let _ = caller.run_call(1, 1).await;
 
         // 5. Wait for call to complete
         tokio::time::sleep(Duration::from_secs(10)).await;

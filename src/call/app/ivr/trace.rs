@@ -12,12 +12,12 @@ pub struct IvrTraceEntry {
     pub callee: String,
     pub timestamp: DateTime<Utc>,
     pub step_index: u32,
-    pub event_type: String,         // "session_start" | "audio_complete" | "dtmf" | "timeout" | "provider_response"
+    pub event_type: String, // "session_start" | "audio_complete" | "dtmf" | "timeout" | "provider_response"
     pub event_detail: Option<String>,
     pub provider_url: Option<String>,
-    pub action_type: String,        // "Prompt" | "DtmfMenu" | "Transfer" | ...
+    pub action_type: String, // "Prompt" | "DtmfMenu" | "Transfer" | ...
     pub action_json: Option<String>, // serialized ActionNode
-    pub result_kind: String,        // "terminal" | "continue" | "chain_next" | "error" | "provider_call"
+    pub result_kind: String, // "terminal" | "continue" | "chain_next" | "error" | "provider_call"
     pub duration_ms: u64,
     pub error: Option<String>,
 }
@@ -33,7 +33,7 @@ pub struct IvrTraceSession {
     pub started_at: DateTime<Utc>,
     pub ended_at: Option<DateTime<Utc>>,
     pub total_steps: u32,
-    pub status: String,    // "active" | "completed" | "error"
+    pub status: String, // "active" | "completed" | "error"
 }
 
 /// In-memory trace collector for step-mode IVR debugging.
@@ -77,7 +77,10 @@ impl IvrTraceCollector {
         status: &str,
     ) {
         let mut sessions = self.sessions.write().await;
-        if let Some(s) = sessions.iter_mut().find(|s: &&mut IvrTraceSession| s.session_id == session_id) {
+        if let Some(s) = sessions
+            .iter_mut()
+            .find(|s: &&mut IvrTraceSession| s.session_id == session_id)
+        {
             s.ended_at = Some(ended_at);
             s.status = status.to_string();
         }
@@ -104,7 +107,13 @@ impl IvrTraceCollector {
     }
 
     pub async fn increment_steps(&self, session_id: &str) {
-        if let Some(s) = self.sessions.write().await.iter_mut().find(|s| s.session_id == session_id) {
+        if let Some(s) = self
+            .sessions
+            .write()
+            .await
+            .iter_mut()
+            .find(|s| s.session_id == session_id)
+        {
             s.total_steps += 1;
         }
     }
@@ -181,10 +190,15 @@ mod tests {
         collector.record_session(mk_session("call_001")).await;
 
         let now = Utc::now();
-        collector.update_session_end("call_001", now, "completed").await;
+        collector
+            .update_session_end("call_001", now, "completed")
+            .await;
 
         let sessions = collector.sessions().await;
-        let s = sessions.iter().find(|s| s.session_id == "call_001").unwrap();
+        let s = sessions
+            .iter()
+            .find(|s| s.session_id == "call_001")
+            .unwrap();
         assert!(s.ended_at.is_some());
         assert_eq!(s.status, "completed");
     }
@@ -198,7 +212,14 @@ mod tests {
 
         collector.clear_session("call_001").await;
         assert!(collector.query_by_session("call_001").await.is_empty());
-        assert!(collector.sessions().await.iter().find(|s| s.session_id == "call_001").is_none());
+        assert!(
+            collector
+                .sessions()
+                .await
+                .iter()
+                .find(|s| s.session_id == "call_001")
+                .is_none()
+        );
     }
 
     #[tokio::test]

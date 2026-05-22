@@ -204,9 +204,11 @@ async fn test_full_session_resume_flow() {
                 }),
                 rustpbx::rwi::RwiEvent::CallRinging {
                     call_id: "resume-call-1".to_string(),
+                    context: Default::default(),
                 },
                 rustpbx::rwi::RwiEvent::CallAnswered {
                     call_id: "resume-call-1".to_string(),
+                    context: Default::default(),
                 },
             ];
 
@@ -290,6 +292,7 @@ async fn test_incremental_resume_with_sequence() {
         for i in 0..5 {
             let event = rustpbx::rwi::RwiEvent::CallRinging {
                 call_id: format!("seq-call-{}", i),
+                context: Default::default(),
             };
             gw.cache_event(&format!("seq-call-{}", i), &event);
         }
@@ -334,12 +337,14 @@ async fn test_call_resume_filters_by_call_id() {
             &"call-a".to_string(),
             &rustpbx::rwi::RwiEvent::CallRinging {
                 call_id: "call-a".to_string(),
+                context: Default::default(),
             },
         );
         gw.cache_event(
             &"call-a".to_string(),
             &rustpbx::rwi::RwiEvent::CallAnswered {
                 call_id: "call-a".to_string(),
+                context: Default::default(),
             },
         );
 
@@ -348,6 +353,7 @@ async fn test_call_resume_filters_by_call_id() {
             &"call-b".to_string(),
             &rustpbx::rwi::RwiEvent::CallRinging {
                 call_id: "call-b".to_string(),
+                context: Default::default(),
             },
         );
         gw.cache_event(
@@ -431,6 +437,7 @@ async fn test_event_sequence_monotonicity() {
                 call_id: "dtmf-call".to_string(),
                 digit: i.to_string(),
                 leg_id: None,
+                context: Default::default(),
             };
             gw.cache_event(&"dtmf-call".to_string(), &event);
         }

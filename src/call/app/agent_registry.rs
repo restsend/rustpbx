@@ -65,7 +65,10 @@ impl PresenceState {
 
     /// Check if agent is in a call-related state
     pub fn is_call_active(&self) -> bool {
-        matches!(self, PresenceState::Ringing { .. } | PresenceState::Busy { .. })
+        matches!(
+            self,
+            PresenceState::Ringing { .. } | PresenceState::Busy { .. }
+        )
     }
 
     /// Check if state is a custom state
@@ -349,7 +352,6 @@ pub trait AgentRegistry: Send + Sync {
             _ => false,
         }
     }
-
 }
 
 /// Factory for creating registry instances

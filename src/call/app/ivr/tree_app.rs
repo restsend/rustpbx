@@ -142,6 +142,28 @@ impl IvrApp {
         }
     }
 
+    /// Emit IvrFlowCompleted when the IVR flow ends via a terminal action.
+    async fn ivr_flow_completed(
+        &self,
+        ctx: &ApplicationContext,
+        final_result: &str,
+        target: Option<&str>,
+    ) {
+        self.emit_rwi_event(
+            ctx,
+            crate::rwi::proto::RwiEvent::IvrFlowCompleted {
+                call_id: ctx.call_info.session_id.clone(),
+                app_id: self.definition.name.clone(),
+                total_nodes_traversed: 0,
+                total_duration_ms: 0,
+                final_result: final_result.to_string(),
+                completion_time: chrono::Utc::now().to_rfc3339(),
+                final_routing_target: target.map(|s| s.to_string()),
+                context: Default::default(),
+            },
+        );
+    }
+
     /// Check if the current time falls within business hours.
     fn is_within_business_hours(&self, bh: &super::config::BusinessHours) -> bool {
         use chrono::{Datelike, Utc};
@@ -347,6 +369,7 @@ impl IvrApp {
                 dnis: Some(ctx.call_info.callee.clone()),
                 routing_target: Some(menu_key.to_string()),
                 previous_node_id: previous_node,
+                context: Default::default(),
             },
         );
         let menu = self
@@ -421,12 +444,15 @@ impl IvrApp {
                     next_node_id: None,
                     hangup_reason: None,
                     call_result: None,
+                    context: Default::default(),
                 },
             );
         }
         match action {
             EntryAction::Transfer { target } => {
                 info!(ivr = %self.definition.name, target, "IVR transferring call");
+                self.ivr_flow_completed(ctx, "transferred", Some(target))
+                    .await;
                 self.state = IvrState::Done;
                 Ok(AppAction::Transfer(target.clone()))
             }
@@ -440,6 +466,7 @@ impl IvrApp {
                     return_to_ivr = ?return_to_ivr,
                     "IVR sending to queue"
                 );
+                self.ivr_flow_completed(ctx, "queue", Some(target)).await;
                 self.state = IvrState::Done;
                 if return_to_ivr.unwrap_or(false) {
                     // Encode return IVR name so the queue can come back on failure
@@ -462,6 +489,8 @@ impl IvrApp {
             }
             EntryAction::Voicemail { target } => {
                 info!(ivr = %self.definition.name, target, "IVR transferring to voicemail");
+                self.ivr_flow_completed(ctx, "voicemail", Some(target))
+                    .await;
                 self.state = IvrState::Done;
                 Ok(AppAction::Transfer(format!("voicemail:{}", target)))
             }
@@ -495,31 +524,14 @@ impl IvrApp {
                 info!(ivr = %self.definition.name, menu = %current, "IVR repeating menu");
                 self.enter_menu(&current, ctrl, ctx).await
             }
-            EntryAction::Hangup {
-                prompt,
-                prompt_text,
-                prompt_voice,
-            } => {
-                if let Some(path) = self
-                    .resolve_audio(
-                        prompt.as_deref(),
-                        prompt_text.as_deref(),
-                        prompt_voice.as_deref(),
-                    )
-                    .await
-                {
-                    self.state = IvrState::PlayingHangup;
-                    debug!(ivr = %self.definition.name, prompt = %path, "Playing hangup prompt");
-                    ctrl.play_audio(&path, false).await?;
-                    Ok(AppAction::Continue)
-                } else {
-                    info!(ivr = %self.definition.name, "IVR hanging up");
-                    self.state = IvrState::Done;
-                    Ok(AppAction::Hangup {
-                        reason: None,
-                        code: None,
-                    })
-                }
+            EntryAction::Hangup { .. } => {
+                info!(ivr = %self.definition.name, "IVR hanging up");
+                self.ivr_flow_completed(ctx, "hangup", None).await;
+                self.state = IvrState::Done;
+                Ok(AppAction::Hangup {
+                    reason: None,
+                    code: None,
+                })
             }
             EntryAction::PlayAndHangup {
                 prompt,

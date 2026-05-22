@@ -361,7 +361,9 @@ pub type AppFactoryFn = Arc<
 /// Register a custom call app factory.
 /// Stores to the per-context registry (ApplicationContext.app_factories).
 pub fn register_call_app(_name: &'static str, _factory: AppFactoryFn) {
-    tracing::warn!("register_call_app is deprecated — set app_factories on ApplicationContext instead");
+    tracing::warn!(
+        "register_call_app is deprecated — set app_factories on ApplicationContext instead"
+    );
 }
 
 /// Look up a custom call app, checking context.app_factories first.
@@ -402,7 +404,9 @@ pub trait PostCallHook: Send + Sync {
 
 /// Register a PostCallHook (deprecated — set post_call_hook on ApplicationContext).
 pub fn set_post_call_hook(_hook: Arc<dyn PostCallHook>) {
-    tracing::warn!("set_post_call_hook is deprecated — set post_call_hook on ApplicationContext instead");
+    tracing::warn!(
+        "set_post_call_hook is deprecated — set post_call_hook on ApplicationContext instead"
+    );
 }
 
 /// Invoke the PostCallHook from the per-context hook, if registered.

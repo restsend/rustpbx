@@ -7,18 +7,16 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use axum::{Router, routing::post, Json};
+use axum::{Json, Router, routing::post};
 use portpicker::pick_unused_port;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::sync::RwLock;
 use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 
 use helpers::sipbot_helper::TestUa;
 
-use rustpbx::addons::sbc::jsonrpc::config::{
-    SbcJsonRpcConfig, Rule, Upstream, ResponseConfig,
-};
+use rustpbx::addons::sbc::jsonrpc::config::{ResponseConfig, Rule, SbcJsonRpcConfig, Upstream};
 use rustpbx::addons::sbc::jsonrpc::inspector::SbcJsonRpcInspector;
 use rustpbx::call::user::SipUser;
 use rustpbx::config::ProxyConfig;
@@ -184,7 +182,10 @@ async fn test_sbc_jsonrpc_e2e_sipbot_rewrite() {
         1,
         "upstream JSON-RPC should have been called"
     );
-    assert!(bob.has_rtp_rx(), "bob should have received RTP (call established)");
+    assert!(
+        bob.has_rtp_rx(),
+        "bob should have received RTP (call established)"
+    );
 
     // ── Cleanup ──────────────────────────────────────────────────────────
     cancel_token.cancel();

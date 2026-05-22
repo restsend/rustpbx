@@ -551,6 +551,7 @@ async fn test_event_pushed_from_gateway_arrives_at_client() {
         call_id: "pushed-call".to_string(),
         digit: "7".to_string(),
         leg_id: None,
+        context: Default::default(),
     };
     {
         let gw = gateway.read().await;
@@ -858,9 +859,11 @@ async fn test_session_resume_returns_events_and_sequence() {
         let gw = gateway.read().await;
         let event1 = rustpbx::rwi::RwiEvent::CallRinging {
             call_id: "test-call-1".to_string(),
+            context: Default::default(),
         };
         let event2 = rustpbx::rwi::RwiEvent::CallAnswered {
             call_id: "test-call-1".to_string(),
+            context: Default::default(),
         };
         gw.cache_event(&"test-call-1".to_string(), &event1);
         gw.cache_event(&"test-call-1".to_string(), &event2);
@@ -903,9 +906,11 @@ async fn test_session_resume_with_sequence_returns_partial_events() {
         let gw = gateway.read().await;
         let event1 = rustpbx::rwi::RwiEvent::CallRinging {
             call_id: "seq-call".to_string(),
+            context: Default::default(),
         };
         let event2 = rustpbx::rwi::RwiEvent::CallAnswered {
             call_id: "seq-call".to_string(),
+            context: Default::default(),
         };
         let event3 = rustpbx::rwi::RwiEvent::CallBridged {
             leg_a: "seq-call".to_string(),
@@ -945,9 +950,11 @@ async fn test_call_resume_returns_call_specific_events() {
         let gw = gateway.read().await;
         let event1 = rustpbx::rwi::RwiEvent::CallRinging {
             call_id: "call-a".to_string(),
+            context: Default::default(),
         };
         let event2 = rustpbx::rwi::RwiEvent::CallRinging {
             call_id: "call-b".to_string(),
+            context: Default::default(),
         };
         gw.cache_event(&"call-a".to_string(), &event1);
         gw.cache_event(&"call-b".to_string(), &event2);

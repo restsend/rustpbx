@@ -227,8 +227,7 @@ impl AppFactory for BuiltinAppFactory {
                             .and_then(|p| p.get("url").and_then(|v| v.as_str()))?;
 
                         // Build StepProvider with all config
-                        let mut provider =
-                            crate::call::app::ivr::StepProvider::new(url);
+                        let mut provider = crate::call::app::ivr::StepProvider::new(url);
 
                         // Headers
                         if let Some(hdrs) = params.as_ref()?.get("headers") {
@@ -247,9 +246,10 @@ impl AppFactory for BuiltinAppFactory {
                                 .get("max_retries")
                                 .and_then(|v| v.as_u64())
                                 .unwrap_or(3) as u32;
-                            let delay = retry
-                                .get("delay_ms")
+                            let timeout = retry
+                                .get("timeout_ms")
                                 .and_then(|v| v.as_u64())
+                                .or_else(|| retry.get("delay_ms").and_then(|v| v.as_u64()))
                                 .unwrap_or(1000);
                             let fallback = serde_json::from_value(
                                 retry.get("fallback").cloned().unwrap_or(serde_json::json!({
@@ -260,7 +260,7 @@ impl AppFactory for BuiltinAppFactory {
                             .ok();
                             provider = provider.with_retry(crate::call::app::ivr::RetryConfig {
                                 max_retries,
-                                retry_delay_ms: delay,
+                                timeout_ms: timeout,
                                 fallback_action: fallback,
                             });
                         }
@@ -279,9 +279,7 @@ impl AppFactory for BuiltinAppFactory {
                         // Optional TTS override via app_params (same as tree mode)
                         if let Some(tts_value) = params.as_ref()?.get("tts")
                             && let Ok(tts_cfg) =
-                                serde_json::from_value::<crate::tts::TtsConfig>(
-                                    tts_value.clone(),
-                                )
+                                serde_json::from_value::<crate::tts::TtsConfig>(tts_value.clone())
                         {
                             app = app.with_tts(Some(tts_cfg));
                         }
@@ -298,19 +296,13 @@ impl AppFactory for BuiltinAppFactory {
                         let mut app = match crate::call::app::ivr::IvrApp::from_file(file) {
                             Ok(app) => app,
                             Err(e) => {
-                                tracing::warn!(
-                                    "Failed to load IVR app from {}: {}",
-                                    file,
-                                    e
-                                );
+                                tracing::warn!("Failed to load IVR app from {}: {}", file, e);
                                 return None;
                             }
                         };
                         if let Some(tts_value) = params.as_ref()?.get("tts")
                             && let Ok(tts_cfg) =
-                                serde_json::from_value::<crate::tts::TtsConfig>(
-                                    tts_value.clone(),
-                                )
+                                serde_json::from_value::<crate::tts::TtsConfig>(tts_value.clone())
                         {
                             app = app.with_tts(Some(tts_cfg));
                         }
@@ -1318,8 +1310,7 @@ impl SipSession {
             allowed_codecs
         };
 
-        caps
-            .iter()
+        caps.iter()
             .filter(|cap| {
                 effective_allow
                     .iter()
@@ -2210,7 +2201,8 @@ impl SipSession {
             info!(target = %target.aor, "dial_parallel: target");
         }
 
-        self.fork_targets_parallel(targets, None, callee_state_rx).await
+        self.fork_targets_parallel(targets, None, callee_state_rx)
+            .await
     }
 
     /// Fork INVITEs to all targets concurrently and bridge with the first
@@ -2224,8 +2216,8 @@ impl SipSession {
         stop_playback_on_answer: Option<&str>,
         _callee_state_rx: &mut mpsc::UnboundedReceiver<DialogState>,
     ) -> Result<(), (StatusCode, Option<String>)> {
-        use futures::stream::FuturesUnordered;
         use futures::StreamExt;
+        use futures::stream::FuturesUnordered;
         use rsipstack::dialog::invitation::InviteOption;
         use rsipstack::sip::StatusCodeKind;
 
@@ -2273,9 +2265,8 @@ impl SipSession {
                 Self::route_via_home_proxy(target, &local_addrs, cluster_enabled);
             let callee_uri = Self::resolve_outbound_callee_uri(target, route_via_home_proxy);
 
-            let mut headers: Vec<rsipstack::sip::Header> = vec![
-                rsipstack::sip::headers::MaxForwards::from(self.context.max_forwards).into(),
-            ];
+            let mut headers: Vec<rsipstack::sip::Header> =
+                vec![rsipstack::sip::headers::MaxForwards::from(self.context.max_forwards).into()];
 
             if route_via_home_proxy {
                 debug!(
@@ -2317,19 +2308,13 @@ impl SipSession {
                 .map(|c| c.uri.clone())
                 .unwrap_or_else(|| caller.clone());
 
-            let callee_call_id =
-                self.context.dialplan.call_id.clone().unwrap_or_else(|| {
-                    rsipstack::transaction::make_call_id(
-                        self.server
-                            .endpoint
-                            .inner
-                            .option
-                            .callid_suffix
-                            .as_deref(),
-                    )
-                    .value()
-                    .to_string()
-                });
+            let callee_call_id = self.context.dialplan.call_id.clone().unwrap_or_else(|| {
+                rsipstack::transaction::make_call_id(
+                    self.server.endpoint.inner.option.callid_suffix.as_deref(),
+                )
+                .value()
+                .to_string()
+            });
             self.meta.callee_call_ids.insert(callee_call_id.clone());
 
             let invite_option = InviteOption {
@@ -2427,8 +2412,7 @@ impl SipSession {
                             // Clean up leftover fork legs
                             for cleanup_idx in 0..targets.len() {
                                 if cleanup_idx != winner_idx {
-                                    let leg_to_remove =
-                                        LegId::from(format!("fork-{cleanup_idx}"));
+                                    let leg_to_remove = LegId::from(format!("fork-{cleanup_idx}"));
                                     self.legs.remove(&leg_to_remove);
                                 }
                             }
@@ -2494,10 +2478,7 @@ impl SipSession {
 
             // If all forks completed and none succeeded, we're done
             if failures >= total {
-                info!(
-                    "fork_targets_parallel: all {} targets failed",
-                    failures
-                );
+                info!("fork_targets_parallel: all {} targets failed", failures);
                 return Err(last_error);
             }
         }
@@ -3441,7 +3422,9 @@ impl SipSession {
                 let mut track_builder = RtpTrackBuilder::new(Self::CALLER_TRACK_ID.to_string())
                     .with_cancel_token(self.caller_peer().cancel_token())
                     .with_enable_latching(self.server.proxy_config.enable_latching)
-                    .with_probation_max_packets(self.server.proxy_config.latching_probation_max_packets)
+                    .with_probation_max_packets(
+                        self.server.proxy_config.latching_probation_max_packets,
+                    )
                     .with_cname(self.server.rtc_cname.clone());
 
                 if let Some(ref external_ip) = self.server.rtp_config.external_ip {
@@ -3743,12 +3726,10 @@ impl SipSession {
                                                 .unwrap_or(answer_sdp)
                                             });
                                         if let Some(ref rtp_sdp) = rtp_sdp {
-                                            let rtp_video_caps = SessionDescription::parse(
-                                                SdpType::Answer,
-                                                rtp_sdp,
-                                            )
-                                            .map(|desc| desc.to_video_capabilities())
-                                            .unwrap_or_default();
+                                            let rtp_video_caps =
+                                                SessionDescription::parse(SdpType::Answer, rtp_sdp)
+                                                    .map(|desc| desc.to_video_capabilities())
+                                                    .unwrap_or_default();
                                             bridge.set_video_payload_maps(
                                                 &webrtc_video_caps,
                                                 &rtp_video_caps,
@@ -3998,44 +3979,43 @@ impl SipSession {
 
         const SIPFLOW_CHANNEL_CAPACITY: usize =
             crate::media::forwarding_track::ForwardingTrack::DEFAULT_SIPFLOW_CHANNEL_CAPACITY;
-        let (caller_sipflow_tx, callee_sipflow_tx) =
-            if self.server.proxy_config.recording.is_none()
-                && let Some(backend) = self.server.sip_flow.as_ref().and_then(|sf| sf.backend())
-            {
-                use crate::sipflow::{SipFlowItem, SipFlowMsgType};
-                use tokio::sync::mpsc;
+        let (caller_sipflow_tx, callee_sipflow_tx) = if self.server.proxy_config.recording.is_none()
+            && let Some(backend) = self.server.sip_flow.as_ref().and_then(|sf| sf.backend())
+        {
+            use crate::sipflow::{SipFlowItem, SipFlowMsgType};
+            use tokio::sync::mpsc;
 
-                let (tx, mut rx) = mpsc::channel::<(
-                    crate::media::recorder::Leg,
-                    rustrtc::media::frame::MediaSample,
-                )>(SIPFLOW_CHANNEL_CAPACITY);
+            let (tx, mut rx) = mpsc::channel::<(
+                crate::media::recorder::Leg,
+                rustrtc::media::frame::MediaSample,
+            )>(SIPFLOW_CHANNEL_CAPACITY);
 
-                let call_id = self.context.session_id.clone();
-                tokio::spawn(async move {
-                    while let Some((leg, sample)) = rx.recv().await {
-                        if let rustrtc::media::frame::MediaSample::Audio(ref frame) = sample {
-                            if let Some(ref rtp_packet) = frame.raw_packet {
-                                if let Ok(rtp_bytes) = rtp_packet.marshal() {
-                                    let item = SipFlowItem {
-                                        timestamp: frame.rtp_timestamp as u64,
-                                        seq: frame.sequence_number.unwrap_or(0) as u64,
-                                        msg_type: SipFlowMsgType::Rtp,
-                                        src_addr: format!("{leg:?}"),
-                                        dst_addr: "bridge".to_string(),
-                                        payload: bytes::Bytes::from(rtp_bytes),
-                                    };
-                                    let _ = backend.record(&call_id, item);
-                                }
+            let call_id = self.context.session_id.clone();
+            tokio::spawn(async move {
+                while let Some((leg, sample)) = rx.recv().await {
+                    if let rustrtc::media::frame::MediaSample::Audio(ref frame) = sample {
+                        if let Some(ref rtp_packet) = frame.raw_packet {
+                            if let Ok(rtp_bytes) = rtp_packet.marshal() {
+                                let item = SipFlowItem {
+                                    timestamp: frame.rtp_timestamp as u64,
+                                    seq: frame.sequence_number.unwrap_or(0) as u64,
+                                    msg_type: SipFlowMsgType::Rtp,
+                                    src_addr: format!("{leg:?}"),
+                                    dst_addr: "bridge".to_string(),
+                                    payload: bytes::Bytes::from(rtp_bytes),
+                                };
+                                let _ = backend.record(&call_id, item);
                             }
                         }
                     }
-                });
+                }
+            });
 
-                // Clone the sender so both legs can enqueue into the same drain task.
-                (Some(tx.clone()), Some(tx))
-            } else {
-                (None, None)
-            };
+            // Clone the sender so both legs can enqueue into the same drain task.
+            (Some(tx.clone()), Some(tx))
+        } else {
+            (None, None)
+        };
 
         match Self::wire_with_forwarding_track(
             Self::CALLER_FORWARDING_TRACK_ID,
@@ -5007,7 +4987,9 @@ impl SipSession {
         // DN event: call established (200 OK)
         let call_id = self.context.session_id.clone();
         let caller_dn = self.context.original_caller.clone();
-        let callee_dn = callee.clone().unwrap_or_else(|| self.context.original_callee.clone());
+        let callee_dn = callee
+            .clone()
+            .unwrap_or_else(|| self.context.original_callee.clone());
         self.emit_dn_event(
             64,
             "ESTABLISHED",
@@ -5636,15 +5618,14 @@ impl SipSession {
 
             let bridge = self.app_event_bridge.read();
             if let Some(ref handle) = *bridge {
-                let _ = handle.send_app_event(
-                    crate::call::app::ControllerEvent::RecordingComplete(
+                let _ =
+                    handle.send_app_event(crate::call::app::ControllerEvent::RecordingComplete(
                         crate::call::app::RecordingInfo {
                             path: path.clone(),
                             duration,
                             size_bytes: file_size,
                         },
-                    ),
-                );
+                    ));
             }
         }
         Ok(())

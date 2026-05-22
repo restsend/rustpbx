@@ -256,6 +256,7 @@ impl TransferController {
         let gw = self.gateway.read().await;
         let event = RwiEvent::CallTransferAccepted {
             call_id: call_id.clone(),
+            context: Default::default(),
         };
         gw.send_event_to_call_owner(&call_id, &event);
 
@@ -298,6 +299,7 @@ impl TransferController {
         let gw = self.gateway.read().await;
         let event = RwiEvent::CallTransferAccepted {
             call_id: call_id.clone(),
+            context: Default::default(),
         };
         gw.send_event_to_call_owner(&call_id, &event);
 
@@ -453,6 +455,7 @@ impl TransferController {
                 call_id: failed_tx.call_id.clone(),
                 sip_status,
                 reason: Some(reason.as_str().to_string()),
+                context: Default::default(),
             };
             gw.send_event_to_call_owner(&failed_tx.call_id, &event);
         }
@@ -503,6 +506,7 @@ impl TransferController {
         let gw = self.gateway.read().await;
         let event = RwiEvent::CallTransferAccepted {
             call_id: call_id.clone(),
+            context: Default::default(),
         };
         gw.send_event_to_call_owner(&call_id, &event);
 
@@ -544,6 +548,7 @@ impl TransferController {
         let gw = self.gateway.read().await;
         let event = RwiEvent::CallTransferred {
             call_id: call_id.clone(),
+            context: Default::default(),
         };
         gw.send_event_to_call_owner(&call_id, &event);
 
@@ -587,6 +592,7 @@ impl TransferController {
                 call_id: original_call_id.clone(),
                 sip_status: Some(487),
                 reason: Some("cancelled".to_string()),
+                context: Default::default(),
             };
             gw.send_event_to_call_owner(original_call_id, &event);
         }
@@ -656,6 +662,7 @@ impl TransferController {
                 let gw = self.gateway.read().await;
                 let event = RwiEvent::CallTransferAccepted {
                     call_id: call_id.clone(),
+                    context: Default::default(),
                 };
                 gw.send_event_to_call_owner(&call_id, &event);
             }
@@ -669,6 +676,7 @@ impl TransferController {
                     call_id: call_id.clone(),
                     sip_status: Some(sip_status),
                     reason: Some(reason.as_str().to_string()),
+                    context: Default::default(),
                 };
                 gw.send_event_to_call_owner(&call_id, &event);
             }
@@ -724,6 +732,7 @@ impl TransferController {
                         let gw = self.gateway.read().await;
                         let event = RwiEvent::CallTransferred {
                             call_id: completed_tx.call_id.clone(),
+                            context: Default::default(),
                         };
                         gw.send_event_to_call_owner(&completed_tx.call_id, &event);
                         Some(completed_tx)
@@ -759,6 +768,7 @@ impl TransferController {
                     call_id: failed_tx.call_id.clone(),
                     sip_status: Some(notify_status),
                     reason: Some(reason.as_str().to_string()),
+                    context: Default::default(),
                 };
                 gw.send_event_to_call_owner(&failed_tx.call_id, &event);
                 Some(failed_tx)
@@ -811,6 +821,7 @@ impl TransferController {
                 call_id: failed_tx.call_id.clone(),
                 sip_status: failed_tx.sip_status,
                 reason: Some(reason.as_str().to_string()),
+                context: Default::default(),
             };
             gw.send_event_to_call_owner(&failed_tx.call_id, &event);
             return Some(failed_tx);
@@ -908,6 +919,7 @@ impl TransferController {
                 let gw = self.gateway.read().await;
                 let event = RwiEvent::CallTransferred {
                     call_id: call_id.clone(),
+                    context: Default::default(),
                 };
                 gw.send_event_to_call_owner(&call_id, &event);
 
@@ -943,6 +955,7 @@ impl TransferController {
                     call_id: call_id.clone(),
                     sip_status: None,
                     reason: Some(format!("3pcc_originate_failed: {}", e)),
+                    context: Default::default(),
                 };
                 gw.send_event_to_call_owner(&call_id, &event);
 
@@ -1065,14 +1078,14 @@ impl TransferController {
                                             let gw = gateway.read().await;
                                             gw.send_event_to_call_owner(
                                                 &call_id_for_spawn,
-                                                &RwiEvent::CallRinging { call_id: call_id_for_spawn.clone() },
+                                                &RwiEvent::CallRinging { call_id: call_id_for_spawn.clone(), context: Default::default() },
                                             );
                                         }
                                         DialogState::Early(_, _) => {
                                             let gw = gateway.read().await;
                                             gw.send_event_to_call_owner(
                                                 &call_id_for_spawn,
-                                                &RwiEvent::CallEarlyMedia { call_id: call_id_for_spawn.clone() },
+                                                &RwiEvent::CallEarlyMedia { call_id: call_id_for_spawn.clone(), context: Default::default() },
                                             );
                                         }
                                         _ => {}
@@ -1107,6 +1120,7 @@ impl TransferController {
                         &call_id_for_spawn,
                         &RwiEvent::CallAnswered {
                             call_id: call_id_for_spawn.clone(),
+                            context: Default::default(),
                         },
                     );
 
@@ -1145,6 +1159,7 @@ impl TransferController {
                                         &orig_call_id,
                                         &RwiEvent::CallTransferred {
                                             call_id: orig_call_id.clone(),
+                                            context: Default::default(),
                                         },
                                     );
                                 }
@@ -1159,6 +1174,7 @@ impl TransferController {
                                             call_id: orig_call_id.clone(),
                                             sip_status: None,
                                             reason: Some(format!("bridge_failed: {}", e)),
+                                            context: Default::default(),
                                         },
                                     );
                                 }
@@ -1248,6 +1264,7 @@ impl TransferController {
         let gw = self.gateway.read().await;
         let event = RwiEvent::CallTransferred {
             call_id: call_id.clone(),
+            context: Default::default(),
         };
         gw.send_event_to_call_owner(call_id, &event);
 
@@ -1303,6 +1320,7 @@ impl TransferController {
             call_id: call_id.clone(),
             sip_status: None,
             reason: Some(format!("3pcc_failed: {}", reason)),
+            context: Default::default(),
         };
         gw.send_event_to_call_owner(call_id, &event);
 

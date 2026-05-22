@@ -9,7 +9,6 @@
 //! (e.g., G729 on WebRTC side) are correctly filtered.
 
 use audio_codec::CodecType;
-use rustpbx::media::negotiate::MediaNegotiator;
 use rustpbx::media::{RtpTrackBuilder, Track};
 use rustrtc::TransportMode;
 use rustrtc::sdp::{SdpType, SessionDescription};
@@ -74,7 +73,11 @@ async fn test_e2e_webrtc_caller_to_rtp_callee_via_bridge() {
     );
 
     // 3. Bridge sends its RTP offer to the callee
-    let bridge_rtp_sdp = bridge.callee_pc().local_description().unwrap().to_sdp_string();
+    let bridge_rtp_sdp = bridge
+        .callee_pc()
+        .local_description()
+        .unwrap()
+        .to_sdp_string();
     assert!(
         bridge_rtp_sdp.contains("RTP/AVP"),
         "Bridge to callee must be plain RTP"
@@ -234,7 +237,11 @@ async fn test_e2e_rtp_caller_to_webrtc_callee_via_bridge() {
         .set_local_description(bridge_answer)
         .unwrap();
 
-    let answer_sdp = bridge.callee_pc().local_description().unwrap().to_sdp_string();
+    let answer_sdp = bridge
+        .callee_pc()
+        .local_description()
+        .unwrap()
+        .to_sdp_string();
 
     // 7. Verify the answer is plain RTP (no WebRTC artifacts)
     assert!(answer_sdp.contains("RTP/AVP"), "Answer must be plain RTP");
@@ -380,7 +387,11 @@ async fn test_e2e_webrtc_caller_rtp_callee_pcmu_only_allow_codecs() {
     let rtp_offer = bridge.callee_pc().create_offer().await.unwrap();
     bridge.callee_pc().set_local_description(rtp_offer).unwrap();
 
-    let bridge_rtp_sdp = bridge.callee_pc().local_description().unwrap().to_sdp_string();
+    let bridge_rtp_sdp = bridge
+        .callee_pc()
+        .local_description()
+        .unwrap()
+        .to_sdp_string();
     assert!(
         bridge_rtp_sdp.contains("PCMU/8000"),
         "RTP side must offer PCMU"
@@ -570,9 +581,16 @@ async fn test_e2e_rtp_caller_g729_dropped_on_webrtc_side() {
         .unwrap();
 
     let rtp_answer = bridge.callee_pc().create_answer().await.unwrap();
-    bridge.callee_pc().set_local_description(rtp_answer).unwrap();
+    bridge
+        .callee_pc()
+        .set_local_description(rtp_answer)
+        .unwrap();
 
-    let rtp_answer_sdp = bridge.callee_pc().local_description().unwrap().to_sdp_string();
+    let rtp_answer_sdp = bridge
+        .callee_pc()
+        .local_description()
+        .unwrap()
+        .to_sdp_string();
     assert!(
         rtp_answer_sdp.contains("RTP/AVP"),
         "RTP answer must be plain RTP"
@@ -868,7 +886,10 @@ async fn test_e2e_early_media_then_200_ok_address_change() {
 
     // 6. Re-negotiate RTP side: create re-offer -> set local -> set remote with new answer
     let rtp_reoffer = bridge.callee_pc().create_offer().await.unwrap();
-    bridge.callee_pc().set_local_description(rtp_reoffer).unwrap();
+    bridge
+        .callee_pc()
+        .set_local_description(rtp_reoffer)
+        .unwrap();
     let desc_200 = SessionDescription::parse(SdpType::Answer, callee_answer_200).unwrap();
     bridge
         .callee_pc()
@@ -952,9 +973,14 @@ async fn test_e2e_early_media_then_200_ok_same_sdp_rtp_flow_continues() {
     let rtp_offer = bridge.callee_pc().create_offer().await.unwrap();
     bridge.callee_pc().set_local_description(rtp_offer).unwrap();
 
-    let bridge_rtp_addr =
-        parse_rtp_audio_addr(&bridge.callee_pc().local_description().unwrap().to_sdp_string())
-            .expect("Bridge RTP address should be present");
+    let bridge_rtp_addr = parse_rtp_audio_addr(
+        &bridge
+            .callee_pc()
+            .local_description()
+            .unwrap()
+            .to_sdp_string(),
+    )
+    .expect("Bridge RTP address should be present");
 
     // 3. Simulate 183 early media answer from callee
     let callee_answer_183 = "v=0\r\n\
@@ -1045,7 +1071,10 @@ async fn test_e2e_early_media_then_200_ok_same_sdp_rtp_flow_continues() {
 
     // Re-negotiate RTP side exactly as sip_session.rs does
     let rtp_reoffer = bridge.callee_pc().create_offer().await.unwrap();
-    bridge.callee_pc().set_local_description(rtp_reoffer).unwrap();
+    bridge
+        .callee_pc()
+        .set_local_description(rtp_reoffer)
+        .unwrap();
     let desc_200 = SessionDescription::parse(SdpType::Answer, callee_answer_200).unwrap();
     bridge
         .callee_pc()

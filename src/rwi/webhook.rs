@@ -261,8 +261,7 @@ mod tests {
 
     impl TestHttpServer {
         async fn start() -> Self {
-            let received: Arc<Mutex<Vec<serde_json::Value>>> =
-                Arc::new(Mutex::new(Vec::new()));
+            let received: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
             let received_clone = received.clone();
 
             let app = Router::new().route(
@@ -332,6 +331,7 @@ mod tests {
             call_id: "test-call-1".into(),
             event: RwiEvent::CallRinging {
                 call_id: "test-call-1".into(),
+                context: Default::default(),
             },
         };
         tx.send(entry).ok();
@@ -371,6 +371,7 @@ mod tests {
                 call_id: "test-call-2".into(),
                 reason: Some("normal_clearing".into()),
                 sip_status: Some(200),
+                context: Default::default(),
             },
         };
         tx.send(entry).ok();
@@ -437,10 +438,7 @@ mod tests {
             body["event"]["dn_state_changed"]["event_name"],
             "ESTABLISHED"
         );
-        assert_eq!(
-            body["event"]["dn_state_changed"]["kz_conn_id"],
-            "kc-12345"
-        );
+        assert_eq!(body["event"]["dn_state_changed"]["kz_conn_id"], "kc-12345");
     }
 
     #[tokio::test]
@@ -467,6 +465,7 @@ mod tests {
                 call_id: "c-1".into(),
                 reason: None,
                 sip_status: None,
+                context: Default::default(),
             },
         })
         .ok();
@@ -478,6 +477,7 @@ mod tests {
             call_id: "c-2".into(),
             event: RwiEvent::CallRinging {
                 call_id: "c-2".into(),
+                context: Default::default(),
             },
         })
         .ok();
@@ -510,6 +510,7 @@ mod tests {
             call_id: "c-1".into(),
             event: RwiEvent::CallRinging {
                 call_id: "c-1".into(),
+                context: Default::default(),
             },
         })
         .ok();
@@ -519,6 +520,7 @@ mod tests {
             call_id: "c-2".into(),
             event: RwiEvent::CallAnswered {
                 call_id: "c-2".into(),
+                context: Default::default(),
             },
         })
         .ok();
@@ -530,6 +532,7 @@ mod tests {
                 call_id: "c-3".into(),
                 reason: Some("normal".into()),
                 sip_status: Some(200),
+                context: Default::default(),
             },
         })
         .ok();
@@ -566,6 +569,7 @@ mod tests {
 
         gateway.broadcast_event(&RwiEvent::CallRinging {
             call_id: "gw-test-call".into(),
+            context: Default::default(),
         });
 
         wait_for_events(&server.received, 1, 2000).await;
@@ -598,6 +602,7 @@ mod tests {
             call_id: "dedup-test".into(),
             event: RwiEvent::CallRinging {
                 call_id: "dedup-test".into(),
+                context: Default::default(),
             },
         };
         tx.send(entry.clone()).ok();
@@ -639,6 +644,7 @@ mod tests {
             call_id: "c-1".into(),
             event: RwiEvent::CallRinging {
                 call_id: "c-1".into(),
+                context: Default::default(),
             },
         })
         .ok();
@@ -650,6 +656,7 @@ mod tests {
                 call_id: "c-2".into(),
                 reason: None,
                 sip_status: None,
+                context: Default::default(),
             },
         })
         .ok();

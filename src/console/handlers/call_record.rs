@@ -1335,7 +1335,7 @@ fn build_recording_payload(
     let (url, supports_streams) = if let Some(raw_value) = raw {
         if raw_value.starts_with("http://") || raw_value.starts_with("https://") {
             // External URL – cannot extract per-leg streams
-                (raw_value.to_string(), false)
+            (raw_value.to_string(), false)
         } else {
             // Local file path – serve through /recording endpoint with stream selection
             (
@@ -1998,7 +1998,10 @@ mod tests {
             .collect::<::std::result::Result<Vec<_>, _>>()
             .unwrap();
         assert_eq!(mono_samples.len(), 10, "should have 10 samples");
-        assert!(mono_samples.iter().all(|&s| s == 100), "all samples should be 100 (left)");
+        assert!(
+            mono_samples.iter().all(|&s| s == 100),
+            "all samples should be 100 (left)"
+        );
 
         std::fs::remove_file(&path).ok();
     }
@@ -2020,7 +2023,10 @@ mod tests {
             .collect::<::std::result::Result<Vec<_>, _>>()
             .unwrap();
         assert_eq!(mono_samples.len(), 10, "should have 10 samples");
-        assert!(mono_samples.iter().all(|&s| s == 200), "all samples should be 200 (right)");
+        assert!(
+            mono_samples.iter().all(|&s| s == 200),
+            "all samples should be 200 (right)"
+        );
 
         std::fs::remove_file(&path).ok();
     }
@@ -2104,8 +2110,14 @@ mod tests {
 
         let payload = build_recording_payload(&state, &record, None);
         let payload = payload.expect("should return a recording payload");
-        assert_eq!(payload["supports_streams"], true, "local path should support streams");
-        assert!(payload["url"].as_str().unwrap().contains("/call-records/"), "should route through /recording endpoint");
+        assert_eq!(
+            payload["supports_streams"], true,
+            "local path should support streams"
+        );
+        assert!(
+            payload["url"].as_str().unwrap().contains("/call-records/"),
+            "should route through /recording endpoint"
+        );
     }
 
     #[tokio::test]
@@ -2133,8 +2145,14 @@ mod tests {
 
         let payload = build_recording_payload(&state, &record, None);
         let payload = payload.expect("should return a recording payload");
-        assert_eq!(payload["supports_streams"], false, "external URL should not support streams");
-        assert_eq!(payload["url"], "https://cdn.example.com/recording.wav", "should use URL directly");
+        assert_eq!(
+            payload["supports_streams"], false,
+            "external URL should not support streams"
+        );
+        assert_eq!(
+            payload["url"], "https://cdn.example.com/recording.wav",
+            "should use URL directly"
+        );
     }
 
     #[tokio::test]
@@ -2162,7 +2180,10 @@ mod tests {
         let inline_url = state.url_for(&format!("/call-records/{}/recording", record.id));
         let payload = build_recording_payload(&state, &record, Some(inline_url.as_str()));
         let payload = payload.expect("should return a recording payload");
-        assert_eq!(payload["supports_streams"], true, "inline recording URL should support streams");
+        assert_eq!(
+            payload["supports_streams"], true,
+            "inline recording URL should support streams"
+        );
     }
 
     #[tokio::test]
@@ -2188,6 +2209,9 @@ mod tests {
         .expect("insert call record");
 
         let payload = build_recording_payload(&state, &record, None);
-        assert!(payload.is_none(), "should return None when no recording and no sipflow");
+        assert!(
+            payload.is_none(),
+            "should return None when no recording and no sipflow"
+        );
     }
 }

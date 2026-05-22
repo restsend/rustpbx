@@ -79,10 +79,7 @@ async fn test_parallel_queue_fork_first_answer_wins() {
 
     // Skip "auth" module so inbound INVITEs go straight to the call module.
     let proxy_config = ProxyConfig {
-        modules: Some(vec![
-            "registrar".to_string(),
-            "call".to_string(),
-        ]),
+        modules: Some(vec!["registrar".to_string(), "call".to_string()]),
         acl_rules: Some(vec!["allow all".to_string()]),
         ensure_user: Some(false),
         ..Default::default()

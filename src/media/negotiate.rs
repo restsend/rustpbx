@@ -460,10 +460,9 @@ impl MediaNegotiator {
 
         let mut used_pts: HashSet<u8> = result.iter().map(|codec| codec.payload_type).collect();
         for clock_rate in clock_rates {
-            if let Some(dtmf) = offered_dtmf
-                .iter()
-                .find(|codec| codec.clock_rate == clock_rate && !used_pts.contains(&codec.payload_type))
-            {
+            if let Some(dtmf) = offered_dtmf.iter().find(|codec| {
+                codec.clock_rate == clock_rate && !used_pts.contains(&codec.payload_type)
+            }) {
                 used_pts.insert(dtmf.payload_type);
                 result.push(dtmf.clone());
             } else if generate_missing {
@@ -532,7 +531,12 @@ impl MediaNegotiator {
             }
         };
 
-        NegotiatedLegProfile { audio, video, dtmf, transport: rustrtc::TransportMode::Rtp }
+        NegotiatedLegProfile {
+            audio,
+            video,
+            dtmf,
+            transport: rustrtc::TransportMode::Rtp,
+        }
     }
 
     fn attr_payload_type(attr: &rustrtc::sdp::Attribute) -> Option<u8> {

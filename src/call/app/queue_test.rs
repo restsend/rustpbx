@@ -741,7 +741,10 @@ mod tests {
 
         // Verify agent state is ringing
         let agent = agent_registry.get_agent("agent-001").await.unwrap();
-        assert!(matches!(agent.presence, PresenceState::Ringing { call_id: Some(_) }));
+        assert!(matches!(
+            agent.presence,
+            PresenceState::Ringing { call_id: Some(_) }
+        ));
 
         // Simulate agent connected
         stack.custom(
@@ -760,7 +763,10 @@ mod tests {
 
         // Verify agent state is busy
         let agent = agent_registry.get_agent("agent-001").await.unwrap();
-        assert!(matches!(agent.presence, PresenceState::Busy { call_id: None }));
+        assert!(matches!(
+            agent.presence,
+            PresenceState::Busy { call_id: None }
+        ));
 
         stack.join().await.expect("should complete successfully");
     }
@@ -1382,13 +1388,17 @@ mod tests {
         // Should originate calls to ALL agents in parallel
         let cmd0 = stack.next_cmd(200).await.expect("LegAdd for agent1");
         let _leg_id_0 = match &cmd0 {
-            CallCommand::LegAdd { leg_id, .. } => leg_id.clone().expect("LegAdd should have leg_id"),
+            CallCommand::LegAdd { leg_id, .. } => {
+                leg_id.clone().expect("LegAdd should have leg_id")
+            }
             _ => panic!("expected LegAdd, got {cmd0:?}"),
         };
 
         let cmd1 = stack.next_cmd(200).await.expect("LegAdd for agent2");
         let leg_id_1 = match &cmd1 {
-            CallCommand::LegAdd { leg_id, .. } => leg_id.clone().expect("LegAdd should have leg_id"),
+            CallCommand::LegAdd { leg_id, .. } => {
+                leg_id.clone().expect("LegAdd should have leg_id")
+            }
             _ => panic!("expected LegAdd, got {cmd1:?}"),
         };
 

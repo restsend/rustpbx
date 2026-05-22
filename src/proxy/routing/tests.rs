@@ -4,10 +4,10 @@ use crate::config::{MediaProxyMode, RecordingPolicy, RouteResult};
 use crate::proxy::call::q850_reason_value;
 use crate::proxy::routing::matcher::{RouteResourceLookup, match_invite};
 use crate::proxy::routing::{
-    DestConfig, MatchConditions, QueueDialMode, RejectConfig, RewriteRules, RouteAction,
+    DestConfig, MatchConditions, MediaMode, QueueDialMode, RejectConfig, RewriteRules, RouteAction,
     RouteDirection, RouteQueueConfig, RouteQueueFallbackConfig, RouteQueueHoldConfig,
     RouteQueueStrategyConfig, RouteQueueTargetConfig, RouteRule, SourceTrunk, TrunkConfig,
-    TrunkDirection, MediaMode, VideoPolicy,
+    TrunkDirection, VideoPolicy,
 };
 use async_trait::async_trait;
 use rsipstack::dialog::invitation::InviteOption;

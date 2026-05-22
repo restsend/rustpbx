@@ -7,8 +7,8 @@
 use crate::proxy::routing::TrunkConfig;
 use rsipstack::sip::{
     Method, Param, Request, SipMessage, Uri, Version,
-    headers::typed::CSeq,
     headers::CallId,
+    headers::typed::CSeq,
     typed::{From as FromHeader, To as ToHeader, Via},
     uri::Tag,
 };
@@ -56,7 +56,13 @@ async fn probe_trunk(
     endpoint_inner: &EndpointInnerRef,
     local_sip_addr: &str,
 ) -> Result<u64, String> {
-    probe_trunk_with_timeout(dest, endpoint_inner, local_sip_addr, Duration::from_secs(10)).await
+    probe_trunk_with_timeout(
+        dest,
+        endpoint_inner,
+        local_sip_addr,
+        Duration::from_secs(10),
+    )
+    .await
 }
 
 async fn probe_trunk_with_timeout(
@@ -79,13 +85,13 @@ async fn probe_trunk_with_timeout(
         .next()
         .unwrap_or("tag")
         .to_string();
-    let call_id = CallId::new(format!("hc-{}", uuid::Uuid::new_v4().to_string().replace('-', "")));
+    let call_id = CallId::new(format!(
+        "hc-{}",
+        uuid::Uuid::new_v4().to_string().replace('-', "")
+    ));
 
-    let via = Via::parse(&format!(
-        "SIP/2.0/UDP {};branch={}",
-        local_sip_addr, branch
-    ))
-    .map_err(|e| format!("invalid via: {}", e))?;
+    let via = Via::parse(&format!("SIP/2.0/UDP {};branch={}", local_sip_addr, branch))
+        .map_err(|e| format!("invalid via: {}", e))?;
 
     let from = FromHeader {
         display_name: None,
@@ -111,7 +117,11 @@ async fn probe_trunk_with_timeout(
             from.into(),
             to.into(),
             call_id.into(),
-            CSeq { seq: 1, method: Method::Options }.into(),
+            CSeq {
+                seq: 1,
+                method: Method::Options,
+            }
+            .into(),
         ]
         .into(),
         body: vec![],
@@ -163,7 +173,15 @@ pub fn spawn_health_loop(
     default_interval_secs: u64,
     cancel: tokio_util::sync::CancellationToken,
 ) {
-    spawn_health_loop_with_timeout(trunks_fn, states, endpoint_inner, local_sip_addr, default_interval_secs, Duration::from_secs(10), cancel)
+    spawn_health_loop_with_timeout(
+        trunks_fn,
+        states,
+        endpoint_inner,
+        local_sip_addr,
+        default_interval_secs,
+        Duration::from_secs(10),
+        cancel,
+    )
 }
 
 fn spawn_health_loop_with_timeout(
@@ -191,7 +209,9 @@ fn spawn_health_loop_with_timeout(
                     continue;
                 }
 
-                let interval = cfg.health_check_interval_secs.unwrap_or(default_interval_secs);
+                let interval = cfg
+                    .health_check_interval_secs
+                    .unwrap_or(default_interval_secs);
                 next_tick = next_tick.min(interval);
 
                 let per_ip = cfg.health_check_per_ip.unwrap_or(false);
@@ -203,12 +223,20 @@ fn spawn_health_loop_with_timeout(
                     targets.push(cfg.dest.clone());
                     targets.extend(cfg.inbound_hosts.clone());
 
-                    let mut per_ip_results: Vec<PerIpHealthState> = Vec::with_capacity(targets.len());
+                    let mut per_ip_results: Vec<PerIpHealthState> =
+                        Vec::with_capacity(targets.len());
                     let mut any_healthy = false;
 
                     for target in &targets {
                         let tgt = dest_name(target);
-                        match probe_trunk_with_timeout(tgt, &endpoint_inner, &local_sip_addr, probe_timeout).await {
+                        match probe_trunk_with_timeout(
+                            tgt,
+                            &endpoint_inner,
+                            &local_sip_addr,
+                            probe_timeout,
+                        )
+                        .await
+                        {
                             Ok(rtt) => {
                                 any_healthy = true;
                                 per_ip_results.push(PerIpHealthState {
@@ -266,40 +294,55 @@ fn spawn_health_loop_with_timeout(
                         }
                     }
 
-                    map.insert(name.clone(), TrunkHealthState {
-                        trunk_name: name.clone(),
-                        healthy: any_healthy,
-                        consecutive_failures: failures,
-                        rtt_ms: per_ip_results.iter().find_map(|p| if p.healthy { p.rtt_ms } else { None }),
-                        last_checked: Some(now),
-                        last_error: if any_healthy {
-                            None
-                        } else {
-                            per_ip_results.first().and_then(|p| p.last_error.clone())
+                    map.insert(
+                        name.clone(),
+                        TrunkHealthState {
+                            trunk_name: name.clone(),
+                            healthy: any_healthy,
+                            consecutive_failures: failures,
+                            rtt_ms: per_ip_results
+                                .iter()
+                                .find_map(|p| if p.healthy { p.rtt_ms } else { None }),
+                            last_checked: Some(now),
+                            last_error: if any_healthy {
+                                None
+                            } else {
+                                per_ip_results.first().and_then(|p| p.last_error.clone())
+                            },
+                            dest: cfg.dest.clone(),
+                            fallback_trunk: cfg.health_check_fallback_trunk.clone(),
+                            per_ip_states: Some(per_ip_results),
                         },
-                        dest: cfg.dest.clone(),
-                        fallback_trunk: cfg.health_check_fallback_trunk.clone(),
-                        per_ip_states: Some(per_ip_results),
-                    });
+                    );
                     drop(map);
                 } else {
                     // ── Standard mode: probe dest only ──
                     let trunk_dest = dest_name(&cfg.dest);
 
-                    match probe_trunk_with_timeout(trunk_dest, &endpoint_inner, &local_sip_addr, probe_timeout).await {
+                    match probe_trunk_with_timeout(
+                        trunk_dest,
+                        &endpoint_inner,
+                        &local_sip_addr,
+                        probe_timeout,
+                    )
+                    .await
+                    {
                         Ok(rtt) => {
                             let mut map = states.write().await;
-                            map.insert(name.clone(), TrunkHealthState {
-                                trunk_name: name.clone(),
-                                healthy: true,
-                                consecutive_failures: 0,
-                                rtt_ms: Some(rtt),
-                                last_checked: Some(chrono::Utc::now().to_rfc3339()),
-                                last_error: None,
-                                dest: cfg.dest.clone(),
-                                fallback_trunk: cfg.health_check_fallback_trunk.clone(),
-                                per_ip_states: None,
-                            });
+                            map.insert(
+                                name.clone(),
+                                TrunkHealthState {
+                                    trunk_name: name.clone(),
+                                    healthy: true,
+                                    consecutive_failures: 0,
+                                    rtt_ms: Some(rtt),
+                                    last_checked: Some(chrono::Utc::now().to_rfc3339()),
+                                    last_error: None,
+                                    dest: cfg.dest.clone(),
+                                    fallback_trunk: cfg.health_check_fallback_trunk.clone(),
+                                    per_ip_states: None,
+                                },
+                            );
                             drop(map);
                             debug!("health OK  {}  {}ms", name, rtt);
                         }
@@ -333,17 +376,20 @@ fn spawn_health_loop_with_timeout(
                                 }
                             }
 
-                            map.insert(name.clone(), TrunkHealthState {
-                                trunk_name: name.clone(),
-                                healthy: !is_unhealthy,
-                                consecutive_failures: failures,
-                                rtt_ms: None,
-                                last_checked: Some(chrono::Utc::now().to_rfc3339()),
-                                last_error: Some(format!("OPTIONS failed: {}", e)),
-                                dest: cfg.dest.clone(),
-                                fallback_trunk: cfg.health_check_fallback_trunk.clone(),
-                                per_ip_states: None,
-                            });
+                            map.insert(
+                                name.clone(),
+                                TrunkHealthState {
+                                    trunk_name: name.clone(),
+                                    healthy: !is_unhealthy,
+                                    consecutive_failures: failures,
+                                    rtt_ms: None,
+                                    last_checked: Some(chrono::Utc::now().to_rfc3339()),
+                                    last_error: Some(format!("OPTIONS failed: {}", e)),
+                                    dest: cfg.dest.clone(),
+                                    fallback_trunk: cfg.health_check_fallback_trunk.clone(),
+                                    per_ip_states: None,
+                                },
+                            );
                             drop(map);
                             debug!("health FAIL {}  {}  ({}/{})", name, e, failures, threshold);
                         }
@@ -385,6 +431,7 @@ mod tests {
     // ── Helpers ─────────────────────────────────────────────────────────────
 
     struct OptionsResponder {
+        #[allow(dead_code)]
         cancel: CancellationToken,
         port: u16,
     }
@@ -439,8 +486,13 @@ mod tests {
             Self { cancel, port }
         }
 
-        fn stop(&self) { self.cancel.cancel(); }
-        fn addr(&self) -> String { format!("127.0.0.1:{}", self.port) }
+        #[allow(dead_code)]
+        fn stop(&self) {
+            self.cancel.cancel();
+        }
+        fn addr(&self) -> String {
+            format!("127.0.0.1:{}", self.port)
+        }
     }
 
     async fn create_client_endpoint() -> (EndpointInnerRef, String) {
@@ -525,16 +577,34 @@ mod tests {
         let states = Arc::new(RwLock::new(HashMap::new()));
         {
             let mut map = states.write().await;
-            map.insert("b".into(), TrunkHealthState {
-                trunk_name: "b".into(), healthy: true, consecutive_failures: 0,
-                rtt_ms: Some(5), last_checked: None, last_error: None,
-                dest: "b.com".into(), fallback_trunk: None, per_ip_states: None,
-            });
-            map.insert("a".into(), TrunkHealthState {
-                trunk_name: "a".into(), healthy: true, consecutive_failures: 0,
-                rtt_ms: Some(3), last_checked: None, last_error: None,
-                dest: "a.com".into(), fallback_trunk: None, per_ip_states: None,
-            });
+            map.insert(
+                "b".into(),
+                TrunkHealthState {
+                    trunk_name: "b".into(),
+                    healthy: true,
+                    consecutive_failures: 0,
+                    rtt_ms: Some(5),
+                    last_checked: None,
+                    last_error: None,
+                    dest: "b.com".into(),
+                    fallback_trunk: None,
+                    per_ip_states: None,
+                },
+            );
+            map.insert(
+                "a".into(),
+                TrunkHealthState {
+                    trunk_name: "a".into(),
+                    healthy: true,
+                    consecutive_failures: 0,
+                    rtt_ms: Some(3),
+                    last_checked: None,
+                    last_error: None,
+                    dest: "a.com".into(),
+                    fallback_trunk: None,
+                    per_ip_states: None,
+                },
+            );
         }
         let snap = snapshot(&states).await;
         assert_eq!(snap.len(), 2);
@@ -551,7 +621,13 @@ mod tests {
         let (ep_inner, local_addr) = create_client_endpoint().await;
 
         sleep(Duration::from_millis(200)).await;
-        let result = probe_trunk_with_timeout(&responder.addr(), &ep_inner, &local_addr, Duration::from_secs(3)).await;
+        let result = probe_trunk_with_timeout(
+            &responder.addr(),
+            &ep_inner,
+            &local_addr,
+            Duration::from_secs(3),
+        )
+        .await;
         assert!(result.is_ok(), "probe should succeed: {:?}", result.err());
         assert!(result.unwrap() > 0, "rtt should be positive");
     }
@@ -574,7 +650,13 @@ mod tests {
     #[tokio::test]
     async fn test_probe_trunk_invalid_dest() {
         let (ep_inner, local_addr) = create_client_endpoint().await;
-        let result = probe_trunk_with_timeout("not-a-valid-address!", &ep_inner, &local_addr, Duration::from_secs(1)).await;
+        let result = probe_trunk_with_timeout(
+            "not-a-valid-address!",
+            &ep_inner,
+            &local_addr,
+            Duration::from_secs(1),
+        )
+        .await;
         assert!(result.is_err(), "probe should fail for invalid dest");
     }
 
@@ -591,9 +673,19 @@ mod tests {
         let cancel = CancellationToken::new();
 
         let trunks = Arc::new(TestTrunks::new(HashMap::from([("test".into(), trunk)])));
-        let trunks_fn = { let t = trunks.clone(); move || t.lock().unwrap().clone() };
+        let trunks_fn = {
+            let t = trunks.clone();
+            move || t.lock().unwrap().clone()
+        };
 
-        spawn_health_loop(trunks_fn, states.clone(), ep_inner, local_addr, 1, cancel.child_token());
+        spawn_health_loop(
+            trunks_fn,
+            states.clone(),
+            ep_inner,
+            local_addr,
+            1,
+            cancel.child_token(),
+        );
 
         sleep(Duration::from_secs(2)).await;
         let snap = snapshot(&states).await;
@@ -617,16 +709,33 @@ mod tests {
         let cancel = CancellationToken::new();
 
         let trunks = Arc::new(TestTrunks::new(HashMap::from([("test".into(), trunk)])));
-        let trunks_fn = { let t = trunks.clone(); move || t.lock().unwrap().clone() };
+        let trunks_fn = {
+            let t = trunks.clone();
+            move || t.lock().unwrap().clone()
+        };
 
-        spawn_health_loop_with_timeout(trunks_fn, states.clone(), ep_inner, local_addr, 1, Duration::from_secs(1), cancel.child_token());
+        spawn_health_loop_with_timeout(
+            trunks_fn,
+            states.clone(),
+            ep_inner,
+            local_addr,
+            1,
+            Duration::from_secs(1),
+            cancel.child_token(),
+        );
 
         // At interval=1s, threshold=2, with 1s probe timeout → ~4s should be enough
         sleep(Duration::from_secs(4)).await;
         let snap = snapshot(&states).await;
         assert!(!snap.is_empty(), "should have health state");
-        assert!(!snap[0].healthy, "trunk should be unhealthy after threshold exceeded");
-        assert!(snap[0].consecutive_failures >= 2, "failures should be >= threshold");
+        assert!(
+            !snap[0].healthy,
+            "trunk should be unhealthy after threshold exceeded"
+        );
+        assert!(
+            snap[0].consecutive_failures >= 2,
+            "failures should be >= threshold"
+        );
         assert!(snap[0].last_error.is_some());
 
         cancel.cancel();
@@ -642,14 +751,28 @@ mod tests {
         let cancel = CancellationToken::new();
 
         let trunks = Arc::new(TestTrunks::new(HashMap::from([("test".into(), trunk)])));
-        let trunks_fn = { let t = trunks.clone(); move || t.lock().unwrap().clone() };
+        let trunks_fn = {
+            let t = trunks.clone();
+            move || t.lock().unwrap().clone()
+        };
 
-        spawn_health_loop_with_timeout(trunks_fn, states.clone(), ep_inner.clone(), local_addr.clone(), 1, Duration::from_secs(1), cancel.child_token());
+        spawn_health_loop_with_timeout(
+            trunks_fn,
+            states.clone(),
+            ep_inner.clone(),
+            local_addr.clone(),
+            1,
+            Duration::from_secs(1),
+            cancel.child_token(),
+        );
 
         // Let failures accumulate first
         sleep(Duration::from_secs(4)).await;
         let snap1 = snapshot(&states).await;
-        assert!(!snap1.is_empty() && !snap1[0].healthy, "should be unhealthy");
+        assert!(
+            !snap1.is_empty() && !snap1[0].healthy,
+            "should be unhealthy"
+        );
 
         // Start responder → restore health
         let _responder = OptionsResponder::start(port).await;
@@ -672,17 +795,29 @@ mod tests {
         let cancel = CancellationToken::new();
 
         let trunks = Arc::new(TestTrunks::new(HashMap::from([("test".into(), trunk)])));
-        let trunks_fn = { let t = trunks.clone(); move || t.lock().unwrap().clone() };
+        let trunks_fn = {
+            let t = trunks.clone();
+            move || t.lock().unwrap().clone()
+        };
 
-        spawn_health_loop(trunks_fn, states.clone(), ep_inner, local_addr, 1, cancel.child_token());
+        spawn_health_loop(
+            trunks_fn,
+            states.clone(),
+            ep_inner,
+            local_addr,
+            1,
+            cancel.child_token(),
+        );
 
         // Short wait: should have failures but below threshold → still healthy
         sleep(Duration::from_secs(2)).await;
         let snap = snapshot(&states).await;
         if !snap.is_empty() {
             // Threshold=5, with 2s we likely have 1-2 failures, should still be healthy
-            assert!(snap[0].healthy || snap[0].consecutive_failures < 5,
-                "with threshold=5, 2s should not yet mark unhealthy");
+            assert!(
+                snap[0].healthy || snap[0].consecutive_failures < 5,
+                "with threshold=5, 2s should not yet mark unhealthy"
+            );
         }
 
         cancel.cancel();
@@ -701,10 +836,23 @@ mod tests {
         trunk.inbound_hosts = vec![format!("127.0.0.1:{p2}")];
         let cancel = CancellationToken::new();
 
-        let trunks = Arc::new(TestTrunks::new(HashMap::from([("test_per_ip".into(), trunk)])));
-        let trunks_fn = { let t = trunks.clone(); move || t.lock().unwrap().clone() };
+        let trunks = Arc::new(TestTrunks::new(HashMap::from([(
+            "test_per_ip".into(),
+            trunk,
+        )])));
+        let trunks_fn = {
+            let t = trunks.clone();
+            move || t.lock().unwrap().clone()
+        };
 
-        spawn_health_loop(trunks_fn, states.clone(), ep_inner, local_addr, 1, cancel.child_token());
+        spawn_health_loop(
+            trunks_fn,
+            states.clone(),
+            ep_inner,
+            local_addr,
+            1,
+            cancel.child_token(),
+        );
 
         sleep(Duration::from_secs(2)).await;
         let snap = snapshot(&states).await;
@@ -729,9 +877,19 @@ mod tests {
         let cancel = CancellationToken::new();
 
         let trunks = Arc::new(TestTrunks::new(HashMap::from([("disabled".into(), trunk)])));
-        let trunks_fn = { let t = trunks.clone(); move || t.lock().unwrap().clone() };
+        let trunks_fn = {
+            let t = trunks.clone();
+            move || t.lock().unwrap().clone()
+        };
 
-        spawn_health_loop(trunks_fn, states.clone(), ep_inner, local_addr, 1, cancel.child_token());
+        spawn_health_loop(
+            trunks_fn,
+            states.clone(),
+            ep_inner,
+            local_addr,
+            1,
+            cancel.child_token(),
+        );
 
         sleep(Duration::from_secs(1)).await;
         let snap = snapshot(&states).await;

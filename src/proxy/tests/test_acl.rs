@@ -277,7 +277,11 @@ async fn test_dos_blocks_excessive_requests() {
             )
             .await
             .unwrap();
-        assert!(matches!(result, ProxyAction::Continue), "expected Continue, got {:?}", result);
+        assert!(
+            matches!(result, ProxyAction::Continue),
+            "expected Continue, got {:?}",
+            result
+        );
     }
 
     // 3rd request from same IP → blocked
@@ -291,7 +295,11 @@ async fn test_dos_blocks_excessive_requests() {
         )
         .await
         .unwrap();
-    assert!(matches!(result, ProxyAction::Abort), "expected Abort, got {:?}", result);
+    assert!(
+        matches!(result, ProxyAction::Abort),
+        "expected Abort, got {:?}",
+        result
+    );
 }
 
 #[tokio::test]
@@ -308,14 +316,28 @@ async fn test_dos_different_ip_not_affected() {
     let request = create_acl_request(rsipstack::sip::Method::Invite, "alice", "10.0.0.1");
     let (mut tx, _) = create_transaction(request).await;
     assert!(matches!(
-        module.on_transaction_begin(CancellationToken::new(), &mut tx, TransactionCookie::default()).await.unwrap(),
+        module
+            .on_transaction_begin(
+                CancellationToken::new(),
+                &mut tx,
+                TransactionCookie::default()
+            )
+            .await
+            .unwrap(),
         ProxyAction::Continue
     ));
 
     let request = create_acl_request(rsipstack::sip::Method::Invite, "alice", "10.0.0.1");
     let (mut tx, _) = create_transaction(request).await;
     assert!(matches!(
-        module.on_transaction_begin(CancellationToken::new(), &mut tx, TransactionCookie::default()).await.unwrap(),
+        module
+            .on_transaction_begin(
+                CancellationToken::new(),
+                &mut tx,
+                TransactionCookie::default()
+            )
+            .await
+            .unwrap(),
         ProxyAction::Abort
     ));
 
@@ -323,7 +345,14 @@ async fn test_dos_different_ip_not_affected() {
     let request = create_acl_request(rsipstack::sip::Method::Invite, "alice", "10.0.0.2");
     let (mut tx, _) = create_transaction(request).await;
     assert!(matches!(
-        module.on_transaction_begin(CancellationToken::new(), &mut tx, TransactionCookie::default()).await.unwrap(),
+        module
+            .on_transaction_begin(
+                CancellationToken::new(),
+                &mut tx,
+                TransactionCookie::default()
+            )
+            .await
+            .unwrap(),
         ProxyAction::Continue
     ));
 }
@@ -343,7 +372,14 @@ async fn test_dos_release_on_transaction_end() {
     let request = create_acl_request(rsipstack::sip::Method::Invite, "alice", "10.0.0.1");
     let (mut tx1, _) = create_transaction(request).await;
     assert!(matches!(
-        module.on_transaction_begin(CancellationToken::new(), &mut tx1, TransactionCookie::default()).await.unwrap(),
+        module
+            .on_transaction_begin(
+                CancellationToken::new(),
+                &mut tx1,
+                TransactionCookie::default()
+            )
+            .await
+            .unwrap(),
         ProxyAction::Continue
     ));
 
@@ -351,7 +387,14 @@ async fn test_dos_release_on_transaction_end() {
     let request = create_acl_request(rsipstack::sip::Method::Invite, "bob", "10.0.0.1");
     let (mut tx2, _) = create_transaction(request).await;
     assert!(matches!(
-        module.on_transaction_begin(CancellationToken::new(), &mut tx2, TransactionCookie::default()).await.unwrap(),
+        module
+            .on_transaction_begin(
+                CancellationToken::new(),
+                &mut tx2,
+                TransactionCookie::default()
+            )
+            .await
+            .unwrap(),
         ProxyAction::Abort
     ));
 
@@ -362,7 +405,14 @@ async fn test_dos_release_on_transaction_end() {
     let request = create_acl_request(rsipstack::sip::Method::Invite, "bob", "10.0.0.1");
     let (mut tx3, _) = create_transaction(request).await;
     assert!(matches!(
-        module.on_transaction_begin(CancellationToken::new(), &mut tx3, TransactionCookie::default()).await.unwrap(),
+        module
+            .on_transaction_begin(
+                CancellationToken::new(),
+                &mut tx3,
+                TransactionCookie::default()
+            )
+            .await
+            .unwrap(),
         ProxyAction::Continue
     ));
 }
@@ -381,7 +431,14 @@ async fn test_dos_disabled_allows_all() {
         let request = create_acl_request(rsipstack::sip::Method::Invite, "alice", "10.0.0.1");
         let (mut tx, _) = create_transaction(request).await;
         assert!(matches!(
-            module.on_transaction_begin(CancellationToken::new(), &mut tx, TransactionCookie::default()).await.unwrap(),
+            module
+                .on_transaction_begin(
+                    CancellationToken::new(),
+                    &mut tx,
+                    TransactionCookie::default()
+                )
+                .await
+                .unwrap(),
             ProxyAction::Continue
         ));
     }
@@ -409,7 +466,9 @@ fn create_request_with_from_uri(from_uri: &str) -> rsipstack::sip::Request {
     let from = rsipstack::sip::typed::From {
         display_name: None,
         uri: from_uri.parse().unwrap(),
-        params: vec![rsipstack::sip::Param::Tag(rsipstack::sip::param::Tag::new("abc123"))],
+        params: vec![rsipstack::sip::Param::Tag(rsipstack::sip::param::Tag::new(
+            "abc123",
+        ))],
     };
 
     let to = rsipstack::sip::typed::To {
@@ -418,12 +477,14 @@ fn create_request_with_from_uri(from_uri: &str) -> rsipstack::sip::Request {
         params: vec![],
     };
 
-    let via = rsipstack::sip::headers::Via::new(
-        "SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK-testbranch",
-    );
+    let via =
+        rsipstack::sip::headers::Via::new("SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK-testbranch");
 
     let call_id = rsipstack::sip::headers::CallId::new("testcallid");
-    let cseq = rsipstack::sip::headers::typed::CSeq { seq: 1u32, method: rsipstack::sip::Method::Invite };
+    let cseq = rsipstack::sip::headers::typed::CSeq {
+        seq: 1u32,
+        method: rsipstack::sip::Method::Invite,
+    };
 
     let contact_uri = rsipstack::sip::Uri {
         scheme: Some(rsipstack::sip::Scheme::Sip),
@@ -446,7 +507,15 @@ fn create_request_with_from_uri(from_uri: &str) -> rsipstack::sip::Request {
         method: rsipstack::sip::Method::Invite,
         uri,
         version: rsipstack::sip::Version::V2,
-        headers: vec![from.into(), to.into(), via.into(), call_id.into(), cseq.into(), contact.into()].into(),
+        headers: vec![
+            from.into(),
+            to.into(),
+            via.into(),
+            call_id.into(),
+            cseq.into(),
+            contact.into(),
+        ]
+        .into(),
         body: vec![],
     }
 }
@@ -470,7 +539,11 @@ async fn test_uri_normalization_rejects_long_from() {
         )
         .await
         .unwrap();
-    assert!(matches!(result, ProxyAction::Abort), "expected Abort for long URI, got {:?}", result);
+    assert!(
+        matches!(result, ProxyAction::Abort),
+        "expected Abort for long URI, got {:?}",
+        result
+    );
 }
 
 #[tokio::test]
@@ -492,7 +565,11 @@ async fn test_uri_normalization_allows_short_from() {
         )
         .await
         .unwrap();
-    assert!(matches!(result, ProxyAction::Continue), "expected Continue for short URI, got {:?}", result);
+    assert!(
+        matches!(result, ProxyAction::Continue),
+        "expected Continue for short URI, got {:?}",
+        result
+    );
 }
 
 #[tokio::test]
@@ -514,5 +591,9 @@ async fn test_uri_normalization_disabled_allows_long() {
         )
         .await
         .unwrap();
-    assert!(matches!(result, ProxyAction::Continue), "expected Continue when disabled, got {:?}", result);
+    assert!(
+        matches!(result, ProxyAction::Continue),
+        "expected Continue when disabled, got {:?}",
+        result
+    );
 }

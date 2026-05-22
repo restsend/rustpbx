@@ -2,8 +2,8 @@ use crate::call::{DialStrategy, Dialplan, DialplanFlow, Location};
 use crate::config::EmergencyConfig;
 use crate::proxy::call::{DialplanInspector, RouteError};
 use async_trait::async_trait;
-use rsipstack::sip::prelude::HeadersExt;
 use rsipstack::sip::Request;
+use rsipstack::sip::prelude::HeadersExt;
 use tracing::info;
 
 pub struct EmergencyInspector {
@@ -101,7 +101,9 @@ mod tests {
         let from = rsipstack::sip::typed::From {
             display_name: None,
             uri: uri.clone(),
-            params: vec![rsipstack::sip::Param::Tag(rsipstack::sip::param::Tag::new("t1"))],
+            params: vec![rsipstack::sip::Param::Tag(rsipstack::sip::param::Tag::new(
+                "t1",
+            ))],
         };
 
         let to = rsipstack::sip::typed::To {
@@ -117,10 +119,8 @@ mod tests {
             headers: vec![
                 from.into(),
                 to.into(),
-                rsipstack::sip::headers::Via::new(
-                    "SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK-b",
-                )
-                .into(),
+                rsipstack::sip::headers::Via::new("SIP/2.0/UDP 10.0.0.1:5060;branch=z9hG4bK-b")
+                    .into(),
                 rsipstack::sip::headers::CallId::new("c1").into(),
                 rsipstack::sip::headers::typed::CSeq {
                     seq: 1,
@@ -160,7 +160,10 @@ mod tests {
         let inspector = EmergencyInspector::new(make_cfg(true, &["911", "999"], "sip:emg@pbx.com"));
         let req = emg_request("911");
         let dp = Dialplan::new("s".into(), req.clone(), crate::call::DialDirection::Inbound);
-        let r = inspector.inspect_dialplan(dp, &Default::default(), &req).await.unwrap();
+        let r = inspector
+            .inspect_dialplan(dp, &Default::default(), &req)
+            .await
+            .unwrap();
         match r.flow {
             DialplanFlow::Targets(s) => {
                 let t = match s {
@@ -179,7 +182,10 @@ mod tests {
         let inspector = EmergencyInspector::new(make_cfg(true, &["911"], "sip:emg@pbx.com"));
         let req = emg_request("14085551234");
         let dp = Dialplan::new("s".into(), req.clone(), crate::call::DialDirection::Inbound);
-        let r = inspector.inspect_dialplan(dp, &Default::default(), &req).await.unwrap();
+        let r = inspector
+            .inspect_dialplan(dp, &Default::default(), &req)
+            .await
+            .unwrap();
         assert!(empty_targets(&r.flow));
     }
 
@@ -188,7 +194,10 @@ mod tests {
         let inspector = EmergencyInspector::new(make_cfg(false, &["911"], "sip:t@c.com"));
         let req = emg_request("911");
         let dp = Dialplan::new("s".into(), req.clone(), crate::call::DialDirection::Inbound);
-        let r = inspector.inspect_dialplan(dp, &Default::default(), &req).await.unwrap();
+        let r = inspector
+            .inspect_dialplan(dp, &Default::default(), &req)
+            .await
+            .unwrap();
         assert!(empty_targets(&r.flow));
     }
 
@@ -197,7 +206,10 @@ mod tests {
         let inspector = EmergencyInspector::new(None);
         let req = emg_request("911");
         let dp = Dialplan::new("s".into(), req.clone(), crate::call::DialDirection::Inbound);
-        let r = inspector.inspect_dialplan(dp, &Default::default(), &req).await.unwrap();
+        let r = inspector
+            .inspect_dialplan(dp, &Default::default(), &req)
+            .await
+            .unwrap();
         assert!(empty_targets(&r.flow));
     }
 
@@ -207,7 +219,10 @@ mod tests {
         let mut req = emg_request("911");
         req.method = rsipstack::sip::Method::Register;
         let dp = Dialplan::new("s".into(), req.clone(), crate::call::DialDirection::Inbound);
-        let r = inspector.inspect_dialplan(dp, &Default::default(), &req).await.unwrap();
+        let r = inspector
+            .inspect_dialplan(dp, &Default::default(), &req)
+            .await
+            .unwrap();
         assert!(empty_targets(&r.flow));
     }
 }

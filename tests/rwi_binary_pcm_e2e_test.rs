@@ -425,6 +425,7 @@ async fn test_pcm_frame_does_not_break_session_state() {
         let gw = gateway.read().await;
         let event = rustpbx::rwi::RwiEvent::CallRinging {
             call_id: "test".to_string(),
+            context: Default::default(),
         };
         gw.fan_out_event_to_context("pcm-test", &event, &"test".to_string());
     }

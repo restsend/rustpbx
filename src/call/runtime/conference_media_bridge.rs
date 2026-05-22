@@ -414,7 +414,7 @@ impl ConferenceMediaBridge {
 }
 
 /// Resample audio using linear interpolation.
-fn resample_linear(samples: &[i16], src_rate: u32, dst_rate: u32) -> Vec<i16> {
+pub(crate) fn resample_linear(samples: &[i16], src_rate: u32, dst_rate: u32) -> Vec<i16> {
     if src_rate == dst_rate {
         return samples.to_vec();
     }
@@ -444,7 +444,7 @@ fn resample_linear(samples: &[i16], src_rate: u32, dst_rate: u32) -> Vec<i16> {
 
 /// Handle to control a conference media bridge.
 pub struct ConferenceBridgeHandle {
-    _tasks: Vec<tokio::task::JoinHandle<()>>,
+    pub(crate) _tasks: Vec<tokio::task::JoinHandle<()>>,
     pub cancel_token: tokio_util::sync::CancellationToken,
 }
 
@@ -1025,10 +1025,7 @@ mod tests {
 
         match &sent[0] {
             MediaSample::Audio(frame) => {
-                assert!(
-                    !frame.data.is_empty(),
-                    "G.722 payload should not be empty"
-                );
+                assert!(!frame.data.is_empty(), "G.722 payload should not be empty");
             }
             _ => panic!("Expected Audio sample"),
         }

@@ -249,6 +249,9 @@ mod tests {
             .await
             .unwrap();
         let agent = registry.get_agent("agent-001").await.unwrap();
-        assert!(matches!(agent.presence, PresenceState::Busy { call_id: None }));
+        assert!(matches!(
+            agent.presence,
+            PresenceState::Busy { call_id: None }
+        ));
     }
 }

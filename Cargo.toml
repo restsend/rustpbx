@@ -41,7 +41,7 @@ addon-transcript = []
 addon-voicemail = ["dep:url"]
 addon-ivr-editor = ["dep:hex"]
 addon-cc = []
-test-harness = ["addon-cc", "dep:sipbot", "dep:portpicker"]
+
 addon-sbc = ["dep:minijinja", "dep:evalexpr"]
 addon-observability = ["metrics-exporter-prometheus"]
 addon-telemetry = [
@@ -206,16 +206,12 @@ totp-rs = { version = "5.7.1", features = ["qr", "gen_secret"] }
 ldap3 = { version = "0.12.1", optional = true }
 ring = { version = "0.17", optional = true }
 
-sipbot = { version = "0.2.30", default-features = false, features = [
-    "opus",
-], optional = true }
-portpicker = { version = "0.1.1", optional = true }
 
 [dev-dependencies]
 tempfile = "3.27.0"
 portpicker = "0.1.1"
 tower = { version = "0.5", features = ["util"] }
-sipbot = { version = "0.2.30", default-features = false, features = ["opus"] }
+sipbot = { version = "0.2.37", default-features = false }
 serde_urlencoded = "0.7"
 
 [build-dependencies]
@@ -234,7 +230,4 @@ required-features = ["opus"]
 name = "verify-i18n"
 path = "tools/verify_i18n.rs"
 
-[[bin]]
-name = "pbx-harness"
-path = "src/bin/pbx-harness.rs"
-required-features = ["test-harness"]
+
