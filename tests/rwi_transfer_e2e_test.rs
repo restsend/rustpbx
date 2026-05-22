@@ -134,6 +134,7 @@ async fn test_rwi_event_transfer_failed_with_reason() {
         call_id: "test-call".to_string(),
         sip_status: Some(486),
         reason: Some("refer_rejected".to_string()),
+        context: Default::default(),
     };
 
     match event {
@@ -141,6 +142,7 @@ async fn test_rwi_event_transfer_failed_with_reason() {
             call_id,
             sip_status,
             reason,
+            ..
         } => {
             assert_eq!(call_id, "test-call");
             assert_eq!(sip_status, Some(486));
@@ -155,10 +157,15 @@ async fn test_rwi_event_conference_consult_dialing() {
     let event = RwiEvent::ConferenceConsultDialing {
         call_id: "call-001".to_string(),
         target: "sip:target@local".to_string(),
+        context: Default::default(),
     };
 
     match event {
-        RwiEvent::ConferenceConsultDialing { call_id, target } => {
+        RwiEvent::ConferenceConsultDialing {
+            call_id,
+            target,
+            ..
+        } => {
             assert_eq!(call_id, "call-001");
             assert_eq!(target, "sip:target@local");
         }
@@ -171,10 +178,15 @@ async fn test_rwi_event_conference_consult_connected() {
     let event = RwiEvent::ConferenceConsultConnected {
         call_id: "call-001".to_string(),
         target: "sip:target@local".to_string(),
+        context: Default::default(),
     };
 
     match event {
-        RwiEvent::ConferenceConsultConnected { call_id, target } => {
+        RwiEvent::ConferenceConsultConnected {
+            call_id,
+            target,
+            ..
+        } => {
             assert_eq!(call_id, "call-001");
             assert_eq!(target, "sip:target@local");
         }
@@ -187,12 +199,14 @@ async fn test_rwi_event_conference_merge_requested() {
     let event = RwiEvent::ConferenceMergeRequested {
         call_id: "call-001".to_string(),
         consultation_call_id: "call-002".to_string(),
+        context: Default::default(),
     };
 
     match event {
         RwiEvent::ConferenceMergeRequested {
             call_id,
             consultation_call_id,
+            ..
         } => {
             assert_eq!(call_id, "call-001");
             assert_eq!(consultation_call_id, "call-002");
@@ -206,10 +220,15 @@ async fn test_rwi_event_conference_merged() {
     let event = RwiEvent::ConferenceMerged {
         conf_id: "conf-001".to_string(),
         call_id: "call-001".to_string(),
+        context: Default::default(),
     };
 
     match event {
-        RwiEvent::ConferenceMerged { conf_id, call_id } => {
+        RwiEvent::ConferenceMerged {
+            conf_id,
+            call_id,
+            ..
+        } => {
             assert_eq!(conf_id, "conf-001");
             assert_eq!(call_id, "call-001");
         }
@@ -223,6 +242,7 @@ async fn test_rwi_event_conference_merge_failed() {
         conf_id: "conf-001".to_string(),
         call_id: "call-001".to_string(),
         reason: "bridge_failed".to_string(),
+        context: Default::default(),
     };
 
     match event {
@@ -230,6 +250,7 @@ async fn test_rwi_event_conference_merge_failed() {
             conf_id,
             call_id,
             reason,
+            ..
         } => {
             assert_eq!(conf_id, "conf-001");
             assert_eq!(call_id, "call-001");
@@ -245,6 +266,7 @@ async fn test_rwi_event_call_ownership_changed() {
         call_id: "call-001".to_string(),
         session_id: "session-001".to_string(),
         mode: "control".to_string(),
+        context: Default::default(),
     };
 
     match event {
@@ -252,6 +274,7 @@ async fn test_rwi_event_call_ownership_changed() {
             call_id,
             session_id,
             mode,
+            ..
         } => {
             assert_eq!(call_id, "call-001");
             assert_eq!(session_id, "session-001");

@@ -16,19 +16,19 @@ use tokio::sync::RwLock;
 use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 
-use rustpbx::call::user::SipUser;
 use rustpbx::config::ProxyConfig;
 use rustpbx::proxy::call::CallModule;
 use rustpbx::proxy::locator::MemoryLocator;
 use rustpbx::proxy::registrar::RegistrarModule;
 use rustpbx::proxy::routing::TrunkConfig;
 use rustpbx::proxy::server::SipServerBuilder;
-use rustpbx::proxy::trunk_health::{HealthStateMap, spawn_health_loop, snapshot};
+use rustpbx::proxy::trunk_health::{HealthStateMap, snapshot, spawn_health_loop};
 use rustpbx::proxy::user::MemoryUserBackend;
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
 struct OptionsResponder {
+    #[allow(dead_code)]
     cancel: CancellationToken,
     port: u16,
 }
@@ -83,8 +83,13 @@ impl OptionsResponder {
         Self { cancel, port }
     }
 
-    fn stop(&self) { self.cancel.cancel(); }
-    fn addr(&self) -> String { format!("127.0.0.1:{}", self.port) }
+    #[allow(dead_code)]
+    fn stop(&self) {
+        self.cancel.cancel();
+    }
+    fn addr(&self) -> String {
+        format!("127.0.0.1:{}", self.port)
+    }
 }
 
 async fn create_pbx(port: u16) -> (rustpbx::proxy::server::SipServer, CancellationToken) {
@@ -151,13 +156,26 @@ async fn test_e2e_health_check_healthy() {
     let trunk = make_trunk(&responder.addr());
     let cancel = CancellationToken::new();
 
-    let trunks = Arc::new(std::sync::Mutex::new(HashMap::from([("e2e-trunk".into(), trunk)])));
-    let fn_ = { let t = trunks.clone(); move || t.lock().unwrap().clone() };
+    let trunks = Arc::new(std::sync::Mutex::new(HashMap::from([(
+        "e2e-trunk".into(),
+        trunk,
+    )])));
+    let fn_ = {
+        let t = trunks.clone();
+        move || t.lock().unwrap().clone()
+    };
 
     let endpoint_inner = server.inner.endpoint.inner.clone();
     let local_addr = format!("127.0.0.1:{pbx_port}");
 
-    spawn_health_loop(fn_, states.clone(), endpoint_inner, local_addr, 1, cancel.child_token());
+    spawn_health_loop(
+        fn_,
+        states.clone(),
+        endpoint_inner,
+        local_addr,
+        1,
+        cancel.child_token(),
+    );
 
     sleep(Duration::from_secs(3)).await;
     let snap = snapshot(&states).await;
@@ -181,21 +199,36 @@ async fn test_e2e_health_check_unhealthy() {
     let trunk = make_trunk(&dest);
     let cancel = CancellationToken::new();
 
-    let trunks = Arc::new(std::sync::Mutex::new(HashMap::from([("e2e-trunk".into(), trunk)])));
-    let fn_ = { let t = trunks.clone(); move || t.lock().unwrap().clone() };
+    let trunks = Arc::new(std::sync::Mutex::new(HashMap::from([(
+        "e2e-trunk".into(),
+        trunk,
+    )])));
+    let fn_ = {
+        let t = trunks.clone();
+        move || t.lock().unwrap().clone()
+    };
 
     let endpoint_inner = server.inner.endpoint.inner.clone();
     let local_addr = format!("127.0.0.1:{pbx_port}");
 
-    spawn_health_loop(fn_, states.clone(), endpoint_inner, local_addr, 1, cancel.child_token());
+    spawn_health_loop(
+        fn_,
+        states.clone(),
+        endpoint_inner,
+        local_addr,
+        1,
+        cancel.child_token(),
+    );
 
     // Probe timeout is 10s (default), interval=1s → each probe cycle ~11s
     // threshold=2 → ~22s needed. We use shorter wait + check it's failing
     sleep(Duration::from_secs(5)).await;
     let snap = snapshot(&states).await;
     if !snap.is_empty() {
-        assert!(!snap[0].healthy || snap[0].consecutive_failures > 0,
-            "should have some failures");
+        assert!(
+            !snap[0].healthy || snap[0].consecutive_failures > 0,
+            "should have some failures"
+        );
     }
 
     cancel.cancel();
@@ -212,13 +245,26 @@ async fn test_e2e_health_check_recovery() {
     let trunk = make_trunk(&format!("127.0.0.1:{resp_port}"));
     let cancel = CancellationToken::new();
 
-    let trunks = Arc::new(std::sync::Mutex::new(HashMap::from([("e2e-trunk".into(), trunk)])));
-    let fn_ = { let t = trunks.clone(); move || t.lock().unwrap().clone() };
+    let trunks = Arc::new(std::sync::Mutex::new(HashMap::from([(
+        "e2e-trunk".into(),
+        trunk,
+    )])));
+    let fn_ = {
+        let t = trunks.clone();
+        move || t.lock().unwrap().clone()
+    };
 
     let endpoint_inner = server.inner.endpoint.inner.clone();
     let local_addr = format!("127.0.0.1:{pbx_port}");
 
-    spawn_health_loop(fn_, states.clone(), endpoint_inner, local_addr, 1, cancel.child_token());
+    spawn_health_loop(
+        fn_,
+        states.clone(),
+        endpoint_inner,
+        local_addr,
+        1,
+        cancel.child_token(),
+    );
 
     // Initially no responder → failures accumulate
     sleep(Duration::from_secs(4)).await;
@@ -261,12 +307,22 @@ async fn test_e2e_health_check_multiple_trunks() {
         ("trunk-a".into(), t1),
         ("trunk-b".into(), t2),
     ])));
-    let fn_ = { let t = trunks.clone(); move || t.lock().unwrap().clone() };
+    let fn_ = {
+        let t = trunks.clone();
+        move || t.lock().unwrap().clone()
+    };
 
     let endpoint_inner = server.inner.endpoint.inner.clone();
     let local_addr = format!("127.0.0.1:{pbx_port}");
 
-    spawn_health_loop(fn_, states.clone(), endpoint_inner, local_addr, 1, cancel.child_token());
+    spawn_health_loop(
+        fn_,
+        states.clone(),
+        endpoint_inner,
+        local_addr,
+        1,
+        cancel.child_token(),
+    );
 
     sleep(Duration::from_secs(3)).await;
     let snap = snapshot(&states).await;

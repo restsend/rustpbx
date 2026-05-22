@@ -3,7 +3,8 @@ use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter, QueryOr
 use std::{collections::HashMap, fs, path::Path};
 
 use crate::{
-    addons::queue::models as queue, addons::queue::services::utils as queue_utils,
+    addons::queue::models as queue,
+    addons::queue::services::utils as queue_utils,
     call::DEFAULT_QUEUE_HOLD_AUDIO,
     config::ProxyConfig,
     proxy::routing::{RouteQueueConfig, RouteQueueHoldConfig},

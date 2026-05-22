@@ -37,7 +37,9 @@ use tracing::info;
 #[derive(Debug, Clone)]
 enum HookEvent {
     Connected(CallSessionContext),
+    #[allow(dead_code)]
     Held(CallSessionContext, String),
+    #[allow(dead_code)]
     Unheld(CallSessionContext, String),
     Ended(CallSessionContext, u64),
 }

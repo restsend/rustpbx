@@ -512,6 +512,7 @@ async fn test_leg_timeline_via_call_resume() {
             }),
             rustpbx::rwi::RwiEvent::CallAnswered {
                 call_id: "timeline-call".to_string(),
+                context: Default::default(),
             },
             rustpbx::rwi::RwiEvent::CallBridged {
                 leg_a: "timeline-call".to_string(),
@@ -519,9 +520,11 @@ async fn test_leg_timeline_via_call_resume() {
             },
             rustpbx::rwi::RwiEvent::CallUnbridged {
                 call_id: "timeline-call".to_string(),
+                context: Default::default(),
             },
             rustpbx::rwi::RwiEvent::CallTransferred {
                 call_id: "timeline-call".to_string(),
+                context: Default::default(),
             },
         ];
 

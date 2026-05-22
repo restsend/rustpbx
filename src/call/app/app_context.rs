@@ -1,5 +1,5 @@
-use crate::call::app::ivr::trace::IvrTraceCollector;
 use crate::call::app::CallApp;
+use crate::call::app::ivr::trace::IvrTraceCollector;
 use crate::call::runtime::PostCallHook;
 use crate::config::Config;
 use chrono::{DateTime, Utc};
@@ -107,8 +107,20 @@ pub struct ApplicationContext {
     pub ivr_trace: Option<Arc<IvrTraceCollector>>,
 
     /// Custom call app factories (registered by addons).
-    pub app_factories:
-        Arc<Vec<(&'static str, Arc<dyn Fn(&str, Option<serde_json::Value>, &ApplicationContext) -> Option<Box<dyn CallApp>> + Send + Sync>)>>,
+    pub app_factories: Arc<
+        Vec<(
+            &'static str,
+            Arc<
+                dyn Fn(
+                        &str,
+                        Option<serde_json::Value>,
+                        &ApplicationContext,
+                    ) -> Option<Box<dyn CallApp>>
+                    + Send
+                    + Sync,
+            >,
+        )>,
+    >,
 
     /// Post-call hook (registered by callcenter addon).
     pub post_call_hook: Option<Arc<dyn PostCallHook>>,
@@ -116,11 +128,7 @@ pub struct ApplicationContext {
 
 impl ApplicationContext {
     /// Create a new application context.
-    pub fn new(
-        db: DatabaseConnection,
-        call_info: CallInfo,
-        config: Arc<Config>,
-    ) -> Self {
+    pub fn new(db: DatabaseConnection, call_info: CallInfo, config: Arc<Config>) -> Self {
         Self {
             session_vars: Arc::new(RwLock::new(HashMap::new())),
             queue_name: Arc::new(RwLock::new(None)),

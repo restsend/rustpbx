@@ -324,10 +324,7 @@ impl MediaMixer {
     }
 
     /// The main mixing loop
-    async fn mixing_loop(
-        mixer_id: &str,
-        cancel_token: CancellationToken,
-    ) {
+    async fn mixing_loop(mixer_id: &str, cancel_token: CancellationToken) {
         info!("Mixing loop started for {}", mixer_id);
 
         loop {
@@ -445,7 +442,6 @@ mod tests {
         mixer.set_mode(SupervisorMixerMode::Barge);
         assert_eq!(mixer.get_mode(), SupervisorMixerMode::Barge);
     }
-
 
     #[test]
     fn test_audio_mixer_mix_frames_with_zero_gain() {

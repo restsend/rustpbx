@@ -15,7 +15,9 @@ use tracing::info;
 use crate::{
     call::{DialDirection, RoutingState, policy::PolicyCheckStatus},
     config::{DialplanHints, MediaProxyMode, RouteResult},
-    proxy::routing::{ActionType, MediaMode, RouteQueueConfig, RouteRule, SourceTrunk, TrunkConfig},
+    proxy::routing::{
+        ActionType, MediaMode, RouteQueueConfig, RouteRule, SourceTrunk, TrunkConfig,
+    },
 };
 
 // Debug routes are now stored in ProxyDataContext.debug_routes
@@ -1155,10 +1157,7 @@ fn select_trunk_weighted(
 }
 
 /// Apply trunk configuration
-pub(crate) fn apply_trunk_config(
-    option: &mut InviteOption,
-    trunk: &TrunkConfig,
-) -> Result<()> {
+pub(crate) fn apply_trunk_config(option: &mut InviteOption, trunk: &TrunkConfig) -> Result<()> {
     // Set destination
     let dest_uri: rsipstack::sip::Uri = trunk
         .dest
@@ -1220,10 +1219,7 @@ pub(crate) fn apply_trunk_config(
     Ok(())
 }
 
-fn merge_trunk_media_hints(
-    hints: &mut Option<DialplanHints>,
-    trunk: &TrunkConfig,
-) {
+fn merge_trunk_media_hints(hints: &mut Option<DialplanHints>, trunk: &TrunkConfig) {
     if trunk.codec.is_empty()
         && trunk.media_mode.is_none()
         && trunk.video_policy.is_none()

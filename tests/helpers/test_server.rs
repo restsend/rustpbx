@@ -57,6 +57,7 @@ pub struct TestPbxInject {
 /// A running in-process PBX with a real SIP stack and an RWI WebSocket endpoint.
 pub struct TestPbx {
     /// Base WebSocket URL for connecting RWI clients, e.g. `ws://127.0.0.1:<port>/rwi/v1`.
+    #[allow(dead_code)]
     pub rwi_url: String,
     /// SIP port this server is listening on (UDP).
     #[allow(dead_code)]

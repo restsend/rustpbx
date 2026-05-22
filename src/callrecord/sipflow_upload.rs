@@ -37,7 +37,14 @@ impl CallRecordHook for SipFlowUploadHook {
 
         tokio::spawn(async move {
             crate::callrecord::sipflow_upload::do_upload(
-                backend, upload_config, db, &call_id, start, end, duration_secs, &date_prefix,
+                backend,
+                upload_config,
+                db,
+                &call_id,
+                start,
+                end,
+                duration_secs,
+                &date_prefix,
             )
             .await;
         });
@@ -119,11 +126,18 @@ async fn do_upload(
                 "SipFlowUploadHook: recording uploaded"
             );
             if let Some(ref db) = db {
-                if let Err(e) =
-                    crate::models::call_record::update_recording_url(db, call_id, &url, duration_secs)
-                        .await
+                if let Err(e) = crate::models::call_record::update_recording_url(
+                    db,
+                    call_id,
+                    &url,
+                    duration_secs,
+                )
+                .await
                 {
-                    warn!(call_id, "SipFlowUploadHook: failed to update recording_url: {e}");
+                    warn!(
+                        call_id,
+                        "SipFlowUploadHook: failed to update recording_url: {e}"
+                    );
                 }
             }
         }

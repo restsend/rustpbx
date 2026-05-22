@@ -1,9 +1,10 @@
-use crate::call::app::ivr::config::{ActionNode, EntryAction, IvrDefinition, MenuNode};
 use crate::call::app::ivr::common::SessionData;
+use crate::call::app::ivr::config::{ActionNode, EntryAction, IvrDefinition, MenuNode};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::Duration;
+use tracing::warn;
 
 // ── Provider Trait ───────────────────────────────────────────────────────────
 
@@ -25,6 +26,11 @@ pub trait ActionProvider: Send + Sync {
         let _ = reason;
         Ok(())
     }
+
+    /// Called when a DtmfMenu resolves a DTMF key locally (no round‑trip to
+    /// the provider).  Fire‑and‑forget notification so the provider stays
+    /// informed about which keys were pressed and what action was taken.
+    async fn on_local_dtmf_match(&self, _digit: &str, _action: &ActionNode) {}
 }
 
 // ── Context ──────────────────────────────────────────────────────────────────────────
@@ -55,15 +61,34 @@ pub struct ProviderContext {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ProviderEvent {
     SessionStart,
-    AudioComplete { interrupted: bool },
-    Dtmf { digit: String },
+    AudioComplete {
+        interrupted: bool,
+    },
+    Dtmf {
+        digit: String,
+    },
     DtmfTimeout,
-    ApiResponse { status: u16, body: serde_json::Value },
-    PhoneCollected { number: String },
-    RecordingComplete { url: String, duration_secs: u64 },
-    InputVoice { text: String, confidence: f32 },
-    Error { reason: String },
-    DtmfMenuInvalid { digit: String },
+    ApiResponse {
+        status: u16,
+        body: serde_json::Value,
+    },
+    PhoneCollected {
+        number: String,
+    },
+    RecordingComplete {
+        url: String,
+        duration_secs: u64,
+    },
+    InputVoice {
+        text: String,
+        confidence: f32,
+    },
+    Error {
+        reason: String,
+    },
+    DtmfMenuInvalid {
+        digit: String,
+    },
     DtmfMenuTimeout,
 }
 
@@ -90,7 +115,7 @@ impl From<&str> for EndReason {
 #[derive(Debug, Clone)]
 pub struct RetryConfig {
     pub max_retries: u32,
-    pub retry_delay_ms: u64,
+    pub timeout_ms: u64,
     pub fallback_action: Option<ActionNode>,
 }
 
@@ -98,7 +123,7 @@ impl Default for RetryConfig {
     fn default() -> Self {
         Self {
             max_retries: 3,
-            retry_delay_ms: 1000,
+            timeout_ms: 1000,
             fallback_action: Some(ActionNode {
                 action: EntryAction::Hangup {
                     prompt: Some("sounds/error.wav".into()),
@@ -149,17 +174,25 @@ impl TreeProvider {
         let mut entries = HashMap::new();
         for entry in &menu.entries {
             // Convert TOML EntryAction to ActionNode
-            entries.insert(entry.key.clone(), ActionNode {
-                action: entry.action.clone(),
-                next: None,
-            });
+            entries.insert(
+                entry.key.clone(),
+                ActionNode {
+                    action: entry.action.clone(),
+                    next: None,
+                },
+            );
         }
-        let timeout_action = menu.timeout_action.clone().map(|a| Box::new(ActionNode {
-            action: a,
-            next: None,
-        }));
+        let timeout_action = menu.timeout_action.clone().map(|a| {
+            Box::new(ActionNode {
+                action: a,
+                next: None,
+            })
+        });
         let invalid_action = if menu.invalid_prompt.is_some() || menu.invalid_text.is_some() {
-            let prompt = menu.invalid_prompt.clone().or_else(|| menu.invalid_text.clone());
+            let prompt = menu
+                .invalid_prompt
+                .clone()
+                .or_else(|| menu.invalid_text.clone());
             Some(Box::new(ActionNode::with_next(
                 EntryAction::Prompt {
                     file: prompt,
@@ -198,9 +231,7 @@ impl ActionProvider for TreeProvider {
 
     async fn next_action(&self, ctx: ProviderContext) -> anyhow::Result<ActionNode> {
         match ctx.event.as_ref() {
-            Some(ProviderEvent::SessionStart) => {
-                Ok(self.build_dtmf_menu_action())
-            }
+            Some(ProviderEvent::SessionStart) => Ok(self.build_dtmf_menu_action()),
             Some(ProviderEvent::Dtmf { digit }) => {
                 let menu = self.current_menu().cloned().unwrap_or_default();
                 // Try matching DTMF key
@@ -224,7 +255,10 @@ impl ActionProvider for TreeProvider {
                 // Timeout → repeat or timeout_action
                 let menu = self.current_menu().cloned().unwrap_or_default();
                 if let Some(ta) = menu.timeout_action {
-                    Ok(ActionNode { action: ta, next: None })
+                    Ok(ActionNode {
+                        action: ta,
+                        next: None,
+                    })
                 } else {
                     Ok(ActionNode::new(EntryAction::Repeat))
                 }
@@ -287,7 +321,8 @@ impl ActionProvider for StepProvider {
             for (k, v) in &self.headers {
                 req = req.header(k, v);
             }
-            match tokio::time::timeout(Duration::from_millis(self.retry.retry_delay_ms), req.send()).await
+            match tokio::time::timeout(Duration::from_millis(self.retry.timeout_ms), req.send())
+                .await
             {
                 Ok(Ok(resp)) => {
                     if resp.status().is_success() {
@@ -313,22 +348,48 @@ impl ActionProvider for StepProvider {
     }
 
     async fn on_session_start(&self, ctx: &SessionContext) -> anyhow::Result<()> {
-        let mut req = self.http_client.post(format!("{}/start", self.url)).json(ctx);
+        let mut req = self
+            .http_client
+            .post(format!("{}/start", self.url))
+            .json(ctx);
         for (k, v) in &self.headers {
             req = req.header(k, v);
         }
-        let _ = req.send().await;
+        if let Err(e) = req.send().await {
+            warn!(url = %self.url, error = %e, "StepProvider on_session_start failed");
+        }
         Ok(())
     }
 
     async fn on_session_end(&self, reason: &EndReason) -> anyhow::Result<()> {
-        let mut req = self.http_client.post(format!("{}/end", self.url)).json(&serde_json::json!({
-            "reason": format!("{:?}", reason),
-        }));
+        let mut req = self
+            .http_client
+            .post(format!("{}/end", self.url))
+            .json(&serde_json::json!({
+                "reason": format!("{:?}", reason),
+            }));
         for (k, v) in &self.headers {
             req = req.header(k, v);
         }
-        let _ = req.send().await;
+        if let Err(e) = req.send().await {
+            warn!(url = %self.url, reason = ?reason, error = %e, "StepProvider on_session_end failed");
+        }
         Ok(())
+    }
+
+    async fn on_local_dtmf_match(&self, digit: &str, action: &ActionNode) {
+        let mut req = self
+            .http_client
+            .post(format!("{}/dtmf-match", self.url))
+            .json(&serde_json::json!({
+                "digit": digit,
+                "action": action,
+            }));
+        for (k, v) in &self.headers {
+            req = req.header(k, v);
+        }
+        if let Err(e) = req.send().await {
+            warn!(url = %self.url, digit = %digit, error = %e, "StepProvider on_local_dtmf_match failed");
+        }
     }
 }

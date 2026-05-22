@@ -676,7 +676,12 @@ impl CallApp for QueueApp {
 
                 // Update agent presence to ringing
                 let _ = registry
-                    .update_presence(&agent.agent_id, PresenceState::Ringing { call_id: Some(self.call_id.clone()) })
+                    .update_presence(
+                        &agent.agent_id,
+                        PresenceState::Ringing {
+                            call_id: Some(self.call_id.clone()),
+                        },
+                    )
                     .await;
 
                 // Originate call to agent
@@ -734,11 +739,11 @@ impl CallApp for QueueApp {
                 );
                 let mut pending = Vec::with_capacity(agents.len());
                 for (idx, agent) in agents.iter().enumerate() {
-                    let uri = agent.contact_raw.clone().unwrap_or_else(|| agent.aor.to_string());
-                    match ctrl
-                        .originate_call(&uri, Some(self.call_id.clone()))
-                        .await
-                    {
+                    let uri = agent
+                        .contact_raw
+                        .clone()
+                        .unwrap_or_else(|| agent.aor.to_string());
+                    match ctrl.originate_call(&uri, Some(self.call_id.clone())).await {
                         Ok(call_id) => {
                             info!(
                                 index = idx,
@@ -901,7 +906,12 @@ impl CallApp for QueueApp {
 
                         if let Some(ref registry) = self.agent_registry {
                             let _ = registry
-                                .update_presence(agent_id, PresenceState::Ringing { call_id: Some(self.call_id.clone()) })
+                                .update_presence(
+                                    agent_id,
+                                    PresenceState::Ringing {
+                                        call_id: Some(self.call_id.clone()),
+                                    },
+                                )
                                 .await;
                         }
                     }
@@ -913,7 +923,12 @@ impl CallApp for QueueApp {
                         && let Some(ref registry) = self.agent_registry
                     {
                         let _ = registry
-                            .update_presence(agent_id, PresenceState::Busy { call_id: Some(self.call_id.clone()) })
+                            .update_presence(
+                                agent_id,
+                                PresenceState::Busy {
+                                    call_id: Some(self.call_id.clone()),
+                                },
+                            )
                             .await;
                     }
                     self.handle_agent_unavailable(ctrl, AgentUnavailableReason::Busy)

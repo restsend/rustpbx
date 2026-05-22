@@ -182,7 +182,9 @@ mod tests {
 
     #[async_trait::async_trait]
     impl AppRuntime for MockAppRuntime {
-        fn as_any(&self) -> &dyn std::any::Any { self }
+        fn as_any(&self) -> &dyn std::any::Any {
+            self
+        }
         async fn start_app(
             &self,
             _app_name: &str,

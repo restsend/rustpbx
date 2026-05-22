@@ -399,7 +399,10 @@ impl ClusterEventHub {
                 debug!(status = %resp.status_code, peer = %peer, "cluster MESSAGE response received");
             }
             Ok(_) => {}
-            Err(_) => debug!("timed out waiting for cluster MESSAGE response from {}", peer),
+            Err(_) => debug!(
+                "timed out waiting for cluster MESSAGE response from {}",
+                peer
+            ),
         }
         Ok(())
     }
@@ -654,7 +657,10 @@ mod tests {
             LocatorEvent::Registered(loc) => {
                 assert_eq!(loc.aor.to_string(), "sip:1001@pbx.local");
                 assert_eq!(
-                    loc.registered_aor.as_ref().map(|uri| uri.to_string()).as_deref(),
+                    loc.registered_aor
+                        .as_ref()
+                        .map(|uri| uri.to_string())
+                        .as_deref(),
                     Some("sip:1001@pbx.local")
                 );
                 assert_eq!(loc.expires, 3600);
@@ -1171,7 +1177,10 @@ mod tests {
         if let LocatorEvent::Registered(loc) = reconstructed {
             assert_eq!(loc.aor, aor);
             assert_eq!(
-                loc.registered_aor.as_ref().map(|uri| uri.to_string()).as_deref(),
+                loc.registered_aor
+                    .as_ref()
+                    .map(|uri| uri.to_string())
+                    .as_deref(),
                 Some("sip:1001@example.com")
             );
             assert_eq!(loc.expires, 3600);

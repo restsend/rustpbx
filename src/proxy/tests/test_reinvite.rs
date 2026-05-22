@@ -256,12 +256,7 @@ async fn test_reinvite_audio_to_video_add_via_bridge() {
     use rustrtc::sdp::{SdpType, SessionDescription};
 
     let caller_sdp = "v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\ns=-\r\nt=0 0\r\nm=audio 10000 RTP/AVP 0 101\r\na=rtpmap:0 PCMU/8000\r\na=rtpmap:101 telephone-event/8000\r\n";
-    let codec_lists = MediaNegotiator::build_bridge_codec_lists(
-        caller_sdp,
-        false,
-        true,
-        &[],
-    );
+    let codec_lists = MediaNegotiator::build_bridge_codec_lists(caller_sdp, false, true, &[]);
     let audio_caps: Vec<_> = codec_lists
         .caller_side
         .iter()

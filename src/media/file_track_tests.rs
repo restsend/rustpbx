@@ -204,11 +204,7 @@ async fn test_file_track_playback_completion_accurate() {
 
     // The file has 20 ms of audio.  Allow 2 s for completion (the RTP loop
     // fires every 20 ms, so it should finish in ≤ 40 ms in practice).
-    let result = tokio::time::timeout(
-        tokio::time::Duration::from_secs(2),
-        end_rx.recv(),
-    )
-    .await;
+    let result = tokio::time::timeout(tokio::time::Duration::from_secs(2), end_rx.recv()).await;
 
     assert!(
         matches!(result, Ok(Some(PlaybackEndReason::Completed))),
@@ -240,11 +236,8 @@ async fn test_file_track_playback_completion() {
 
     // Allow 500 ms — the RTP loop fires within 20 ms and the empty source
     // immediately returns 0, triggering completion.
-    let completion = tokio::time::timeout(
-        tokio::time::Duration::from_millis(500),
-        end_rx.recv(),
-    )
-    .await;
+    let completion =
+        tokio::time::timeout(tokio::time::Duration::from_millis(500), end_rx.recv()).await;
 
     assert!(
         matches!(completion, Ok(Some(PlaybackEndReason::Completed))),
@@ -285,11 +278,7 @@ async fn test_file_track_cancel_stops_rtp() {
     track.stop().await;
 
     // on_end must fire promptly after cancellation.
-    let result = tokio::time::timeout(
-        tokio::time::Duration::from_millis(500),
-        end_rx.recv(),
-    )
-    .await;
+    let result = tokio::time::timeout(tokio::time::Duration::from_millis(500), end_rx.recv()).await;
 
     assert!(
         matches!(result, Ok(Some(PlaybackEndReason::Interrupted))),
@@ -677,11 +666,7 @@ async fn test_start_playback_on_none_backward_compatible() {
     // start_playback().
     track.start_playback_on(None).await.unwrap();
 
-    let result = tokio::time::timeout(
-        tokio::time::Duration::from_secs(2),
-        end_rx.recv(),
-    )
-    .await;
+    let result = tokio::time::timeout(tokio::time::Duration::from_secs(2), end_rx.recv()).await;
 
     assert!(
         matches!(result, Ok(Some(PlaybackEndReason::Completed))),

@@ -1,6 +1,6 @@
 use crate::call::RouteContext;
-use crate::call::app::{AppAction, ApplicationContext, CallApp, CallAppType};
 use crate::call::app::CallController;
+use crate::call::app::{AppAction, ApplicationContext, CallApp, CallAppType};
 use crate::rwi::gateway::{RwiGateway, SessionId};
 use crate::rwi::proto::RwiEvent;
 use crate::rwi::session::OwnershipMode;
@@ -115,6 +115,23 @@ impl CallApp for RwiApp {
     ) -> anyhow::Result<AppAction> {
         let call_id = context.call_info.session_id.clone();
 
+        // Populate CallMetaStore for event enrichment
+        {
+            let gateway = self.gateway.read().await;
+            gateway
+                .meta_store
+                .insert(
+                    call_id.clone(),
+                    crate::rwi::proto::CallMeta {
+                        caller: Some(context.call_info.caller.clone()),
+                        callee: Some(context.call_info.callee.clone()),
+                        direction: Some(context.call_info.direction.clone()),
+                        ..Default::default()
+                    },
+                )
+                .await;
+        }
+
         self.send_event(RwiEvent::CallIncoming(
             crate::rwi::proto::CallIncomingData {
                 call_id: call_id.clone(),
@@ -150,6 +167,7 @@ impl CallApp for RwiApp {
                 self.owned_call_id = Some(call_id.clone());
                 self.send_event(RwiEvent::CallAnswered {
                     call_id: call_id.clone(),
+                    context: Default::default(),
                 })
                 .await;
             }

@@ -1185,11 +1185,8 @@ impl CallModule {
         }
 
         let recording_policy_override = dialplan.recording_policy.clone();
-        let dialplan = self.apply_recording_policy(
-            dialplan,
-            caller,
-            recording_policy_override.as_ref(),
-        );
+        let dialplan =
+            self.apply_recording_policy(dialplan, caller, recording_policy_override.as_ref());
         Ok(dialplan)
     }
 
@@ -1469,6 +1466,7 @@ impl CallModule {
                                         if let Some(ref gw) = server.rwi_gateway {
                                             let event = crate::rwi::proto::RwiEvent::CallTransferred {
                                                 call_id: old_session_id.clone(),
+                                            context: Default::default(),
                                             };
                                             let g = gw.read().await;
                                             g.broadcast_event(&event);
@@ -1730,6 +1728,7 @@ impl CallModule {
             {
                 let event = crate::rwi::proto::RwiEvent::CallTransferred {
                     call_id: original_session_id.clone(),
+                    context: Default::default(),
                 };
                 let g = gw.read().await;
                 g.send_event_to_call_owner(&original_session_id, &event);

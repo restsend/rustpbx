@@ -1,9 +1,9 @@
-pub mod config;
 pub mod common;
-pub mod tree_app;
+pub mod config;
 pub mod executor;
 pub mod provider;
 pub mod trace;
+pub mod tree_app;
 
 pub use self::tree_app::IvrApp;
 

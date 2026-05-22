@@ -20,9 +20,8 @@ use crate::{
     models::{routing, sip_trunk},
     proxy::routing::matcher::RouteResourceLookup,
     proxy::routing::{
-        CacPolicy, CallIdMode, ConfigOrigin, DestConfig, MatchConditions, MediaMode,
-        RewriteRules, RouteAction, RouteDirection, RouteQueueConfig, RouteRule, TrunkConfig,
-        VideoPolicy,
+        CacPolicy, CallIdMode, ConfigOrigin, DestConfig, MatchConditions, MediaMode, RewriteRules,
+        RouteAction, RouteDirection, RouteQueueConfig, RouteRule, TrunkConfig, VideoPolicy,
     },
     proxy::trunk_registrar::TrunkRegistrar,
 };
@@ -869,7 +868,11 @@ pub fn sbc_config_from_metadata(meta: &serde_json::Value) -> TrunkConfig {
     let from_bool = |v: Option<&serde_json::Value>| v.and_then(|v| v.as_bool());
     let from_strs = |v: Option<&serde_json::Value>| -> Vec<String> {
         v.and_then(|v| v.as_array())
-            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            })
             .unwrap_or_default()
     };
 
@@ -890,37 +893,51 @@ pub fn sbc_config_from_metadata(meta: &serde_json::Value) -> TrunkConfig {
     });
 
     TrunkConfig {
-        call_id_mode: from_str(sbc.and_then(|s| s.get("call_id_mode"))).and_then(|s| match s.as_str() {
-            "transparent" => Some(CallIdMode::Transparent),
-            "rewrite" => Some(CallIdMode::Rewrite),
-            _ => None,
+        call_id_mode: from_str(sbc.and_then(|s| s.get("call_id_mode"))).and_then(|s| {
+            match s.as_str() {
+                "transparent" => Some(CallIdMode::Transparent),
+                "rewrite" => Some(CallIdMode::Rewrite),
+                _ => None,
+            }
         }),
         health_check_enabled: from_bool(sbc.and_then(|s| s.get("health_check_enabled"))),
         health_check_per_ip: from_bool(sbc.and_then(|s| s.get("health_check_per_ip"))),
-        health_check_interval_secs: sbc.and_then(|s| s.get("health_check_interval")).and_then(|v| v.as_u64()),
+        health_check_interval_secs: sbc
+            .and_then(|s| s.get("health_check_interval"))
+            .and_then(|v| v.as_u64()),
         health_check_probe_count: from_u64(sbc.and_then(|s| s.get("health_check_probe_count"))),
-        health_check_fallback_trunk: from_str(sbc.and_then(|s| s.get("health_check_fallback_trunk"))),
-        cac_policy: from_str(sbc.and_then(|s| s.get("cac_policy"))).and_then(|s| match s.as_str() {
-            "lossy" => Some(CacPolicy::Lossy),
-            "reject" => Some(CacPolicy::Reject),
-            "overflow" => Some(CacPolicy::Overflow),
-            _ => None,
+        health_check_fallback_trunk: from_str(
+            sbc.and_then(|s| s.get("health_check_fallback_trunk")),
+        ),
+        cac_policy: from_str(sbc.and_then(|s| s.get("cac_policy"))).and_then(|s| {
+            match s.as_str() {
+                "lossy" => Some(CacPolicy::Lossy),
+                "reject" => Some(CacPolicy::Reject),
+                "overflow" => Some(CacPolicy::Overflow),
+                _ => None,
+            }
         }),
         overflow_threshold: from_u64(sbc.and_then(|s| s.get("overflow_threshold"))),
-        media_mode: from_str(sbc.and_then(|s| s.get("media_mode"))).and_then(|s| match s.as_str() {
-            "none" => Some(MediaMode::None),
-            "bypass" => Some(MediaMode::Bypass),
-            "auto" => Some(MediaMode::Auto),
-            "force_transcode" => Some(MediaMode::ForceTranscode),
-            _ => None,
+        media_mode: from_str(sbc.and_then(|s| s.get("media_mode"))).and_then(|s| {
+            match s.as_str() {
+                "none" => Some(MediaMode::None),
+                "bypass" => Some(MediaMode::Bypass),
+                "auto" => Some(MediaMode::Auto),
+                "force_transcode" => Some(MediaMode::ForceTranscode),
+                _ => None,
+            }
         }),
-        video_policy: from_str(sbc.and_then(|s| s.get("video_policy"))).and_then(|s| match s.as_str() {
-            "pass_through" => Some(VideoPolicy::PassThrough),
-            "strip" => Some(VideoPolicy::Strip),
-            "transcode" => Some(VideoPolicy::Transcode),
-            _ => None,
+        video_policy: from_str(sbc.and_then(|s| s.get("video_policy"))).and_then(|s| {
+            match s.as_str() {
+                "pass_through" => Some(VideoPolicy::PassThrough),
+                "strip" => Some(VideoPolicy::Strip),
+                "transcode" => Some(VideoPolicy::Transcode),
+                _ => None,
+            }
         }),
-        header_rules: sbc.and_then(|s| s.get("header_rules")).and_then(|v| serde_json::from_value(v.clone()).ok()),
+        header_rules: sbc
+            .and_then(|s| s.get("header_rules"))
+            .and_then(|v| serde_json::from_value(v.clone()).ok()),
         codec: codecs,
         recording: if recording.is_some() { recording } else { None },
         ..Default::default()
@@ -928,7 +945,11 @@ pub fn sbc_config_from_metadata(meta: &serde_json::Value) -> TrunkConfig {
 }
 
 fn convert_trunk(model: sip_trunk::Model) -> Option<(String, TrunkConfig)> {
-    let dest = model.sip_server.clone().or(model.outbound_proxy.clone()).unwrap_or_default();
+    let dest = model
+        .sip_server
+        .clone()
+        .or(model.outbound_proxy.clone())
+        .unwrap_or_default();
 
     let backup_dest = model
         .outbound_proxy
@@ -985,7 +1006,9 @@ fn convert_trunk(model: sip_trunk::Model) -> Option<(String, TrunkConfig)> {
             .register_extra_headers
             .and_then(|v| serde_json::from_value(v).ok()),
         rewrite_hostport: model.rewrite_hostport,
-        did_numbers: model.did_numbers.clone()
+        did_numbers: model
+            .did_numbers
+            .clone()
             .and_then(|v| serde_json::from_value::<Vec<String>>(v).ok())
             .unwrap_or_default(),
         origin: ConfigOrigin::embedded(),
@@ -996,19 +1019,45 @@ fn convert_trunk(model: sip_trunk::Model) -> Option<(String, TrunkConfig)> {
     if let Some(ref meta) = model.metadata {
         if meta.get("sbc").is_some() {
             let sbc = sbc_config_from_metadata(meta);
-            if sbc.call_id_mode.is_some() { trunk.call_id_mode = sbc.call_id_mode; }
-            if sbc.health_check_enabled.is_some() { trunk.health_check_enabled = sbc.health_check_enabled; }
-            if sbc.health_check_per_ip.is_some() { trunk.health_check_per_ip = sbc.health_check_per_ip; }
-            if sbc.health_check_interval_secs.is_some() { trunk.health_check_interval_secs = sbc.health_check_interval_secs; }
-            if sbc.health_check_probe_count.is_some() { trunk.health_check_probe_count = sbc.health_check_probe_count; }
-            if sbc.health_check_fallback_trunk.is_some() { trunk.health_check_fallback_trunk = sbc.health_check_fallback_trunk; }
-            if sbc.cac_policy.is_some() { trunk.cac_policy = sbc.cac_policy; }
-            if sbc.overflow_threshold.is_some() { trunk.overflow_threshold = sbc.overflow_threshold; }
-            if sbc.media_mode.is_some() { trunk.media_mode = sbc.media_mode; }
-            if sbc.video_policy.is_some() { trunk.video_policy = sbc.video_policy; }
-            if sbc.header_rules.is_some() { trunk.header_rules = sbc.header_rules; }
-            if !sbc.codec.is_empty() { trunk.codec = sbc.codec; }
-            if sbc.recording.is_some() { trunk.recording = sbc.recording; }
+            if sbc.call_id_mode.is_some() {
+                trunk.call_id_mode = sbc.call_id_mode;
+            }
+            if sbc.health_check_enabled.is_some() {
+                trunk.health_check_enabled = sbc.health_check_enabled;
+            }
+            if sbc.health_check_per_ip.is_some() {
+                trunk.health_check_per_ip = sbc.health_check_per_ip;
+            }
+            if sbc.health_check_interval_secs.is_some() {
+                trunk.health_check_interval_secs = sbc.health_check_interval_secs;
+            }
+            if sbc.health_check_probe_count.is_some() {
+                trunk.health_check_probe_count = sbc.health_check_probe_count;
+            }
+            if sbc.health_check_fallback_trunk.is_some() {
+                trunk.health_check_fallback_trunk = sbc.health_check_fallback_trunk;
+            }
+            if sbc.cac_policy.is_some() {
+                trunk.cac_policy = sbc.cac_policy;
+            }
+            if sbc.overflow_threshold.is_some() {
+                trunk.overflow_threshold = sbc.overflow_threshold;
+            }
+            if sbc.media_mode.is_some() {
+                trunk.media_mode = sbc.media_mode;
+            }
+            if sbc.video_policy.is_some() {
+                trunk.video_policy = sbc.video_policy;
+            }
+            if sbc.header_rules.is_some() {
+                trunk.header_rules = sbc.header_rules;
+            }
+            if !sbc.codec.is_empty() {
+                trunk.codec = sbc.codec;
+            }
+            if sbc.recording.is_some() {
+                trunk.recording = sbc.recording;
+            }
         }
     }
 

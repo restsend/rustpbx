@@ -123,7 +123,8 @@ impl SipSession {
                     }
                 }
             });
-            self.legs.tasks
+            self.legs
+                .tasks
                 .entry(leg_id.clone())
                 .or_default()
                 .push(forwarder_handle);
@@ -266,7 +267,8 @@ impl SipSession {
                 }
             }
         });
-        self.legs.tasks
+        self.legs
+            .tasks
             .entry(leg_id.clone())
             .or_default()
             .push(forwarder_handle);
@@ -356,18 +358,15 @@ impl SipSession {
     pub(super) fn leg_negotiated_codec(&self, leg_id: &LegId) -> audio_codec::CodecType {
         use crate::media::negotiate::MediaNegotiator;
 
-        let sdp = self
-            .legs
-            .get_answer(leg_id)
-            .or_else(|| {
-                if leg_id.as_str() == "caller" {
-                    self.media.answer.as_deref()
-                } else if leg_id.as_str() == "callee" {
-                    self.media.callee_answer_sdp.as_deref()
-                } else {
-                    None
-                }
-            });
+        let sdp = self.legs.get_answer(leg_id).or_else(|| {
+            if leg_id.as_str() == "caller" {
+                self.media.answer.as_deref()
+            } else if leg_id.as_str() == "callee" {
+                self.media.callee_answer_sdp.as_deref()
+            } else {
+                None
+            }
+        });
 
         match sdp.and_then(|s| MediaNegotiator::extract_leg_profile(s).audio) {
             Some(audio) => {

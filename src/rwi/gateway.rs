@@ -1,5 +1,5 @@
 use crate::rwi::auth::RwiIdentity;
-use crate::rwi::proto::RwiEvent;
+use crate::rwi::proto::{CallMetaStore, RwiEvent};
 use crate::rwi::session::{OwnershipMode, RwiSession, SupervisorMode};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Arc as StdArc, Mutex};
@@ -50,6 +50,8 @@ pub struct RwiGateway {
     session_event_filters: HashMap<SessionId, HashSet<String>>,
     /// Optional broadcast sender for the RWI webhook handler.
     webhook_tx: Option<broadcast::Sender<EventCacheEntry>>,
+    /// In-memory call context store for event enrichment.
+    pub meta_store: Arc<CallMetaStore>,
 }
 
 #[derive(Debug)]
@@ -92,6 +94,7 @@ impl RwiGateway {
             call_vars: HashMap::new(),
             session_event_filters: HashMap::new(),
             webhook_tx: None,
+            meta_store: CallMetaStore::new(),
         }
     }
 
@@ -299,15 +302,11 @@ impl RwiGateway {
         self.call_ownership.len()
     }
 
-    /// Send an event to a single session by session_id.
-    /// If the session has an event type filter, events not matching the filter are dropped.
-    pub fn send_event_to_session(&self, session_id: &SessionId, event: &RwiEvent) {
-        if let Some(sender) = self.session_event_senders.get(session_id)
-            && let Ok(value) = serde_json::to_value(event)
-        {
-            // Check per-session event type filter
+    /// Send a pre-serialized JSON value to a single session.
+    /// Applies per-session event type filter before sending.
+    fn send_json_to_session(&self, session_id: &SessionId, value: &serde_json::Value) {
+        if let Some(sender) = self.session_event_senders.get(session_id) {
             if let Some(filter) = self.session_event_filters.get(session_id) {
-                // serde renders enum as {"event_type_name": ...} — get the outer key
                 let event_type = value
                     .as_object()
                     .and_then(|o| o.keys().next().map(|k| k.as_str()));
@@ -317,7 +316,20 @@ impl RwiGateway {
                     }
                 }
             }
-            let _ = sender.send(value);
+            let _ = sender.send(value.clone());
+        }
+    }
+
+    /// Send an event to a single session by session_id.
+    /// Auto-enriches from `CallMetaStore` then serializes to JSON.
+    pub fn send_event_to_session(&self, session_id: &SessionId, event: &RwiEvent) {
+        let enriched = if let Some(call_id) = event.call_id() {
+            self.enrich_event(call_id, event)
+        } else {
+            event.clone()
+        };
+        if let Ok(value) = serde_json::to_value(&enriched) {
+            self.send_json_to_session(session_id, &value);
         }
     }
 
@@ -347,6 +359,17 @@ impl RwiGateway {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs()
+    }
+
+    /// Enrich an event with call context from `CallMetaStore`.
+    /// If no metadata is found, returns the event unchanged.
+    fn enrich_event(&self, call_id: &str, event: &RwiEvent) -> RwiEvent {
+        let event = event.clone();
+        if let Some(meta) = self.meta_store.get_sync(call_id) {
+            event.enrich(meta.into())
+        } else {
+            event
+        }
     }
 
     pub fn cache_event(&self, call_id: &CallId, event: &RwiEvent) -> u64 {
@@ -851,6 +874,7 @@ mod tests {
 
         let event = RwiEvent::CallAnswered {
             call_id: "call_001".to_string(),
+            context: Default::default(),
         };
         gateway.send_event_to_session(&session_id, &event);
 
@@ -878,6 +902,7 @@ mod tests {
             call_id: call_id.clone(),
             reason: None,
             sip_status: None,
+            context: Default::default(),
         };
         gateway.send_event_to_call_owner(&call_id, &event);
 
@@ -913,6 +938,7 @@ mod tests {
 
         let event = RwiEvent::CallRinging {
             call_id: "c1".into(),
+            context: Default::default(),
         };
         gateway.fan_out_event_to_context("ctx", &event, &"c1".to_string());
 
@@ -944,14 +970,17 @@ mod tests {
         // Add some events
         let event1 = RwiEvent::CallRinging {
             call_id: "c1".into(),
+            context: Default::default(),
         };
         let event2 = RwiEvent::CallAnswered {
             call_id: "c1".into(),
+            context: Default::default(),
         };
         let event3 = RwiEvent::CallHangup {
             call_id: "c1".into(),
             reason: None,
             sip_status: None,
+            context: Default::default(),
         };
 
         let seq1 = gateway.cache_event(&"c1".to_string(), &event1);
@@ -980,6 +1009,7 @@ mod tests {
         for i in 0..10 {
             let event = RwiEvent::CallRinging {
                 call_id: format!("c{}", i),
+                context: Default::default(),
             };
             gateway.cache_event(&format!("c{}", i), &event);
         }
@@ -1000,9 +1030,11 @@ mod tests {
         // Add some events
         let event1 = RwiEvent::CallRinging {
             call_id: "c1".into(),
+            context: Default::default(),
         };
         let event2 = RwiEvent::CallAnswered {
             call_id: "c1".into(),
+            context: Default::default(),
         };
 
         gateway.cache_event(&"c1".to_string(), &event1);
@@ -1025,12 +1057,15 @@ mod tests {
         // Add events for different calls
         let event1 = RwiEvent::CallRinging {
             call_id: "c1".into(),
+            context: Default::default(),
         };
         let event2 = RwiEvent::CallRinging {
             call_id: "c2".into(),
+            context: Default::default(),
         };
         let event3 = RwiEvent::CallAnswered {
             call_id: "c1".into(),
+            context: Default::default(),
         };
 
         gateway.cache_event(&"c1".to_string(), &event1);
@@ -1051,6 +1086,7 @@ mod tests {
         // Test various events
         let event1 = RwiEvent::CallRinging {
             call_id: "c1".into(),
+            context: Default::default(),
         };
         assert_eq!(event1.call_id(), Some("c1"));
 
@@ -1058,6 +1094,7 @@ mod tests {
             call_id: "c2".into(),
             sip_status: Some(404),
             reason: Some("Not found".into()),
+            context: Default::default(),
         };
         assert_eq!(event2.call_id(), Some("c2"));
 
@@ -1153,6 +1190,7 @@ mod tests {
             &session_id,
             &RwiEvent::CallRinging {
                 call_id: "c1".into(),
+                context: Default::default(),
             },
         );
         assert!(rx.try_recv().is_ok(), "call_ringing should pass filter");
@@ -1162,6 +1200,7 @@ mod tests {
             &session_id,
             &RwiEvent::CallAnswered {
                 call_id: "c1".into(),
+                context: Default::default(),
             },
         );
         assert!(
@@ -1189,12 +1228,14 @@ mod tests {
             &session_id,
             &RwiEvent::CallRinging {
                 call_id: "c1".into(),
+                context: Default::default(),
             },
         );
         gateway.send_event_to_session(
             &session_id,
             &RwiEvent::CallAnswered {
                 call_id: "c1".into(),
+                context: Default::default(),
             },
         );
         gateway.send_event_to_session(
@@ -1203,6 +1244,7 @@ mod tests {
                 call_id: "c1".into(),
                 reason: None,
                 sip_status: None,
+                context: Default::default(),
             },
         );
 
@@ -1234,12 +1276,14 @@ mod tests {
             &session_id,
             &RwiEvent::CallRinging {
                 call_id: "c1".into(),
+                context: Default::default(),
             },
         );
         gateway.send_event_to_session(
             &session_id,
             &RwiEvent::CallAnswered {
                 call_id: "c1".into(),
+                context: Default::default(),
             },
         );
         gateway.send_event_to_session(
@@ -1248,6 +1292,7 @@ mod tests {
                 call_id: "c1".into(),
                 reason: None,
                 sip_status: None,
+                context: Default::default(),
             },
         );
 
@@ -1296,6 +1341,7 @@ mod tests {
             &session_id,
             &RwiEvent::CallAnswered {
                 call_id: "c1".into(),
+                context: Default::default(),
             },
         );
         assert!(
