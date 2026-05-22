@@ -93,6 +93,7 @@ impl SipSession {
         leg_id: LegId,
         target: String,
         attended: bool,
+        callee_state_rx: &mut mpsc::UnboundedReceiver<DialogState>,
     ) -> Result<()> {
         info!(%leg_id, %target, %attended, "Handling transfer");
 
@@ -111,7 +112,8 @@ impl SipSession {
 
         if attended {
             if !target.is_empty() {
-                self.handle_replace_transfer(leg_id, target).await?;
+                self.handle_replace_transfer(leg_id, target, callee_state_rx)
+                    .await?;
             } else {
                 self.update_leg_state(&leg_id, LegState::Hold);
                 info!(
@@ -119,7 +121,8 @@ impl SipSession {
                 );
             }
         } else {
-            self.handle_blind_transfer(leg_id, target).await?;
+            self.handle_blind_transfer(leg_id, target, callee_state_rx)
+                .await?;
         }
 
         Ok(())
@@ -129,11 +132,13 @@ impl SipSession {
         &mut self,
         leg_id: LegId,
         target: String,
+        callee_state_rx: &mut mpsc::UnboundedReceiver<DialogState>,
     ) -> Result<()> {
         match parse_transfer_target(&target) {
             TransferTarget::Queue { name, return_ivr } => {
                 info!(%leg_id, queue = %name, ?return_ivr, "Handling queue transfer");
-                self.handle_queue_transfer(leg_id, &name, return_ivr).await
+                self.handle_queue_transfer(leg_id, &name, return_ivr, callee_state_rx)
+                    .await
             }
             TransferTarget::Ivr { name } => {
                 info!(%leg_id, ivr = %name, "Handling IVR transfer by starting IvrApp");
@@ -157,14 +162,9 @@ impl SipSession {
                         aor: refer_to_uri,
                         ..Default::default()
                     };
-                    // Create a proper dialog-state channel so early media (183) from the
-                    // B-leg propagates correctly during the transfer INVITE.
-                    let (callee_tx, mut callee_rx) = mpsc::unbounded_channel::<DialogState>();
-                    let prev_callee_tx = self.callee_event_tx.replace(callee_tx);
                     let result = self
-                        .try_single_target(&location, &mut callee_rx, None)
+                        .try_single_target(&location, callee_state_rx, None)
                         .await;
-                    self.callee_event_tx = prev_callee_tx;
                     return result.map_err(|(code, reason)| {
                         anyhow!(
                             "B-leg transfer failed: {:?} - {}",
@@ -288,6 +288,7 @@ impl SipSession {
         leg_id: LegId,
         queue_name: &str,
         return_ivr: Option<String>,
+        callee_state_rx: &mut mpsc::UnboundedReceiver<DialogState>,
     ) -> Result<()> {
         info!(%leg_id, queue = %queue_name, ?return_ivr, "Starting queue transfer");
 
@@ -335,12 +336,7 @@ impl SipSession {
             queue_plan.failure_audio = return_ivr_fallback_audio;
         }
 
-        // Create a proper dialog-state channel so early media (183) from agents
-        // propagates correctly during queue-driven transfers at runtime.
-        let (callee_tx, mut callee_rx) = mpsc::unbounded_channel::<DialogState>();
-        let prev_callee_tx = self.callee_event_tx.replace(callee_tx);
-        let queue_result = self.execute_queue(&queue_plan, &mut callee_rx).await;
-        self.callee_event_tx = prev_callee_tx;
+        let queue_result = self.execute_queue(&queue_plan, callee_state_rx).await;
 
         match queue_result {
             Ok(()) => {
@@ -575,6 +571,7 @@ impl SipSession {
         &mut self,
         leg_id: LegId,
         target: String,
+        callee_state_rx: &mut mpsc::UnboundedReceiver<DialogState>,
     ) -> Result<()> {
         let replaces = self
             .build_replaces_header()
@@ -587,7 +584,8 @@ impl SipSession {
             format!("{}?Replaces={}", target, encoded_replaces)
         };
 
-        self.handle_blind_transfer(leg_id, refer_target).await
+        self.handle_blind_transfer(leg_id, refer_target, callee_state_rx)
+            .await
     }
 
     pub(super) async fn emit_refer_event(
