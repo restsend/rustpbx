@@ -463,9 +463,11 @@ async fn test_queue_transfer_without_return_ivr_keeps_hangup_fallback_when_no_ag
     );
     let config = make_queue_hangup_config("support");
     let mut session = build_session_with_config(dialplan, config).await;
+    let (callee_tx, mut callee_rx) = mpsc::unbounded_channel();
+    session.callee_event_tx = Some(callee_tx);
 
     let err = session
-        .handle_queue_transfer(LegId::from("caller"), "support", None)
+        .handle_queue_transfer(LegId::from("caller"), "support", None, &mut callee_rx)
         .await
         .expect_err("without return_ivr, hangup fallback should surface failure");
     assert!(
@@ -484,12 +486,19 @@ async fn test_queue_transfer_return_ivr_overrides_hangup_fallback_when_no_agents
     );
     let config = make_queue_hangup_config("support");
     let mut session = build_session_with_config(dialplan, config).await;
+    let (callee_tx, mut callee_rx) = mpsc::unbounded_channel();
+    session.callee_event_tx = Some(callee_tx);
 
     let runtime = Arc::new(StartOnlyRuntime::new());
     session.app_runtime = runtime.clone();
 
     session
-        .handle_queue_transfer(LegId::from("caller"), "support", Some("hello".to_string()))
+        .handle_queue_transfer(
+            LegId::from("caller"),
+            "support",
+            Some("hello".to_string()),
+            &mut callee_rx,
+        )
         .await
         .expect("return_ivr should override hangup fallback and start IVR");
 
