@@ -1489,7 +1489,9 @@ impl SipSession {
 
 
                 Some(cmd) = cmd_rx.recv() => {
-                    let result = self.execute_command(cmd).await;
+                    let result = self
+                        .execute_command(cmd, Some(&mut callee_state_rx))
+                        .await;
                     if !result.success {
                         warn!(error = ?result.message, "Command execution failed");
                     }
@@ -1908,6 +1910,11 @@ impl SipSession {
                     .await?;
             }
             DialogState::Terminated(terminated_dialog_id, reason) => {
+                let connected_callee_terminated =
+                    self.meta.connected_callee_dialog_id.as_ref() == Some(&terminated_dialog_id);
+                let tracked_callee_terminated =
+                    self.callee_dialogs.contains_key(&terminated_dialog_id);
+
                 self.pending_hangup.remove(&terminated_dialog_id);
                 self.callee_dialogs.remove(&terminated_dialog_id);
                 self.legs.retain_dialogs_by_dialog_id(&terminated_dialog_id);
@@ -1922,8 +1929,15 @@ impl SipSession {
                 self.callee_guards
                     .retain(|guard| guard.id() != &terminated_dialog_id);
 
-                let connected_callee_terminated =
-                    self.meta.connected_callee_dialog_id.as_ref() == Some(&terminated_dialog_id);
+                if !tracked_callee_terminated && !connected_callee_terminated {
+                    debug!(
+                        dialog_id = %terminated_dialog_id,
+                        ?reason,
+                        "Ignoring terminated untracked callee dialog"
+                    );
+                    return Ok(());
+                }
+
                 if self.meta.connected_callee_dialog_id.is_some() && !connected_callee_terminated {
                     debug!(
                         dialog_id = %terminated_dialog_id,
@@ -2243,6 +2257,12 @@ impl SipSession {
         let dialog_layer = self.server.dialog_layer.clone();
         let fork_cancel = CancellationToken::new();
         let mut fork_set = FuturesUnordered::new();
+        let state_tx = self.callee_event_tx.clone().ok_or_else(|| {
+            (
+                StatusCode::ServerInternalError,
+                Some("No callee event sender".to_string()),
+            )
+        })?;
 
         for (idx, target) in targets.iter().enumerate() {
             if fork_cancel.is_cancelled() {
@@ -2330,8 +2350,7 @@ impl SipSession {
                 ..Default::default()
             };
 
-            // Each fork gets its own state channel so events don't interleave
-            let (fork_tx, _fork_rx) = mpsc::unbounded_channel();
+            let fork_tx = state_tx.clone();
             let dlg = dialog_layer.clone();
             let ct = fork_cancel.clone();
 
@@ -2361,14 +2380,34 @@ impl SipSession {
             Some("All targets failed".to_string()),
         );
         let total = targets.len() as u32;
+        let mut caller_end_check = tokio::time::interval(Duration::from_millis(100));
 
-        while let Some(join_result) = fork_set.next().await {
-            if self.cancel_token.is_cancelled() {
-                return Err((
-                    StatusCode::RequestTerminated,
-                    Some("Caller cancelled".to_string()),
-                ));
-            }
+        while !fork_set.is_empty() {
+            let join_result = tokio::select! {
+                _ = caller_end_check.tick() => {
+                    if self.server_dialog.state().is_terminated() {
+                        info!(
+                            session_id = %self.context.session_id,
+                            "Caller dialog terminated while parallel callee INVITEs were pending"
+                        );
+                        fork_cancel.cancel();
+                        self.cancel_token.cancel();
+                        return Err((
+                            StatusCode::RequestTerminated,
+                            Some("Caller cancelled".to_string()),
+                        ));
+                    }
+                    continue;
+                }
+                _ = self.cancel_token.cancelled() => {
+                    fork_cancel.cancel();
+                    return Err((
+                        StatusCode::RequestTerminated,
+                        Some("Caller cancelled".to_string()),
+                    ));
+                }
+                Some(join_result) = fork_set.next() => join_result,
+            };
 
             match join_result {
                 Ok(Some((winner_idx, Ok((dialog, response)), callee_uri))) => {
@@ -5100,16 +5139,25 @@ impl SipSession {
 
     async fn get_local_reinvite_pc(&self, side: DialogSide) -> Option<rustrtc::PeerConnection> {
         if let Some(bridge) = &self.media.media_bridge {
-            let leg_is_webrtc = match side {
-                DialogSide::Caller => self.is_caller_webrtc(),
-                DialogSide::Callee => self.is_callee_webrtc(),
+            let bridge_endpoint = match side {
+                DialogSide::Caller if self.media.caller_answer_uses_media_bridge => {
+                    Some(self.leg_bridge_endpoint(&LegId::from("caller")))
+                }
+                DialogSide::Callee if self.media.callee_offer_uses_media_bridge => {
+                    Some(self.leg_bridge_endpoint(&LegId::from("callee")))
+                }
+                _ => None,
             };
 
-            return Some(if leg_is_webrtc {
-                bridge.caller_pc().clone()
-            } else {
-                bridge.callee_pc().clone()
-            });
+            // A session may keep an app/IVR bridge after transferring to a
+            // normal SIP callee. Only use the bridge PC for a leg explicitly
+            // negotiated on that bridge; otherwise use the leg's own track PC.
+            if let Some(endpoint) = bridge_endpoint {
+                return Some(match endpoint {
+                    BridgeEndpoint::Caller => bridge.caller_pc().clone(),
+                    BridgeEndpoint::Callee => bridge.callee_pc().clone(),
+                });
+            }
         }
 
         let (peer, track_id) = match side {
@@ -6196,7 +6244,11 @@ impl SipSession {
 }
 
 impl SipSession {
-    pub async fn execute_command(&mut self, command: CallCommand) -> CommandResult {
+    pub async fn execute_command(
+        &mut self,
+        command: CallCommand,
+        callee_state_rx: Option<&mut mpsc::UnboundedReceiver<DialogState>>,
+    ) -> CommandResult {
         let capability_check = self.check_capability(&command);
 
         let degradation_reason = match capability_check {
@@ -6210,7 +6262,7 @@ impl SipSession {
             MediaCapabilityCheck::Allowed => None,
         };
 
-        let mut result = self.process_command(command).await;
+        let mut result = self.process_command(command, callee_state_rx).await;
 
         if let Some(reason) = degradation_reason {
             result.media_degraded = true;
@@ -6225,7 +6277,11 @@ impl SipSession {
         ctx.check_media_capability(command)
     }
 
-    async fn process_command(&mut self, command: CallCommand) -> CommandResult {
+    async fn process_command(
+        &mut self,
+        command: CallCommand,
+        mut callee_state_rx: Option<&mut mpsc::UnboundedReceiver<DialogState>>,
+    ) -> CommandResult {
         match command {
             CallCommand::Answer { leg_id } => {
                 if leg_id.0 == "caller" {
@@ -6362,10 +6418,20 @@ impl SipSession {
                 leg_id,
                 target,
                 attended,
-            } => match self.handle_transfer(leg_id, target, attended).await {
-                Ok(_) => CommandResult::success(),
-                Err(e) => CommandResult::failure(e.to_string()),
-            },
+            } => {
+                let Some(callee_state_rx) = callee_state_rx.as_deref_mut() else {
+                    return CommandResult::failure(
+                        "No callee state receiver available for transfer".to_string(),
+                    );
+                };
+                match self
+                    .handle_transfer(leg_id, target, attended, callee_state_rx)
+                    .await
+                {
+                    Ok(_) => CommandResult::success(),
+                    Err(e) => CommandResult::failure(e.to_string()),
+                }
+            }
 
             CallCommand::TransferComplete { consult_leg } => {
                 match self.handle_transfer_complete(consult_leg).await {
@@ -8468,7 +8534,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_get_local_reinvite_pc_uses_bridge_when_present() {
+    async fn test_get_local_reinvite_pc_uses_bridge_only_for_bridge_backed_leg() {
         use crate::call::{DialDirection, Dialplan, TransactionCookie};
         use crate::proxy::proxy_call::test_util::tests::MockMediaPeer;
         use crate::proxy::tests::common::{
@@ -8521,6 +8587,8 @@ mod tests {
 
         session.media.media_bridge =
             Some(BridgePeerBuilder::new("test-bridge".to_string()).build());
+        session.media.caller_answer_uses_media_bridge = true;
+        session.media.callee_offer_uses_media_bridge = false;
         session
             .legs
             .transports
@@ -8535,6 +8603,15 @@ mod tests {
         assert!(pc.is_some(), "bridge-backed caller leg should resolve a PC");
         assert_eq!(caller_peer.get_tracks_call_count(), 0);
         assert_eq!(callee_peer.get_tracks_call_count(), 0);
+
+        let pc = session.get_local_reinvite_pc(DialogSide::Callee).await;
+
+        assert!(
+            pc.is_none(),
+            "non-bridge callee leg should resolve through its own track PC"
+        );
+        assert_eq!(caller_peer.get_tracks_call_count(), 0);
+        assert_eq!(callee_peer.get_tracks_call_count(), 1);
     }
 
     #[tokio::test]
@@ -9049,9 +9126,15 @@ mod tests {
             caller_peer,
             callee_peer,
         );
+        let (callee_tx, mut callee_rx) = mpsc::unbounded_channel();
+        session.callee_event_tx = Some(callee_tx);
 
         let result = session
-            .handle_blind_transfer(LegId::from("caller"), "queue:test-queue".to_string())
+            .handle_blind_transfer(
+                LegId::from("caller"),
+                "queue:test-queue".to_string(),
+                &mut callee_rx,
+            )
             .await;
 
         assert!(
@@ -9112,9 +9195,15 @@ mod tests {
             caller_peer,
             callee_peer,
         );
+        let (callee_tx, mut callee_rx) = mpsc::unbounded_channel();
+        session.callee_event_tx = Some(callee_tx);
 
         let result = session
-            .handle_blind_transfer(LegId::from("caller"), "queue:nonexistent".to_string())
+            .handle_blind_transfer(
+                LegId::from("caller"),
+                "queue:nonexistent".to_string(),
+                &mut callee_rx,
+            )
             .await;
 
         assert!(

@@ -70,7 +70,7 @@ impl SipSession {
             self.play_queue_transfer_prompt_before_bridge(transfer_prompt)
                 .await;
 
-            return self.execute_queue_fallback(plan).await;
+            return self.execute_queue_fallback(plan, callee_state_rx).await;
         }
 
         if plan.accept_immediately {
@@ -148,7 +148,7 @@ impl SipSession {
             }
             Err(e) => {
                 warn!(error = ?e, "Queue: all agents failed, executing fallback");
-                self.execute_queue_fallback(plan).await
+                self.execute_queue_fallback(plan, callee_state_rx).await
             }
         }
     }
@@ -248,6 +248,7 @@ impl SipSession {
     pub(super) async fn execute_queue_fallback(
         &mut self,
         plan: &crate::call::QueuePlan,
+        callee_state_rx: &mut mpsc::UnboundedReceiver<DialogState>,
     ) -> Result<(), (StatusCode, Option<String>)> {
         use crate::call::{FailureAction, QueueFallbackAction, TransferEndpoint};
 
@@ -295,19 +296,24 @@ impl SipSession {
 
                 match target {
                     TransferEndpoint::Uri(uri) => {
-                        Box::pin(self.handle_blind_transfer(LegId::from("caller"), uri.clone()))
-                            .await
-                            .map_err(|e| {
-                                (
-                                    StatusCode::TemporarilyUnavailable,
-                                    Some(format!("Transfer failed: {}", e)),
-                                )
-                            })
+                        Box::pin(self.handle_blind_transfer(
+                            LegId::from("caller"),
+                            uri.clone(),
+                            callee_state_rx,
+                        ))
+                        .await
+                        .map_err(|e| {
+                            (
+                                StatusCode::TemporarilyUnavailable,
+                                Some(format!("Transfer failed: {}", e)),
+                            )
+                        })
                     }
                     TransferEndpoint::Queue(queue_name) => Box::pin(self.handle_queue_transfer(
                         LegId::from("caller"),
                         queue_name,
                         None,
+                        callee_state_rx,
                     ))
                     .await
                     .map_err(|e| {
@@ -331,14 +337,18 @@ impl SipSession {
             Some(QueueFallbackAction::Redirect { target }) => {
                 info!(target = %target, "Queue fallback - redirecting call");
 
-                Box::pin(self.handle_blind_transfer(LegId::from("caller"), target.to_string()))
-                    .await
-                    .map_err(|e| {
-                        (
-                            StatusCode::TemporarilyUnavailable,
-                            Some(format!("Redirect failed: {}", e)),
-                        )
-                    })
+                Box::pin(self.handle_blind_transfer(
+                    LegId::from("caller"),
+                    target.to_string(),
+                    callee_state_rx,
+                ))
+                .await
+                .map_err(|e| {
+                    (
+                        StatusCode::TemporarilyUnavailable,
+                        Some(format!("Redirect failed: {}", e)),
+                    )
+                })
             }
             Some(QueueFallbackAction::Queue { name }) => {
                 if name.starts_with("skill-group:") {
@@ -351,14 +361,18 @@ impl SipSession {
                         if !agents.is_empty() {
                             info!(agents = ?agents, "Resolved skill group to agents");
                             let target = agents[0].clone();
-                            Box::pin(self.handle_blind_transfer(LegId::from("caller"), target))
-                                .await
-                                .map_err(|e| {
-                                    (
-                                        StatusCode::TemporarilyUnavailable,
-                                        Some(format!("Transfer failed: {}", e)),
-                                    )
-                                })
+                            Box::pin(self.handle_blind_transfer(
+                                LegId::from("caller"),
+                                target,
+                                callee_state_rx,
+                            ))
+                            .await
+                            .map_err(|e| {
+                                (
+                                    StatusCode::TemporarilyUnavailable,
+                                    Some(format!("Transfer failed: {}", e)),
+                                )
+                            })
                         } else {
                             warn!(skill_group = %skill_group_id, "No agents found for this skill group");
                             Err((
@@ -378,8 +392,13 @@ impl SipSession {
                     }
                 } else {
                     info!(queue = %name, "Queue fallback - transfer to another queue");
-                    match Box::pin(self.handle_queue_transfer(LegId::from("caller"), name, None))
-                        .await
+                    match Box::pin(self.handle_queue_transfer(
+                        LegId::from("caller"),
+                        name,
+                        None,
+                        callee_state_rx,
+                    ))
+                    .await
                     {
                         Ok(_) => {
                             info!(queue = %name, "Queue fallback - re-enqueue succeeded");
