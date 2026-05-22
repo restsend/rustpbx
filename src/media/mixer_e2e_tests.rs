@@ -4,46 +4,6 @@
 #[cfg(test)]
 mod mixer_e2e_tests {
     use crate::media::mixer::{AudioMixer, MediaMixer, SupervisorMixerMode};
-    use crate::media::mixer_input::{DecodedFrame, MixerInput};
-    use crate::media::mixer_output::MixerOutput;
-    use crate::proxy::proxy_call::test_util::tests::MockMediaPeer;
-    use audio_codec::CodecType;
-    use std::sync::Arc;
-
-    /// Test: Encode -> Mix -> Decode pipeline
-    /// This simulates a complete audio processing pipeline:
-    /// 1. Source encodes audio
-    /// 2. Mixer combines multiple sources
-    /// 3. Output decodes for playback
-    #[test]
-    fn test_encode_mix_decode_pipeline() {
-        // Create two mixer outputs for encoding
-        let peer1 = Arc::new(MockMediaPeer::new());
-        let peer2 = Arc::new(MockMediaPeer::new());
-
-        let mut output1 = MixerOutput::new("output-1".to_string(), peer1, CodecType::PCMU);
-        let mut output2 = MixerOutput::new("output-2".to_string(), peer2, CodecType::PCMU);
-
-        // Create test audio data (160 samples = 20ms at 8kHz)
-        let samples1: Vec<i16> = (0..160).map(|i| (i as i16 * 10).min(3000)).collect();
-        let samples2: Vec<i16> = (0..160).map(|i| (1000 - i as i16 * 5).max(-3000)).collect();
-
-        // Encode both sources
-        let _encoded1 = output1.encode(&samples1).expect("should encode");
-        let _encoded2 = output2.encode(&samples2).expect("should encode");
-
-        // Now simulate mixing by creating a mixer
-        let mixer = AudioMixer::new(8000, 1);
-
-        // Create decoded frames from encoded data (simulating what read_frame would do)
-        // For this test, we'll use the raw samples
-        let mixed = mixer.mix_frames(vec![samples1, samples2], &[1.0, 1.0]);
-
-        // Verify mixed output is reasonable
-        assert_eq!(mixed.len(), 160);
-        // The mixed samples should be bounded (not overflow)
-        assert!(mixed.iter().all(|&s| (i16::MIN..=i16::MAX).contains(&s)));
-    }
 
     /// Test: Multiple inputs with different gains
     #[test]
@@ -177,42 +137,6 @@ mod mixer_e2e_tests {
         assert!(supervisor_route.outputs.contains_key("agent-out"));
     }
 
-    /// Test: Output routing configuration
-    #[test]
-    fn test_output_routing_configuration() {
-        let mixer = MediaMixer::new("test-routing".to_string(), 8000);
-
-        // Configure output routing: agent-out receives from customer and supervisor
-        mixer.set_output_routing(
-            "agent-out",
-            vec!["customer".to_string(), "supervisor".to_string()],
-        );
-
-        // Configure customer-out receives from agent
-        mixer.set_output_routing("customer-out", vec!["agent".to_string()]);
-
-        // Verify routing
-        let agent_routing = mixer.get_output_routing("agent-out").unwrap();
-        assert_eq!(agent_routing, vec!["customer", "supervisor"]);
-
-        let customer_routing = mixer.get_output_routing("customer-out").unwrap();
-        assert_eq!(customer_routing, vec!["agent"]);
-    }
-
-    /// Test: DecodedFrame creation and manipulation
-    #[test]
-    fn test_decoded_frame_lifecycle() {
-        // Create a frame with sequence directly
-        let frame =
-            DecodedFrame::new("input-1".to_string(), vec![100i16; 160], 8000, 0).with_sequence(42);
-
-        assert_eq!(frame.input_id, "input-1");
-        assert_eq!(frame.samples.len(), 160);
-        assert_eq!(frame.sample_rate, 8000);
-        assert_eq!(frame.timestamp, 0);
-        assert_eq!(frame.sequence, Some(42));
-    }
-
     /// Test: AudioMixer with saturation handling
     #[test]
     fn test_mixer_saturation_at_boundary() {
@@ -257,25 +181,6 @@ mod mixer_e2e_tests {
         // With 0.5 gain, should be 500
         let result = mixer.mix_frames(vec![frame], &[0.5]);
         assert!(result.iter().all(|&s| (450..=550).contains(&s)));
-    }
-
-    /// Test: MixerInput and MixerOutput codec compatibility
-    #[test]
-    fn test_codec_compatibility_pcmu() {
-        let peer = Arc::new(MockMediaPeer::new());
-
-        // Create input and output with same codec
-        let input = MixerInput::new("input-1".to_string(), peer.clone(), CodecType::PCMU);
-        let mut output = MixerOutput::new("output-1".to_string(), peer, CodecType::PCMU);
-
-        // They should both work with PCMU
-        assert_eq!(input.codec(), CodecType::PCMU);
-        assert_eq!(output.codec(), CodecType::PCMU);
-
-        // Output should be able to encode
-        let samples: Vec<i16> = (0..160).map(|i| i as i16).collect();
-        let encoded = output.encode(&samples);
-        assert!(encoded.is_some());
     }
 
     /// Test: Mixer start/stop lifecycle

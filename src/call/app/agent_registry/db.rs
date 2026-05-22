@@ -155,7 +155,7 @@ impl AgentRegistry for DbRegistry {
             .ok_or_else(|| anyhow::anyhow!("Agent {} not found", agent_id))?;
 
         agent.current_calls += 1;
-        agent.presence = PresenceState::Busy;
+        agent.presence = PresenceState::Busy { call_id: None };
         agent.last_state_change = Instant::now();
 
         let record = agent.clone();
@@ -180,7 +180,7 @@ impl AgentRegistry for DbRegistry {
 
         // Auto-transition to Available if no more calls
         if agent.current_calls == 0 {
-            agent.presence = PresenceState::Wrapup;
+            agent.presence = PresenceState::Wrapup { call_id: None };
         }
 
         let record = agent.clone();
@@ -207,13 +207,6 @@ impl AgentRegistry for DbRegistry {
         let candidates = self.find_available_agents(required_skills).await;
         let mut rr_counter = self.rr_counter.write().await;
         select_best_agent(candidates, strategy, &mut rr_counter)
-    }
-
-    async fn on_state_change(&self, handler: Box<dyn Fn(&AgentRecord) + Send + Sync>) {
-        let mut handlers = self.event_handlers.write().await;
-        let handler: Box<dyn Fn(&AgentRecord) + Send + Sync + 'static> =
-            unsafe { std::mem::transmute(handler) };
-        handlers.push(handler);
     }
 
     async fn resolve_target(&self, _target_uri: &str) -> Vec<String> {
@@ -252,10 +245,10 @@ mod tests {
 
         // Update presence
         registry
-            .update_presence("agent-001", PresenceState::Busy)
+            .update_presence("agent-001", PresenceState::Busy { call_id: None })
             .await
             .unwrap();
         let agent = registry.get_agent("agent-001").await.unwrap();
-        assert!(matches!(agent.presence, PresenceState::Busy));
+        assert!(matches!(agent.presence, PresenceState::Busy { call_id: None }));
     }
 }

@@ -18,6 +18,9 @@ use crate::{
     proxy::routing::{ActionType, MediaMode, RouteQueueConfig, RouteRule, SourceTrunk, TrunkConfig},
 };
 
+// Debug routes are now stored in ProxyDataContext.debug_routes
+// and checked upstream in call.rs before calling match_invite.
+
 #[derive(Debug, Default, Clone)]
 pub struct RouteTrace {
     pub matched_rule: Option<String>,

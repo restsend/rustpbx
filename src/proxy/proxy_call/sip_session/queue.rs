@@ -196,16 +196,22 @@ impl SipSession {
         _ring_timeout: Option<Duration>,
         callee_state_rx: &mut mpsc::UnboundedReceiver<DialogState>,
     ) -> Result<(), (StatusCode, Option<String>)> {
-        if let Some(agent) = agents.first() {
-            info!(agent = %agent.aor, "Queue: trying parallel agent");
-            self.try_single_target(agent, callee_state_rx, Some(Self::QUEUE_HOLD_TRACK_ID))
-                .await
-        } else {
-            Err((
+        if agents.is_empty() {
+            return Err((
                 StatusCode::TemporarilyUnavailable,
                 Some("No agents available".to_string()),
-            ))
+            ));
         }
+
+        for agent in agents {
+            info!(agent = %agent.aor, "Queue: dialing agent in parallel");
+        }
+
+        // Uses the shared parallel forking method on SipSession.
+        // When the first agent answers, hold music is stopped and the
+        // caller is bridged. All other pending forks are cancelled.
+        self.fork_targets_parallel(agents, Some(Self::QUEUE_HOLD_TRACK_ID), callee_state_rx)
+            .await
     }
 
     pub(super) async fn play_queue_transfer_prompt_before_bridge(

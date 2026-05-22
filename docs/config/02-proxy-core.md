@@ -163,3 +163,21 @@ To disable explicitly:
 [proxy]
 dialog_auth_cache = { enabled = false }
 ```
+
+## Identity & Privacy
+
+These settings control how the PBX identifies itself in SIP signaling and SDP media attributes.
+
+```toml
+[proxy]
+# Contact header username when no dialplan caller_contact is set.
+# If not specified, a random 16-char hex string is generated at startup.
+contact_username = "my-pbx-01"
+
+# CNAME value used in SDP a=ssrc:<n> cname:<value> attributes.
+# If not specified, a random 16-char hex string is generated at startup.
+# This replaces the default "rustrtc-cname-<ssrc>" in generated SDP.
+rtc_cname = "my-pbx-01"
+```
+
+When neither is specified, both default to the same randomly generated hex string, making the PBX instance identifiable without revealing implementation details.

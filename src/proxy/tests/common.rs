@@ -101,6 +101,7 @@ pub async fn create_test_server_with_config(
         presence_manager: Arc::new(crate::proxy::presence::PresenceManager::new(None)),
         addon_registry: None,
         rwi_gateway: None,
+        ivr_trace: None,
         tls_listener: None,
         queue_manager: Arc::new(crate::call::runtime::QueueManager::new()),
         conference_manager: Arc::new(crate::call::runtime::ConferenceManager::new()),
@@ -112,6 +113,8 @@ pub async fn create_test_server_with_config(
         media_policy: Arc::new(crate::call::DefaultMediaPolicy),
         trunk_health: None,
         session_hooks: Arc::new(Vec::new()),
+        contact_username: "rustpbx".to_string(),
+        rtc_cname: "test-cname".to_string(),
     });
     // Add test users
     let enabled_user = SipUser {

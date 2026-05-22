@@ -37,11 +37,20 @@ pub enum PresenceState {
     /// Agent is online and ready to receive calls
     Available,
     /// Agent is being rang for a call
-    Ringing,
+    Ringing {
+        /// ID of the call being routed to this agent
+        call_id: Option<String>,
+    },
     /// Agent is on an active call
-    Busy,
+    Busy {
+        /// ID of the active call
+        call_id: Option<String>,
+    },
     /// Agent is in wrap-up after a call
-    Wrapup,
+    Wrapup {
+        /// ID of the just-finished call
+        call_id: Option<String>,
+    },
     /// Agent is in a meeting/training (Do Not Disturb)
     Dnd,
     /// Custom state for extended use cases (e.g., "training", "lunch", "meeting")
@@ -56,7 +65,7 @@ impl PresenceState {
 
     /// Check if agent is in a call-related state
     pub fn is_call_active(&self) -> bool {
-        matches!(self, PresenceState::Ringing | PresenceState::Busy)
+        matches!(self, PresenceState::Ringing { .. } | PresenceState::Busy { .. })
     }
 
     /// Check if state is a custom state
@@ -78,9 +87,9 @@ impl PresenceState {
             PresenceState::Offline => "offline".to_string(),
             PresenceState::Away => "away".to_string(),
             PresenceState::Available => "available".to_string(),
-            PresenceState::Ringing => "ringing".to_string(),
-            PresenceState::Busy => "busy".to_string(),
-            PresenceState::Wrapup => "wrapup".to_string(),
+            PresenceState::Ringing { .. } => "ringing".to_string(),
+            PresenceState::Busy { .. } => "busy".to_string(),
+            PresenceState::Wrapup { .. } => "wrapup".to_string(),
             PresenceState::Dnd => "dnd".to_string(),
             PresenceState::Custom(name) => format!("custom:{}", name),
         }
@@ -93,9 +102,9 @@ impl PresenceState {
             "offline" => Some(PresenceState::Offline),
             "away" => Some(PresenceState::Away),
             "available" => Some(PresenceState::Available),
-            "ringing" => Some(PresenceState::Ringing),
-            "busy" => Some(PresenceState::Busy),
-            "wrapup" => Some(PresenceState::Wrapup),
+            "ringing" => Some(PresenceState::Ringing { call_id: None }),
+            "busy" => Some(PresenceState::Busy { call_id: None }),
+            "wrapup" => Some(PresenceState::Wrapup { call_id: None }),
             "dnd" => Some(PresenceState::Dnd),
             _ => {
                 // Check for custom state format: "custom:state_name"
@@ -118,9 +127,9 @@ impl PresenceState {
             PresenceState::Offline => "Offline".to_string(),
             PresenceState::Away => "Away".to_string(),
             PresenceState::Available => "Available".to_string(),
-            PresenceState::Ringing => "Ringing".to_string(),
-            PresenceState::Busy => "Busy".to_string(),
-            PresenceState::Wrapup => "Wrap-up".to_string(),
+            PresenceState::Ringing { .. } => "Ringing".to_string(),
+            PresenceState::Busy { .. } => "Busy".to_string(),
+            PresenceState::Wrapup { .. } => "Wrap-up".to_string(),
             PresenceState::Dnd => "Do Not Disturb".to_string(),
             PresenceState::Custom(name) => name.clone(),
         }
@@ -303,20 +312,20 @@ pub trait AgentRegistry: Send + Sync {
             // Can go to Available from any non-active state
             (
                 PresenceState::Away
-                | PresenceState::Wrapup
+                | PresenceState::Wrapup { .. }
                 | PresenceState::Dnd
                 | PresenceState::Custom(_),
                 PresenceState::Available,
             ) => true,
 
             // Can go to Ringing only from Available
-            (PresenceState::Available, PresenceState::Ringing) => true,
+            (PresenceState::Available, PresenceState::Ringing { .. }) => true,
 
             // Can go to Busy only from Ringing
-            (PresenceState::Ringing, PresenceState::Busy) => true,
+            (PresenceState::Ringing { .. }, PresenceState::Busy { .. }) => true,
 
             // Can go to Wrapup only from Busy
-            (PresenceState::Busy, PresenceState::Wrapup) => true,
+            (PresenceState::Busy { .. }, PresenceState::Wrapup { .. }) => true,
 
             // Can go to Away/Dnd from Available or Custom
             (
@@ -329,7 +338,7 @@ pub trait AgentRegistry: Send + Sync {
                 PresenceState::Available
                 | PresenceState::Away
                 | PresenceState::Dnd
-                | PresenceState::Wrapup,
+                | PresenceState::Wrapup { .. },
                 PresenceState::Custom(_),
             ) => true,
 
@@ -341,8 +350,6 @@ pub trait AgentRegistry: Send + Sync {
         }
     }
 
-    /// Register event handler for agent state changes
-    async fn on_state_change(&self, handler: Box<dyn Fn(&AgentRecord) + Send + Sync>);
 }
 
 /// Factory for creating registry instances

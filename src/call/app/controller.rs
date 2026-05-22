@@ -8,7 +8,7 @@ use std::time::Duration;
 use thiserror::Error;
 use tokio::sync::mpsc;
 use tokio::time::Instant;
-use tracing::info;
+use tracing::{info, warn};
 
 /// An audio playback session.
 #[derive(Debug, Clone)]
@@ -387,6 +387,27 @@ impl CallController {
             event: crate::call::domain::AppEvent::Custom { name, data },
         })?;
         Ok(())
+    }
+
+    /// Remove (cancel) a set of call legs by their leg IDs.
+    ///
+    /// Each leg is sent a `LegRemove` command, which causes the SIP session
+    /// to send a BYE/CANCEL and clean up the dialog.
+    pub fn remove_legs(&self, leg_ids: &[String]) {
+        for leg_id in leg_ids {
+            if let Err(e) = self
+                .session
+                .send_command(CallCommand::LegRemove {
+                    leg_id: LegId::from(leg_id.as_str()),
+                })
+            {
+                warn!(
+                    "Failed to send LegRemove for {}: {}",
+                    leg_id,
+                    e
+                );
+            }
+        }
     }
 }
 

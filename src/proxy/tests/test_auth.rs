@@ -503,6 +503,7 @@ async fn test_guest_call_allowed_extension() {
         presence_manager: Arc::new(crate::proxy::presence::PresenceManager::new(None)),
         addon_registry: None,
         rwi_gateway: None,
+        ivr_trace: None,
         tls_listener: None,
         queue_manager: Arc::new(crate::call::runtime::QueueManager::new()),
         conference_manager: Arc::new(crate::call::runtime::ConferenceManager::new()),
@@ -514,8 +515,9 @@ async fn test_guest_call_allowed_extension() {
         media_policy: Arc::new(crate::call::DefaultMediaPolicy),
         trunk_health: None,
         session_hooks: Arc::new(Vec::new()),
+        contact_username: "rustpbx".to_string(),
+        rtc_cname: "test-cname".to_string(),
     });
-
     let module = AuthModule::new(server_inner.clone(), server_inner.proxy_config.clone());
 
     let request = {

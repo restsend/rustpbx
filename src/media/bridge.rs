@@ -1362,14 +1362,18 @@ impl BridgePeer {
                                                         inner: track.clone(),
                                                         payload_type: Arc::clone(&callee_video_payload_type),
                                                         payload_map: Arc::clone(&callee_video_payload_map),
-                                                    });
-                                                let sender = rustrtc::RtpSender::builder(
+                                                     });
+                                                let mut sender_builder = rustrtc::RtpSender::builder(
                                                     forwarding_track,
                                                     existing_sender.ssrc(),
                                                 )
                                                 .stream_id(existing_sender.stream_id().to_string())
-                                                .params(existing_sender.params())
-                                                .build();
+                                                .params(existing_sender.params());
+                                                let cname_val = existing_sender.cname();
+                                                if !cname_val.starts_with("rustrtc-cname-") {
+                                                    sender_builder = sender_builder.cname(cname_val.to_string());
+                                                }
+                                                let sender = sender_builder.build();
                                                 target_transceiver.set_sender(Some(sender.clone()));
                                                 Self::spawn_pli_forwarder(
                                                     bridge_id.clone(),
@@ -1476,14 +1480,18 @@ impl BridgePeer {
                                                         inner: track.clone(),
                                                         payload_type: Arc::clone(&caller_video_payload_type),
                                                         payload_map: Arc::clone(&caller_video_payload_map),
-                                                    });
-                                                let sender = rustrtc::RtpSender::builder(
+                                                     });
+                                                let mut sender_builder = rustrtc::RtpSender::builder(
                                                     forwarding_track,
                                                     existing_sender.ssrc(),
                                                 )
                                                 .stream_id(existing_sender.stream_id().to_string())
-                                                .params(existing_sender.params())
-                                                .build();
+                                                .params(existing_sender.params());
+                                                let cname_val = existing_sender.cname();
+                                                if !cname_val.starts_with("rustrtc-cname-") {
+                                                    sender_builder = sender_builder.cname(cname_val.to_string());
+                                                }
+                                                let sender = sender_builder.build();
                                                 target_transceiver.set_sender(Some(sender.clone()));
                                                 Self::spawn_pli_forwarder(
                                                     bridge_id.clone(),
@@ -2047,6 +2055,7 @@ pub struct BridgePeerBuilder {
     rtp_sdp_compatibility: rustrtc::config::SdpCompatibilityMode,
     ice_servers: Vec<IceServer>,
     recorder: Option<Arc<parking_lot::RwLock<Option<Recorder>>>>,
+    cname: Option<String>,
 }
 
 impl BridgePeerBuilder {
@@ -2069,6 +2078,7 @@ impl BridgePeerBuilder {
             rtp_sdp_compatibility: rustrtc::config::SdpCompatibilityMode::LegacySip,
             ice_servers: Vec::new(),
             recorder: None,
+            cname: None,
         }
     }
 
@@ -2184,6 +2194,11 @@ impl BridgePeerBuilder {
         self
     }
 
+    pub fn with_cname(mut self, cname: String) -> Self {
+        self.cname = Some(cname);
+        self
+    }
+
     fn default_video_capabilities() -> Vec<rustrtc::config::VideoCapability> {
         vec![
             rustrtc::config::VideoCapability {
@@ -2227,6 +2242,7 @@ impl BridgePeerBuilder {
                     audio,
                     video: caller_video,
                     application: None,
+                    image: vec![],
                 });
 
         let caller_config = self
@@ -2238,6 +2254,7 @@ impl BridgePeerBuilder {
                 ssrc_start: rand::random::<u32>(),
                 sdp_compatibility: rustrtc::config::SdpCompatibilityMode::Standard,
                 ice_servers: self.ice_servers,
+                cname: self.cname.clone(),
                 ..Default::default()
             });
 
@@ -2247,6 +2264,7 @@ impl BridgePeerBuilder {
                     audio,
                     video: callee_video,
                     application: None,
+                    image: vec![],
                 });
 
         let callee_config = self
@@ -2262,6 +2280,7 @@ impl BridgePeerBuilder {
                 media_capabilities: callee_media_caps,
                 ssrc_start: rand::random::<u32>(),
                 sdp_compatibility: self.rtp_sdp_compatibility,
+                cname: self.cname.clone(),
                 ..Default::default()
             });
 

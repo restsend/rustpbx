@@ -1,3 +1,6 @@
+use crate::call::app::ivr::trace::IvrTraceCollector;
+use crate::call::app::CallApp;
+use crate::call::runtime::PostCallHook;
 use crate::config::Config;
 use chrono::{DateTime, Utc};
 use sea_orm::DatabaseConnection;
@@ -96,11 +99,28 @@ pub struct ApplicationContext {
 
     /// System configuration.
     pub config: Arc<Config>,
+
+    /// RWI gateway for emitting real-time events.
+    pub rwi_gateway: Option<Arc<tokio::sync::RwLock<crate::rwi::gateway::RwiGateway>>>,
+
+    /// IVR step trace collector for debugging (optional).
+    pub ivr_trace: Option<Arc<IvrTraceCollector>>,
+
+    /// Custom call app factories (registered by addons).
+    pub app_factories:
+        Arc<Vec<(&'static str, Arc<dyn Fn(&str, Option<serde_json::Value>, &ApplicationContext) -> Option<Box<dyn CallApp>> + Send + Sync>)>>,
+
+    /// Post-call hook (registered by callcenter addon).
+    pub post_call_hook: Option<Arc<dyn PostCallHook>>,
 }
 
 impl ApplicationContext {
     /// Create a new application context.
-    pub fn new(db: DatabaseConnection, call_info: CallInfo, config: Arc<Config>) -> Self {
+    pub fn new(
+        db: DatabaseConnection,
+        call_info: CallInfo,
+        config: Arc<Config>,
+    ) -> Self {
         Self {
             session_vars: Arc::new(RwLock::new(HashMap::new())),
             queue_name: Arc::new(RwLock::new(None)),
@@ -108,6 +128,10 @@ impl ApplicationContext {
             http_client: reqwest::Client::new(),
             call_info,
             config,
+            rwi_gateway: None,
+            ivr_trace: None,
+            app_factories: Arc::new(Vec::new()),
+            post_call_hook: None,
         }
     }
 
