@@ -1489,7 +1489,9 @@ impl SipSession {
 
 
                 Some(cmd) = cmd_rx.recv() => {
-                    let result = self.execute_command(cmd).await;
+                    let result = self
+                        .execute_command(cmd, Some(&mut callee_state_rx))
+                        .await;
                     if !result.success {
                         warn!(error = ?result.message, "Command execution failed");
                     }
@@ -1908,6 +1910,11 @@ impl SipSession {
                     .await?;
             }
             DialogState::Terminated(terminated_dialog_id, reason) => {
+                let connected_callee_terminated =
+                    self.meta.connected_callee_dialog_id.as_ref() == Some(&terminated_dialog_id);
+                let tracked_callee_terminated =
+                    self.callee_dialogs.contains_key(&terminated_dialog_id);
+
                 self.pending_hangup.remove(&terminated_dialog_id);
                 self.callee_dialogs.remove(&terminated_dialog_id);
                 self.legs.retain_dialogs_by_dialog_id(&terminated_dialog_id);
@@ -1922,8 +1929,15 @@ impl SipSession {
                 self.callee_guards
                     .retain(|guard| guard.id() != &terminated_dialog_id);
 
-                let connected_callee_terminated =
-                    self.meta.connected_callee_dialog_id.as_ref() == Some(&terminated_dialog_id);
+                if !tracked_callee_terminated && !connected_callee_terminated {
+                    debug!(
+                        dialog_id = %terminated_dialog_id,
+                        ?reason,
+                        "Ignoring terminated untracked callee dialog"
+                    );
+                    return Ok(());
+                }
+
                 if self.meta.connected_callee_dialog_id.is_some() && !connected_callee_terminated {
                     debug!(
                         dialog_id = %terminated_dialog_id,
@@ -2243,6 +2257,12 @@ impl SipSession {
         let dialog_layer = self.server.dialog_layer.clone();
         let fork_cancel = CancellationToken::new();
         let mut fork_set = FuturesUnordered::new();
+        let state_tx = self.callee_event_tx.clone().ok_or_else(|| {
+            (
+                StatusCode::ServerInternalError,
+                Some("No callee event sender".to_string()),
+            )
+        })?;
 
         for (idx, target) in targets.iter().enumerate() {
             if fork_cancel.is_cancelled() {
@@ -2330,8 +2350,7 @@ impl SipSession {
                 ..Default::default()
             };
 
-            // Each fork gets its own state channel so events don't interleave
-            let (fork_tx, _fork_rx) = mpsc::unbounded_channel();
+            let fork_tx = state_tx.clone();
             let dlg = dialog_layer.clone();
             let ct = fork_cancel.clone();
 
@@ -6196,7 +6215,11 @@ impl SipSession {
 }
 
 impl SipSession {
-    pub async fn execute_command(&mut self, command: CallCommand) -> CommandResult {
+    pub async fn execute_command(
+        &mut self,
+        command: CallCommand,
+        callee_state_rx: Option<&mut mpsc::UnboundedReceiver<DialogState>>,
+    ) -> CommandResult {
         let capability_check = self.check_capability(&command);
 
         let degradation_reason = match capability_check {
@@ -6210,7 +6233,7 @@ impl SipSession {
             MediaCapabilityCheck::Allowed => None,
         };
 
-        let mut result = self.process_command(command).await;
+        let mut result = self.process_command(command, callee_state_rx).await;
 
         if let Some(reason) = degradation_reason {
             result.media_degraded = true;
@@ -6225,7 +6248,11 @@ impl SipSession {
         ctx.check_media_capability(command)
     }
 
-    async fn process_command(&mut self, command: CallCommand) -> CommandResult {
+    async fn process_command(
+        &mut self,
+        command: CallCommand,
+        mut callee_state_rx: Option<&mut mpsc::UnboundedReceiver<DialogState>>,
+    ) -> CommandResult {
         match command {
             CallCommand::Answer { leg_id } => {
                 if leg_id.0 == "caller" {
@@ -6362,10 +6389,20 @@ impl SipSession {
                 leg_id,
                 target,
                 attended,
-            } => match self.handle_transfer(leg_id, target, attended).await {
-                Ok(_) => CommandResult::success(),
-                Err(e) => CommandResult::failure(e.to_string()),
-            },
+            } => {
+                let Some(callee_state_rx) = callee_state_rx.as_deref_mut() else {
+                    return CommandResult::failure(
+                        "No callee state receiver available for transfer".to_string(),
+                    );
+                };
+                match self
+                    .handle_transfer(leg_id, target, attended, callee_state_rx)
+                    .await
+                {
+                    Ok(_) => CommandResult::success(),
+                    Err(e) => CommandResult::failure(e.to_string()),
+                }
+            }
 
             CallCommand::TransferComplete { consult_leg } => {
                 match self.handle_transfer_complete(consult_leg).await {
@@ -9049,9 +9086,15 @@ mod tests {
             caller_peer,
             callee_peer,
         );
+        let (callee_tx, mut callee_rx) = mpsc::unbounded_channel();
+        session.callee_event_tx = Some(callee_tx);
 
         let result = session
-            .handle_blind_transfer(LegId::from("caller"), "queue:test-queue".to_string())
+            .handle_blind_transfer(
+                LegId::from("caller"),
+                "queue:test-queue".to_string(),
+                &mut callee_rx,
+            )
             .await;
 
         assert!(
@@ -9112,9 +9155,15 @@ mod tests {
             caller_peer,
             callee_peer,
         );
+        let (callee_tx, mut callee_rx) = mpsc::unbounded_channel();
+        session.callee_event_tx = Some(callee_tx);
 
         let result = session
-            .handle_blind_transfer(LegId::from("caller"), "queue:nonexistent".to_string())
+            .handle_blind_transfer(
+                LegId::from("caller"),
+                "queue:nonexistent".to_string(),
+                &mut callee_rx,
+            )
             .await;
 
         assert!(
