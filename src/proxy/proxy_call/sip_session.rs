@@ -5119,16 +5119,25 @@ impl SipSession {
 
     async fn get_local_reinvite_pc(&self, side: DialogSide) -> Option<rustrtc::PeerConnection> {
         if let Some(bridge) = &self.media.media_bridge {
-            let leg_is_webrtc = match side {
-                DialogSide::Caller => self.is_caller_webrtc(),
-                DialogSide::Callee => self.is_callee_webrtc(),
+            let bridge_endpoint = match side {
+                DialogSide::Caller if self.media.caller_answer_uses_media_bridge => {
+                    Some(self.leg_bridge_endpoint(&LegId::from("caller")))
+                }
+                DialogSide::Callee if self.media.callee_offer_uses_media_bridge => {
+                    Some(self.leg_bridge_endpoint(&LegId::from("callee")))
+                }
+                _ => None,
             };
 
-            return Some(if leg_is_webrtc {
-                bridge.caller_pc().clone()
-            } else {
-                bridge.callee_pc().clone()
-            });
+            // A session may keep an app/IVR bridge after transferring to a
+            // normal SIP callee. Only use the bridge PC for a leg explicitly
+            // negotiated on that bridge; otherwise use the leg's own track PC.
+            if let Some(endpoint) = bridge_endpoint {
+                return Some(match endpoint {
+                    BridgeEndpoint::Caller => bridge.caller_pc().clone(),
+                    BridgeEndpoint::Callee => bridge.callee_pc().clone(),
+                });
+            }
         }
 
         let (peer, track_id) = match side {
@@ -8505,7 +8514,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_get_local_reinvite_pc_uses_bridge_when_present() {
+    async fn test_get_local_reinvite_pc_uses_bridge_only_for_bridge_backed_leg() {
         use crate::call::{DialDirection, Dialplan, TransactionCookie};
         use crate::proxy::proxy_call::test_util::tests::MockMediaPeer;
         use crate::proxy::tests::common::{
@@ -8558,6 +8567,8 @@ mod tests {
 
         session.media.media_bridge =
             Some(BridgePeerBuilder::new("test-bridge".to_string()).build());
+        session.media.caller_answer_uses_media_bridge = true;
+        session.media.callee_offer_uses_media_bridge = false;
         session
             .legs
             .transports
@@ -8572,6 +8583,15 @@ mod tests {
         assert!(pc.is_some(), "bridge-backed caller leg should resolve a PC");
         assert_eq!(caller_peer.get_tracks_call_count(), 0);
         assert_eq!(callee_peer.get_tracks_call_count(), 0);
+
+        let pc = session.get_local_reinvite_pc(DialogSide::Callee).await;
+
+        assert!(
+            pc.is_none(),
+            "non-bridge callee leg should resolve through its own track PC"
+        );
+        assert_eq!(caller_peer.get_tracks_call_count(), 0);
+        assert_eq!(callee_peer.get_tracks_call_count(), 1);
     }
 
     #[tokio::test]
