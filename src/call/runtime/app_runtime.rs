@@ -249,6 +249,9 @@ impl CapabilityCheckResult {
 /// Implementations manage the actual app instance and event routing.
 #[async_trait]
 pub trait AppRuntime: Send + Sync {
+    /// Downcast to Any for accessing implementation-specific state.
+    fn as_any(&self) -> &dyn std::any::Any;
+
     /// Start an application
     ///
     /// # Arguments

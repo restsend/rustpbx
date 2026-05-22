@@ -25,6 +25,7 @@ pub struct HttpRegistry {
     /// Round-robin counter
     rr_counter: RwLock<u64>,
     /// Event callbacks for state changes
+    #[allow(dead_code)]
     event_handlers: RwLock<Vec<super::AgentEventHandler>>,
 
     /// Cache TTL
@@ -312,7 +313,7 @@ impl AgentRegistry for HttpRegistry {
         let mut cache = self.cache.write().await;
         if let Some((record, _)) = cache.get_mut(agent_id) {
             record.current_calls += 1;
-            record.presence = PresenceState::Busy;
+            record.presence = PresenceState::Busy { call_id: None };
             record.last_state_change = Instant::now();
         }
 
@@ -337,7 +338,7 @@ impl AgentRegistry for HttpRegistry {
             record.last_call_end = Some(Instant::now());
 
             if record.current_calls == 0 {
-                record.presence = PresenceState::Wrapup;
+                record.presence = PresenceState::Wrapup { call_id: None };
             }
         }
 
@@ -360,13 +361,6 @@ impl AgentRegistry for HttpRegistry {
         let candidates = self.find_available_agents(required_skills).await;
         let mut rr_counter = self.rr_counter.write().await;
         super::select_best_agent(candidates, strategy, &mut rr_counter)
-    }
-
-    async fn on_state_change(&self, handler: Box<dyn Fn(&AgentRecord) + Send + Sync>) {
-        let mut handlers = self.event_handlers.write().await;
-        let handler: Box<dyn Fn(&AgentRecord) + Send + Sync + 'static> =
-            unsafe { std::mem::transmute(handler) };
-        handlers.push(handler);
     }
 
     async fn resolve_target(&self, _target_uri: &str) -> Vec<String> {

@@ -276,6 +276,36 @@ async fn diagnostics_bootstrap(state: &Arc<ConsoleState>) -> JsonValue {
         ("/ws".to_string(), "/iceservers".to_string())
     };
 
+    #[allow(unused_mut)]
+    let mut destination_samples: Vec<JsonValue> = Vec::new();
+
+    // Load active IVR projects as destination samples (when addon enabled)
+    #[cfg(feature = "addon-ivr-editor")]
+    {
+        use crate::addons::ivr_editor::models::{Column as IvrColumn, Entity as IvrEntity};
+        use sea_orm::{ColumnTrait, QueryFilter};
+        if let Ok(projects) = IvrEntity::find()
+            .filter(IvrColumn::Status.eq("active"))
+            .all(state.db())
+            .await
+        {
+            for p in &projects {
+                let is_step = p
+                    .current_data
+                    .get("ivr_mode")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("tree")
+                    == "step";
+                let mode_tag = if is_step { " (step)" } else { " (tree)" };
+                let test_number = format!("*99{:03}", p.id % 1000);
+                destination_samples.push(serde_json::json!({
+                    "label": format!("{} — {}{}", p.name, test_number, mode_tag),
+                    "value": test_number,
+                }));
+            }
+        }
+    }
+
     json!({
         "last_audit": last_audit,
         "trunks": trunks,
@@ -283,7 +313,7 @@ async fn diagnostics_bootstrap(state: &Arc<ConsoleState>) -> JsonValue {
         "dialer": {
             "default_source": JsonValue::Null,
             "source_options": JsonValue::Array(vec![]),
-            "destination_samples": JsonValue::Array(vec![]),
+            "destination_samples": JsonValue::Array(destination_samples),
             "trunk_options": trunk_options,
         },
         "connection": connection,

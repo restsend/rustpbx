@@ -4,7 +4,7 @@ use crate::rwi::session::{OwnershipMode, RwiSession, SupervisorMode};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, Arc as StdArc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
-use tokio::sync::{RwLock, mpsc};
+use tokio::sync::{RwLock, broadcast, mpsc};
 
 pub type SessionId = String;
 pub type CallId = String;
@@ -48,6 +48,8 @@ pub struct RwiGateway {
     call_vars: HashMap<CallId, HashMap<String, String>>,
     /// Per-session event type filter; if set, only events whose type name is in the set are delivered.
     session_event_filters: HashMap<SessionId, HashSet<String>>,
+    /// Optional broadcast sender for the RWI webhook handler.
+    webhook_tx: Option<broadcast::Sender<EventCacheEntry>>,
 }
 
 #[derive(Debug)]
@@ -89,6 +91,7 @@ impl RwiGateway {
             dtmf_taps: Mutex::new(HashMap::new()),
             call_vars: HashMap::new(),
             session_event_filters: HashMap::new(),
+            webhook_tx: None,
         }
     }
 
@@ -108,6 +111,11 @@ impl RwiGateway {
     pub fn set_session_event_sender(&mut self, session_id: &SessionId, sender: WsEventSender) {
         self.session_event_senders
             .insert(session_id.clone(), sender);
+    }
+
+    /// Set the broadcast sender for the RWI webhook handler.
+    pub fn set_webhook_tx(&mut self, tx: broadcast::Sender<EventCacheEntry>) {
+        self.webhook_tx = Some(tx);
     }
 
     pub async fn remove_session(&mut self, session_id: &SessionId) {
@@ -436,6 +444,19 @@ impl RwiGateway {
         cache_state.next_sequence
     }
 
+    /// Forward a cached event to the webhook broadcast channel, if configured.
+    fn forward_to_webhook(&self, call_id: &CallId, event: &RwiEvent, sequence: u64) {
+        if let Some(tx) = &self.webhook_tx {
+            let entry = EventCacheEntry {
+                sequence,
+                timestamp: self.current_timestamp(),
+                call_id: call_id.clone(),
+                event: event.clone(),
+            };
+            let _ = tx.send(entry);
+        }
+    }
+
     /// Send an event to the owner of a call_id (if any).
     /// Also caches the event for session resumption.
     pub fn send_event_to_call_owner(&self, call_id: &CallId, event: &RwiEvent) {
@@ -451,7 +472,10 @@ impl RwiGateway {
         }
 
         // Cache the event first
-        let _sequence = self.cache_event(call_id, event);
+        let sequence = self.cache_event(call_id, event);
+
+        // Forward to webhook handler (if configured)
+        self.forward_to_webhook(call_id, event, sequence);
 
         // Send to owner
         if let Some(owner_id) = self.call_ownership.get(call_id) {
@@ -482,7 +506,10 @@ impl RwiGateway {
     /// Also caches the event for session resumption.
     pub fn fan_out_event_to_context(&self, context: &str, event: &RwiEvent, call_id: &CallId) {
         // Cache the event first
-        let _sequence = self.cache_event(call_id, event);
+        let sequence = self.cache_event(call_id, event);
+
+        // Forward to webhook handler (if configured)
+        self.forward_to_webhook(call_id, event, sequence);
 
         // Fan out to subscribers
         if let Some(subscribers) = self.context_subscriptions.get(context) {
@@ -495,6 +522,18 @@ impl RwiGateway {
     /// Send an event to every known session (broadcast).
     /// Note: Broadcasting does not cache events as there's no specific call_id.
     pub fn broadcast_event(&self, event: &RwiEvent) {
+        // Forward to webhook handler (if configured).
+        // Use an empty call_id and zero sequence since broadcast events are not cached.
+        if let Some(tx) = &self.webhook_tx {
+            let entry = EventCacheEntry {
+                sequence: 0,
+                timestamp: self.current_timestamp(),
+                call_id: String::new(),
+                event: event.clone(),
+            };
+            let _ = tx.send(entry);
+        }
+
         for session_id in self.session_event_senders.keys() {
             self.send_event_to_session(session_id, event);
         }

@@ -41,6 +41,7 @@ addon-transcript = []
 addon-voicemail = ["dep:url"]
 addon-ivr-editor = ["dep:hex"]
 addon-cc = []
+test-harness = ["addon-cc", "dep:sipbot", "dep:portpicker"]
 addon-sbc = ["dep:minijinja", "dep:evalexpr"]
 addon-observability = ["metrics-exporter-prometheus"]
 addon-telemetry = [
@@ -90,7 +91,7 @@ axum = { version = "0.8.9", features = ["ws", "tokio", "multipart"] }
 bytes = "1"
 futures = "0.3.31"
 rustls = { version = "0.23.39", features = ["ring"] }
-minijinja = { version = "2.19.0", features = [
+minijinja = { version = "2.20.0", features = [
     "loader",
     "json",
 ], optional = true }
@@ -103,6 +104,9 @@ tokio = { version = "1.52.2", features = ["full", "tracing", "test-util"] }
 parking_lot = "0.12"
 dashmap = "6"
 tokio-util = "0.7.18"
+tokio-tungstenite = { version = "0.29.0", features = [
+    "rustls-tls-native-roots",
+] }
 tracing = "0.1.43"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 tracing-appender = "0.2.5"
@@ -120,7 +124,7 @@ hex = { version = "0.4.3", optional = true }
 audio-codec = "0.3.38"
 #udio-codec = { path = "../audio-codec", default-features = false }
 #rustrtc = { path = "../rustrtc" }
-rustrtc = "0.3.63"
+rustrtc = "0.3.66"
 reqwest = { version = "0.13", features = [
     "json",
     "stream",
@@ -202,15 +206,17 @@ totp-rs = { version = "5.7.1", features = ["qr", "gen_secret"] }
 ldap3 = { version = "0.12.1", optional = true }
 ring = { version = "0.17", optional = true }
 
+sipbot = { version = "0.2.30", default-features = false, features = [
+    "opus",
+], optional = true }
+portpicker = { version = "0.1.1", optional = true }
+
 [dev-dependencies]
 tempfile = "3.27.0"
 portpicker = "0.1.1"
 tower = { version = "0.5", features = ["util"] }
 sipbot = { version = "0.2.30", default-features = false, features = ["opus"] }
 serde_urlencoded = "0.7"
-tokio-tungstenite = { version = "0.29.0", features = [
-    "rustls-tls-native-roots",
-] }
 
 [build-dependencies]
 chrono = "0.4"
@@ -227,3 +233,8 @@ required-features = ["opus"]
 [[bin]]
 name = "verify-i18n"
 path = "tools/verify_i18n.rs"
+
+[[bin]]
+name = "pbx-harness"
+path = "src/bin/pbx-harness.rs"
+required-features = ["test-harness"]

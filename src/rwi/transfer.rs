@@ -994,7 +994,8 @@ impl TransferController {
         // Create media track and SDP offer
         let media_track = crate::media::RtpTrackBuilder::new(format!("3pcc-{}", call_id))
             .with_cancel_token(tokio_util::sync::CancellationToken::new())
-            .with_external_ip(external_ip);
+            .with_external_ip(external_ip)
+            .with_cname(sip_server.rtc_cname.clone());
         let media_track = if let Some(bind_ip) = sip_server.rtp_config.bind_ip.clone() {
             media_track.with_bind_ip(bind_ip)
         } else {

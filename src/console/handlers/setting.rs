@@ -121,12 +121,19 @@ struct AssignRolesPayload {
 pub(crate) struct ProxySettingsPayload {
     pub realms: Option<Vec<String>>,
     pub locator_webhook: Option<LocatorWebhookConfig>,
+    pub rwi_webhook: Option<LocatorWebhookConfig>,
     pub user_backends: Option<Vec<UserBackendConfig>>,
     pub http_router: Option<HttpRouterConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub(crate) struct TestLocatorWebhookPayload {
+    pub url: String,
+    pub headers: Option<std::collections::HashMap<String, String>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct TestRwiWebhookPayload {
     pub url: String,
     pub headers: Option<std::collections::HashMap<String, String>>,
 }
@@ -189,6 +196,10 @@ pub fn urls() -> Router<Arc<ConsoleState>> {
         .route(
             "/settings/config/proxy/locator-webhook/test",
             post(test_locator_webhook),
+        )
+        .route(
+            "/settings/config/proxy/rwi-webhook/test",
+            post(test_rwi_webhook),
         )
         .route(
             "/settings/config/proxy/http-router/test",
@@ -383,6 +394,7 @@ async fn build_settings_payload(state: &ConsoleState) -> JsonValue {
             "rtp": config.rtp_config(),
             "user_backends": config.proxy.user_backends.clone(),
             "locator_webhook": config.proxy.locator_webhook.clone(),
+            "rwi_webhook": config.rwi_webhook.clone(),
             "http_router": config.proxy.http_router.clone(),
             "realms": config.proxy.realms.clone().unwrap_or_default(),
             "dos_enabled": config.proxy.dos_enabled,
@@ -1690,6 +1702,7 @@ pub(crate) async fn update_proxy_settings(
     };
 
     let mut modified = false;
+    let mut rwi_webhook_value = None;
     let table = ensure_table_mut(&mut doc, "proxy");
 
     if let Some(realms) = payload.realms {
@@ -1718,6 +1731,28 @@ pub(crate) async fn update_proxy_settings(
         };
         table["locator_webhook"] = new_doc.as_item().clone();
         modified = true;
+    }
+
+    if let Some(webhook) = payload.rwi_webhook {
+        let toml_s = match toml::to_string(&webhook) {
+            Ok(s) => s,
+            Err(err) => {
+                return json_error(
+                    StatusCode::BAD_REQUEST,
+                    format!("Failed to serialize rwi_webhook: {err}"),
+                );
+            }
+        };
+        let new_doc = match toml_s.parse::<DocumentMut>() {
+            Ok(parsed) => parsed,
+            Err(err) => {
+                return json_error(
+                    StatusCode::BAD_REQUEST,
+                    format!("Invalid rwi_webhook payload: {err}"),
+                );
+            }
+        };
+        rwi_webhook_value = Some(new_doc.as_item().clone());
     }
 
     if let Some(backends) = payload.user_backends {
@@ -1771,6 +1806,12 @@ pub(crate) async fn update_proxy_settings(
             }
         };
         table["http_router"] = new_doc.as_item().clone();
+        modified = true;
+    }
+
+    // Write rwi_webhook at root level (after table borrow is done)
+    if let Some(value) = rwi_webhook_value {
+        doc["rwi_webhook"] = value;
         modified = true;
     }
 
@@ -3180,6 +3221,37 @@ pub(crate) async fn test_locator_webhook(
         Err(err) => json_error(
             StatusCode::BAD_REQUEST,
             format!("Webhook request failed: {}", err),
+        ),
+    }
+}
+
+pub(crate) async fn test_rwi_webhook(
+    State(state): State<Arc<ConsoleState>>,
+    AuthRequired(user): AuthRequired,
+    Json(payload): Json<TestRwiWebhookPayload>,
+) -> Response {
+    if !state.has_permission(&user, "system", "write").await {
+        return json_error(StatusCode::FORBIDDEN, "Permission denied");
+    }
+
+    match crate::rwi::webhook::send_test_event(&payload.url, payload.headers.as_ref()).await {
+        Ok(resp) => {
+            if resp.status().is_success() {
+                Json(json!({
+                    "status": "ok",
+                    "message": format!("RWI webhook test successful: HTTP {}", resp.status()),
+                }))
+                .into_response()
+            } else {
+                json_error(
+                    StatusCode::BAD_REQUEST,
+                    format!("RWI webhook returned error: HTTP {}", resp.status()),
+                )
+            }
+        }
+        Err(err) => json_error(
+            StatusCode::BAD_REQUEST,
+            format!("RWI webhook request failed: {}", err),
         ),
     }
 }

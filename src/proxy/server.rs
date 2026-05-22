@@ -81,6 +81,8 @@ pub struct SipServerInner {
     pub presence_manager: Arc<PresenceManager>,
     pub addon_registry: Option<Arc<crate::addons::registry::AddonRegistry>>,
     pub rwi_gateway: Option<Arc<tokio::sync::RwLock<crate::rwi::gateway::RwiGateway>>>,
+    /// IVR step trace collector (set by IVR Editor addon, accessed by StepIvrApp).
+    pub ivr_trace: Option<Arc<crate::call::app::ivr::trace::IvrTraceCollector>>,
     pub tls_listener: Option<rsipstack::transport::TlsListenerConnection>,
     pub queue_manager: Arc<crate::call::runtime::QueueManager>,
     pub conference_manager: Arc<crate::call::runtime::ConferenceManager>,
@@ -101,6 +103,14 @@ pub struct SipServerInner {
     pub trunk_health: Option<crate::proxy::trunk_health::HealthStateMap>,
     /// Session lifecycle hooks (connected, held, unheld, ended).
     pub session_hooks: Arc<Vec<Arc<dyn crate::proxy::proxy_call::session_hooks::CallSessionHook>>>,
+    /// Resolved contact username (from config or random hex).
+    pub contact_username: String,
+    /// Resolved CNAME for SDP ssrc attributes (from config or random hex).
+    pub rtc_cname: String,
+}
+
+fn random_hex() -> String {
+    format!("{:016x}", rand::random::<u64>())
 }
 
 pub type SipServerRef = Arc<SipServerInner>;
@@ -139,6 +149,7 @@ pub struct SipServerBuilder {
     addon_registry: Option<Arc<crate::addons::registry::AddonRegistry>>,
     /// RWI gateway to wire into the server for call-app factory use.
     rwi_gateway: Option<Arc<tokio::sync::RwLock<crate::rwi::gateway::RwiGateway>>>,
+    ivr_trace: Option<Arc<crate::call::app::ivr::trace::IvrTraceCollector>>,
     /// AgentRegistry for agent management and presence state.
     agent_registry: Option<Arc<dyn crate::call::app::agent_registry::AgentRegistry>>,
     queue_location_enricher: Option<Arc<dyn crate::proxy::call::QueueLocationEnricher>>,
@@ -180,6 +191,7 @@ impl SipServerBuilder {
             no_bind: false,
             addon_registry: None,
             rwi_gateway: None,
+            ivr_trace: None,
             agent_registry: None,
             queue_location_enricher: None,
             skip_migrate: false,
@@ -720,6 +732,7 @@ impl SipServerBuilder {
             presence_manager,
             addon_registry: self.addon_registry,
             rwi_gateway: self.rwi_gateway,
+            ivr_trace: self.ivr_trace,
             tls_listener: tls_listener_clone,
             queue_manager,
             conference_manager,
@@ -733,6 +746,12 @@ impl SipServerBuilder {
                 .unwrap_or_else(|| Arc::new(crate::call::DefaultMediaPolicy)),
             trunk_health: self.trunk_health.clone(),
             session_hooks: Arc::new(self.session_hooks),
+            contact_username: self
+                .config
+                .contact_username
+                .clone()
+                .unwrap_or_else(random_hex),
+            rtc_cname: self.config.rtc_cname.clone().unwrap_or_else(random_hex),
         });
 
         let inner_weak = Arc::downgrade(&inner);
@@ -1088,7 +1107,7 @@ impl SipServerInner {
         Some(rsipstack::sip::Uri {
             scheme: addr.r#type.map(|t| t.sip_scheme()),
             auth: Some(Auth {
-                user: "rustpbx".to_string(),
+                user: self.contact_username.clone(),
                 password: None,
             }),
             host_with_port: addr.addr,

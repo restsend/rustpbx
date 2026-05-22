@@ -593,6 +593,58 @@
                             </div>
                         </div>
 
+                        <!-- RWI Webhook -->
+                        <div class="space-y-4">
+                            <div>
+                                <h3 class="text-sm font-semibold text-slate-900">RWI Webhook</h3>
+                                <p class="text-xs text-slate-500">Forward RWI events (call lifecycle, recording, queue, agent, conference, etc.) to an HTTP endpoint as JSON.</p>
+                            </div>
+                            <div class="grid gap-4 md:grid-cols-2">
+                                <div class="md:col-span-1">
+                                    <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Webhook URL</label>
+                                    <input type="url" x-model="proxyDraft.rwi_webhook.url"
+                                        :disabled="proxyProcessing"
+                                        class="mt-1 block w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                        placeholder="https://api.example.com/rwi-events">
+                                </div>
+                                <div class="md:col-span-1">
+                                    <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Timeout (ms)</label>
+                                    <input type="number" x-model="proxyDraft.rwi_webhook.timeout_ms"
+                                        :disabled="proxyProcessing"
+                                        class="mt-1 block w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                        placeholder="5000">
+                                </div>
+                                <div class="md:col-span-2">
+                                    <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Custom Headers</label>
+                                    <textarea x-model="proxyDraft.rwi_webhook.headers" :disabled="proxyProcessing"
+                                        rows="2"
+                                        class="mt-1 block w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                        placeholder="X-API-Key: secret-key"></textarea>
+                                </div>
+                                <div class="md:col-span-2">
+                                    <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">Event Filter (optional, one per line)</label>
+                                    <textarea x-model="proxyDraft.rwi_webhook.events" :disabled="proxyProcessing"
+                                        rows="2"
+                                        class="mt-1 block w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                        placeholder="call_ringing&#10;call_hangup&#10;agent_state_changed"></textarea>
+                                </div>
+                            </div>
+                            <div class="flex justify-start">
+                                <button type="button" @click="testRwiWebhook"
+                                    :disabled="proxyProcessing || !proxyDraft.rwi_webhook.url"
+                                    class="inline-flex items-center gap-2 rounded-md border border-slate-200 px-3 py-1.5 text-xs font-semibold text-slate-600 transition hover:bg-slate-50 disabled:opacity-50">
+                                    <svg class="h-3.5 w-3.5" viewBox="0 0 20 20" fill="none" stroke="currentColor"
+                                        stroke-width="1.6">
+                                        <path stroke-linecap="round" stroke-linejoin="round"
+                                            d="M14.752 11.168l-3.197-2.132A1 1 0 0010 9.87v4.263a1 1 0 001.555.832l3.197-2.132a1 1 0 000-1.664z" />
+                                        <path stroke-linecap="round" stroke-linejoin="round"
+                                            d="M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                                    </svg>
+                                    Test webhook
+                                </button>
+                            </div>
+                        </div>
+
                         <hr class="border-slate-100">
 
                         <!-- User Backends -->
@@ -2727,6 +2779,12 @@
                     timeout_ms: '',
                     headers: '',
                 },
+                rwi_webhook: {
+                    url: '',
+                    timeout_ms: '',
+                    headers: '',
+                    events: '',
+                },
                 http_router: {
                     url: '',
                     timeout_ms: '',
@@ -4751,6 +4809,12 @@
                         timeout_ms: proxy.locator_webhook?.timeout_ms || '',
                         headers: this.formatHeaders(proxy.locator_webhook?.headers),
                     },
+                    rwi_webhook: {
+                        url: proxy.rwi_webhook?.url || '',
+                        timeout_ms: proxy.rwi_webhook?.timeout_ms || '',
+                        headers: this.formatHeaders(proxy.rwi_webhook?.headers),
+                        events: (proxy.rwi_webhook?.events || []).join('\n'),
+                    },
                     http_router: {
                         url: proxy.http_router?.url || '',
                         timeout_ms: proxy.http_router?.timeout_ms || '',
@@ -4789,6 +4853,15 @@
                     };
                 }
 
+                if (this.proxyDraft.rwi_webhook.url) {
+                    body.rwi_webhook = {
+                        url: this.proxyDraft.rwi_webhook.url,
+                        timeout_ms: this.normalizeOptionalNumber(this.proxyDraft.rwi_webhook.timeout_ms),
+                        headers: this.parseHeaders(this.proxyDraft.rwi_webhook.headers),
+                        events: this.listFromTextarea(this.proxyDraft.rwi_webhook.events),
+                    };
+                }
+
                 if (this.proxyDraft.http_router.url) {
                     body.http_router = {
                         url: this.proxyDraft.http_router.url,
@@ -4813,6 +4886,7 @@
                     this.proxyConfig.realms = body.realms;
                     this.proxyConfig.user_backends = body.user_backends;
                     this.proxyConfig.locator_webhook = body.locator_webhook;
+                    this.proxyConfig.rwi_webhook = body.rwi_webhook;
                     this.proxyConfig.http_router = body.http_router;
                     this.initProxyDraft();
                 } catch (err) {
@@ -4828,6 +4902,24 @@
                 this.proxyProcessing = true;
                 try {
                     const response = await fetch(`${this.basePath}/settings/config/proxy/locator-webhook/test`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ url: draft.url, headers: this.parseHeaders(draft.headers) }),
+                    });
+                    const data = await response.json();
+                    this.$dispatch('toast', { title: response.ok ? 'Success' : 'Failed', message: data.message });
+                } catch (err) {
+                    this.$dispatch('toast', { title: 'Test failed', message: err.message });
+                } finally {
+                    this.proxyProcessing = false;
+                }
+            },
+            async testRwiWebhook() {
+                const draft = this.proxyDraft.rwi_webhook;
+                if (!draft.url) return;
+                this.proxyProcessing = true;
+                try {
+                    const response = await fetch(`${this.basePath}/settings/config/proxy/rwi-webhook/test`, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ url: draft.url, headers: this.parseHeaders(draft.headers) }),

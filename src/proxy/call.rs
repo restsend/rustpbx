@@ -220,6 +220,19 @@ impl RouteInvite for DefaultRouteInvite {
             }
         }
         let resource_lookup = self.data_context.as_ref() as &dyn RouteResourceLookup;
+        // Check debug routes before standard routing
+        if let Some(callee_user) = origin.uri.user() {
+            let callee_str = callee_user.to_string();
+            let debug_routes = self.data_context.debug_routes.read().unwrap();
+            if let Some((app_name, app_params)) = debug_routes.get(&callee_str) {
+                return Ok(RouteResult::Application {
+                    option,
+                    app_name: app_name.clone(),
+                    app_params: app_params.clone(),
+                    auto_answer: true,
+                });
+            }
+        }
         match_invite(
             if trunks_snapshot.is_empty() {
                 None
@@ -252,6 +265,19 @@ impl RouteInvite for DefaultRouteInvite {
             self.build_context(origin, direction).await;
 
         let resource_lookup = self.data_context.as_ref() as &dyn RouteResourceLookup;
+        // Check debug routes before standard routing (preview mode)
+        if let Some(callee_user) = origin.uri.user() {
+            let callee_str = callee_user.to_string();
+            let debug_routes = self.data_context.debug_routes.read().unwrap();
+            if let Some((app_name, app_params)) = debug_routes.get(&callee_str) {
+                return Ok(RouteResult::Application {
+                    option,
+                    app_name: app_name.clone(),
+                    app_params: app_params.clone(),
+                    auto_answer: true,
+                });
+            }
+        }
         match_invite(
             if trunks_snapshot.is_empty() {
                 None
@@ -1815,7 +1841,8 @@ impl CallModule {
         let media_track =
             crate::media::RtpTrackBuilder::new(format!("inbound-refer-{}", new_call_id))
                 .with_cancel_token(tokio_util::sync::CancellationToken::new())
-                .with_external_ip(external_ip);
+                .with_external_ip(external_ip)
+                .with_cname(server.rtc_cname.clone());
         let media_track = if let Some(bind_ip) = server.rtp_config.bind_ip.clone() {
             media_track.with_bind_ip(bind_ip)
         } else {

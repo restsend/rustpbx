@@ -17,10 +17,10 @@
 //!       Webhook → (response determines next action)
 //! ```
 
-use super::{
+use super::config::{EntryAction, IvrDefinition, WebhookResponse};
+use crate::call::app::{
     AppAction, ApplicationContext, CallApp, CallAppType, CallController, DtmfCollectConfig,
 };
-use crate::call::app::ivr_config::{EntryAction, IvrDefinition, WebhookResponse};
 use crate::callrecord::CallRecordHangupReason;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -121,7 +121,7 @@ impl IvrApp {
     pub fn from_file(path: &str) -> anyhow::Result<Self> {
         let content = std::fs::read_to_string(path)
             .map_err(|e| anyhow::anyhow!("Failed to read IVR config '{}': {}", path, e))?;
-        let file_config: crate::call::app::ivr_config::IvrFileConfig = toml::from_str(&content)
+        let file_config: super::config::IvrFileConfig = toml::from_str(&content)
             .map_err(|e| anyhow::anyhow!("Failed to parse IVR config '{}': {}", path, e))?;
         file_config
             .ivr
@@ -130,8 +130,20 @@ impl IvrApp {
         Ok(Self::new(file_config.ivr))
     }
 
+    /// Emit an RWI event via the gateway in the application context, if configured.
+    fn emit_rwi_event(&self, ctx: &ApplicationContext, event: crate::rwi::proto::RwiEvent) {
+        if let Some(ref gw) = ctx.rwi_gateway {
+            let gw = gw.clone();
+            let call_id = ctx.call_info.session_id.clone();
+            tokio::spawn(async move {
+                let guard = gw.read().await;
+                guard.fan_out_event_to_context(&call_id, &event, &call_id);
+            });
+        }
+    }
+
     /// Check if the current time falls within business hours.
-    fn is_within_business_hours(&self, bh: &crate::call::app::ivr_config::BusinessHours) -> bool {
+    fn is_within_business_hours(&self, bh: &super::config::BusinessHours) -> bool {
         use chrono::{Datelike, Utc};
 
         let tz: chrono_tz::Tz = match bh.timezone.parse() {
@@ -310,7 +322,7 @@ impl IvrApp {
         &mut self,
         menu_key: &str,
         ctrl: &mut CallController,
-        _ctx: &ApplicationContext,
+        ctx: &ApplicationContext,
     ) -> anyhow::Result<AppAction> {
         self.navigate_to_menu(menu_key);
         info!(
@@ -318,6 +330,24 @@ impl IvrApp {
             menu = menu_key,
             menu_stack = ?self.menu_stack,
             "IVR entering menu"
+        );
+
+        // Emit IvrNodeEntered event
+        let previous_node = self.menu_stack.iter().rev().nth(1).cloned();
+        self.emit_rwi_event(
+            ctx,
+            crate::rwi::proto::RwiEvent::IvrNodeEntered {
+                call_id: ctx.call_info.session_id.clone(),
+                node_id: menu_key.to_string(),
+                node_name: menu_key.to_string(),
+                node_type: "menu".to_string(),
+                app_id: self.definition.name.clone(),
+                entry_time: chrono::Utc::now().to_rfc3339(),
+                ani: Some(ctx.call_info.caller.clone()),
+                dnis: Some(ctx.call_info.callee.clone()),
+                routing_target: Some(menu_key.to_string()),
+                previous_node_id: previous_node,
+            },
         );
         let menu = self
             .definition
@@ -373,6 +403,27 @@ impl IvrApp {
         ctx: &ApplicationContext,
     ) -> anyhow::Result<AppAction> {
         ctrl.cancel_timeout("ivr_dtmf_timeout");
+
+        // Emit IvrNodeExited event when leaving a menu node.
+        if let IvrState::WaitingDtmf { ref menu_key, .. }
+        | IvrState::PlayingGreeting { ref menu_key } = self.state
+        {
+            let node_name = menu_key.clone();
+            self.emit_rwi_event(
+                ctx,
+                crate::rwi::proto::RwiEvent::IvrNodeExited {
+                    call_id: ctx.call_info.session_id.clone(),
+                    node_id: menu_key.clone(),
+                    node_name,
+                    result_value: None,
+                    duration_ms: 0,
+                    exit_time: chrono::Utc::now().to_rfc3339(),
+                    next_node_id: None,
+                    hangup_reason: None,
+                    call_result: None,
+                },
+            );
+        }
         match action {
             EntryAction::Transfer { target } => {
                 info!(ivr = %self.definition.name, target, "IVR transferring call");
@@ -695,6 +746,21 @@ impl IvrApp {
                     }
                 }
             }
+
+            EntryAction::Prompt { .. }
+            | EntryAction::DtmfMenu { .. }
+            | EntryAction::CollectDtmf { .. }
+            | EntryAction::InputPhone { .. }
+            | EntryAction::InputVoice { .. }
+            | EntryAction::Api { .. }
+            | EntryAction::Torecord { .. }
+            | EntryAction::JumpIvr { .. }
+            | EntryAction::RouteToAgent { .. }
+            | EntryAction::VoipBridge { .. } => {
+                error!(ivr = %self.definition.name, action = ?std::mem::discriminant(action),
+                    "Tree mode IVR received unsupported step-mode action");
+                Err(anyhow::anyhow!("unsupported action type for tree mode"))
+            }
         }
     }
 
@@ -995,7 +1061,7 @@ impl CallApp for IvrApp {
     async fn on_enter(
         &mut self,
         ctrl: &mut CallController,
-        _ctx: &ApplicationContext,
+        ctx: &ApplicationContext,
     ) -> anyhow::Result<AppAction> {
         info!(ivr = %self.definition.name, "IVR application started");
         ctrl.answer().await?;
@@ -1027,7 +1093,7 @@ impl CallApp for IvrApp {
 
         if let Some(action) = closed_action {
             if let Some(action) = action {
-                return self.execute_action(&action, ctrl, _ctx).await;
+                return self.execute_action(&action, ctrl, ctx).await;
             }
             // Default: hang up
             self.state = IvrState::Done;
@@ -1037,7 +1103,7 @@ impl CallApp for IvrApp {
             });
         }
 
-        self.enter_menu("root", ctrl, _ctx).await
+        self.enter_menu("root", ctrl, ctx).await
     }
 
     async fn on_dtmf(

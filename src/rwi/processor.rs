@@ -112,9 +112,11 @@ async fn start_peer_conference_bridge(
 
     if let Some(transceiver) = existing {
         let track_arc: std::sync::Arc<dyn rustrtc::media::MediaStreamTrack> = sample_track_arc;
-        let new_sender = rustrtc::RtpSender::builder(track_arc, ssrc)
-            .params(params)
-            .build();
+        let mut sender_builder = rustrtc::RtpSender::builder(track_arc, ssrc).params(params);
+        if let Some(ref cname) = pc.config().cname {
+            sender_builder = sender_builder.cname(cname.clone());
+        }
+        let new_sender = sender_builder.build();
         transceiver.set_sender(Some(new_sender));
         tracing::debug!(%leg_id, "auto-bridge: set_sender on existing transceiver");
     } else {
@@ -1097,7 +1099,8 @@ impl RwiCommandProcessor {
         let media_track =
             crate::media::RtpTrackBuilder::new(format!("rwi-originate-{}", req.call_id))
                 .with_cancel_token(tokio_util::sync::CancellationToken::new())
-                .with_external_ip(external_ip.clone());
+                .with_external_ip(external_ip.clone())
+                .with_cname(server.rtc_cname.clone());
         let media_track = if let Some(bind_ip) = server.rtp_config.bind_ip.clone() {
             media_track.with_bind_ip(bind_ip)
         } else {
@@ -1351,7 +1354,8 @@ impl RwiCommandProcessor {
 
                                             // Create RTP track
                                             let track_builder = crate::media::RtpTrackBuilder::new(track_id.clone())
-                                                .with_cancel_token(cmd_cancel.child_token());
+                                                .with_cancel_token(cmd_cancel.child_token())
+                                                .with_cname(server.rtc_cname.clone());
                                             let track = track_builder.build();
 
                                             // Get SDP offer
@@ -1508,7 +1512,8 @@ impl RwiCommandProcessor {
                                     let track = FileTrack::new(track_id.clone())
                                         .with_path(file_path.clone())
                                         .with_codec_preference(vec![CodecType::PCMU])
-                                        .with_loop(loop_pb);
+                                        .with_loop(loop_pb)
+                                        .with_cname(server.rtc_cname.clone());
 
                                     if let Err(e) = track.start_playback_on(target_pc).await {
                                         tracing::warn!(%cmd_call_id, error = %e, "Originate play failed");
@@ -1572,7 +1577,8 @@ impl RwiCommandProcessor {
                                                     let track = FileTrack::new(track_id.clone())
                                                         .with_path(file_path.clone())
                                                         .with_codec_preference(vec![CodecType::PCMU])
-                                                        .with_loop(loop_pb);
+                                                        .with_loop(loop_pb)
+                                                        .with_cname(server.rtc_cname.clone());
                                                     if let Err(e) = track.start_playback_on(target_pc).await {
                                                         tracing::warn!(%cmd_call_id, error = %e, "Queue hold music playback failed");
                                                     } else {
@@ -1998,7 +2004,8 @@ impl RwiCommandProcessor {
         let media_track =
             crate::media::RtpTrackBuilder::new(format!("parallel-{}-{}", operation_id, call_id))
                 .with_cancel_token(tokio_util::sync::CancellationToken::new())
-                .with_external_ip(external_ip.clone());
+                .with_external_ip(external_ip.clone())
+                .with_cname(server.rtc_cname.clone());
         let media_track = if let Some(bind_ip) = server.rtp_config.bind_ip.clone() {
             media_track.with_bind_ip(bind_ip)
         } else {
@@ -3073,6 +3080,21 @@ impl RwiCommandProcessor {
                 call_id: call_id.to_string(),
                 recording_id: rid,
                 duration_secs: duration,
+                filename: None,
+                unique_id: None,
+                file_size: None,
+                download_url: None,
+                ani: None,
+                dnis: None,
+                called_phone: None,
+                call_type: None,
+                agent_id: None,
+                agent_name: None,
+                call_start_time: None,
+                call_end_time: None,
+                upload_time: None,
+                switch_flag: None,
+                root_call_id: None,
             };
             let gw = self.gateway.read().await;
             gw.send_event_to_call_owner(&call_id.to_string(), &event);

@@ -50,6 +50,7 @@ pub type HealthStateMap = Arc<RwLock<HashMap<String, TrunkHealthState>>>;
 
 /// Probe a single trunk via rsipstack transaction.
 /// Returns `Ok(rtt_ms)` on success, `Err(message)` on failure.
+#[allow(dead_code)]
 async fn probe_trunk(
     dest: &str,
     endpoint_inner: &EndpointInnerRef,

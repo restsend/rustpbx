@@ -210,26 +210,113 @@ impl AppFactory for BuiltinAppFactory {
         &self,
         app_name: &str,
         params: Option<serde_json::Value>,
-        _context: &ApplicationContext,
+        context: &ApplicationContext,
     ) -> Option<Box<dyn crate::call::app::CallApp>> {
         match app_name {
             "ivr" => {
-                let file = params.as_ref()?.get("file")?.as_str()?;
-                let mut app = match crate::call::app::ivr::IvrApp::from_file(file) {
-                    Ok(app) => app,
-                    Err(e) => {
-                        tracing::warn!("Failed to load IVR app from {}: {}", file, e);
-                        return None;
+                // Determine mode: "step" or "tree" (default)
+                let mode = params
+                    .as_ref()
+                    .and_then(|p| p.get("mode").and_then(|v| v.as_str()))
+                    .unwrap_or("tree");
+
+                match mode {
+                    "step" => {
+                        let url = params
+                            .as_ref()
+                            .and_then(|p| p.get("url").and_then(|v| v.as_str()))?;
+
+                        // Build StepProvider with all config
+                        let mut provider =
+                            crate::call::app::ivr::StepProvider::new(url);
+
+                        // Headers
+                        if let Some(hdrs) = params.as_ref()?.get("headers") {
+                            if let Some(h) = hdrs.as_object() {
+                                for (k, v) in h {
+                                    if let Some(vs) = v.as_str() {
+                                        provider.add_header(k, vs);
+                                    }
+                                }
+                            }
+                        }
+
+                        // Retry config
+                        if let Some(retry) = params.as_ref()?.get("retry") {
+                            let max_retries = retry
+                                .get("max_retries")
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or(3) as u32;
+                            let delay = retry
+                                .get("delay_ms")
+                                .and_then(|v| v.as_u64())
+                                .unwrap_or(1000);
+                            let fallback = serde_json::from_value(
+                                retry.get("fallback").cloned().unwrap_or(serde_json::json!({
+                                    "type": "hangup",
+                                    "prompt": "sounds/error.wav"
+                                })),
+                            )
+                            .ok();
+                            provider = provider.with_retry(crate::call::app::ivr::RetryConfig {
+                                max_retries,
+                                retry_delay_ms: delay,
+                                fallback_action: fallback,
+                            });
+                        }
+
+                        let mut app =
+                            crate::call::app::ivr::StepIvrApp::with_provider(Box::new(provider));
+
+                        // IVR name from params or url
+                        let ivr_name = params
+                            .as_ref()
+                            .and_then(|p| p.get("name").and_then(|v| v.as_str()))
+                            .unwrap_or("step_ivr")
+                            .to_string();
+                        app = app.with_name(ivr_name);
+
+                        // Optional TTS override via app_params (same as tree mode)
+                        if let Some(tts_value) = params.as_ref()?.get("tts")
+                            && let Ok(tts_cfg) =
+                                serde_json::from_value::<crate::tts::TtsConfig>(
+                                    tts_value.clone(),
+                                )
+                        {
+                            app = app.with_tts(Some(tts_cfg));
+                        }
+
+                        // Pass RWI gateway for real-time IVR trace events
+                        app = app.with_rwi_gateway(context.rwi_gateway.clone());
+                        // Pass IVR trace collector for debugging
+                        app = app.with_trace(context.ivr_trace.clone());
+
+                        Some(Box::new(app) as Box<dyn crate::call::app::CallApp>)
                     }
-                };
-                // Allow per-instance TTS override via app_params
-                if let Some(tts_value) = params.as_ref()?.get("tts")
-                    && let Ok(tts_cfg) =
-                        serde_json::from_value::<crate::tts::TtsConfig>(tts_value.clone())
-                {
-                    app = app.with_tts(Some(tts_cfg));
+                    _ => {
+                        let file = params.as_ref()?.get("file")?.as_str()?;
+                        let mut app = match crate::call::app::ivr::IvrApp::from_file(file) {
+                            Ok(app) => app,
+                            Err(e) => {
+                                tracing::warn!(
+                                    "Failed to load IVR app from {}: {}",
+                                    file,
+                                    e
+                                );
+                                return None;
+                            }
+                        };
+                        if let Some(tts_value) = params.as_ref()?.get("tts")
+                            && let Ok(tts_cfg) =
+                                serde_json::from_value::<crate::tts::TtsConfig>(
+                                    tts_value.clone(),
+                                )
+                        {
+                            app = app.with_tts(Some(tts_cfg));
+                        }
+                        Some(Box::new(app) as Box<dyn crate::call::app::CallApp>)
+                    }
                 }
-                Some(Box::new(app) as Box<dyn crate::call::app::CallApp>)
             }
             "voicemail" => {
                 let extension = params.as_ref()?.get("extension")?.as_str()?.to_string();
@@ -321,7 +408,7 @@ impl SipSession {
             direction: context.dialplan.direction.to_string(),
             started_at: chrono::Utc::now(),
         };
-        let app_ctx = ApplicationContext::new(
+        let mut app_ctx = ApplicationContext::new(
             server
                 .database
                 .clone()
@@ -329,6 +416,8 @@ impl SipSession {
             call_info,
             Arc::new(crate::config::Config::default()),
         );
+        app_ctx.rwi_gateway = server.rwi_gateway.clone();
+        app_ctx.ivr_trace = server.ivr_trace.clone();
 
         // Create a bridge handle that speaks SessionAction (for DefaultAppRuntime)
         // and translates to CallCommand for the unified SipSession.
@@ -2096,14 +2185,285 @@ impl SipSession {
         targets: &[crate::call::Location],
         callee_state_rx: &mut mpsc::UnboundedReceiver<DialogState>,
     ) -> Result<(), (StatusCode, Option<String>)> {
-        if let Some(target) = targets.first() {
-            self.try_single_target(target, callee_state_rx, None).await
-        } else {
-            Err((
+        if targets.is_empty() {
+            return Err((
                 StatusCode::TemporarilyUnavailable,
                 Some("No targets to dial".to_string()),
-            ))
+            ));
         }
+
+        for target in targets {
+            info!(target = %target.aor, "dial_parallel: target");
+        }
+
+        self.fork_targets_parallel(targets, None, callee_state_rx).await
+    }
+
+    /// Fork INVITEs to all targets concurrently and bridge with the first
+    /// that answers (200 OK), cancelling the rest.
+    ///
+    /// Returns `Ok(())` on first successful connection, or an error when
+    /// every target has failed (busy, no-answer, reject, timeout, …).
+    async fn fork_targets_parallel(
+        &mut self,
+        targets: &[crate::call::Location],
+        stop_playback_on_answer: Option<&str>,
+        _callee_state_rx: &mut mpsc::UnboundedReceiver<DialogState>,
+    ) -> Result<(), (StatusCode, Option<String>)> {
+        use futures::stream::FuturesUnordered;
+        use futures::StreamExt;
+        use rsipstack::dialog::invitation::InviteOption;
+        use rsipstack::sip::StatusCodeKind;
+
+        if targets.is_empty() {
+            return Err((
+                StatusCode::TemporarilyUnavailable,
+                Some("No targets to dial".to_string()),
+            ));
+        }
+
+        let caller = self.context.dialplan.caller.clone().ok_or_else(|| {
+            (
+                StatusCode::ServerInternalError,
+                Some("No caller in dialplan".to_string()),
+            )
+        })?;
+
+        let local_addrs = self.server.endpoint.get_addrs();
+        let cluster_enabled = !self.server.cluster_peer_ips.is_empty();
+
+        let default_expires = self
+            .server
+            .proxy_config
+            .session_expires
+            .unwrap_or(DEFAULT_SESSION_EXPIRES);
+        let session_timer_enabled = self.server.proxy_config.session_timer_mode().is_enabled();
+
+        // Build INVITE options for every target
+        let dialog_layer = self.server.dialog_layer.clone();
+        let fork_cancel = CancellationToken::new();
+        let mut fork_set = FuturesUnordered::new();
+
+        for (idx, target) in targets.iter().enumerate() {
+            if fork_cancel.is_cancelled() {
+                break;
+            }
+
+            let route_via_home_proxy =
+                Self::route_via_home_proxy(target, &local_addrs, cluster_enabled);
+            let callee_uri = Self::resolve_outbound_callee_uri(target, route_via_home_proxy);
+
+            let mut headers: Vec<rsipstack::sip::Header> = vec![
+                rsipstack::sip::headers::MaxForwards::from(self.context.max_forwards).into(),
+            ];
+
+            if route_via_home_proxy {
+                debug!(
+                    session_id = %self.context.session_id,
+                    %callee_uri,
+                    "fork_targets_parallel: routing via home_proxy without self-RR"
+                );
+            }
+
+            if session_timer_enabled {
+                headers.extend(build_default_session_timer_headers(
+                    default_expires,
+                    MIN_MIN_SE,
+                ));
+            }
+
+            if let Some(target_headers) = &target.headers {
+                headers.extend(target_headers.iter().cloned());
+            }
+
+            let callee_is_webrtc = target.supports_webrtc;
+            self.legs.set_transport(
+                LegId::from(format!("fork-{idx}")),
+                if callee_is_webrtc {
+                    rustrtc::TransportMode::WebRtc
+                } else {
+                    rustrtc::TransportMode::Rtp
+                },
+            );
+
+            let offer = self.prepare_callee_media_offer(target).await;
+            let content_type = offer.as_ref().map(|_| "application/sdp".to_string());
+
+            let contact_uri = self
+                .context
+                .dialplan
+                .caller_contact
+                .as_ref()
+                .map(|c| c.uri.clone())
+                .unwrap_or_else(|| caller.clone());
+
+            let callee_call_id =
+                self.context.dialplan.call_id.clone().unwrap_or_else(|| {
+                    rsipstack::transaction::make_call_id(
+                        self.server
+                            .endpoint
+                            .inner
+                            .option
+                            .callid_suffix
+                            .as_deref(),
+                    )
+                    .value()
+                    .to_string()
+                });
+            self.meta.callee_call_ids.insert(callee_call_id.clone());
+
+            let invite_option = InviteOption {
+                caller_display_name: self.context.dialplan.caller_display_name.clone(),
+                callee: callee_uri.clone(),
+                caller: caller.clone(),
+                content_type,
+                offer,
+                destination: if route_via_home_proxy {
+                    None
+                } else {
+                    target.destination.clone()
+                },
+                contact: contact_uri,
+                credential: target.credential.clone(),
+                headers: Some(headers),
+                call_id: Some(callee_call_id),
+                ..Default::default()
+            };
+
+            // Each fork gets its own state channel so events don't interleave
+            let (fork_tx, _fork_rx) = mpsc::unbounded_channel();
+            let dlg = dialog_layer.clone();
+            let ct = fork_cancel.clone();
+
+            let join = tokio::spawn(async move {
+                tokio::select! {
+                    _ = ct.cancelled() => {
+                        None
+                    }
+                    result = dlg.do_invite(invite_option, fork_tx) => {
+                        Some((idx, result, callee_uri))
+                    }
+                }
+            });
+
+            fork_set.push(join);
+        }
+
+        // If the caller hasn't confirmed yet, send 180 Ringing before forking
+        if !self.server_dialog.state().is_confirmed() {
+            let _ = self.server_dialog.ringing(None, None);
+        }
+
+        // Race the forked INVITEs – first 200 OK wins
+        let mut failures = 0u32;
+        let mut last_error = (
+            StatusCode::TemporarilyUnavailable,
+            Some("All targets failed".to_string()),
+        );
+        let total = targets.len() as u32;
+
+        while let Some(join_result) = fork_set.next().await {
+            if self.cancel_token.is_cancelled() {
+                return Err((
+                    StatusCode::RequestTerminated,
+                    Some("Caller cancelled".to_string()),
+                ));
+            }
+
+            match join_result {
+                Ok(Some((winner_idx, Ok((dialog, response)), callee_uri))) => {
+                    if let Some(ref resp) = response {
+                        if resp.status_code.kind() == StatusCodeKind::Successful {
+                            info!(
+                                fork = winner_idx,
+                                callee_uri = %callee_uri,
+                                "fork_targets_parallel: target answered first"
+                            );
+
+                            // Cancel all remaining forks
+                            fork_cancel.cancel();
+
+                            let dialog_id = dialog.id();
+
+                            // Clean up leftover fork legs
+                            for cleanup_idx in 0..targets.len() {
+                                if cleanup_idx != winner_idx {
+                                    let leg_to_remove =
+                                        LegId::from(format!("fork-{cleanup_idx}"));
+                                    self.legs.remove(&leg_to_remove);
+                                }
+                            }
+
+                            // Rename the winning fork leg to "callee"
+                            let win_leg = LegId::from(format!("fork-{winner_idx}"));
+                            if let Some(mut leg) = self.legs.remove(&win_leg) {
+                                leg.id = LegId::from("callee");
+                                self.legs.insert(LegId::from("callee"), leg);
+                            }
+
+                            return self
+                                .finalize_callee_connection(
+                                    dialog_id,
+                                    response,
+                                    callee_uri,
+                                    stop_playback_on_answer,
+                                    &InviteOption::default(),
+                                    default_expires,
+                                )
+                                .await;
+                        }
+                    }
+                    // Non-success response (4xx/5xx)
+                    let code = response
+                        .as_ref()
+                        .map(|r| StatusCode::from(r.status_code.code()))
+                        .unwrap_or(StatusCode::TemporarilyUnavailable);
+                    warn!(
+                        fork = winner_idx,
+                        ?code,
+                        "fork_targets_parallel: target rejected"
+                    );
+                    failures += 1;
+                    last_error = (code, None);
+                }
+                Ok(Some((_idx, Err(e), _callee_uri))) => {
+                    warn!(
+                        fork = _idx,
+                        error = %e,
+                        "fork_targets_parallel: target errored"
+                    );
+                    failures += 1;
+                    last_error = (
+                        StatusCode::ServerInternalError,
+                        Some(format!("Target fork failed: {e}")),
+                    );
+                }
+                Ok(None) => {
+                    // Fork was cancelled by fork_cancel (another fork won)
+                    debug!("fork_targets_parallel: fork cancelled (another answered)");
+                    failures += 1;
+                }
+                Err(e) => {
+                    warn!(error = %e, "fork_targets_parallel: join error");
+                    failures += 1;
+                    last_error = (
+                        StatusCode::ServerInternalError,
+                        Some(format!("Fork join error: {e}")),
+                    );
+                }
+            }
+
+            // If all forks completed and none succeeded, we're done
+            if failures >= total {
+                info!(
+                    "fork_targets_parallel: all {} targets failed",
+                    failures
+                );
+                return Err(last_error);
+            }
+        }
+
+        Err(last_error)
     }
 
     async fn prepare_app_caller_media_bridge(&mut self) -> Option<String> {
@@ -2175,7 +2535,8 @@ impl SipSession {
     ) -> Result<()> {
         let mut bridge_builder = BridgePeerBuilder::new(format!("{}-app-bridge", self.id))
             .with_enable_latching(self.server.proxy_config.enable_latching)
-            .with_probation_max_packets(self.server.proxy_config.latching_probation_max_packets);
+            .with_probation_max_packets(self.server.proxy_config.latching_probation_max_packets)
+            .with_cname(self.server.rtc_cname.clone());
 
         if let (Some(start), Some(end)) = (
             self.server.rtp_config.start_port,
@@ -3041,7 +3402,8 @@ impl SipSession {
                 let mut track_builder = RtpTrackBuilder::new(Self::CALLER_TRACK_ID.to_string())
                     .with_cancel_token(self.caller_peer().cancel_token())
                     .with_enable_latching(self.server.proxy_config.enable_latching)
-                    .with_probation_max_packets(self.server.proxy_config.latching_probation_max_packets);
+                    .with_probation_max_packets(self.server.proxy_config.latching_probation_max_packets)
+                    .with_cname(self.server.rtc_cname.clone());
 
                 if let Some(ref external_ip) = self.server.rtp_config.external_ip {
                     track_builder = track_builder.with_external_ip(external_ip.clone());
@@ -4093,13 +4455,16 @@ impl SipSession {
             egress_profile,
         ));
 
-        let sender = rustrtc::RtpSender::builder(
+        let mut sender_builder = rustrtc::RtpSender::builder(
             forwarding.clone() as Arc<dyn rustrtc::media::MediaStreamTrack>,
             existing_sender.ssrc(),
         )
         .stream_id(existing_sender.stream_id().to_string())
-        .params(existing_sender.params())
-        .build();
+        .params(existing_sender.params());
+        if !existing_sender.cname().starts_with("rustrtc-cname-") {
+            sender_builder = sender_builder.cname(existing_sender.cname().to_string());
+        }
+        let sender = sender_builder.build();
 
         target_transceiver.set_sender(Some(sender));
 
@@ -4222,7 +4587,8 @@ impl SipSession {
             self.media.callee_offer_uses_media_bridge = true;
             let mut bridge_builder = BridgePeerBuilder::new(format!("{}-bridge", self.id))
                 .with_enable_latching(self.server.proxy_config.enable_latching)
-                .with_probation_max_packets(self.server.proxy_config.latching_probation_max_packets);
+                .with_probation_max_packets(self.server.proxy_config.latching_probation_max_packets)
+                .with_cname(self.server.rtc_cname.clone());
             if let (Some(start), Some(end)) = (
                 self.server.rtp_config.start_port,
                 self.server.rtp_config.end_port,
@@ -4411,7 +4777,8 @@ impl SipSession {
             let mut track_builder = RtpTrackBuilder::new(track_id.clone())
                 .with_cancel_token(self.callee_peer().cancel_token())
                 .with_enable_latching(self.server.proxy_config.enable_latching)
-                .with_probation_max_packets(self.server.proxy_config.latching_probation_max_packets);
+                .with_probation_max_packets(self.server.proxy_config.latching_probation_max_packets)
+                .with_cname(self.server.rtc_cname.clone());
 
             if let Some(ref external_ip) = self.server.rtp_config.external_ip {
                 track_builder = track_builder.with_external_ip(external_ip.clone());
@@ -4478,7 +4845,8 @@ impl SipSession {
         } else {
             self.media.callee_offer_uses_media_bridge = false;
             let mut track_builder = RtpTrackBuilder::new(track_id.clone())
-                .with_cancel_token(self.callee_peer().cancel_token());
+                .with_cancel_token(self.callee_peer().cancel_token())
+                .with_cname(self.server.rtc_cname.clone());
 
             if callee_is_webrtc {
                 track_builder = track_builder.with_mode(rustrtc::TransportMode::WebRtc);
@@ -4518,7 +4886,8 @@ impl SipSession {
         let mut track_builder = RtpTrackBuilder::new(Self::CALLER_TRACK_ID.to_string())
             .with_cancel_token(self.caller_peer().cancel_token())
             .with_enable_latching(self.server.proxy_config.enable_latching)
-            .with_probation_max_packets(self.server.proxy_config.latching_probation_max_packets);
+            .with_probation_max_packets(self.server.proxy_config.latching_probation_max_packets)
+            .with_cname(self.server.rtc_cname.clone());
 
         if let Some(ref external_ip) = self.server.rtp_config.external_ip {
             track_builder = track_builder.with_external_ip(external_ip.clone());
@@ -4595,6 +4964,19 @@ impl SipSession {
         }
 
         self.meta.connected_callee = callee.clone();
+
+        // DN event: call established (200 OK)
+        let call_id = self.context.session_id.clone();
+        let caller_dn = self.context.original_caller.clone();
+        let callee_dn = callee.clone().unwrap_or_else(|| self.context.original_callee.clone());
+        self.emit_dn_event(
+            64,
+            "ESTABLISHED",
+            Some(call_id),
+            Some(&callee_dn),
+            Some(&caller_dn),
+            Some(&callee_dn),
+        );
 
         let mut timer_headers = vec![];
         if self.server.proxy_config.session_timer_mode().is_enabled() {
@@ -6282,6 +6664,17 @@ impl SipSession {
         self.state = Self::derive_state(&self.legs);
         self.bridge.clear();
 
+        // DN event: call released (hangup)
+        let _hangup_reason = cmd.reason.as_ref().map(|r| r.to_string());
+        self.emit_dn_event(
+            65,
+            "RELEASED",
+            Some(self.context.session_id.clone()),
+            Some(&self.context.original_callee),
+            Some(&self.context.original_caller),
+            Some(&self.context.original_callee),
+        );
+
         if self.app_runtime.is_running() {
             let reason_str = cmd.reason.as_ref().map(|r| r.to_string());
             if let Err(e) = self.app_runtime.stop_app(reason_str).await {
@@ -6303,8 +6696,49 @@ impl SipSession {
             leg.state = new_state;
             self.legs.insert(leg_id.clone(), leg);
         }
-        self.state = Self::derive_state(&self.legs);
+
         true
+    }
+
+    /// Emit a `DnStateChanged` event via the RWI gateway, if configured.
+    fn emit_dn_event(
+        &self,
+        event_code: u16,
+        event_name: &str,
+        call_id: Option<String>,
+        dn: Option<&str>,
+        ani: Option<&str>,
+        dnis: Option<&str>,
+    ) {
+        if let Some(ref gw) = self.server.rwi_gateway {
+            use crate::rwi::proto::RwiEvent;
+            let dn = dn.unwrap_or("unknown").to_string();
+            let event = RwiEvent::DnStateChanged {
+                dn,
+                event_code,
+                event_name: event_name.to_string(),
+                system_time: chrono::Utc::now().to_rfc3339(),
+                call_id,
+                kz_conn_id: None,
+                agent_id: None,
+                other_dn: None,
+                ani: ani.map(|s| s.to_string()),
+                dnis: dnis.map(|s| s.to_string()),
+                reason_code: None,
+                agent_work_mode: None,
+                releasing_party: None,
+                third_party_dn: None,
+                vq_name: None,
+                routing_target: None,
+                skill_group: None,
+                target_dn: None,
+            };
+            let gw = gw.clone();
+            tokio::spawn(async move {
+                let g = gw.read().await;
+                g.broadcast_event(&event);
+            });
+        }
     }
 
     /// Add a new leg to the session dynamically.
@@ -6377,7 +6811,8 @@ impl SipSession {
 
         // Create RTP track
         let mut track_builder = crate::media::RtpTrackBuilder::new(track_id.clone())
-            .with_cancel_token(self.cancel_token.child_token());
+            .with_cancel_token(self.cancel_token.child_token())
+            .with_cname(self.server.rtc_cname.clone());
 
         if let Some(ref external_ip) = self.server.rtp_config.external_ip {
             track_builder = track_builder.with_external_ip(external_ip.clone());
@@ -6400,6 +6835,7 @@ impl SipSession {
         // Re-create a placeholder track for the return value (the real one is inside peer now)
         let placeholder_track = crate::media::RtpTrackBuilder::new(track_id)
             .with_cancel_token(self.cancel_token.child_token())
+            .with_cname(self.server.rtc_cname.clone())
             .build();
 
         Ok((peer, Box::new(placeholder_track), sdp))
@@ -6740,7 +7176,8 @@ impl SipSession {
                 let mut leg_track = FileTrack::new(target_tid.clone())
                     .with_path(file_path.clone())
                     .with_loop(loop_playback)
-                    .with_codec_info(codec_info.clone());
+                    .with_codec_info(codec_info.clone())
+                    .with_cname(self.server.rtc_cname.clone());
                 let app_runtime = self.app_runtime.clone();
                 let track_id = target_tid.clone();
                 let notify = completion_notify.clone();
@@ -6952,6 +7389,16 @@ impl SipSession {
         }
 
         self.update_leg_state(&leg_id, LegState::Ringing);
+
+        // DN event: extension ringing
+        self.emit_dn_event(
+            60,
+            "RINGING",
+            Some(self.context.session_id.clone()),
+            Some(&self.context.original_callee),
+            Some(&self.context.original_caller),
+            Some(&self.context.original_callee),
+        );
 
         let sdp = ringback.as_ref().and_then(|policy| match policy {
             RingbackPolicy::Replace { .. } => self.media.caller_offer.clone(),
@@ -7329,6 +7776,21 @@ impl SipSession {
 
         self.update_leg_state(&leg_id, LegState::Hold);
 
+        // DN event: call held
+        let dn = if leg_id.to_string() == "caller" {
+            self.context.original_caller.clone()
+        } else {
+            self.context.original_callee.clone()
+        };
+        self.emit_dn_event(
+            66,
+            "HELD",
+            Some(self.context.session_id.clone()),
+            Some(&dn),
+            Some(&self.context.original_caller),
+            Some(&self.context.original_callee),
+        );
+
         let hold_sdp = self.generate_hold_sdp().await?;
 
         match self.send_reinvite_to_caller(hold_sdp).await {
@@ -7379,6 +7841,21 @@ impl SipSession {
         }
 
         self.update_leg_state(&leg_id, LegState::Connected);
+
+        // DN event: call retrieved (unhold)
+        let dn = if leg_id.to_string() == "caller" {
+            self.context.original_caller.clone()
+        } else {
+            self.context.original_callee.clone()
+        };
+        self.emit_dn_event(
+            67,
+            "RETRIEVED",
+            Some(self.context.session_id.clone()),
+            Some(&dn),
+            Some(&self.context.original_caller),
+            Some(&self.context.original_callee),
+        );
 
         self.media.playback_tracks.remove("hold-music");
 

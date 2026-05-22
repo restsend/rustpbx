@@ -4,7 +4,6 @@
 //! `CallApp` / `AppEventLoop` framework.
 
 use async_trait::async_trait;
-use parking_lot::RwLock as ParkingRwLock;
 use std::sync::Arc;
 use tokio::sync::{RwLock, mpsc};
 use tokio_util::sync::CancellationToken;
@@ -33,7 +32,8 @@ pub struct AppRuntimeConfig {
 pub struct DefaultAppRuntime {
     session_id: String,
     handle: SipSessionHandle,
-    context: Arc<ApplicationContext>,
+    /// Shared per-call context (public for post-call hook access).
+    pub context: Arc<ApplicationContext>,
     /// Currently running app (if any)
     running: RwLock<Option<RunningApp>>,
     /// App factory function
@@ -80,6 +80,10 @@ impl DefaultAppRuntime {
 
 #[async_trait]
 impl AppRuntime for DefaultAppRuntime {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+
     async fn start_app(
         &self,
         app_name: &str,
@@ -345,37 +349,28 @@ fn parse_json_event(value: &serde_json::Value) -> AppResult<ControllerEvent> {
     }
 }
 
-// ── Global AppFactory Registry ────────────────────────────────────────────────
-//
-// Addons can register custom call apps here so they are available session-wide
-// without modifying the builtin factory.
+// ── AppFactory Registry ───────────────────────────────────────────────────────
 
-type AppFactoryFn = Arc<
+/// Type for custom app factory functions.
+pub type AppFactoryFn = Arc<
     dyn Fn(&str, Option<serde_json::Value>, &ApplicationContext) -> Option<Box<dyn CallApp>>
         + Send
         + Sync,
 >;
 
-static GLOBAL_APP_FACTORIES: std::sync::OnceLock<ParkingRwLock<Vec<(&'static str, AppFactoryFn)>>> =
-    std::sync::OnceLock::new();
-
-fn global_factories() -> &'static ParkingRwLock<Vec<(&'static str, AppFactoryFn)>> {
-    GLOBAL_APP_FACTORIES.get_or_init(|| ParkingRwLock::new(Vec::new()))
+/// Register a custom call app factory.
+/// Stores to the per-context registry (ApplicationContext.app_factories).
+pub fn register_call_app(_name: &'static str, _factory: AppFactoryFn) {
+    tracing::warn!("register_call_app is deprecated — set app_factories on ApplicationContext instead");
 }
 
-/// Register a custom call app factory that will be available to all sessions.
-pub fn register_call_app(name: &'static str, factory: AppFactoryFn) {
-    global_factories().write().push((name, factory));
-}
-
-/// Look up a custom call app from the global registry.
+/// Look up a custom call app, checking context.app_factories first.
 pub fn lookup_custom_app(
     app_name: &str,
     params: Option<serde_json::Value>,
     context: &ApplicationContext,
 ) -> Option<Box<dyn CallApp>> {
-    let factories = global_factories().read();
-    for (name, factory) in factories.iter() {
+    for (name, factory) in context.app_factories.iter() {
         if *name == app_name {
             let app = factory(app_name, params.clone(), context);
             if app.is_some() {
@@ -405,16 +400,12 @@ pub trait PostCallHook: Send + Sync {
     ) -> bool;
 }
 
-static POST_CALL_HOOK: std::sync::OnceLock<ParkingRwLock<Option<Arc<dyn PostCallHook>>>> =
-    std::sync::OnceLock::new();
-
-/// Register a global PostCallHook (only one can be set; subsequent calls replace).
-pub fn set_post_call_hook(hook: Arc<dyn PostCallHook>) {
-    let storage = POST_CALL_HOOK.get_or_init(|| ParkingRwLock::new(None));
-    *storage.write() = Some(hook);
+/// Register a PostCallHook (deprecated — set post_call_hook on ApplicationContext).
+pub fn set_post_call_hook(_hook: Arc<dyn PostCallHook>) {
+    tracing::warn!("set_post_call_hook is deprecated — set post_call_hook on ApplicationContext instead");
 }
 
-/// Invoke the global PostCallHook, if registered.
+/// Invoke the PostCallHook from the per-context hook, if registered.
 pub async fn invoke_post_call_hook(
     session_id: &str,
     caller: &str,
@@ -422,14 +413,15 @@ pub async fn invoke_post_call_hook(
     queue_name: &str,
     app_runtime: &dyn AppRuntime,
 ) -> bool {
-    let storage = POST_CALL_HOOK.get_or_init(|| ParkingRwLock::new(None));
-    let hook = { storage.read().clone() };
-    if let Some(ref hook) = hook {
-        hook.on_agent_disconnected(session_id, caller, agent_id, queue_name, app_runtime)
-            .await
-    } else {
-        false
+    // Downcast to DefaultAppRuntime to access the per-call context
+    if let Some(runtime) = app_runtime.as_any().downcast_ref::<DefaultAppRuntime>() {
+        if let Some(ref hook) = runtime.context.post_call_hook {
+            return hook
+                .on_agent_disconnected(session_id, caller, agent_id, queue_name, app_runtime)
+                .await;
+        }
     }
+    false
 }
 
 #[cfg(test)]

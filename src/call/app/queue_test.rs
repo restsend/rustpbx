@@ -741,7 +741,7 @@ mod tests {
 
         // Verify agent state is ringing
         let agent = agent_registry.get_agent("agent-001").await.unwrap();
-        assert!(matches!(agent.presence, PresenceState::Ringing));
+        assert!(matches!(agent.presence, PresenceState::Ringing { call_id: Some(_) }));
 
         // Simulate agent connected
         stack.custom(
@@ -760,7 +760,7 @@ mod tests {
 
         // Verify agent state is busy
         let agent = agent_registry.get_agent("agent-001").await.unwrap();
-        assert!(matches!(agent.presence, PresenceState::Busy));
+        assert!(matches!(agent.presence, PresenceState::Busy { call_id: None }));
 
         stack.join().await.expect("should complete successfully");
     }
@@ -1353,6 +1353,118 @@ mod tests {
 
         stack
             .assert_cmd(200, "Hangup", |c| matches!(c, CallCommand::Hangup(_)))
+            .await;
+    }
+
+    // ── Parallel queue: originate all agents, cancel rest on first answer ──
+
+    #[tokio::test]
+    async fn test_queue_parallel_originate_all_cancel_rest() {
+        let config = build_parallel_queue_config();
+        let plan = config.to_plan();
+        let agents = config.agents.clone();
+        assert_eq!(agents.len(), 2, "parallel queue should have 2 agents");
+
+        let mut stack = MockCallStack::run(Box::new(QueueApp::new(plan, config)), "caller", "1000");
+
+        // Answer
+        stack
+            .assert_cmd(200, "AcceptCall", |c| {
+                matches!(c, CallCommand::Answer { .. })
+            })
+            .await;
+
+        // Play hold music
+        stack
+            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .await;
+
+        // Should originate calls to ALL agents in parallel
+        let cmd0 = stack.next_cmd(200).await.expect("LegAdd for agent1");
+        let _leg_id_0 = match &cmd0 {
+            CallCommand::LegAdd { leg_id, .. } => leg_id.clone().expect("LegAdd should have leg_id"),
+            _ => panic!("expected LegAdd, got {cmd0:?}"),
+        };
+
+        let cmd1 = stack.next_cmd(200).await.expect("LegAdd for agent2");
+        let leg_id_1 = match &cmd1 {
+            CallCommand::LegAdd { leg_id, .. } => leg_id.clone().expect("LegAdd should have leg_id"),
+            _ => panic!("expected LegAdd, got {cmd1:?}"),
+        };
+
+        // Simulate agent 1 answering first
+        stack.custom(
+            "agent_connected",
+            serde_json::json!({"agent_uri": "sip:agent1@example.com", "agent_id": "agent-001"}),
+        );
+
+        // Should cancel agent 2's leg via LegRemove (NOT agent 1's leg)
+        let remove = stack.next_cmd(200).await.expect("LegRemove");
+        match &remove {
+            CallCommand::LegRemove { leg_id } => {
+                assert_eq!(
+                    format!("{leg_id:?}"),
+                    format!("{leg_id_1:?}"),
+                    "should remove the non-answering agent (agent 2)"
+                );
+            }
+            other => panic!("expected LegRemove, got {other:?}"),
+        }
+
+        // Should transfer to agent 1
+        stack
+            .assert_cmd(200, "Transfer", |c| {
+                matches!(c, CallCommand::Transfer { target, .. } if target == "sip:agent1@example.com")
+            })
+            .await;
+
+        stack.cancel();
+        let _ = stack.join().await;
+    }
+
+    #[tokio::test]
+    async fn test_queue_parallel_all_agents_busy_fallback() {
+        let mut config = build_parallel_queue_config();
+        config.fallback = Some(QueueFallbackAction::Failure(FailureAction::Hangup {
+            code: Some(rsipstack::sip::StatusCode::TemporarilyUnavailable),
+            reason: Some("All agents busy".to_string()),
+        }));
+        let plan = config.to_plan();
+
+        let mut stack = MockCallStack::run(Box::new(QueueApp::new(plan, config)), "caller", "1000");
+
+        // Answer
+        stack
+            .assert_cmd(200, "AcceptCall", |c| {
+                matches!(c, CallCommand::Answer { .. })
+            })
+            .await;
+
+        // Play hold music
+        stack
+            .assert_cmd(200, "PlayPrompt", |c| matches!(c, CallCommand::Play { .. }))
+            .await;
+
+        // Should originate calls to both agents
+        stack
+            .assert_cmd(200, "LegAdd-agent1", |c| {
+                matches!(c, CallCommand::LegAdd { target, .. } if target == "sip:agent1@example.com")
+            })
+            .await;
+        stack
+            .assert_cmd(200, "LegAdd-agent2", |c| {
+                matches!(c, CallCommand::LegAdd { target, .. } if target == "sip:agent2@example.com")
+            })
+            .await;
+
+        // Both agents fail - ring timeout
+        stack.timeout("agent_ring_timeout");
+
+        // Should hit no-answer fallback
+        stack
+            .assert_cmd(200, "FallbackHangup", |c| {
+                matches!(c, CallCommand::Hangup(_))
+            })
             .await;
     }
 }

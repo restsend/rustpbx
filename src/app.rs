@@ -507,6 +507,15 @@ impl AppStateBuilder {
             });
         }
 
+        // Start RWI webhook handler if configured.
+        if let Some(webhook_config) = config.rwi_webhook.clone()
+            && let Some(gateway_ref) = core.rwi_gateway.clone()
+        {
+            let webhook_tx = crate::rwi::webhook::start_rwi_webhook_handler(webhook_config);
+            let mut gw = gateway_ref.write().await;
+            gw.set_webhook_tx(webhook_tx);
+        }
+
         // Initialize addons
         if let Err(e) = addon_registry.initialize_all(app_state.clone()).await {
             tracing::error!("Failed to initialize addons: {}", e);

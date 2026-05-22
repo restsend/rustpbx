@@ -51,6 +51,7 @@ impl AlreadyRunningThenOkRuntime {
 
 #[async_trait]
 impl AppRuntime for AlreadyRunningThenOkRuntime {
+    fn as_any(&self) -> &dyn std::any::Any { self }
     async fn start_app(
         &self,
         app_name: &str,
@@ -116,6 +117,7 @@ impl StartOnlyRuntime {
 
 #[async_trait]
 impl AppRuntime for AlwaysFailStartRuntime {
+    fn as_any(&self) -> &dyn std::any::Any { self }
     async fn start_app(
         &self,
         app_name: &str,
@@ -156,6 +158,7 @@ impl AppRuntime for AlwaysFailStartRuntime {
 
 #[async_trait]
 impl AppRuntime for StartOnlyRuntime {
+    fn as_any(&self) -> &dyn std::any::Any { self }
     async fn start_app(
         &self,
         _app_name: &str,

@@ -35,6 +35,8 @@ pub struct ProxyDataContext {
     acl_rules: RwLock<Vec<String>>,
     db: Option<DatabaseConnection>,
     trunk_registrar: Arc<TrunkRegistrar>,
+    /// Debug routes — temporary overrides set by IVR Editor.
+    pub debug_routes: RwLock<HashMap<String, (String, Option<serde_json::Value>)>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -73,6 +75,7 @@ impl ProxyDataContext {
             acl_rules: RwLock::new(Vec::new()),
             db,
             trunk_registrar,
+            debug_routes: RwLock::new(HashMap::new()),
         };
         let _ = ctx.reload_trunks(false, None).await?;
         let _ = ctx.reload_queues(false, None).await?;

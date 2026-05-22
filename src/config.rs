@@ -261,6 +261,8 @@ pub struct Config {
     #[serde(default)]
     pub rwi: Option<RwiConfig>,
     #[serde(default)]
+    pub rwi_webhook: Option<LocatorWebhookConfig>,
+    #[serde(default)]
     pub cluster: Option<ClusterConfig>,
 }
 
@@ -718,9 +720,12 @@ pub struct ProxyConfig {
     pub uri_max_length: usize,
     #[serde(default)]
     pub uri_reject_malformed: bool,
-
     #[serde(default)]
     pub emergency: Option<EmergencyConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contact_username: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rtc_cname: Option<String>,
 }
 
 /// Emergency number routing configuration.
@@ -1045,6 +1050,8 @@ impl Default for ProxyConfig {
             uri_max_length: default_uri_max_length(),
             uri_reject_malformed: false,
             emergency: None,
+            contact_username: None,
+            rtc_cname: None,
         }
     }
 }
@@ -1097,6 +1104,7 @@ impl Default for Config {
             sipflow: None,
             #[cfg(feature = "commerce")]
             licenses: None,
+            rwi_webhook: None,
             cluster: None,
         }
     }

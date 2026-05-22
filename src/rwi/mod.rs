@@ -6,6 +6,7 @@ pub mod processor;
 pub mod proto;
 pub mod session;
 pub mod transfer;
+pub mod webhook;
 
 pub use app::*;
 pub use auth::*;
@@ -14,4 +15,7 @@ pub use handler::*;
 pub use processor::*;
 pub use session::*;
 
-pub use proto::{CallIncomingData, RwiCommand, RwiEvent};
+pub use proto::{
+    CallIncomingData, CallMetadata, IvrFlowContext, IvrNodeInfo, RecordingMetadata, RwiCommand,
+    RwiEvent,
+};

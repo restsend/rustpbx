@@ -1,0 +1,156 @@
+{% extends "../layout.html" %}
+{% block title %}IVR Editor{% endblock %}
+{% block content %}
+<div class="space-y-6" x-data="ivrProjects()">
+  <div class="flex items-center justify-between">
+    <h1 class="text-2xl font-bold text-gray-800">IVR Editor</h1>
+    <div class="flex gap-2">
+      <button @click="showNewForm = true" class="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700">New Project</button>
+    </div>
+  </div>
+
+  <div class="bg-white rounded shadow overflow-hidden">
+    <table class="w-full text-sm">
+      <thead class="bg-gray-50 text-left">
+        <tr>
+          <th class="px-4 py-3 font-medium text-gray-600">Name</th>
+          <th class="px-4 py-3 font-medium text-gray-600">Mode</th>
+          <th class="px-4 py-3 font-medium text-gray-600">Status</th>
+          <th class="px-4 py-3 font-medium text-gray-600">Version</th>
+          <th class="px-4 py-3 font-medium text-gray-600">Published</th>
+          <th class="px-4 py-3 font-medium text-gray-600">Actions</th>
+        </tr>
+      </thead>
+      <tbody class="divide-y">
+        <template x-for="project in projects" :key="project.id">
+          <tr class="hover:bg-gray-50">
+            <td class="px-4 py-3">
+              <a :href="`{{ base_path }}/ivr_editor/${project.id}`" class="text-blue-600 hover:underline font-medium" x-text="project.name"></a>
+              <div class="text-xs text-gray-400" x-text="project.description"></div>
+            </td>
+            <td class="px-4 py-3">
+              <span class="text-xs px-2 py-0.5 rounded"
+                    :class="project.ivr_mode === 'step' ? 'bg-purple-100 text-purple-700' : 'bg-green-100 text-green-700'"
+                    x-text="project.ivr_mode || 'tree'"></span>
+            </td>
+            <td class="px-4 py-3" x-text="project.status"></td>
+            <td class="px-4 py-3" x-text="'v' + project.version"></td>
+            <td class="px-4 py-3 text-xs text-gray-500" x-text="project.published_at ? new Date(project.published_at).toLocaleString() : '-'"></td>
+            <td class="px-4 py-3">
+              <div class="flex gap-2">
+                <a :href="`{{ base_path }}/ivr_editor/${project.id}`" class="text-blue-600 hover:underline text-xs">Edit</a>
+                <a :href="`{{ base_path }}/ivr_editor/${project.id}/debug`" x-show="project.ivr_mode === 'step'" class="text-purple-600 hover:underline text-xs">Debug</a>
+                <button @click="publish(project.id)" class="text-green-600 hover:underline text-xs">Publish</button>
+                <button @click="deleteProject(project.id)" class="text-red-600 hover:underline text-xs">Delete</button>
+              </div>
+            </td>
+          </tr>
+        </template>
+      </tbody>
+    </table>
+    <div x-show="!projects || projects.length === 0" class="p-6 text-center text-gray-400">
+      No IVR projects yet. Create your first project to get started.
+    </div>
+  </div>
+
+  <!-- New Project Modal -->
+  <div x-show="showNewForm" class="fixed inset-0 bg-black/30 z-50 flex items-center justify-center" @click.self="showNewForm = false">
+    <div class="bg-white rounded shadow-lg w-full max-w-md p-6">
+      <h2 class="text-lg font-bold mb-4">New IVR Project</h2>
+      <form @submit.prevent="createProject">
+        <div class="mb-3">
+          <label class="block text-sm font-medium text-gray-700 mb-1">Name</label>
+          <input type="text" x-model="newName" class="w-full border rounded px-3 py-2 text-sm" required>
+        </div>
+        <div class="mb-3">
+          <label class="block text-sm font-medium text-gray-700 mb-1">Description</label>
+          <input type="text" x-model="newDescription" class="w-full border rounded px-3 py-2 text-sm">
+        </div>
+        <div class="mb-4">
+          <label class="block text-sm font-medium text-gray-700 mb-1">Mode</label>
+          <select x-model="newMode" class="w-full border rounded px-3 py-2 text-sm">
+            <option value="tree">Tree (drag-and-drop editor)</option>
+            <option value="step">Step (external provider)</option>
+          </select>
+        </div>
+        <div class="flex justify-end gap-2">
+          <button type="button" @click="showNewForm = false" class="px-4 py-2 text-sm border rounded hover:bg-gray-50">Cancel</button>
+          <button type="submit" class="px-4 py-2 text-sm bg-blue-600 text-white rounded hover:bg-blue-700">Create</button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+
+<script>
+function ivrProjects() {
+  return {
+    projects: [],
+    showNewForm: false,
+    newName: '',
+    newDescription: '',
+    newMode: 'tree',
+
+    async init() {
+      await this.loadProjects();
+    },
+
+    async loadProjects() {
+      try {
+        const resp = await fetch('{{ base_path }}/ivr_editor/api/projects');
+        this.projects = await resp.json();
+      } catch(e) { console.error('load projects failed', e); }
+    },
+
+    async createProject() {
+      try {
+        const resp = await fetch('{{ base_path }}/ivr_editor', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            name: this.newName,
+            description: this.newDescription,
+            ivr_mode: this.newMode,
+          }),
+        });
+        const data = await resp.json();
+        if (data.status === 'ok') {
+          this.showNewForm = false;
+          this.newName = '';
+          this.newDescription = '';
+          await this.loadProjects();
+        } else {
+          alert(data.message || 'Create failed');
+        }
+      } catch(e) { alert('Create failed: ' + e); }
+    },
+
+    async publish(id) {
+      if (!confirm('Publish this project?')) return;
+      try {
+        const resp = await fetch(`{{ base_path }}/ivr_editor/${id}/publish`, { method: 'POST' });
+        const data = await resp.json();
+        if (data.status === 'ok') {
+          await this.loadProjects();
+        } else {
+          alert(data.message || 'Publish failed');
+        }
+      } catch(e) { alert('Publish failed: ' + e); }
+    },
+
+    async deleteProject(id) {
+      if (!confirm('Delete this project?')) return;
+      try {
+        const resp = await fetch(`{{ base_path }}/ivr_editor/${id}`, { method: 'DELETE' });
+        const data = await resp.json();
+        if (data.status === 'ok') {
+          await this.loadProjects();
+        } else {
+          alert(data.message || 'Delete failed');
+        }
+      } catch(e) { alert('Delete failed: ' + e); }
+    }
+  };
+}
+</script>
+{% endblock %}

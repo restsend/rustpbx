@@ -27,8 +27,6 @@ pub mod forwarding_track;
 pub mod mixer;
 #[cfg(test)]
 mod mixer_e2e_tests;
-pub mod mixer_input;
-pub mod mixer_output;
 pub mod mixer_registry;
 pub mod negotiate;
 pub mod sdp_bridge;
@@ -495,6 +493,7 @@ pub struct RtpTrackBuilder {
     enable_latching: bool,
     probation_max_packets: Option<u8>,
     ice_servers: Vec<IceServer>,
+    cname: Option<String>,
 }
 
 impl RtpTrackBuilder {
@@ -523,6 +522,7 @@ impl RtpTrackBuilder {
             .map(negotiate::MediaNegotiator::codec_info_for_type)
             .collect(),
             video_capabilities: Vec::new(),
+            cname: None,
         }
     }
 
@@ -586,6 +586,11 @@ impl RtpTrackBuilder {
         self
     }
 
+    pub fn with_cname(mut self, cname: String) -> Self {
+        self.cname = Some(cname);
+        self
+    }
+
     pub fn build(self) -> RtcTrack {
         // Choose SDP compatibility mode based on transport mode:
         // - WebRTC mode: use Standard (includes rtcp-mux, a=mid)
@@ -639,9 +644,11 @@ impl RtpTrackBuilder {
                 audio: audio_capabilities,
                 video: self.video_capabilities.clone(),
                 application: None,
+                image: vec![],
             }),
             ssrc_start: rand::random::<u32>(),
             sdp_compatibility,
+            cname: self.cname,
             ..Default::default()
         };
 
@@ -673,6 +680,7 @@ pub struct FileTrack {
     audio_source_manager: Option<Arc<audio_source::AudioSourceManager>>,
     muted: std::sync::atomic::AtomicBool,
     lifetime_guard: Arc<()>,
+    cname: Option<String>,
 }
 
 impl Clone for FileTrack {
@@ -696,6 +704,7 @@ impl Clone for FileTrack {
                 self.muted.load(std::sync::atomic::Ordering::Relaxed),
             ),
             lifetime_guard: self.lifetime_guard.clone(),
+            cname: self.cname.clone(),
         }
     }
 }
@@ -792,6 +801,7 @@ impl FileTrack {
             audio_source_manager: None,
             muted: std::sync::atomic::AtomicBool::new(false),
             lifetime_guard: Arc::new(()),
+            cname: None,
         }
     }
 
@@ -850,6 +860,11 @@ impl FileTrack {
         self
     }
 
+    pub fn with_cname(mut self, cname: String) -> Self {
+        self.cname = Some(cname);
+        self
+    }
+
     fn recreate_pc(&mut self) {
         let bind_ip = if matches!(self.mode, TransportMode::Rtp | TransportMode::Srtp) {
             self.bind_ip.clone()
@@ -864,6 +879,7 @@ impl FileTrack {
             external_ip: self.external_ip.clone(),
             bind_ip,
             ssrc_start: rand::random::<u32>(),
+            cname: self.cname.clone(),
             ..Default::default()
         };
 
@@ -1046,9 +1062,11 @@ impl FileTrack {
 
         if let Some(transceiver) = existing {
             let track_arc: Arc<dyn rustrtc::media::MediaStreamTrack> = track_target;
-            let new_sender = rustrtc::RtpSender::builder(track_arc, ssrc)
-                .params(params)
-                .build();
+            let mut builder = rustrtc::RtpSender::builder(track_arc, ssrc).params(params);
+            if let Some(ref cname) = self.cname {
+                builder = builder.cname(cname.clone());
+            }
+            let new_sender = builder.build();
             transceiver.set_sender(Some(new_sender));
         } else {
             let _ = pc.add_track(track_target, params);
