@@ -214,92 +214,120 @@ impl AppFactory for BuiltinAppFactory {
     ) -> Option<Box<dyn crate::call::app::CallApp>> {
         match app_name {
             "ivr" => {
-                // Determine mode: "step" or "tree" (default)
+                // First check if params has inline step mode config (legacy/debug routes)
                 let mode = params
                     .as_ref()
                     .and_then(|p| p.get("mode").and_then(|v| v.as_str()))
                     .unwrap_or("tree");
 
-                match mode {
-                    "step" => {
-                        let url = params
-                            .as_ref()
-                            .and_then(|p| p.get("url").and_then(|v| v.as_str()))?;
+                if mode == "step" && params.as_ref()?.get("url").is_some() {
+                    // Inline step mode (from debug routes or legacy app_params)
+                    let url = params
+                        .as_ref()
+                        .and_then(|p| p.get("url").and_then(|v| v.as_str()))?;
 
-                        // Build StepProvider with all config
-                        let mut provider = crate::call::app::ivr::StepProvider::new(url);
+                    let mut provider = crate::call::app::ivr::StepProvider::new(url);
 
-                        // Headers
-                        if let Some(hdrs) = params.as_ref()?.get("headers") {
-                            if let Some(h) = hdrs.as_object() {
-                                for (k, v) in h {
-                                    if let Some(vs) = v.as_str() {
-                                        provider.add_header(k, vs);
-                                    }
+                    if let Some(hdrs) = params.as_ref()?.get("headers") {
+                        if let Some(h) = hdrs.as_object() {
+                            for (k, v) in h {
+                                if let Some(vs) = v.as_str() {
+                                    provider.add_header(k, vs);
                                 }
                             }
                         }
+                    }
 
-                        // Retry config
-                        if let Some(retry) = params.as_ref()?.get("retry") {
-                            let max_retries = retry
-                                .get("max_retries")
-                                .and_then(|v| v.as_u64())
-                                .unwrap_or(3) as u32;
-                            let timeout = retry
-                                .get("timeout_ms")
-                                .and_then(|v| v.as_u64())
-                                .or_else(|| retry.get("delay_ms").and_then(|v| v.as_u64()))
-                                .unwrap_or(1000);
-                            let fallback = serde_json::from_value(
-                                retry.get("fallback").cloned().unwrap_or(serde_json::json!({
-                                    "type": "hangup",
-                                    "prompt": "sounds/error.wav"
-                                })),
-                            )
-                            .ok();
-                            provider = provider.with_retry(crate::call::app::ivr::RetryConfig {
-                                max_retries,
-                                timeout_ms: timeout,
-                                fallback_action: fallback,
-                            });
+                    if let Some(retry) = params.as_ref()?.get("retry") {
+                        let max_retries = retry
+                            .get("max_retries")
+                            .and_then(|v| v.as_u64())
+                            .unwrap_or(3) as u32;
+                        let timeout = retry
+                            .get("timeout_ms")
+                            .and_then(|v| v.as_u64())
+                            .or_else(|| retry.get("delay_ms").and_then(|v| v.as_u64()))
+                            .unwrap_or(1000);
+                        let fallback = serde_json::from_value(
+                            retry.get("fallback").cloned().unwrap_or(serde_json::json!({
+                                "type": "hangup",
+                                "prompt": "sounds/error.wav"
+                            })),
+                        )
+                        .ok();
+                        provider = provider.with_retry(crate::call::app::ivr::RetryConfig {
+                            max_retries,
+                            timeout_ms: timeout,
+                            fallback_action: fallback,
+                        });
+                    }
+
+                    let mut app =
+                        crate::call::app::ivr::StepIvrApp::with_provider(Box::new(provider));
+                    let ivr_name = params
+                        .as_ref()
+                        .and_then(|p| p.get("name").and_then(|v| v.as_str()))
+                        .unwrap_or("step_ivr")
+                        .to_string();
+                    app = app.with_name(ivr_name);
+                    if let Some(tts_value) = params.as_ref()?.get("tts")
+                        && let Ok(tts_cfg) =
+                            serde_json::from_value::<crate::tts::TtsConfig>(tts_value.clone())
+                    {
+                        app = app.with_tts(Some(tts_cfg));
+                    }
+                    app = app.with_rwi_gateway(context.rwi_gateway.clone());
+                    app = app.with_trace(context.ivr_trace.clone());
+                    Some(Box::new(app) as Box<dyn crate::call::app::CallApp>)
+                } else {
+                    // File-based: read TOML and detect mode from content
+                    let file = params.as_ref()?.get("file")?.as_str()?;
+                    let content = match std::fs::read_to_string(file) {
+                        Ok(c) => c,
+                        Err(e) => {
+                            tracing::warn!("Failed to read IVR config '{}': {}", file, e);
+                            return None;
                         }
+                    };
+
+                    let file_config: crate::call::app::ivr_config::IvrFileConfig =
+                        match toml::from_str(&content) {
+                            Ok(c) => c,
+                            Err(e) => {
+                                tracing::warn!("Failed to parse IVR TOML '{}': {}", file, e);
+                                return None;
+                            }
+                        };
+
+                    if file_config.ivr.is_step_mode() {
+                        // Step mode from TOML
+                        let provider_cfg = file_config.ivr.provider.as_ref()?;
+                        let mut provider =
+                            crate::call::app::ivr::StepProvider::new(&provider_cfg.url);
+                        for (k, v) in &provider_cfg.headers {
+                            provider.add_header(k, v);
+                        }
+                        provider = provider.with_retry(crate::call::app::ivr::RetryConfig {
+                            max_retries: provider_cfg.max_retries,
+                            timeout_ms: provider_cfg.retry_delay_ms,
+                            fallback_action: None,
+                        });
 
                         let mut app =
                             crate::call::app::ivr::StepIvrApp::with_provider(Box::new(provider));
-
-                        // IVR name from params or url
-                        let ivr_name = params
-                            .as_ref()
-                            .and_then(|p| p.get("name").and_then(|v| v.as_str()))
-                            .unwrap_or("step_ivr")
-                            .to_string();
-                        app = app.with_name(ivr_name);
-
-                        // Optional TTS override via app_params (same as tree mode)
+                        app = app.with_name(file_config.ivr.name.clone());
                         if let Some(tts_value) = params.as_ref()?.get("tts")
                             && let Ok(tts_cfg) =
                                 serde_json::from_value::<crate::tts::TtsConfig>(tts_value.clone())
                         {
                             app = app.with_tts(Some(tts_cfg));
                         }
-
-                        // Pass RWI gateway for real-time IVR trace events
                         app = app.with_rwi_gateway(context.rwi_gateway.clone());
-                        // Pass IVR trace collector for debugging
                         app = app.with_trace(context.ivr_trace.clone());
-
                         Some(Box::new(app) as Box<dyn crate::call::app::CallApp>)
-                    }
-                    _ => {
-                        let file = params.as_ref()?.get("file")?.as_str()?;
-                        let mut app = match crate::call::app::ivr::IvrApp::from_file(file) {
-                            Ok(app) => app,
-                            Err(e) => {
-                                tracing::warn!("Failed to load IVR app from {}: {}", file, e);
-                                return None;
-                            }
-                        };
+                    } else {
+                        // Tree mode from TOML
+                        let mut app = crate::call::app::ivr::IvrApp::new(file_config.ivr);
                         if let Some(tts_value) = params.as_ref()?.get("tts")
                             && let Ok(tts_cfg) =
                                 serde_json::from_value::<crate::tts::TtsConfig>(tts_value.clone())

@@ -55,13 +55,41 @@ pub struct IvrDefinition {
     pub default_voice: Option<String>,
     #[serde(default)]
     pub dynamic_build: bool,
+    #[serde(default, rename = "mode")]
+    pub ivr_mode: Option<String>,
+    #[serde(default)]
+    pub provider: Option<IvrProviderConfig>,
     #[serde(default)]
     pub business_hours: Option<BusinessHours>,
     #[serde(default)]
     pub tts: Option<crate::tts::TtsConfig>,
-    pub root: MenuNode,
+    #[serde(default)]
+    pub root: Option<MenuNode>,
     #[serde(default)]
     pub menus: HashMap<String, MenuNode>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct IvrProviderConfig {
+    pub url: String,
+    #[serde(default)]
+    pub headers: HashMap<String, String>,
+    #[serde(default = "default_provider_retries")]
+    pub max_retries: u32,
+    #[serde(default = "default_provider_delay")]
+    pub retry_delay_ms: u64,
+    #[serde(default = "default_provider_timeout")]
+    pub timeout_secs: u64,
+}
+
+fn default_provider_retries() -> u32 { 3 }
+fn default_provider_delay() -> u64 { 1000 }
+fn default_provider_timeout() -> u64 { 10 }
+
+impl IvrDefinition {
+    pub fn is_step_mode(&self) -> bool {
+        self.ivr_mode.as_deref() == Some("step")
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -467,14 +495,19 @@ impl WebhookResponse {
 impl IvrDefinition {
     pub fn get_menu(&self, key: &str) -> Option<&MenuNode> {
         if key == "root" {
-            Some(&self.root)
+            self.root.as_ref()
         } else {
             self.menus.get(key)
         }
     }
 
     pub fn validate(&self) -> Result<(), String> {
-        Self::validate_menu_refs(&self.root, "root", &self.menus)?;
+        if self.is_step_mode() {
+            return Ok(());
+        }
+        if let Some(ref root) = self.root {
+            Self::validate_menu_refs(root, "root", &self.menus)?;
+        }
         for (key, menu) in &self.menus {
             Self::validate_menu_refs(menu, key, &self.menus)?;
         }
