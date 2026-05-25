@@ -68,7 +68,7 @@ impl MigrationTrait for Migration {
                     )
                     .col(
                         MigrationColumnDef::new(Column::CreatedAt)
-                            .timestamp()
+                            .timestamp_with_time_zone()
                             .not_null()
                             .default(Expr::current_timestamp()),
                     )

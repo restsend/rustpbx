@@ -1,6 +1,6 @@
 use sea_orm::entity::prelude::*;
 use sea_orm_migration::prelude::*;
-use sea_orm_migration::schema::timestamp;
+use sea_orm_migration::schema::timestamp_with_time_zone as timestamp;
 use sea_orm_migration::sea_query::{
     ColumnDef, ForeignKeyAction as MigrationForeignKeyAction, Index,
 };

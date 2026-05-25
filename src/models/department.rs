@@ -1,6 +1,8 @@
 use sea_orm::entity::prelude::*;
 use sea_orm_migration::prelude::*;
-use sea_orm_migration::schema::{json_null, string, string_null, text_null, timestamp};
+use sea_orm_migration::schema::{
+    json_null, string_len, string_len_null, text_null, timestamp_with_time_zone as timestamp,
+};
 use sea_orm_migration::sea_query::ColumnDef;
 use sea_query::Expr;
 use serde::{Deserialize, Serialize};
@@ -46,12 +48,12 @@ impl MigrationTrait for Migration {
                             .auto_increment()
                             .primary_key(),
                     )
-                    .col(string(Column::Name).char_len(120))
-                    .col(string_null(Column::DisplayLabel).char_len(160))
-                    .col(string_null(Column::Slug).char_len(120))
+                    .col(string_len(Column::Name, 120))
+                    .col(string_len_null(Column::DisplayLabel, 160))
+                    .col(string_len_null(Column::Slug, 120))
                     .col(text_null(Column::Description))
-                    .col(string_null(Column::Color).char_len(32))
-                    .col(string_null(Column::ManagerContact).char_len(160))
+                    .col(string_len_null(Column::Color, 32))
+                    .col(string_len_null(Column::ManagerContact, 160))
                     .col(timestamp(Column::CreatedAt).default(Expr::current_timestamp()))
                     .col(timestamp(Column::UpdatedAt).default(Expr::current_timestamp()))
                     .col(json_null(Column::Metadata))
