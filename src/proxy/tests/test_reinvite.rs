@@ -1,11 +1,8 @@
+use super::test_helpers;
 use super::test_ua::{TestUa, TestUaConfig, TestUaEvent};
-use crate::call::user::SipUser;
 use crate::config::ProxyConfig;
 use crate::proxy::{
-    auth::AuthModule,
-    call::CallModule,
     locator::MemoryLocator,
-    registrar::RegistrarModule,
     server::{SipServer, SipServerBuilder},
     user::MemoryUserBackend,
 };
@@ -19,26 +16,19 @@ use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 fn create_test_proxy_config(port: u16) -> ProxyConfig {
-    ProxyConfig {
-        addr: "127.0.0.1".to_string(),
-        udp_port: Some(port),
-        tcp_port: None,
-        tls_port: None,
-        ws_port: None,
-        useragent: Some("RustPBX-Test/0.1.0".to_string()),
-        modules: Some(vec![
-            "auth".to_string(),
-            "registrar".to_string(),
-            "call".to_string(),
-        ]),
-        ..Default::default()
-    }
+    test_helpers::test_proxy_config(port)
 }
 
 async fn create_test_ua(username: &str, proxy_addr: SocketAddr, local_port: u16) -> Result<TestUa> {
+    let password = match username {
+        "alice" => "password123",
+        "bob" => "password456",
+        "charlie" => "password789",
+        _ => "password123",
+    };
     let config = TestUaConfig {
         username: username.to_string(),
-        password: "password".to_string(),
+        password: password.to_string(),
         realm: "127.0.0.1".to_string(),
         local_port,
         proxy_addr,
@@ -57,49 +47,18 @@ async fn setup_proxy_and_users_with_config(
     config: Arc<ProxyConfig>,
 ) -> (Arc<SipServer>, CancellationToken) {
     let user_backend = MemoryUserBackend::new(None);
-    user_backend
-        .create_user(SipUser {
-            id: 1,
-            username: "alice".to_string(),
-            password: Some("password".to_string()),
-            enabled: true,
-            realm: Some("127.0.0.1".to_string()),
-            ..Default::default()
-        })
-        .await
-        .unwrap();
-    user_backend
-        .create_user(SipUser {
-            id: 2,
-            username: "bob".to_string(),
-            password: Some("password".to_string()),
-            enabled: true,
-            realm: Some("127.0.0.1".to_string()),
-            ..Default::default()
-        })
-        .await
-        .unwrap();
+    for user in test_helpers::standard_test_users() {
+        user_backend.create_user(user).await.unwrap();
+    }
 
     let locator = MemoryLocator::new();
     let cancel_token = CancellationToken::new();
-    let mut builder = SipServerBuilder::new(config)
-        .with_user_backend(Box::new(user_backend))
-        .with_locator(Box::new(locator))
-        .with_cancel_token(cancel_token.clone());
-
-    builder = builder
-        .register_module("registrar", |inner, config| {
-            Ok(Box::new(RegistrarModule::new(inner, config)))
-        })
-        .register_module("auth", |inner, _config| {
-            Ok(Box::new(AuthModule::new(
-                inner.clone(),
-                inner.proxy_config.clone(),
-            )))
-        })
-        .register_module("call", |inner, config| {
-            Ok(Box::new(CallModule::new(config, inner)))
-        });
+    let builder = test_helpers::register_standard_modules(
+        SipServerBuilder::new(config)
+            .with_user_backend(Box::new(user_backend))
+            .with_locator(Box::new(locator))
+            .with_cancel_token(cancel_token.clone()),
+    );
 
     let server = Arc::new(builder.build().await.unwrap());
     let server_clone = server.clone();

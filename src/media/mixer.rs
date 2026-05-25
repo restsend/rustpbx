@@ -560,8 +560,8 @@ mod tests {
         assert!(routes.contains_key("supervisor"));
     }
 
-    #[test]
-    fn test_mixer_start_stop() {
+    #[tokio::test]
+    async fn test_mixer_start_stop() {
         let mixer = MediaMixer::new("test-start-stop".to_string(), 8000);
 
         // Start the mixer

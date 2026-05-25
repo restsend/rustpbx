@@ -10,7 +10,8 @@ use chrono::{DateTime, Utc};
 use rsipstack::dialog::DialogId;
 use rsipstack::sip::StatusCode;
 use serde::{Deserialize, Serialize};
-use std::sync::{Arc, RwLock, Weak};
+use parking_lot::RwLock;
+use std::sync::{Arc, Weak};
 use std::time::Instant;
 use tokio::sync::mpsc;
 
@@ -52,8 +53,7 @@ impl From<&SessionHangupMessage> for CallRecordHangupMessage {
     }
 }
 
-/// Immutable context for the entire duration of a call
-/// Immutable context for the entire duration of a call
+/// Context carried throughout the lifetime of a call.
 #[derive(Clone)]
 pub struct CallContext {
     pub session_id: String,
@@ -63,7 +63,6 @@ pub struct CallContext {
     pub original_caller: String,
     pub original_callee: String,
     pub max_forwards: u32,
-    pub dtmf_digits: Vec<char>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -233,58 +232,46 @@ impl SipSessionShared {
         &self,
         sender: Option<mpsc::UnboundedSender<crate::call::app::ControllerEvent>>,
     ) {
-        if let Ok(mut slot) = self.app_event_tx.write() {
-            *slot = sender;
-        }
+        *self.app_event_tx.write() = sender;
     }
 
-    /// Send a [`ControllerEvent`] directly to the running `CallApp` event loop,
-    /// bypassing the `SessionAction` / `action_inbox` path.
-    ///
-    /// Returns `true` if the event was delivered (i.e. an app is currently running).
     pub fn send_app_event(&self, event: crate::call::app::ControllerEvent) -> bool {
-        if let Ok(slot) = self.app_event_tx.read()
-            && let Some(tx) = slot.as_ref()
-        {
+        let slot = self.app_event_tx.read();
+        if let Some(tx) = slot.as_ref() {
             return tx.send(event).is_ok();
         }
         false
     }
 
-    /// Check if an app event sender is currently set (i.e., an app is running)
     pub fn has_app_event_sender(&self) -> bool {
-        if let Ok(slot) = self.app_event_tx.read() {
-            slot.is_some()
-        } else {
-            false
-        }
+        self.app_event_tx.read().is_some()
     }
 
     #[cfg(test)]
     pub(crate) fn snapshot(&self) -> SipSessionSnapshot {
-        let inner = self.inner.read().unwrap();
+        let inner = self.inner.read();
         inner.clone()
     }
 
     pub fn set_answer_sdp(&self, sdp: String) {
-        let mut inner = self.inner.write().unwrap();
+        let mut inner = self.inner.write();
         inner.answer_sdp = Some(sdp);
     }
 
     pub fn answer_sdp(&self) -> Option<String> {
-        let inner = self.inner.read().unwrap();
+        let inner = self.inner.read();
         inner.answer_sdp.clone()
     }
 
     pub fn queue_name(&self) -> Option<String> {
-        let inner = self.inner.read().unwrap();
+        let inner = self.inner.read();
         inner.queue_name.clone()
     }
 
     /// Register this session with the active call registry
     pub fn register_active_call(&self, handle: NewSipSessionHandle) {
         if let Some(registry) = self.registry.as_ref().and_then(|r| r.upgrade()) {
-            let inner = self.inner.read().unwrap();
+            let inner = self.inner.read();
             let entry = ActiveProxyCallEntry {
                 session_id: inner.session_id.clone(),
                 caller: inner.caller.clone(),
@@ -309,15 +296,13 @@ impl SipSessionShared {
 
     pub fn unregister(&self) {
         if let Some(registry) = self.registry.as_ref().and_then(|r| r.upgrade()) {
-            let inner = self.inner.read().unwrap();
+            let inner = self.inner.read();
             registry.remove(&inner.session_id);
         }
     }
 
     pub fn set_event_sender(&self, sender: ProxyCallEventSender) {
-        if let Ok(mut slot) = self.events.write() {
-            *slot = Some(sender);
-        }
+        *self.events.write() = Some(sender);
     }
 
     pub(crate) fn emit_custom_event(&self, event: ProxyCallEvent) {
@@ -327,10 +312,7 @@ impl SipSessionShared {
     }
 
     pub fn session_id(&self) -> String {
-        self.inner
-            .read()
-            .map(|inner| inner.session_id.clone())
-            .unwrap_or_default()
+        self.inner.read().session_id.clone()
     }
 
     pub fn update_routed_parties(&self, caller: Option<String>, callee: Option<String>) {
@@ -432,7 +414,7 @@ impl SipSessionShared {
     where
         F: FnOnce(&mut SipSessionSnapshot) -> bool,
     {
-        let mut inner = self.inner.write().unwrap();
+        let mut inner = self.inner.write();
         let prev_phase = inner.phase;
         let prev_queue = inner.queue_name.clone();
         let prev_hangup = inner.hangup_reason.clone();
@@ -516,7 +498,7 @@ impl SipSessionShared {
     }
 
     fn event_sender(&self) -> Option<ProxyCallEventSender> {
-        self.events.read().ok().and_then(|opt| opt.clone())
+        self.events.read().clone()
     }
 }
 
@@ -554,8 +536,10 @@ pub enum ProxyCallEvent {
     },
 }
 
-pub(crate) type SessionActionSender = mpsc::UnboundedSender<SessionAction>;
-pub(crate) type SessionActionReceiver = mpsc::UnboundedReceiver<SessionAction>;
+pub(crate) type SessionActionSender = mpsc::Sender<SessionAction>;
+pub(crate) type SessionActionReceiver = mpsc::Receiver<SessionAction>;
+
+const SESSION_CHANNEL_CAPACITY: usize = 256;
 pub type ProxyCallEventSender = mpsc::UnboundedSender<ProxyCallEvent>;
 
 #[derive(Clone)]
@@ -571,8 +555,7 @@ impl SipSessionHandle {
     /// currently not actively polled. This is a placeholder for future app framework integration.
     pub fn with_shared(shared: SipSessionShared) -> (Self, SessionActionReceiver) {
         let session_id = shared.session_id();
-        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
-        // App event channel - sender stored in shared, receiver would be polled by app framework
+        let (cmd_tx, cmd_rx) = mpsc::channel(SESSION_CHANNEL_CAPACITY);
         let (event_tx, _event_rx) = mpsc::unbounded_channel();
         shared.set_event_sender(event_tx);
         let handle = Self {
@@ -593,7 +576,7 @@ impl SipSessionHandle {
     }
 
     pub fn send_command(&self, action: SessionAction) -> Result<()> {
-        self.cmd_tx.send(action).map_err(Into::into)
+        self.cmd_tx.try_send(action).map_err(Into::into)
     }
 
     pub fn set_queue_name(&self, queue: Option<String>) {

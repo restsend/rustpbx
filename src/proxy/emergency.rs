@@ -1,6 +1,6 @@
 use crate::call::{DialStrategy, Dialplan, DialplanFlow, Location};
 use crate::config::EmergencyConfig;
-use crate::proxy::call::{DialplanInspector, RouteError};
+use crate::proxy::call::{DialplanInspector, DialplanVerdict};
 use async_trait::async_trait;
 use rsipstack::sip::Request;
 use rsipstack::sip::prelude::HeadersExt;
@@ -29,26 +29,26 @@ impl DialplanInspector for EmergencyInspector {
         mut dialplan: Dialplan,
         _cookie: &crate::call::TransactionCookie,
         original: &Request,
-    ) -> Result<Dialplan, RouteError> {
+    ) -> DialplanVerdict {
         let cfg = match self.config.as_ref() {
             Some(c) => c,
-            None => return Ok(dialplan),
+            None => return DialplanVerdict::Continue(dialplan),
         };
 
         if !cfg.enabled {
-            return Ok(dialplan);
+            return DialplanVerdict::Continue(dialplan);
         }
 
         if original.method() != &rsipstack::sip::Method::Invite {
-            return Ok(dialplan);
+            return DialplanVerdict::Continue(dialplan);
         }
 
         let callee = match original.to_header() {
             Ok(to) => match to.uri() {
                 Ok(uri) => uri.user().unwrap_or_default().to_string(),
-                Err(_) => return Ok(dialplan),
+                Err(_) => return DialplanVerdict::Continue(dialplan),
             },
-            Err(_) => return Ok(dialplan),
+            Err(_) => return DialplanVerdict::Continue(dialplan),
         };
 
         if cfg.numbers.iter().any(|n| callee.contains(n.as_str())) {
@@ -64,7 +64,7 @@ impl DialplanInspector for EmergencyInspector {
             }
         }
 
-        Ok(dialplan)
+        DialplanVerdict::Continue(dialplan)
     }
 }
 
@@ -155,6 +155,13 @@ mod tests {
         })
     }
 
+    fn extract_dp(verdict: DialplanVerdict) -> Dialplan {
+        match verdict {
+            DialplanVerdict::Continue(dp) | DialplanVerdict::Final(dp) => dp,
+            DialplanVerdict::Reject(err) => panic!("unexpected reject: {:?}", err),
+        }
+    }
+
     #[tokio::test]
     async fn test_emergency_matches_911() {
         let inspector = EmergencyInspector::new(make_cfg(true, &["911", "999"], "sip:emg@pbx.com"));
@@ -162,8 +169,8 @@ mod tests {
         let dp = Dialplan::new("s".into(), req.clone(), crate::call::DialDirection::Inbound);
         let r = inspector
             .inspect_dialplan(dp, &Default::default(), &req)
-            .await
-            .unwrap();
+            .await;
+        let r = extract_dp(r);
         match r.flow {
             DialplanFlow::Targets(s) => {
                 let t = match s {
@@ -184,8 +191,8 @@ mod tests {
         let dp = Dialplan::new("s".into(), req.clone(), crate::call::DialDirection::Inbound);
         let r = inspector
             .inspect_dialplan(dp, &Default::default(), &req)
-            .await
-            .unwrap();
+            .await;
+        let r = extract_dp(r);
         assert!(empty_targets(&r.flow));
     }
 
@@ -196,8 +203,8 @@ mod tests {
         let dp = Dialplan::new("s".into(), req.clone(), crate::call::DialDirection::Inbound);
         let r = inspector
             .inspect_dialplan(dp, &Default::default(), &req)
-            .await
-            .unwrap();
+            .await;
+        let r = extract_dp(r);
         assert!(empty_targets(&r.flow));
     }
 
@@ -208,8 +215,8 @@ mod tests {
         let dp = Dialplan::new("s".into(), req.clone(), crate::call::DialDirection::Inbound);
         let r = inspector
             .inspect_dialplan(dp, &Default::default(), &req)
-            .await
-            .unwrap();
+            .await;
+        let r = extract_dp(r);
         assert!(empty_targets(&r.flow));
     }
 
@@ -221,8 +228,8 @@ mod tests {
         let dp = Dialplan::new("s".into(), req.clone(), crate::call::DialDirection::Inbound);
         let r = inspector
             .inspect_dialplan(dp, &Default::default(), &req)
-            .await
-            .unwrap();
+            .await;
+        let r = extract_dp(r);
         assert!(empty_targets(&r.flow));
     }
 }

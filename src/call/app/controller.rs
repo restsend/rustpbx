@@ -181,9 +181,14 @@ impl CallController {
     ) -> anyhow::Result<PlaybackHandle> {
         let path = file.into();
         let track_id = track_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let source = if path.starts_with("http://") || path.starts_with("https://") {
+            MediaSource::Url { url: path.clone() }
+        } else {
+            MediaSource::File { path: path.clone() }
+        };
         self.session.send_command(CallCommand::Play {
             leg_id: None,
-            source: MediaSource::File { path: path.clone() },
+            source,
             options: Some(PlayOptions {
                 loop_playback,
                 await_completion: false,
@@ -416,9 +421,9 @@ mod tests {
     fn make_controller_with_channels() -> (
         CallController,
         mpsc::UnboundedSender<ControllerEvent>,
-        mpsc::UnboundedReceiver<CallCommand>,
+        mpsc::Receiver<CallCommand>,
     ) {
-        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+        let (cmd_tx, cmd_rx) = mpsc::channel(256);
         let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
 
         // Create a minimal SipSessionHandle for testing

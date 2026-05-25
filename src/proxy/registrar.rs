@@ -383,18 +383,11 @@ fn parse_route_header(request: &rsipstack::sip::Request, header: &str) -> Vec<Ur
 }
 
 fn parse_transport_token(value: &str) -> Option<Transport> {
-    match value.to_ascii_lowercase().as_str() {
-        "udp" => Some(Transport::Udp),
-        "tcp" => Some(Transport::Tcp),
-        "tls" => Some(Transport::Tls),
-        "ws" => Some(Transport::Ws),
-        "wss" => Some(Transport::Wss),
-        _ => None,
-    }
+    super::routing::resolve_transport_from_str(value)
 }
 
 fn escape_display_name(input: &str) -> String {
-    input.replace('\\', "\\\\").replace('"', "\\\"")
+    super::routing::escape_sip_quoted(input)
 }
 
 impl RegistrarModule {

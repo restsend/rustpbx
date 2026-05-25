@@ -6,6 +6,7 @@
 //! - `on_call_held` / `on_call_unheld` fires via `CallCommand::Hold/Unhold`
 //! - Wholesale/trunk scenario: caller is not pre-registered; hook still fires
 
+use super::test_helpers;
 use super::test_ua::{TestUa, TestUaConfig, TestUaEvent};
 use crate::call::domain::{CallCommand, LegId};
 use crate::call::user::SipUser;
@@ -100,17 +101,7 @@ impl CallSessionHook for RecordingHook {
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 fn make_sdp(port: u16) -> String {
-    format!(
-        "v=0\r\n\
-         o=- 123456 123456 IN IP4 127.0.0.1\r\n\
-         s=-\r\n\
-         c=IN IP4 127.0.0.1\r\n\
-         t=0 0\r\n\
-         m=audio {} RTP/AVP 0\r\n\
-         a=rtpmap:0 PCMU/8000\r\n\
-         a=sendrecv\r\n",
-        port
-    )
+    test_helpers::pcmu_sdp("127.0.0.1", port)
 }
 
 struct TestEnv {
@@ -129,23 +120,11 @@ impl Drop for TestEnv {
 
 async fn start_server_with_hook() -> Result<TestEnv> {
     let port = portpicker::pick_unused_port().unwrap_or(15080);
-    let config = Arc::new(ProxyConfig {
-        addr: "127.0.0.1".to_string(),
-        udp_port: Some(port),
-        tcp_port: None,
-        tls_port: None,
-        ws_port: None,
-        useragent: Some("RustPBX-Hook-Test/0.1".to_string()),
-        modules: Some(vec![
-            "auth".to_string(),
-            "registrar".to_string(),
-            "call".to_string(),
-        ]),
-        media_proxy: MediaProxyMode::Auto,
-        ensure_user: Some(false),
-        enable_latching: false,
-        ..Default::default()
-    });
+    let mut proxy_config = test_helpers::test_proxy_config(port);
+    proxy_config.media_proxy = MediaProxyMode::Auto;
+    proxy_config.ensure_user = Some(false);
+    proxy_config.enable_latching = false;
+    let config = Arc::new(proxy_config);
 
     let user_backend = MemoryUserBackend::new(None);
     for user in test_users() {
@@ -155,23 +134,13 @@ async fn start_server_with_hook() -> Result<TestEnv> {
     let (hook, events) = RecordingHook::new();
     let cancel_token = CancellationToken::new();
 
-    let builder = SipServerBuilder::new(config)
-        .with_user_backend(Box::new(user_backend))
-        .with_locator(Box::new(MemoryLocator::new()))
-        .with_cancel_token(cancel_token.clone())
-        .with_session_hook(Arc::new(hook))
-        .register_module("registrar", |inner, config| {
-            Ok(Box::new(RegistrarModule::new(inner, config)))
-        })
-        .register_module("auth", |inner, _config| {
-            Ok(Box::new(AuthModule::new(
-                inner.clone(),
-                inner.proxy_config.clone(),
-            )))
-        })
-        .register_module("call", |inner, config| {
-            Ok(Box::new(CallModule::new(config, inner)))
-        });
+    let builder = test_helpers::register_standard_modules(
+        SipServerBuilder::new(config)
+            .with_user_backend(Box::new(user_backend))
+            .with_locator(Box::new(MemoryLocator::new()))
+            .with_cancel_token(cancel_token.clone())
+            .with_session_hook(Arc::new(hook)),
+    );
 
     let server = Arc::new(builder.build().await?);
     let registry = server.get_inner().active_call_registry.clone();
@@ -199,24 +168,7 @@ async fn start_server_with_hook() -> Result<TestEnv> {
 }
 
 fn test_users() -> Vec<SipUser> {
-    vec![
-        SipUser {
-            id: 1,
-            username: "alice".to_string(),
-            password: Some("password123".to_string()),
-            enabled: true,
-            realm: Some("127.0.0.1".to_string()),
-            ..Default::default()
-        },
-        SipUser {
-            id: 2,
-            username: "bob".to_string(),
-            password: Some("password456".to_string()),
-            enabled: true,
-            realm: Some("127.0.0.1".to_string()),
-            ..Default::default()
-        },
-    ]
+    test_helpers::standard_test_users()
 }
 
 async fn create_ua(port: u16, username: &str, password: &str) -> Result<TestUa> {
@@ -512,25 +464,18 @@ async fn test_hook_wholesale_caller_not_registered() -> Result<()> {
         },
     );
 
-    let config = Arc::new(ProxyConfig {
-        addr: "127.0.0.1".to_string(),
-        udp_port: Some(port),
-        tcp_port: None,
-        tls_port: None,
-        ws_port: None,
-        useragent: Some("RustPBX-Hook-Test/0.1".to_string()),
-        modules: Some(vec![
-            "acl".to_string(),
-            "auth".to_string(),
-            "registrar".to_string(),
-            "call".to_string(),
-        ]),
-        media_proxy: MediaProxyMode::Auto,
-        ensure_user: Some(false),
-        enable_latching: false,
-        trunks,
-        ..Default::default()
-    });
+    let mut proxy_config = test_helpers::test_proxy_config(port);
+    proxy_config.modules = Some(vec![
+        "acl".to_string(),
+        "auth".to_string(),
+        "registrar".to_string(),
+        "call".to_string(),
+    ]);
+    proxy_config.media_proxy = MediaProxyMode::Auto;
+    proxy_config.ensure_user = Some(false);
+    proxy_config.enable_latching = false;
+    proxy_config.trunks = trunks;
+    let config = Arc::new(proxy_config);
 
     let user_backend = MemoryUserBackend::new(None);
     for user in test_users() {

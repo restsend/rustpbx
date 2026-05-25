@@ -1,116 +1,18 @@
+use super::e2e_test_server::E2eTestServer;
 use super::test_ua::{TestUa, TestUaConfig, TestUaEvent};
-use crate::call::user::SipUser;
-use crate::config::{MediaProxyMode, ProxyConfig};
-use crate::proxy::{
-    auth::AuthModule, call::CallModule, locator::MemoryLocator, registrar::RegistrarModule,
-    server::SipServerBuilder, user::MemoryUserBackend,
-};
+use crate::config::MediaProxyMode;
 use anyhow::Result;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::sleep;
-use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
-
-fn create_test_proxy_config(port: u16) -> ProxyConfig {
-    ProxyConfig {
-        addr: "127.0.0.1".to_string(),
-        udp_port: Some(port),
-        tcp_port: None,
-        tls_port: None,
-        ws_port: None,
-        useragent: Some("RustPBX-Test/0.1.0".to_string()),
-        modules: Some(vec![
-            "auth".to_string(),
-            "registrar".to_string(),
-            "call".to_string(),
-        ]),
-        media_proxy: MediaProxyMode::Auto,
-        ..Default::default()
-    }
-}
-
-fn create_test_users() -> Vec<SipUser> {
-    vec![
-        SipUser {
-            id: 1,
-            username: "alice".to_string(),
-            password: Some("password123".to_string()),
-            enabled: true,
-            realm: Some("127.0.0.1".to_string()),
-            ..Default::default()
-        },
-        SipUser {
-            id: 2,
-            username: "bob".to_string(),
-            password: Some("password456".to_string()),
-            enabled: true,
-            realm: Some("127.0.0.1".to_string()),
-            ..Default::default()
-        },
-    ]
-}
-
-pub struct TestProxyServer {
-    _cancel_token: CancellationToken,
-    pub port: u16,
-    _server: Arc<crate::proxy::server::SipServer>,
-}
-
-impl TestProxyServer {
-    pub async fn start() -> Result<Self> {
-        let port = portpicker::pick_unused_port().unwrap_or(15060);
-        let config = Arc::new(create_test_proxy_config(port));
-
-        let user_backend = MemoryUserBackend::new(None);
-        for user in create_test_users() {
-            user_backend.create_user(user).await?;
-        }
-
-        let locator = MemoryLocator::new();
-        let cancel_token = CancellationToken::new();
-        let mut builder = SipServerBuilder::new(config)
-            .with_user_backend(Box::new(user_backend))
-            .with_locator(Box::new(locator))
-            .with_cancel_token(cancel_token.clone());
-
-        builder = builder
-            .register_module("registrar", |inner, config| {
-                Ok(Box::new(RegistrarModule::new(inner, config)))
-            })
-            .register_module("auth", |inner, _config| {
-                Ok(Box::new(AuthModule::new(
-                    inner.clone(),
-                    inner.proxy_config.clone(),
-                )))
-            })
-            .register_module("call", |inner, config| {
-                Ok(Box::new(CallModule::new(config, inner)))
-            });
-        let server = Arc::new(builder.build().await?);
-        let server_clone = server.clone();
-
-        tokio::spawn(async move {
-            if let Err(e) = server_clone.serve().await {
-                warn!("Proxy server error: {:?}", e);
-            }
-        });
-
-        sleep(Duration::from_millis(100)).await;
-        Ok(Self {
-            _cancel_token: cancel_token,
-            port,
-            _server: server,
-        })
-    }
-}
 
 #[tokio::test]
 async fn test_webrtc_to_rtp_media_proxy_auto() -> Result<()> {
     let _ = tracing_subscriber::fmt::try_init();
     // 1. Start Proxy Server
-    let server = TestProxyServer::start().await?;
-    let proxy_addr = format!("127.0.0.1:{}", server.port).parse()?;
+    let server = E2eTestServer::start_with_mode(MediaProxyMode::Auto).await?;
+    let proxy_addr = server.proxy_addr;
 
     // 2. Setup Alice (WebRTC Caller)
     let mut alice_ua = TestUa::new(TestUaConfig {
@@ -213,8 +115,8 @@ async fn test_codec_negotiation_optimization() -> Result<()> {
     // Expected: PBX should optimize to use PCMU for both, avoiding transcoding
 
     // 1. Start Proxy Server
-    let server = TestProxyServer::start().await?;
-    let proxy_addr = format!("127.0.0.1:{}", server.port).parse()?;
+    let server = E2eTestServer::start_with_mode(MediaProxyMode::Auto).await?;
+    let proxy_addr = server.proxy_addr;
 
     // 2. Setup Alice (WebRTC Caller) supporting both Opus and PCMU
     let mut alice_ua = TestUa::new(TestUaConfig {
@@ -329,8 +231,8 @@ async fn test_webrtc_to_rtp_sdp_bridge() -> Result<()> {
     let _ = tracing_subscriber::fmt::try_init();
 
     // Start Proxy Server
-    let server = TestProxyServer::start().await?;
-    let proxy_addr = format!("127.0.0.1:{}", server.port).parse()?;
+    let server = E2eTestServer::start_with_mode(MediaProxyMode::Auto).await?;
+    let proxy_addr = server.proxy_addr;
 
     // Setup Alice (WebRTC Caller)
     let mut alice_ua = TestUa::new(TestUaConfig {
@@ -520,26 +422,12 @@ async fn test_rtp_to_webrtc_sdp_bridge() -> Result<()> {
     // Setup server
     let locator = crate::proxy::locator::MemoryLocator::new();
     let cancel_token = tokio_util::sync::CancellationToken::new();
-    let mut builder = crate::proxy::server::SipServerBuilder::new(std::sync::Arc::new(config))
-        .with_user_backend(Box::new(user_backend))
-        .with_locator(Box::new(locator))
-        .with_cancel_token(cancel_token.clone());
-
-    builder = builder
-        .register_module("registrar", |inner, config| {
-            Ok(Box::new(crate::proxy::registrar::RegistrarModule::new(
-                inner, config,
-            )))
-        })
-        .register_module("auth", |inner, _config| {
-            Ok(Box::new(crate::proxy::auth::AuthModule::new(
-                inner.clone(),
-                inner.proxy_config.clone(),
-            )))
-        })
-        .register_module("call", |inner, config| {
-            Ok(Box::new(crate::proxy::call::CallModule::new(config, inner)))
-        });
+    let builder = super::test_helpers::register_standard_modules(
+        crate::proxy::server::SipServerBuilder::new(std::sync::Arc::new(config))
+            .with_user_backend(Box::new(user_backend))
+            .with_locator(Box::new(locator))
+            .with_cancel_token(cancel_token.clone()),
+    );
 
     let server = std::sync::Arc::new(builder.build().await?);
     let server_clone = server.clone();

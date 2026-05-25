@@ -26,7 +26,7 @@ mod tests {
             dynamic_build: false,
             business_hours: None,
             tts: None,
-            root: MenuNode {
+            root: Some(MenuNode {
                 greeting: "sounds/welcome.wav".to_string(),
                 timeout_ms: 200, // short for tests
                 max_retries: 2,
@@ -77,7 +77,7 @@ mod tests {
                     },
                 ],
                 ..Default::default()
-            },
+            }),
             menus: {
                 let mut m = HashMap::new();
                 m.insert(
@@ -114,6 +114,8 @@ mod tests {
                 );
                 m
             },
+        ivr_mode: None,
+        provider: None,
         }
     }
 
@@ -265,7 +267,7 @@ mod tests {
     async fn test_ivr_back_action_pops_one_level() {
         let ivr = IvrDefinition {
             name: "back-test".to_string(),
-            root: MenuNode {
+            root: Some(MenuNode {
                 greeting: "sounds/root.wav".to_string(),
                 entries: vec![MenuEntry {
                     key: "1".to_string(),
@@ -275,7 +277,7 @@ mod tests {
                     },
                 }],
                 ..Default::default()
-            },
+            }),
             menus: {
                 let mut m = HashMap::new();
                 m.insert(
@@ -358,7 +360,7 @@ mod tests {
     async fn test_ivr_back_at_root_is_noop() {
         let ivr = IvrDefinition {
             name: "back-root-test".to_string(),
-            root: MenuNode {
+            root: Some(MenuNode {
                 greeting: "sounds/root.wav".to_string(),
                 entries: vec![MenuEntry {
                     key: "9".to_string(),
@@ -366,7 +368,7 @@ mod tests {
                     action: EntryAction::Back,
                 }],
                 ..Default::default()
-            },
+            }),
             menus: HashMap::new(),
             ..Default::default()
         };
@@ -682,7 +684,7 @@ action = { type = "transfer", target = "100" }
             dynamic_build: false,
             business_hours: None,
             tts: None,
-            root: MenuNode {
+            root: Some(MenuNode {
                 greeting: "sounds/collect_menu.wav".to_string(),
                 timeout_ms: 200,
                 max_retries: 1,
@@ -727,8 +729,10 @@ action = { type = "transfer", target = "100" }
                     },
                 ],
                 ..Default::default()
-            },
+            }),
             menus: HashMap::new(),
+        ivr_mode: None,
+        provider: None,
         }
     }
 
@@ -893,7 +897,7 @@ action = { type = "transfer", target = "100" }
             dynamic_build: false,
             business_hours: None,
             tts: None,
-            root: MenuNode {
+            root: Some(MenuNode {
                 greeting: "sounds/queue_menu.wav".to_string(),
                 timeout_ms: 200,
                 max_retries: 1,
@@ -935,8 +939,10 @@ action = { type = "transfer", target = "100" }
                     },
                 ],
                 ..Default::default()
-            },
+            }),
             menus: HashMap::new(),
+        ivr_mode: None,
+        provider: None,
         }
     }
 
@@ -1074,7 +1080,7 @@ action = { type = "transfer", target = "100" }
             dynamic_build: false,
             business_hours: None,
             tts: None,
-            root: MenuNode {
+            root: Some(MenuNode {
                 greeting: "sounds/welcome.wav".to_string(),
                 timeout_ms: 200,
                 max_retries: 1,
@@ -1101,8 +1107,10 @@ action = { type = "transfer", target = "100" }
                     },
                 }],
                 ..Default::default()
-            },
+            }),
             menus: HashMap::new(),
+        ivr_mode: None,
+        provider: None,
         }
     }
 
@@ -1627,7 +1635,7 @@ action = { type = "transfer", target = "100" }
             dynamic_build: false,
             business_hours: None,
             tts: None,
-            root: MenuNode {
+            root: Some(MenuNode {
                 greeting: "sounds/welcome.wav".to_string(),
                 timeout_ms: 200,
                 max_retries: 1,
@@ -1675,8 +1683,10 @@ action = { type = "transfer", target = "100" }
                     },
                 ],
                 ..Default::default()
-            },
+            }),
             menus: HashMap::new(),
+        ivr_mode: None,
+        provider: None,
         }
     }
 
@@ -1874,7 +1884,7 @@ action = { type = "transfer", target = "100" }
             dynamic_build: false,
             business_hours: None,
             tts: None,
-            root: MenuNode {
+            root: Some(MenuNode {
                 greeting: greeting_path.clone(),
                 timeout_ms: 2000,
                 max_retries: 1,
@@ -1897,8 +1907,10 @@ action = { type = "transfer", target = "100" }
                     },
                 }],
                 ..Default::default()
-            },
+            }),
             menus: HashMap::new(),
+        ivr_mode: None,
+        provider: None,
         };
 
         let mut stack = MockCallStack::run(Box::new(IvrApp::new(ivr)), "caller", "1000");
@@ -1948,7 +1960,7 @@ action = { type = "transfer", target = "100" }
             dynamic_build: false,
             business_hours: None,
             tts: None,
-            root: MenuNode {
+            root: Some(MenuNode {
                 greeting: root_wav.clone(),
                 timeout_ms: 2000,
                 max_retries: 1,
@@ -1971,7 +1983,7 @@ action = { type = "transfer", target = "100" }
                     },
                 }],
                 ..Default::default()
-            },
+            }),
             menus: {
                 let mut m = HashMap::new();
                 m.insert(
@@ -2003,6 +2015,8 @@ action = { type = "transfer", target = "100" }
                 );
                 m
             },
+        ivr_mode: None,
+        provider: None,
         };
 
         let mut stack = MockCallStack::run(Box::new(IvrApp::new(ivr)), "caller", "1000");
@@ -2060,7 +2074,7 @@ action = { type = "transfer", target = "100" }
             dynamic_build: false,
             business_hours: None,
             tts: None,
-            root: MenuNode {
+            root: Some(MenuNode {
                 greeting: greeting_wav.clone(),
                 timeout_ms: 2000,
                 max_retries: 1,
@@ -2085,8 +2099,10 @@ action = { type = "transfer", target = "100" }
                     },
                 }],
                 ..Default::default()
-            },
+            }),
             menus: HashMap::new(),
+        ivr_mode: None,
+        provider: None,
         };
 
         let mut stack = MockCallStack::run(Box::new(IvrApp::new(ivr)), "caller", "1000");
@@ -2137,7 +2153,7 @@ action = { type = "transfer", target = "100" }
             dynamic_build: false,
             business_hours: None,
             tts: None,
-            root: MenuNode {
+            root: Some(MenuNode {
                 greeting: greeting_wav.clone(),
                 timeout_ms: 2000,
                 max_retries: 2,
@@ -2156,8 +2172,10 @@ action = { type = "transfer", target = "100" }
                     },
                 }],
                 ..Default::default()
-            },
+            }),
             menus: HashMap::new(),
+        ivr_mode: None,
+        provider: None,
         };
 
         let mut stack = MockCallStack::run(Box::new(IvrApp::new(ivr)), "caller", "1000");
@@ -2210,7 +2228,7 @@ action = { type = "transfer", target = "100" }
             dynamic_build: false,
             business_hours: None,
             tts: None,
-            root: MenuNode {
+            root: Some(MenuNode {
                 greeting: greeting_wav.clone(),
                 timeout_ms: 2000,
                 max_retries: 1,
@@ -2244,8 +2262,10 @@ action = { type = "transfer", target = "100" }
                     },
                 ],
                 ..Default::default()
-            },
+            }),
             menus: HashMap::new(),
+        ivr_mode: None,
+        provider: None,
         };
 
         let mut stack = MockCallStack::run(Box::new(IvrApp::new(ivr)), "caller", "1000");
@@ -2299,7 +2319,7 @@ action = { type = "transfer", target = "100" }
             dynamic_build: false,
             business_hours: None,
             tts: None,
-            root: MenuNode {
+            root: Some(MenuNode {
                 greeting: greeting_wav.clone(),
                 timeout_ms: 2000,
                 max_retries: 1,
@@ -2322,8 +2342,10 @@ action = { type = "transfer", target = "100" }
                     },
                 }],
                 ..Default::default()
-            },
+            }),
             menus: HashMap::new(),
+        ivr_mode: None,
+        provider: None,
         };
 
         let mut stack = MockCallStack::run(Box::new(IvrApp::new(ivr)), "caller", "1000");
@@ -2372,7 +2394,7 @@ action = { type = "transfer", target = "100" }
             dynamic_build: false,
             business_hours: None,
             tts: None,
-            root: MenuNode {
+            root: Some(MenuNode {
                 greeting: greeting_wav.clone(),
                 timeout_ms: 150, // short so test doesn't take long
                 max_retries: 2,
@@ -2391,8 +2413,10 @@ action = { type = "transfer", target = "100" }
                     },
                 }],
                 ..Default::default()
-            },
+            }),
             menus: HashMap::new(),
+        ivr_mode: None,
+        provider: None,
         };
 
         let mut stack = MockCallStack::run(Box::new(IvrApp::new(ivr)), "caller", "1000");
@@ -2444,7 +2468,7 @@ action = { type = "transfer", target = "100" }
             dynamic_build: false,
             business_hours: None,
             tts: None,
-            root: MenuNode {
+            root: Some(MenuNode {
                 greeting: greeting_wav.clone(),
                 timeout_ms: 2000,
                 max_retries: 1,
@@ -2470,8 +2494,10 @@ action = { type = "transfer", target = "100" }
                     },
                 }],
                 ..Default::default()
-            },
+            }),
             menus: HashMap::new(),
+        ivr_mode: None,
+        provider: None,
         };
 
         let mut stack = MockCallStack::run(Box::new(IvrApp::new(ivr)), "caller", "1000");
@@ -2620,7 +2646,7 @@ action = { type = "transfer", target = "100" }
             dynamic_build: false,
             business_hours: None,
             tts: Some(tts_config),
-            root: MenuNode {
+            root: Some(MenuNode {
                 greeting: "".to_string(),
                 greeting_text: Some("hello from tts".to_string()),
                 greeting_voice: Some("xiaoxiao".to_string()),
@@ -2645,8 +2671,10 @@ action = { type = "transfer", target = "100" }
                     },
                 }],
                 ..Default::default()
-            },
+            }),
             menus: HashMap::new(),
+        ivr_mode: None,
+        provider: None,
         };
 
         let mut stack = MockCallStack::run(Box::new(IvrApp::new(ivr)), "caller", "1000");
@@ -2678,6 +2706,123 @@ action = { type = "transfer", target = "100" }
                 "Transfer",
                 |c| matches!(c, CallCommand::Transfer { target, .. } if target == "2001"),
             )
+            .await;
+    }
+
+    // ── URL prompt support ──────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_ivr_url_greeting() {
+        let ivr = IvrDefinition {
+            name: "url-test".to_string(),
+            description: None,
+            lang: None,
+            default_voice: None,
+            dynamic_build: false,
+            business_hours: None,
+            tts: None,
+            root: Some(MenuNode {
+                greeting: "https://example.com/sounds/welcome.wav".to_string(),
+                timeout_ms: 5000,
+                max_retries: 1,
+                entries: vec![MenuEntry {
+                    key: "1".to_string(),
+                    label: Some("Sales".to_string()),
+                    action: EntryAction::Transfer {
+                        target: "2001".to_string(),
+                    },
+                }],
+                ..Default::default()
+            }),
+            menus: HashMap::new(),
+            ivr_mode: None,
+            provider: None,
+        };
+        let mut stack = MockCallStack::run(Box::new(IvrApp::new(ivr)), "caller", "1000");
+
+        stack
+            .assert_cmd(200, "AcceptCall", |c| {
+                matches!(c, CallCommand::Answer { .. })
+            })
+            .await;
+
+        stack
+            .assert_cmd(200, "PlayPrompt", |c| {
+                matches!(
+                    c,
+                    CallCommand::Play {
+                        source: MediaSource::Url { url },
+                        ..
+                    } if url == "https://example.com/sounds/welcome.wav"
+                )
+            })
+            .await;
+
+        stack.cancel();
+        let _ = stack.join().await;
+    }
+
+    #[tokio::test]
+    async fn test_ivr_hangup_with_url_prompt() {
+        let ivr = IvrDefinition {
+            name: "url-hangup-test".to_string(),
+            description: None,
+            lang: None,
+            default_voice: None,
+            dynamic_build: false,
+            business_hours: None,
+            tts: None,
+            root: Some(MenuNode {
+                greeting: "sounds/welcome.wav".to_string(),
+                timeout_ms: 5000,
+                max_retries: 1,
+                entries: vec![MenuEntry {
+                    key: "0".to_string(),
+                    label: Some("Hangup".to_string()),
+                    action: EntryAction::Hangup {
+                        prompt: Some("https://example.com/sounds/goodbye.wav".to_string()),
+                        prompt_text: None,
+                        prompt_voice: None,
+                    },
+                }],
+                ..Default::default()
+            }),
+            menus: HashMap::new(),
+            ivr_mode: None,
+            provider: None,
+        };
+        let mut stack = MockCallStack::run(Box::new(IvrApp::new(ivr)), "caller", "1000");
+
+        stack
+            .assert_cmd(200, "AcceptCall", |c| {
+                matches!(c, CallCommand::Answer { .. })
+            })
+            .await;
+
+        stack
+            .assert_cmd(200, "PlayPrompt", |c| {
+                matches!(c, CallCommand::Play { source: MediaSource::File { .. }, .. })
+            })
+            .await;
+        stack.audio_complete("default");
+
+        stack.dtmf("0");
+
+        stack
+            .assert_cmd(200, "PlayPrompt-goodbye", |c| {
+                matches!(
+                    c,
+                    CallCommand::Play {
+                        source: MediaSource::Url { url },
+                        ..
+                    } if url == "https://example.com/sounds/goodbye.wav"
+                )
+            })
+            .await;
+
+        stack.audio_complete("default");
+        stack
+            .assert_cmd(200, "Hangup", |c| matches!(c, CallCommand::Hangup(_)))
             .await;
     }
 }

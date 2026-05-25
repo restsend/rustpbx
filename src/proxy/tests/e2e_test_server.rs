@@ -2,15 +2,13 @@
 
 use super::cdr_capture::CdrCapture;
 use super::rtp_utils::{RtpReceiver, RtpSender};
+use super::test_helpers;
 use super::test_ua::{TestUa, TestUaConfig};
 use crate::call::user::SipUser;
 use crate::config::{MediaProxyMode, ProxyConfig};
 use crate::proxy::{
     active_call_registry::ActiveProxyCallRegistry,
-    auth::AuthModule,
-    call::CallModule,
     locator::MemoryLocator,
-    registrar::RegistrarModule,
     server::{SipServerBuilder, SipServerRef},
     user::MemoryUserBackend,
 };
@@ -40,61 +38,36 @@ impl E2eTestServer {
         let port = portpicker::pick_unused_port().unwrap_or(15060);
         let proxy_addr = format!("127.0.0.1:{}", port).parse()?;
 
-        let config = Arc::new(ProxyConfig {
-            addr: "127.0.0.1".to_string(),
-            udp_port: Some(port),
-            tcp_port: None,
-            tls_port: None,
-            ws_port: None,
-            useragent: Some("RustPBX-E2E-Test/0.1.0".to_string()),
-            modules: Some(vec![
-                "auth".to_string(),
-                "registrar".to_string(),
-                "call".to_string(),
-            ]),
-            media_proxy: mode,
-            ensure_user: Some(false),
-            enable_latching: false,
-            ..Default::default()
-        });
+        let mut proxy_config = test_helpers::test_proxy_config(port);
+        proxy_config.media_proxy = mode;
+        proxy_config.ensure_user = Some(false);
+        proxy_config.enable_latching = false;
+        let config = Arc::new(proxy_config);
 
         // Create CDR capture
         let (cdr_capture, cdr_sender) = CdrCapture::new();
 
         // Create user backend with test users
         let user_backend = MemoryUserBackend::new(None);
-        for user in Self::create_test_users() {
+        for user in test_helpers::standard_test_users() {
             user_backend.create_user(user).await?;
         }
 
         let locator = MemoryLocator::new();
         let cancel_token = CancellationToken::new();
 
-        let mut builder = SipServerBuilder::new(config)
-            .with_user_backend(Box::new(user_backend))
-            .with_locator(Box::new(locator))
-            .with_cancel_token(cancel_token.clone())
-            .with_callrecord_sender(Some(cdr_sender));
-
-        builder = builder
-            .register_module("registrar", |inner, config| {
-                Ok(Box::new(RegistrarModule::new(inner, config)))
-            })
-            .register_module("auth", |inner, _config| {
-                Ok(Box::new(AuthModule::new(
-                    inner.clone(),
-                    inner.proxy_config.clone(),
-                )))
-            })
-            .register_module("call", |inner, config| {
-                Ok(Box::new(CallModule::new(config, inner)))
-            });
+        let builder = test_helpers::register_standard_modules(
+            SipServerBuilder::new(config)
+                .with_user_backend(Box::new(user_backend))
+                .with_locator(Box::new(locator))
+                .with_cancel_token(cancel_token.clone())
+                .with_callrecord_sender(Some(cdr_sender)),
+        );
 
         let server = Arc::new(builder.build().await?);
         let server_ref = server.get_inner();
         let registry = server_ref.active_call_registry.clone();
 
-        // Start server in background
         let cancel_token_clone = cancel_token.clone();
         let _server_handle = Some(tokio::spawn(async move {
             tokio::select! {
@@ -131,17 +104,14 @@ impl E2eTestServer {
         let port = portpicker::pick_unused_port().unwrap_or(15060);
         let proxy_addr = format!("127.0.0.1:{}", port).parse()?;
 
-        proxy_config.addr = "127.0.0.1".to_string();
-        proxy_config.udp_port = Some(port);
-        proxy_config.tcp_port = None;
-        proxy_config.tls_port = None;
-        proxy_config.ws_port = None;
-        proxy_config.useragent = Some("RustPBX-E2E-Test/0.1.0".to_string());
-        proxy_config.modules = Some(vec![
-            "auth".to_string(),
-            "registrar".to_string(),
-            "call".to_string(),
-        ]);
+        let base = test_helpers::test_proxy_config(port);
+        proxy_config.addr = base.addr;
+        proxy_config.udp_port = base.udp_port;
+        proxy_config.tcp_port = base.tcp_port;
+        proxy_config.tls_port = base.tls_port;
+        proxy_config.ws_port = base.ws_port;
+        proxy_config.useragent = base.useragent;
+        proxy_config.modules = base.modules;
         proxy_config.ensure_user = Some(false);
 
         let config = Arc::new(proxy_config);
@@ -152,38 +122,25 @@ impl E2eTestServer {
 
         // Create user backend with test users
         let user_backend = MemoryUserBackend::new(None);
-        for user in Self::create_test_users() {
+        for user in test_helpers::standard_test_users() {
             user_backend.create_user(user).await?;
         }
 
         let locator = MemoryLocator::new();
         let cancel_token = CancellationToken::new();
 
-        let mut builder = SipServerBuilder::new(config)
-            .with_user_backend(Box::new(user_backend))
-            .with_locator(Box::new(locator))
-            .with_cancel_token(cancel_token.clone())
-            .with_callrecord_sender(Some(cdr_sender));
-
-        builder = builder
-            .register_module("registrar", |inner, config| {
-                Ok(Box::new(RegistrarModule::new(inner, config)))
-            })
-            .register_module("auth", |inner, _config| {
-                Ok(Box::new(AuthModule::new(
-                    inner.clone(),
-                    inner.proxy_config.clone(),
-                )))
-            })
-            .register_module("call", |inner, config| {
-                Ok(Box::new(CallModule::new(config, inner)))
-            });
+        let builder = test_helpers::register_standard_modules(
+            SipServerBuilder::new(config)
+                .with_user_backend(Box::new(user_backend))
+                .with_locator(Box::new(locator))
+                .with_cancel_token(cancel_token.clone())
+                .with_callrecord_sender(Some(cdr_sender)),
+        );
 
         let server = Arc::new(builder.build().await?);
         let server_ref = server.get_inner();
         let registry = server_ref.active_call_registry.clone();
 
-        // Start server in background
         let cancel_token_clone = cancel_token.clone();
         let _server_handle = Some(tokio::spawn(async move {
             tokio::select! {
@@ -221,38 +178,6 @@ impl E2eTestServer {
     }
 
     /// Create standard test users
-    fn create_test_users() -> Vec<SipUser> {
-        vec![
-            SipUser {
-                id: 1,
-                username: "alice".to_string(),
-                password: Some("password123".to_string()),
-                enabled: true,
-                realm: Some("127.0.0.1".to_string()),
-                is_support_webrtc: true,
-                ..Default::default()
-            },
-            SipUser {
-                id: 2,
-                username: "bob".to_string(),
-                password: Some("password456".to_string()),
-                enabled: true,
-                realm: Some("127.0.0.1".to_string()),
-                is_support_webrtc: false,
-                ..Default::default()
-            },
-            SipUser {
-                id: 3,
-                username: "charlie".to_string(),
-                password: Some("password789".to_string()),
-                enabled: true,
-                realm: Some("127.0.0.1".to_string()),
-                is_support_webrtc: true,
-                ..Default::default()
-            },
-        ]
-    }
-
     /// Create a TestUa for a user
     pub async fn create_ua(&self, username: &str) -> Result<TestUa> {
         let password = match username {

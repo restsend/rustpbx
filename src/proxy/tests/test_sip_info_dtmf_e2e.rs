@@ -5,6 +5,7 @@
 //! - Callee → Caller: SIP INFO with application/dtmf-relay is forwarded back to the caller
 
 use super::e2e_test_server::E2eTestServer;
+use super::test_helpers;
 use super::test_ua::TestUaEvent;
 use crate::config::MediaProxyMode;
 use anyhow::Result;
@@ -13,22 +14,7 @@ use std::time::Duration;
 use tokio::time::sleep;
 use tracing::info;
 
-/// SDP with telephone-event for both sides
-fn make_sdp(port: u16) -> String {
-    format!(
-        "v=0\r\n\
-         o=- 123456 123456 IN IP4 127.0.0.1\r\n\
-         s=-\r\n\
-         c=IN IP4 127.0.0.1\r\n\
-         t=0 0\r\n\
-         m=audio {} RTP/AVP 0 101\r\n\
-         a=rtpmap:0 PCMU/8000\r\n\
-         a=rtpmap:101 telephone-event/8000\r\n\
-         a=fmtp:101 0-15\r\n\
-         a=sendrecv\r\n",
-        port
-    )
-}
+use test_helpers::make_sdp;
 
 /// Helper: establish a B2B call between alice and bob.
 /// Returns (alice_dialog_id, bob_dialog_id).

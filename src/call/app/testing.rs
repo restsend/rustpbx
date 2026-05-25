@@ -36,7 +36,7 @@ use tokio_util::sync::CancellationToken;
 /// Type alias for mock call stack command sender.
 pub type MockCmdTx = tokio::sync::mpsc::UnboundedSender<CallCommand>;
 /// Type alias for mock call stack command receiver.
-pub type MockCmdRx = tokio::sync::mpsc::UnboundedReceiver<CallCommand>;
+pub type MockCmdRx = tokio::sync::mpsc::Receiver<CallCommand>;
 
 /// Fully assembled, in-memory [`CallApp`] harness — no SIP stack required.
 ///
@@ -81,7 +81,7 @@ impl MockCallStack {
 
     pub fn run_with_context(app: Box<dyn CallApp>, ctx: ApplicationContext) -> Self {
         // Real SipSessionHandle — backed only by channels, no SIP socket.
-        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+        let (cmd_tx, cmd_rx) = mpsc::channel(256);
         let handle = SipSessionHandle::new_for_test("test-session", cmd_tx);
 
         // Synthetic event channel: test → controller.
