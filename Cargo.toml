@@ -1,6 +1,6 @@
 [package]
 name = "rustpbx"
-version = "0.4.4"
+version = "0.4.5"
 edition = "2024"
 default-run = "rustpbx"
 authors = ["jinti<shenjindi@fourz.cn>"]
@@ -229,5 +229,3 @@ required-features = ["opus"]
 [[bin]]
 name = "verify-i18n"
 path = "tools/verify_i18n.rs"
-
-
