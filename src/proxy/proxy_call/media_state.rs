@@ -10,7 +10,6 @@ pub(crate) struct CallerIngressMonitor {
     pub task: JoinHandle<()>,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub enum RecordingPhase {
     Idle,
@@ -31,10 +30,12 @@ impl RecordingPhase {
         matches!(self, RecordingPhase::Recording { .. } | RecordingPhase::Paused { .. })
     }
 
+    #[allow(dead_code)]
     pub fn is_recording(&self) -> bool {
         matches!(self, RecordingPhase::Recording { .. })
     }
 
+    #[allow(dead_code)]
     pub fn path(&self) -> Option<&str> {
         match self {
             RecordingPhase::Recording { path, .. } | RecordingPhase::Paused { path, .. } => {
@@ -56,6 +57,7 @@ impl RecordingPhase {
         self.started_at().map(|t| t.elapsed())
     }
 
+    #[allow(dead_code)]
     pub fn check_max_duration(&self) -> bool {
         if let RecordingPhase::Recording {
             started_at,
