@@ -116,12 +116,8 @@ async fn synthesize_tts(
             }
         }
     }
-    // Fallback: return tts:// URI (edge-cli or runtime TTS will handle it)
-    let mut uri = format!("tts://{}", text);
-    if let Some(v) = voice.filter(|v| !v.is_empty()) {
-        uri.push_str(&format!("?voice={}", v));
-    }
-    Some(uri)
+    tracing::warn!(text = %text, "TTS service not available, cannot synthesize speech");
+    None
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -221,6 +217,8 @@ pub async fn execute_action(
             if let Some(a) = audio {
                 ctrl.play_audio_with_options(a, Some("ivr_prompt".into()), false, *interruptible)
                     .await?;
+            } else {
+                ctrl.signal_audio_complete("ivr_prompt".into(), false);
             }
             Ok(ActionResult::WaitFor(WaitEvent::AudioComplete {
                 interrupted: false,
@@ -248,6 +246,8 @@ pub async fn execute_action(
             if let Some(a) = audio {
                 ctrl.play_audio_with_options(a, Some("ivr_menu_greeting".into()), false, true)
                     .await?;
+            } else {
+                ctrl.signal_audio_complete("ivr_menu_greeting".into(), false);
             }
             Ok(ActionResult::WaitFor(WaitEvent::AudioComplete {
                 interrupted: false,

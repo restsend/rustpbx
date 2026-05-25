@@ -55,7 +55,7 @@ pub struct IvrDefinition {
     pub default_voice: Option<String>,
     #[serde(default)]
     pub dynamic_build: bool,
-    #[serde(default, rename = "mode")]
+    #[serde(default)]
     pub ivr_mode: Option<String>,
     #[serde(default)]
     pub provider: Option<IvrProviderConfig>,

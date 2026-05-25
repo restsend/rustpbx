@@ -1,12 +1,11 @@
-/// Integration tests for the SipFlow local backend, including the `flush()` command
-/// added to support `SipFlowUploadHook`.
+/// Integration tests for the SipFlow backends.
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
     use std::sync::Arc;
     use tempfile::TempDir;
 
-    use crate::config::{SipFlowConfig, SipFlowSubdirs};
+    use crate::config::{SipFlowClusterNode, SipFlowConfig, SipFlowSubdirs};
     use crate::sipflow::backend::create_backend;
     use crate::sipflow::{SipFlowBackend, SipFlowItem, SipFlowMsgType};
 
@@ -73,5 +72,56 @@ mod tests {
             !db_files.is_empty(),
             "expected at least one .db file after flush; got none in {root}"
         );
+    }
+
+    /// RemoteBackend with legacy single-node format (udp_addr + http_addr)
+    #[tokio::test]
+    async fn test_remote_backend_legacy_format() {
+        let cfg = SipFlowConfig::Remote {
+            nodes: vec![],
+            udp_addr: Some("127.0.0.1:3000".to_string()),
+            http_addr: Some("http://127.0.0.1:3001".to_string()),
+            timeout_secs: 10,
+            upload: None,
+        };
+        let backend = create_backend(&cfg);
+        assert!(backend.is_ok(), "legacy format should create backend");
+    }
+
+    /// RemoteBackend with new multi-node format
+    #[tokio::test]
+    async fn test_remote_backend_multi_node_format() {
+        let cfg = SipFlowConfig::Remote {
+            nodes: vec![
+                SipFlowClusterNode {
+                    udp: "192.168.1.1:3000".to_string(),
+                    http: "http://192.168.1.1:3001".to_string(),
+                },
+                SipFlowClusterNode {
+                    udp: "192.168.1.2:3000".to_string(),
+                    http: "http://192.168.1.2:3001".to_string(),
+                },
+            ],
+            udp_addr: None,
+            http_addr: None,
+            timeout_secs: 10,
+            upload: None,
+        };
+        let backend = create_backend(&cfg);
+        assert!(backend.is_ok(), "multi-node format should create backend");
+    }
+
+    /// RemoteBackend with neither nodes nor legacy fields must fail
+    #[test]
+    fn test_remote_backend_missing_config() {
+        let cfg = SipFlowConfig::Remote {
+            nodes: vec![],
+            udp_addr: None,
+            http_addr: None,
+            timeout_secs: 10,
+            upload: None,
+        };
+        let result = create_backend(&cfg);
+        assert!(result.is_err(), "expected error when neither nodes nor udp_addr/http_addr provided");
     }
 }

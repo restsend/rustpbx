@@ -12,7 +12,7 @@ use sea_orm::{ColumnTrait, EntityTrait, QueryFilter};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::{fs, sync::Arc};
-use toml_edit::{DocumentMut, Item, Table, value};
+use toml_edit::{Array, DocumentMut, InlineTable, Item, Table, value};
 
 #[derive(Debug, Deserialize)]
 struct FlowQueryParams {
@@ -58,7 +58,7 @@ async fn get_settings(
     let (enabled, backend_type, config_json) = match &config.sipflow {
         None => (false, "none".to_string(), json!({})),
         Some(sipflow_config) => {
-            use crate::config::SipFlowConfig;
+            use crate::config::{SipFlowClusterNode, SipFlowConfig};
             let (backend_type, config_data) = match sipflow_config {
                 SipFlowConfig::Local {
                     root,
@@ -78,18 +78,29 @@ async fn get_settings(
                     }),
                 ),
                 SipFlowConfig::Remote {
+                    nodes,
                     udp_addr,
                     http_addr,
                     timeout_secs,
                     ..
-                } => (
-                    "remote",
-                    json!({
-                        "udp_addr": udp_addr,
-                        "http_addr": http_addr,
-                        "timeout_secs": timeout_secs
-                    }),
-                ),
+                } => {
+                    let mut resolved = nodes.clone();
+                    if resolved.is_empty() {
+                        if let (Some(udp), Some(http)) = (udp_addr, http_addr) {
+                            resolved.push(SipFlowClusterNode {
+                                udp: udp.clone(),
+                                http: http.clone(),
+                            });
+                        }
+                    }
+                    (
+                        "remote",
+                        json!({
+                            "nodes": resolved,
+                            "timeout_secs": timeout_secs
+                        }),
+                    )
+                }
             };
             (true, backend_type.to_string(), config_data)
         }
@@ -160,11 +171,37 @@ async fn update_settings(
         }
         "remote" => {
             table["type"] = value("remote");
-            if let Some(addr) = payload.config.get("udp_addr").and_then(|v| v.as_str()) {
-                table["udp_addr"] = value(addr);
-            }
-            if let Some(addr) = payload.config.get("http_addr").and_then(|v| v.as_str()) {
-                table["http_addr"] = value(addr);
+            let has_nodes = payload
+                .config
+                .get("nodes")
+                .and_then(|v| v.as_array())
+                .map(|a| !a.is_empty())
+                .unwrap_or(false);
+            if has_nodes {
+                if let Some(nodes) = payload.config.get("nodes").and_then(|v| v.as_array()) {
+                    let arr: Array = nodes
+                        .iter()
+                        .filter_map(|n| {
+                            let udp = n.get("udp")?.as_str()?;
+                            let http = n.get("http")?.as_str()?;
+                            let mut t = InlineTable::new();
+                            t.insert("udp", udp.into());
+                            t.insert("http", http.into());
+                            Some(toml_edit::Value::from(t))
+                        })
+                        .collect();
+                    table["nodes"] = value(arr);
+                }
+                table.remove("udp_addr");
+                table.remove("http_addr");
+            } else {
+                if let Some(addr) = payload.config.get("udp_addr").and_then(|v| v.as_str()) {
+                    table["udp_addr"] = value(addr);
+                }
+                if let Some(addr) = payload.config.get("http_addr").and_then(|v| v.as_str()) {
+                    table["http_addr"] = value(addr);
+                }
+                table.remove("nodes");
             }
             if let Some(secs) = payload.config.get("timeout_secs").and_then(|v| v.as_i64()) {
                 table["timeout_secs"] = value(secs);
