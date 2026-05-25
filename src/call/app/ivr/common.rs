@@ -43,6 +43,9 @@ pub enum WaitEvent {
         text: String,
         confidence: f32,
     },
+    /// Audio source was requested (e.g. via tts_text) but no TTS service is available.
+    /// The caller should inform the provider and request a fallback action.
+    NoAudio,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -116,8 +119,40 @@ async fn synthesize_tts(
             }
         }
     }
-    tracing::warn!(text = %text, "TTS service not available, cannot synthesize speech");
-    None
+    // Fallback: try edge-cli if no TTS service configured
+    tracing::warn!(text = %text, "TTS service not configured, falling back to edge-cli");
+    let voice_str = voice.unwrap_or("zh-CN-XiaoxiaoNeural").to_string();
+    let fallback_cfg = crate::tts::TtsConfig {
+        cache_dir: std::env::temp_dir()
+            .join("rustpbx_tts_cache")
+            .to_string_lossy()
+            .to_string(),
+        cache_ttl_seconds: 86400,
+        driver: crate::tts::TtsDriverConfig::Cli(crate::tts::CliTtsConfig {
+            command: "edge-cli".to_string(),
+            args: vec![
+                "speak".to_string(),
+                "--text".to_string(),
+                "{text}".to_string(),
+                "--voice".to_string(),
+                "{voice}".to_string(),
+                "--output".to_string(),
+                "{output}".to_string(),
+            ],
+            output_format: "mp3".to_string(),
+        }),
+    };
+    let fallback_service = crate::tts::TtsService::new(fallback_cfg);
+    match fallback_service.synthesize(text, Some(&voice_str)).await {
+        Ok(audio_path) => {
+            tracing::info!(path = %audio_path, "edge-cli TTS synthesis succeeded");
+            Some(audio_path)
+        }
+        Err(e) => {
+            tracing::warn!(text = %text, error = %e, "edge-cli TTS fallback failed");
+            None
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -217,12 +252,12 @@ pub async fn execute_action(
             if let Some(a) = audio {
                 ctrl.play_audio_with_options(a, Some("ivr_prompt".into()), false, *interruptible)
                     .await?;
+                Ok(ActionResult::WaitFor(WaitEvent::AudioComplete {
+                    interrupted: false,
+                }))
             } else {
-                ctrl.signal_audio_complete("ivr_prompt".into(), false);
+                Ok(ActionResult::WaitFor(WaitEvent::NoAudio))
             }
-            Ok(ActionResult::WaitFor(WaitEvent::AudioComplete {
-                interrupted: false,
-            }))
         }
 
         EntryAction::DtmfMenu {
@@ -246,12 +281,12 @@ pub async fn execute_action(
             if let Some(a) = audio {
                 ctrl.play_audio_with_options(a, Some("ivr_menu_greeting".into()), false, true)
                     .await?;
+                Ok(ActionResult::WaitFor(WaitEvent::AudioComplete {
+                    interrupted: false,
+                }))
             } else {
-                ctrl.signal_audio_complete("ivr_menu_greeting".into(), false);
+                Ok(ActionResult::WaitFor(WaitEvent::NoAudio))
             }
-            Ok(ActionResult::WaitFor(WaitEvent::AudioComplete {
-                interrupted: false,
-            }))
         }
 
         EntryAction::CollectDtmf {
