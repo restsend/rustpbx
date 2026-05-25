@@ -1101,9 +1101,14 @@ impl FileTrack {
 
                         if read == 0 {
                             if !loop_playback {
+                                let reason = if cancel_token.is_cancelled() {
+                                    PlaybackEndReason::Interrupted
+                                } else {
+                                    PlaybackEndReason::Completed
+                                };
                                 debug!("FileTrack playback completed (file exhausted)");
                                 if let Some(on_end) = on_end.take() {
-                                    on_end(PlaybackEndReason::Completed);
+                                    on_end(reason);
                                 }
                                 break;
                             }

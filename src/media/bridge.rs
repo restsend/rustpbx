@@ -1928,7 +1928,7 @@ impl BridgePeer {
         );
 
         if let Some(digit) = detector.observe(&frame.data, frame.rtp_timestamp) {
-            debug!(digit = %digit, "DTMF observe: digit detected via RFC2833");
+            info!(digit = %digit, endpoint = ?sink.endpoint, "DTMF digit detected");
             (sink.handler)(digit);
         }
     }

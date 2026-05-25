@@ -269,7 +269,7 @@ impl StepIvrApp {
                     }
                     ActionResult::ChainedTo(next) => {
                         self.current_node = Some(next);
-                        (AppAction::Continue, "chain_next")
+                        return Box::pin(self.__exec_node(ctrl, ctx)).await;
                     }
                     ActionResult::WaitFor(_) => (AppAction::Continue, "continue"),
                 };
@@ -514,6 +514,26 @@ impl StepIvrApp {
             if node.action.is_dtmf_menu() {
                 self.pending_menu = Some(self.build_pending_menu(&node.action));
             }
+        }
+        if matches!(&result, ActionResult::WaitFor(WaitEvent::NoAudio)) {
+            if node.action.is_dtmf_menu() {
+                self.pending_menu = Some(self.build_pending_menu(&node.action));
+                if let Some(ref menu) = self.pending_menu {
+                    ctrl.set_timeout(
+                        "ivr_dtmf_timeout",
+                        Duration::from_millis(menu.max_retries as u64 * 5000),
+                    );
+                }
+                return Ok(ActionResult::WaitFor(WaitEvent::AudioComplete {
+                    interrupted: true,
+                }));
+            }
+            let fallback = self
+                .request_next(Some(ProviderEvent::Error {
+                    reason: "TTS service not available".into(),
+                }))
+                .await?;
+            return Ok(ActionResult::ChainedTo(fallback));
         }
         Ok(result)
     }
@@ -1430,23 +1450,23 @@ mod tests {
 
         let mut stack = MockCallStack::run(Box::new(app), "1001", "2000");
 
-        // 1. Session start → Python returns TTS Prompt (interruptible)
+        // 1. Session start → Python returns TTS Prompt
+        //    TTS falls back to edge-cli → synthesized file plays
         stack
             .assert_cmd(1000, "accept", |c| matches!(c, CallCommand::Answer { .. }))
             .await;
         stack
-            .assert_cmd(2000, "play:tts", |c| {
+            .assert_cmd(3000, "play:prompt", |c| {
                 matches!(
                     c,
                     CallCommand::Play {
                         source: crate::call::domain::MediaSource::File { path }, ..
-                    } if path.starts_with("tts://IVR step")
+                    } if path.contains("rustpbx_tts_cache")
                 )
             })
             .await;
 
         // 2. Send DTMF "2" while prompt is playing → Transfer("agent")
-        //    (no pending_menu, so dtmf goes directly to provider)
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         let _ = stack.drain_cmds();
         stack.dtmf("2");
