@@ -1,7 +1,8 @@
 use sea_orm::entity::prelude::*;
 use sea_orm_migration::prelude::*;
 use sea_orm_migration::schema::{
-    boolean, integer, json_null, string, string_null, text_null, timestamp, timestamp_null,
+    boolean, integer, json_null, string_len, string_len_null, text_null,
+    timestamp_with_time_zone as timestamp, timestamp_with_time_zone_null as timestamp_null,
 };
 use sea_orm_migration::sea_query::{ColumnDef, ForeignKeyAction as MigrationForeignKeyAction};
 use sea_query::Expr;
@@ -147,29 +148,27 @@ impl MigrationTrait for Migration {
                             .auto_increment()
                             .primary_key(),
                     )
-                    .col(string(Column::Name).char_len(160))
+                    .col(string_len(Column::Name, 160))
                     .col(text_null(Column::Description))
                     .col(
-                        string(Column::Direction)
-                            .char_len(32)
+                        string_len(Column::Direction, 32)
                             .default(RoutingDirection::default().as_str()),
                     )
                     .col(integer(Column::Priority).not_null().default(100))
                     .col(boolean(Column::IsActive).default(true))
                     .col(
-                        string(Column::SelectionStrategy)
-                            .char_len(32)
+                        string_len(Column::SelectionStrategy, 32)
                             .default(RoutingSelectionStrategy::default().as_str()),
                     )
-                    .col(string_null(Column::HashKey).char_len(120))
+                    .col(string_len_null(Column::HashKey, 120))
                     .col(ColumnDef::new(Column::SourceTrunkId).big_integer().null())
                     .col(ColumnDef::new(Column::DefaultTrunkId).big_integer().null())
-                    .col(string_null(Column::SourcePattern).char_len(160))
-                    .col(string_null(Column::DestinationPattern).char_len(160))
+                    .col(string_len_null(Column::SourcePattern, 160))
+                    .col(string_len_null(Column::DestinationPattern, 160))
                     .col(json_null(Column::HeaderFilters))
                     .col(json_null(Column::RewriteRules))
                     .col(json_null(Column::TargetTrunks))
-                    .col(string_null(Column::Owner).char_len(120))
+                    .col(string_len_null(Column::Owner, 120))
                     .col(json_null(Column::Notes))
                     .col(json_null(Column::Metadata))
                     .col(timestamp(Column::CreatedAt).default(Expr::current_timestamp()))

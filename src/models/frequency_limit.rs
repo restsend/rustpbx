@@ -72,10 +72,14 @@ impl MigrationTrait for Migration {
                             .not_null(),
                     )
                     .col(MigrationColumnDef::new(Column::Count).unsigned().not_null())
-                    .col(MigrationColumnDef::new(Column::WindowEnd).timestamp())
+                    .col(
+                        MigrationColumnDef::new(Column::WindowEnd)
+                            .timestamp_with_time_zone()
+                            .null(),
+                    )
                     .col(
                         MigrationColumnDef::new(Column::UpdatedAt)
-                            .timestamp()
+                            .timestamp_with_time_zone()
                             .not_null()
                             .default(Expr::current_timestamp()),
                     )

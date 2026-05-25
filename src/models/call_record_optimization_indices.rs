@@ -63,16 +63,20 @@ impl MigrationTrait for Migration {
             )
             .await?;
 
-        manager
-            .drop_index(
-                Index::drop()
-                    .if_exists()
-                    .name("idx_rustpbx_call_records_tags")
-                    .table(table)
-                    .to_owned(),
-            )
-            .await
-            .ok();
+        if manager
+            .has_index("rustpbx_call_records", "idx_rustpbx_call_records_tags")
+            .await?
+        {
+            manager
+                .drop_index(
+                    Index::drop()
+                        .name("idx_rustpbx_call_records_tags")
+                        .table(table)
+                        .to_owned(),
+                )
+                .await
+                .ok();
+        }
 
         manager
             .drop_index(

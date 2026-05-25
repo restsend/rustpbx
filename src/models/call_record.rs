@@ -2,8 +2,8 @@ use sea_orm::Set;
 use sea_orm::entity::prelude::*;
 use sea_orm_migration::prelude::*;
 use sea_orm_migration::schema::{
-    boolean, integer, integer_null, json_null, string, string_null, text_null, timestamp,
-    timestamp_null,
+    boolean, integer, integer_null, json_null, string_len, string_len_null, text_null,
+    timestamp_with_time_zone as timestamp, timestamp_with_time_zone_null as timestamp_null,
 };
 use sea_orm_migration::sea_query::{ColumnDef, ForeignKeyAction as MigrationForeignKeyAction};
 use sea_query::Expr;
@@ -334,36 +334,32 @@ impl MigrationTrait for Migration {
                             .primary_key()
                             .auto_increment(),
                     )
-                    .col(string(Column::CallId).char_len(120))
-                    .col(string_null(Column::DisplayId).char_len(120))
-                    .col(string(Column::Direction).char_len(16))
-                    .col(string(Column::Status).char_len(32))
+                    .col(string_len(Column::CallId, 120))
+                    .col(string_len_null(Column::DisplayId, 120))
+                    .col(string_len(Column::Direction, 16))
+                    .col(string_len(Column::Status, 32))
                     .col(timestamp(Column::StartedAt).default(Expr::current_timestamp()))
                     .col(timestamp_null(Column::EndedAt))
                     .col(integer(Column::DurationSecs).not_null().default(0))
-                    .col(string_null(Column::FromNumber).char_len(64))
-                    .col(string_null(Column::ToNumber).char_len(64))
-                    .col(string_null(Column::CallerName).char_len(160))
-                    .col(string_null(Column::AgentName).char_len(160))
-                    .col(string_null(Column::Queue).char_len(120))
+                    .col(string_len_null(Column::FromNumber, 64))
+                    .col(string_len_null(Column::ToNumber, 64))
+                    .col(string_len_null(Column::CallerName, 160))
+                    .col(string_len_null(Column::AgentName, 160))
+                    .col(string_len_null(Column::Queue, 120))
                     .col(ColumnDef::new(Column::DepartmentId).big_integer().null())
                     .col(ColumnDef::new(Column::ExtensionId).big_integer().null())
                     .col(ColumnDef::new(Column::SipTrunkId).big_integer().null())
                     .col(ColumnDef::new(Column::RouteId).big_integer().null())
-                    .col(string_null(Column::SipGateway).char_len(160))
-                    .col(string_null(Column::RewriteOriginalFrom).char_len(64))
-                    .col(string_null(Column::RewriteOriginalTo).char_len(64))
+                    .col(string_len_null(Column::SipGateway, 160))
+                    .col(string_len_null(Column::RewriteOriginalFrom, 64))
+                    .col(string_len_null(Column::RewriteOriginalTo, 64))
                     .col(text_null(Column::CallerUri))
                     .col(text_null(Column::CalleeUri))
-                    .col(string_null(Column::RecordingUrl).char_len(255))
+                    .col(string_len_null(Column::RecordingUrl, 255))
                     .col(integer_null(Column::RecordingDurationSecs))
                     .col(boolean(Column::HasTranscript).default(false))
-                    .col(
-                        string(Column::TranscriptStatus)
-                            .char_len(32)
-                            .default("pending"),
-                    )
-                    .col(string_null(Column::TranscriptLanguage).char_len(16))
+                    .col(string_len(Column::TranscriptStatus, 32).default("pending"))
+                    .col(string_len_null(Column::TranscriptLanguage, 16))
                     .col(json_null(Column::Tags))
                     .col(json_null(Column::LegTimeline))
                     .col(json_null(Column::Metadata))
