@@ -2,14 +2,19 @@
 """Step-by-step IVR Provider — stdlib only (http.server, json, threading).
 
 Demonstrates the external provider protocol for rustpbx step-mode IVR.
+Supports: TTS welcome prompt, get current time (press 1), transfer to
+human agent (press 2).
 
 Run:
     python3 examples/step_ivr_provider.py [port]
 
 Test:
-    curl -X POST http://localhost:8080/ivr/step \\
-         -H "Content-Type: application/json" \\
+    curl -X POST http://localhost:8080/ivr/step \
+         -H "Content-Type: application/json" \
          -d '{"session_id":"test","event":{"type":"session_start"},"caller":"1001","callee":"2000"}'
+
+Unit tests:
+    python3 -m unittest examples/step_ivr_provider.py
 """
 
 import json
@@ -18,9 +23,15 @@ import time
 from http.server import HTTPServer, BaseHTTPRequestHandler
 from threading import Lock
 
-PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8080
+try:
+    PORT = int(sys.argv[1])
+except (IndexError, ValueError):
+    PORT = 8080
 
 # ── Session Manager ──────────────────────────────────────────────────────────
+
+WELCOME_TEXT = "IVR step, press 1 to get current time, press 2 to transfer to a human agent"
+
 
 class IvrSession:
     """Per-call state machine. rustpbx calls POST /ivr/step on each event,
@@ -33,87 +44,55 @@ class IvrSession:
         self._menu_retries = 0
 
     def next_action(self, event):
-        """Determine next ActionNode based on current step + event."""
         ev_type = event.get("type", "")
 
-        # ── Step 1: initial greeting ──
         if self._step == "start":
             self._step = "wait_menu"
             return action_prompt(
-                "sounds/ivr/welcome.wav",
+                tts_text=WELCOME_TEXT,
                 interruptible=True,
-                next=action_dtmf_menu(
-                    greeting="sounds/ivr/menu.wav",
-                    entries={
-                        "1": action_transfer("2001"),
-                        "2": action_queue("support"),
-                        "0": action_transfer("operator"),
-                    },
-                    timeout_action=action_prompt(
-                        "sounds/ivr/timed_out.wav",
-                        next=action_repeat(),
-                    ),
-                    invalid_action=action_prompt(
-                        "sounds/ivr/invalid.wav",
-                        next=action_repeat(),
-                    ),
-                ),
             )
 
-        # ── Step 2: menu DTMF processing ──
         if self._step == "wait_menu":
             if ev_type == "dtmf":
                 digit = event.get("digit", "")
                 if digit == "1":
-                    return action_transfer("2001")
+                    now = time.strftime("%Y-%m-%d %H:%M:%S")
+                    return action_prompt(
+                        tts_text=f"The current time is {now}",
+                    )
                 elif digit == "2":
-                    return action_queue("support")
-                elif digit == "0":
-                    return action_transfer("operator")
+                    return action_transfer("agent")
                 else:
                     self._menu_retries += 1
                     if self._menu_retries >= 3:
                         return action_hangup()
                     return action_prompt(
-                        "sounds/ivr/invalid.wav",
-                        next=action_repeat(),
+                        tts_text="Invalid option. " + WELCOME_TEXT,
+                        interruptible=True,
                     )
             elif ev_type == "dtmf_timeout":
+                return action_hangup()
+            elif ev_type == "audio_complete":
                 return action_prompt(
-                    "sounds/ivr/timed_out.wav",
-                    next=action_repeat(),
+                    tts_text=WELCOME_TEXT,
+                    interruptible=True,
                 )
 
-        # ── Unknown step / event: hangup ──
         return action_hangup()
 
 
 # ── ActionNode builders ──────────────────────────────────────────────────────
 
-def action_prompt(file, tts_text=None, interruptible=False, next=None):
-    node = {"type": "prompt", "file": file, "interruptible": interruptible}
+
+def action_prompt(file=None, tts_text=None, interruptible=False, next=None):
+    node = {"type": "prompt", "interruptible": interruptible}
     if tts_text:
         node["tts_text"] = tts_text
-        del node["file"]
+    if file:
+        node["file"] = file
     if next is not None:
         node["next"] = next
-    return node
-
-
-def action_dtmf_menu(entries, greeting="sounds/ivr/menu.wav",
-                     timeout_action=None, invalid_action=None,
-                     timeout_ms=5000, max_retries=3):
-    node = {
-        "type": "dtmf_menu",
-        "greeting": greeting,
-        "timeout_ms": timeout_ms,
-        "max_retries": max_retries,
-        "entries": entries,
-    }
-    if timeout_action is not None:
-        node["timeout_action"] = timeout_action
-    if invalid_action is not None:
-        node["invalid_action"] = invalid_action
     return node
 
 
@@ -121,19 +100,12 @@ def action_transfer(target):
     return {"type": "transfer", "target": target}
 
 
-def action_queue(target):
-    return {"type": "queue", "target": target}
-
-
 def action_hangup():
     return {"type": "hangup"}
 
 
-def action_repeat():
-    return {"type": "repeat"}
-
-
 # ── HTTP Server ──────────────────────────────────────────────────────────────
+
 
 class IvrStepHandler(BaseHTTPRequestHandler):
     """Handle POST /ivr/step — the main provider endpoint."""
@@ -152,8 +124,6 @@ class IvrStepHandler(BaseHTTPRequestHandler):
             self._handle_end()
         else:
             self._send_json(404, {"error": "not_found", "path": path})
-
-    # ── Session endpoints ──────────────────────────────────────────────
 
     def _handle_start(self):
         """POST /ivr/step/start — called when a new call enters the IVR."""
@@ -181,7 +151,6 @@ class IvrStepHandler(BaseHTTPRequestHandler):
         with self.sessions_lock:
             session = self.sessions.get(session_id)
 
-        # If session not found, create a new one
         if session is None:
             session = IvrSession(
                 body.get("caller", ""),
@@ -193,8 +162,6 @@ class IvrStepHandler(BaseHTTPRequestHandler):
         event = body.get("event", {"type": "session_start"})
         node = session.next_action(event)
         self._send_json(200, node)
-
-    # ── Helpers ────────────────────────────────────────────────────────
 
     def _read_body(self):
         length = int(self.headers.get("Content-Length", 0))
@@ -208,11 +175,11 @@ class IvrStepHandler(BaseHTTPRequestHandler):
         self.wfile.write(json.dumps(data).encode("utf-8"))
 
     def log_message(self, format, *args):
-        # Quiet logging: prefix with [IVR Provider]
         sys.stderr.write(f"[IVR Provider] {args[0]} {args[1]} {args[2]}\n")
 
 
 # ── Server Start ─────────────────────────────────────────────────────────────
+
 
 def main():
     server = HTTPServer(("", PORT), IvrStepHandler)
@@ -231,6 +198,65 @@ def main():
     except KeyboardInterrupt:
         print("\n[IVR Provider] Shutting down...")
         server.server_close()
+
+
+# ── Unit Tests ────────────────────────────────────────────────────────────────
+
+
+import unittest
+
+
+class TestIvrSession(unittest.TestCase):
+
+    def setUp(self):
+        self.sess = IvrSession("1001", "2000")
+
+    def test_start_returns_interruptible_prompt(self):
+        node = self.sess.next_action({"type": "session_start"})
+        self.assertEqual(node["type"], "prompt")
+        self.assertTrue(node["interruptible"])
+        self.assertIn("IVR step", node.get("tts_text", ""))
+
+    def test_dtmf_1_returns_time_prompt(self):
+        self.sess.next_action({"type": "session_start"})
+        node = self.sess.next_action({"type": "dtmf", "digit": "1"})
+        self.assertEqual(node["type"], "prompt")
+        self.assertIn("current time", node.get("tts_text", ""))
+
+    def test_dtmf_2_returns_transfer(self):
+        self.sess.next_action({"type": "session_start"})
+        node = self.sess.next_action({"type": "dtmf", "digit": "2"})
+        self.assertEqual(node["type"], "transfer")
+        self.assertEqual(node["target"], "agent")
+
+    def test_invalid_digit_returns_prompt(self):
+        self.sess.next_action({"type": "session_start"})
+        node = self.sess.next_action({"type": "dtmf", "digit": "9"})
+        self.assertEqual(node["type"], "prompt")
+        self.assertTrue(node["interruptible"])
+        self.assertIn("Invalid option", node.get("tts_text", ""))
+
+    def test_invalid_digit_three_times_hangup(self):
+        self.sess.next_action({"type": "session_start"})
+        for _ in range(3):
+            node = self.sess.next_action({"type": "dtmf", "digit": "9"})
+        self.assertEqual(node["type"], "hangup")
+
+    def test_dtmf_timeout_returns_hangup(self):
+        self.sess.next_action({"type": "session_start"})
+        node = self.sess.next_action({"type": "dtmf_timeout"})
+        self.assertEqual(node["type"], "hangup")
+
+    def test_audio_complete_returns_welcome_prompt(self):
+        self.sess.next_action({"type": "session_start"})
+        node = self.sess.next_action({"type": "audio_complete"})
+        self.assertEqual(node["type"], "prompt")
+        self.assertTrue(node["interruptible"])
+
+    def test_unknown_event_hangup(self):
+        self.sess.next_action({"type": "session_start"})
+        node = self.sess.next_action({"type": "unknown_event"})
+        self.assertEqual(node["type"], "hangup")
 
 
 if __name__ == "__main__":

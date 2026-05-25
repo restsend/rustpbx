@@ -516,6 +516,12 @@ pub enum SipFlowUploadConfig {
 }
 
 #[derive(Debug, Deserialize, Clone, Serialize)]
+pub struct SipFlowClusterNode {
+    pub udp: String,
+    pub http: String,
+}
+
+#[derive(Debug, Deserialize, Clone, Serialize)]
 #[serde(tag = "type")]
 #[serde(rename_all = "snake_case")]
 pub enum SipFlowConfig {
@@ -533,8 +539,12 @@ pub enum SipFlowConfig {
         upload: Option<SipFlowUploadConfig>,
     },
     Remote {
-        udp_addr: String,
-        http_addr: String,
+        #[serde(default)]
+        nodes: Vec<SipFlowClusterNode>,
+        #[serde(default)]
+        udp_addr: Option<String>,
+        #[serde(default)]
+        http_addr: Option<String>,
         #[serde(default = "default_sipflow_timeout")]
         timeout_secs: u64,
         #[serde(default)]

@@ -1098,28 +1098,52 @@
                         <!-- Remote Backend Config -->
                         <div x-show="sipflowDraft.backend_type === 'remote'"
                             class="space-y-4 rounded-lg border border-slate-200 bg-slate-50 p-4">
-                            <div class="grid gap-4 md:grid-cols-2">
-                                <div>
+                            <div>
+                                <div class="flex items-center justify-between">
                                     <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">{{
-                                        "settings_page.udp_address" | t }}</label>
-                                    <input type="text" x-model="sipflowDraft.remote_udp_addr"
+                                        "settings_page.sipflow_nodes" | t }}</label>
+                                    <button type="button" @click="sipflowDraft.remote_nodes.push({ udp: '', http: '' })"
                                         :disabled="sipflowProcessing"
-                                        class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                        placeholder="192.168.1.100:3000">
-                                    <p class="mt-1 text-xs text-slate-500">{{ "settings_page.udp_address_hint" | t }}
-                                    </p>
+                                        class="inline-flex items-center gap-1 rounded-md bg-white px-2 py-1 text-xs font-medium text-sky-600 shadow-sm ring-1 ring-sky-200 transition hover:bg-sky-50 disabled:cursor-not-allowed disabled:opacity-50">
+                                        <svg class="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                                d="M12 4v16m8-8H4" />
+                                        </svg>
+                                        {{ "settings_page.sipflow_add_node" | t }}
+                                    </button>
                                 </div>
-                                <div>
-                                    <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">{{
-                                        "settings_page.http_address" | t }}</label>
-                                    <input type="text" x-model="sipflowDraft.remote_http_addr"
-                                        :disabled="sipflowProcessing"
-                                        class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                        placeholder="http://192.168.1.100:3001">
-                                    <p class="mt-1 text-xs text-slate-500">{{ "settings_page.http_address_hint" | t }}
-                                    </p>
-                                </div>
+                                <p class="mt-1 text-xs text-slate-500">{{ "settings_page.udp_address_hint" | t }}</p>
                             </div>
+                            <template x-for="(node, idx) in sipflowDraft.remote_nodes" :key="idx">
+                                <div class="flex items-start gap-2 rounded-md border border-slate-200 bg-white p-3">
+                                    <div class="flex-1 space-y-2">
+                                        <div class="grid gap-2 md:grid-cols-2">
+                                            <div>
+                                                <label class="block text-xs font-medium text-slate-500">{{
+                                                    "settings_page.udp_address" | t }}</label>
+                                                <input type="text" x-model="node.udp" :disabled="sipflowProcessing"
+                                                    class="mt-0.5 w-full rounded-md border border-slate-200 px-2.5 py-1.5 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                                    placeholder="192.168.1.100:3000">
+                                            </div>
+                                            <div>
+                                                <label class="block text-xs font-medium text-slate-500">{{
+                                                    "settings_page.http_address" | t }}</label>
+                                                <input type="text" x-model="node.http" :disabled="sipflowProcessing"
+                                                    class="mt-0.5 w-full rounded-md border border-slate-200 px-2.5 py-1.5 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                                    placeholder="http://192.168.1.100:3001">
+                                            </div>
+                                        </div>
+                                    </div>
+                                    <button type="button" @click="sipflowDraft.remote_nodes.splice(idx, 1)"
+                                        :disabled="sipflowProcessing || sipflowDraft.remote_nodes.length <= 1"
+                                        class="mt-5 inline-flex flex-none items-center justify-center rounded-md border border-red-200 bg-white px-2 py-1.5 text-xs font-medium text-red-500 transition hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-40">
+                                        <svg class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                                d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                                        </svg>
+                                    </button>
+                                </div>
+                            </template>
                             <div>
                                 <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">{{
                                     "settings_page.timeout_label" | t }}</label>
@@ -2820,8 +2844,7 @@
                 local_root: '',
                 local_flush_count: 1000,
                 local_flush_interval_secs: 5,
-                remote_udp_addr: '',
-                remote_http_addr: '',
+                remote_nodes: [{ udp: '', http: '' }],
                 remote_timeout_secs: 10,
             },
             sipflowProcessing: false,
@@ -5290,6 +5313,15 @@
                 const config = this.sipflowSettings.config || {};
                 const backendType = this.sipflowSettings.backend_type || 'none';
 
+                let remoteNodes = [{ udp: '', http: '' }];
+                if (backendType === 'remote') {
+                    if (Array.isArray(config.nodes) && config.nodes.length > 0) {
+                        remoteNodes = config.nodes.map(n => ({ udp: n.udp || '', http: n.http || '' }));
+                    } else if (config.udp_addr || config.http_addr) {
+                        remoteNodes = [{ udp: config.udp_addr || '', http: config.http_addr || '' }];
+                    }
+                }
+
                 this.sipflowDraft = {
                     backend_type: backendType,
                     // Local backend
@@ -5298,8 +5330,7 @@
                     local_flush_count: backendType === 'local' ? (config.flush_count || 1000) : 1000,
                     local_flush_interval_secs: backendType === 'local' ? (config.flush_interval_secs || 5) : 5,
                     // Remote backend
-                    remote_udp_addr: backendType === 'remote' ? (config.udp_addr || '') : '',
-                    remote_http_addr: backendType === 'remote' ? (config.http_addr || '') : '',
+                    remote_nodes: remoteNodes,
                     remote_timeout_secs: backendType === 'remote' ? (config.timeout_secs || 10) : 10,
                 };
             },
@@ -5330,9 +5361,10 @@
                         flush_interval_secs: this.sipflowDraft.local_flush_interval_secs || 5,
                     };
                 } else if (backendType === 'remote') {
-                    const udp_addr = (this.sipflowDraft.remote_udp_addr || '').trim();
-                    const http_addr = (this.sipflowDraft.remote_http_addr || '').trim();
-                    if (!udp_addr || !http_addr) {
+                    const nodes = (this.sipflowDraft.remote_nodes || [])
+                        .map(n => ({ udp: (n.udp || '').trim(), http: (n.http || '').trim() }))
+                        .filter(n => n.udp && n.http);
+                    if (nodes.length === 0) {
                         this.$dispatch('toast', {
                             title: this.tt('settings_page.missing_information'),
                             message: this.tt('settings_page.sipflow_remote_required'),
@@ -5340,8 +5372,7 @@
                         return;
                     }
                     config = {
-                        udp_addr,
-                        http_addr,
+                        nodes,
                         timeout_secs: this.sipflowDraft.remote_timeout_secs || 10,
                     };
                 }

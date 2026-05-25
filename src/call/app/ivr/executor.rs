@@ -1430,55 +1430,34 @@ mod tests {
 
         let mut stack = MockCallStack::run(Box::new(app), "1001", "2000");
 
-        // 1. Session start → Python returns Prompt("sounds/ivr/welcome.wav")
+        // 1. Session start → Python returns TTS Prompt (interruptible)
         stack
             .assert_cmd(1000, "accept", |c| matches!(c, CallCommand::Answer { .. }))
             .await;
         stack
-            .assert_cmd(2000, "play:welcome", |c| {
+            .assert_cmd(2000, "play:tts", |c| {
                 matches!(
                     c,
                     CallCommand::Play {
                         source: crate::call::domain::MediaSource::File { path }, ..
-                    } if path == "sounds/ivr/welcome.wav"
+                    } if path.starts_with("tts://IVR step")
                 )
             })
             .await;
 
-        // 2. Audio complete → next chain → DtmfMenu greeting
-        stack.audio_complete("ivr_prompt");
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-        stack
-            .assert_cmd(2000, "play:menu", |c| {
-                matches!(
-                    c,
-                    CallCommand::Play {
-                        source: crate::call::domain::MediaSource::File { path }, ..
-                    } if path == "sounds/ivr/menu.wav"
-                )
-            })
-            .await;
-
-        // 3. Menu audio complete → wait for DTMF
-        stack.audio_complete("ivr_menu_greeting");
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-
-        // 4. Send DTMF "1" → Python returns Transfer("2001")
+        // 2. Send DTMF "2" while prompt is playing → Transfer("agent")
+        //    (no pending_menu, so dtmf goes directly to provider)
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         let _ = stack.drain_cmds();
-        stack.dtmf("1");
+        stack.dtmf("2");
 
-        // Expected: StopPlayback (from dtmf handler) then Transfer
-        stack
-            .assert_cmd(5000, "stop", |c| {
-                matches!(c, CallCommand::StopPlayback { .. })
-            })
-            .await;
         stack
             .assert_cmd(
                 5000,
-                "transfer:2001",
-                |c| matches!(c, CallCommand::Transfer { target, .. } if target == "2001"),
+                "transfer:agent",
+                |c| {
+                    matches!(c, CallCommand::Transfer { target, .. } if target == "agent")
+                },
             )
             .await;
     }

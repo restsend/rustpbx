@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::Duration;
-use tracing::warn;
+use tracing::{info, warn};
 
 // ── Provider Trait ───────────────────────────────────────────────────────────
 
@@ -316,25 +316,61 @@ impl ActionProvider for StepProvider {
 
     async fn next_action(&self, ctx: ProviderContext) -> anyhow::Result<ActionNode> {
         let mut last_err = anyhow::anyhow!("no retry attempted");
+        let body_str = serde_json::to_string(&ctx).unwrap_or_default();
         for attempt in 0..self.retry.max_retries {
-            let mut req = self.http_client.post(&self.url).json(&ctx);
+            let start = std::time::Instant::now();
+            let mut req = self.http_client.post(&self.url);
             for (k, v) in &self.headers {
                 req = req.header(k, v);
             }
+            info!(
+                url = %self.url,
+                method = "POST",
+                headers = ?self.headers,
+                body = %body_str,
+                attempt = attempt,
+                "StepProvider next_action request"
+            );
+            let req = req.json(&ctx);
             match tokio::time::timeout(Duration::from_millis(self.retry.timeout_ms), req.send())
                 .await
             {
                 Ok(Ok(resp)) => {
-                    if resp.status().is_success() {
-                        return resp
-                            .json::<ActionNode>()
-                            .await
+                    let status = resp.status();
+                    let elapsed = start.elapsed();
+                    let body = resp.text().await.unwrap_or_default();
+                    info!(
+                        url = %self.url,
+                        status = %status,
+                        duration_ms = %elapsed.as_millis(),
+                        response_body = %body,
+                        "StepProvider next_action response"
+                    );
+                    if status.is_success() {
+                        return serde_json::from_str(&body)
                             .map_err(|e| anyhow::anyhow!("failed to parse ActionNode: {}", e));
                     }
-                    last_err = anyhow::anyhow!("HTTP {}", resp.status());
+                    last_err = anyhow::anyhow!("HTTP {}", status);
                 }
-                Ok(Err(e)) => last_err = anyhow::anyhow!("request failed: {}", e),
-                Err(_) => last_err = anyhow::anyhow!("timeout"),
+                Ok(Err(e)) => {
+                    let elapsed = start.elapsed();
+                    last_err = anyhow::anyhow!("request failed: {}", e);
+                    info!(
+                        url = %self.url,
+                        error = %e,
+                        duration_ms = %elapsed.as_millis(),
+                        "StepProvider next_action error"
+                    );
+                }
+                Err(_) => {
+                    let elapsed = start.elapsed();
+                    last_err = anyhow::anyhow!("timeout");
+                    info!(
+                        url = %self.url,
+                        duration_ms = %elapsed.as_millis(),
+                        "StepProvider next_action timeout"
+                    );
+                }
             }
             if attempt < self.retry.max_retries - 1 {
                 tokio::time::sleep(Duration::from_millis(100)).await;
@@ -348,48 +384,118 @@ impl ActionProvider for StepProvider {
     }
 
     async fn on_session_start(&self, ctx: &SessionContext) -> anyhow::Result<()> {
-        let mut req = self
-            .http_client
-            .post(format!("{}/start", self.url))
-            .json(ctx);
+        let url = format!("{}/start", self.url);
+        let body_str = serde_json::to_string(ctx).unwrap_or_default();
+        let mut req = self.http_client.post(&url);
         for (k, v) in &self.headers {
             req = req.header(k, v);
         }
-        if let Err(e) = req.send().await {
-            warn!(url = %self.url, error = %e, "StepProvider on_session_start failed");
+        info!(
+            url = %url,
+            method = "POST",
+            headers = ?self.headers,
+            body = %body_str,
+            "StepProvider on_session_start request"
+        );
+        let start = std::time::Instant::now();
+        let req = req.json(ctx);
+        match req.send().await {
+            Ok(resp) => {
+                let elapsed = start.elapsed();
+                info!(
+                    url = %url,
+                    status = %resp.status(),
+                    duration_ms = %elapsed.as_millis(),
+                    "StepProvider on_session_start response"
+                );
+            }
+            Err(e) => {
+                let elapsed = start.elapsed();
+                warn!(
+                    url = %url,
+                    error = %e,
+                    duration_ms = %elapsed.as_millis(),
+                    "StepProvider on_session_start failed"
+                );
+            }
         }
         Ok(())
     }
 
     async fn on_session_end(&self, reason: &EndReason) -> anyhow::Result<()> {
-        let mut req = self
-            .http_client
-            .post(format!("{}/end", self.url))
-            .json(&serde_json::json!({
-                "reason": format!("{:?}", reason),
-            }));
+        let url = format!("{}/end", self.url);
+        let body = serde_json::json!({ "reason": format!("{:?}", reason) });
+        let body_str = serde_json::to_string(&body).unwrap_or_default();
+        let mut req = self.http_client.post(&url).json(&body);
         for (k, v) in &self.headers {
             req = req.header(k, v);
         }
-        if let Err(e) = req.send().await {
-            warn!(url = %self.url, reason = ?reason, error = %e, "StepProvider on_session_end failed");
+        info!(
+            url = %url,
+            method = "POST",
+            headers = ?self.headers,
+            body = %body_str,
+            "StepProvider on_session_end request"
+        );
+        let start = std::time::Instant::now();
+        match req.send().await {
+            Ok(resp) => {
+                let elapsed = start.elapsed();
+                info!(
+                    url = %url,
+                    status = %resp.status(),
+                    duration_ms = %elapsed.as_millis(),
+                    "StepProvider on_session_end response"
+                );
+            }
+            Err(e) => {
+                let elapsed = start.elapsed();
+                warn!(
+                    url = %url,
+                    error = %e,
+                    duration_ms = %elapsed.as_millis(),
+                    "StepProvider on_session_end failed"
+                );
+            }
         }
         Ok(())
     }
 
     async fn on_local_dtmf_match(&self, digit: &str, action: &ActionNode) {
-        let mut req = self
-            .http_client
-            .post(format!("{}/dtmf-match", self.url))
-            .json(&serde_json::json!({
-                "digit": digit,
-                "action": action,
-            }));
+        let url = format!("{}/dtmf-match", self.url);
+        let body = serde_json::json!({ "digit": digit, "action": action });
+        let body_str = serde_json::to_string(&body).unwrap_or_default();
+        let mut req = self.http_client.post(&url).json(&body);
         for (k, v) in &self.headers {
             req = req.header(k, v);
         }
-        if let Err(e) = req.send().await {
-            warn!(url = %self.url, digit = %digit, error = %e, "StepProvider on_local_dtmf_match failed");
+        info!(
+            url = %url,
+            method = "POST",
+            headers = ?self.headers,
+            body = %body_str,
+            "StepProvider on_local_dtmf_match request"
+        );
+        let start = std::time::Instant::now();
+        match req.send().await {
+            Ok(resp) => {
+                let elapsed = start.elapsed();
+                info!(
+                    url = %url,
+                    status = %resp.status(),
+                    duration_ms = %elapsed.as_millis(),
+                    "StepProvider on_local_dtmf_match response"
+                );
+            }
+            Err(e) => {
+                let elapsed = start.elapsed();
+                warn!(
+                    url = %url,
+                    error = %e,
+                    duration_ms = %elapsed.as_millis(),
+                    "StepProvider on_local_dtmf_match failed"
+                );
+            }
         }
     }
 }

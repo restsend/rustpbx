@@ -5,7 +5,7 @@ use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, Local};
 
-use crate::config::SipFlowConfig;
+use crate::config::{SipFlowClusterNode, SipFlowConfig};
 use crate::sipflow::SipFlowItem;
 
 #[async_trait]
@@ -76,11 +76,26 @@ pub fn create_backend(config: &SipFlowConfig) -> Result<Box<dyn SipFlowBackend>>
         )
         .map(|b| Box::new(b) as Box<dyn SipFlowBackend>),
         SipFlowConfig::Remote {
+            nodes,
             udp_addr,
             http_addr,
             timeout_secs,
             ..
-        } => remote::RemoteBackend::new(udp_addr.clone(), http_addr.clone(), *timeout_secs)
-            .map(|b| Box::new(b) as Box<dyn SipFlowBackend>),
+        } => {
+            let resolved = if !nodes.is_empty() {
+                nodes.clone()
+            } else if let (Some(udp), Some(http)) = (udp_addr, http_addr) {
+                vec![SipFlowClusterNode {
+                    udp: udp.clone(),
+                    http: http.clone(),
+                }]
+            } else {
+                anyhow::bail!(
+                    "Remote backend requires either `nodes` or both `udp_addr` and `http_addr`"
+                )
+            };
+            remote::RemoteBackend::new(resolved, *timeout_secs)
+                .map(|b| Box::new(b) as Box<dyn SipFlowBackend>)
+        }
     }
 }

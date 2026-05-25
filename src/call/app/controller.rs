@@ -407,6 +407,16 @@ impl CallController {
             }
         }
     }
+
+    /// Inject an AudioComplete event into the app event loop.
+    ///
+    /// Used internally when no audio file is available to play
+    /// (e.g., TTS text was requested but no TTS service is configured)
+    /// so the application can continue to the next step instead of
+    /// waiting indefinitely for an AudioComplete event.
+    pub fn signal_audio_complete(&self, track_id: String, interrupted: bool) {
+        self.session.send_app_event(ControllerEvent::AudioComplete { track_id, interrupted });
+    }
 }
 
 #[cfg(test)]
