@@ -643,10 +643,11 @@ action = { type = "menu", menu = "root" }
         let config: IvrFileConfig = toml::from_str(toml_str).expect("parse TOML");
         let ivr = &config.ivr;
         assert_eq!(ivr.name, "main");
-        assert_eq!(ivr.root.greeting, "sounds/ivr/welcome.wav");
-        assert_eq!(ivr.root.entries.len(), 2);
-        assert_eq!(ivr.root.timeout_ms, 5000);
-        assert_eq!(ivr.root.max_retries, 3);
+        let root = ivr.root.as_ref().expect("root menu");
+        assert_eq!(root.greeting, "sounds/ivr/welcome.wav");
+        assert_eq!(root.entries.len(), 2);
+        assert_eq!(root.timeout_ms, 5000);
+        assert_eq!(root.max_retries, 3);
         let sales = ivr.menus.get("sales").expect("sales menu");
         assert_eq!(sales.entries.len(), 3);
         ivr.validate().expect("validation should pass");
@@ -821,7 +822,8 @@ key = "0"
 action = { type = "menu", menu = "root" }
 "#;
         let config: IvrFileConfig = toml::from_str(toml_str).expect("parse TOML");
-        assert_eq!(config.ivr.root.entries.len(), 9);
+        let root = config.ivr.root.as_ref().expect("root menu");
+        assert_eq!(root.entries.len(), 9);
         config.ivr.validate().expect("all refs valid");
     }
 

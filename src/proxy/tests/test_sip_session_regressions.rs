@@ -240,7 +240,6 @@ async fn build_session_on_server(
         original_caller: "sip:alice@rustpbx.com".to_string(),
         original_callee: "sip:ivr@rustpbx.com".to_string(),
         max_forwards: 70,
-        dtmf_digits: Vec::new(),
     };
 
     let caller_peer = Arc::new(MockMediaPeer::new());

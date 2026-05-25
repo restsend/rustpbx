@@ -14,6 +14,7 @@ use crate::proxy::routing::{
     RouteRule, SourceTrunk, TrunkConfig, build_source_trunk,
     matcher::{RouteResourceLookup, match_invite},
 };
+use crate::proxy::routing::{extract_from_user as routing_extract_from_user, extract_to_user as routing_extract_to_user};
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use audio_codec::CodecType;
@@ -27,8 +28,7 @@ use rsipstack::dialog::invitation::InviteOption;
 use rsipstack::sip::prelude::HeadersExt;
 use rsipstack::transaction::key::TransactionRole;
 use rsipstack::transaction::transaction::Transaction;
-use rsipstack::transport::SipConnection;
-use std::{collections::HashMap, net::IpAddr, path::PathBuf, sync::Arc};
+use std::{collections::HashMap, path::PathBuf, sync::Arc};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
@@ -81,7 +81,7 @@ fn q850_cause_from_status(code: &rsipstack::sip::StatusCode) -> u16 {
 }
 
 fn escape_reason_text(text: &str) -> String {
-    text.replace('\\', "\\\\").replace('"', "\\\"")
+    crate::proxy::routing::escape_sip_quoted(text)
 }
 
 /// Decide what to do when routing returned NotHandled (no explicit forward/queue).
@@ -115,6 +115,25 @@ pub fn q850_reason_value(code: &rsipstack::sip::StatusCode, detail: Option<&str>
     )
 }
 
+/// Verdict returned by a [`DialplanInspector`].
+///
+/// Allows an inspector to continue the chain, finalize the dialplan
+/// (skipping remaining inspectors), or reject the call outright.
+pub enum DialplanVerdict {
+    /// Pass the (possibly modified) dialplan to the next inspector.
+    Continue(Dialplan),
+    /// The dialplan is final — skip remaining inspectors.
+    Final(Dialplan),
+    /// Reject the call with the given error.
+    Reject(RouteError),
+}
+
+impl From<Dialplan> for DialplanVerdict {
+    fn from(dp: Dialplan) -> Self {
+        DialplanVerdict::Continue(dp)
+    }
+}
+
 #[async_trait]
 pub trait DialplanInspector: Send + Sync {
     async fn inspect_dialplan(
@@ -122,7 +141,7 @@ pub trait DialplanInspector: Send + Sync {
         dialplan: Dialplan,
         cookie: &TransactionCookie,
         original: &rsipstack::sip::Request,
-    ) -> Result<Dialplan, RouteError>;
+    ) -> DialplanVerdict;
 }
 
 /// Context passed to [`QueueLocationEnricher::enrich`].
@@ -334,9 +353,7 @@ impl DefaultRouteInvite {
             return build_source_trunk(name.clone(), config, direction);
         }
 
-        let via = origin.via_header().ok()?;
-        let (_, target) = SipConnection::parse_target_from_via(via).ok()?;
-        let ip: IpAddr = target.host.try_into().ok()?;
+        let ip = super::routing::extract_via_ip(origin)?;
         let name = self.data_context.find_trunk_by_ip(&ip).await?;
         let config = trunks.get(&name)?;
         build_source_trunk(name, config, direction)
@@ -344,19 +361,11 @@ impl DefaultRouteInvite {
 }
 
 fn extract_from_user(origin: &rsipstack::sip::Request) -> Option<String> {
-    origin
-        .from_header()
-        .ok()
-        .and_then(|header| header.uri().ok())
-        .and_then(|uri| uri.user().map(|u| u.to_string()))
+    routing_extract_from_user(origin)
 }
 
 fn extract_to_user(origin: &rsipstack::sip::Request) -> Option<String> {
-    origin
-        .to_header()
-        .ok()
-        .and_then(|header| header.uri().ok())
-        .and_then(|uri| uri.user().map(|u| u.to_string()))
+    routing_extract_to_user(origin)
 }
 
 fn resolve_callee_uri(origin: &rsipstack::sip::Request) -> Result<rsipstack::sip::Uri> {
@@ -1088,6 +1097,73 @@ impl CallModule {
         }
     }
 
+    async fn reply_route_error(
+        &self,
+        tx: &mut Transaction,
+        cookie: &TransactionCookie,
+        route_err: RouteError,
+    ) -> Result<()> {
+        if cookie.is_spam() {
+            return Ok(());
+        }
+        let code = route_err
+            .status
+            .unwrap_or(rsipstack::sip::StatusCode::ServerInternalError);
+        let reason_text = route_err.error.to_string();
+        let reason_value = if reason_text.contains(";cause=") {
+            reason_text.clone()
+        } else {
+            q850_reason_value(&code, Some(reason_text.as_str()))
+        };
+        self.report_failure(
+            tx,
+            cookie,
+            code.clone(),
+            Some(reason_text),
+            route_err.extensions,
+        );
+        tx.reply_with(
+            code,
+            vec![rsipstack::sip::Header::Other("Reason".into(), reason_value)],
+            None,
+        )
+        .await
+        .map_err(|e| anyhow!("Failed to send reply: {}", e))?;
+        Err(route_err.error)
+    }
+
+    fn extract_max_forwards(tx: &Transaction) -> u32 {
+        tx.original
+            .max_forwards_header()
+            .ok()
+            .and_then(|h| h.value().parse::<u32>().ok())
+            .unwrap_or(70)
+    }
+
+    async fn build_and_serve_dialplan(
+        &self,
+        tx: &mut Transaction,
+        cookie: TransactionCookie,
+        dialplan: Dialplan,
+    ) -> Result<()> {
+        let max_forwards = Self::extract_max_forwards(tx);
+        if max_forwards == 0 {
+            self.report_failure(
+                tx,
+                &cookie,
+                rsipstack::sip::StatusCode::TooManyHops,
+                None,
+                None,
+            );
+            tx.reply(rsipstack::sip::StatusCode::TooManyHops).await?;
+            return Ok(());
+        }
+        let builder = CallSessionBuilder::new(cookie, dialplan, max_forwards - 1)
+            .with_call_record_sender(self.inner.server.callrecord_sender.clone())
+            .with_cancel_token(self.inner.server.cancel_token.child_token());
+        builder.build_and_serve(self.inner.server.clone(), tx).await
+    }
+
     async fn build_dialplan(
         &self,
         tx: &mut Transaction,
@@ -1142,9 +1218,17 @@ impl CallModule {
             dialplan = dialplan.with_caller_contact(contact);
         }
         for inspector in &self.inner.server.dialplan_inspectors {
-            dialplan = inspector
+            match inspector
                 .inspect_dialplan(dialplan, &cookie, &tx.original)
-                .await?
+                .await
+            {
+                DialplanVerdict::Continue(dp) => dialplan = dp,
+                DialplanVerdict::Final(dp) => {
+                    dialplan = dp;
+                    break;
+                }
+                DialplanVerdict::Reject(err) => return Err(err),
+            }
         }
 
         // After dialplan inspectors have had a chance to fill in routes,
@@ -1264,57 +1348,24 @@ impl CallModule {
 
                 if conf_id.is_some() {
                     info!(%old_session_id, "Replaces target is in a conference; proceeding with seat replacement");
-                    // Proceed with normal call creation, then spawn background task to do seat replacement
-                    let dialplan = match self.build_dialplan(tx, cookie.clone(), &caller).await {
+                    let dialplan = self.build_dialplan(tx, cookie.clone(), &caller).await;
+                    let dialplan = match dialplan {
                         Ok(d) => d,
                         Err(route_err) => {
-                            if cookie.is_spam() {
-                                return Ok(());
-                            }
-                            let code = route_err
-                                .status
-                                .unwrap_or(rsipstack::sip::StatusCode::ServerInternalError);
-                            let reason_text = route_err.error.to_string();
-                            let reason_value = if reason_text.contains(";cause=") {
-                                reason_text.clone()
-                            } else {
-                                q850_reason_value(&code, Some(reason_text.as_str()))
-                            };
-                            self.report_failure(
-                                tx,
-                                &cookie,
-                                code.clone(),
-                                Some(reason_text),
-                                route_err.extensions,
-                            );
-                            tx.reply_with(
-                                code.clone(),
-                                vec![rsipstack::sip::Header::Other("Reason".into(), reason_value)],
-                                None,
-                            )
-                            .await
-                            .map_err(|e| anyhow!("Failed to send reply: {}", e))?;
-                            return Err(route_err.error);
+                            return self.reply_route_error(tx, &cookie, route_err).await;
                         }
                     };
 
-                    let max_forwards = if let Ok(header) = tx.original.max_forwards_header() {
-                        header.value().parse::<u32>().unwrap_or(70)
-                    } else {
-                        70
-                    };
-
+                    let server = self.inner.server.clone();
+                    let max_forwards = Self::extract_max_forwards(tx);
                     if max_forwards == 0 {
                         tx.reply(rsipstack::sip::StatusCode::TooManyHops).await?;
                         return Ok(());
                     }
-
                     let builder =
                         CallSessionBuilder::new(cookie.clone(), dialplan, max_forwards - 1)
                             .with_call_record_sender(self.inner.server.callrecord_sender.clone())
                             .with_cancel_token(self.inner.server.cancel_token.child_token());
-
-                    let server = self.inner.server.clone();
                     let result = builder.build_and_serve(server.clone(), tx).await;
 
                     // Spawn background task to perform seat replacement once new call answers
@@ -1324,42 +1375,36 @@ impl CallModule {
                         .map(|h| h.value().to_string())
                         .unwrap_or_default();
                     if !new_session_id.is_empty() {
+                        let reg = registry.clone();
+                        let sid = new_session_id.clone();
                         tokio::spawn(async move {
-                            // Poll registry until new call is answered (Talking)
-                            for _ in 0..300 {
-                                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                                if let Some(entry) = registry.get(&new_session_id)
-                                    && matches!(entry.status, crate::proxy::active_call_registry::ActiveProxyCallStatus::Talking) {
-                                        info!(%new_session_id, "New Replaces call answered; executing conference seat replacement");
+                            if reg.wait_for_status(&sid, ActiveProxyCallStatus::Talking, std::time::Duration::from_secs(30)).await {
+                                info!(session_id = %sid, "New Replaces call answered; executing conference seat replacement");
 
-                                        if let Some(ref conf) = conf_id {
-                                            let _ = conference_manager.remove_participant(conf, &old_leg).await;
-                                            let new_leg = crate::call::domain::LegId::new(&new_session_id);
-                                            let _ = conference_manager.add_participant(conf, new_leg).await;
-                                            info!(%old_session_id, %new_session_id, "Conference seat replacement completed for Replaces");
-                                        }
+                                if let Some(ref conf) = conf_id {
+                                    let _ = conference_manager.remove_participant(conf, &old_leg).await;
+                                    let new_leg = crate::call::domain::LegId::new(&sid);
+                                    let _ = conference_manager.add_participant(conf, new_leg).await;
+                                    info!(%old_session_id, %sid, "Conference seat replacement completed for Replaces");
+                                }
 
-                                        // Hang up old session
-                                        let _ = old_handle_clone.send_command(crate::call::domain::CallCommand::Hangup(
-                                            crate::call::domain::HangupCommand::local(
-                                                "replaced_by_replaces",
-                                                Some(crate::callrecord::CallRecordHangupReason::BySystem),
-                                                Some(200),
-                                            ),
-                                        ));
+                                let _ = old_handle_clone.send_command(crate::call::domain::CallCommand::Hangup(
+                                    crate::call::domain::HangupCommand::local(
+                                        "replaced_by_replaces",
+                                        Some(crate::callrecord::CallRecordHangupReason::BySystem),
+                                        Some(200),
+                                    ),
+                                ));
 
-                                        // Send RWI events if gateway is available
-                                        if let Some(ref gw) = server.rwi_gateway {
-                                            let event = crate::rwi::proto::RwiEvent::ConferenceSeatReplaceSucceeded {
-                                                conf_id: conf_id.map(|c| c.0).unwrap_or_default(),
-                                                old_call_id: old_session_id.clone(),
-                                                new_call_id: new_session_id.clone(),
-                                            };
-                                            let g = gw.read().await;
-                                            g.broadcast_event(&event);
-                                        }
-                                        break;
-                                    }
+                                if let Some(ref gw) = server.rwi_gateway {
+                                    let event = crate::rwi::proto::RwiEvent::ConferenceSeatReplaceSucceeded {
+                                        conf_id: conf_id.map(|c| c.0).unwrap_or_default(),
+                                        old_call_id: old_session_id.clone(),
+                                        new_call_id: sid.clone(),
+                                    };
+                                    let g = gw.read().await;
+                                    g.broadcast_event(&event);
+                                }
                             }
                         });
                     }
@@ -1367,58 +1412,24 @@ impl CallModule {
                     return result;
                 } else {
                     info!(%old_session_id, "Replaces target is not in a conference; creating conference for attended transfer");
-                    // Standard attended transfer: C sends INVITE with Replaces to replace B
-                    // We create a conference on the fly and merge both sessions
-                    let dialplan = match self.build_dialplan(tx, cookie.clone(), &caller).await {
+                    let dialplan = self.build_dialplan(tx, cookie.clone(), &caller).await;
+                    let dialplan = match dialplan {
                         Ok(d) => d,
                         Err(route_err) => {
-                            if cookie.is_spam() {
-                                return Ok(());
-                            }
-                            let code = route_err
-                                .status
-                                .unwrap_or(rsipstack::sip::StatusCode::ServerInternalError);
-                            let reason_text = route_err.error.to_string();
-                            let reason_value = if reason_text.contains(";cause=") {
-                                reason_text.clone()
-                            } else {
-                                q850_reason_value(&code, Some(reason_text.as_str()))
-                            };
-                            self.report_failure(
-                                tx,
-                                &cookie,
-                                code.clone(),
-                                Some(reason_text),
-                                route_err.extensions,
-                            );
-                            tx.reply_with(
-                                code.clone(),
-                                vec![rsipstack::sip::Header::Other("Reason".into(), reason_value)],
-                                None,
-                            )
-                            .await
-                            .map_err(|e| anyhow!("Failed to send reply: {}", e))?;
-                            return Err(route_err.error);
+                            return self.reply_route_error(tx, &cookie, route_err).await;
                         }
                     };
 
-                    let max_forwards = if let Ok(header) = tx.original.max_forwards_header() {
-                        header.value().parse::<u32>().unwrap_or(70)
-                    } else {
-                        70
-                    };
-
+                    let server = self.inner.server.clone();
+                    let max_forwards = Self::extract_max_forwards(tx);
                     if max_forwards == 0 {
                         tx.reply(rsipstack::sip::StatusCode::TooManyHops).await?;
                         return Ok(());
                     }
-
                     let builder =
                         CallSessionBuilder::new(cookie.clone(), dialplan, max_forwards - 1)
                             .with_call_record_sender(self.inner.server.callrecord_sender.clone())
                             .with_cancel_token(self.inner.server.cancel_token.child_token());
-
-                    let server = self.inner.server.clone();
                     let result = builder.build_and_serve(server.clone(), tx).await;
 
                     // Spawn background task to perform conference merge once new call answers
@@ -1428,51 +1439,41 @@ impl CallModule {
                         .map(|h| h.value().to_string())
                         .unwrap_or_default();
                     if !new_session_id.is_empty() {
+                        let reg = registry.clone();
+                        let sid = new_session_id.clone();
                         tokio::spawn(async move {
-                            // Poll registry until new call is answered (Talking)
-                            for _ in 0..300 {
-                                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                                if let Some(entry) = registry.get(&new_session_id)
-                                    && matches!(entry.status, crate::proxy::active_call_registry::ActiveProxyCallStatus::Talking) {
-                                        info!(%new_session_id, "New Replaces call answered; creating conference for attended transfer");
+                            if reg.wait_for_status(&sid, ActiveProxyCallStatus::Talking, std::time::Duration::from_secs(30)).await {
+                                info!(session_id = %sid, "New Replaces call answered; creating conference for attended transfer");
 
-                                        // Create a new conference for this transfer
-                                        let conf_id = crate::call::runtime::ConferenceId::from(format!("conf-replaces-{}", new_session_id).as_str());
-                                        let _ = conference_manager.create_conference(conf_id.clone(), None).await;
+                                let conf_id = crate::call::runtime::ConferenceId::from(format!("conf-replaces-{}", sid).as_str());
+                                let _ = conference_manager.create_conference(conf_id.clone(), None).await;
 
-                                        // Add old session (A-B) to conference
-                                        let old_leg = crate::call::domain::LegId::new(&old_session_id);
-                                        let _ = conference_manager.add_participant(&conf_id, old_leg.clone()).await;
+                                let old_leg = crate::call::domain::LegId::new(&old_session_id);
+                                let _ = conference_manager.add_participant(&conf_id, old_leg.clone()).await;
 
-                                        // Add new session (C) to conference
-                                        let new_leg = crate::call::domain::LegId::new(&new_session_id);
-                                        let _ = conference_manager.add_participant(&conf_id, new_leg.clone()).await;
+                                let new_leg = crate::call::domain::LegId::new(&sid);
+                                let _ = conference_manager.add_participant(&conf_id, new_leg.clone()).await;
 
-                                        info!(%old_session_id, %new_session_id, "Conference created for attended transfer");
+                                info!(%old_session_id, %sid, "Conference created for attended transfer");
 
-                                        // Hang up old session's callee side (B) only
-                                        // Use AllExcept caller to keep A connected
-                                        let _ = old_handle_clone.send_command(crate::call::domain::CallCommand::Hangup(
-                                            crate::call::domain::HangupCommand::local(
-                                                "replaced_by_replaces",
-                                                Some(crate::callrecord::CallRecordHangupReason::BySystem),
-                                                Some(200),
-                                            ).with_cascade(crate::call::domain::HangupCascade::AllExcept(vec![
-                                                crate::call::domain::LegId::from("caller")
-                                            ])),
-                                        ));
+                                let _ = old_handle_clone.send_command(crate::call::domain::CallCommand::Hangup(
+                                    crate::call::domain::HangupCommand::local(
+                                        "replaced_by_replaces",
+                                        Some(crate::callrecord::CallRecordHangupReason::BySystem),
+                                        Some(200),
+                                    ).with_cascade(crate::call::domain::HangupCascade::AllExcept(vec![
+                                        crate::call::domain::LegId::from("caller")
+                                    ])),
+                                ));
 
-                                        // Send RWI events if gateway is available
-                                        if let Some(ref gw) = server.rwi_gateway {
-                                            let event = crate::rwi::proto::RwiEvent::CallTransferred {
-                                                call_id: old_session_id.clone(),
-                                            context: Default::default(),
-                                            };
-                                            let g = gw.read().await;
-                                            g.broadcast_event(&event);
-                                        }
-                                        break;
-                                    }
+                                if let Some(ref gw) = server.rwi_gateway {
+                                    let event = crate::rwi::proto::RwiEvent::CallTransferred {
+                                        call_id: old_session_id.clone(),
+                                    context: Default::default(),
+                                    };
+                                    let g = gw.read().await;
+                                    g.broadcast_event(&event);
+                                }
                             }
                         });
                     }
@@ -1487,67 +1488,16 @@ impl CallModule {
             }
         }
 
-        let dialplan = match self.build_dialplan(tx, cookie.clone(), &caller).await {
+        let dialplan = self.build_dialplan(tx, cookie.clone(), &caller).await;
+        let dialplan = match dialplan {
             Ok(d) => d,
             Err(route_err) => {
-                if cookie.is_spam() {
-                    return Ok(());
-                }
-                let code = route_err
-                    .status
-                    .unwrap_or(rsipstack::sip::StatusCode::ServerInternalError);
-                let reason_text = route_err.error.to_string();
-                // If error already contains ;cause= (e.g. "invite;cause=1234;text=\"xxx\""),
-                // treat it as pre-formatted Q850 and use directly.
-                let reason_value = if reason_text.contains(";cause=") {
-                    reason_text.clone()
-                } else {
-                    q850_reason_value(&code, Some(reason_text.as_str()))
-                };
-                warn!(%code, key = %tx.key, reason = %reason_value, "failed to build dialplan");
-                self.report_failure(
-                    tx,
-                    &cookie,
-                    code.clone(),
-                    Some(reason_text),
-                    route_err.extensions,
-                );
-                tx.reply_with(
-                    code.clone(),
-                    vec![rsipstack::sip::Header::Other("Reason".into(), reason_value)],
-                    None,
-                )
-                .await
-                .map_err(|e| anyhow!("Failed to send reply: {}", e))?;
-                return Err(route_err.error);
+                warn!(key = %tx.key, "failed to build dialplan");
+                return self.reply_route_error(tx, &cookie, route_err).await;
             }
         };
 
-        // Create event sender for media stream events
-        let max_forwards = if let Ok(header) = tx.original.max_forwards_header() {
-            header.value().parse::<u32>().unwrap_or(70)
-        } else {
-            70
-        };
-
-        if max_forwards == 0 {
-            info!(key = %tx.key, "Max-Forwards exceeded");
-            self.report_failure(
-                tx,
-                &cookie,
-                rsipstack::sip::StatusCode::TooManyHops,
-                None,
-                None,
-            );
-            tx.reply(rsipstack::sip::StatusCode::TooManyHops).await?;
-            return Ok(());
-        }
-
-        let builder = CallSessionBuilder::new(cookie.clone(), dialplan, max_forwards - 1)
-            .with_call_record_sender(self.inner.server.callrecord_sender.clone())
-            .with_cancel_token(self.inner.server.cancel_token.child_token());
-
-        builder.build_and_serve(self.inner.server.clone(), tx).await
+        self.build_and_serve_dialplan(tx, cookie, dialplan).await
     }
 
     async fn process_message(&self, tx: &mut Transaction) -> Result<()> {

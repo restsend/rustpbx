@@ -35,6 +35,7 @@
 
 use super::e2e_test_server::E2eTestServer;
 use super::rtp_utils::{RtpPacket, RtpReceiver, RtpSender, extract_media_endpoint};
+use super::test_helpers;
 use super::test_ua::TestUaEvent;
 use crate::config::MediaProxyMode;
 use anyhow::Result;
@@ -45,11 +46,8 @@ use tracing::info;
 
 // ─── SDP helpers ─────────────────────────────────────────────────────────────
 
-/// PCMA SDP with a **fixed** `o=` session-id / session-version.
-///
-/// Using the exact values from the production CCP-server SDPs so that
-/// the 183 and 200 OK carry bit-for-bit identical session lines — which
-/// is precisely what triggers the re-negotiate bug.
+use test_helpers::pcmu_sdp;
+
 fn pcma_sdp_fixed(ip: &str, port: u16) -> String {
     format!(
         "v=0\r\n\
@@ -60,23 +58,6 @@ fn pcma_sdp_fixed(ip: &str, port: u16) -> String {
          m=audio {port} RTP/AVP 8 126\r\n\
          a=rtpmap:8 PCMA/8000\r\n\
          a=rtpmap:126 telephone-event/8000\r\n\
-         a=sendrecv\r\n"
-    )
-}
-
-/// Plain PCMU SDP for the A-leg (caller).
-fn pcmu_sdp(ip: &str, port: u16) -> String {
-    let sid = chrono::Utc::now().timestamp();
-    format!(
-        "v=0\r\n\
-         o=- {sid} {sid} IN IP4 {ip}\r\n\
-         s=-\r\n\
-         c=IN IP4 {ip}\r\n\
-         t=0 0\r\n\
-         m=audio {port} RTP/AVP 0 8 101\r\n\
-         a=rtpmap:0 PCMU/8000\r\n\
-         a=rtpmap:8 PCMA/8000\r\n\
-         a=rtpmap:101 telephone-event/8000\r\n\
          a=sendrecv\r\n"
     )
 }

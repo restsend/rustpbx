@@ -3,6 +3,7 @@ use crate::{
     config::RecordingPolicy,
 };
 use anyhow::{Result, anyhow};
+use rsipstack::sip::prelude::HeadersExt;
 use ipnetwork::IpNetwork;
 use regex::Regex;
 use rsipstack::sip::{StatusCode, Uri};
@@ -968,4 +969,47 @@ fn matches_user_prefix(pattern: &str, value: &str) -> Result<bool> {
     let regex =
         Regex::new(trimmed).map_err(|err| anyhow!("invalid regex '{}': {}", trimmed, err))?;
     Ok(regex.is_match(value))
+}
+
+/// Resolve a transport enum from a lowercase string (e.g. "udp", "tcp", "tls", "ws", "wss").
+/// Returns `None` for unrecognized values.
+pub fn resolve_transport_from_str(s: &str) -> Option<rsipstack::sip::transport::Transport> {
+    match s.to_lowercase().as_str() {
+        "udp" => Some(rsipstack::sip::transport::Transport::Udp),
+        "tcp" => Some(rsipstack::sip::transport::Transport::Tcp),
+        "tls" => Some(rsipstack::sip::transport::Transport::Tls),
+        "ws" => Some(rsipstack::sip::transport::Transport::Ws),
+        "wss" => Some(rsipstack::sip::transport::Transport::Wss),
+        _ => None,
+    }
+}
+
+pub fn extract_via_ip(origin: &rsipstack::sip::Request) -> Option<std::net::IpAddr> {
+    let via = origin.via_header().ok()?;
+    let (_, target) = rsipstack::transport::SipConnection::parse_target_from_via(via).ok()?;
+    target.host.try_into().ok()
+}
+
+pub fn extract_from_user(origin: &rsipstack::sip::Request) -> Option<String> {
+    origin
+        .from_header()
+        .ok()
+        .and_then(|h| h.uri().ok())
+        .and_then(|uri| uri.user().map(|u| u.to_string()))
+}
+
+pub fn extract_to_user(origin: &rsipstack::sip::Request) -> Option<String> {
+    origin
+        .to_header()
+        .ok()
+        .and_then(|h| h.uri().ok())
+        .and_then(|uri| uri.user().map(|u| u.to_string()))
+}
+
+pub fn extract_request_user(origin: &rsipstack::sip::Request) -> Option<String> {
+    origin.uri.user().map(|u| u.to_string())
+}
+
+pub fn escape_sip_quoted(input: &str) -> String {
+    input.replace('\\', "\\\\").replace('"', "\\\"")
 }

@@ -730,7 +730,6 @@ fn extract_regex_captures(pattern: &str, value: &str) -> Result<Option<Vec<Strin
         return Ok(None);
     }
 
-    // Compile pattern as regex to obtain capture groups
     let regex =
         Regex::new(pattern).map_err(|e| anyhow!("Invalid regex pattern '{}': {}", pattern, e))?;
     if let Some(captures) = regex.captures(value) {
@@ -764,7 +763,6 @@ fn matches_pattern(pattern: &str, value: &str) -> Result<bool> {
         return Ok(pattern == value);
     }
 
-    // Use regex matching
     let regex =
         Regex::new(pattern).map_err(|e| anyhow!("Invalid regex pattern '{}': {}", pattern, e))?;
     Ok(regex.is_match(value))
@@ -1165,18 +1163,10 @@ pub(crate) fn apply_trunk_config(option: &mut InviteOption, trunk: &TrunkConfig)
         .try_into()
         .map_err(|e| anyhow!("Invalid trunk destination '{}': {:?}", trunk.dest, e))?;
 
-    let transport = if let Some(transport_str) = &trunk.transport {
-        match transport_str.to_lowercase().as_str() {
-            "udp" => Some(rsipstack::sip::transport::Transport::Udp),
-            "tcp" => Some(rsipstack::sip::transport::Transport::Tcp),
-            "tls" => Some(rsipstack::sip::transport::Transport::Tls),
-            "ws" => Some(rsipstack::sip::transport::Transport::Ws),
-            "wss" => Some(rsipstack::sip::transport::Transport::Wss),
-            _ => None,
-        }
-    } else {
-        None
-    };
+    let transport = trunk
+        .transport
+        .as_deref()
+        .and_then(super::resolve_transport_from_str);
 
     option.destination = Some(SipAddr {
         r#type: transport,

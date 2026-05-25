@@ -2493,4 +2493,213 @@ a=rtpmap:0 PCMU/8000\r\n";
         assert!(rewritten.contains("a=rtpmap:101 telephone-event/8000"));
         assert!(rewritten.contains("a=rtpmap:102 telephone-event/48000"));
     }
+
+    #[test]
+    fn test_negotiate_codec_g722_selected_when_first_in_local() {
+        let local_codecs = vec![CodecType::G722, CodecType::PCMU, CodecType::PCMA];
+        let remote_sdp = "v=0\r\n\
+            o=- 1234 1234 IN IP4 127.0.0.1\r\n\
+            s=-\r\n\
+            t=0 0\r\n\
+            m=audio 10000 RTP/AVP 0 9 8 101\r\n\
+            a=rtpmap:0 PCMU/8000\r\n\
+            a=rtpmap:9 G722/8000\r\n\
+            a=rtpmap:8 PCMA/8000\r\n\
+            a=rtpmap:101 telephone-event/8000\r\n";
+
+        let result = MediaNegotiator::negotiate_codec(&local_codecs, remote_sdp).unwrap();
+        assert_eq!(
+            result.codec,
+            CodecType::G722,
+            "G722 is first in local preference and present in remote, should be selected"
+        );
+        assert_eq!(result.params.payload_type, 9);
+    }
+
+    #[test]
+    fn test_negotiate_codec_g729_selected() {
+        let local_codecs = vec![CodecType::G729, CodecType::PCMU];
+        let remote_sdp = "v=0\r\n\
+            o=- 1234 1234 IN IP4 127.0.0.1\r\n\
+            s=-\r\n\
+            t=0 0\r\n\
+            m=audio 10000 RTP/AVP 0 18 101\r\n\
+            a=rtpmap:0 PCMU/8000\r\n\
+            a=rtpmap:18 G729/8000\r\n\
+            a=rtpmap:101 telephone-event/8000\r\n";
+
+        let result = MediaNegotiator::negotiate_codec(&local_codecs, remote_sdp).unwrap();
+        assert_eq!(
+            result.codec,
+            CodecType::G729,
+            "G729 is first in local preference and present in remote"
+        );
+        assert_eq!(result.params.payload_type, 18);
+    }
+
+    #[test]
+    fn test_select_best_codec_g722_first_in_remote() {
+        let codecs = vec![
+            CodecInfo {
+                payload_type: 9,
+                codec: CodecType::G722,
+                clock_rate: 8000,
+                channels: 1,
+            },
+            CodecInfo {
+                payload_type: 0,
+                codec: CodecType::PCMU,
+                clock_rate: 8000,
+                channels: 1,
+            },
+        ];
+        let allowed: Vec<CodecType> = vec![];
+        let best = MediaNegotiator::select_best_codec(&codecs, &allowed).unwrap();
+        assert_eq!(best.codec, CodecType::G722, "G722 first in remote, empty allow → pick G722");
+    }
+
+    #[test]
+    fn test_select_best_codec_g729_allowed() {
+        let codecs = vec![
+            CodecInfo {
+                payload_type: 0,
+                codec: CodecType::PCMU,
+                clock_rate: 8000,
+                channels: 1,
+            },
+            CodecInfo {
+                payload_type: 18,
+                codec: CodecType::G729,
+                clock_rate: 8000,
+                channels: 1,
+            },
+        ];
+        let allowed = vec![CodecType::G729];
+        let best = MediaNegotiator::select_best_codec(&codecs, &allowed).unwrap();
+        assert_eq!(best.codec, CodecType::G729, "Only G729 allowed, scan past PCMU");
+        assert_eq!(best.payload_type, 18);
+    }
+
+    #[test]
+    fn test_extract_leg_profile_g722() {
+        let sdp = "v=0\r\n\
+            o=- 1 1 IN IP4 127.0.0.1\r\n\
+            s=-\r\n\
+            c=IN IP4 127.0.0.1\r\n\
+            t=0 0\r\n\
+            m=audio 10000 RTP/AVP 9 101\r\n\
+            a=rtpmap:9 G722/8000\r\n\
+            a=rtpmap:101 telephone-event/8000\r\n";
+
+        let profile = MediaNegotiator::extract_leg_profile(sdp);
+        assert!(profile.audio.is_some());
+        let audio = profile.audio.unwrap();
+        assert_eq!(audio.codec, CodecType::G722);
+        assert_eq!(audio.payload_type, 9);
+        assert!(profile.dtmf.is_some());
+    }
+
+    #[test]
+    fn test_extract_leg_profile_g729() {
+        let sdp = "v=0\r\n\
+            o=- 1 1 IN IP4 127.0.0.1\r\n\
+            s=-\r\n\
+            c=IN IP4 127.0.0.1\r\n\
+            t=0 0\r\n\
+            m=audio 10000 RTP/AVP 18 0 101\r\n\
+            a=rtpmap:18 G729/8000\r\n\
+            a=rtpmap:0 PCMU/8000\r\n\
+            a=rtpmap:101 telephone-event/8000\r\n";
+
+        let profile = MediaNegotiator::extract_leg_profile(sdp);
+        assert!(profile.audio.is_some());
+        let audio = profile.audio.unwrap();
+        assert_eq!(audio.codec, CodecType::G729, "First audio codec in answer = G729");
+        assert_eq!(audio.payload_type, 18);
+    }
+
+    #[test]
+    fn test_build_callee_offer_g722_preserves_caller_pt() {
+        let caller_sdp = "v=0\r\n\
+            o=- 1 1 IN IP4 127.0.0.1\r\n\
+            s=-\r\n\
+            t=0 0\r\n\
+            m=audio 10000 RTP/AVP 9 0 101\r\n\
+            a=rtpmap:9 G722/8000\r\n\
+            a=rtpmap:0 PCMU/8000\r\n\
+            a=rtpmap:101 telephone-event/8000\r\n";
+
+        let codecs = MediaNegotiator::build_callee_codec_offer_with_allow(
+            caller_sdp,
+            false,
+            &[CodecType::G722, CodecType::PCMU, CodecType::TelephoneEvent],
+        );
+        let g722 = codecs.iter().find(|c| c.codec == CodecType::G722).unwrap();
+        assert_eq!(g722.payload_type, 9, "G722 PT must preserve caller's PT 9");
+    }
+
+    #[test]
+    fn test_build_callee_offer_g729_preserves_caller_pt() {
+        let caller_sdp = "v=0\r\n\
+            o=- 1 1 IN IP4 127.0.0.1\r\n\
+            s=-\r\n\
+            t=0 0\r\n\
+            m=audio 10000 RTP/AVP 18 0 101\r\n\
+            a=rtpmap:18 G729/8000\r\n\
+            a=rtpmap:0 PCMU/8000\r\n\
+            a=rtpmap:101 telephone-event/8000\r\n";
+
+        let codecs = MediaNegotiator::build_callee_codec_offer_with_allow(
+            caller_sdp,
+            false,
+            &[CodecType::G729, CodecType::PCMU, CodecType::TelephoneEvent],
+        );
+        let g729 = codecs.iter().find(|c| c.codec == CodecType::G729).unwrap();
+        assert_eq!(g729.payload_type, 18, "G729 PT must preserve caller's PT 18");
+    }
+
+    #[test]
+    fn test_build_callee_offer_g722_with_16k_rtpmap() {
+        let caller_sdp = "v=0\r\n\
+            o=- 1 1 IN IP4 127.0.0.1\r\n\
+            s=-\r\n\
+            t=0 0\r\n\
+            m=audio 10000 RTP/AVP 9 0\r\n\
+            a=rtpmap:9 G722/16000\r\n\
+            a=rtpmap:0 PCMU/8000\r\n";
+
+        let codecs = MediaNegotiator::build_callee_codec_offer_with_allow(
+            caller_sdp,
+            false,
+            &[],
+        );
+        let g722 = codecs.iter().find(|c| c.codec == CodecType::G722);
+        assert!(g722.is_some(), "G722 should be in callee offer");
+        let g722 = g722.unwrap();
+        assert_eq!(g722.payload_type, 9);
+    }
+
+    #[test]
+    fn test_build_caller_answer_filters_g729_when_not_allowed() {
+        let caller_sdp = "v=0\r\n\
+            o=- 1 1 IN IP4 127.0.0.1\r\n\
+            s=-\r\n\
+            t=0 0\r\n\
+            m=audio 10000 RTP/AVP 18 0 9 101\r\n\
+            a=rtpmap:18 G729/8000\r\n\
+            a=rtpmap:0 PCMU/8000\r\n\
+            a=rtpmap:9 G722/8000\r\n\
+            a=rtpmap:101 telephone-event/8000\r\n";
+
+        let codecs = MediaNegotiator::build_caller_answer_codec_list_with_allow(
+            caller_sdp,
+            true,
+            &[CodecType::PCMU, CodecType::TelephoneEvent],
+        );
+        let audio: Vec<_> = codecs.iter().filter(|c| !c.is_dtmf()).collect();
+        assert_eq!(audio.len(), 1, "Only PCMU should survive");
+        assert_eq!(audio[0].codec, CodecType::PCMU);
+        assert!(!codecs.iter().any(|c| c.codec == CodecType::G729));
+        assert!(!codecs.iter().any(|c| c.codec == CodecType::G722));
+    }
 }

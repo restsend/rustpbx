@@ -158,14 +158,7 @@ impl DbLocator {
 }
 
 fn parse_transport_token(value: &str) -> Option<rsipstack::sip::transport::Transport> {
-    match value.trim().to_ascii_uppercase().as_str() {
-        "UDP" => Some(rsipstack::sip::transport::Transport::Udp),
-        "TCP" => Some(rsipstack::sip::transport::Transport::Tcp),
-        "TLS" => Some(rsipstack::sip::transport::Transport::Tls),
-        "WS" => Some(rsipstack::sip::transport::Transport::Ws),
-        "WSS" => Some(rsipstack::sip::transport::Transport::Wss),
-        _ => None,
-    }
+    super::routing::resolve_transport_from_str(value.trim())
 }
 
 fn encode_sip_addr(addr: &SipAddr) -> String {

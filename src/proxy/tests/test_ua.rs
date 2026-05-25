@@ -860,109 +860,8 @@ mod tests {
     use tracing::Level;
 
     use super::*;
-    use crate::call::SipUser;
-    use crate::config::{MediaProxyMode, ProxyConfig};
-    use crate::proxy::{
-        auth::AuthModule, call::CallModule, locator::MemoryLocator, registrar::RegistrarModule,
-        server::SipServerBuilder, user::MemoryUserBackend,
-    };
-
-    /// Simplified Test Proxy Server
-    pub struct TestProxyServer {
-        cancel_token: CancellationToken,
-        port: u16,
-    }
-
-    impl TestProxyServer {
-        /// Create and start test proxy server
-        pub async fn start_with_media_proxy(mode: MediaProxyMode) -> Result<Self> {
-            let port = portpicker::pick_unused_port().unwrap_or(15060);
-            let addr = "127.0.0.1";
-            let config = Arc::new(ProxyConfig {
-                addr: addr.to_string(),
-                udp_port: Some(port),
-                tcp_port: None,
-                tls_port: None,
-                ws_port: None,
-                useragent: Some("RustPBX-Test/0.1.0".to_string()),
-                modules: Some(vec![
-                    "auth".to_string(),
-                    "registrar".to_string(),
-                    "call".to_string(),
-                ]),
-                media_proxy: mode,
-                ensure_user: Some(false),
-                ..Default::default()
-            });
-
-            let user_backend = MemoryUserBackend::new(None);
-            let users = vec![
-                SipUser {
-                    id: 1,
-                    username: "alice".to_string(),
-                    password: Some("password123".to_string()),
-                    enabled: true,
-                    realm: Some(addr.to_string()),
-                    ..Default::default()
-                },
-                SipUser {
-                    id: 2,
-                    username: "bob".to_string(),
-                    password: Some("password456".to_string()),
-                    enabled: true,
-                    realm: Some(addr.to_string()),
-                    ..Default::default()
-                },
-            ];
-
-            for user in users {
-                user_backend.create_user(user).await?;
-            }
-
-            let locator = MemoryLocator::new();
-            let cancel_token = CancellationToken::new();
-
-            let mut builder = SipServerBuilder::new(config.clone())
-                .with_user_backend(Box::new(user_backend))
-                .with_locator(Box::new(locator))
-                .with_cancel_token(cancel_token.clone());
-
-            builder = builder
-                .register_module("registrar", |inner, config| {
-                    Ok(Box::new(RegistrarModule::new(inner, config)))
-                })
-                .register_module("auth", |inner, _config| {
-                    Ok(Box::new(AuthModule::new(
-                        inner.clone(),
-                        inner.proxy_config.clone(),
-                    )))
-                })
-                .register_module("call", |inner, config| {
-                    Ok(Box::new(CallModule::new(config, inner)))
-                });
-            let server = builder.build().await?;
-            tokio::spawn(async move {
-                server.serve().await.ok();
-            });
-
-            sleep(Duration::from_millis(100)).await; // Reduced from 200ms
-            Ok(Self { cancel_token, port })
-        }
-
-        pub fn get_addr(&self) -> SocketAddr {
-            format!("127.0.0.1:{}", self.port).parse().unwrap()
-        }
-
-        pub fn stop(&self) {
-            self.cancel_token.cancel();
-        }
-    }
-
-    impl Drop for TestProxyServer {
-        fn drop(&mut self) {
-            self.stop();
-        }
-    }
+    use super::super::e2e_test_server::E2eTestServer;
+    use crate::config::MediaProxyMode;
 
     // Simplified test helper functions
     pub async fn create_test_ua(
@@ -1020,10 +919,10 @@ mod tests {
     /// Test basic registration functionality
     #[tokio::test]
     async fn test_basic_registration() {
-        let proxy = TestProxyServer::start_with_media_proxy(MediaProxyMode::None)
+        let proxy = E2eTestServer::start_with_mode(MediaProxyMode::None)
             .await
             .unwrap();
-        let proxy_addr = proxy.get_addr();
+        let proxy_addr = proxy.proxy_addr;
 
         let alice_port = portpicker::pick_unused_port().unwrap_or(25000);
         let alice = Arc::new(
@@ -1067,8 +966,8 @@ mod tests {
         ] {
             println!("Testing call flow with MediaProxyMode::{:?}", mode);
 
-            let proxy = TestProxyServer::start_with_media_proxy(mode).await.unwrap();
-            let proxy_addr = proxy.get_addr();
+            let proxy = E2eTestServer::start_with_mode(mode).await.unwrap();
+            let proxy_addr = proxy.proxy_addr;
 
             let alice_port = portpicker::pick_unused_port().unwrap_or(25010);
             let alice = Arc::new(
@@ -1144,10 +1043,10 @@ mod tests {
     /// Test call rejection scenarios
     #[tokio::test]
     async fn test_call_rejection_scenarios() {
-        let proxy = TestProxyServer::start_with_media_proxy(MediaProxyMode::Auto)
+        let proxy = E2eTestServer::start_with_mode(MediaProxyMode::Auto)
             .await
             .unwrap();
-        let proxy_addr = proxy.get_addr();
+        let proxy_addr = proxy.proxy_addr;
 
         let alice_port = portpicker::pick_unused_port().unwrap_or(25020);
         let alice = Arc::new(
@@ -1231,10 +1130,10 @@ mod tests {
     /// Test error handling and edge cases
     #[tokio::test]
     async fn test_error_handling_and_edge_cases() {
-        let proxy = TestProxyServer::start_with_media_proxy(MediaProxyMode::Auto)
+        let proxy = E2eTestServer::start_with_mode(MediaProxyMode::Auto)
             .await
             .unwrap();
-        let proxy_addr = proxy.get_addr();
+        let proxy_addr = proxy.proxy_addr;
 
         let alice_port = portpicker::pick_unused_port().unwrap_or(25030);
         let alice = Arc::new(
@@ -1284,10 +1183,10 @@ mod tests {
     /// Test concurrent operations and stress scenarios
     #[tokio::test]
     async fn test_concurrent_operations() {
-        let proxy = TestProxyServer::start_with_media_proxy(MediaProxyMode::All)
+        let proxy = E2eTestServer::start_with_mode(MediaProxyMode::All)
             .await
             .unwrap();
-        let proxy_addr = proxy.get_addr();
+        let proxy_addr = proxy.proxy_addr;
 
         // Create multiple UAs
         let mut users = Vec::new();
@@ -1346,10 +1245,10 @@ mod tests {
         for (test_name, sdp) in test_cases {
             println!("Testing {}", test_name);
 
-            let proxy = TestProxyServer::start_with_media_proxy(MediaProxyMode::Auto)
+            let proxy = E2eTestServer::start_with_mode(MediaProxyMode::Auto)
                 .await
                 .unwrap();
-            let proxy_addr = proxy.get_addr();
+            let proxy_addr = proxy.proxy_addr;
 
             let alice_port = portpicker::pick_unused_port().unwrap_or(25050);
             let alice = Arc::new(
@@ -1408,10 +1307,10 @@ mod tests {
     /// Test dialog state monitoring
     #[tokio::test]
     async fn test_dialog_state_monitoring() {
-        let proxy = TestProxyServer::start_with_media_proxy(MediaProxyMode::All)
+        let proxy = E2eTestServer::start_with_mode(MediaProxyMode::All)
             .await
             .unwrap();
-        let proxy_addr = proxy.get_addr();
+        let proxy_addr = proxy.proxy_addr;
 
         let alice_port = portpicker::pick_unused_port().unwrap_or(25060);
         let alice = Arc::new(
@@ -1504,10 +1403,10 @@ mod tests {
     /// Test resource cleanup
     #[tokio::test]
     async fn test_resource_cleanup() {
-        let proxy = TestProxyServer::start_with_media_proxy(MediaProxyMode::All)
+        let proxy = E2eTestServer::start_with_mode(MediaProxyMode::All)
             .await
             .unwrap();
-        let proxy_addr = proxy.get_addr();
+        let proxy_addr = proxy.proxy_addr;
 
         let alice_port = portpicker::pick_unused_port().unwrap_or(25070);
         let alice = Arc::new(
@@ -1571,10 +1470,10 @@ mod tests {
     /// Test authentication failures and recovery
     #[tokio::test]
     async fn test_authentication_failures_and_recovery() {
-        let proxy = TestProxyServer::start_with_media_proxy(MediaProxyMode::None)
+        let proxy = E2eTestServer::start_with_mode(MediaProxyMode::None)
             .await
             .unwrap();
-        let proxy_addr = proxy.get_addr();
+        let proxy_addr = proxy.proxy_addr;
 
         // Test 1: Wrong password
         let alice_port = portpicker::pick_unused_port().unwrap_or(25080);
@@ -1617,10 +1516,10 @@ mod tests {
     /// Test network timeout and retry scenarios
     #[tokio::test]
     async fn test_network_timeout_scenarios() {
-        let proxy = TestProxyServer::start_with_media_proxy(MediaProxyMode::Auto)
+        let proxy = E2eTestServer::start_with_mode(MediaProxyMode::Auto)
             .await
             .unwrap();
-        let proxy_addr = proxy.get_addr();
+        let proxy_addr = proxy.proxy_addr;
 
         let alice_port = portpicker::pick_unused_port().unwrap_or(25090);
         let alice = Arc::new(
@@ -1683,10 +1582,10 @@ mod tests {
     /// Test DTMF and INFO message handling
     #[tokio::test]
     async fn test_dtmf_and_info_messages() {
-        let proxy = TestProxyServer::start_with_media_proxy(MediaProxyMode::All)
+        let proxy = E2eTestServer::start_with_mode(MediaProxyMode::All)
             .await
             .unwrap();
-        let proxy_addr = proxy.get_addr();
+        let proxy_addr = proxy.proxy_addr;
 
         let alice_port = portpicker::pick_unused_port().unwrap_or(25100);
         let alice = Arc::new(
@@ -1759,10 +1658,10 @@ mod tests {
     /// Test call transfer and REFER scenarios
     #[tokio::test]
     async fn test_call_transfer_scenarios() {
-        let proxy = TestProxyServer::start_with_media_proxy(MediaProxyMode::All)
+        let proxy = E2eTestServer::start_with_mode(MediaProxyMode::All)
             .await
             .unwrap();
-        let proxy_addr = proxy.get_addr();
+        let proxy_addr = proxy.proxy_addr;
 
         let alice_port = portpicker::pick_unused_port().unwrap_or(25110);
         let alice = Arc::new(
@@ -1830,10 +1729,10 @@ mod tests {
     /// Test codec negotiation scenarios
     #[tokio::test]
     async fn test_codec_negotiation() {
-        let proxy = TestProxyServer::start_with_media_proxy(MediaProxyMode::All)
+        let proxy = E2eTestServer::start_with_mode(MediaProxyMode::All)
             .await
             .unwrap();
-        let proxy_addr = proxy.get_addr();
+        let proxy_addr = proxy.proxy_addr;
 
         let alice_port = portpicker::pick_unused_port().unwrap_or(25120);
         let alice = Arc::new(
@@ -1919,10 +1818,10 @@ mod tests {
     /// Test hold and unhold scenarios
     #[tokio::test]
     async fn test_hold_unhold_scenarios() {
-        let proxy = TestProxyServer::start_with_media_proxy(MediaProxyMode::All)
+        let proxy = E2eTestServer::start_with_mode(MediaProxyMode::All)
             .await
             .unwrap();
-        let proxy_addr = proxy.get_addr();
+        let proxy_addr = proxy.proxy_addr;
 
         let alice_port = portpicker::pick_unused_port().unwrap_or(25130);
         let alice = Arc::new(
@@ -1996,10 +1895,10 @@ mod tests {
     /// Test SIP message retransmission scenarios  
     #[tokio::test]
     async fn test_message_retransmission() {
-        let proxy = TestProxyServer::start_with_media_proxy(MediaProxyMode::Auto)
+        let proxy = E2eTestServer::start_with_mode(MediaProxyMode::Auto)
             .await
             .unwrap();
-        let proxy_addr = proxy.get_addr();
+        let proxy_addr = proxy.proxy_addr;
 
         let alice_port = portpicker::pick_unused_port().unwrap_or(25140);
         let alice = create_test_ua("alice", "password123", proxy_addr, alice_port)
@@ -2050,10 +1949,10 @@ mod tests {
     /// Test IPv6 and mixed IP scenarios
     #[tokio::test]
     async fn test_ipv6_and_mixed_ip_scenarios() {
-        let proxy = TestProxyServer::start_with_media_proxy(MediaProxyMode::All)
+        let proxy = E2eTestServer::start_with_mode(MediaProxyMode::All)
             .await
             .unwrap();
-        let proxy_addr = proxy.get_addr();
+        let proxy_addr = proxy.proxy_addr;
 
         let alice_port = portpicker::pick_unused_port().unwrap_or(25150);
         let alice = Arc::new(
@@ -2160,10 +2059,10 @@ a=candidate:2 1 udp 2130706430 2001:db8::1 54401 typ host"#;
     /// Test caller cancel scenarios
     #[tokio::test]
     async fn test_caller_cancel_scenarios() {
-        let proxy = TestProxyServer::start_with_media_proxy(MediaProxyMode::Auto)
+        let proxy = E2eTestServer::start_with_mode(MediaProxyMode::Auto)
             .await
             .unwrap();
-        let proxy_addr = proxy.get_addr();
+        let proxy_addr = proxy.proxy_addr;
 
         let alice_port = portpicker::pick_unused_port().unwrap_or(26000);
         let alice = Arc::new(
@@ -2257,10 +2156,10 @@ a=candidate:2 1 udp 2130706430 2001:db8::1 54401 typ host"#;
     /// Test callee hangup during established call
     #[tokio::test]
     async fn test_callee_hangup_scenarios() {
-        let proxy = TestProxyServer::start_with_media_proxy(MediaProxyMode::All)
+        let proxy = E2eTestServer::start_with_mode(MediaProxyMode::All)
             .await
             .unwrap();
-        let proxy_addr = proxy.get_addr();
+        let proxy_addr = proxy.proxy_addr;
 
         let alice_port = portpicker::pick_unused_port().unwrap_or(26010);
         let alice = Arc::new(
@@ -2326,8 +2225,8 @@ a=candidate:2 1 udp 2130706430 2001:db8::1 54401 typ host"#;
                 mode
             );
 
-            let proxy = TestProxyServer::start_with_media_proxy(mode).await.unwrap();
-            let proxy_addr = proxy.get_addr();
+            let proxy = E2eTestServer::start_with_mode(mode).await.unwrap();
+            let proxy_addr = proxy.proxy_addr;
 
             let alice_port = portpicker::pick_unused_port().unwrap_or(26020);
             let alice = Arc::new(
@@ -2471,10 +2370,10 @@ a=rtpmap:111 opus/48000/2"#;
     /// Test media proxy with private IPs (NAT mode)
     #[tokio::test]
     async fn test_media_proxy_nat_scenarios() {
-        let proxy = TestProxyServer::start_with_media_proxy(MediaProxyMode::Nat)
+        let proxy = E2eTestServer::start_with_mode(MediaProxyMode::Nat)
             .await
             .unwrap();
-        let proxy_addr = proxy.get_addr();
+        let proxy_addr = proxy.proxy_addr;
 
         let alice_port = portpicker::pick_unused_port().unwrap_or(26030);
         let alice = Arc::new(
@@ -2599,10 +2498,10 @@ a=rtpmap:0 PCMU/8000"#;
 
     #[tokio::test]
     async fn test_play_then_hangup_sends_183_session_progress() {
-        let proxy = TestProxyServer::start_with_media_proxy(MediaProxyMode::All)
+        let proxy = E2eTestServer::start_with_mode(MediaProxyMode::All)
             .await
             .unwrap();
-        let proxy_addr = proxy.get_addr();
+        let proxy_addr = proxy.proxy_addr;
 
         let alice_port = portpicker::pick_unused_port().unwrap_or(25200);
         let alice = create_test_ua("alice", "password123", proxy_addr, alice_port)
@@ -2626,10 +2525,10 @@ a=rtpmap:0 PCMU/8000"#;
 
     #[tokio::test]
     async fn test_ringtone_functionality() {
-        let proxy = TestProxyServer::start_with_media_proxy(MediaProxyMode::All)
+        let proxy = E2eTestServer::start_with_mode(MediaProxyMode::All)
             .await
             .unwrap();
-        let proxy_addr = proxy.get_addr();
+        let proxy_addr = proxy.proxy_addr;
 
         let alice_port = portpicker::pick_unused_port().unwrap_or(25210);
         let alice = Arc::new(
@@ -2686,10 +2585,10 @@ a=rtpmap:0 PCMU/8000"#;
 
     #[tokio::test]
     async fn test_audio_playback_code_reuse() {
-        let proxy = TestProxyServer::start_with_media_proxy(MediaProxyMode::All)
+        let proxy = E2eTestServer::start_with_mode(MediaProxyMode::All)
             .await
             .unwrap();
-        let proxy_addr = proxy.get_addr();
+        let proxy_addr = proxy.proxy_addr;
 
         let alice_port = portpicker::pick_unused_port().unwrap_or(25220);
         let alice = create_test_ua("alice", "password123", proxy_addr, alice_port)

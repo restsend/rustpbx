@@ -8,6 +8,7 @@
 //! 6. Exchanges raw PCM16 data and verifies round-trip
 
 use super::e2e_test_server::E2eTestServer;
+use super::test_helpers;
 use super::test_ua::TestUaEvent;
 use crate::call::domain::{CallCommand, LegId};
 use crate::config::MediaProxyMode;
@@ -85,27 +86,7 @@ impl Drop for WsEchoServer {
     }
 }
 
-/// Helper: build PCMU SDP
-fn pcmu_sdp(ip: &str, port: u16) -> String {
-    format!(
-        "v=0\r\n\
-         o=- {} 0 IN IP4 {}\r\n\
-         s=-\r\n\
-         c=IN IP4 {}\r\n\
-         t=0 0\r\n\
-         m=audio {} RTP/AVP 0 101\r\n\
-         a=rtpmap:0 PCMU/8000\r\n\
-         a=rtpmap:101 telephone-event/8000\r\n\
-         a=sendrecv\r\n",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs(),
-        ip,
-        ip,
-        port
-    )
-}
+use test_helpers::pcmu_sdp;
 
 #[tokio::test]
 async fn test_voip_bridge_e2e_transfer_command() -> Result<()> {

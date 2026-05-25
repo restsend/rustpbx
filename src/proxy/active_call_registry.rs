@@ -1,8 +1,9 @@
 use crate::proxy::proxy_call::sip_session::SipSessionHandle;
 use chrono::{DateTime, Utc};
+use parking_lot::Mutex;
 use serde::Serialize;
 use std::collections::HashMap;
-use std::sync::Mutex;
+use tokio::sync::Notify;
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Serialize)]
 pub enum ActiveProxyCallStatus {
@@ -35,12 +36,12 @@ struct RegistryState {
     entries: HashMap<String, ActiveProxyCallEntry>,
     handles: HashMap<String, SipSessionHandle>,
     handles_by_dialog: HashMap<String, SipSessionHandle>,
-    // session_id -> all registered dialog_ids (multiple dialogs per session during failover)
     dialog_by_session: HashMap<String, Vec<String>>,
 }
 
 pub struct ActiveProxyCallRegistry {
     inner: Mutex<RegistryState>,
+    change_notify: Notify,
 }
 
 impl Default for ActiveProxyCallRegistry {
@@ -53,19 +54,26 @@ impl ActiveProxyCallRegistry {
     pub fn new() -> Self {
         Self {
             inner: Mutex::new(RegistryState::default()),
+            change_notify: Notify::new(),
         }
     }
 
+    fn notify_waiters(&self) {
+        self.change_notify.notify_waiters();
+    }
+
     pub fn upsert(&self, entry: ActiveProxyCallEntry, handle: SipSessionHandle) {
-        let mut guard = self.inner.lock().unwrap();
+        let mut guard = self.inner.lock();
         guard.entries.insert(entry.session_id.clone(), entry);
         guard
             .handles
             .insert(handle.session_id().to_string(), handle);
+        drop(guard);
+        self.notify_waiters();
     }
 
     pub fn register_dialog(&self, dialog_id: String, handle: SipSessionHandle) {
-        let mut guard = self.inner.lock().unwrap();
+        let mut guard = self.inner.lock();
         guard
             .dialog_by_session
             .entry(handle.session_id().to_string())
@@ -75,7 +83,7 @@ impl ActiveProxyCallRegistry {
     }
 
     pub fn unregister_dialog(&self, dialog_id: &str) {
-        let mut guard = self.inner.lock().unwrap();
+        let mut guard = self.inner.lock();
         if let Some(handle) = guard.handles_by_dialog.remove(dialog_id)
             && let Some(dialogs) = guard.dialog_by_session.get_mut(handle.session_id())
         {
@@ -87,7 +95,7 @@ impl ActiveProxyCallRegistry {
     }
 
     pub fn get_handle_by_dialog(&self, dialog_id: &str) -> Option<SipSessionHandle> {
-        let guard = self.inner.lock().unwrap();
+        let guard = self.inner.lock();
         guard.handles_by_dialog.get(dialog_id).cloned()
     }
 
@@ -95,13 +103,14 @@ impl ActiveProxyCallRegistry {
     where
         F: FnOnce(&mut ActiveProxyCallEntry),
     {
-        if let Some(entry) = self.inner.lock().unwrap().entries.get_mut(session_id) {
+        if let Some(entry) = self.inner.lock().entries.get_mut(session_id) {
             updater(entry);
         }
+        self.notify_waiters();
     }
 
     pub fn remove(&self, session_id: &str) {
-        let mut guard = self.inner.lock().unwrap();
+        let mut guard = self.inner.lock();
         guard.entries.remove(session_id);
         guard.handles.remove(session_id);
         // Remove all dialog handles registered for this session
@@ -113,14 +122,13 @@ impl ActiveProxyCallRegistry {
     }
 
     pub fn count(&self) -> usize {
-        self.inner.lock().unwrap().entries.len()
+        self.inner.lock().entries.len()
     }
 
     pub fn list_recent(&self, limit: usize) -> Vec<ActiveProxyCallEntry> {
         let mut entries: Vec<_> = self
             .inner
             .lock()
-            .unwrap()
             .entries
             .values()
             .cloned()
@@ -133,21 +141,44 @@ impl ActiveProxyCallRegistry {
     }
 
     pub fn get(&self, session_id: &str) -> Option<ActiveProxyCallEntry> {
-        self.inner.lock().unwrap().entries.get(session_id).cloned()
+        self.inner.lock().entries.get(session_id).cloned()
     }
 
     pub fn get_handle(&self, session_id: &str) -> Option<SipSessionHandle> {
-        self.inner.lock().unwrap().handles.get(session_id).cloned()
+        self.inner.lock().handles.get(session_id).cloned()
     }
 
     /// Get all active session IDs
     pub fn session_ids(&self) -> Vec<String> {
-        self.inner.lock().unwrap().entries.keys().cloned().collect()
+        self.inner.lock().entries.keys().cloned().collect()
     }
 
     /// Alias for count() for SessionRegistry compatibility
     pub fn len(&self) -> usize {
         self.count()
+    }
+
+    pub async fn wait_for_status(
+        &self,
+        session_id: &str,
+        target: ActiveProxyCallStatus,
+        timeout: std::time::Duration,
+    ) -> bool {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            if let Some(entry) = self.get(session_id) {
+                if entry.status == target {
+                    return true;
+                }
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return false;
+            }
+            tokio::select! {
+                _ = self.change_notify.notified() => {}
+                _ = tokio::time::sleep_until(deadline) => return false,
+            }
+        }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -171,12 +202,12 @@ impl ActiveProxyCallRegistry {
 
     #[cfg(test)]
     pub fn handles_by_dialog_count(&self) -> usize {
-        self.inner.lock().unwrap().handles_by_dialog.len()
+        self.inner.lock().handles_by_dialog.len()
     }
 
     #[cfg(test)]
     pub fn dialog_by_session_count(&self) -> usize {
-        self.inner.lock().unwrap().dialog_by_session.len()
+        self.inner.lock().dialog_by_session.len()
     }
 
     /// Cleanup stale entries that have been inactive for longer than max_age
@@ -184,7 +215,7 @@ impl ActiveProxyCallRegistry {
     pub fn cleanup_stale(&self, max_age: std::time::Duration) -> usize {
         let cutoff = Utc::now()
             - chrono::Duration::from_std(max_age).unwrap_or_else(|_| chrono::Duration::hours(1));
-        let mut guard = self.inner.lock().unwrap();
+        let mut guard = self.inner.lock();
 
         let stale_ids: Vec<String> = guard
             .entries
@@ -262,7 +293,7 @@ mod tests {
 
         // All 3 dialogs should be tracked under this session
         assert_eq!(
-            registry.inner.lock().unwrap().dialog_by_session[session].len(),
+            registry.inner.lock().dialog_by_session[session].len(),
             3
         );
 
@@ -318,7 +349,7 @@ mod tests {
 
         // session still has 1 dialog tracked
         assert_eq!(
-            registry.inner.lock().unwrap().dialog_by_session[session].len(),
+            registry.inner.lock().dialog_by_session[session].len(),
             1
         );
 

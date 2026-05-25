@@ -335,6 +335,8 @@ pub struct BridgePeer {
     caller_gate: Arc<AtomicBool>,
     /// Shared recorder for call recording (written by both bridge directions)
     recorder: Option<Arc<parking_lot::RwLock<Option<Recorder>>>>,
+    /// When true, the bridge skips writing to the recorder (recording paused).
+    recording_paused: Arc<AtomicBool>,
     dtmf_sink: Arc<parking_lot::RwLock<Option<BridgeDtmfSink>>>,
     /// Audio sender channels for forwarding — fast-path aliases
     caller_send: Arc<AsyncMutex<Option<MediaSender>>>,
@@ -377,13 +379,13 @@ pub struct BridgePeer {
 
     /// Optional transcoder for RTP→WebRTC direction (e.g. G.729→PCMU).
     /// Set dynamically via set_transcoder() when caller and callee codecs differ.
-    callee_to_caller_transcoder: Arc<parking_lot::RwLock<Option<Transcoder>>>,
+    callee_to_caller_transcoder: Arc<parking_lot::Mutex<Option<Transcoder>>>,
     /// Optional RTP timestamp/sequence rewriter for RTP→WebRTC direction.
-    callee_to_caller_timing: Arc<parking_lot::RwLock<Option<RtpTiming>>>,
+    callee_to_caller_timing: Arc<parking_lot::Mutex<Option<RtpTiming>>>,
     /// Optional transcoder for WebRTC→RTP direction (e.g. PCMU→G.729).
-    caller_to_callee_transcoder: Arc<parking_lot::RwLock<Option<Transcoder>>>,
+    caller_to_callee_transcoder: Arc<parking_lot::Mutex<Option<Transcoder>>>,
     /// Optional RTP timestamp/sequence rewriter for WebRTC→RTP direction.
-    caller_to_callee_timing: Arc<parking_lot::RwLock<Option<RtpTiming>>>,
+    caller_to_callee_timing: Arc<parking_lot::Mutex<Option<RtpTiming>>>,
     /// Optional telephone-event mapping for RTP→WebRTC direction.
     callee_to_caller_dtmf_mapping: Arc<parking_lot::RwLock<Option<BridgePayloadMapping>>>,
     /// Optional telephone-event mapping for WebRTC→RTP direction.
@@ -402,6 +404,7 @@ impl BridgePeer {
             forwarding_started: AtomicBool::new(false),
             caller_gate: Arc::new(AtomicBool::new(false)),
             recorder: None,
+            recording_paused: Arc::new(AtomicBool::new(false)),
             dtmf_sink: Arc::new(parking_lot::RwLock::new(None)),
             caller_send: Arc::new(AsyncMutex::new(None)),
             callee_send: Arc::new(AsyncMutex::new(None)),
@@ -441,10 +444,10 @@ impl BridgePeer {
             callee_to_caller_stats: LegStats::new(),
             peers: Arc::new(AsyncMutex::new(std::collections::HashMap::new())),
             routes: Arc::new(AsyncMutex::new(std::collections::HashMap::new())),
-            callee_to_caller_transcoder: Arc::new(parking_lot::RwLock::new(None)),
-            callee_to_caller_timing: Arc::new(parking_lot::RwLock::new(None)),
-            caller_to_callee_transcoder: Arc::new(parking_lot::RwLock::new(None)),
-            caller_to_callee_timing: Arc::new(parking_lot::RwLock::new(None)),
+            callee_to_caller_transcoder: Arc::new(parking_lot::Mutex::new(None)),
+            callee_to_caller_timing: Arc::new(parking_lot::Mutex::new(None)),
+            caller_to_callee_transcoder: Arc::new(parking_lot::Mutex::new(None)),
+            caller_to_callee_timing: Arc::new(parking_lot::Mutex::new(None)),
             callee_to_caller_dtmf_mapping: Arc::new(parking_lot::RwLock::new(None)),
             caller_to_callee_dtmf_mapping: Arc::new(parking_lot::RwLock::new(None)),
         }
@@ -991,11 +994,11 @@ impl BridgePeer {
         };
         let source_cr = source.clock_rate();
         let target_cr = target.clock_rate();
-        *transcoder_slot.write() = Some(Transcoder::new(source, target, target_pt));
+        *transcoder_slot.lock() = Some(Transcoder::new(source, target, target_pt));
         if source_cr != target_cr {
-            *timing_slot.write() = Some(RtpTiming::default());
+            *timing_slot.lock() = Some(RtpTiming::default());
         } else {
-            timing_slot.write().take();
+            timing_slot.lock().take();
         }
         info!(
             bridge_id = %self.id,
@@ -1018,8 +1021,8 @@ impl BridgePeer {
                 &self.caller_to_callee_timing,
             ),
         };
-        *transcoder_slot.write() = None;
-        *timing_slot.write() = None;
+        *transcoder_slot.lock() = None;
+        *timing_slot.lock() = None;
     }
 
     /// Configure telephone-event mapping for media received from one bridge endpoint.
@@ -1204,6 +1207,7 @@ impl BridgePeer {
         let bridge_id = self.id.clone();
         let dtmf_sink = Arc::clone(&self.dtmf_sink);
         let recorder = self.recorder.clone();
+        let _recording_paused = self.recording_paused.clone();
 
         tokio::spawn(async move {
             let peers = peers_map.lock().await;
@@ -1302,6 +1306,7 @@ impl BridgePeer {
         let w2r_stats = Arc::clone(&self.caller_to_callee_stats);
         let r2w_stats = Arc::clone(&self.callee_to_caller_stats);
         let recorder = self.recorder.clone();
+        let recording_paused = self.recording_paused.clone();
         let dtmf_sink = Arc::clone(&self.dtmf_sink);
         let caller_to_callee_transcoder = Arc::clone(&self.caller_to_callee_transcoder);
         let caller_to_callee_timing = Arc::clone(&self.caller_to_callee_timing);
@@ -1417,6 +1422,7 @@ impl BridgePeer {
                                         Arc::clone(&w2r_stats),
                                         if !is_video { recorder.clone() } else { None },
                                         if !is_video { Some(RecLeg::A) } else { None },
+                                        recording_paused.clone(),
                                         Arc::clone(&dtmf_sink),
                                         Some(Arc::clone(&caller_to_callee_transcoder)),
                                         Some(Arc::clone(&caller_to_callee_timing)),
@@ -1535,6 +1541,7 @@ impl BridgePeer {
                                         Arc::clone(&r2w_stats),
                                         if !is_video { recorder.clone() } else { None },
                                         if !is_video { Some(RecLeg::B) } else { None },
+                                        recording_paused.clone(),
                                         Arc::clone(&dtmf_sink),
                                         Some(Arc::clone(&callee_to_caller_transcoder)),
                                         Some(Arc::clone(&callee_to_caller_timing)),
@@ -1578,9 +1585,10 @@ impl BridgePeer {
         leg_stats: Arc<LegStats>,
         recorder: Option<Arc<parking_lot::RwLock<Option<Recorder>>>>,
         recorder_leg: Option<RecLeg>,
+        recording_paused: Arc<AtomicBool>,
         dtmf_sink: Arc<parking_lot::RwLock<Option<BridgeDtmfSink>>>,
-        transcoder: Option<Arc<parking_lot::RwLock<Option<Transcoder>>>>,
-        transcoder_timing: Option<Arc<parking_lot::RwLock<Option<RtpTiming>>>>,
+        transcoder: Option<Arc<parking_lot::Mutex<Option<Transcoder>>>>,
+        transcoder_timing: Option<Arc<parking_lot::Mutex<Option<RtpTiming>>>>,
         dtmf_mapping: Option<Arc<parking_lot::RwLock<Option<BridgePayloadMapping>>>>,
         gate: Option<Arc<AtomicBool>>,
     ) {
@@ -1705,7 +1713,7 @@ impl BridgePeer {
                                     // set dynamically by sip_session when it detects a mismatch
                                     // (e.g. caller uses G.729, agent uses PCMU).
                                     let transcoded = transcoder.as_ref().and_then(|tx_arc| {
-                                        let mut guard = tx_arc.write();
+                                        let mut guard = tx_arc.lock();
                                         let tx = guard.as_mut()?;
                                         // Telephone-event (DTMF) MUST NOT go through
                                         // audio transcoding — it has its own codec format
@@ -1733,7 +1741,7 @@ impl BridgePeer {
                                         };
                                         let mut output = tx.transcode(&frame);
                                         if let Some(ref timing_arc) = transcoder_timing {
-                                            if let Some(ref mut timing) = *timing_arc.write() {
+                                            if let Some(ref mut timing) = *timing_arc.lock() {
                                                 timing.rewrite(
                                                     &mut output,
                                                     tx.source_clock_rate(),
@@ -1791,14 +1799,16 @@ impl BridgePeer {
                                     }
                                 }
                             };
-                            // Write audio samples to recorder (non-blocking: skip on lock contention)
+                            // Write audio samples to recorder (non-blocking: skip on lock contention or paused)
                             if let (Some(rec), Some(leg)) = (&recorder, recorder_leg) {
-                                for s in &samples_to_send {
-                                    if matches!(s, MediaSample::Audio(_))
-                                        && let Some(mut guard) = rec.try_write()
-                                            && let Some(r) = guard.as_mut() {
-                                                let _ = r.write_sample(leg, s, None, None, None::<AudioCodecType>);
-                                            }
+                                if !recording_paused.load(std::sync::atomic::Ordering::Relaxed) {
+                                    for s in &samples_to_send {
+                                        if matches!(s, MediaSample::Audio(_))
+                                            && let Some(mut guard) = rec.try_write()
+                                                && let Some(r) = guard.as_mut() {
+                                                    let _ = r.write_sample(leg, s, None, None, None::<AudioCodecType>);
+                                                }
+                                    }
                                 }
                             }
                             for sample in samples_to_send {
@@ -1833,7 +1843,7 @@ impl BridgePeer {
     fn rewrite_dtmf_sample(
         frame: &mut AudioFrame,
         mapping_slot: Option<&parking_lot::RwLock<Option<BridgePayloadMapping>>>,
-        timing_slot: Option<&parking_lot::RwLock<Option<RtpTiming>>>,
+        timing_slot: Option<&parking_lot::Mutex<Option<RtpTiming>>>,
     ) -> bool {
         let Some(mapping_slot) = mapping_slot else {
             return false;
@@ -1855,8 +1865,7 @@ impl BridgePeer {
         }
 
         let used_shared_timing = if let Some(timing_slot) = timing_slot {
-            let mut guard = timing_slot.write();
-            if let Some(timing) = guard.as_mut() {
+            let mut guard = timing_slot.lock();            if let Some(timing) = guard.as_mut() {
                 timing.rewrite(
                     frame,
                     mapping.source_clock_rate,
@@ -1969,9 +1978,10 @@ impl BridgePeer {
         leg_stats: Arc<LegStats>,
         recorder: Option<Arc<parking_lot::RwLock<Option<Recorder>>>>,
         recorder_leg: Option<RecLeg>,
+        recording_paused: Arc<AtomicBool>,
         dtmf_sink: Arc<parking_lot::RwLock<Option<BridgeDtmfSink>>>,
-        transcoder: Option<Arc<parking_lot::RwLock<Option<Transcoder>>>>,
-        transcoder_timing: Option<Arc<parking_lot::RwLock<Option<RtpTiming>>>>,
+        transcoder: Option<Arc<parking_lot::Mutex<Option<Transcoder>>>>,
+        transcoder_timing: Option<Arc<parking_lot::Mutex<Option<RtpTiming>>>>,
         dtmf_mapping: Option<Arc<parking_lot::RwLock<Option<BridgePayloadMapping>>>>,
         gate: Option<Arc<AtomicBool>>,
     ) {
@@ -1986,6 +1996,7 @@ impl BridgePeer {
                 leg_stats,
                 recorder,
                 recorder_leg,
+                recording_paused,
                 dtmf_sink,
                 transcoder,
                 transcoder_timing,
@@ -2055,6 +2066,7 @@ pub struct BridgePeerBuilder {
     rtp_sdp_compatibility: rustrtc::config::SdpCompatibilityMode,
     ice_servers: Vec<IceServer>,
     recorder: Option<Arc<parking_lot::RwLock<Option<Recorder>>>>,
+    recording_paused: Arc<AtomicBool>,
     cname: Option<String>,
 }
 
@@ -2078,6 +2090,7 @@ impl BridgePeerBuilder {
             rtp_sdp_compatibility: rustrtc::config::SdpCompatibilityMode::LegacySip,
             ice_servers: Vec::new(),
             recorder: None,
+            recording_paused: Arc::new(AtomicBool::new(false)),
             cname: None,
         }
     }
@@ -2189,8 +2202,9 @@ impl BridgePeerBuilder {
     /// Attach a shared recorder so that both bridge directions write audio to it.
     /// The recorder is lazily activated: once `start_recording()` puts a `Recorder`
     /// inside the `Arc<RwLock<…>>`, the bridge forward loops will start writing.
-    pub fn with_recorder(mut self, recorder: Arc<parking_lot::RwLock<Option<Recorder>>>) -> Self {
+    pub fn with_recorder(mut self, recorder: Arc<parking_lot::RwLock<Option<Recorder>>>, recording_paused: Arc<AtomicBool>) -> Self {
         self.recorder = Some(recorder);
+        self.recording_paused = recording_paused;
         self
     }
 
@@ -2296,6 +2310,7 @@ impl BridgePeerBuilder {
         bridge.caller_sender_codec = self.caller_sender_codec;
         bridge.callee_sender_codec = self.callee_sender_codec;
         bridge.recorder = self.recorder;
+        bridge.recording_paused = self.recording_paused;
 
         // Store video codec params for setup_bridge to create video senders
         bridge.caller_video_codec = self
@@ -3467,37 +3482,37 @@ mod tests {
             .build();
 
         // Initially both directions are None
-        assert!(bridge.callee_to_caller_transcoder.read().is_none());
-        assert!(bridge.caller_to_callee_transcoder.read().is_none());
+        assert!(bridge.callee_to_caller_transcoder.lock().is_none());
+        assert!(bridge.caller_to_callee_transcoder.lock().is_none());
 
         // Set RTP→WebRTC transcoder (G.729→PCMU)
         bridge.set_transcoder(BridgeEndpoint::Callee, CodecType::G729, CodecType::PCMU, 0);
         assert!(
-            bridge.callee_to_caller_transcoder.read().is_some(),
+            bridge.callee_to_caller_transcoder.lock().is_some(),
             "RTP→WebRTC transcoder should be set"
         );
 
         // Set WebRTC→RTP transcoder (PCMU→G.729)
         bridge.set_transcoder(BridgeEndpoint::Caller, CodecType::PCMU, CodecType::G729, 18);
         assert!(
-            bridge.caller_to_callee_transcoder.read().is_some(),
+            bridge.caller_to_callee_transcoder.lock().is_some(),
             "WebRTC→RTP transcoder should be set"
         );
 
         // Clear RTP→WebRTC
         bridge.clear_transcoder(BridgeEndpoint::Callee);
         assert!(
-            bridge.callee_to_caller_transcoder.read().is_none(),
+            bridge.callee_to_caller_transcoder.lock().is_none(),
             "RTP→WebRTC should be cleared"
         );
         assert!(
-            bridge.caller_to_callee_transcoder.read().is_some(),
+            bridge.caller_to_callee_transcoder.lock().is_some(),
             "WebRTC→RTP should still be set"
         );
 
         // Clear all
         bridge.clear_transcoder(BridgeEndpoint::Caller);
-        assert!(bridge.caller_to_callee_transcoder.read().is_none());
+        assert!(bridge.caller_to_callee_transcoder.lock().is_none());
     }
 
     /// Verify that the bridge's forwarding loop applies a Transcoder when
@@ -3535,13 +3550,13 @@ mod tests {
         let sender_weak = Arc::downgrade(&sender_arc);
 
         // Configure G.729 → PCMU transcoder
-        let transcoder = Arc::new(parking_lot::RwLock::new(Some(Transcoder::new(
+        let transcoder = Arc::new(parking_lot::Mutex::new(Some(Transcoder::new(
             CodecType::G729,
             CodecType::PCMU,
             0, // PCMU PT
         ))));
-        let timing: Arc<parking_lot::RwLock<Option<RtpTiming>>> =
-            Arc::new(parking_lot::RwLock::new(None));
+        let timing: Arc<parking_lot::Mutex<Option<RtpTiming>>> =
+            Arc::new(parking_lot::Mutex::new(None));
 
         let cancel = CancellationToken::new();
         let stats: Arc<LegStats> = LegStats::new();
@@ -3568,6 +3583,7 @@ mod tests {
                     st,
                     None, // no recorder
                     None, // no recorder leg
+                    Arc::new(AtomicBool::new(false)), // not paused
                     ds,
                     tr,
                     ti,
@@ -3635,7 +3651,7 @@ mod tests {
         let sender_arc = Arc::new(AsyncMutex::new(Some(output_tx)));
         let sender_weak = Arc::downgrade(&sender_arc);
 
-        let transcoder = Arc::new(parking_lot::RwLock::new(Some(Transcoder::new(
+        let transcoder = Arc::new(parking_lot::Mutex::new(Some(Transcoder::new(
             CodecType::PCMU,
             CodecType::PCMA,
             8,
@@ -3670,6 +3686,7 @@ mod tests {
                     st,
                     None,
                     None,
+                    Arc::new(AtomicBool::new(false)),
                     ds,
                     tr,
                     None,
@@ -3709,7 +3726,7 @@ mod tests {
             source_clock_rate: 48_000,
             target_clock_rate: 8_000,
         }));
-        let timing = parking_lot::RwLock::new(Some(RtpTiming::default()));
+        let timing = parking_lot::Mutex::new(Some(RtpTiming::default()));
 
         let mut first = AudioFrame {
             rtp_timestamp: 48_000,
@@ -3983,6 +4000,7 @@ mod tests {
                     st,
                     None,
                     None,
+                    Arc::new(AtomicBool::new(false)),
                     ds,
                     None, // no transcoder
                     None, // no timing

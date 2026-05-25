@@ -129,30 +129,35 @@ pub struct SipSession {
     pub callee_event_tx: Option<mpsc::UnboundedSender<DialogState>>,
     pub callee_guards: Vec<ClientDialogGuard>,
 
+    pub dtmf_digits: Vec<char>,
+
     pub reporter: Option<CallReporter>,
     pub recorder: Arc<RwLock<Option<Recorder>>>,
+    pub recording_paused: Arc<std::sync::atomic::AtomicBool>,
 
     pub app_event_bridge: Arc<RwLock<Option<crate::proxy::proxy_call::state::SipSessionHandle>>>,
 
     pub conference_bridge: crate::call::runtime::SessionConferenceBridge,
 
     #[allow(dead_code)]
-    pub cmd_tx: Option<mpsc::UnboundedSender<CallCommand>>,
+    pub cmd_tx: Option<mpsc::Sender<CallCommand>>,
 }
 
 #[derive(Clone)]
 pub struct SipSessionHandle {
     session_id: SessionId,
-    cmd_tx: mpsc::UnboundedSender<CallCommand>,
+    cmd_tx: mpsc::Sender<CallCommand>,
     snapshot_cache: Arc<RwLock<Option<SessionSnapshot>>>,
     app_event_bridge: Arc<RwLock<Option<crate::proxy::proxy_call::state::SipSessionHandle>>>,
 }
 
+const CMD_CHANNEL_CAPACITY: usize = 256;
+
 impl SipSessionHandle {
     pub fn send_command(&self, cmd: CallCommand) -> anyhow::Result<()> {
         self.cmd_tx
-            .send(cmd)
-            .map_err(|e| anyhow::anyhow!("channel closed: {}", e))
+            .try_send(cmd)
+            .map_err(|e| anyhow::anyhow!("channel error: {}", e))
     }
 
     pub fn session_id(&self) -> &str {
@@ -191,7 +196,7 @@ impl SipSessionHandle {
     #[cfg(test)]
     pub fn new_for_test(
         session_id: &str,
-        cmd_tx: mpsc::UnboundedSender<crate::call::domain::CallCommand>,
+        cmd_tx: mpsc::Sender<crate::call::domain::CallCommand>,
     ) -> Self {
         Self {
             session_id: SessionId::from(session_id.to_string()),
@@ -355,6 +360,8 @@ impl AppFactory for BuiltinAppFactory {
     }
 }
 
+const MID_DIALOG_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 impl SipSession {
     pub const CALLER_TRACK_ID: &'static str = "caller-track";
     pub const CALLEE_TRACK_ID: &'static str = "callee-track";
@@ -374,8 +381,8 @@ impl SipSession {
         self.legs.callee_peer().expect("callee peer always present")
     }
 
-    pub fn with_handle(id: SessionId) -> (SipSessionHandle, mpsc::UnboundedReceiver<CallCommand>) {
-        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+    pub fn with_handle(id: SessionId) -> (SipSessionHandle, mpsc::Receiver<CallCommand>) {
+        let (cmd_tx, cmd_rx) = mpsc::channel(CMD_CHANNEL_CAPACITY);
         let snapshot_cache: Arc<RwLock<Option<SessionSnapshot>>> = Arc::new(RwLock::new(None));
 
         let handle = SipSessionHandle {
@@ -398,7 +405,7 @@ impl SipSession {
         use_media_proxy: bool,
         caller_peer: Arc<dyn MediaPeer>,
         callee_peer: Arc<dyn MediaPeer>,
-    ) -> (Self, SipSessionHandle, mpsc::UnboundedReceiver<CallCommand>) {
+    ) -> (Self, SipSessionHandle, mpsc::Receiver<CallCommand>) {
         let session_id = SessionId::from(context.session_id.clone());
 
         let media_profile = if use_media_proxy {
@@ -407,7 +414,7 @@ impl SipSession {
             MediaRuntimeProfile::from_media_path(MediaPathMode::Bypass)
         };
 
-        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+        let (cmd_tx, cmd_rx) = mpsc::channel(CMD_CHANNEL_CAPACITY);
         let snapshot_cache: Arc<RwLock<Option<SessionSnapshot>>> = Arc::new(RwLock::new(None));
         let app_event_bridge: Arc<
             RwLock<Option<crate::proxy::proxy_call::state::SipSessionHandle>>,
@@ -439,8 +446,9 @@ impl SipSession {
         app_ctx.rwi_gateway = server.rwi_gateway.clone();
         app_ctx.ivr_trace = server.ivr_trace.clone();
 
-        // Create a bridge handle that speaks SessionAction (for DefaultAppRuntime)
-        // and translates to CallCommand for the unified SipSession.
+        // Create a shared handle for app event delivery (send_app_event).
+        // The old SessionAction→CallCommand bridge has been removed — the
+        // unified SipSessionHandle speaks CallCommand natively.
         let bridge_shared = crate::proxy::proxy_call::state::SipSessionShared::new(
             context.session_id.clone(),
             crate::call::DialDirection::Inbound,
@@ -448,34 +456,12 @@ impl SipSession {
             Some(context.original_callee.clone()),
             None,
         );
-        let (bridge_handle, mut action_rx) =
+        let (bridge_handle, _action_rx) =
             crate::proxy::proxy_call::state::SipSessionHandle::with_shared(bridge_shared);
 
         // Wire the bridge into the sip handle so send_app_event forwards events.
         let mut slot = app_event_bridge.write();
         *slot = Some(bridge_handle.clone());
-
-        // Spawn the bridge task: SessionAction -> CallCommand
-        let sip_handle_clone = sip_handle.clone();
-        tokio::spawn(async move {
-            use crate::call::adapters::session_action_to_call_command;
-            while let Some(action) = action_rx.recv().await {
-                match session_action_to_call_command(action) {
-                    Ok(cmd) => {
-                        if let Err(e) = sip_handle_clone.send_command(cmd) {
-                            tracing::warn!(
-                                "SessionAction bridge failed to send CallCommand: {}",
-                                e
-                            );
-                            break;
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!("Failed to convert SessionAction to CallCommand: {}", e);
-                    }
-                }
-            }
-        });
 
         let app_runtime: Arc<dyn AppRuntime> = Arc::new(
             DefaultAppRuntime::new(AppRuntimeConfig {
@@ -535,9 +521,11 @@ impl SipSession {
             callee_guards: Vec::new(),
             reporter: None,
             recorder: Arc::new(RwLock::new(None)),
+            recording_paused: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             app_event_bridge: app_event_bridge.clone(),
             conference_bridge: crate::call::runtime::SessionConferenceBridge::new(),
             cmd_tx: Some(cmd_tx.clone()),
+            dtmf_digits: Vec::new(),
         };
 
         (session, sip_handle, cmd_rx)
@@ -719,6 +707,22 @@ impl SipSession {
     }
 
     async fn send_mid_dialog_request_to_side(
+        &mut self,
+        side: DialogSide,
+        method: rsipstack::sip::Method,
+        headers: Vec<rsipstack::sip::Header>,
+        body: Option<Vec<u8>>,
+    ) -> Result<Option<rsipstack::sip::Response>> {
+        let result = tokio::time::timeout(
+            MID_DIALOG_TIMEOUT,
+            self.send_mid_dialog_request_to_side_inner(side, method, headers, body),
+        )
+        .await
+        .map_err(|_| anyhow!("mid-dialog request timed out after {}s", MID_DIALOG_TIMEOUT.as_secs()))?;
+        result
+    }
+
+    async fn send_mid_dialog_request_to_side_inner(
         &mut self,
         side: DialogSide,
         method: rsipstack::sip::Method,
@@ -1427,7 +1431,7 @@ impl SipSession {
         &mut self,
         mut state_rx: mpsc::UnboundedReceiver<DialogState>,
         mut callee_state_rx: mpsc::UnboundedReceiver<DialogState>,
-        mut cmd_rx: mpsc::UnboundedReceiver<CallCommand>,
+        mut cmd_rx: mpsc::Receiver<CallCommand>,
         _dialog_guard: ServerDialogGuard,
     ) -> Result<()> {
         let _cancel_guard = self.cancel_token.clone().drop_guard();
@@ -2656,7 +2660,7 @@ impl SipSession {
         }
 
         if self.context.dialplan.recording.enabled {
-            bridge_builder = bridge_builder.with_recorder(self.recorder.clone());
+            bridge_builder = bridge_builder.with_recorder(self.recorder.clone(), self.recording_paused.clone());
         }
 
         let bridge = bridge_builder.build();
@@ -4781,7 +4785,7 @@ impl SipSession {
 
             // Attach recorder to bridge so audio is captured when recording starts
             if self.context.dialplan.recording.enabled {
-                bridge_builder = bridge_builder.with_recorder(self.recorder.clone());
+                bridge_builder = bridge_builder.with_recorder(self.recorder.clone(), self.recording_paused.clone());
             }
 
             let bridge = bridge_builder.build();
@@ -5111,7 +5115,7 @@ impl SipSession {
         // Auto-start recording when the call is answered if configured.
         if self.context.dialplan.recording.enabled
             && self.context.dialplan.recording.auto_start
-            && self.media.recording_state.is_none()
+            && !self.media.recording_state.is_active()
             && let Some(ref option) = self.context.dialplan.recording.option
         {
             let path = option.recorder_file.clone();
@@ -5450,9 +5454,14 @@ impl SipSession {
         loop_playback: bool,
     ) -> Result<()> {
         let resolved = Self::resolve_audio_file_path(audio_file);
+        let source = if resolved.starts_with("http://") || resolved.starts_with("https://") {
+            crate::call::domain::MediaSource::Url { url: resolved }
+        } else {
+            crate::call::domain::MediaSource::File { path: resolved }
+        };
         self.handle_play(
             None,
-            crate::call::domain::MediaSource::File { path: resolved },
+            source,
             Some(crate::call::domain::PlayOptions {
                 await_completion,
                 track_id: Some(track_id.to_string()),
@@ -5551,6 +5560,10 @@ impl SipSession {
     }
 
     fn resolve_audio_file_path(audio_file: &str) -> String {
+        if audio_file.starts_with("http://") || audio_file.starts_with("https://") {
+            return audio_file.to_string();
+        }
+
         let path = Path::new(audio_file);
         if path.is_absolute() || path.exists() {
             return audio_file.to_string();
@@ -5571,9 +5584,10 @@ impl SipSession {
     pub async fn start_recording(
         &mut self,
         path: &str,
-        _max_duration: Option<Duration>,
+        max_duration: Option<Duration>,
         beep: bool,
     ) -> Result<()> {
+        use crate::proxy::proxy_call::media_state::RecordingPhase;
         if self.server.sip_flow.is_some() && !self.context.dialplan.recording.enabled {
             return Err(anyhow!(
                 "Live recording is disabled when SipFlow is enabled"
@@ -5607,54 +5621,111 @@ impl SipSession {
             }
             *guard = Some(recorder);
         }
-        self.media.recording_state = Some((path.to_string(), Instant::now()));
+        self.media.recording_state = RecordingPhase::Recording {
+            path: path.to_string(),
+            started_at: Instant::now(),
+            max_duration,
+        };
 
         if beep {
-            debug!("Playing recording beep");
+            info!(session_id = %self.context.session_id, "Playing recording beep");
+            self.handle_play(
+                None,
+                crate::call::domain::MediaSource::file("beep.wav"),
+                None,
+            )
+            .await?;
         }
         Ok(())
     }
 
     pub async fn pause_recording(&mut self) -> Result<()> {
-        if self.media.recording_state.is_none() {
-            return Err(anyhow!("Recording not active"));
-        }
-        info!("Recording paused");
+        use crate::proxy::proxy_call::media_state::RecordingPhase;
+        let next = match &self.media.recording_state {
+            RecordingPhase::Recording {
+                path,
+                started_at,
+                max_duration,
+            } => {
+                self.recording_paused
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+                info!(path = %path, "Recording paused");
+                RecordingPhase::Paused {
+                    path: path.clone(),
+                    started_at: *started_at,
+                    max_duration: *max_duration,
+                }
+            }
+            RecordingPhase::Paused { path, .. } => {
+                return Err(anyhow!("Recording already paused: {}", path));
+            }
+            RecordingPhase::Idle => {
+                return Err(anyhow!("Recording not active"));
+            }
+        };
+        self.media.recording_state = next;
         Ok(())
     }
 
     pub async fn resume_recording(&mut self) -> Result<()> {
-        if self.media.recording_state.is_none() {
-            return Err(anyhow!("Recording not active"));
-        }
-        info!("Recording resumed");
+        use crate::proxy::proxy_call::media_state::RecordingPhase;
+        let next = match &self.media.recording_state {
+            RecordingPhase::Paused {
+                path,
+                started_at,
+                max_duration,
+            } => {
+                self.recording_paused
+                    .store(false, std::sync::atomic::Ordering::Relaxed);
+                info!(path = %path, "Recording resumed");
+                RecordingPhase::Recording {
+                    path: path.clone(),
+                    started_at: *started_at,
+                    max_duration: *max_duration,
+                }
+            }
+            RecordingPhase::Recording { path, .. } => {
+                return Err(anyhow!("Recording already active: {}", path));
+            }
+            RecordingPhase::Idle => {
+                return Err(anyhow!("Recording not active"));
+            }
+        };
+        self.media.recording_state = next;
         Ok(())
     }
 
     pub async fn stop_recording(&mut self) -> Result<()> {
-        if let Some((path, start_time)) = self.media.recording_state.take() {
-            let duration = start_time.elapsed();
-            let file_size = {
-                let mut guard = self.recorder.write();
-                if let Some(ref mut r) = *guard {
-                    let _ = r.finalize();
-                }
-                *guard = None;
-                std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0)
-            };
-            info!(path = %path, duration = ?duration, file_size, "Recording stopped");
-
-            let bridge = self.app_event_bridge.read();
-            if let Some(ref handle) = *bridge {
-                let _ =
-                    handle.send_app_event(crate::call::app::ControllerEvent::RecordingComplete(
-                        crate::call::app::RecordingInfo {
-                            path: path.clone(),
-                            duration,
-                            size_bytes: file_size,
-                        },
-                    ));
+        use crate::proxy::proxy_call::media_state::RecordingPhase;
+        let prev = std::mem::replace(&mut self.media.recording_state, RecordingPhase::Idle);
+        let path = match &prev {
+            RecordingPhase::Recording { path, .. } | RecordingPhase::Paused { path, .. } => {
+                path.clone()
             }
+            RecordingPhase::Idle => return Ok(()),
+        };
+        let duration = prev.elapsed().unwrap_or_default();
+        self.recording_paused
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        let file_size = {
+            let mut guard = self.recorder.write();
+            if let Some(ref mut r) = *guard {
+                let _ = r.finalize();
+            }
+            *guard = None;
+            std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0)
+        };
+        info!(path = %path, duration = ?duration, file_size, "Recording stopped");
+
+        let bridge = self.app_event_bridge.read();
+        if let Some(ref handle) = *bridge {
+            let _ = handle.send_app_event(crate::call::app::ControllerEvent::RecordingComplete(
+                crate::call::app::RecordingInfo {
+                    path: path.clone(),
+                    duration,
+                    size_bytes: file_size,
+                },
+            ));
         }
         Ok(())
     }
@@ -5664,7 +5735,7 @@ impl SipSession {
 
         self.stop_caller_ingress_monitor().await;
 
-        if self.media.recording_state.is_some() {
+        if self.media.recording_state.is_active() {
             let _ = self.stop_recording().await;
         }
 
@@ -7221,7 +7292,8 @@ impl SipSession {
             .unwrap_or_else(|| "playback".to_string());
         let file_path = match source {
             crate::call::domain::MediaSource::File { path } => path,
-            _ => return Err(anyhow!("Only file playback supported")),
+            crate::call::domain::MediaSource::Url { url } => url,
+            _ => return Err(anyhow!("Only file/URL playback supported")),
         };
 
         let codec_info = self
@@ -7681,7 +7753,7 @@ impl SipSession {
         match info_result {
             Ok(()) => {
                 for digit in &valid_digits {
-                    self.context.dtmf_digits.push(*digit);
+                    self.dtmf_digits.push(*digit);
                 }
                 info!(%leg_id, digits = %valid_digits.iter().collect::<String>(), "DTMF sent via SIP INFO");
             }
@@ -7887,7 +7959,11 @@ impl SipSession {
                 }
 
                 if let Some(media_source) = music
-                    && let crate::call::domain::MediaSource::File { path } = media_source
+                    && let Some(path) = match &media_source {
+                        crate::call::domain::MediaSource::File { path } => Some(path.clone()),
+                        crate::call::domain::MediaSource::Url { url } => Some(url.clone()),
+                        _ => None,
+                    }
                     && let Err(e) = self.play_audio_file(&path, false, "hold-music", true).await
                 {
                     warn!(error = %e, "Failed to start hold music");
@@ -8495,7 +8571,6 @@ mod tests {
             original_caller: "sip:alice@rustpbx.com".to_string(),
             original_callee: "sip:bob@rustpbx.com".to_string(),
             max_forwards: 70,
-            dtmf_digits: Vec::new(),
         };
 
         let caller_peer = Arc::new(MockMediaPeer::new());
@@ -8578,7 +8653,6 @@ mod tests {
             original_caller: "sip:alice@rustpbx.com".to_string(),
             original_callee: "sip:bob@rustpbx.com".to_string(),
             max_forwards: 70,
-            dtmf_digits: Vec::new(),
         };
 
         let caller_peer = Arc::new(MockMediaPeer::new());
@@ -8659,7 +8733,6 @@ mod tests {
             original_caller: "sip:alice@rustpbx.com".to_string(),
             original_callee: "sip:ivr@rustpbx.com".to_string(),
             max_forwards: 70,
-            dtmf_digits: Vec::new(),
         };
 
         let caller_peer = Arc::new(MockMediaPeer::new());
@@ -8769,7 +8842,6 @@ mod tests {
             original_caller: "sip:alice@rustpbx.com".to_string(),
             original_callee: "sip:ivr@rustpbx.com".to_string(),
             max_forwards: 70,
-            dtmf_digits: Vec::new(),
         };
 
         let caller_peer = Arc::new(MockMediaPeer::new());
@@ -9120,7 +9192,6 @@ mod tests {
             original_caller: "sip:alice@rustpbx.com".to_string(),
             original_callee: "sip:bob@rustpbx.com".to_string(),
             max_forwards: 70,
-            dtmf_digits: Vec::new(),
         };
 
         let caller_peer = Arc::new(MockMediaPeer::new());
@@ -9189,7 +9260,6 @@ mod tests {
             original_caller: "sip:alice@rustpbx.com".to_string(),
             original_callee: "sip:bob@rustpbx.com".to_string(),
             max_forwards: 70,
-            dtmf_digits: Vec::new(),
         };
 
         let caller_peer = Arc::new(MockMediaPeer::new());
@@ -9616,5 +9686,65 @@ a=rtcp-fb:104 nack\r\n";
         assert_eq!(result.len(), 2, "both H264 profiles should be kept");
         assert!(result.iter().all(|c| c.codec_name == "H264"));
         assert!(result.iter().all(|c| c.rtcp_fbs.is_empty()));
+    }
+
+    // ── DTMF payload building ─────────────────────────────────────────────
+
+    #[test]
+    fn test_build_telephone_event_payload_digit_1() {
+        let payload = SipSession::build_telephone_event_payload('1', false, 800).unwrap();
+        assert_eq!(payload[0], 1); // DTMF event code for '1'
+        assert_eq!(payload[1] & 0x80, 0); // E bit not set
+        assert_eq!(u16::from_be_bytes([payload[2], payload[3]]), 800);
+    }
+
+    #[test]
+    fn test_build_telephone_event_payload_digit_end_bit() {
+        let payload = SipSession::build_telephone_event_payload('5', true, 1600).unwrap();
+        assert_eq!(payload[0], 5);
+        assert_eq!(payload[1] & 0x80, 0x80); // E bit set
+        assert_eq!(u16::from_be_bytes([payload[2], payload[3]]), 1600);
+    }
+
+    #[test]
+    fn test_build_telephone_event_payload_star() {
+        let payload = SipSession::build_telephone_event_payload('*', false, 0).unwrap();
+        assert_eq!(payload[0], 10); // DTMF event code for '*'
+    }
+
+    #[test]
+    fn test_build_telephone_event_payload_hash() {
+        let payload = SipSession::build_telephone_event_payload('#', false, 0).unwrap();
+        assert_eq!(payload[0], 11); // DTMF event code for '#'
+    }
+
+    #[test]
+    fn test_build_telephone_event_payload_invalid() {
+        let result = SipSession::build_telephone_event_payload('Z', false, 0);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_build_telephone_event_payload_all_digits() {
+        for (ch, expected_code) in [
+            ('0', 0), ('1', 1), ('2', 2), ('3', 3), ('4', 4),
+            ('5', 5), ('6', 6), ('7', 7), ('8', 8), ('9', 9),
+            ('*', 10), ('#', 11),
+        ] {
+            let payload = SipSession::build_telephone_event_payload(ch, false, 800).unwrap();
+            assert_eq!(payload[0], expected_code, "DTMF digit '{}' should map to code {}", ch, expected_code);
+        }
+    }
+
+    #[test]
+    fn test_build_telephone_event_payload_duration_zero() {
+        let payload = SipSession::build_telephone_event_payload('3', false, 0).unwrap();
+        assert_eq!(u16::from_be_bytes([payload[2], payload[3]]), 0);
+    }
+
+    #[test]
+    fn test_build_telephone_event_payload_duration_max() {
+        let payload = SipSession::build_telephone_event_payload('7', false, 65535).unwrap();
+        assert_eq!(u16::from_be_bytes([payload[2], payload[3]]), 65535);
     }
 }

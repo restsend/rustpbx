@@ -103,7 +103,6 @@ impl CallSessionBuilder {
             original_caller,
             original_callee,
             max_forwards: self.max_forwards,
-            dtmf_digits: Vec::new(),
         };
 
         SipSession::serve(server, context, tx, cancel_token, self.call_record_sender).await
@@ -143,7 +142,6 @@ impl CallSessionBuilder {
             original_caller: original_caller.clone(),
             original_callee: original_callee.clone(),
             max_forwards: 70,
-            dtmf_digits: Vec::new(),
         };
 
         let reporter = crate::proxy::proxy_call::reporter::CallReporter {

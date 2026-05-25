@@ -524,14 +524,28 @@ impl IvrApp {
                 info!(ivr = %self.definition.name, menu = %current, "IVR repeating menu");
                 self.enter_menu(&current, ctrl, ctx).await
             }
-            EntryAction::Hangup { .. } => {
-                info!(ivr = %self.definition.name, "IVR hanging up");
-                self.ivr_flow_completed(ctx, "hangup", None).await;
-                self.state = IvrState::Done;
-                Ok(AppAction::Hangup {
-                    reason: None,
-                    code: None,
-                })
+            EntryAction::Hangup { prompt, prompt_text, prompt_voice, .. } => {
+                if let Some(path) = self
+                    .resolve_audio(
+                        prompt.as_deref(),
+                        prompt_text.as_deref(),
+                        prompt_voice.as_deref(),
+                    )
+                    .await
+                {
+                    self.state = IvrState::PlayingAndHangup { code: None };
+                    debug!(ivr = %self.definition.name, prompt = %path, "Playing prompt before hangup");
+                    ctrl.play_audio(&path, false).await?;
+                    Ok(AppAction::Continue)
+                } else {
+                    info!(ivr = %self.definition.name, "IVR hanging up");
+                    self.ivr_flow_completed(ctx, "hangup", None).await;
+                    self.state = IvrState::Done;
+                    Ok(AppAction::Hangup {
+                        reason: None,
+                        code: None,
+                    })
+                }
             }
             EntryAction::PlayAndHangup {
                 prompt,

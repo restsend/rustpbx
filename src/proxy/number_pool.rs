@@ -1,5 +1,5 @@
 use crate::call::{Dialplan, TransactionCookie, TrunkContext};
-use crate::proxy::call::{DialplanInspector, RouteError};
+use crate::proxy::call::{DialplanInspector, DialplanVerdict};
 use rsipstack::sip::Request as SipRequest;
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
@@ -31,13 +31,13 @@ impl DialplanInspector for NumberPoolInspector {
         mut dialplan: Dialplan,
         cookie: &TransactionCookie,
         _original: &SipRequest,
-    ) -> Result<Dialplan, RouteError> {
+    ) -> DialplanVerdict {
         let Some(ctx) = cookie.get_extension::<TrunkContext>() else {
-            return Ok(dialplan);
+            return DialplanVerdict::Continue(dialplan);
         };
 
         if ctx.did_numbers.is_empty() {
-            return Ok(dialplan);
+            return DialplanVerdict::Continue(dialplan);
         }
 
         let counter = usage_counter();
@@ -63,6 +63,6 @@ impl DialplanInspector for NumberPoolInspector {
         let mut usage = counter.lock().unwrap();
         *usage.entry(did).or_insert(0) += 1;
 
-        Ok(dialplan)
+        DialplanVerdict::Continue(dialplan)
     }
 }

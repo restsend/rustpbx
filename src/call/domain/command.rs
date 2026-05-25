@@ -18,9 +18,9 @@ use tokio::sync::mpsc;
 use super::{HangupCommand, LegId, MediaSource, RingbackPolicy};
 
 /// Type alias for CallCommand sender.
-pub type CallCommandTx = mpsc::UnboundedSender<CallCommand>;
+pub type CallCommandTx = mpsc::Sender<CallCommand>;
 /// Type alias for CallCommand receiver.
-pub type CallCommandRx = mpsc::UnboundedReceiver<CallCommand>;
+pub type CallCommandRx = mpsc::Receiver<CallCommand>;
 
 /// Unified command for session control
 #[derive(Debug, Clone, Serialize, Deserialize)]
