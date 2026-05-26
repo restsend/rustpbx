@@ -324,8 +324,14 @@ impl PresenceManager {
         match event {
             LocatorEvent::Registered(loc) => {
                 if let Some(user) = Self::get_user(&loc) {
-                    info!("Presence: Registered {}", user);
                     let current = self.get_state(&user);
+                    info!(
+                        extension = %user,
+                        destination = %loc.destination.as_ref().map(|d| d.to_string()).unwrap_or_default(),
+                        user_agent = %loc.user_agent.as_deref().unwrap_or_default(),
+                        status = %current.status,
+                        "Presence: Registered"
+                    );
                     if current.status == PresenceStatus::Offline {
                         self.update_state(
                             &user,
