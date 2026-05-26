@@ -4,7 +4,7 @@ use crate::call::{
     TrunkContext,
 };
 use crate::config::{HttpRouterConfig, MediaProxyMode, RtpConfig};
-use crate::proxy::call::{CallRouter, RouteError};
+use crate::proxy::call::{CallRouter, RouteError, apply_allowed_codecs};
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use rsipstack::sip::prelude::*;
@@ -88,6 +88,9 @@ struct HttpResponsePayload {
     pub headers: Option<HashMap<String, String>>,
     pub with_original_headers: Option<bool>,
     pub extensions: Option<HashMap<String, String>>,
+    /// Allowed audio codecs. If set, restricts the audio codecs used for this call.
+    /// Values are codec names like "pcma", "pcmu", "g722", "opus", "g729".
+    pub allow_codecs: Option<Vec<String>>,
 }
 
 #[async_trait]
@@ -314,6 +317,8 @@ impl CallRouter for HttpCallRouter {
                 if let Some(max_ring_time) = result.max_ring_time {
                     dialplan.max_ring_time = Duration::from_secs(max_ring_time as u64);
                 }
+
+                apply_allowed_codecs(&mut dialplan, result.allow_codecs.as_deref(), None);
 
                 Ok(dialplan)
             }
