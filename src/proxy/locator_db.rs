@@ -3,9 +3,14 @@ use crate::call::Location;
 use anyhow::Result;
 use async_trait::async_trait;
 use rsipstack::transport::SipAddr;
-use sea_orm::{ActiveModelTrait, Database, QueryOrder, Set, entity::prelude::*};
+use sea_orm::{
+    ActiveModelTrait, Database, QueryOrder, Set, entity::prelude::*,
+};
 pub use sea_orm_migration::prelude::*;
-use sea_orm_migration::schema::{boolean, integer, pk_auto, string, string_null, timestamp};
+use sea_orm_migration::schema::{
+    big_integer, boolean, string_len, string_len_null, timestamp_with_time_zone as timestamp,
+};
+use sea_orm_migration::sea_query::ColumnDef as MigrationColumnDef;
 use std::time::{Duration, Instant, SystemTime};
 use tokio::sync::Mutex;
 use tracing::{info, warn};
@@ -51,14 +56,19 @@ impl MigrationTrait for Migration {
                 Table::create()
                     .table(Entity)
                     .if_not_exists()
-                    .col(pk_auto(Column::Id))
-                    .col(string(Column::Aor).char_len(255).not_null())
-                    .col(integer(Column::Expires).not_null())
-                    .col(string(Column::Username).char_len(200).not_null())
-                    .col(string_null(Column::Realm).char_len(200))
-                    .col(string(Column::Destination).char_len(255).not_null())
-                    .col(string(Column::Transport).char_len(32).not_null())
-                    .col(integer(Column::LastModified).not_null())
+                    .col(
+                        MigrationColumnDef::new(Column::Id)
+                            .big_integer()
+                            .auto_increment()
+                            .primary_key(),
+                    )
+                    .col(string_len(Column::Aor, 255).not_null())
+                    .col(big_integer(Column::Expires).not_null())
+                    .col(string_len(Column::Username, 200).not_null())
+                    .col(string_len_null(Column::Realm, 200))
+                    .col(string_len(Column::Destination, 255).not_null())
+                    .col(string_len(Column::Transport, 32).not_null())
+                    .col(big_integer(Column::LastModified).not_null())
                     .col(
                         timestamp(Column::CreatedAt)
                             .not_null()
@@ -70,7 +80,7 @@ impl MigrationTrait for Migration {
                             .default(Expr::current_timestamp()),
                     )
                     .col(boolean(Column::SupportsWebrtc).not_null().default(false))
-                    .col(string_null(Column::UserAgent).char_len(255))
+                    .col(string_len_null(Column::UserAgent, 255))
                     .to_owned(),
             )
             .await?;

@@ -2,7 +2,8 @@ use sea_orm::entity::prelude::*;
 use sea_orm::{ActiveValue::Set, ConnectionTrait, DbErr, QueryFilter};
 use sea_orm_migration::prelude::*;
 use sea_orm_migration::schema::{
-    boolean, integer_null, string, string_null, text_null, timestamp, timestamp_null,
+    boolean, integer_null, string_len, string_len_null, text_null,
+    timestamp_with_time_zone as timestamp, timestamp_with_time_zone_null as timestamp_null,
 };
 use sea_orm_migration::sea_query::ColumnDef;
 use sea_query::Expr;
@@ -196,16 +197,16 @@ impl MigrationTrait for Migration {
                             .auto_increment()
                             .primary_key(),
                     )
-                    .col(string(Column::Extension).char_len(32))
-                    .col(string_null(Column::DisplayName).char_len(160))
-                    .col(string_null(Column::Email).char_len(160))
-                    .col(string_null(Column::Status).char_len(32))
+                    .col(string_len(Column::Extension, 32))
+                    .col(string_len_null(Column::DisplayName, 160))
+                    .col(string_len_null(Column::Email, 160))
+                    .col(string_len_null(Column::Status, 32))
                     .col(boolean(Column::LoginDisabled).default(false))
                     .col(boolean(Column::VoicemailDisabled).default(false))
                     .col(boolean(Column::AllowGuestCalls).default(false))
-                    .col(string_null(Column::SipPassword).char_len(160))
-                    .col(string_null(Column::CallForwardingMode).char_len(32))
-                    .col(string_null(Column::CallForwardingDestination).char_len(160))
+                    .col(string_len_null(Column::SipPassword, 160))
+                    .col(string_len_null(Column::CallForwardingMode, 32))
+                    .col(string_len_null(Column::CallForwardingDestination, 160))
                     .col(integer_null(Column::CallForwardingTimeout))
                     .col(timestamp_null(Column::RegisteredAt))
                     .col(text_null(Column::Notes))

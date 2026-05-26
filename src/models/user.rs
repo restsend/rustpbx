@@ -9,7 +9,8 @@ use sea_orm::ActiveValue::Set;
 use sea_orm::entity::prelude::*;
 use sea_orm_migration::prelude::*;
 use sea_orm_migration::schema::{
-    boolean, string, string_null, string_uniq, timestamp, timestamp_null,
+    boolean, string_len, string_len_null, string_len_uniq, timestamp_with_time_zone as timestamp,
+    timestamp_with_time_zone_null as timestamp_null,
 };
 use sea_orm_migration::sea_query::ColumnDef;
 use serde::Serialize;
@@ -148,21 +149,21 @@ impl MigrationTrait for Migration {
                             .auto_increment()
                             .primary_key(),
                     )
-                    .col(string_uniq(Column::Email).char_len(255))
-                    .col(string_uniq(Column::Username).char_len(100))
-                    .col(string(Column::PasswordHash).char_len(255))
-                    .col(string_null(Column::ResetToken).char_len(128))
+                    .col(string_len_uniq(Column::Email, 255))
+                    .col(string_len_uniq(Column::Username, 100))
+                    .col(string_len(Column::PasswordHash, 255))
+                    .col(string_len_null(Column::ResetToken, 128))
                     .col(timestamp_null(Column::ResetTokenExpires))
                     .col(timestamp_null(Column::LastLoginAt))
-                    .col(string_null(Column::LastLoginIp).char_len(128))
+                    .col(string_len_null(Column::LastLoginIp, 128))
                     .col(timestamp(Column::CreatedAt).default(Expr::current_timestamp()))
                     .col(timestamp(Column::UpdatedAt).default(Expr::current_timestamp()))
                     .col(boolean(Column::IsActive).default(true))
                     .col(boolean(Column::IsStaff).default(false))
                     .col(boolean(Column::IsSuperuser).default(false))
                     .col(boolean(Column::MfaEnabled).default(false))
-                    .col(string_null(Column::MfaSecret).char_len(64))
-                    .col(string(Column::AuthSource).char_len(32).default("local"))
+                    .col(string_len_null(Column::MfaSecret, 64))
+                    .col(string_len(Column::AuthSource, 32).default("local"))
                     .to_owned(),
             )
             .await?;

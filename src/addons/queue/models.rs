@@ -1,6 +1,9 @@
 use sea_orm::entity::prelude::*;
 use sea_orm_migration::prelude::*;
-use sea_orm_migration::schema::{boolean, json_null, string, text_null, timestamp, timestamp_null};
+use sea_orm_migration::schema::{
+    boolean, json_null, string_len, text_null, timestamp_with_time_zone as timestamp,
+    timestamp_with_time_zone_null as timestamp_null,
+};
 use sea_orm_migration::sea_query::ColumnDef;
 use sea_query::Expr;
 use serde::{Deserialize, Serialize};
@@ -48,7 +51,7 @@ impl MigrationTrait for Migration {
                             .primary_key()
                             .auto_increment(),
                     )
-                    .col(string(Column::Name).char_len(160))
+                    .col(string_len(Column::Name, 160))
                     .col(text_null(Column::Description))
                     .col(json_null(Column::Metadata))
                     .col(ColumnDef::new(Column::Spec).json().not_null())

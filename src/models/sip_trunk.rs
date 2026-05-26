@@ -1,8 +1,8 @@
 use sea_orm::entity::prelude::*;
 use sea_orm_migration::prelude::*;
 use sea_orm_migration::schema::{
-    boolean, double_null, integer_null, json_null, string, string_null, text_null, timestamp,
-    timestamp_null,
+    boolean, double_null, integer_null, json_null, string_len, string_len_null, text_null,
+    timestamp_with_time_zone as timestamp, timestamp_with_time_zone_null as timestamp_null,
 };
 use sea_orm_migration::sea_query::ColumnDef;
 use sea_query::Expr;
@@ -146,30 +146,27 @@ impl MigrationTrait for Migration {
                             .primary_key()
                             .auto_increment(),
                     )
-                    .col(string(Column::Name).char_len(120))
-                    .col(string_null(Column::DisplayName).char_len(160))
-                    .col(string_null(Column::Carrier).char_len(160))
+                    .col(string_len(Column::Name, 120))
+                    .col(string_len_null(Column::DisplayName, 160))
+                    .col(string_len_null(Column::Carrier, 160))
                     .col(text_null(Column::Description))
                     .col(
-                        string(Column::Status)
-                            .char_len(32)
+                        string_len(Column::Status, 32)
                             .default(SipTrunkStatus::default().as_str()),
                     )
                     .col(
-                        string(Column::Direction)
-                            .char_len(32)
+                        string_len(Column::Direction, 32)
                             .default(SipTrunkDirection::default().as_str()),
                     )
-                    .col(string_null(Column::SipServer).char_len(160))
+                    .col(string_len_null(Column::SipServer, 160))
                     .col(
-                        string(Column::SipTransport)
-                            .char_len(16)
+                        string_len(Column::SipTransport, 16)
                             .default(SipTransport::default().as_str()),
                     )
-                    .col(string_null(Column::OutboundProxy).char_len(160))
-                    .col(string_null(Column::AuthUsername).char_len(160))
-                    .col(string_null(Column::AuthPassword).char_len(160))
-                    .col(string_null(Column::DefaultRouteLabel).char_len(160))
+                    .col(string_len_null(Column::OutboundProxy, 160))
+                    .col(string_len_null(Column::AuthUsername, 160))
+                    .col(string_len_null(Column::AuthPassword, 160))
+                    .col(string_len_null(Column::DefaultRouteLabel, 160))
                     .col(integer_null(Column::MaxCps))
                     .col(integer_null(Column::MaxConcurrent))
                     .col(integer_null(Column::MaxCallDuration))
@@ -180,8 +177,8 @@ impl MigrationTrait for Migration {
                     .col(json_null(Column::BillingSnapshot))
                     .col(json_null(Column::Analytics))
                     .col(json_null(Column::Tags))
-                    .col(string_null(Column::IncomingFromUserPrefix).char_len(160))
-                    .col(string_null(Column::IncomingToUserPrefix).char_len(160))
+                    .col(string_len_null(Column::IncomingFromUserPrefix, 160))
+                    .col(string_len_null(Column::IncomingToUserPrefix, 160))
                     .col(boolean(Column::IsActive).default(true))
                     .col(boolean(Column::RegisterEnabled).default(false))
                     .col(integer_null(Column::RegisterExpires))
