@@ -123,6 +123,62 @@ pub struct TrunkConfig {
 
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub did_numbers: Vec<String>,
+
+    /// Per-trunk ringback/early-media audio configuration
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ringback: Option<RingbackAudio>,
+}
+
+/// Per-trunk ringback/early-media audio configuration
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct RingbackAudio {
+    /// Ringback/waiting tone — played as 183 early media while callee rings
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ring: Option<String>,
+    /// Busy tone — played as 183 early media before sending 486
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub busy: Option<String>,
+    /// Reject tone — played as 183 early media before sending 603
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reject: Option<String>,
+    /// Offline/unavailable tone — played as 183 early media before sending 480
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offline: Option<String>,
+    /// Not-found tone — played as 183 early media before sending 404
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notfound: Option<String>,
+    /// How many seconds to play the tone before sending the final rejection.
+    /// Defaults to 2 seconds when not set (backward compatible).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub play_duration_secs: Option<u32>,
+}
+
+impl RingbackAudio {
+    /// Get the audio file for a specific SIP status code
+    pub fn for_status(&self, code: &rsipstack::sip::StatusCode) -> Option<&str> {
+        match code {
+            c if *c == rsipstack::sip::StatusCode::BusyHere => self.busy.as_deref(),
+            c if *c == rsipstack::sip::StatusCode::TemporarilyUnavailable => self.offline.as_deref(),
+            c if *c == rsipstack::sip::StatusCode::NotFound => self.notfound.as_deref(),
+            c if *c == rsipstack::sip::StatusCode::Decline => self.reject.as_deref(),
+            _ => None,
+        }
+    }
+
+    /// Returns `true` if any failure tone (busy/reject/offline/notfound) is configured
+    pub fn has_failure_tone(&self) -> bool {
+        self.busy.is_some() || self.reject.is_some() || self.offline.is_some() || self.notfound.is_some()
+    }
+
+    /// Get the play duration before rejection for a given status code.
+    /// Returns `None` if no tone is configured for the given status code.
+    pub fn play_duration_for(&self, code: &rsipstack::sip::StatusCode) -> Option<std::time::Duration> {
+        if self.for_status(code).is_some() {
+            Some(std::time::Duration::from_secs(self.play_duration_secs.unwrap_or(2) as u64))
+        } else {
+            None
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -220,6 +276,7 @@ impl Default for TrunkConfig {
             media_mode: None,
             video_policy: None,
             did_numbers: Vec::new(),
+            ringback: None,
             origin: ConfigOrigin::embedded(),
         }
     }

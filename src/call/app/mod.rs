@@ -103,7 +103,7 @@ mod ivr_test;
 #[cfg(test)]
 mod queue_test;
 
-pub use app_context::{AppSharedState, ApplicationContext, CallInfo};
+pub use app_context::{AppSharedState, ApplicationContext, CallInfo, extract_sip_headers};
 pub use controller::{
     CallController, ControllerEvent, DtmfCollectConfig, HangupDuringCollection, PlaybackHandle,
     RecordingHandle, RecordingInfo,

@@ -152,6 +152,8 @@ pub enum RingbackPolicy {
     Block,
     /// Replace with local audio source
     Replace { source: MediaSource },
+    /// Proactive 183 Session Progress with bridge-generated early media
+    EarlyMedia { source: MediaSource },
     /// Conditional: wait for remote, fallback to local on timeout
     Conditional {
         remote_timeout_ms: Option<u32>,

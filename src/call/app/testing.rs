@@ -28,6 +28,7 @@ use crate::config::Config;
 use crate::proxy::proxy_call::sip_session::SipSessionHandle;
 use chrono::Utc;
 use sea_orm::DatabaseConnection;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -72,6 +73,7 @@ impl MockCallStack {
                 callee: callee.into(),
                 direction: "inbound".into(),
                 started_at: Utc::now(),
+                sip_headers: HashMap::new(),
             },
             Arc::new(Config::default()),
         );

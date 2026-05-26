@@ -832,6 +832,8 @@ pub struct DialplanHints {
     pub media_mode: Option<MediaProxyMode>,
     /// Video policy from trunk config
     pub video_policy: Option<crate::proxy::routing::VideoPolicy>,
+    /// Per-trunk ringback/early-media audio configuration
+    pub ringback: Option<crate::proxy::routing::RingbackAudio>,
 }
 
 impl std::fmt::Debug for DialplanHints {

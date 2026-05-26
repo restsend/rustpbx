@@ -2,7 +2,7 @@ use crate::call::Location;
 use crate::call::app::{ApplicationContext, CallInfo};
 use crate::call::domain::{
     CallCommand, HangupCascade, HangupCommand, LegId, LegState, MediaPathMode, MediaRuntimeProfile,
-    RingbackPolicy,
+    MediaSource, RingbackPolicy,
 };
 use crate::call::domain::{Leg, SessionState};
 use crate::call::runtime::BridgeConfig;
@@ -434,6 +434,9 @@ impl SipSession {
             callee: context.original_callee.clone(),
             direction: context.dialplan.direction.to_string(),
             started_at: chrono::Utc::now(),
+            sip_headers: crate::call::app::extract_sip_headers(
+                &server_dialog.initial_request(),
+            ),
         };
         let mut app_ctx = ApplicationContext::new(
             server
@@ -1436,13 +1439,33 @@ impl SipSession {
     ) -> Result<()> {
         let _cancel_guard = self.cancel_token.clone().drop_guard();
 
+        // Send proactive 183 early media if trunk has configured ringback.ring tone
+        let ring_audio = self
+            .context
+            .dialplan
+            .audio_profile
+            .as_ref()
+            .and_then(|p| p.ring.clone());
+        if let Some(ref audio) = ring_audio {
+            info!(
+                session_id = %self.context.session_id,
+                audio = %audio,
+                "Sending proactive 183 Session Progress with ringback tone"
+            );
+            if let Err(e) = self.send_early_media_tone(audio).await {
+                warn!(session_id = %self.context.session_id, error = %e, "Failed to send proactive 183");
+            }
+        }
+
         if !self.context.dialplan.is_empty()
             && let Err((status_code, reason)) = self.execute_dialplan(&mut callee_state_rx).await
         {
             warn!(?status_code, ?reason, "Dialplan execution failed");
 
             let code = status_code.clone();
-            let _ = self.server_dialog.reject(Some(code), reason.clone());
+            if let Err(e) = self.reject_with_tone(code, reason.clone()).await {
+                warn!(session_id = %self.context.session_id, error = %e, "Failed to send rejection with tone");
+            }
             // Store error so cleanup/CDR can report the failure reason
             self.meta.last_error = Some((status_code.clone(), reason));
             self.meta.hangup_reason = Some(CallRecordHangupReason::Failed);
@@ -2051,7 +2074,7 @@ impl SipSession {
                             "Callee rejected the call"
                         );
                         self.meta.last_error = Some((code.clone(), reason_str.clone()));
-                        if let Err(e) = self.server_dialog.reject(code.into(), reason_str) {
+                        if let Err(e) = self.reject_with_tone(code.into(), reason_str.clone()).await {
                             warn!(session_id = %self.context.session_id, error = %e, "Failed to send rejection response to caller");
                         }
                     }
@@ -2516,6 +2539,184 @@ impl SipSession {
         }
 
         Err(last_error)
+    }
+
+    /// Send 183 Session Progress with early media audio played to the caller.
+    /// Supports file paths and `tone://frequency,duration_ms` format.
+    async fn send_early_media_tone(&mut self, audio_path: &str) -> Result<()> {
+        if self.media.early_media_sent {
+            return Ok(());
+        }
+
+        let caller_offer = match self.media.caller_offer.clone() {
+            Some(offer) => offer,
+            None => {
+                warn!("Cannot send 183: no caller offer available");
+                return Ok(());
+            }
+        };
+
+        let caller_is_webrtc = self.is_caller_webrtc();
+
+        // Create media bridge if not already present
+        let created_bridge = self.media.media_bridge.is_none();
+        if self.media.media_bridge.is_none() {
+            if let Err(e) = self
+                .create_app_caller_media_bridge(&caller_offer, caller_is_webrtc)
+                .await
+            {
+                warn!(
+                    session_id = %self.context.session_id,
+                    error = %e,
+                    "Failed to create media bridge for 183 early media"
+                );
+                return Ok(());
+            }
+        }
+
+        // Get caller-facing answer SDP from bridge
+        let answer_sdp = match self.prepare_bridge_caller_answer().await {
+            Ok(sdp) => sdp,
+            Err(e) => {
+                if created_bridge {
+                    if let Some(bridge) = self.media.media_bridge.take() {
+                        bridge.stop().await;
+                    }
+                }
+                warn!(
+                    session_id = %self.context.session_id,
+                    error = %e,
+                    "Failed to prepare bridge answer for 183 early media"
+                );
+                return Ok(());
+            }
+        };
+
+        self.media.answer = Some(answer_sdp.clone());
+        self.media.caller_answer_uses_media_bridge = true;
+        self.media.early_media_sent = true;
+
+        // Send 183 Session Progress with SDP
+        if let Err(e) = self.server_dialog.ringing(
+            Some(vec![rsipstack::sip::Header::ContentType("application/sdp".into())]),
+            Some(answer_sdp.into_bytes()),
+        ) {
+            warn!(session_id = %self.context.session_id, error = %e, "Failed to send 183 Session Progress");
+            // Continue even if 183 fails
+        } else {
+            info!(session_id = %self.context.session_id, "Sent 183 Session Progress with early media");
+        }
+
+        // Resolve audio path — generate temp WAV for tone:// specs
+        let resolved_path = Self::resolve_audio_path(audio_path)?;
+
+        // Play progress audio through the bridge
+        if let Some(ref bridge) = self.media.media_bridge {
+            let codec_info = self.caller_output_codec_info();
+            let track = crate::media::FileTrack::new("progress-media".to_string())
+                .with_path(resolved_path)
+                .with_loop(true)
+                .with_codec_info(codec_info)
+                .with_cname(self.server.rtc_cname.clone());
+            if let Err(e) = bridge
+                .replace_output_with_file(
+                    self.leg_bridge_endpoint(&LegId::from("caller")),
+                    &track,
+                )
+                .await
+            {
+                warn!(session_id = %self.context.session_id, error = %e, "Failed to play progress audio");
+            }
+            self.media.bridge_playback_track_id = Some("progress-media".to_string());
+            self.media.playback_tracks.insert("progress-media".to_string(), track);
+        }
+
+        Ok(())
+    }
+
+    /// Resolve an audio path specification to an actual file path.
+    /// Supports:
+    ///   - Regular file paths (passthrough)
+    ///   - `tone://frequency,duration_ms` — generates a temporary WAV file with a sine wave
+    fn resolve_audio_path(spec: &str) -> Result<String> {
+        if let Some(tone_spec) = spec.strip_prefix("tone://") {
+            let parts: Vec<&str> = tone_spec.splitn(2, ',').collect();
+            if parts.len() != 2 {
+                return Err(anyhow!("Invalid tone spec '{}': expected tone://frequency,duration_ms", spec));
+            }
+            let frequency: u32 = parts[0].trim().parse()
+                .map_err(|e| anyhow!("Invalid frequency in tone spec '{}': {}", spec, e))?;
+            let duration_ms: u64 = parts[1].trim().parse()
+                .map_err(|e| anyhow!("Invalid duration in tone spec '{}': {}", spec, e))?;
+
+            let sample_rate = 8000u32;
+            let num_samples = (sample_rate as u64 * duration_ms / 1000) as usize;
+            let amplitude = 8192i16;
+
+            let pcm: Vec<i16> = (0..num_samples)
+                .map(|i| {
+                    let t = i as f64 / sample_rate as f64;
+                    (amplitude as f64 * (2.0 * std::f64::consts::PI * frequency as f64 * t).sin()) as i16
+                })
+                .collect();
+
+            let temp_dir = std::env::temp_dir();
+            let temp_path = temp_dir.join(format!(
+                "rustpbx_tone_{}hz_{}ms_{}.wav",
+                frequency,
+                duration_ms,
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos())
+                    .unwrap_or(0)
+            ));
+
+            let spec = hound::WavSpec {
+                channels: 1,
+                sample_rate: 8000,
+                bits_per_sample: 16,
+                sample_format: hound::SampleFormat::Int,
+            };
+            let mut writer = hound::WavWriter::create(&temp_path, spec)
+                .map_err(|e| anyhow!("Failed to create temp WAV for tone: {}", e))?;
+            for sample in &pcm {
+                writer.write_sample(*sample)
+                    .map_err(|e| anyhow!("Failed to write WAV sample: {}", e))?;
+            }
+            writer.finalize()
+                .map_err(|e| anyhow!("Failed to finalize WAV: {}", e))?;
+
+            Ok(temp_path.to_string_lossy().to_string())
+        } else {
+            // Passthrough — regular file path
+            Ok(spec.to_string())
+        }
+    }
+
+    /// Reject the call with a specific status code, optionally playing a configured
+    /// failure tone as 183 early media before sending the rejection.
+    async fn reject_with_tone(&mut self, code: StatusCode, reason: Option<String>) -> Result<()> {
+        let profile = self.context.dialplan.audio_profile.as_ref();
+        let audio_path = profile.and_then(|rb| rb.for_status(&code).map(|s| s.to_string()));
+        if let Some(ref path) = audio_path {
+            let dur = profile
+                .and_then(|rb| rb.play_duration_for(&code))
+                .unwrap_or(std::time::Duration::from_secs(2));
+            info!(
+                session_id = %self.context.session_id,
+                status = %code,
+                audio = %path,
+                play_seconds = %dur.as_secs(),
+                "Playing failure tone before rejection",
+            );
+            if let Err(e) = self.send_early_media_tone(path).await {
+                warn!(session_id = %self.context.session_id, error = %e, "Failed to play failure tone");
+            } else {
+                tokio::time::sleep(dur).await;
+            }
+        }
+        self.server_dialog.reject(Some(code), reason.clone())?;
+        Ok(())
     }
 
     async fn prepare_app_caller_media_bridge(&mut self) -> Option<String> {
@@ -3236,6 +3437,16 @@ impl SipSession {
         if let Some(track_id) = stop_playback_on_answer {
             self.stop_playback_track(track_id, false).await;
         }
+
+        // Stop early media bridge (if any) before transitioning to confirmed call
+        if self.media.early_media_sent {
+            if let Some(bridge) = self.media.media_bridge.take() {
+                bridge.stop().await;
+            }
+            self.media.caller_answer_uses_media_bridge = false;
+            self.media.bridge_playback_track_id = None;
+        }
+
         let caller_answer = self
             .prepare_caller_answer_from_callee_sdp(callee_sdp, false, false)
             .await;
@@ -7535,6 +7746,17 @@ impl SipSession {
             return Err(anyhow!("Leg not found: {}", leg_id));
         }
 
+        // Handle EarlyMedia policy: send proactive 183 with bridge SDP and audio
+        if let Some(RingbackPolicy::EarlyMedia { source }) = &ringback {
+            let audio_path = match source {
+                MediaSource::File { path } => path.clone(),
+                _ => {
+                    return Err(anyhow!("EarlyMedia requires a File media source"));
+                }
+            };
+            return self.send_early_media_tone(&audio_path).await;
+        }
+
         self.update_leg_state(&leg_id, LegState::Ringing);
 
         // DN event: extension ringing
@@ -7556,8 +7778,8 @@ impl SipSession {
             .server_dialog
             .ringing(None, sdp.map(|s| s.into_bytes()))
         {
-            warn!(%leg_id, error = %e, "Failed to send 180 Ringing");
-            return Err(anyhow!("Failed to send 180 Ringing: {}", e));
+            warn!(%leg_id, error = %e, "Failed to send ringing indication");
+            return Err(anyhow!("Failed to send ringing indication: {}", e));
         }
 
         info!(%leg_id, "Ringing indication sent successfully");

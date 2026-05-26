@@ -938,6 +938,9 @@ pub fn sbc_config_from_metadata(meta: &serde_json::Value) -> TrunkConfig {
         header_rules: sbc
             .and_then(|s| s.get("header_rules"))
             .and_then(|v| serde_json::from_value(v.clone()).ok()),
+        ringback: sbc
+            .and_then(|s| s.get("ringback"))
+            .and_then(|v| serde_json::from_value(v.clone()).ok()),
         codec: codecs,
         recording: if recording.is_some() { recording } else { None },
         ..Default::default()
@@ -1057,6 +1060,9 @@ fn convert_trunk(model: sip_trunk::Model) -> Option<(String, TrunkConfig)> {
             }
             if sbc.recording.is_some() {
                 trunk.recording = sbc.recording;
+            }
+            if sbc.ringback.is_some() {
+                trunk.ringback = sbc.ringback;
             }
         }
     }
@@ -1536,5 +1542,65 @@ mod tests {
             trunks.values().any(|t| !t.inbound_hosts.is_empty()),
             "one trunk has inbound_hosts — warning should fire"
         );
+    }
+
+    #[test]
+    fn sbc_config_extracts_ringback_from_metadata() {
+        let meta: serde_json::Value = serde_json::from_str(r#"{
+            "sbc": {
+                "ringback": {
+                    "busy": "/sounds/busy.wav",
+                    "reject": "/sounds/reject.wav",
+                    "play_duration_secs": 5
+                }
+            }
+        }"#).unwrap();
+        let cfg = sbc_config_from_metadata(&meta);
+        let rb = cfg.ringback.as_ref().expect("ringback should be parsed");
+        assert_eq!(rb.busy, Some("/sounds/busy.wav".to_string()));
+        assert_eq!(rb.reject, Some("/sounds/reject.wav".to_string()));
+        assert_eq!(rb.play_duration_secs, Some(5));
+    }
+
+    #[test]
+    fn sbc_config_ringback_absent_when_not_in_metadata() {
+        let meta: serde_json::Value = serde_json::from_str(r#"{"sbc": {"media_mode": "bypass"}}"#).unwrap();
+        let cfg = sbc_config_from_metadata(&meta);
+        assert!(cfg.ringback.is_none(), "no ringback field → ringback should be None");
+    }
+
+    #[test]
+    fn convert_trunk_merges_sbc_ringback() {
+        let model = sip_trunk::Model {
+            id: 1,
+            name: "test".to_string(),
+            sip_server: Some("sip:1.2.3.4:5060".to_string()),
+            metadata: Some(serde_json::json!({
+                "sbc": {
+                    "ringback": {
+                        "offline": "/sounds/offline.wav",
+                        "notfound": "/sounds/notfound.wav"
+                    }
+                }
+            })),
+            ..Default::default()
+        };
+        let (_, trunk) = convert_trunk(model).expect("should convert");
+        let rb = trunk.ringback.as_ref().expect("ringback should be merged");
+        assert_eq!(rb.offline, Some("/sounds/offline.wav".to_string()));
+        assert_eq!(rb.notfound, Some("/sounds/notfound.wav".to_string()));
+    }
+
+    #[test]
+    fn convert_trunk_no_ringback_without_sbc_metadata() {
+        let model = sip_trunk::Model {
+            id: 2,
+            name: "test-no-sbc".to_string(),
+            sip_server: Some("sip:5.6.7.8:5060".to_string()),
+            metadata: None,
+            ..Default::default()
+        };
+        let (_, trunk) = convert_trunk(model).expect("should convert");
+        assert!(trunk.ringback.is_none(), "no metadata → no ringback");
     }
 }

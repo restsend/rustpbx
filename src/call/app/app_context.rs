@@ -22,6 +22,10 @@ pub struct CallInfo {
     pub direction: String,
     /// When the session started.
     pub started_at: DateTime<Utc>,
+    /// All SIP headers from the original INVITE (excluding standard transport
+    /// headers like Via, Max-Forwards, Call-ID, CSeq, Content-Length).
+    #[serde(skip_serializing_if = "HashMap::is_empty")]
+    pub sip_headers: HashMap<String, String>,
 }
 
 pub struct AppSharedState {
@@ -169,6 +173,31 @@ impl ApplicationContext {
     }
 }
 
+/// Extract all SIP headers from a request into a `HashMap`, skipping standard
+/// transport/dialog headers that already have typed representations.
+pub fn extract_sip_headers(request: &rsipstack::sip::Request) -> HashMap<String, String> {
+    let mut headers = HashMap::new();
+    for h in request.headers.iter() {
+        let skip = matches!(
+            h,
+            rsipstack::sip::Header::Via(_)
+                | rsipstack::sip::Header::MaxForwards(_)
+                | rsipstack::sip::Header::CallId(_)
+                | rsipstack::sip::Header::CSeq(_)
+                | rsipstack::sip::Header::ContentLength(_)
+                | rsipstack::sip::Header::ContentType(_)
+                | rsipstack::sip::Header::From(_)
+                | rsipstack::sip::Header::To(_)
+                | rsipstack::sip::Header::UserAgent(_)
+                | rsipstack::sip::Header::Allow(_)
+        );
+        if !skip {
+            headers.insert(h.name().to_string(), h.value().to_string());
+        }
+    }
+    headers
+}
+
 impl std::fmt::Debug for ApplicationContext {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ApplicationContext")
@@ -188,6 +217,7 @@ mod tests {
             callee: "sip:bob@example.com".to_string(),
             direction: "inbound".to_string(),
             started_at: Utc::now(),
+            sip_headers: HashMap::new(),
         }
     }
 
