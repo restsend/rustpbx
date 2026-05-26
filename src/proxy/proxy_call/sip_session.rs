@@ -1763,6 +1763,9 @@ impl SipSession {
                 self.handle_updated_dialog(DialogSide::Caller, dialog_id, request, tx_handle)
                     .await?;
             }
+            DialogState::Options(_, _, tx_handle) => {
+                tx_handle.respond(rsipstack::sip::StatusCode::OK, None, None).await.ok();
+            }
             DialogState::Info(_, request, tx_handle) => {
                 self.handle_dialog_info(request, tx_handle).await?;
             }
@@ -2141,6 +2144,9 @@ impl SipSession {
                         }
                     }
                 }
+            }
+            DialogState::Options(_, _, tx_handle) => {
+                tx_handle.respond(rsipstack::sip::StatusCode::OK, None, None).await.ok();
             }
             DialogState::Info(_, request, tx_handle) => {
                 let content_type = Self::request_content_type(&request);
