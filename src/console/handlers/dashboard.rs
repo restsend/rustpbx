@@ -18,6 +18,27 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use tracing::warn;
 
+fn count_when<C>(condition: C) -> sea_query::SimpleExpr
+where
+    C: sea_query::IntoCondition,
+{
+    sea_query::Func::count(sea_query::Expr::case(condition, sea_query::Expr::val(1))).into()
+}
+
+fn sum_i64<E>(db: &impl ConnectionTrait, expr: E) -> sea_query::SimpleExpr
+where
+    E: Into<sea_query::SimpleExpr>,
+{
+    let cast_type = match db.get_database_backend() {
+        DatabaseBackend::Sqlite => "INTEGER",
+        DatabaseBackend::MySql => "SIGNED",
+        DatabaseBackend::Postgres => "BIGINT",
+    };
+
+    sea_query::SimpleExpr::from(sea_query::Func::sum(expr))
+        .cast_as(sea_query::Alias::new(cast_type))
+}
+
 pub async fn dashboard(
     State(state): State<Arc<ConsoleState>>,
     headers: HeaderMap,
@@ -216,27 +237,18 @@ async fn build_dashboard_payload(
         .select_only()
         .column_as(CallRecordColumn::Id.count(), "total")
         .column_as(
-            sea_query::SimpleExpr::from(sea_query::Func::sum(
-                sea_query::CaseStatement::new()
-                    .case(
-                        CallRecordColumn::Status.is_in(["answered", "completed"]),
-                        sea_query::Expr::val(1),
-                    )
-                    .finally(sea_query::Expr::val(0)),
-            ))
-            .cast_as(sea_query::Alias::new("SIGNED")),
+            count_when(CallRecordColumn::Status.is_in(["answered", "completed"])),
             "answered",
         )
         .column_as(
-            sea_query::SimpleExpr::from(sea_query::Func::sum(
-                sea_query::CaseStatement::new()
-                    .case(
-                        CallRecordColumn::Status.is_in(["answered", "completed"]),
-                        CallRecordColumn::DurationSecs.into_expr(),
-                    )
-                    .finally(sea_query::Expr::val(0)),
-            ))
-            .cast_as(sea_query::Alias::new("SIGNED")),
+            sum_i64(
+                db,
+                sea_query::Expr::case(
+                    CallRecordColumn::Status.is_in(["answered", "completed"]),
+                    CallRecordColumn::DurationSecs.into_expr(),
+                )
+                .finally(sea_query::Expr::val(0)),
+            ),
             "total_duration",
         )
         .into_model::<RecentStats>()
@@ -301,27 +313,18 @@ async fn build_dashboard_payload(
         .filter(CallRecordColumn::StartedAt.gte(today_start))
         .select_only()
         .column_as(
-            sea_query::SimpleExpr::from(sea_query::Func::sum(
-                sea_query::CaseStatement::new()
-                    .case(
-                        CallRecordColumn::Status.is_in(["answered", "completed"]),
-                        sea_query::Expr::val(1),
-                    )
-                    .finally(sea_query::Expr::val(0)),
-            ))
-            .cast_as(sea_query::Alias::new("SIGNED")),
+            count_when(CallRecordColumn::Status.is_in(["answered", "completed"])),
             "answered_count",
         )
         .column_as(
-            sea_query::SimpleExpr::from(sea_query::Func::sum(
-                sea_query::CaseStatement::new()
-                    .case(
-                        CallRecordColumn::Status.is_in(["answered", "completed"]),
-                        CallRecordColumn::DurationSecs.into_expr(),
-                    )
-                    .finally(sea_query::Expr::val(0)),
-            ))
-            .cast_as(sea_query::Alias::new("SIGNED")),
+            sum_i64(
+                db,
+                sea_query::Expr::case(
+                    CallRecordColumn::Status.is_in(["answered", "completed"]),
+                    CallRecordColumn::DurationSecs.into_expr(),
+                )
+                .finally(sea_query::Expr::val(0)),
+            ),
             "total_duration",
         )
         .into_model::<TodayStats>()

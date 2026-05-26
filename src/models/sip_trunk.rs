@@ -189,40 +189,54 @@ impl MigrationTrait for Migration {
             )
             .await?;
 
-        manager
-            .create_index(
-                Index::create()
-                    .if_not_exists()
-                    .name("idx_rustpbx_sip_trunks_name")
-                    .table(Entity)
-                    .col(Column::Name)
-                    .unique()
-                    .to_owned(),
-            )
-            .await?;
+        if !manager
+            .has_index("rustpbx_sip_trunks", "idx_rustpbx_sip_trunks_name")
+            .await?
+        {
+            manager
+                .create_index(
+                    Index::create()
+                        .name("idx_rustpbx_sip_trunks_name")
+                        .table(Entity)
+                        .col(Column::Name)
+                        .unique()
+                        .to_owned(),
+                )
+                .await?;
+        }
 
-        manager
-            .create_index(
-                Index::create()
-                    .if_not_exists()
-                    .name("idx_rustpbx_sip_trunks_status")
-                    .table(Entity)
-                    .col(Column::Status)
-                    .col(Column::IsActive)
-                    .to_owned(),
-            )
-            .await?;
+        if !manager
+            .has_index("rustpbx_sip_trunks", "idx_rustpbx_sip_trunks_status")
+            .await?
+        {
+            manager
+                .create_index(
+                    Index::create()
+                        .name("idx_rustpbx_sip_trunks_status")
+                        .table(Entity)
+                        .col(Column::Status)
+                        .col(Column::IsActive)
+                        .to_owned(),
+                )
+                .await?;
+        }
 
-        manager
-            .create_index(
-                Index::create()
-                    .if_not_exists()
-                    .name("idx_rustpbx_sip_trunks_direction")
-                    .table(Entity)
-                    .col(Column::Direction)
-                    .to_owned(),
-            )
-            .await
+        if !manager
+            .has_index("rustpbx_sip_trunks", "idx_rustpbx_sip_trunks_direction")
+            .await?
+        {
+            manager
+                .create_index(
+                    Index::create()
+                        .name("idx_rustpbx_sip_trunks_direction")
+                        .table(Entity)
+                        .col(Column::Direction)
+                        .to_owned(),
+                )
+                .await?;
+        }
+
+        Ok(())
     }
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
