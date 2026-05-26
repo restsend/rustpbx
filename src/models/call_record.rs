@@ -402,50 +402,75 @@ impl MigrationTrait for Migration {
             )
             .await?;
 
-        manager
-            .create_index(
-                Index::create()
-                    .name("idx_rustpbx_call_records_call_id")
-                    .table(Entity)
-                    .col(Column::CallId)
-                    .unique()
-                    .to_owned(),
-            )
-            .await?;
+        if !manager
+            .has_index("rustpbx_call_records", "idx_rustpbx_call_records_call_id")
+            .await?
+        {
+            manager
+                .create_index(
+                    Index::create()
+                        .name("idx_rustpbx_call_records_call_id")
+                        .table(Entity)
+                        .col(Column::CallId)
+                        .unique()
+                        .to_owned(),
+                )
+                .await?;
+        }
 
-        manager
-            .create_index(
-                Index::create()
-                    .if_not_exists()
-                    .name("idx_rustpbx_call_records_started_at")
-                    .table(Entity)
-                    .col(Column::StartedAt)
-                    .col(Column::Direction)
-                    .to_owned(),
+        if !manager
+            .has_index(
+                "rustpbx_call_records",
+                "idx_rustpbx_call_records_started_at",
             )
-            .await?;
+            .await?
+        {
+            manager
+                .create_index(
+                    Index::create()
+                        .name("idx_rustpbx_call_records_started_at")
+                        .table(Entity)
+                        .col(Column::StartedAt)
+                        .col(Column::Direction)
+                        .to_owned(),
+                )
+                .await?;
+        }
 
-        manager
-            .create_index(
-                Index::create()
-                    .if_not_exists()
-                    .name("idx_rustpbx_call_records_status")
-                    .table(Entity)
-                    .col(Column::Status)
-                    .to_owned(),
-            )
-            .await?;
+        if !manager
+            .has_index("rustpbx_call_records", "idx_rustpbx_call_records_status")
+            .await?
+        {
+            manager
+                .create_index(
+                    Index::create()
+                        .name("idx_rustpbx_call_records_status")
+                        .table(Entity)
+                        .col(Column::Status)
+                        .to_owned(),
+                )
+                .await?;
+        }
 
-        manager
-            .create_index(
-                Index::create()
-                    .if_not_exists()
-                    .name("idx_rustpbx_call_records_extension")
-                    .table(Entity)
-                    .col(Column::ExtensionId)
-                    .to_owned(),
+        if !manager
+            .has_index(
+                "rustpbx_call_records",
+                "idx_rustpbx_call_records_extension",
             )
-            .await
+            .await?
+        {
+            manager
+                .create_index(
+                    Index::create()
+                        .name("idx_rustpbx_call_records_extension")
+                        .table(Entity)
+                        .col(Column::ExtensionId)
+                        .to_owned(),
+                )
+                .await?;
+        }
+
+        Ok(())
     }
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {

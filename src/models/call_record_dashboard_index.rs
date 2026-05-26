@@ -13,18 +13,27 @@ impl MigrationTrait for Migration {
 
         // Composite index on started_at + status + duration_secs
         // This covers the dashboard query which filters by started_at and aggregates based on status and duration_secs
-        manager
-            .create_index(
-                Index::create()
-                    .if_not_exists()
-                    .name("idx_rustpbx_call_records_dashboard_stats")
-                    .table(table)
-                    .col(col_started_at)
-                    .col(col_status)
-                    .col(col_duration_secs)
-                    .to_owned(),
+        if !manager
+            .has_index(
+                "rustpbx_call_records",
+                "idx_rustpbx_call_records_dashboard_stats",
             )
-            .await
+            .await?
+        {
+            manager
+                .create_index(
+                    Index::create()
+                        .name("idx_rustpbx_call_records_dashboard_stats")
+                        .table(table)
+                        .col(col_started_at)
+                        .col(col_status)
+                        .col(col_duration_secs)
+                        .to_owned(),
+                )
+                .await?;
+        }
+
+        Ok(())
     }
 
     async fn down(&self, manager: &SchemaManager) -> Result<(), DbErr> {
