@@ -633,6 +633,34 @@ impl SipSession {
             .active_call_registry
             .register_dialog(server_dialog.id().to_string(), handle.clone());
 
+        // Emit CallIncoming event via RWI gateway if configured.
+        if let Some(ref gw) = server.rwi_gateway {
+            let event = crate::rwi::proto::RwiEvent::CallIncoming(
+                crate::rwi::proto::CallIncomingData {
+                    call_id: session_id.clone(),
+                    context: "default".into(),
+                    caller: context.original_caller.clone(),
+                    callee: context.original_callee.clone(),
+                    dial_direction: "inbound".into(),
+                    trunk: None,
+                    sip_headers: std::collections::HashMap::new(),
+                    root_call_id: None,
+                    ani: None,
+                    dnis: None,
+                    called_phone: None,
+                    app_id: None,
+                    routing_target: None,
+                    uuid: None,
+                    routing_path: None,
+                },
+            );
+            let gw = gw.clone();
+            tokio::spawn(async move {
+                let g = gw.read().await;
+                g.broadcast_event(&event);
+            });
+        }
+
         let mut server_dialog_clone = server_dialog.clone();
         crate::utils::spawn(async move {
             session
@@ -3506,6 +3534,9 @@ impl SipSession {
                                     "Failed to send 180 Ringing"
                                 );
                             }
+                            self.emit_rwi_event(crate::rwi::proto::RwiEvent::ringing(
+                                self.context.session_id.clone(),
+                            ));
                         }
                         self.update_snapshot_cache();
                     }
@@ -5425,6 +5456,10 @@ impl SipSession {
             Some(&callee_dn),
         );
 
+        self.emit_rwi_event(crate::rwi::proto::RwiEvent::answered(
+            self.context.session_id.clone(),
+        ));
+
         let mut timer_headers = vec![];
         if self.server.proxy_config.session_timer_mode().is_enabled() {
             let default_expires = self
@@ -6215,6 +6250,12 @@ impl SipSession {
                     .await;
             }
         }
+
+        self.emit_rwi_event(crate::rwi::proto::RwiEvent::hangup(
+            self.context.session_id.clone(),
+            self.meta.hangup_reason.clone().map(|r| format!("{:?}", r)),
+            None,
+        ));
 
         debug!(session_id = %self.context.session_id, "Session cleanup complete");
     }
@@ -7273,6 +7314,17 @@ impl SipSession {
                 skill_group: None,
                 target_dn: None,
             };
+            let gw = gw.clone();
+            tokio::spawn(async move {
+                let g = gw.read().await;
+                g.broadcast_event(&event);
+            });
+        }
+    }
+
+    /// Emit a generic RWI event via the gateway, if configured.
+    fn emit_rwi_event(&self, event: crate::rwi::proto::RwiEvent) {
+        if let Some(ref gw) = self.server.rwi_gateway {
             let gw = gw.clone();
             tokio::spawn(async move {
                 let g = gw.read().await;

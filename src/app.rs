@@ -383,9 +383,13 @@ impl AppStateBuilder {
             callrecord_stats: callrecord_stats.clone(),
             storage: storage.clone(),
             rwi_auth: crate::rwi::create_rwi_auth(&config),
-            rwi_gateway: config.rwi.as_ref().map(|_| {
-                std::sync::Arc::new(tokio::sync::RwLock::new(crate::rwi::RwiGateway::new()))
-            }),
+            rwi_gateway: if config.rwi.is_some() || config.rwi_webhook.is_some() {
+                Some(std::sync::Arc::new(tokio::sync::RwLock::new(
+                    crate::rwi::RwiGateway::new(),
+                )))
+            } else {
+                None
+            },
             rwi_call_registry: None,
         });
 
