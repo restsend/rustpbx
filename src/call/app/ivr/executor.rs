@@ -311,6 +311,14 @@ impl StepIvrApp {
         }
     }
 
+    fn get_sip_headers(&self) -> Option<HashMap<String, String>> {
+        if self.sess.sip_headers.is_empty() {
+            None
+        } else {
+            Some(self.sess.sip_headers.clone())
+        }
+    }
+
     async fn request_next(&self, event: Option<ProviderEvent>) -> anyhow::Result<ActionNode> {
         let ctx = ProviderContext {
             session_id: self
@@ -340,6 +348,7 @@ impl StepIvrApp {
             tenant_id: self.sess.variables.get("tenant_id").cloned(),
             ivr_id: self.sess.variables.get("ivr_id").cloned(),
             variables: self.sess.variables.clone(),
+            sip_headers: self.get_sip_headers(),
             event,
         };
 
@@ -652,6 +661,17 @@ impl CallApp for StepIvrApp {
             .variables
             .insert("direction".into(), context.call_info.direction.clone());
 
+        // Clone SIP headers once; store in self.sess for future request_next calls,
+        // then move into SessionContext to avoid a second full clone.
+        let headers = context.call_info.sip_headers.clone();
+
+        for (name, value) in &headers {
+            let key = format!("sip_{}", name.replace(|c: char| !c.is_alphanumeric(), "_"));
+            self.sess.variables.insert(key, value.clone());
+        }
+
+        self.sess.sip_headers = headers.clone();
+
         let sess_ctx = SessionContext {
             session_id: context.call_info.session_id.clone(),
             caller: context.call_info.caller.clone(),
@@ -659,6 +679,7 @@ impl CallApp for StepIvrApp {
             direction: context.call_info.direction.clone(),
             tenant_id: None,
             ivr_id: None,
+            sip_headers: Some(headers),
         };
         self.provider.on_session_start(&sess_ctx).await.ok();
 

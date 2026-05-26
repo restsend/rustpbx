@@ -809,6 +809,9 @@ pub struct Dialplan {
     pub extensions: http::Extensions,
     pub allow_codecs: Vec<CodecType>,
     pub passthrough_failure: bool,
+
+    /// Optional per-trunk ringback/early-media audio configuration
+    pub audio_profile: Option<crate::proxy::routing::RingbackAudio>,
 }
 
 impl std::fmt::Debug for Dialplan {
@@ -873,6 +876,7 @@ impl Dialplan {
                 CodecType::TelephoneEvent,
             ],
             passthrough_failure: false,
+            audio_profile: None,
         }
     }
 
@@ -943,6 +947,11 @@ impl Dialplan {
 
     pub fn with_passthrough_failure(mut self, enabled: bool) -> Self {
         self.passthrough_failure = enabled;
+        self
+    }
+
+    pub fn with_audio_profile(mut self, profile: crate::proxy::routing::RingbackAudio) -> Self {
+        self.audio_profile = Some(profile);
         self
     }
 

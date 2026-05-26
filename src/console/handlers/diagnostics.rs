@@ -719,6 +719,7 @@ fn trunk_config_from_model(model: &sip_trunk::Model) -> Option<routing::TrunkCon
         media_mode: None,
         video_policy: None,
         did_numbers: vec![],
+        ringback: None,
     })
 }
 

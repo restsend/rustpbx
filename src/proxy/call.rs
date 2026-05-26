@@ -850,6 +850,9 @@ impl CallModule {
                 hints.allow_codecs.as_deref(),
                 fallback_codecs,
             );
+            if let Some(ringback) = hints.ringback.take() {
+                dialplan.audio_profile = Some(ringback);
+            }
             dialplan.extensions = std::mem::take(&mut hints.extensions);
         } else {
             apply_allowed_codecs(&mut dialplan, None, fallback_codecs);

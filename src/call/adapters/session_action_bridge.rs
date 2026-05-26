@@ -77,7 +77,7 @@ pub fn call_command_to_session_action(cmd: CallCommand) -> Result<SessionAction>
         } => {
             let (rb, passthrough) = match ringback {
                 Some(RingbackPolicy::PassThrough) => (None, true),
-                Some(RingbackPolicy::Replace { source }) => {
+                Some(RingbackPolicy::Replace { source } | RingbackPolicy::EarlyMedia { source }) => {
                     let path = match source {
                         MediaSource::File { path } => path,
                         _ => String::new(),

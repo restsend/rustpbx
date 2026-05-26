@@ -51,6 +51,8 @@ pub enum WaitEvent {
 #[derive(Debug, Default, Clone)]
 pub struct SessionData {
     pub variables: HashMap<String, String>,
+    /// SIP headers from the original INVITE (excluding standard transport headers).
+    pub sip_headers: HashMap<String, String>,
 }
 
 pub fn substitute_vars(s: &str, vars: &HashMap<String, String>) -> String {

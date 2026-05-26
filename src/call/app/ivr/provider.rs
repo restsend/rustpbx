@@ -43,6 +43,9 @@ pub struct SessionContext {
     pub direction: String,
     pub tenant_id: Option<String>,
     pub ivr_id: Option<String>,
+    /// All SIP headers from the original INVITE request.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sip_headers: Option<HashMap<String, String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -54,6 +57,9 @@ pub struct ProviderContext {
     pub tenant_id: Option<String>,
     pub ivr_id: Option<String>,
     pub variables: HashMap<String, String>,
+    /// All SIP headers from the original INVITE request.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sip_headers: Option<HashMap<String, String>>,
     pub event: Option<ProviderEvent>,
 }
 

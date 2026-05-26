@@ -1214,6 +1214,7 @@ fn merge_trunk_media_hints(hints: &mut Option<DialplanHints>, trunk: &TrunkConfi
         && trunk.media_mode.is_none()
         && trunk.video_policy.is_none()
         && trunk.recording.is_none()
+        && trunk.ringback.is_none()
     {
         return;
     }
@@ -1230,6 +1231,9 @@ fn merge_trunk_media_hints(hints: &mut Option<DialplanHints>, trunk: &TrunkConfi
     }
     if let Some(recording) = trunk.recording.clone() {
         hints.recording = Some(recording);
+    }
+    if let Some(ringback) = &trunk.ringback {
+        hints.ringback = Some(ringback.clone());
     }
 }
 
