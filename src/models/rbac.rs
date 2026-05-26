@@ -1,7 +1,9 @@
 use sea_orm::Set;
 use sea_orm::entity::prelude::*;
 use sea_orm_migration::prelude::*;
-use sea_orm_migration::schema::{big_integer, boolean, string, text_null, timestamp};
+use sea_orm_migration::schema::{
+    big_integer, boolean, string_len, text_null, timestamp_with_time_zone as timestamp,
+};
 use sea_orm_migration::sea_query::{ColumnDef, ForeignKeyAction};
 use serde::{Deserialize, Serialize};
 
@@ -343,8 +345,7 @@ impl MigrationTrait for Migration {
                     )
                     .col(
                         ColumnDef::new(Column::Name)
-                            .string()
-                            .char_len(100)
+                            .string_len(100)
                             .unique_key()
                             .not_null(),
                     )
@@ -368,8 +369,8 @@ impl MigrationTrait for Migration {
                             .primary_key(),
                     )
                     .col(big_integer(role_permission::Column::RoleId))
-                    .col(string(role_permission::Column::Resource).char_len(100))
-                    .col(string(role_permission::Column::Action).char_len(100))
+                    .col(string_len(role_permission::Column::Resource, 100))
+                    .col(string_len(role_permission::Column::Action, 100))
                     .foreign_key(
                         ForeignKey::create()
                             .from(role_permission::Entity, role_permission::Column::RoleId)

@@ -33,8 +33,7 @@ impl MigrationTrait for Migration {
                         .table(super::user::Entity)
                         .add_column(
                             ColumnDef::new(super::user::Column::MfaSecret)
-                                .string()
-                                .char_len(64)
+                                .string_len(64)
                                 .null(),
                         )
                         .to_owned(),
@@ -49,8 +48,7 @@ impl MigrationTrait for Migration {
                         .table(super::user::Entity)
                         .add_column(
                             ColumnDef::new(super::user::Column::AuthSource)
-                                .string()
-                                .char_len(32)
+                                .string_len(32)
                                 .not_null()
                                 .default("local"),
                         )
