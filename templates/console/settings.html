@@ -2041,13 +2041,27 @@
                     </div>
                     <template x-if="clusterReloadResults.length">
                         <div class="mt-4 space-y-2 border-t border-slate-200 pt-4">
+                            <template x-if="clusterReloadDone">
+                                <div class="mb-3 rounded-lg border-2 px-4 py-3 text-sm font-semibold"
+                                    :class="clusterReloadOverall === 'ok' ? 'border-emerald-300 bg-emerald-50 text-emerald-800' : 'border-rose-300 bg-rose-50 text-rose-800'">
+                                    <div class="flex items-center justify-between">
+                                        <span x-text="clusterReloadOverall === 'ok' ? '✅ All nodes succeeded' : '❌ Some nodes failed'"></span>
+                                        <span class="rounded-full px-3 py-1 text-xs font-bold"
+                                            :class="clusterReloadOverall === 'ok' ? 'bg-emerald-200 text-emerald-800' : 'bg-rose-200 text-rose-800'"
+                                            x-text="clusterReloadOverall"></span>
+                                    </div>
+                                </div>
+                            </template>
                             <template x-for="result in clusterReloadResults" :key="(result.addon || 'node') + '-' + result.node">
                                 <div class="rounded-lg border px-4 py-2 text-sm"
-                                    :class="result.status === 'ok' ? 'border-emerald-200 bg-emerald-50' : (result.status === 'skipped' ? 'border-slate-200 bg-slate-50' : 'border-rose-200 bg-rose-50')">
+                                    :class="result.status === 'ok' ? 'border-emerald-200 bg-emerald-50' : (result.status === 'running' ? 'border-sky-200 bg-sky-50' : (result.status === 'skipped' ? 'border-slate-200 bg-slate-50' : 'border-rose-200 bg-rose-50'))">
                                     <div class="flex items-center justify-between">
-                                        <span class="font-semibold text-slate-700" x-text="(result.addon || result.node)"></span>
+                                        <span class="font-semibold text-slate-700">
+                                            <span x-text="(result.addon || result.node)"></span>
+                                            <span x-show="result.addon === null && result.elapsed_ms != null" class="ml-2 text-xs font-normal text-slate-400" x-text="'(' + result.elapsed_ms + 'ms)'"></span>
+                                        </span>
                                         <span class="rounded-full px-2 py-0.5 text-[11px] font-semibold"
-                                            :class="result.status === 'ok' ? 'bg-emerald-100 text-emerald-700' : (result.status === 'skipped' ? 'bg-slate-200 text-slate-600' : 'bg-rose-100 text-rose-700')"
+                                            :class="result.status === 'ok' ? 'bg-emerald-100 text-emerald-700' : (result.status === 'running' ? 'bg-sky-100 text-sky-700' : (result.status === 'skipped' ? 'bg-slate-200 text-slate-600' : 'bg-rose-100 text-rose-700'))"
                                             x-text="result.status"></span>
                                     </div>
                                     <div x-show="result.message" class="mt-1 text-xs text-slate-500" x-text="result.message"></div>
@@ -2906,6 +2920,8 @@
             clusterReloadDraft: { trunks: true, routes: true },
             clusterReloading: false,
             clusterReloadResults: [],
+            clusterReloadOverall: null,
+            clusterReloadDone: false,
             logViewer: {
                 lines: [],
                 limit: 200,
@@ -5766,6 +5782,8 @@
                 }
                 this.clusterReloading = true;
                 this.clusterReloadResults = [];
+                this.clusterReloadOverall = null;
+                this.clusterReloadDone = false;
 
                 const params = new URLSearchParams();
                 if (trunkSelected) params.set('trunks', 'true');
@@ -5815,9 +5833,12 @@
                     const existing = this.clusterReloadResults.find(r => r.addon === null && r.node === data.node);
                     const nodeStatus = t === 'node_complete' ? (data.result?.status || 'ok') : 'error';
                     const nodeMsg = data.error || '';
-                    if (existing) Object.assign(existing, { status: nodeStatus, result: data.result, message: nodeMsg });
-                    else this.clusterReloadResults.push({ addon: null, node: data.node, status: nodeStatus, result: data.result, message: nodeMsg });
+                    const elapsed_ms = data.elapsed_ms;
+                    if (existing) Object.assign(existing, { status: nodeStatus, result: data.result, message: nodeMsg, elapsed_ms });
+                    else this.clusterReloadResults.push({ addon: null, node: data.node, status: nodeStatus, result: data.result, message: nodeMsg, elapsed_ms });
                 } else if (t === 'complete') {
+                    this.clusterReloadOverall = data.overall_status || 'ok';
+                    this.clusterReloadDone = true;
                     this.$dispatch('toast', { title: 'Reload complete', message: 'All selected addons have been reloaded.' });
                 }
             },

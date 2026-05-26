@@ -2600,6 +2600,9 @@ async fn cluster_reload_sse_handler(
             .clone()
             .unwrap_or_else(|| "/ami/v1".to_string());
 
+        let mut peer_results_summary: Vec<serde_json::Value> = Vec::new();
+        let mut any_error = false;
+
         for peer in &peers {
             let peer_label = format!("{}:{}", peer.addr, peer.ami_port);
             sse_send!(
@@ -2616,31 +2619,42 @@ async fn cluster_reload_sse_handler(
                 .build()
                 .unwrap_or_default();
 
+            let start = std::time::Instant::now();
             match client.post(&url).json(&payload).send().await {
-                Ok(resp) => match resp.json::<serde_json::Value>().await {
-                    Ok(peer_results) => {
-                        sse_send!(
-                            "progress",
-                            serde_json::json!({"type": "node_complete", "node": &peer_label, "result": peer_results})
-                        );
+                Ok(resp) => {
+                    let elapsed_ms = start.elapsed().as_millis() as u64;
+                    match resp.json::<serde_json::Value>().await {
+                        Ok(peer_results) => {
+                            sse_send!(
+                                "progress",
+                                serde_json::json!({"type": "node_complete", "node": &peer_label, "elapsed_ms": elapsed_ms, "result": peer_results})
+                            );
+                            peer_results_summary.push(serde_json::json!({"node": &peer_label, "status": "ok", "elapsed_ms": elapsed_ms}));
+                        }
+                        Err(e) => {
+                            sse_send!(
+                                "progress",
+                                serde_json::json!({"type": "node_error", "node": &peer_label, "elapsed_ms": elapsed_ms, "error": format!("Invalid JSON: {}", e)})
+                            );
+                            any_error = true;
+                            peer_results_summary.push(serde_json::json!({"node": &peer_label, "status": "error", "elapsed_ms": elapsed_ms, "error": format!("Invalid JSON: {}", e)}));
+                        }
                     }
-                    Err(e) => {
-                        sse_send!(
-                            "progress",
-                            serde_json::json!({"type": "node_error", "node": &peer_label, "error": format!("Invalid JSON: {}", e)})
-                        );
-                    }
-                },
+                }
                 Err(e) => {
+                    let elapsed_ms = start.elapsed().as_millis() as u64;
                     sse_send!(
                         "progress",
-                        serde_json::json!({"type": "node_error", "node": &peer_label, "error": format!("Connection failed: {}", e)})
+                        serde_json::json!({"type": "node_error", "node": &peer_label, "elapsed_ms": elapsed_ms, "error": format!("Connection failed: {}", e)})
                     );
+                    any_error = true;
+                    peer_results_summary.push(serde_json::json!({"node": &peer_label, "status": "error", "elapsed_ms": elapsed_ms, "error": format!("Connection failed: {}", e)}));
                 }
             }
         }
 
-        sse_send!("complete", serde_json::json!({"type": "complete"}));
+        let overall_status = if any_error { "error" } else { "ok" };
+        sse_send!("complete", serde_json::json!({"type": "complete", "overall_status": overall_status, "peers": peer_results_summary}));
     });
 
     let sse_stream = futures::stream::unfold(rx, |mut rx| async move {
