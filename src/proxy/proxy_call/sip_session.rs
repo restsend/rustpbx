@@ -7294,6 +7294,7 @@ impl SipSession {
         if let Some(ref gw) = self.server.rwi_gateway {
             use crate::rwi::proto::RwiEvent;
             let dn = dn.unwrap_or("unknown").to_string();
+            let dn_call_id = call_id.clone().unwrap_or_default();
             let event = RwiEvent::DnStateChanged {
                 dn,
                 event_code,
@@ -7317,18 +7318,21 @@ impl SipSession {
             let gw = gw.clone();
             tokio::spawn(async move {
                 let g = gw.read().await;
-                g.broadcast_event(&event);
+                g.send_event_to_call_owner(&dn_call_id, &event);
             });
         }
     }
 
-    /// Emit a generic RWI event via the gateway, if configured.
+    /// Emit a call lifecycle RWI event via the gateway, if configured.
+    /// Uses `send_event_to_call_owner` which assigns a unique sequence number
+    /// and forwards to the webhook, avoiding the dedup issue of `broadcast_event`.
     fn emit_rwi_event(&self, event: crate::rwi::proto::RwiEvent) {
         if let Some(ref gw) = self.server.rwi_gateway {
             let gw = gw.clone();
+            let call_id = self.context.session_id.clone();
             tokio::spawn(async move {
                 let g = gw.read().await;
-                g.broadcast_event(&event);
+                g.send_event_to_call_owner(&call_id, &event);
             });
         }
     }
