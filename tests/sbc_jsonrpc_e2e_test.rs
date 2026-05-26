@@ -92,11 +92,13 @@ async fn test_sbc_jsonrpc_e2e_sipbot_rewrite() {
             when: "true".into(),
             match_group: None,
             extractors: vec![],
+            trunks: vec![],
             upstream: Upstream {
                 method: "POST".into(),
                 url: format!("http://127.0.0.1:{upstream_port}/jsonrpc"),
                 headers: HashMap::new(),
                 body: json!({"jsonrpc":"2.0","method":"route","id":1}).to_string(),
+                query_params: None,
             },
             response: ResponseConfig {
                 success_when: "true".into(),
@@ -106,6 +108,7 @@ async fn test_sbc_jsonrpc_e2e_sipbot_rewrite() {
                 reject_reason: "".into(),
                 passthrough_original_headers: true,
                 inject_headers: vec![],
+                allow_codecs: vec![],
             },
         }],
     })));
@@ -240,11 +243,13 @@ async fn test_sbc_jsonrpc_e2e_reject_call() {
             when: "true".into(),
             match_group: None,
             extractors: vec![],
+            trunks: vec![],
             upstream: Upstream {
                 method: "POST".into(),
                 url: format!("http://127.0.0.1:{upstream_port}/jsonrpc"),
                 headers: HashMap::new(),
                 body: json!({"jsonrpc":"2.0","method":"route","id":1}).to_string(),
+                query_params: None,
             },
             response: ResponseConfig {
                 success_when: "json.result == \"ok\"".into(),
@@ -254,6 +259,7 @@ async fn test_sbc_jsonrpc_e2e_reject_call() {
                 reject_reason: "Blocked by policy".into(),
                 passthrough_original_headers: true,
                 inject_headers: vec![],
+                allow_codecs: vec![],
             },
         }],
     })));
@@ -355,11 +361,13 @@ async fn test_sbc_jsonrpc_e2e_header_injection() {
             when: "true".into(),
             match_group: None,
             extractors: vec![],
+            trunks: vec![],
             upstream: Upstream {
                 method: "POST".into(),
                 url: format!("http://127.0.0.1:{upstream_port}/jsonrpc"),
                 headers: HashMap::new(),
                 body: json!({"jsonrpc":"2.0","method":"route","id":1}).to_string(),
+                query_params: None,
             },
             response: ResponseConfig {
                 success_when: "true".into(),
@@ -380,6 +388,7 @@ async fn test_sbc_jsonrpc_e2e_header_injection() {
                         value: "high".into(),
                     },
                 ],
+                allow_codecs: vec![],
             },
         }],
     })));
@@ -491,11 +500,13 @@ async fn test_sbc_jsonrpc_e2e_multi_rule_matching() {
                     }],
                 }),
                 extractors: vec![],
+                trunks: vec![],
                 upstream: Upstream {
                     method: "POST".into(),
                     url: format!("http://127.0.0.1:{upstream_port}/jsonrpc"),
                     headers: HashMap::new(),
                     body: json!({"jsonrpc":"2.0","method":"route","id":1}).to_string(),
+                    query_params: None,
                 },
                 response: ResponseConfig {
                     success_when: "true".into(),
@@ -505,6 +516,7 @@ async fn test_sbc_jsonrpc_e2e_multi_rule_matching() {
                     reject_reason: "".into(),
                     passthrough_original_headers: true,
                     inject_headers: vec![],
+                    allow_codecs: vec![],
                 },
             },
             Rule {
@@ -513,11 +525,13 @@ async fn test_sbc_jsonrpc_e2e_multi_rule_matching() {
                 when: "true".into(),
                 match_group: None,
                 extractors: vec![],
+                trunks: vec![],
                 upstream: Upstream {
                     method: "POST".into(),
                     url: format!("http://127.0.0.1:{upstream_port}/jsonrpc"),
                     headers: HashMap::new(),
                     body: json!({"jsonrpc":"2.0","method":"route","id":2}).to_string(),
+                    query_params: None,
                 },
                 response: ResponseConfig {
                     success_when: "true".into(),
@@ -527,6 +541,7 @@ async fn test_sbc_jsonrpc_e2e_multi_rule_matching() {
                     reject_reason: "".into(),
                     passthrough_original_headers: true,
                     inject_headers: vec![],
+                    allow_codecs: vec![],
                 },
             },
         ],
@@ -626,11 +641,13 @@ async fn test_sbc_jsonrpc_e2e_upstream_unreachable_rejects() {
             when: "true".into(),
             match_group: None,
             extractors: vec![],
+            trunks: vec![],
             upstream: Upstream {
                 method: "POST".into(),
                 url: format!("http://127.0.0.1:{dead_port}/jsonrpc"),
                 headers: HashMap::new(),
                 body: json!({"jsonrpc":"2.0","method":"route","id":1}).to_string(),
+                query_params: None,
             },
             response: ResponseConfig {
                 success_when: "true".into(),
@@ -640,6 +657,7 @@ async fn test_sbc_jsonrpc_e2e_upstream_unreachable_rejects() {
                 reject_reason: "".into(),
                 passthrough_original_headers: true,
                 inject_headers: vec![],
+                allow_codecs: vec![],
             },
         }],
     })));
@@ -762,11 +780,13 @@ async fn test_sbc_jsonrpc_e2e_callee_rewrite() {
             when: "true".into(),
             match_group: None,
             extractors: vec![],
+            trunks: vec![],
             upstream: Upstream {
                 method: "POST".into(),
                 url: format!("http://127.0.0.1:{upstream_port}/jsonrpc"),
                 headers: HashMap::new(),
                 body: json!({"jsonrpc":"2.0","method":"route","id":1}).to_string(),
+                query_params: None,
             },
             response: ResponseConfig {
                 success_when: "json.result == \"ok\"".into(),
@@ -776,6 +796,7 @@ async fn test_sbc_jsonrpc_e2e_callee_rewrite() {
                 reject_reason: "".into(),
                 passthrough_original_headers: true,
                 inject_headers: vec![],
+                allow_codecs: vec![],
             },
         }],
     })));

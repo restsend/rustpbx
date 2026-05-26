@@ -35,6 +35,7 @@ use crate::media::mixer::MediaMixer;
 use crate::media::negotiate::{CodecInfo, MediaNegotiator};
 use crate::media::recorder::Recorder;
 use crate::media::{FileTrack, PlaybackEndReason, RtpTrackBuilder, Track};
+use crate::proxy::call::parse_allowed_codecs;
 use crate::proxy::proxy_call::{
     dtmf::RtpDtmfDetector,
     media_peer::{MediaPeer, VoiceEnginePeer},
@@ -361,6 +362,26 @@ impl AppFactory for BuiltinAppFactory {
 }
 
 const MID_DIALOG_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Parse trunk dest to extract (host, port). Handles both SIP URIs and bare host:port.
+fn trunk_host_port(dest: &str) -> Option<(String, u16)> {
+    if dest.trim().is_empty() {
+        return None;
+    }
+    if let Ok(uri) = rsipstack::sip::Uri::try_from(dest) {
+        let host = uri.host().to_string();
+        let port = uri.host_with_port.port.map(|p| p.0).unwrap_or(5060);
+        return Some((host, port));
+    }
+    // Try as bare host:port
+    let parts: Vec<&str> = dest.split(':').collect();
+    let host = *parts.first()?;
+    if host.is_empty() {
+        return None;
+    }
+    let port = parts.get(1).and_then(|p| p.parse::<u16>().ok()).unwrap_or(5060);
+    Some((host.to_string(), port))
+}
 
 impl SipSession {
     pub const CALLER_TRACK_ID: &'static str = "caller-track";
@@ -2905,12 +2926,12 @@ impl SipSession {
             bridge_builder = bridge_builder.with_ice_servers(ice_servers.clone());
         }
 
-        let allow_codecs = &self.context.dialplan.allow_codecs;
+        let allow_codecs = self.resolve_effective_codecs();
         let codec_lists = MediaNegotiator::build_bridge_codec_lists(
             caller_offer,
             caller_is_webrtc,
             !caller_is_webrtc,
-            allow_codecs,
+            &allow_codecs,
         );
         let caller_leg_codecs = if caller_is_webrtc {
             &codec_lists.caller_side
@@ -3593,8 +3614,12 @@ impl SipSession {
         let caller_is_webrtc = self.is_caller_webrtc();
         let callee_sdp = if self.bypasses_local_media() && caller_is_webrtc == callee_is_webrtc {
             self.media.callee_offer_uses_media_bridge = false;
-            let allow_codecs = &self.context.dialplan.allow_codecs;
-            let default_codecs = crate::media::negotiate::MediaNegotiator::default_rtp_codecs();
+            let allow_codecs = self.resolve_effective_codecs();
+            let default_codecs = if callee_is_webrtc {
+                crate::media::negotiate::MediaNegotiator::default_webrtc_codecs()
+            } else {
+                crate::media::negotiate::MediaNegotiator::default_rtp_codecs()
+            };
             let is_restricted = allow_codecs.len() < default_codecs.len()
                 || allow_codecs.iter().any(|c| !default_codecs.contains(c))
                 || default_codecs.iter().any(|c| !allow_codecs.contains(c));
@@ -3603,7 +3628,7 @@ impl SipSession {
                     let new_codecs = crate::media::negotiate::MediaNegotiator::build_callee_codec_offer_with_allow(
                         caller_offer,
                         callee_is_webrtc,
-                        allow_codecs,
+                        &allow_codecs,
                     );
                     crate::media::negotiate::MediaNegotiator::rewrite_sdp_codec_list(
                         caller_offer,
@@ -3746,10 +3771,11 @@ impl SipSession {
             }
 
             if let Some(ref caller_offer) = self.media.caller_offer {
+                let allow_codecs = self.resolve_effective_codecs();
                 let codec_info = MediaNegotiator::build_caller_answer_codec_list_with_allow(
                     caller_offer,
                     caller_is_webrtc,
-                    &self.context.dialplan.allow_codecs,
+                    &allow_codecs,
                 );
 
                 let mut track_builder = RtpTrackBuilder::new(Self::CALLER_TRACK_ID.to_string())
@@ -4901,6 +4927,57 @@ impl SipSession {
             .map_err(|e| anyhow!("Failed to set bridge callee remote answer: {}", e))
     }
 
+    /// Resolve effective audio codec allow list by priority:
+    /// 1. `dialplan.allow_codecs` (set by routing rules + merge_trunk_media_hints)
+    /// 2. Codecs from the trunk whose destination matches the callee URI (by host:port)
+    /// 3. Proxy-level `audio_codecs` config as global fallback
+    ///
+    /// An empty list means "no restriction" (all transport-supported codecs pass through).
+    fn resolve_effective_codecs(&self) -> Vec<CodecType> {
+        if !self.context.dialplan.allow_codecs.is_empty() {
+            return self.context.dialplan.allow_codecs.clone();
+        }
+
+        if let Some(codecs) = self.match_destination_trunk_codecs() {
+            return codecs;
+        }
+
+        if let Some(ref codecs) = self.server.proxy_config.audio_codecs {
+            let parsed = parse_allowed_codecs(codecs);
+            if !parsed.is_empty() {
+                return parsed;
+            }
+        }
+
+        vec![]
+    }
+
+    /// Try to find codecs by matching the callee URI host:port against trunk destinations.
+    /// This covers both regular file-based trunks and DB-based (wholesale) trunks.
+    fn match_destination_trunk_codecs(&self) -> Option<Vec<CodecType>> {
+        let callee_uri = &self.context.dialplan.original.uri;
+        let callee_host: String = callee_uri.host().to_string().to_lowercase();
+        let callee_port: u16 = callee_uri.host_with_port.port.map(|p| p.0).unwrap_or(5060);
+
+        let trunks = self.server.data_context.trunks_snapshot();
+        for (_name, trunk) in trunks.iter() {
+            if trunk.codec.is_empty() {
+                continue;
+            }
+            if let Some((trunk_host, trunk_port)) = trunk_host_port(&trunk.dest) {
+                if trunk_host.to_lowercase() == callee_host
+                    && trunk_port == callee_port
+                {
+                    let parsed = parse_allowed_codecs(&trunk.codec);
+                    if !parsed.is_empty() {
+                        return Some(parsed);
+                    }
+                }
+            }
+        }
+        None
+    }
+
     pub async fn create_callee_track(&mut self, callee_is_webrtc: bool) -> Result<String> {
         let track_id = Self::CALLEE_TRACK_ID.to_string();
 
@@ -4982,14 +5059,14 @@ impl SipSession {
                 bridge_builder = bridge_builder.with_ice_servers(ice_servers.clone());
             }
 
-            // Configure codecs from allow_codecs + caller's SDP
+            // Configure codecs from effective allow list (dialplan → trunk → proxy fallback)
             if let Some(ref caller_sdp) = self.media.caller_offer {
-                let allow_codecs = &self.context.dialplan.allow_codecs;
+                let allow_codecs = self.resolve_effective_codecs();
                 let codec_lists = MediaNegotiator::build_bridge_codec_lists(
                     caller_sdp,
                     caller_is_webrtc,
                     callee_is_webrtc,
-                    allow_codecs,
+                    &allow_codecs,
                 );
 
                 let caller_leg_codecs = if caller_is_webrtc {
@@ -5170,10 +5247,11 @@ impl SipSession {
             }
 
             if let Some(ref caller_offer) = self.media.caller_offer {
+                let allow_codecs = self.resolve_effective_codecs();
                 let codecs = MediaNegotiator::build_callee_codec_offer_with_allow(
                     caller_offer,
                     callee_is_webrtc,
-                    &self.context.dialplan.allow_codecs,
+                    &allow_codecs,
                 );
                 if !codecs.is_empty() {
                     track_builder = track_builder.with_codec_info(codecs);
@@ -5243,10 +5321,11 @@ impl SipSession {
         let caller_offer = self.media.caller_offer.clone()?;
         let caller_is_webrtc = self.is_caller_webrtc();
 
+        let allow_codecs = self.resolve_effective_codecs();
         let codec_info = MediaNegotiator::build_caller_answer_codec_list_with_allow(
             &caller_offer,
             caller_is_webrtc,
-            &self.context.dialplan.allow_codecs,
+            &allow_codecs,
         );
 
         let mut track_builder = RtpTrackBuilder::new(Self::CALLER_TRACK_ID.to_string())
@@ -10085,5 +10164,107 @@ a=rtcp-fb:104 nack\r\n";
     fn test_build_telephone_event_payload_duration_max() {
         let payload = SipSession::build_telephone_event_payload('7', false, 65535).unwrap();
         assert_eq!(u16::from_be_bytes([payload[2], payload[3]]), 65535);
+    }
+
+    // --- trunk_host_port tests ---
+
+    #[test]
+    fn test_trunk_host_port_sip_uri_with_port() {
+        let (host, port) = trunk_host_port("sip:58.246.19.74:6988").unwrap();
+        assert_eq!(host, "58.246.19.74");
+        assert_eq!(port, 6988);
+    }
+
+    #[test]
+    fn test_trunk_host_port_sip_uri_without_port() {
+        let (host, port) = trunk_host_port("sip:pbx.example.com").unwrap();
+        assert_eq!(host, "pbx.example.com");
+        assert_eq!(port, 5060);
+    }
+
+    #[test]
+    fn test_trunk_host_port_sip_uri_with_user_and_port() {
+        let (host, port) = trunk_host_port("sip:user@203.0.113.5:5060").unwrap();
+        assert_eq!(host, "203.0.113.5");
+        assert_eq!(port, 5060);
+    }
+
+    #[test]
+    fn test_trunk_host_port_bare_host_port() {
+        let (host, port) = trunk_host_port("58.246.19.74:6988").unwrap();
+        assert_eq!(host, "58.246.19.74");
+        assert_eq!(port, 6988);
+    }
+
+    #[test]
+    fn test_trunk_host_port_bare_host_only() {
+        let (host, port) = trunk_host_port("203.0.113.10").unwrap();
+        assert_eq!(host, "203.0.113.10");
+        assert_eq!(port, 5060);
+    }
+
+    #[test]
+    fn test_trunk_host_port_bare_ipv6() {
+        let (host, port) = trunk_host_port("[::1]").unwrap();
+        assert_eq!(host, "[::1]");
+        assert_eq!(port, 5060);
+    }
+
+    #[test]
+    fn test_trunk_host_port_empty() {
+        assert!(trunk_host_port("").is_none());
+    }
+
+    // --- resolve_effective_codecs priority logic tests ---
+
+    #[test]
+    fn test_priority_uses_dialplan_first() {
+        let codecs = resolve_codecs_fake(&[CodecType::PCMA, CodecType::G729], &[]);
+        assert_eq!(codecs, vec![CodecType::PCMA, CodecType::G729]);
+    }
+
+    #[test]
+    fn test_priority_falls_back_to_proxy_when_dialplan_empty() {
+        let codecs = resolve_codecs_fake(&[], &["pcma", "g729"]);
+        assert_eq!(codecs, vec![CodecType::PCMA, CodecType::G729]);
+    }
+
+    #[test]
+    fn test_priority_returns_empty_when_no_sources() {
+        let codecs = resolve_codecs_fake(&[], &[] as &[&str]);
+        assert!(codecs.is_empty());
+    }
+
+    #[test]
+    fn test_priority_filters_invalid_codec_names() {
+        let codecs = resolve_codecs_fake(
+            &[],
+            &["pcma", "invalid_codec", "g729"],
+        );
+        assert_eq!(codecs, vec![CodecType::PCMA, CodecType::G729]);
+    }
+
+    #[test]
+    fn test_priority_ignores_empty_proxy_config() {
+        let codecs = resolve_codecs_fake(&[], &[""]);
+        assert!(codecs.is_empty());
+    }
+
+    #[test]
+    fn test_priority_dialplan_with_opus() {
+        let codecs = resolve_codecs_fake(&[CodecType::Opus, CodecType::PCMU], &[]);
+        assert_eq!(codecs, vec![CodecType::Opus, CodecType::PCMU]);
+    }
+
+    /// Simulates the priority chain: dialplan → trunk → proxy.
+    fn resolve_codecs_fake(dialplan: &[CodecType], proxy_strs: &[&str]) -> Vec<CodecType> {
+        if !dialplan.is_empty() {
+            return dialplan.to_vec();
+        }
+        let proxy: Vec<String> = proxy_strs.iter().filter(|s| !s.is_empty()).map(|s| s.to_string()).collect();
+        if !proxy.is_empty() {
+            return parse_allowed_codecs(&proxy);
+        }
+        vec![]
     }
 }

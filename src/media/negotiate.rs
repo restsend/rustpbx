@@ -13,15 +13,15 @@ pub struct CodecInfo {
 }
 
 impl CodecInfo {
+    fn clamp_channels(channels: u16) -> u8 {
+        if channels > u8::MAX as u16 { u8::MAX } else { channels as u8 }
+    }
+
     pub fn to_params(&self) -> rustrtc::RtpCodecParameters {
         rustrtc::RtpCodecParameters {
             payload_type: self.payload_type,
             clock_rate: self.clock_rate,
-            channels: if self.channels > 255 {
-                255
-            } else {
-                self.channels as u8
-            },
+            channels: Self::clamp_channels(self.channels),
         }
     }
 
@@ -51,11 +51,7 @@ impl CodecInfo {
             payload_type: self.payload_type,
             codec_name,
             clock_rate: self.clock_rate,
-            channels: if self.channels > u8::MAX as u16 {
-                u8::MAX
-            } else {
-                self.channels as u8
-            },
+            channels: Self::clamp_channels(self.channels),
             fmtp: default_fmtp,
             rtcp_fbs: vec![],
         })
@@ -124,22 +120,13 @@ pub struct BridgeCodecLists {
 }
 
 impl MediaNegotiator {
-    fn parse_audio_section(sdp_str: &str) -> Option<rustrtc::MediaSection> {
+    fn parse_media_section(sdp_str: &str, kind: MediaKind) -> Option<rustrtc::MediaSection> {
         SessionDescription::parse(SdpType::Answer, sdp_str)
             .or_else(|_| SessionDescription::parse(SdpType::Offer, sdp_str))
             .ok()?
             .media_sections
             .into_iter()
-            .find(|m| m.kind == MediaKind::Audio)
-    }
-
-    fn parse_video_section(sdp_str: &str) -> Option<rustrtc::MediaSection> {
-        SessionDescription::parse(SdpType::Answer, sdp_str)
-            .or_else(|_| SessionDescription::parse(SdpType::Offer, sdp_str))
-            .ok()?
-            .media_sections
-            .into_iter()
-            .find(|m| m.kind == MediaKind::Video)
+            .find(|m| m.kind == kind)
     }
 
     fn parse_rtpmap_attributes(
@@ -264,7 +251,7 @@ impl MediaNegotiator {
         let mut extracted = ExtractedCodecs::default();
 
         // Extract audio codecs
-        if let Some(section) = Self::parse_audio_section(sdp_str) {
+        if let Some(section) = Self::parse_media_section(sdp_str, MediaKind::Audio) {
             for codec in Self::extract_ordered_codecs_from_section(&section) {
                 if codec.is_dtmf() {
                     extracted.dtmf.push(codec);
@@ -275,7 +262,7 @@ impl MediaNegotiator {
         }
 
         // Extract video codecs
-        if let Some(section) = Self::parse_video_section(sdp_str) {
+        if let Some(section) = Self::parse_media_section(sdp_str, MediaKind::Video) {
             for codec in Self::extract_ordered_codecs_from_section(&section) {
                 extracted.video.push(codec);
             }
@@ -476,14 +463,6 @@ impl MediaNegotiator {
                 });
             }
         }
-    }
-
-    /// Get preferred codec from a list
-    pub fn get_preferred_codec(codecs: &[CodecType]) -> Option<CodecType> {
-        codecs
-            .iter()
-            .find(|c| **c != CodecType::TelephoneEvent)
-            .copied()
     }
 
     /// Extract a negotiated leg profile from an SDP answer.
@@ -751,10 +730,6 @@ impl MediaNegotiator {
     ///    list, one per audio RTP clock rate, preserving the final audio clock-rate
     ///    order. Caller-offered telephone-event PTs are reused when their rate
     ///    matches; missing rates are generated locally.
-    pub fn build_callee_codec_offer(caller_sdp: &str, is_webrtc: bool) -> Vec<CodecInfo> {
-        Self::build_callee_codec_offer_with_allow(caller_sdp, is_webrtc, &[])
-    }
-
     pub fn build_callee_codec_offer_with_allow(
         caller_sdp: &str,
         is_webrtc: bool,
@@ -841,10 +816,6 @@ impl MediaNegotiator {
         Some(desc.to_sdp_string())
     }
 
-    pub fn build_caller_answer_codec_list(caller_sdp: &str, is_webrtc: bool) -> Vec<CodecInfo> {
-        Self::build_caller_answer_codec_list_with_allow(caller_sdp, is_webrtc, &[])
-    }
-
     /// Build codec list for the answer sent back to the caller.
     ///
     /// Audio is a strict subset of the caller offer. Telephone-event is also
@@ -914,29 +885,6 @@ impl MediaNegotiator {
         }
     }
 
-    pub fn extract_ssrc(sdp: &str) -> Option<u32> {
-        // Try parsing as Answer first, then Offer if it fails (though usually it's Answer)
-        let session = SessionDescription::parse(SdpType::Answer, sdp)
-            .or_else(|_| SessionDescription::parse(SdpType::Offer, sdp))
-            .ok()?;
-
-        for section in session.media_sections {
-            if section.kind == MediaKind::Audio {
-                for attr in section.attributes {
-                    if attr.key == "ssrc"
-                        && let Some(value) = attr.value
-                    {
-                        // value format: "12345 cname:..." or just "12345"
-                        let ssrc_str = value.split_whitespace().next()?;
-                        if let Ok(ssrc) = ssrc_str.parse::<u32>() {
-                            return Some(ssrc);
-                        }
-                    }
-                }
-            }
-        }
-        None
-    }
 }
 
 #[cfg(test)]
