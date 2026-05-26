@@ -871,15 +871,7 @@ impl Dialplan {
             route_invite: None,
             with_original_headers: true,
             extensions: http::Extensions::new(),
-            allow_codecs: vec![
-                CodecType::G729,
-                CodecType::G722,
-                CodecType::PCMU,
-                CodecType::PCMA,
-                #[cfg(feature = "opus")]
-                CodecType::Opus,
-                CodecType::TelephoneEvent,
-            ],
+            allow_codecs: vec![],
             passthrough_failure: false,
             audio_profile: None,
             routed_headers: None,
