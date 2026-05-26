@@ -7,10 +7,10 @@ use crate::proxy::proxy_call::sip_session::SipSessionHandle as NewSipSessionHand
 use crate::rwi::SupervisorMode;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
+use parking_lot::RwLock;
 use rsipstack::dialog::DialogId;
 use rsipstack::sip::StatusCode;
 use serde::{Deserialize, Serialize};
-use parking_lot::RwLock;
 use std::sync::{Arc, Weak};
 use std::time::Instant;
 use tokio::sync::mpsc;

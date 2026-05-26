@@ -1496,9 +1496,7 @@ mod tests {
             .assert_cmd(
                 5000,
                 "transfer:agent",
-                |c| {
-                    matches!(c, CallCommand::Transfer { target, .. } if target == "agent")
-                },
+                |c| matches!(c, CallCommand::Transfer { target, .. } if target == "agent"),
             )
             .await;
     }

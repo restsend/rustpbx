@@ -434,9 +434,7 @@ impl SipSession {
             callee: context.original_callee.clone(),
             direction: context.dialplan.direction.to_string(),
             started_at: chrono::Utc::now(),
-            sip_headers: crate::call::app::extract_sip_headers(
-                &server_dialog.initial_request(),
-            ),
+            sip_headers: crate::call::app::extract_sip_headers(&server_dialog.initial_request()),
         };
         let mut app_ctx = ApplicationContext::new(
             server
@@ -721,7 +719,12 @@ impl SipSession {
             self.send_mid_dialog_request_to_side_inner(side, method, headers, body),
         )
         .await
-        .map_err(|_| anyhow!("mid-dialog request timed out after {}s", MID_DIALOG_TIMEOUT.as_secs()))?;
+        .map_err(|_| {
+            anyhow!(
+                "mid-dialog request timed out after {}s",
+                MID_DIALOG_TIMEOUT.as_secs()
+            )
+        })?;
         result
     }
 
@@ -1902,8 +1905,7 @@ impl SipSession {
     }
 
     fn is_picture_fast_update_info(content_type: Option<&str>, body: &str) -> bool {
-        content_type
-            .is_some_and(|ct| ct.contains("application/media_control+xml"))
+        content_type.is_some_and(|ct| ct.contains("application/media_control+xml"))
             && body.to_ascii_lowercase().contains("picture_fast_update")
     }
 
@@ -2133,7 +2135,8 @@ impl SipSession {
                             "Callee rejected the call"
                         );
                         self.meta.last_error = Some((code.clone(), reason_str.clone()));
-                        if let Err(e) = self.reject_with_tone(code.into(), reason_str.clone()).await {
+                        if let Err(e) = self.reject_with_tone(code.into(), reason_str.clone()).await
+                        {
                             warn!(session_id = %self.context.session_id, error = %e, "Failed to send rejection response to caller");
                         }
                     }
@@ -2659,7 +2662,9 @@ impl SipSession {
 
         // Send 183 Session Progress with SDP
         if let Err(e) = self.server_dialog.ringing(
-            Some(vec![rsipstack::sip::Header::ContentType("application/sdp".into())]),
+            Some(vec![rsipstack::sip::Header::ContentType(
+                "application/sdp".into(),
+            )]),
             Some(answer_sdp.into_bytes()),
         ) {
             warn!(session_id = %self.context.session_id, error = %e, "Failed to send 183 Session Progress");
@@ -2680,16 +2685,15 @@ impl SipSession {
                 .with_codec_info(codec_info)
                 .with_cname(self.server.rtc_cname.clone());
             if let Err(e) = bridge
-                .replace_output_with_file(
-                    self.leg_bridge_endpoint(&LegId::from("caller")),
-                    &track,
-                )
+                .replace_output_with_file(self.leg_bridge_endpoint(&LegId::from("caller")), &track)
                 .await
             {
                 warn!(session_id = %self.context.session_id, error = %e, "Failed to play progress audio");
             }
             self.media.bridge_playback_track_id = Some("progress-media".to_string());
-            self.media.playback_tracks.insert("progress-media".to_string(), track);
+            self.media
+                .playback_tracks
+                .insert("progress-media".to_string(), track);
         }
 
         Ok(())
@@ -2703,11 +2707,18 @@ impl SipSession {
         if let Some(tone_spec) = spec.strip_prefix("tone://") {
             let parts: Vec<&str> = tone_spec.splitn(2, ',').collect();
             if parts.len() != 2 {
-                return Err(anyhow!("Invalid tone spec '{}': expected tone://frequency,duration_ms", spec));
+                return Err(anyhow!(
+                    "Invalid tone spec '{}': expected tone://frequency,duration_ms",
+                    spec
+                ));
             }
-            let frequency: u32 = parts[0].trim().parse()
+            let frequency: u32 = parts[0]
+                .trim()
+                .parse()
                 .map_err(|e| anyhow!("Invalid frequency in tone spec '{}': {}", spec, e))?;
-            let duration_ms: u64 = parts[1].trim().parse()
+            let duration_ms: u64 = parts[1]
+                .trim()
+                .parse()
                 .map_err(|e| anyhow!("Invalid duration in tone spec '{}': {}", spec, e))?;
 
             let sample_rate = 8000u32;
@@ -2717,7 +2728,8 @@ impl SipSession {
             let pcm: Vec<i16> = (0..num_samples)
                 .map(|i| {
                     let t = i as f64 / sample_rate as f64;
-                    (amplitude as f64 * (2.0 * std::f64::consts::PI * frequency as f64 * t).sin()) as i16
+                    (amplitude as f64 * (2.0 * std::f64::consts::PI * frequency as f64 * t).sin())
+                        as i16
                 })
                 .collect();
 
@@ -2741,10 +2753,12 @@ impl SipSession {
             let mut writer = hound::WavWriter::create(&temp_path, spec)
                 .map_err(|e| anyhow!("Failed to create temp WAV for tone: {}", e))?;
             for sample in &pcm {
-                writer.write_sample(*sample)
+                writer
+                    .write_sample(*sample)
                     .map_err(|e| anyhow!("Failed to write WAV sample: {}", e))?;
             }
-            writer.finalize()
+            writer
+                .finalize()
                 .map_err(|e| anyhow!("Failed to finalize WAV: {}", e))?;
 
             Ok(temp_path.to_string_lossy().to_string())
@@ -2922,7 +2936,8 @@ impl SipSession {
         }
 
         if self.context.dialplan.recording.enabled {
-            bridge_builder = bridge_builder.with_recorder(self.recorder.clone(), self.recording_paused.clone());
+            bridge_builder =
+                bridge_builder.with_recorder(self.recorder.clone(), self.recording_paused.clone());
         }
 
         let bridge = bridge_builder.build();
@@ -5070,7 +5085,8 @@ impl SipSession {
 
             // Attach recorder to bridge so audio is captured when recording starts
             if self.context.dialplan.recording.enabled {
-                bridge_builder = bridge_builder.with_recorder(self.recorder.clone(), self.recording_paused.clone());
+                bridge_builder = bridge_builder
+                    .with_recorder(self.recorder.clone(), self.recording_paused.clone());
             }
 
             let bridge = bridge_builder.build();
@@ -10023,12 +10039,25 @@ a=rtcp-fb:104 nack\r\n";
     #[test]
     fn test_build_telephone_event_payload_all_digits() {
         for (ch, expected_code) in [
-            ('0', 0), ('1', 1), ('2', 2), ('3', 3), ('4', 4),
-            ('5', 5), ('6', 6), ('7', 7), ('8', 8), ('9', 9),
-            ('*', 10), ('#', 11),
+            ('0', 0),
+            ('1', 1),
+            ('2', 2),
+            ('3', 3),
+            ('4', 4),
+            ('5', 5),
+            ('6', 6),
+            ('7', 7),
+            ('8', 8),
+            ('9', 9),
+            ('*', 10),
+            ('#', 11),
         ] {
             let payload = SipSession::build_telephone_event_payload(ch, false, 800).unwrap();
-            assert_eq!(payload[0], expected_code, "DTMF digit '{}' should map to code {}", ch, expected_code);
+            assert_eq!(
+                payload[0], expected_code,
+                "DTMF digit '{}' should map to code {}",
+                ch, expected_code
+            );
         }
     }
 

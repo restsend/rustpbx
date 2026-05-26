@@ -4,7 +4,6 @@ use super::cdr_capture::CdrCapture;
 use super::rtp_utils::{RtpReceiver, RtpSender};
 use super::test_helpers;
 use super::test_ua::{TestUa, TestUaConfig};
-use crate::call::user::SipUser;
 use crate::config::{MediaProxyMode, ProxyConfig};
 use crate::proxy::{
     active_call_registry::ActiveProxyCallRegistry,

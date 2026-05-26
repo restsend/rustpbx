@@ -470,7 +470,9 @@ async fn test_sbc_jsonrpc_e2e_multi_rule_matching() {
 
     let upstream_cancel = start_mock_upstream(upstream_port, call_count.clone()).await;
 
-    use rustpbx::addons::sbc::jsonrpc::config::{MatchCondition, MatchField, MatchGroup, MatchLogic, MatchOp};
+    use rustpbx::addons::sbc::jsonrpc::config::{
+        MatchCondition, MatchField, MatchGroup, MatchLogic, MatchOp,
+    };
 
     let sbc_config = Arc::new(RwLock::new(Some(SbcJsonRpcConfig {
         enabled: true,

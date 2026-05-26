@@ -262,7 +262,6 @@ default('RustPBX') }}{% endblock %}
                         </label>
                     </div>
                 </section>
-
                 <section class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
                     <div class="flex flex-col gap-1">
                         <h2 class="text-sm font-semibold text-slate-900">{{ "sip_trunk_detail.section_inbound_filters" |
@@ -471,6 +470,56 @@ default('RustPBX') }}{% endblock %}
                         </label>
                     </div>
                 </section>
+                <section class="rounded-xl bg-white p-6 shadow-sm ring-1 ring-black/5">
+                    <h2 class="text-sm font-semibold text-slate-900">{{ "sip_trunk_detail.section_ringback" | t }}</h2>
+                    <p class="mt-1 text-xs text-slate-500">{{ "sip_trunk_detail.section_ringback_desc" | t }}</p>
+                    <div class="mt-4 space-y-4">
+                        <div class="grid gap-4 md:grid-cols-2">
+                            <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                                {{ "sip_trunk_detail.field_ringback_ring" | t }}
+                                <input type="text" x-model.trim="form.ringback_ring" maxlength="512"
+                                    class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                    placeholder="/sounds/ringtone.wav">
+                                <span class="text-xs font-normal text-slate-400">{{ "sip_trunk_detail.field_ringback_ring_hint" | t }}</span>
+                            </label>
+                            <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                                {{ "sip_trunk_detail.field_ringback_busy" | t }}
+                                <input type="text" x-model.trim="form.ringback_busy" maxlength="512"
+                                    class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                    placeholder="/sounds/busy.wav">
+                                <span class="text-xs font-normal text-slate-400">{{ "sip_trunk_detail.field_ringback_busy_hint" | t }}</span>
+                            </label>
+                            <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                                {{ "sip_trunk_detail.field_ringback_reject" | t }}
+                                <input type="text" x-model.trim="form.ringback_reject" maxlength="512"
+                                    class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                    placeholder="/sounds/reject.wav">
+                                <span class="text-xs font-normal text-slate-400">{{ "sip_trunk_detail.field_ringback_reject_hint" | t }}</span>
+                            </label>
+                            <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                                {{ "sip_trunk_detail.field_ringback_offline" | t }}
+                                <input type="text" x-model.trim="form.ringback_offline" maxlength="512"
+                                    class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                    placeholder="/sounds/offline.wav">
+                                <span class="text-xs font-normal text-slate-400">{{ "sip_trunk_detail.field_ringback_offline_hint" | t }}</span>
+                            </label>
+                            <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                                {{ "sip_trunk_detail.field_ringback_notfound" | t }}
+                                <input type="text" x-model.trim="form.ringback_notfound" maxlength="512"
+                                    class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                    placeholder="/sounds/notfound.wav">
+                                <span class="text-xs font-normal text-slate-400">{{ "sip_trunk_detail.field_ringback_notfound_hint" | t }}</span>
+                            </label>
+                            <label class="flex flex-col gap-2 text-sm font-medium text-slate-700">
+                                {{ "sip_trunk_detail.field_ringback_play_duration" | t }}
+                                <input type="number" min="1" max="120" step="1" x-model="form.ringback_play_duration"
+                                    class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                    placeholder="2">
+                                <span class="text-xs font-normal text-slate-400">{{ "sip_trunk_detail.field_ringback_play_duration_hint" | t }}</span>
+                            </label>
+                        </div>
+                    </div>
+                </section>
             </div>
 
             <div class="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
@@ -549,6 +598,12 @@ default('RustPBX') }}{% endblock %}
                 video_policy: '',
                 audio_codecs: '',
                 video_codecs: '',
+                ringback_ring: '',
+                ringback_busy: '',
+                ringback_reject: '',
+                ringback_offline: '',
+                ringback_notfound: '',
+                ringback_play_duration: '',
             },
             regStatus: null,
             success: null,
@@ -618,6 +673,13 @@ default('RustPBX') }}{% endblock %}
                     this.form.video_policy = sbc.video_policy || '';
                     this.form.audio_codecs = Array.isArray(sbc.audio_codecs) ? sbc.audio_codecs.join('\n') : '';
                     this.form.video_codecs = Array.isArray(sbc.video_codecs) ? sbc.video_codecs.join('\n') : '';
+                    const rb = sbc.ringback || {};
+                    this.form.ringback_ring = rb.ring || '';
+                    this.form.ringback_busy = rb.busy || '';
+                    this.form.ringback_reject = rb.reject || '';
+                    this.form.ringback_offline = rb.offline || '';
+                    this.form.ringback_notfound = rb.notfound || '';
+                    this.form.ringback_play_duration = rb.play_duration_secs != null ? String(rb.play_duration_secs) : '';
                 } catch(e) {
                     // ignore parse errors
                 }
@@ -838,6 +900,23 @@ default('RustPBX') }}{% endblock %}
                         meta.sbc.video_codecs = videoCodecs;
                     } else {
                         delete meta.sbc.video_codecs;
+                    }
+                    const ringback = {};
+                    if (this.form.ringback_ring.trim()) ringback.ring = this.form.ringback_ring.trim();
+                    if (this.form.ringback_busy.trim()) ringback.busy = this.form.ringback_busy.trim();
+                    if (this.form.ringback_reject.trim()) ringback.reject = this.form.ringback_reject.trim();
+                    if (this.form.ringback_offline.trim()) ringback.offline = this.form.ringback_offline.trim();
+                    if (this.form.ringback_notfound.trim()) ringback.notfound = this.form.ringback_notfound.trim();
+                    if (this.form.ringback_play_duration !== '' && this.form.ringback_play_duration != null) {
+                        const dur = Number(this.form.ringback_play_duration);
+                        if (!Number.isNaN(dur) && dur > 0) {
+                            ringback.play_duration_secs = Math.round(dur);
+                        }
+                    }
+                    if (Object.keys(ringback).length) {
+                        meta.sbc.ringback = ringback;
+                    } else {
+                        delete meta.sbc.ringback;
                     }
                     if (!Object.keys(meta.sbc).length) {
                         delete meta.sbc;

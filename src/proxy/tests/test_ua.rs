@@ -859,8 +859,8 @@ mod tests {
     use tokio::time::sleep;
     use tracing::Level;
 
-    use super::*;
     use super::super::e2e_test_server::E2eTestServer;
+    use super::*;
     use crate::config::MediaProxyMode;
 
     // Simplified test helper functions

@@ -114,8 +114,8 @@ mod tests {
                 );
                 m
             },
-        ivr_mode: None,
-        provider: None,
+            ivr_mode: None,
+            provider: None,
         }
     }
 
@@ -731,8 +731,8 @@ action = { type = "transfer", target = "100" }
                 ..Default::default()
             }),
             menus: HashMap::new(),
-        ivr_mode: None,
-        provider: None,
+            ivr_mode: None,
+            provider: None,
         }
     }
 
@@ -941,8 +941,8 @@ action = { type = "transfer", target = "100" }
                 ..Default::default()
             }),
             menus: HashMap::new(),
-        ivr_mode: None,
-        provider: None,
+            ivr_mode: None,
+            provider: None,
         }
     }
 
@@ -1109,8 +1109,8 @@ action = { type = "transfer", target = "100" }
                 ..Default::default()
             }),
             menus: HashMap::new(),
-        ivr_mode: None,
-        provider: None,
+            ivr_mode: None,
+            provider: None,
         }
     }
 
@@ -1685,8 +1685,8 @@ action = { type = "transfer", target = "100" }
                 ..Default::default()
             }),
             menus: HashMap::new(),
-        ivr_mode: None,
-        provider: None,
+            ivr_mode: None,
+            provider: None,
         }
     }
 
@@ -1909,8 +1909,8 @@ action = { type = "transfer", target = "100" }
                 ..Default::default()
             }),
             menus: HashMap::new(),
-        ivr_mode: None,
-        provider: None,
+            ivr_mode: None,
+            provider: None,
         };
 
         let mut stack = MockCallStack::run(Box::new(IvrApp::new(ivr)), "caller", "1000");
@@ -2015,8 +2015,8 @@ action = { type = "transfer", target = "100" }
                 );
                 m
             },
-        ivr_mode: None,
-        provider: None,
+            ivr_mode: None,
+            provider: None,
         };
 
         let mut stack = MockCallStack::run(Box::new(IvrApp::new(ivr)), "caller", "1000");
@@ -2101,8 +2101,8 @@ action = { type = "transfer", target = "100" }
                 ..Default::default()
             }),
             menus: HashMap::new(),
-        ivr_mode: None,
-        provider: None,
+            ivr_mode: None,
+            provider: None,
         };
 
         let mut stack = MockCallStack::run(Box::new(IvrApp::new(ivr)), "caller", "1000");
@@ -2174,8 +2174,8 @@ action = { type = "transfer", target = "100" }
                 ..Default::default()
             }),
             menus: HashMap::new(),
-        ivr_mode: None,
-        provider: None,
+            ivr_mode: None,
+            provider: None,
         };
 
         let mut stack = MockCallStack::run(Box::new(IvrApp::new(ivr)), "caller", "1000");
@@ -2264,8 +2264,8 @@ action = { type = "transfer", target = "100" }
                 ..Default::default()
             }),
             menus: HashMap::new(),
-        ivr_mode: None,
-        provider: None,
+            ivr_mode: None,
+            provider: None,
         };
 
         let mut stack = MockCallStack::run(Box::new(IvrApp::new(ivr)), "caller", "1000");
@@ -2344,8 +2344,8 @@ action = { type = "transfer", target = "100" }
                 ..Default::default()
             }),
             menus: HashMap::new(),
-        ivr_mode: None,
-        provider: None,
+            ivr_mode: None,
+            provider: None,
         };
 
         let mut stack = MockCallStack::run(Box::new(IvrApp::new(ivr)), "caller", "1000");
@@ -2415,8 +2415,8 @@ action = { type = "transfer", target = "100" }
                 ..Default::default()
             }),
             menus: HashMap::new(),
-        ivr_mode: None,
-        provider: None,
+            ivr_mode: None,
+            provider: None,
         };
 
         let mut stack = MockCallStack::run(Box::new(IvrApp::new(ivr)), "caller", "1000");
@@ -2496,8 +2496,8 @@ action = { type = "transfer", target = "100" }
                 ..Default::default()
             }),
             menus: HashMap::new(),
-        ivr_mode: None,
-        provider: None,
+            ivr_mode: None,
+            provider: None,
         };
 
         let mut stack = MockCallStack::run(Box::new(IvrApp::new(ivr)), "caller", "1000");
@@ -2673,8 +2673,8 @@ action = { type = "transfer", target = "100" }
                 ..Default::default()
             }),
             menus: HashMap::new(),
-        ivr_mode: None,
-        provider: None,
+            ivr_mode: None,
+            provider: None,
         };
 
         let mut stack = MockCallStack::run(Box::new(IvrApp::new(ivr)), "caller", "1000");
@@ -2801,7 +2801,13 @@ action = { type = "transfer", target = "100" }
 
         stack
             .assert_cmd(200, "PlayPrompt", |c| {
-                matches!(c, CallCommand::Play { source: MediaSource::File { .. }, .. })
+                matches!(
+                    c,
+                    CallCommand::Play {
+                        source: MediaSource::File { .. },
+                        ..
+                    }
+                )
             })
             .await;
         stack.audio_complete("default");

@@ -126,13 +126,7 @@ impl ActiveProxyCallRegistry {
     }
 
     pub fn list_recent(&self, limit: usize) -> Vec<ActiveProxyCallEntry> {
-        let mut entries: Vec<_> = self
-            .inner
-            .lock()
-            .entries
-            .values()
-            .cloned()
-            .collect();
+        let mut entries: Vec<_> = self.inner.lock().entries.values().cloned().collect();
         entries.sort_by_key(|b| std::cmp::Reverse(b.started_at));
         if entries.len() > limit {
             entries.truncate(limit);
@@ -292,10 +286,7 @@ mod tests {
         assert_eq!(registry.handles_by_dialog_count(), 3);
 
         // All 3 dialogs should be tracked under this session
-        assert_eq!(
-            registry.inner.lock().dialog_by_session[session].len(),
-            3
-        );
+        assert_eq!(registry.inner.lock().dialog_by_session[session].len(), 3);
 
         // 4. Session ends → remove() must clean ALL three handles_by_dialog entries
         registry.remove(session);
@@ -348,10 +339,7 @@ mod tests {
         assert_eq!(registry.handles_by_dialog_count(), 1, "dlg-b should remain");
 
         // session still has 1 dialog tracked
-        assert_eq!(
-            registry.inner.lock().dialog_by_session[session].len(),
-            1
-        );
+        assert_eq!(registry.inner.lock().dialog_by_session[session].len(), 1);
 
         // Unregister second
         registry.unregister_dialog("dlg-b");

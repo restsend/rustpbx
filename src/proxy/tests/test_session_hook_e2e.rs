@@ -11,7 +11,7 @@ use super::test_ua::{TestUa, TestUaConfig, TestUaEvent};
 use crate::call::domain::{CallCommand, LegId};
 use crate::call::user::SipUser;
 use crate::callrecord::CallRecordHangupReason;
-use crate::config::{MediaProxyMode, ProxyConfig};
+use crate::config::MediaProxyMode;
 use crate::proxy::routing::TrunkConfig;
 use crate::proxy::{
     acl::AclModule,

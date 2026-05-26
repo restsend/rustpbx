@@ -3,10 +3,7 @@ use super::test_helpers;
 use super::test_ua::{TestUa, TestUaConfig, TestUaEvent};
 use crate::call::user::SipUser;
 use crate::config::ProxyConfig;
-use crate::proxy::{
-    locator::MemoryLocator,
-    server::SipServerBuilder, user::MemoryUserBackend,
-};
+use crate::proxy::{locator::MemoryLocator, server::SipServerBuilder, user::MemoryUserBackend};
 use anyhow::Result;
 use std::net::SocketAddr;
 use std::sync::Arc;

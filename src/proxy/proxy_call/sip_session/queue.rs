@@ -295,20 +295,18 @@ impl SipSession {
                 info!(target = ?target, "Queue fallback - transfer");
 
                 match target {
-                    TransferEndpoint::Uri(uri) => {
-                        Box::pin(self.handle_blind_transfer(
-                            LegId::from("caller"),
-                            uri.clone(),
-                            callee_state_rx,
-                        ))
-                        .await
-                        .map_err(|e| {
-                            (
-                                StatusCode::TemporarilyUnavailable,
-                                Some(format!("Transfer failed: {}", e)),
-                            )
-                        })
-                    }
+                    TransferEndpoint::Uri(uri) => Box::pin(self.handle_blind_transfer(
+                        LegId::from("caller"),
+                        uri.clone(),
+                        callee_state_rx,
+                    ))
+                    .await
+                    .map_err(|e| {
+                        (
+                            StatusCode::TemporarilyUnavailable,
+                            Some(format!("Transfer failed: {}", e)),
+                        )
+                    }),
                     TransferEndpoint::Queue(queue_name) => Box::pin(self.handle_queue_transfer(
                         LegId::from("caller"),
                         queue_name,

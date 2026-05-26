@@ -30,6 +30,6 @@ mod test_rtp_e2e;
 mod test_session_hook_e2e;
 mod test_sip_info_dtmf_e2e;
 mod test_sip_session_regressions;
+mod test_trunk_b2bua_e2e;
 mod test_trunk_e2e;
 mod test_voip_bridge_e2e;
-mod test_trunk_b2bua_e2e;

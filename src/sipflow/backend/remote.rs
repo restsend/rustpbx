@@ -46,10 +46,7 @@ struct ClusterNode {
 }
 
 enum Command {
-    RecordItem {
-        call_id: String,
-        item: SipFlowItem,
-    },
+    RecordItem { call_id: String, item: SipFlowItem },
 }
 
 /// Remote backend that sends data to one of several remote sipflow servers
@@ -297,7 +294,13 @@ mod tests {
 
     #[test]
     fn test_jump_hash_deterministic() {
-        let keys = ["", "a", "hello", "call-id-12345", "very-long-call-id-that-exceeds-64-chars-in-length-abcdefghijklmnopqrstuvwxyz"];
+        let keys = [
+            "",
+            "a",
+            "hello",
+            "call-id-12345",
+            "very-long-call-id-that-exceeds-64-chars-in-length-abcdefghijklmnopqrstuvwxyz",
+        ];
         for key in &keys {
             let h1 = jump_consistent_hash(key, 10);
             let h2 = jump_consistent_hash(key, 10);
@@ -308,10 +311,8 @@ mod tests {
     #[test]
     fn test_jump_hash_different_keys() {
         let keys = ["call-a", "call-b", "call-c", "call-d", "call-e"];
-        let results: std::collections::HashSet<usize> = keys
-            .iter()
-            .map(|k| jump_consistent_hash(k, 4))
-            .collect();
+        let results: std::collections::HashSet<usize> =
+            keys.iter().map(|k| jump_consistent_hash(k, 4)).collect();
         // At least 2 different buckets out of 5 keys and 4 buckets (high probability)
         assert!(results.len() >= 2, "expected at least 2 distinct buckets");
     }

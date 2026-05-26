@@ -3,9 +3,7 @@ use crate::call::Location;
 use anyhow::Result;
 use async_trait::async_trait;
 use rsipstack::transport::SipAddr;
-use sea_orm::{
-    ActiveModelTrait, Database, QueryOrder, Set, entity::prelude::*,
-};
+use sea_orm::{ActiveModelTrait, Database, QueryOrder, Set, entity::prelude::*};
 pub use sea_orm_migration::prelude::*;
 use sea_orm_migration::schema::{
     big_integer, boolean, string_len, string_len_null, timestamp_with_time_zone as timestamp,

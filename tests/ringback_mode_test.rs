@@ -238,7 +238,10 @@ mod ringback_mode_tests {
         let deserialized: RingbackConfig = serde_json::from_str(&json).expect("from JSON");
 
         assert_eq!(deserialized.mode, RingbackMode::Local);
-        assert_eq!(deserialized.audio_file, Some("/sounds/ringback.wav".to_string()));
+        assert_eq!(
+            deserialized.audio_file,
+            Some("/sounds/ringback.wav".to_string())
+        );
         assert!(!deserialized.loop_playback);
         assert!(!deserialized.wait_for_completion);
     }
@@ -642,7 +645,8 @@ mod ringback_audio_tests {
     #[test]
     fn test_ringback_audio_json_string_roundtrip() {
         // This is the exact format stored in wholesale_trunk_config.ringback text column
-        let json_str = r#"{"busy":"/sounds/busy.wav","reject":"/sounds/reject.wav","play_duration_secs":5}"#;
+        let json_str =
+            r#"{"busy":"/sounds/busy.wav","reject":"/sounds/reject.wav","play_duration_secs":5}"#;
         let audio: RingbackAudio = serde_json::from_str(json_str).expect("deserialize");
         assert_eq!(audio.busy, Some("/sounds/busy.wav".to_string()));
         assert_eq!(audio.reject, Some("/sounds/reject.wav".to_string()));
@@ -693,7 +697,10 @@ mod ringback_audio_tests {
             ring: Some("/sounds/ring.wav".to_string()),
             ..Default::default()
         };
-        assert!(!audio.has_failure_tone(), "ring alone is not a failure tone");
+        assert!(
+            !audio.has_failure_tone(),
+            "ring alone is not a failure tone"
+        );
     }
 
     #[test]
@@ -702,7 +709,9 @@ mod ringback_audio_tests {
             busy: Some("/sounds/busy.wav".to_string()),
             ..Default::default()
         };
-        let dur = audio.play_duration_for(&StatusCode::BusyHere).expect("should have duration");
+        let dur = audio
+            .play_duration_for(&StatusCode::BusyHere)
+            .expect("should have duration");
         assert_eq!(dur.as_secs(), 2, "default play_duration should be 2s");
     }
 
@@ -713,7 +722,9 @@ mod ringback_audio_tests {
             play_duration_secs: Some(5),
             ..Default::default()
         };
-        let dur = audio.play_duration_for(&StatusCode::BusyHere).expect("should have duration");
+        let dur = audio
+            .play_duration_for(&StatusCode::BusyHere)
+            .expect("should have duration");
         assert_eq!(dur.as_secs(), 5);
     }
 
@@ -724,7 +735,9 @@ mod ringback_audio_tests {
             play_duration_secs: Some(0),
             ..Default::default()
         };
-        let dur = audio.play_duration_for(&StatusCode::BusyHere).expect("should have duration");
+        let dur = audio
+            .play_duration_for(&StatusCode::BusyHere)
+            .expect("should have duration");
         assert_eq!(dur.as_secs(), 0, "0 means no playback");
     }
 
@@ -755,13 +768,16 @@ mod ringback_audio_tests {
         let audio: RingbackAudio = serde_json::from_str(json).expect("from JSON");
         assert_eq!(audio.play_duration_secs, None);
         let s = serde_json::to_string(&audio).expect("to JSON");
-        assert!(!s.contains("play_duration_secs"), "should skip serializing None");
+        assert!(
+            !s.contains("play_duration_secs"),
+            "should skip serializing None"
+        );
     }
 } // mod ringback_audio_tests
 
 #[cfg(test)]
 mod ringback_tone_audio_tests {
-    use hound::{WavReader, WavSpec, WavWriter, SampleFormat};
+    use hound::{SampleFormat, WavReader, WavSpec, WavWriter};
 
     /// Generate sine wave PCM matching the exact algorithm in
     /// `SipSession::resolve_audio_path()` (src/proxy/proxy_call/sip_session.rs).
@@ -774,7 +790,8 @@ mod ringback_tone_audio_tests {
         (0..num_samples)
             .map(|i| {
                 let t = i as f64 / sample_rate as f64;
-                (amplitude as f64 * (2.0 * std::f64::consts::PI * frequency as f64 * t).sin()) as i16
+                (amplitude as f64 * (2.0 * std::f64::consts::PI * frequency as f64 * t).sin())
+                    as i16
             })
             .collect()
     }
@@ -840,7 +857,7 @@ mod ringback_tone_audio_tests {
 
     #[test]
     fn test_tone_pcm_sample_count() {
-        assert_eq!(generate_tone_pcm(440, 20).len(), 160);  // 20ms at 8kHz
+        assert_eq!(generate_tone_pcm(440, 20).len(), 160); // 20ms at 8kHz
         assert_eq!(generate_tone_pcm(440, 100).len(), 800); // 100ms at 8kHz
         assert_eq!(generate_tone_pcm(440, 1000).len(), 8000); // 1s at 8kHz
     }
@@ -859,8 +876,7 @@ mod ringback_tone_audio_tests {
             sample_format: SampleFormat::Int,
         };
         {
-            let mut writer = WavWriter::create(&wav_path, spec)
-                .expect("create WAV");
+            let mut writer = WavWriter::create(&wav_path, spec).expect("create WAV");
             for &sample in &pcm {
                 writer.write_sample(sample).expect("write sample");
             }
@@ -963,7 +979,8 @@ mod ringback_tone_audio_tests {
         for &freq in &[200, 440, 800, 1000, 2000] {
             let pcm = generate_tone_pcm(freq, 40);
             assert_eq!(pcm.len(), 320, "40ms at 8kHz = 320 samples for {}Hz", freq);
-            let rms = (pcm.iter().map(|&s| (s as f64).powi(2)).sum::<f64>() / pcm.len() as f64).sqrt();
+            let rms =
+                (pcm.iter().map(|&s| (s as f64).powi(2)).sum::<f64>() / pcm.len() as f64).sqrt();
             assert!(
                 rms > 1000.0,
                 "Tone {}Hz should have energy, RMS={}",

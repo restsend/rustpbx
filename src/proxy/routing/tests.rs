@@ -5,9 +5,8 @@ use crate::proxy::call::q850_reason_value;
 use crate::proxy::routing::matcher::{RouteResourceLookup, match_invite};
 use crate::proxy::routing::{
     DestConfig, MatchConditions, MediaMode, QueueDialMode, RejectConfig, RewriteRules, RouteAction,
-    RouteDirection, RouteQueueConfig, RouteQueueFallbackConfig, RouteQueueHoldConfig,
-    RouteQueueStrategyConfig, RouteQueueTargetConfig, RouteRule, SourceTrunk, TrunkConfig,
-    TrunkDirection, VideoPolicy,
+    RouteQueueConfig, RouteQueueFallbackConfig, RouteQueueHoldConfig, RouteQueueStrategyConfig,
+    RouteQueueTargetConfig, RouteRule, SourceTrunk, TrunkConfig, TrunkDirection, VideoPolicy,
 };
 use async_trait::async_trait;
 use rsipstack::dialog::invitation::InviteOption;
@@ -311,7 +310,6 @@ async fn test_match_invite_inbound_respects_source_trunk() {
     let routes = vec![RouteRule {
         name: "inbound-route".to_string(),
         priority: 10,
-        direction: RouteDirection::Inbound,
         source_trunks: vec!["ingress".to_string()],
         match_conditions: MatchConditions {
             to_user: Some("1001".to_string()),
@@ -359,7 +357,7 @@ async fn test_match_invite_inbound_respects_source_trunk() {
 }
 
 #[tokio::test]
-async fn test_match_invite_inbound_without_source_trunk() {
+async fn test_source_trunks_must_match_inbound() {
     let routing_state = Arc::new(RoutingState::new());
     let mut trunks = HashMap::new();
     trunks.insert(
@@ -374,7 +372,6 @@ async fn test_match_invite_inbound_without_source_trunk() {
     let routes = vec![RouteRule {
         name: "inbound-route".to_string(),
         priority: 10,
-        direction: RouteDirection::Inbound,
         source_trunks: vec!["ingress".to_string()],
         match_conditions: MatchConditions {
             to_user: Some("1001".to_string()),
@@ -682,7 +679,6 @@ async fn test_match_invite_queue_action_builds_hold_and_fallback() {
     let routes = vec![RouteRule {
         name: "support-queue".to_string(),
         priority: 50,
-        direction: RouteDirection::Inbound,
         match_conditions: MatchConditions {
             to_user: Some("1001".to_string()),
             ..Default::default()
@@ -743,6 +739,153 @@ async fn test_match_invite_queue_action_builds_hold_and_fallback() {
         RouteResult::Abort(..) => panic!("queue route aborted"),
         RouteResult::Application { .. } => panic!("unexpected Application route in test"),
     }
+}
+
+#[tokio::test]
+async fn test_rule_without_source_trunks_matches_any_source() {
+    let routing_state = Arc::new(RoutingState::new());
+    let trunks = HashMap::new();
+    let routes = vec![RouteRule {
+        name: "catch-all".to_string(),
+        priority: 100,
+        match_conditions: MatchConditions {
+            to_user: Some("1001".to_string()),
+            ..Default::default()
+        },
+        action: RouteAction {
+            dest: Some(DestConfig::Single("carrier".to_string())),
+            select: "rr".to_string(),
+            ..Default::default()
+        },
+        ..Default::default()
+    }];
+
+    let source_trunk = SourceTrunk {
+        name: "inbound-carrier".to_string(),
+        id: None,
+        direction: Some(TrunkDirection::Inbound),
+    };
+
+    // Rule should match inbound calls (with source trunk)
+    let result = match_invite(
+        Some(&trunks),
+        Some(&routes),
+        None,
+        create_test_invite_option(),
+        &create_test_request(),
+        Some(&source_trunk),
+        routing_state.clone(),
+        &DialDirection::Inbound,
+    )
+    .await
+    .expect("rule should match inbound call");
+    assert!(
+        matches!(&result, RouteResult::Forward(_, _)),
+        "expected Forward for inbound call with no source_trunks restriction"
+    );
+
+    // Rule should also match outbound calls (no source trunk)
+    let result = match_invite(
+        Some(&trunks),
+        Some(&routes),
+        None,
+        create_test_invite_option(),
+        &create_test_request(),
+        None,
+        routing_state.clone(),
+        &DialDirection::Outbound,
+    )
+    .await
+    .expect("rule should match outbound call");
+    assert!(
+        matches!(&result, RouteResult::Forward(_, _)),
+        "expected Forward for outbound call with no source_trunks restriction"
+    );
+}
+
+#[tokio::test]
+async fn test_source_trunks_filters_by_trunk_name() {
+    let routing_state = Arc::new(RoutingState::new());
+    let trunks = HashMap::new();
+    let routes = vec![RouteRule {
+        name: "specific-trunk-rule".to_string(),
+        priority: 100,
+        source_trunks: vec!["carrier-a".to_string()],
+        match_conditions: MatchConditions {
+            to_user: Some("1001".to_string()),
+            ..Default::default()
+        },
+        action: RouteAction {
+            dest: Some(DestConfig::Single("carrier-a".to_string())),
+            select: "rr".to_string(),
+            ..Default::default()
+        },
+        ..Default::default()
+    }];
+
+    // Match: call from carrier-a
+    let source_trunk = SourceTrunk {
+        name: "carrier-a".to_string(),
+        id: None,
+        direction: Some(TrunkDirection::Inbound),
+    };
+    let result = match_invite(
+        Some(&trunks),
+        Some(&routes),
+        None,
+        create_test_invite_option(),
+        &create_test_request(),
+        Some(&source_trunk),
+        routing_state.clone(),
+        &DialDirection::Inbound,
+    )
+    .await
+    .expect("rule should match call from carrier-a");
+    assert!(
+        matches!(&result, RouteResult::Forward(_, _)),
+        "expected Forward for matching source_trunk"
+    );
+
+    // No match: call from carrier-b
+    let source_trunk_b = SourceTrunk {
+        name: "carrier-b".to_string(),
+        id: None,
+        direction: Some(TrunkDirection::Inbound),
+    };
+    let result = match_invite(
+        Some(&trunks),
+        Some(&routes),
+        None,
+        create_test_invite_option(),
+        &create_test_request(),
+        Some(&source_trunk_b),
+        routing_state.clone(),
+        &DialDirection::Inbound,
+    )
+    .await
+    .expect("rule should resolve NotHandled for different source_trunk");
+    assert!(
+        matches!(&result, RouteResult::NotHandled(_, _)),
+        "expected NotHandled for non-matching source_trunk"
+    );
+
+    // No match: no source trunk (outbound call)
+    let result = match_invite(
+        Some(&trunks),
+        Some(&routes),
+        None,
+        create_test_invite_option(),
+        &create_test_request(),
+        None,
+        routing_state.clone(),
+        &DialDirection::Outbound,
+    )
+    .await
+    .expect("rule should not match outbound call");
+    assert!(
+        matches!(&result, RouteResult::NotHandled(_, _)),
+        "expected NotHandled for outbound call (no source trunk)"
+    );
 }
 
 #[test]
