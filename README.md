@@ -3,116 +3,24 @@
 ![Crates.io License](https://img.shields.io/crates/l/rustpbx)
  ![GitHub commit activity](https://img.shields.io/github/commit-activity/m/restsend/rustpbx) ![Crates.io Total Downloads](https://img.shields.io/crates/d/rustpbx) ![GitHub Repo stars](https://img.shields.io/github/stars/restsend/rustpbx)
 
+**A high-performance, software-defined PBX built in Rust** — the AI-native communication platform for next-gen contact centers.
 
-**A high-performance Software-Defined PBX built in Rust** — An AI-native communication platform for next-generation contact centers.
+RustPBX externalizes all call control via **HTTP/WebSocket/Webhook**. Route decisions, media control, and event streams are fully programmable in any language.
 
-Different from Asterisk/FreeSWITCH (C modules), RustPBX exposes all call control via **HTTP/WebSocket/Webhook**, making it fully programmable in any language. Route decisions, media control, and event streams are all externalized — AI becomes a native participant in every call.
-
-> **Note**: The Voice Agent functionality has been moved to a separate repository: [Active Call](https://github.com/restsend/active-call). This repository now focuses on the SIP Proxy and PBX features.
+> Voice Agent functionality has moved to [Active Call](https://github.com/restsend/active-call). This repo focuses on SIP Proxy & PBX.
 
 **[GitHub](https://github.com/restsend/rustpbx)** | **[Website](https://miuda.ai)**
 
 ---
 
-## Software-Defined Communication
+## Quick Start
 
-RustPBX breaks the closed architecture of traditional PBX systems by exposing three powerful integration channels:
-
-| Channel | Protocol | Purpose |
-|---------|----------|---------|
-| **Policy Decision** | HTTP Router | Real-time routing decisions: AI first, agent queue, IVR, or direct transfer |
-| **Real-time Control** | RWI (WebSocket) | In-call control: listen, whisper, barge, transfer, hold, media injection |
-| **Event Stream** | Webhook | Push CDR, queue status, and events to your CRM/ticketing system |
-
----
-
-## Editions
-
-| | Community | Commerce |
-|---|---|---|
-| License | MIT | Commercial |
-| SIP Proxy + Media | ✅ | ✅ |
-| HTTP Router (dynamic routing) | ✅ | ✅ |
-| Queue / ACD | ✅ | ✅ |
-| Call Recording + SipFlow | ✅ | ✅ |
-| Transcript (SenseVoice offline) | ✅ | ✅ |
-| Web Console | ✅ | ✅ |
-| RWI (WebSocket Interface) | ✅ | ✅ |
-| **VoIP Wholesale** (VOS3000 alternative) | ❌ | ✅ |
-| **IVR Visual Editor** | ❌ | ✅ |
-| **Voicemail Pro** | ❌ | ✅ |
-| **Enterprise Auth** (LDAP/SAML/MFA) | ❌ | ✅ |
-| **Endpoint Manager** (phone auto-provisioning) | ❌ | ✅ |
-
----
-
-## AI-Native UCaaS Architecture
-
-![RustPBX Architecture](./docs/architecture.svg)
-
-**Architecture Layers:**
-- **App Service Layer**: AI Voice Agent, Human Agents, HTTP DialPlan Handler, RWI Call Control, Webhook Consumer, CRM/Ticketing
-- **RustPBX Core Layer**: B2BUA, IVR, Media Fabric, Queue/ACD, Recording, CDR, SIP Trunk
-- **Access Layer**: PSTN (SIP Trunk), WebRTC Browser, SIP Client, Mobile App
-
----
-
-## Core Capabilities
-
-### SIP & Media
-- **SIP Proxy** — Full SIP stack (UDP/TCP/WS/TLS/WebRTC), registration, auth, B2BUA
-- **Media Proxy** — RTP relay, NAT traversal, WebRTC ↔ SIP bridging
-- **TLS/SRTP** — End-to-end encryption with automatic ACME certificate management
-
-### Routing & Control
-- **HTTP Router** — Every INVITE hits your webhook; you return routing decision in JSON
-- **RWI (WebSocket Interface)** — Real-time call control: originate, answer, hold, transfer, record, queue management, supervisor whisper/barge, and media stream injection (PCM)
-- **Queue / ACD** — Sequential or parallel agent ringing, hold music, priority scheduling
-
-### Recording & Analytics
-- **SipFlow Capture** — SIP ladder capture plus optional RTP recording when no explicit recording policy is configured
-- **Transcript** — Post-call transcription via local SenseVoice (offline, no cloud dependency)
-- **CDR Webhooks** — Push call detail records + recordings to your system on hangup
-
-### Operations
-- **Web Console** — Built-in management UI with visual configuration
-- **WebRTC Phone** — Built-in browser softphone for testing
-- **RBAC** — Role-Based Access Control with fine-grained permissions
-- **Observability** — Built-in Prometheus metrics + OpenTelemetry tracing
-
----
-
-## Typical Use Cases
-
-| Scenario | Description |
-|----------|-------------|
-| **AI Contact Center** | AI Voice Agent handles incoming calls, transfers to human agents for complex issues, 24/7 availability |
-| **Cloud Call Center** | Multi-tenant SaaS architecture, remote agents, WebRTC + SIP endpoints |
-| **Enterprise UC** | Internal communication, conferencing, voicemail, CRM/OA integration |
-| **VoIP Wholesale** | Multi-carrier routing, flexible billing, profit optimization (Commercial) |
-| **Compliance Recording** | Financial/healthcare compliance recording, AI quality inspection, PCI masking |
-| **Outbound Marketing** | Predictive dialing, call analytics, lead scoring |
-
----
-
-## Quick Start (Docker)
-
-```bash
-# Commerce image (includes Wholesale + all commercial plugins)
-docker pull docker.cnb.cool/miuda.ai/rustpbx:latest
-
-# Community image
-docker pull ghcr.io/restsend/rustpbx:latest
-```
+Run RustPBX with minimal config in 2 commands:
 
 **Minimal `config.toml`**:
 ```toml
 http_addr = "0.0.0.0:8080"
 database_url = "sqlite://rustpbx.sqlite3"
-
-[console]
-base_path = "/console"
-allow_registration = false
 
 [proxy]
 addr = "0.0.0.0"
@@ -123,58 +31,57 @@ modules = ["auth", "registrar", "call"]
 type = "memory"
 users = [{ username = "1001", password = "password" }]
 
-[sipflow]
-type = "local"
-root = "./config/sipflow"
-subdirs = "hourly"
+[console]
+base_path = "/console"
+allow_registration = false
 ```
 
 ```bash
 docker run -d --name rustpbx --net host \
   -v $(pwd)/config.toml:/app/config.toml \
-  -v $(pwd)/config:/app/config \
   ghcr.io/restsend/rustpbx:latest --conf /app/config.toml
 
-# Create first admin
+# Create admin
 docker exec rustpbx /app/rustpbx --conf /app/config.toml \
   --super-username admin --super-password changeme
 ```
 
-Web console: `http://localhost:8080/console/`
-SIP proxy: `udp://localhost:5060`
+| Access | URL |
+|--------|-----|
+| Web Console | `http://localhost:8080/console/` |
+| SIP Proxy | `udp://localhost:5060` |
+| Register SIP phone as | `1001` / `password` |
+
+> **Commerce image** (includes Wholesale + all plugins): `docker pull docker.cnb.cool/miuda.ai/rustpbx:latest`
 
 ---
 
-## Build from Source
+## Why RustPBX?
 
-**Dependencies** (Linux):
-```bash
-apt-get install -y cmake pkg-config libasound2-dev libssl-dev libopus-dev
-```
-
-macOS:
-```bash
-brew install cmake openssl pkg-config
-```
-
-```bash
-git clone https://github.com/restsend/rustpbx
-cd rustpbx
-cargo build --release
-cargo run --bin rustpbx -- --conf config.toml.example
-```
-
-Cross-compilation for `aarch64` / `x86_64` via [cross](https://github.com/cross-rs/cross):
-```bash
-cargo install cross
-cross build --release --target aarch64-unknown-linux-gnu
-```
+| Software-Defined | AI-Native | High Performance |
+|---|---|---|
+| Every INVITE calls your **HTTP webhook**. Return JSON routing decisions. No recompilation needed. | AI agents are **native participants** — listen, speak, barge, transfer via WebSocket. | 800 concurrent calls with RTP proxy: **6ms latency, 0% loss, 280MB memory**. |
 
 ---
 
-## HTTP Router — The Key Extension Point
+## Core Capabilities
 
-RustPBX calls your API on every incoming INVITE. You decide what happens:
+**SIP & Media** — Full SIP stack (UDP/TCP/WS/TLS/WebRTC), RTP relay, NAT traversal, TLS/SRTP with auto ACME certs.
+
+**Routing & Control** — HTTP Router (dynamic routing decisions), RWI WebSocket Interface (real-time call control), Queue/ACD (sequential or parallel agent ringing).
+
+**Recording & Analytics** — SipFlow unified SIP+RTP capture, post-call transcript via local SenseVoice (offline), CDR webhooks.
+
+**Operations** — Built-in Web Console, WebRTC Phone, RBAC, Prometheus metrics + OpenTelemetry.
+
+---
+
+## Programmable Interfaces
+
+RustPBX exposes all call logic through standard protocols — no C modules, no recompilation.
+
+### HTTP Router
+Every incoming INVITE calls your webhook. Return JSON to decide routing.
 
 ```toml
 [proxy.http_router]
@@ -183,32 +90,100 @@ timeout_ms = 3000
 ```
 
 ```json
-// POST to your endpoint:
-{ "call_id": "abc-123", "from": "sip:+861390000@trunk", "to": "sip:400800", "direction": "inbound" }
-
-// Your response:
-{ "action": "forward", "targets": ["sip:ai-agent@internal"], "record": true }
+// POST to your webhook: { "call_id": "abc-123", "from": "sip:+861390000@trunk", "to": "sip:400800" }
+// Your response:       { "action": "forward", "targets": ["sip:ai-agent@internal"], "record": true }
 ```
 
 Actions: `forward` · `reject` · `abort` · `spam`
-See [API Integration Guide](docs/api_integration_guide.md) for the full webhook and active call control reference.
 
----
-
-## RWI — Real-time WebSocket Interface
-
-RWI provides JSON-over-WebSocket for real-time call control:
+### RWI (Real-time WebSocket Interface)
+JSON-over-WebSocket for in-call control:
 
 | Category | Commands |
-|----------|----------|
-| Call Control | `originate`, `answer`, `hangup`, `bridge`, `transfer`, `hold`, `reject` |
-| Media Control | `play`, `stop`, `stream_start`, `inject_start` (PCM) |
-| Recording | `record.start`, `pause`, `resume`, `stop`, `mask_segment` |
-| Queue Management | `enqueue`, `dequeue`, `set_priority`, `assign_agent`, `requeue` |
+|---|---|
+| Call Control | `originate`, `answer`, `hangup`, `bridge`, `transfer`, `hold` |
+| Media | `play`, `stop`, `stream_start`, `inject_start` (PCM) |
+| Recording | `record.start`, `pause`, `resume`, `stop` |
+| Queue | `enqueue`, `dequeue`, `assign_agent`, `requeue` |
 | Supervisor | `listen`, `whisper`, `barge`, `takeover` |
 | Conference | `create`, `add`, `remove`, `mute`, `destroy` |
 
-See [RWI Protocol](docs/rwi.md) for details.
+See [API Integration Guide](docs/api_integration_guide.md) and [RWI Protocol](docs/rwi.md).
+
+---
+
+## Editions
+
+| | Community | Commerce |
+|---|---|---|
+| License | MIT | Commercial |
+| SIP Proxy + Media | ✅ | ✅ |
+| HTTP Router | ✅ | ✅ |
+| Queue / ACD | ✅ | ✅ |
+| Recording + SipFlow | ✅ | ✅ |
+| Transcript (offline SenseVoice) | ✅ | ✅ |
+| Web Console | ✅ | ✅ |
+| RWI | ✅ | ✅ |
+| **VoIP Wholesale** (VOS3000 alt) | ❌ | ✅ |
+| **IVR Visual Editor** | ❌ | ✅ |
+| **Voicemail Pro** | ❌ | ✅ |
+| **Enterprise Auth** (LDAP/SAML/MFA) | ❌ | ✅ |
+| **Endpoint Manager** (auto-provisioning) | ❌ | ✅ |
+
+---
+
+## Benchmark
+
+Tested on 2026-04-03 · RustPBX 0.4.0 · Linux x86_64 · 16 cores / 32 GB · G.711 PCMU
+
+| Level | Scenario | Completion | Peak | Loss | Latency | CPU | Mem |
+|---|---|---|---|---|---|---|---|
+| 500 | signaling only | 100% | 500 | 0% | 4.40ms | 32.4% | 137 MB |
+| 500 | + RTP proxy | 100% | 500 | 0% | 3.73ms | 98.4% | 183 MB |
+| 500 | + sipflow | 100% | 500 | 0% | 5.96ms | 101% | 198 MB |
+| 800 | signaling only | 100% | 800 | 0% | 8.32ms | 47.9% | 192 MB |
+| 800 | + RTP proxy | 100% | 800 | 0% | 6.38ms | 155% | 265 MB |
+| 800 | + sipflow | 100% | 800 | 0% | 6.08ms | 156% | 280 MB |
+
+Per-channel overhead: ~0.06% CPU / 0.24 MB (signaling); ~0.19% CPU / 0.33 MB (with RTP proxy).
+
+> See [Benchmark Details](tests/bench/bench.md) for methodology and full results.
+
+---
+
+## Use Cases
+
+| Scenario | Description |
+|---|---|
+| **AI Contact Center** | AI agents handle calls 24/7, escalate to humans |
+| **Cloud Call Center** | Multi-tenant SaaS, remote agents, WebRTC + SIP |
+| **Enterprise UC** | Internal comms, conferencing, CRM integration |
+| **VoIP Wholesale** | Multi-carrier routing, flexible billing (Commerce) |
+| **Compliance Recording** | PCI/healthcare recording, AI quality inspection |
+
+---
+
+## Architecture
+
+![RustPBX Architecture](./docs/architecture.svg)
+
+**App Service** (AI Agents, HTTP DialPlan, CRM) → **RustPBX Core** (B2BUA, IVR, Media, Queue, CDR) → **Access** (PSTN, WebRTC, SIP, Mobile)
+
+---
+
+## Build from Source
+
+```bash
+# Linux: apt-get install cmake pkg-config libasound2-dev libssl-dev libopus-dev
+# macOS: brew install cmake openssl pkg-config
+
+git clone https://github.com/restsend/rustpbx
+cd rustpbx
+cargo build --release
+cargo run --bin rustpbx -- --conf config.toml.example
+```
+
+> Cross-compile via [cross](https://github.com/cross-rs/cross): `cargo install cross && cross build --release --target aarch64-unknown-linux-gnu`
 
 ---
 
@@ -226,11 +201,11 @@ See [RWI Protocol](docs/rwi.md) for details.
 
 ## Documentation
 
-| | |
+| Guide | Description |
 |---|---|
 | [Configuration Guide](docs/configuration.md) | All config options |
-| [API Integration Guide](docs/api_integration_guide.md) | HTTP Router, Webhooks, Active Call Control |
-| [RWI Protocol](docs/rwi.md) | WebSocket Interface for real-time call control |
+| [API Integration Guide](docs/api_integration_guide.md) | HTTP Router, Webhooks, Call Control |
+| [RWI Protocol](docs/rwi.md) | WebSocket Interface |
 
 ---
 
@@ -244,57 +219,8 @@ realms = ["your-public-ip:5060"]
 
 ---
 
-## Benchmark
-
-> Tested on 2026-04-03 · RustPBX 0.4.0 (release) · sipbot 0.2.28 · Linux x86_64 · 16 cores / 32 GB · G.711 PCMU
-
-### Full Comparison
-
-| Level | Scenario | Completion | Peak Conc | Loss | Setup Latency | CPU Peak | Mem Peak |
-|-------|----------|:---:|:---:|:---:|:---:|:---:|:---:|
-| 500 | mediaproxy=none | 100% | 500 | 0.00% | 4.40ms | 32.4% | 137.3 MB |
-| 500 | mediaproxy=all | 100% | 500 | 0.00% | 3.73ms | 98.4% | 183.1 MB |
-| 500 | all + sipflow | 100% | 500 | 0.00% | 5.96ms | 101.0% | 198.3 MB |
-| 800 | mediaproxy=none | 100% | 800 | 0.00% | 8.32ms | 47.9% | 191.8 MB |
-| 800 | mediaproxy=all | 100% | 800 | 0.00% | 6.38ms | 155.0% | 264.8 MB |
-| 800 | all + sipflow | 100% | 800 | 0.00% | 6.08ms | 156.0% | 280.3 MB |
-
-### Per-Channel Overhead
-
-| Metric | 500 (none) | 500 (all) | 500 (sipflow) | 800 (none) | 800 (all) | 800 (sipflow) |
-|--------|:---:|:---:|:---:|:---:|:---:|:---:|
-| CPU (Peak) | 0.065% | 0.197% | 0.202% | 0.060% | 0.194% | 0.195% |
-| Memory (Peak) | 0.275 MB | 0.366 MB | 0.397 MB | 0.240 MB | 0.331 MB | 0.350 MB |
-
-### Resource Scaling Estimate
-
-```
-mediaproxy=none (signaling only):
-  CPU%    ≈ 8 + concurrent × 0.05
-  Mem(MB) ≈ 60 + concurrent × 0.16
-
-  1000 conc: CPU ≈ 58% (0.6 cores),  Mem ≈ 220 MB
-  2000 conc: CPU ≈ 108% (1.1 cores), Mem ≈ 380 MB
-  5000 conc: CPU ≈ 258% (2.6 cores), Mem ≈ 860 MB
-
-mediaproxy=all (RTP forwarding):
-  CPU%    ≈ 8 + concurrent × 0.19
-  Mem(MB) ≈ 80 + concurrent × 0.23
-
-  1000 conc: CPU ≈ 198% (2.0 cores), Mem ≈ 310 MB
-  2000 conc: CPU ≈ 388% (3.9 cores), Mem ≈ 540 MB
-  5000 conc: CPU ≈ 958% (9.6 cores), Mem ≈ 1230 MB
-```
-
-See [Benchmark Details](tests/bench/bench.md) for methodology and full results.
-
----
-
 ## License
 
-Community edition: MIT
-Commercial edition : [hi@miuda.ai](mailto:hi@miuda.ai)
+Community: MIT · Commercial: [hi@miuda.ai](mailto:hi@miuda.ai)
 
----
-
-**https://miuda.ai** - Maintenance & commercial support
+**https://miuda.ai** — Maintenance & commercial support
