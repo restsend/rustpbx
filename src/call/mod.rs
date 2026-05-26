@@ -812,6 +812,11 @@ pub struct Dialplan {
 
     /// Optional per-trunk ringback/early-media audio configuration
     pub audio_profile: Option<crate::proxy::routing::RingbackAudio>,
+
+    /// Headers modified/added by routing (rewrite rules, trunk config, HTTP router).
+    /// When present, these take priority over the original SIP request headers
+    /// when building CallInfo for application flows (IVR, voicemail, etc.).
+    pub routed_headers: Option<Vec<rsipstack::sip::Header>>,
 }
 
 impl std::fmt::Debug for Dialplan {
@@ -877,6 +882,7 @@ impl Dialplan {
             ],
             passthrough_failure: false,
             audio_profile: None,
+            routed_headers: None,
         }
     }
 

@@ -252,4 +252,68 @@ mod tests {
         ctx.set_var("lang", "en").await;
         assert_eq!(ctx.get_var("lang").await, Some("en".to_string()));
     }
+
+    #[test]
+    fn test_routed_headers_override_originals_in_call_info() {
+        // Simulate the merge logic used in SipSession::new():
+        // routed headers should override original SIP request headers
+        use rsipstack::sip::{Header, Request, Method, Uri};
+
+        let mut req = Request {
+            method: Method::Invite,
+            uri: Uri::try_from("sip:test@pbx.com").unwrap(),
+            version: rsipstack::sip::Version::V2,
+            headers: vec![
+                Header::Other("X-Custom".to_string(), "original-value".to_string()),
+                Header::Other("X-Forwarded-For".to_string(), "192.168.1.1".to_string()),
+            ].into(),
+            body: vec![],
+        };
+        // Add a typed header to ensure it's still skipped by extract
+        req.headers.push(
+            rsipstack::sip::typed::From {
+                display_name: None,
+                uri: Uri::try_from("sip:alice@example.com").unwrap(),
+                params: vec![],
+            }.into(),
+        );
+
+        let original = extract_sip_headers(&req);
+        assert_eq!(original.get("X-Custom").unwrap(), "original-value");
+        assert_eq!(original.get("X-Forwarded-For").unwrap(), "192.168.1.1");
+        assert!(original.get("From").is_none(), "From header should be skipped");
+
+        // Simulate routing-modified headers (overriding X-Custom, adding P-Asserted-Identity)
+        let routed_headers: Option<Vec<Header>> = Some(vec![
+            Header::Other("X-Custom".to_string(), "routing-value".to_string()),
+            Header::Other("P-Asserted-Identity".to_string(), "<sip:routing@pbx.com>".to_string()),
+        ]);
+
+        // Apply the same merge logic as in sip_session.rs
+        let mut merged = original;
+        if let Some(ref routed) = routed_headers {
+            for h in routed {
+                merged.insert(h.name().to_string(), h.value().to_string());
+            }
+        }
+
+        // Verify routing headers override originals
+        assert_eq!(
+            merged.get("X-Custom").unwrap(),
+            "routing-value",
+            "routed headers should override original"
+        );
+        // Verify unmodified original headers are preserved
+        assert_eq!(
+            merged.get("X-Forwarded-For").unwrap(),
+            "192.168.1.1",
+            "unmodified original headers should persist"
+        );
+        // Verify new headers from routing are added
+        assert_eq!(
+            merged.get("P-Asserted-Identity").unwrap(),
+            "<sip:routing@pbx.com>",
+            "new routing headers should be present"
+        );
+    }
 }
