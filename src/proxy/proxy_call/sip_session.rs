@@ -434,7 +434,15 @@ impl SipSession {
             callee: context.original_callee.clone(),
             direction: context.dialplan.direction.to_string(),
             started_at: chrono::Utc::now(),
-            sip_headers: crate::call::app::extract_sip_headers(&server_dialog.initial_request()),
+            sip_headers: {
+                let mut hdrs = crate::call::app::extract_sip_headers(&server_dialog.initial_request());
+                if let Some(ref routed) = context.dialplan.routed_headers {
+                    for h in routed {
+                        hdrs.insert(h.name().to_string(), h.value().to_string());
+                    }
+                }
+                hdrs
+            },
         };
         let mut app_ctx = ApplicationContext::new(
             server

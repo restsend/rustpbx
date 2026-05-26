@@ -723,6 +723,7 @@ impl CallModule {
             ..Default::default()
         };
 
+        let mut routed_headers: Option<Vec<rsipstack::sip::Header>> = None;
         let (preview_forward, pending_queue, pending_app, dialplan_hints) = if always_forwarding {
             (
                 forced_preview_forward,
@@ -752,12 +753,15 @@ impl CallModule {
                     return Err(RouteError::from((err, Some(code))));
                 }
                 RouteResult::Application {
-                    option: _,
+                    option,
                     app_name,
                     app_params,
                     auto_answer,
                     ..
-                } => (None, None, Some((app_name, app_params, auto_answer)), None),
+                } => {
+                    routed_headers = option.headers;
+                    (None, None, Some((app_name, app_params, auto_answer)), None)
+                }
             }
         };
 
@@ -798,6 +802,7 @@ impl CallModule {
 
         if let Some((app_name, app_params, auto_answer)) = pending_app {
             dialplan = dialplan.with_application(app_name, app_params, auto_answer);
+            dialplan.routed_headers = routed_headers;
         } else if let Some(queue) = pending_queue {
             dialplan = dialplan.with_queue(queue);
         } else {
@@ -2293,6 +2298,30 @@ mod tests {
         }
     }
 
+    struct ApplicationRouteInvite {
+        headers: Option<Vec<rsipstack::sip::Header>>,
+    }
+
+    #[async_trait]
+    impl RouteInvite for ApplicationRouteInvite {
+        async fn route_invite(
+            &self,
+            option: InviteOption,
+            _origin: &rsipstack::sip::Request,
+            _direction: &DialDirection,
+            _cookie: &TransactionCookie,
+        ) -> Result<RouteResult> {
+            let mut opt = option;
+            opt.headers = self.headers.clone();
+            Ok(RouteResult::Application {
+                option: opt,
+                app_name: "ivr".to_string(),
+                app_params: None,
+                auto_answer: true,
+            })
+        }
+    }
+
     fn replace_to_header(request: &mut rsipstack::sip::Request, to_uri: rsipstack::sip::Uri) {
         request
             .headers
@@ -2939,5 +2968,62 @@ mod tests {
 
         let resolved = resolve_callee_uri(&request).expect("expected callee uri");
         assert_eq!(resolved, to_uri);
+    }
+
+    #[tokio::test]
+    async fn default_resolve_application_carries_routed_headers() {
+        let (server, config) = create_test_server().await;
+        let module = CallModule::new(config, server);
+
+        let mut request = crate::proxy::tests::common::create_test_request(
+            rsipstack::sip::Method::Invite,
+            "bp",
+            None,
+            "rustpbx.com",
+            None,
+        );
+        request.uri = rsipstack::sip::Uri::try_from("sip:ivrapp@rustpbx.com").unwrap();
+        replace_to_header(
+            &mut request,
+            rsipstack::sip::Uri::try_from("sip:ivrapp@rustpbx.com").unwrap(),
+        );
+
+        let caller = SipUser {
+            username: "bp".to_string(),
+            realm: Some("rustpbx.com".to_string()),
+            ..Default::default()
+        };
+
+        let expected_headers = Some(vec![
+            rsipstack::sip::Header::Other(
+                "X-Custom".to_string(),
+                "custom-value".to_string(),
+            ),
+            rsipstack::sip::Header::Other(
+                "P-Asserted-Identity".to_string(),
+                "<sip:routing@pbx.com>".to_string(),
+            ),
+        ]);
+
+        let dialplan = module
+            .default_resolve(
+                &request,
+                Box::new(ApplicationRouteInvite {
+                    headers: expected_headers.clone(),
+                }),
+                &caller,
+                &TransactionCookie::default(),
+            )
+            .await
+            .expect("application route should resolve");
+
+        assert!(
+            matches!(dialplan.flow, crate::call::DialplanFlow::Application { .. }),
+            "expected Application flow"
+        );
+        assert_eq!(
+            dialplan.routed_headers, expected_headers,
+            "routed headers should be preserved in Dialplan"
+        );
     }
 }

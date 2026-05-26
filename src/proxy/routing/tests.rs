@@ -1986,6 +1986,77 @@ async fn test_match_invite_application_auto_answer_false() {
     }
 }
 
+#[tokio::test]
+async fn test_match_invite_application_with_rewrite_headers() {
+    let routing_state = Arc::new(RoutingState::new());
+    let routes = vec![RouteRule {
+        name: "app_with_headers".to_string(),
+        priority: 100,
+        match_conditions: MatchConditions {
+            to_user: Some("ivrapp".to_string()),
+            ..Default::default()
+        },
+        rewrite: Some(RewriteRules {
+            headers: vec![
+                ("header.X-Custom".to_string(), "custom-value".to_string()),
+                ("header.P-Asserted-Identity".to_string(), "<sip:routing@pbx.com>".to_string()),
+            ]
+            .into_iter()
+            .collect(),
+            ..Default::default()
+        }),
+        action: RouteAction {
+            action: Some("application".to_string()),
+            app: Some("ivr".to_string()),
+            app_params: Some(serde_json::json!({"file": "config/ivr/test.toml"})),
+            auto_answer: true,
+            ..Default::default()
+        },
+        ..Default::default()
+    }];
+
+    let option = create_invite_option(
+        "sip:alice@rustpbx.com",
+        "sip:ivrapp@rustpbx.com",
+        None,
+        Some("application/sdp"),
+        None,
+    );
+    let origin = create_test_request();
+    let trunks = HashMap::new();
+
+    let result = match_invite(
+        Some(&trunks),
+        Some(&routes),
+        None,
+        option,
+        &origin,
+        None,
+        routing_state,
+        &DialDirection::Outbound,
+    )
+    .await
+    .unwrap();
+
+    match result {
+        RouteResult::Application {
+            option,
+            app_name,
+            ..
+        } => {
+            assert_eq!(app_name, "ivr");
+            let headers = option.headers.expect("routing should carry headers");
+            assert!(headers.iter().any(|h| {
+                h.name() == "X-Custom" && h.value() == "custom-value"
+            }));
+            assert!(headers.iter().any(|h| {
+                h.name() == "P-Asserted-Identity" && h.value() == "<sip:routing@pbx.com>"
+            }));
+        }
+        _ => panic!("Expected Application"),
+    }
+}
+
 #[test]
 fn test_route_action_get_action_type_application() {
     let action_explicit = RouteAction {
