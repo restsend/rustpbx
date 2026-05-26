@@ -1801,17 +1801,13 @@ impl SipSession {
         request: rsipstack::sip::Request,
         tx_handle: TransactionHandle,
     ) -> Result<()> {
-        let content_type = request.headers.iter().find_map(|h| {
-            if let rsipstack::sip::Header::ContentType(ct) = h {
-                Some(ct.value().to_lowercase())
-            } else {
-                None
-            }
-        });
+        let content_type = Self::request_content_type(&request);
         let is_dtmf = content_type
             .as_deref()
             .is_some_and(|ct| ct.contains("application/dtmf-relay"));
         let body_text = String::from_utf8_lossy(request.body());
+        let is_picture_fast_update =
+            Self::is_picture_fast_update_info(content_type.as_deref(), &body_text);
 
         if is_dtmf {
             info!(
@@ -1880,6 +1876,8 @@ impl SipSession {
                     }
                 }
             }
+        } else if is_picture_fast_update {
+            self.handle_picture_fast_update(DialogSide::Caller).await;
         } else {
             debug!(
                 session_id = %self.context.session_id,
@@ -1891,6 +1889,67 @@ impl SipSession {
             .await
             .ok();
         Ok(())
+    }
+
+    fn request_content_type(request: &rsipstack::sip::Request) -> Option<String> {
+        request.headers.iter().find_map(|h| {
+            if let rsipstack::sip::Header::ContentType(ct) = h {
+                Some(ct.value().to_lowercase())
+            } else {
+                None
+            }
+        })
+    }
+
+    fn is_picture_fast_update_info(content_type: Option<&str>, body: &str) -> bool {
+        content_type
+            .is_some_and(|ct| ct.contains("application/media_control+xml"))
+            && body.to_ascii_lowercase().contains("picture_fast_update")
+    }
+
+    async fn handle_picture_fast_update(&self, requester_side: DialogSide) {
+        let Some(bridge) = self.media.media_bridge.as_ref() else {
+            debug!(
+                session_id = %self.context.session_id,
+                side = ?requester_side,
+                "Received picture_fast_update without media bridge"
+            );
+            return;
+        };
+
+        let (source_side, source_pc) = match requester_side {
+            DialogSide::Caller => (DialogSide::Callee, bridge.callee_pc()),
+            DialogSide::Callee => (DialogSide::Caller, bridge.caller_pc()),
+        };
+
+        match Self::find_video_receiver_track(source_pc).await {
+            Some(track) => {
+                if let Err(e) = track.request_key_frame().await {
+                    warn!(
+                        session_id = %self.context.session_id,
+                        requester_side = ?requester_side,
+                        source_side = ?source_side,
+                        error = %e,
+                        "Failed to handle picture_fast_update keyframe request"
+                    );
+                } else {
+                    info!(
+                        session_id = %self.context.session_id,
+                        requester_side = ?requester_side,
+                        source_side = ?source_side,
+                        "Handled picture_fast_update keyframe request"
+                    );
+                }
+            }
+            None => {
+                debug!(
+                    session_id = %self.context.session_id,
+                    requester_side = ?requester_side,
+                    source_side = ?source_side,
+                    "No video receiver track for picture_fast_update"
+                );
+            }
+        }
     }
 
     async fn handle_dialog_notify(
@@ -2081,15 +2140,15 @@ impl SipSession {
                 }
             }
             DialogState::Info(_, request, tx_handle) => {
-                let is_dtmf = request.headers.iter().any(|h| {
-                    if let rsipstack::sip::Header::ContentType(ct) = h {
-                        ct.value().to_lowercase().contains("application/dtmf-relay")
-                    } else {
-                        false
-                    }
-                });
+                let content_type = Self::request_content_type(&request);
+                let is_dtmf = content_type
+                    .as_deref()
+                    .is_some_and(|ct| ct.contains("application/dtmf-relay"));
+                let body_text = String::from_utf8_lossy(request.body());
+                let is_picture_fast_update =
+                    Self::is_picture_fast_update_info(content_type.as_deref(), &body_text);
+
                 if is_dtmf {
-                    let body_text = String::from_utf8_lossy(request.body());
                     for line in body_text.lines() {
                         let line = line.trim();
                         if line.to_lowercase().starts_with("signal=") {
@@ -2134,6 +2193,8 @@ impl SipSession {
                             "Forwarded callee SIP INFO DTMF to caller"
                         );
                     }
+                } else if is_picture_fast_update {
+                    self.handle_picture_fast_update(DialogSide::Callee).await;
                 }
                 tx_handle
                     .respond(rsipstack::sip::StatusCode::OK, None, None)
@@ -4336,6 +4397,19 @@ impl SipSession {
     ) -> Option<Arc<dyn rustrtc::media::MediaStreamTrack>> {
         for transceiver in pc.get_transceivers() {
             if transceiver.kind() == rustrtc::MediaKind::Audio
+                && let Some(receiver) = transceiver.receiver()
+            {
+                return Some(receiver.track());
+            }
+        }
+        None
+    }
+
+    async fn find_video_receiver_track(
+        pc: &rustrtc::PeerConnection,
+    ) -> Option<Arc<dyn rustrtc::media::MediaStreamTrack>> {
+        for transceiver in pc.get_transceivers() {
+            if transceiver.kind() == rustrtc::MediaKind::Video
                 && let Some(receiver) = transceiver.receiver()
             {
                 return Some(receiver.track());
