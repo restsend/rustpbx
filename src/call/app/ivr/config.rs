@@ -82,9 +82,15 @@ pub struct IvrProviderConfig {
     pub timeout_secs: u64,
 }
 
-fn default_provider_retries() -> u32 { 3 }
-fn default_provider_delay() -> u64 { 1000 }
-fn default_provider_timeout() -> u64 { 10 }
+fn default_provider_retries() -> u32 {
+    3
+}
+fn default_provider_delay() -> u64 {
+    1000
+}
+fn default_provider_timeout() -> u64 {
+    10
+}
 
 impl IvrDefinition {
     pub fn is_step_mode(&self) -> bool {

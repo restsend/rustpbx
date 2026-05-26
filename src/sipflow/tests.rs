@@ -122,6 +122,9 @@ mod tests {
             upload: None,
         };
         let result = create_backend(&cfg);
-        assert!(result.is_err(), "expected error when neither nodes nor udp_addr/http_addr provided");
+        assert!(
+            result.is_err(),
+            "expected error when neither nodes nor udp_addr/http_addr provided"
+        );
     }
 }

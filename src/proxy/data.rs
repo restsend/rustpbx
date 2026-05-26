@@ -21,7 +21,7 @@ use crate::{
     proxy::routing::matcher::RouteResourceLookup,
     proxy::routing::{
         CacPolicy, CallIdMode, ConfigOrigin, DestConfig, MatchConditions, MediaMode, RewriteRules,
-        RouteAction, RouteDirection, RouteQueueConfig, RouteRule, TrunkConfig, VideoPolicy,
+        RouteAction, RouteQueueConfig, RouteRule, TrunkConfig, VideoPolicy,
     },
     proxy::trunk_registrar::TrunkRegistrar,
 };
@@ -1181,11 +1181,6 @@ fn convert_route(
         apply_route_metadata(&mut action, meta_action);
     }
 
-    let direction = match model.direction {
-        routing::RoutingDirection::Inbound => RouteDirection::Inbound,
-        routing::RoutingDirection::Outbound => RouteDirection::Outbound,
-    };
-
     let mut source_trunks = Vec::new();
     let mut source_trunk_ids = Vec::new();
     if let Some(id) = model.source_trunk_id {
@@ -1199,7 +1194,6 @@ fn convert_route(
         name: model.name,
         description: model.description,
         priority: model.priority,
-        direction,
         source_trunks,
         source_trunk_ids,
         match_conditions,
@@ -1546,7 +1540,8 @@ mod tests {
 
     #[test]
     fn sbc_config_extracts_ringback_from_metadata() {
-        let meta: serde_json::Value = serde_json::from_str(r#"{
+        let meta: serde_json::Value = serde_json::from_str(
+            r#"{
             "sbc": {
                 "ringback": {
                     "busy": "/sounds/busy.wav",
@@ -1554,7 +1549,9 @@ mod tests {
                     "play_duration_secs": 5
                 }
             }
-        }"#).unwrap();
+        }"#,
+        )
+        .unwrap();
         let cfg = sbc_config_from_metadata(&meta);
         let rb = cfg.ringback.as_ref().expect("ringback should be parsed");
         assert_eq!(rb.busy, Some("/sounds/busy.wav".to_string()));
@@ -1564,9 +1561,13 @@ mod tests {
 
     #[test]
     fn sbc_config_ringback_absent_when_not_in_metadata() {
-        let meta: serde_json::Value = serde_json::from_str(r#"{"sbc": {"media_mode": "bypass"}}"#).unwrap();
+        let meta: serde_json::Value =
+            serde_json::from_str(r#"{"sbc": {"media_mode": "bypass"}}"#).unwrap();
         let cfg = sbc_config_from_metadata(&meta);
-        assert!(cfg.ringback.is_none(), "no ringback field → ringback should be None");
+        assert!(
+            cfg.ringback.is_none(),
+            "no ringback field → ringback should be None"
+        );
     }
 
     #[test]

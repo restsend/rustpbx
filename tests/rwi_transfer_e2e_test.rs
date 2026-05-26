@@ -162,9 +162,7 @@ async fn test_rwi_event_conference_consult_dialing() {
 
     match event {
         RwiEvent::ConferenceConsultDialing {
-            call_id,
-            target,
-            ..
+            call_id, target, ..
         } => {
             assert_eq!(call_id, "call-001");
             assert_eq!(target, "sip:target@local");
@@ -183,9 +181,7 @@ async fn test_rwi_event_conference_consult_connected() {
 
     match event {
         RwiEvent::ConferenceConsultConnected {
-            call_id,
-            target,
-            ..
+            call_id, target, ..
         } => {
             assert_eq!(call_id, "call-001");
             assert_eq!(target, "sip:target@local");
@@ -225,9 +221,7 @@ async fn test_rwi_event_conference_merged() {
 
     match event {
         RwiEvent::ConferenceMerged {
-            conf_id,
-            call_id,
-            ..
+            conf_id, call_id, ..
         } => {
             assert_eq!(conf_id, "conf-001");
             assert_eq!(call_id, "call-001");

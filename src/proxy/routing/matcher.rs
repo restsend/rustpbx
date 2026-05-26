@@ -180,10 +180,6 @@ async fn match_invite_impl(
             continue;
         }
 
-        if !rule.direction.matches(direction) {
-            continue;
-        }
-
         if !rule.source_trunks.is_empty() {
             match source_trunk {
                 Some(trunk)

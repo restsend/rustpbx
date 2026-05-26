@@ -14,7 +14,9 @@ use crate::proxy::routing::{
     RouteRule, SourceTrunk, TrunkConfig, build_source_trunk,
     matcher::{RouteResourceLookup, match_invite},
 };
-use crate::proxy::routing::{extract_from_user as routing_extract_from_user, extract_to_user as routing_extract_to_user};
+use crate::proxy::routing::{
+    extract_from_user as routing_extract_from_user, extract_to_user as routing_extract_to_user,
+};
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use audio_codec::CodecType;
@@ -1381,23 +1383,35 @@ impl CallModule {
                         let reg = registry.clone();
                         let sid = new_session_id.clone();
                         tokio::spawn(async move {
-                            if reg.wait_for_status(&sid, ActiveProxyCallStatus::Talking, std::time::Duration::from_secs(30)).await {
+                            if reg
+                                .wait_for_status(
+                                    &sid,
+                                    ActiveProxyCallStatus::Talking,
+                                    std::time::Duration::from_secs(30),
+                                )
+                                .await
+                            {
                                 info!(session_id = %sid, "New Replaces call answered; executing conference seat replacement");
 
                                 if let Some(ref conf) = conf_id {
-                                    let _ = conference_manager.remove_participant(conf, &old_leg).await;
+                                    let _ =
+                                        conference_manager.remove_participant(conf, &old_leg).await;
                                     let new_leg = crate::call::domain::LegId::new(&sid);
                                     let _ = conference_manager.add_participant(conf, new_leg).await;
                                     info!(%old_session_id, %sid, "Conference seat replacement completed for Replaces");
                                 }
 
-                                let _ = old_handle_clone.send_command(crate::call::domain::CallCommand::Hangup(
-                                    crate::call::domain::HangupCommand::local(
-                                        "replaced_by_replaces",
-                                        Some(crate::callrecord::CallRecordHangupReason::BySystem),
-                                        Some(200),
-                                    ),
-                                ));
+                                let _ =
+                                    old_handle_clone
+                                        .send_command(crate::call::domain::CallCommand::Hangup(
+                                        crate::call::domain::HangupCommand::local(
+                                            "replaced_by_replaces",
+                                            Some(
+                                                crate::callrecord::CallRecordHangupReason::BySystem,
+                                            ),
+                                            Some(200),
+                                        ),
+                                    ));
 
                                 if let Some(ref gw) = server.rwi_gateway {
                                     let event = crate::rwi::proto::RwiEvent::ConferenceSeatReplaceSucceeded {
@@ -1445,34 +1459,56 @@ impl CallModule {
                         let reg = registry.clone();
                         let sid = new_session_id.clone();
                         tokio::spawn(async move {
-                            if reg.wait_for_status(&sid, ActiveProxyCallStatus::Talking, std::time::Duration::from_secs(30)).await {
+                            if reg
+                                .wait_for_status(
+                                    &sid,
+                                    ActiveProxyCallStatus::Talking,
+                                    std::time::Duration::from_secs(30),
+                                )
+                                .await
+                            {
                                 info!(session_id = %sid, "New Replaces call answered; creating conference for attended transfer");
 
-                                let conf_id = crate::call::runtime::ConferenceId::from(format!("conf-replaces-{}", sid).as_str());
-                                let _ = conference_manager.create_conference(conf_id.clone(), None).await;
+                                let conf_id = crate::call::runtime::ConferenceId::from(
+                                    format!("conf-replaces-{}", sid).as_str(),
+                                );
+                                let _ = conference_manager
+                                    .create_conference(conf_id.clone(), None)
+                                    .await;
 
                                 let old_leg = crate::call::domain::LegId::new(&old_session_id);
-                                let _ = conference_manager.add_participant(&conf_id, old_leg.clone()).await;
+                                let _ = conference_manager
+                                    .add_participant(&conf_id, old_leg.clone())
+                                    .await;
 
                                 let new_leg = crate::call::domain::LegId::new(&sid);
-                                let _ = conference_manager.add_participant(&conf_id, new_leg.clone()).await;
+                                let _ = conference_manager
+                                    .add_participant(&conf_id, new_leg.clone())
+                                    .await;
 
                                 info!(%old_session_id, %sid, "Conference created for attended transfer");
 
-                                let _ = old_handle_clone.send_command(crate::call::domain::CallCommand::Hangup(
-                                    crate::call::domain::HangupCommand::local(
-                                        "replaced_by_replaces",
-                                        Some(crate::callrecord::CallRecordHangupReason::BySystem),
-                                        Some(200),
-                                    ).with_cascade(crate::call::domain::HangupCascade::AllExcept(vec![
-                                        crate::call::domain::LegId::from("caller")
-                                    ])),
-                                ));
+                                let _ =
+                                    old_handle_clone
+                                        .send_command(crate::call::domain::CallCommand::Hangup(
+                                        crate::call::domain::HangupCommand::local(
+                                            "replaced_by_replaces",
+                                            Some(
+                                                crate::callrecord::CallRecordHangupReason::BySystem,
+                                            ),
+                                            Some(200),
+                                        )
+                                        .with_cascade(
+                                            crate::call::domain::HangupCascade::AllExcept(vec![
+                                                crate::call::domain::LegId::from("caller"),
+                                            ]),
+                                        ),
+                                    ));
 
                                 if let Some(ref gw) = server.rwi_gateway {
                                     let event = crate::rwi::proto::RwiEvent::CallTransferred {
                                         call_id: old_session_id.clone(),
-                                    context: Default::default(),
+                                        context: Default::default(),
                                     };
                                     let g = gw.read().await;
                                     g.broadcast_event(&event);

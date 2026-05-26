@@ -183,9 +183,7 @@ mod tests {
 
     fn sine_pcm_8k(freq: f64, amp: f64) -> Vec<i16> {
         (0..160)
-            .map(|i| {
-                (amp * (2.0 * std::f64::consts::PI * freq * i as f64 / 8000.0).sin()) as i16
-            })
+            .map(|i| (amp * (2.0 * std::f64::consts::PI * freq * i as f64 / 8000.0).sin()) as i16)
             .collect()
     }
 
@@ -208,7 +206,11 @@ mod tests {
         assert_eq!(roundtrip.len(), 160);
 
         let energy: f64 = roundtrip.iter().map(|&s| (s as f64).powi(2)).sum::<f64>() / 160.0;
-        assert!(energy.sqrt() > 500.0, "Signal should survive PCMU→PCMA transcoding, RMS={}", energy.sqrt());
+        assert!(
+            energy.sqrt() > 500.0,
+            "Signal should survive PCMU→PCMA transcoding, RMS={}",
+            energy.sqrt()
+        );
     }
 
     #[test]
@@ -230,13 +232,19 @@ mod tests {
         assert_eq!(roundtrip.len(), 160);
 
         let energy: f64 = roundtrip.iter().map(|&s| (s as f64).powi(2)).sum::<f64>() / 160.0;
-        assert!(energy.sqrt() > 500.0, "Signal should survive PCMA→PCMU, RMS={}", energy.sqrt());
+        assert!(
+            energy.sqrt() > 500.0,
+            "Signal should survive PCMA→PCMU, RMS={}",
+            energy.sqrt()
+        );
     }
 
     #[test]
     fn test_transcoder_g722_to_pcmu() {
         let pcm_16k: Vec<i16> = (0..320)
-            .map(|i| (8000.0 * (2.0 * std::f64::consts::PI * 440.0 * i as f64 / 16000.0).sin()) as i16)
+            .map(|i| {
+                (8000.0 * (2.0 * std::f64::consts::PI * 440.0 * i as f64 / 16000.0).sin()) as i16
+            })
             .collect();
         let mut g722_enc = create_encoder(CodecType::G722);
         let g722_data = g722_enc.encode(&pcm_16k);
@@ -313,7 +321,9 @@ mod tests {
         assert_eq!(output.payload_type, Some(111));
         assert_eq!(output.clock_rate, 48000);
         if output.data.is_empty() {
-            eprintln!("WARNING: PCMU→Opus transcoding produced empty output (known Opus encoder behavior for silence)");
+            eprintln!(
+                "WARNING: PCMU→Opus transcoding produced empty output (known Opus encoder behavior for silence)"
+            );
         } else {
             assert!(output.data.len() > 0, "Opus output should have data");
         }
@@ -369,8 +379,15 @@ mod tests {
         timing.rewrite(&mut frame2, 48000, 8000, 0);
 
         let ts_delta = frame2.rtp_timestamp.wrapping_sub(frame1.rtp_timestamp);
-        assert_eq!(ts_delta, 160, "48kHz→8kHz: 960 tick delta should become 160, got {}", ts_delta);
-        let seq_delta = frame2.sequence_number.unwrap().wrapping_sub(frame1.sequence_number.unwrap());
+        assert_eq!(
+            ts_delta, 160,
+            "48kHz→8kHz: 960 tick delta should become 160, got {}",
+            ts_delta
+        );
+        let seq_delta = frame2
+            .sequence_number
+            .unwrap()
+            .wrapping_sub(frame1.sequence_number.unwrap());
         assert_eq!(seq_delta, 1, "Sequence should increment by 1");
     }
 
@@ -384,7 +401,11 @@ mod tests {
         timing.rewrite(&mut frame2, 8000, 48000, 111);
 
         let ts_delta = frame2.rtp_timestamp.wrapping_sub(frame1.rtp_timestamp);
-        assert_eq!(ts_delta, 960, "8kHz→48kHz: 160 tick delta should become 960, got {}", ts_delta);
+        assert_eq!(
+            ts_delta, 960,
+            "8kHz→48kHz: 160 tick delta should become 960, got {}",
+            ts_delta
+        );
     }
 
     #[test]
@@ -399,7 +420,11 @@ mod tests {
         }
 
         for w in outputs.windows(2) {
-            assert_eq!(w[1].wrapping_sub(w[0]), 1, "Sequence must be monotonically increasing by 1");
+            assert_eq!(
+                w[1].wrapping_sub(w[0]),
+                1,
+                "Sequence must be monotonically increasing by 1"
+            );
         }
     }
 
@@ -452,6 +477,10 @@ mod tests {
         let final_pcm = dec.decode(&roundtrip.data);
 
         let max_sample = final_pcm.iter().map(|&s| s.abs()).max().unwrap_or(0);
-        assert!(max_sample < 300, "Silence should remain near-zero after roundtrip, max={}", max_sample);
+        assert!(
+            max_sample < 300,
+            "Silence should remain near-zero after roundtrip, max={}",
+            max_sample
+        );
     }
 }

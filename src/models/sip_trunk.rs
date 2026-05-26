@@ -150,10 +150,7 @@ impl MigrationTrait for Migration {
                     .col(string_len_null(Column::DisplayName, 160))
                     .col(string_len_null(Column::Carrier, 160))
                     .col(text_null(Column::Description))
-                    .col(
-                        string_len(Column::Status, 32)
-                            .default(SipTrunkStatus::default().as_str()),
-                    )
+                    .col(string_len(Column::Status, 32).default(SipTrunkStatus::default().as_str()))
                     .col(
                         string_len(Column::Direction, 32)
                             .default(SipTrunkDirection::default().as_str()),

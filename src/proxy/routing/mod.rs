@@ -3,9 +3,9 @@ use crate::{
     config::RecordingPolicy,
 };
 use anyhow::{Result, anyhow};
-use rsipstack::sip::prelude::HeadersExt;
 use ipnetwork::IpNetwork;
 use regex::Regex;
+use rsipstack::sip::prelude::HeadersExt;
 use rsipstack::sip::{StatusCode, Uri};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -158,7 +158,9 @@ impl RingbackAudio {
     pub fn for_status(&self, code: &rsipstack::sip::StatusCode) -> Option<&str> {
         match code {
             c if *c == rsipstack::sip::StatusCode::BusyHere => self.busy.as_deref(),
-            c if *c == rsipstack::sip::StatusCode::TemporarilyUnavailable => self.offline.as_deref(),
+            c if *c == rsipstack::sip::StatusCode::TemporarilyUnavailable => {
+                self.offline.as_deref()
+            }
             c if *c == rsipstack::sip::StatusCode::NotFound => self.notfound.as_deref(),
             c if *c == rsipstack::sip::StatusCode::Decline => self.reject.as_deref(),
             _ => None,
@@ -167,14 +169,22 @@ impl RingbackAudio {
 
     /// Returns `true` if any failure tone (busy/reject/offline/notfound) is configured
     pub fn has_failure_tone(&self) -> bool {
-        self.busy.is_some() || self.reject.is_some() || self.offline.is_some() || self.notfound.is_some()
+        self.busy.is_some()
+            || self.reject.is_some()
+            || self.offline.is_some()
+            || self.notfound.is_some()
     }
 
     /// Get the play duration before rejection for a given status code.
     /// Returns `None` if no tone is configured for the given status code.
-    pub fn play_duration_for(&self, code: &rsipstack::sip::StatusCode) -> Option<std::time::Duration> {
+    pub fn play_duration_for(
+        &self,
+        code: &rsipstack::sip::StatusCode,
+    ) -> Option<std::time::Duration> {
         if self.for_status(code).is_some() {
-            Some(std::time::Duration::from_secs(self.play_duration_secs.unwrap_or(2) as u64))
+            Some(std::time::Duration::from_secs(
+                self.play_duration_secs.unwrap_or(2) as u64,
+            ))
         } else {
             None
         }
@@ -436,8 +446,6 @@ pub struct RouteRule {
     pub description: Option<String>,
     #[serde(default)]
     pub priority: i32,
-    #[serde(default)]
-    pub direction: RouteDirection,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub source_trunks: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -476,7 +484,6 @@ impl Default for RouteRule {
             name: String::new(),
             description: None,
             priority: 0,
-            direction: RouteDirection::Any,
             source_trunks: Vec::new(),
             source_trunk_ids: Vec::new(),
             match_conditions: MatchConditions::default(),

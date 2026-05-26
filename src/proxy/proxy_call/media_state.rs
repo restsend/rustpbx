@@ -27,7 +27,10 @@ pub enum RecordingPhase {
 
 impl RecordingPhase {
     pub fn is_active(&self) -> bool {
-        matches!(self, RecordingPhase::Recording { .. } | RecordingPhase::Paused { .. })
+        matches!(
+            self,
+            RecordingPhase::Recording { .. } | RecordingPhase::Paused { .. }
+        )
     }
 
     #[allow(dead_code)]

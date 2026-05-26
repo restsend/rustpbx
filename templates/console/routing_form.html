@@ -149,16 +149,18 @@
                         </div>
                         <div class="space-y-2">
                             <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">{{
-                                "routing_form.direction" | t }}</label>
-                            <select name="direction" x-model="route.direction"
+                                "routing_form.source_label" | t }}</label>
+                            <select name="source_trunk" x-model="route.source_trunk"
                                 class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
-                                <option value="" x-bind:selected="!route.direction" :disabled="!!route.direction"
-                                    hidden>{{ "routing_form.select_direction" | t }}</option>
-                                <template x-for="direction in directionOptions" :key="direction">
-                                    <option :value="direction" :selected="route.direction === direction"
-                                        x-text="direction"></option>
+                                <option value="">{{ "routing_form.source_any" | t }}</option>
+                                <template x-for="option in trunkOptions" :key="'source-' + option.name">
+                                    <option :value="option.name" x-text="option.display_name || option.name">
+                                    </option>
                                 </template>
                             </select>
+                            <p class="text-[11px] text-slate-400"
+                                x-text="route.source_trunk ? '{{ "routing_form.source_from_trunk_hint" | t }}' : '{{ "routing_form.source_any_hint" | t }}'">
+                            </p>
                         </div>
                         <div class="space-y-2">
                             <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">{{
@@ -755,20 +757,6 @@
                 </div>
             </div>
 
-            <div class="grid gap-4 md:grid-cols-2">
-                <div class="space-y-2">
-                    <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">{{
-                        "routing_form.source_trunk_label" | t }}</label>
-                    <select name="source_trunk" x-model="route.source_trunk"
-                        class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
-                        <option value="">{{ "routing_form.select_source_trunk" | t }}</option>
-                        <template x-for="option in trunkOptions" :key="'source-' + option.name">
-                            <option :value="option.name" x-text="option.display_name || option.name">
-                            </option>
-                        </template>
-                    </select>
-                </div>
-            </div>
         </div>
     </section>
 </div>
@@ -901,7 +889,6 @@
                     name: '',
                     description: '',
                     owner: '',
-                    direction: 'outbound',
                     priority: 10,
                     disabled: false,
                     match: {},
@@ -951,7 +938,8 @@
                     err_failed_save: '{{ "routing_form.err_failed_save" | t }}',
                     err_validation_failed: '{{ "routing_form.err_validation_failed" | t }}',
                     saved_successfully: '{{ "routing_form.saved_successfully" | t }}',
-                    direction_pending: '{{ "routing_form.direction_pending" | t }}',
+                    source_any: '{{ "routing_form.source_any" | t }}',
+                    source_from_trunk: '{{ "routing_form.source_from_trunk" | t }}',
                     route_summary: '{{ "routing_form.route_summary" | t }}',
                     match_from_user: '{{ "routing_form.match_from_user" | t }}',
                     match_from_host: '{{ "routing_form.match_from_host" | t }}',
@@ -1112,12 +1100,6 @@
                         }
                         return Boolean(value);
                     };
-                    const normalizeDirection = (value) => {
-                        if (typeof value === 'string' && value.trim().length) {
-                            return value.trim().toLowerCase();
-                        }
-                        return 'outbound';
-                    };
                     const normalizeTargetType = (value) => {
                         if (typeof value === 'string') {
                             const trimmed = value.trim().toLowerCase();
@@ -1136,7 +1118,6 @@
                         name: raw?.name ?? '',
                         description: raw?.description ?? '',
                         owner: raw?.owner ?? '',
-                        direction: normalizeDirection(raw?.direction),
                         priority: typeof raw?.priority === 'number' ? raw.priority : Number(raw?.priority) || 10,
                         disabled: toBoolean(raw?.disabled),
                         match: Object.assign({
@@ -1399,9 +1380,11 @@
                     return this.normalizeTargetType(this.route.action?.target_type) === 'ivr';
                 },
                 get routeSummary() {
-                    const direction = this.trimString(this.route.direction) || this.translations.direction_pending;
+                    const sourceLabel = this.route.source_trunk
+                        ? this.translations.source_from_trunk
+                        : this.translations.source_any;
                     return this.translations.route_summary
-                        .replace('{direction}', direction)
+                        .replace('{source}', sourceLabel)
                         .replace('{priority}', this.route.priority);
                 },
                 queuesUrl() {
@@ -1422,10 +1405,6 @@
                     const name = this.trimString(this.route.name);
                     if (!name.length) {
                         throw new Error(this.translations.err_name_required);
-                    }
-                    const direction = this.trimString(this.route.direction);
-                    if (!direction.length) {
-                        throw new Error(this.translations.err_direction_required);
                     }
                     const source = this.trimString(this.route.source_trunk);
                     if (source.length) {
@@ -1522,7 +1501,6 @@
                     const description = this.trimString(this.route.description);
                     const owner = this.trimString(this.route.owner);
 
-                    const direction = this.trimString(this.route.direction);
                     const selectionValue = this.selectionPayloadValue(this.route.action.select);
 
                     const policy = {};
@@ -1551,7 +1529,6 @@
                         name: this.trimString(this.route.name),
                         description: description || null,
                         owner: owner || null,
-                        direction: direction || null,
                         priority: Math.max(0, Math.round(Number(this.route.priority) || 0)),
                         disabled: Boolean(this.route.disabled),
                         match,

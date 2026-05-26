@@ -524,7 +524,12 @@ impl IvrApp {
                 info!(ivr = %self.definition.name, menu = %current, "IVR repeating menu");
                 self.enter_menu(&current, ctrl, ctx).await
             }
-            EntryAction::Hangup { prompt, prompt_text, prompt_voice, .. } => {
+            EntryAction::Hangup {
+                prompt,
+                prompt_text,
+                prompt_voice,
+                ..
+            } => {
                 if let Some(path) = self
                     .resolve_audio(
                         prompt.as_deref(),

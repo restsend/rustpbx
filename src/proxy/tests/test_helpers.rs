@@ -1,7 +1,6 @@
 use crate::call::user::SipUser;
 use crate::config::ProxyConfig;
 use crate::proxy::server::SipServerBuilder;
-use std::sync::Arc;
 
 pub fn test_proxy_config(port: u16) -> ProxyConfig {
     ProxyConfig {
@@ -73,9 +72,7 @@ pub fn standard_test_users() -> Vec<SipUser> {
     ]
 }
 
-pub fn register_standard_modules(
-    builder: SipServerBuilder,
-) -> SipServerBuilder {
+pub fn register_standard_modules(builder: SipServerBuilder) -> SipServerBuilder {
     use crate::proxy::{auth::AuthModule, call::CallModule, registrar::RegistrarModule};
 
     builder

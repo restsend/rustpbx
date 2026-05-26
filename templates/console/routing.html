@@ -168,14 +168,14 @@
                     </div>
                     <div class="flex gap-1 rounded-lg border border-slate-200 p-1 text-xs font-medium text-slate-600">
                         <button type="button" class="rounded-md px-3 py-1 transition"
-                            :class="directionFilter === 'all' ? 'bg-sky-100 text-sky-700' : 'hover:bg-slate-100'"
-                            @click="setDirection('all')">{{ "routing.filter_all" | t }}</button>
+                            :class="sourceFilter === 'all' ? 'bg-sky-100 text-sky-700' : 'hover:bg-slate-100'"
+                            @click="setSource('all')">{{ "routing.filter_all" | t }}</button>
                         <button type="button" class="rounded-md px-3 py-1 transition"
-                            :class="directionFilter === 'inbound' ? 'bg-sky-100 text-sky-700' : 'hover:bg-slate-100'"
-                            @click="setDirection('inbound')">{{ "routing.filter_inbound" | t }}</button>
+                            :class="sourceFilter === 'from_trunk' ? 'bg-sky-100 text-sky-700' : 'hover:bg-slate-100'"
+                            @click="setSource('from_trunk')">{{ "routing.filter_from_trunk" | t }}</button>
                         <button type="button" class="rounded-md px-3 py-1 transition"
-                            :class="directionFilter === 'outbound' ? 'bg-sky-100 text-sky-700' : 'hover:bg-slate-100'"
-                            @click="setDirection('outbound')">{{ "routing.filter_outbound" | t }}</button>
+                            :class="sourceFilter === 'any' ? 'bg-sky-100 text-sky-700' : 'hover:bg-slate-100'"
+                            @click="setSource('any')">{{ "routing.source_any" | t }}</button>
                     </div>
                     <div class="flex gap-1 rounded-lg border border-slate-200 p-1 text-xs font-medium text-slate-600">
                         <button type="button" class="rounded-md px-3 py-1 transition"
@@ -244,10 +244,13 @@
                                                 class="text-sm font-semibold text-slate-900 transition hover:text-sky-600 focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-400 focus-visible:ring-offset-2 focus-visible:ring-offset-white"
                                                 x-text="routeLabel(route)"></a>
                                             <div class="flex flex-wrap items-center gap-2">
-                                                <span
-                                                    class="inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-[11px] font-semibold"
-                                                    :class="route.direction === 'inbound' ? 'bg-emerald-50 text-emerald-600 ring-1 ring-emerald-200' : 'bg-sky-50 text-sky-600 ring-1 ring-sky-200'">
-                                                    <span class="uppercase" x-text="route.direction"></span>
+                                                <span x-show="route.source_context === 'from_trunk'"
+                                                    class="inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-[11px] font-semibold bg-emerald-50 text-emerald-600 ring-1 ring-emerald-200">
+                                                    <span x-text="route.source_trunk || '外线'"></span>
+                                                </span>
+                                                <span x-show="route.source_context !== 'from_trunk'"
+                                                    class="inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-[11px] font-semibold bg-slate-50 text-slate-500 ring-1 ring-slate-200">
+                                                    {{ "routing.source_any" | t }}
                                                 </span>
                                                 <span
                                                     class="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2.5 py-0.5 text-[11px] font-medium text-slate-600 ring-1 ring-slate-200">
@@ -487,7 +490,7 @@
                             <tr>
                                 <th scope="col" class="px-4 py-2">{{ "routing.col_route" | t }}</th>
                                 <th scope="col" class="px-4 py-2">{{ "routing.col_match" | t }}</th>
-                                <th scope="col" class="px-4 py-2">{{ "routing.col_direction" | t }}</th>
+                                <th scope="col" class="px-4 py-2">{{ "routing.col_source" | t }}</th>
                                 <th scope="col" class="px-4 py-2">{{ "routing.col_priority" | t }}</th>
                                 <th scope="col" class="px-4 py-2">{{ "routing.source_file" | t }}</th>
                                 <th scope="col" class="px-4 py-2">{{ "routing.col_state" | t }}</th>
@@ -513,7 +516,7 @@
                                         </template>
                                     </td>
                                     <td class="whitespace-nowrap px-4 py-2">
-                                        <span class="uppercase" x-text="route.direction || 'any'"></span>
+                                        <span x-text="route.source_context === 'from_trunk' ? (route.source_trunk || 'From Trunk') : 'Any'"></span>
                                     </td>
                                     <td class="whitespace-nowrap px-4 py-2">
                                         <span class="inline-flex items-center gap-1 rounded-full bg-slate-100 px-2.5 py-0.5 text-[11px] font-medium text-slate-600 ring-1 ring-slate-200">
@@ -571,12 +574,13 @@
                                 placeholder="{{ "routing.validation_dialled_placeholder" | t }}" required>
                         </label>
                         <label class="flex flex-col gap-2">
-                            <span class="text-xs font-semibold uppercase tracking-wide text-slate-400">{{ "routing.validation_direction" | t }}</span>
-                            <select x-model="validationDirection"
+                            <span class="text-xs font-semibold uppercase tracking-wide text-slate-400">{{ "routing.validation_source_trunk" | t }}</span>
+                            <select x-model="validationSourceTrunk"
                                 class="rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
-                                <option value="outbound">{{ "routing.filter_outbound" | t }}</option>
-                                <option value="inbound">{{ "routing.filter_inbound" | t }}</option>
-                                <option value="internal">{{ "routing.filter_internal" | t }}</option>
+                                <option value="">{{ "routing.validation_auto_detect" | t }}</option>
+                                <template x-for="option in trunkOptions" :key="option.value">
+                                    <option :value="option.value" x-text="option.label"></option>
+                                </template>
                             </select>
                         </label>
                         <label class="flex flex-col gap-2">
@@ -807,11 +811,11 @@
             error: null,
             flash: null,
             search: '',
-            directionFilter: 'all',
+            sourceFilter: 'all',
             statusFilter: 'all',
             algorithmFilter: 'all',
             algorithmOptions: [],
-            directionOptions: [],
+            sourceOptions: [],
             statusOptions: [],
             perPage: 20,
             page: 1,
@@ -825,11 +829,10 @@
             validationOpen: false,
             validationAdvanced: false,
             validationInput: '',
-            validationDirection: 'outbound',
+            validationSourceTrunk: '',
             validationCaller: '',
             validationRequestUri: '',
             validationSourceIp: '',
-            validationSourceTrunk: '',
             validationDataset: 'database',
             validationLoading: false,
             validationError: null,
@@ -1001,8 +1004,8 @@
                 if (term.length) {
                     filters.q = term;
                 }
-                if (this.directionFilter !== 'all') {
-                    filters.direction = this.directionFilter;
+                if (this.sourceFilter !== 'all') {
+                    filters.source_context = this.sourceFilter;
                 }
                 if (this.statusFilter !== 'all') {
                     filters.status = this.statusFilter === 'disabled' ? 'paused' : this.statusFilter;
@@ -1104,15 +1107,12 @@
                 this.page = 1;
                 this.fetchRoutes();
             },
-            setDirection(value) {
-                if (this.directionFilter === value) {
-                    if (value !== 'all') {
-                        this.directionFilter = 'all';
-                        this.applyFilters();
-                    }
-                    return;
+            setSource(value) {
+                if (this.sourceFilter === value) {
+                        this.sourceFilter = 'all';
+                        return;
                 }
-                this.directionFilter = value;
+                this.sourceFilter = value;
                 this.applyFilters();
             },
             setStatus(value) {
@@ -1640,7 +1640,7 @@
             },
             resetValidation() {
                 this.validationInput = '';
-                this.validationDirection = this.directionFilter !== 'all' ? this.directionFilter : 'outbound';
+                this.validationSourceTrunk = '';
                 this.validationCaller = '';
                 this.validationRequestUri = '';
                 this.validationSourceIp = '';
@@ -1673,7 +1673,6 @@
                 }
                 const payload = {
                     callee,
-                    direction: this.validationDirection || 'outbound',
                     dataset: this.validationDataset || 'database',
                 };
                 const caller = (this.validationCaller || '').trim();

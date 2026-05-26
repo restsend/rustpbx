@@ -2555,7 +2555,11 @@ a=rtpmap:0 PCMU/8000\r\n";
         ];
         let allowed: Vec<CodecType> = vec![];
         let best = MediaNegotiator::select_best_codec(&codecs, &allowed).unwrap();
-        assert_eq!(best.codec, CodecType::G722, "G722 first in remote, empty allow → pick G722");
+        assert_eq!(
+            best.codec,
+            CodecType::G722,
+            "G722 first in remote, empty allow → pick G722"
+        );
     }
 
     #[test]
@@ -2576,7 +2580,11 @@ a=rtpmap:0 PCMU/8000\r\n";
         ];
         let allowed = vec![CodecType::G729];
         let best = MediaNegotiator::select_best_codec(&codecs, &allowed).unwrap();
-        assert_eq!(best.codec, CodecType::G729, "Only G729 allowed, scan past PCMU");
+        assert_eq!(
+            best.codec,
+            CodecType::G729,
+            "Only G729 allowed, scan past PCMU"
+        );
         assert_eq!(best.payload_type, 18);
     }
 
@@ -2614,7 +2622,11 @@ a=rtpmap:0 PCMU/8000\r\n";
         let profile = MediaNegotiator::extract_leg_profile(sdp);
         assert!(profile.audio.is_some());
         let audio = profile.audio.unwrap();
-        assert_eq!(audio.codec, CodecType::G729, "First audio codec in answer = G729");
+        assert_eq!(
+            audio.codec,
+            CodecType::G729,
+            "First audio codec in answer = G729"
+        );
         assert_eq!(audio.payload_type, 18);
     }
 
@@ -2655,7 +2667,10 @@ a=rtpmap:0 PCMU/8000\r\n";
             &[CodecType::G729, CodecType::PCMU, CodecType::TelephoneEvent],
         );
         let g729 = codecs.iter().find(|c| c.codec == CodecType::G729).unwrap();
-        assert_eq!(g729.payload_type, 18, "G729 PT must preserve caller's PT 18");
+        assert_eq!(
+            g729.payload_type, 18,
+            "G729 PT must preserve caller's PT 18"
+        );
     }
 
     #[test]
@@ -2668,11 +2683,7 @@ a=rtpmap:0 PCMU/8000\r\n";
             a=rtpmap:9 G722/16000\r\n\
             a=rtpmap:0 PCMU/8000\r\n";
 
-        let codecs = MediaNegotiator::build_callee_codec_offer_with_allow(
-            caller_sdp,
-            false,
-            &[],
-        );
+        let codecs = MediaNegotiator::build_callee_codec_offer_with_allow(caller_sdp, false, &[]);
         let g722 = codecs.iter().find(|c| c.codec == CodecType::G722);
         assert!(g722.is_some(), "G722 should be in callee offer");
         let g722 = g722.unwrap();

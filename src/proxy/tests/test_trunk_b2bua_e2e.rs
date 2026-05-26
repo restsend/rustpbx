@@ -17,7 +17,7 @@
 use super::e2e_test_server::E2eTestServer;
 use super::rtp_utils::{RtpPacket, RtpReceiver, RtpSender, RtpStats, extract_media_endpoint};
 use super::test_helpers;
-use super::test_ua::{TestUa, TestUaEvent};
+use super::test_ua::TestUaEvent;
 use crate::callrecord::CallRecordHangupReason;
 use crate::config::MediaProxyMode;
 use anyhow::Result;
@@ -1294,7 +1294,9 @@ async fn test_trunk_b2bua_mid_call_reinvite() -> Result<()> {
             "Callee should receive RTP after re-INVITE"
         );
     } else {
-        info!("re-INVITE was not completed (proxy may not support mid-call codec change in this mode)");
+        info!(
+            "re-INVITE was not completed (proxy may not support mid-call codec change in this mode)"
+        );
     }
 
     caller_ua.hangup(&caller_id).await?;

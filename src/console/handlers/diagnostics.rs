@@ -1168,24 +1168,25 @@ async fn route_evaluate(
         return bad_request("callee is required");
     }
 
-    let direction_label = payload
-        .direction
-        .as_ref()
-        .map(|d| d.trim().to_ascii_lowercase())
-        .filter(|d| !d.is_empty())
-        .unwrap_or_else(|| "outbound".to_string());
-
-    let direction = match direction_label.as_str() {
-        "inbound" => DialDirection::Inbound,
-        "internal" => DialDirection::Internal,
-        "outbound" => DialDirection::Outbound,
-        other => {
-            return bad_request(format!(
-                "unsupported direction '{}': use inbound/outbound/internal",
-                other
-            ));
+    let direction = if let Some(ref raw) = payload.direction {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "inbound" => DialDirection::Inbound,
+            "internal" => DialDirection::Internal,
+            "outbound" => DialDirection::Outbound,
+            other => {
+                return bad_request(format!(
+                    "unsupported direction '{}': use inbound/outbound/internal",
+                    other
+                ));
+            }
         }
+    } else if payload.source_trunk.is_some() || payload.source_ip.is_some() {
+        DialDirection::Inbound
+    } else {
+        DialDirection::Outbound
     };
+
+    let direction_label = direction.to_string();
 
     let dataset_label = payload
         .dataset

@@ -415,7 +415,10 @@ impl CallController {
     /// so the application can continue to the next step instead of
     /// waiting indefinitely for an AudioComplete event.
     pub fn signal_audio_complete(&self, track_id: String, interrupted: bool) {
-        self.session.send_app_event(ControllerEvent::AudioComplete { track_id, interrupted });
+        self.session.send_app_event(ControllerEvent::AudioComplete {
+            track_id,
+            interrupted,
+        });
     }
 }
 

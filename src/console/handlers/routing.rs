@@ -142,7 +142,7 @@ pub(crate) struct QueryRoutingFilters {
     #[serde(default)]
     q: Option<String>,
     #[serde(default)]
-    direction: Option<String>,
+    source_context: Option<String>,
     #[serde(default)]
     status: Option<String>,
     #[serde(default)]
@@ -612,12 +612,18 @@ fn build_route_console_payload(
     model: &RoutingModel,
 ) -> Value {
     let status = if doc.disabled { "paused" } else { "active" };
+    let source_context = if doc.source_trunk.is_some() || model.source_trunk_id.is_some() {
+        "from_trunk"
+    } else {
+        "any"
+    };
     json!({
         "id": model.id,
         "name": doc.name,
         "description": doc.description.clone().unwrap_or_default(),
         "owner": doc.owner.clone().unwrap_or_default(),
-            "direction": doc.direction,
+        "source_context": source_context,
+        "direction": doc.direction,
         "priority": doc.priority,
         "disabled": doc.disabled,
         "match": doc.matchers.clone(),
@@ -866,14 +872,15 @@ pub(crate) async fn query_routing(
             }
         }
 
-        if let Some(ref raw_direction) = filters.direction {
-            let direction = match raw_direction.trim().to_ascii_lowercase().as_str() {
-                "inbound" => Some(RoutingDirection::Inbound),
-                "outbound" => Some(RoutingDirection::Outbound),
-                _ => None,
-            };
-            if let Some(direction) = direction {
-                selector = selector.filter(RoutingColumn::Direction.eq(direction));
+        if let Some(ref raw_source) = filters.source_context {
+            match raw_source.trim().to_ascii_lowercase().as_str() {
+                "from_trunk" => {
+                    selector = selector.filter(RoutingColumn::SourceTrunkId.is_not_null());
+                }
+                "internal" | "any" => {
+                    selector = selector.filter(RoutingColumn::SourceTrunkId.is_null());
+                }
+                _ => {}
             }
         }
 
@@ -959,12 +966,17 @@ pub(crate) async fn query_routing(
                 if let ConfigOrigin::File(ref path) = route.origin {
                     let action_payload =
                         serde_json::to_value(&route.action).unwrap_or_else(|_| json!({}));
+                    let source_context = if !route.source_trunks.is_empty() {
+                        "from_trunk"
+                    } else {
+                        "any"
+                    };
                     Some(json!({
                         "id": null,
                         "name": route.name,
                         "description": route.description,
                         "priority": route.priority,
-                        "direction": route.direction,
+                        "source_context": source_context,
                         "disabled": route.disabled.unwrap_or(false),
                         "source": "file",
                         "source_file": path,

@@ -1358,7 +1358,9 @@ async fn test_p2p_g722_codec_through_proxy() -> Result<()> {
 
     // G722: PT=9, payload_size varies by implementation but we use 160 for 20ms at 64kbps
     // Timestamp increment for G722 at 8kHz RTP clock rate = 160 per 20ms
-    let (caller_stats, callee_stats) = ctx.exchange_rtp(caller_target, callee_target, 9, 160, 2000).await?;
+    let (caller_stats, callee_stats) = ctx
+        .exchange_rtp(caller_target, callee_target, 9, 160, 2000)
+        .await?;
 
     info!(
         caller_received = caller_stats.packets_received,
@@ -1571,11 +1573,15 @@ async fn test_p2p_multi_codec_offer_call_establishes() -> Result<()> {
     let alice_answer = alice.get_negotiated_answer_sdp(&alice_id).await;
     info!(
         "Multi-codec: alice answer SDP:\n{:?}",
-        alice_answer.as_ref().map(|s| s.chars().take(300).collect::<String>())
+        alice_answer
+            .as_ref()
+            .map(|s| s.chars().take(300).collect::<String>())
     );
     info!(
         "Multi-codec: bob offer SDP:\n{:?}",
-        bob_offer_sdp.as_ref().map(|s| s.chars().take(300).collect::<String>())
+        bob_offer_sdp
+            .as_ref()
+            .map(|s| s.chars().take(300).collect::<String>())
     );
 
     let alice_answer_sdp = alice_answer.unwrap_or_default();
@@ -1804,7 +1810,10 @@ async fn test_p2p_opus_dynamic_pt_sdp_negotiation() -> Result<()> {
     );
 
     // Verify the call was established (both SDPs are non-empty)
-    assert!(!alice_answer.is_empty(), "Caller answer SDP must not be empty");
+    assert!(
+        !alice_answer.is_empty(),
+        "Caller answer SDP must not be empty"
+    );
     assert!(!bob_offer.is_empty(), "Callee offer SDP must not be empty");
 
     alice.hangup(&alice_id).await?;

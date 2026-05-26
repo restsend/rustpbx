@@ -1865,7 +1865,8 @@ impl BridgePeer {
         }
 
         let used_shared_timing = if let Some(timing_slot) = timing_slot {
-            let mut guard = timing_slot.lock();            if let Some(timing) = guard.as_mut() {
+            let mut guard = timing_slot.lock();
+            if let Some(timing) = guard.as_mut() {
                 timing.rewrite(
                     frame,
                     mapping.source_clock_rate,
@@ -2202,7 +2203,11 @@ impl BridgePeerBuilder {
     /// Attach a shared recorder so that both bridge directions write audio to it.
     /// The recorder is lazily activated: once `start_recording()` puts a `Recorder`
     /// inside the `Arc<RwLock<…>>`, the bridge forward loops will start writing.
-    pub fn with_recorder(mut self, recorder: Arc<parking_lot::RwLock<Option<Recorder>>>, recording_paused: Arc<AtomicBool>) -> Self {
+    pub fn with_recorder(
+        mut self,
+        recorder: Arc<parking_lot::RwLock<Option<Recorder>>>,
+        recording_paused: Arc<AtomicBool>,
+    ) -> Self {
         self.recorder = Some(recorder);
         self.recording_paused = recording_paused;
         self
@@ -3581,8 +3586,8 @@ mod tests {
                     c,
                     ForwardPath::new(LegTransport::Callee, LegTransport::Caller),
                     st,
-                    None, // no recorder
-                    None, // no recorder leg
+                    None,                             // no recorder
+                    None,                             // no recorder leg
                     Arc::new(AtomicBool::new(false)), // not paused
                     ds,
                     tr,
