@@ -387,7 +387,7 @@ fn resolve_callee_uri(origin: &rsipstack::sip::Request) -> Result<rsipstack::sip
         .map_err(anyhow::Error::from)
 }
 
-fn parse_allowed_codecs(codec_names: &[String]) -> Vec<CodecType> {
+pub(crate) fn parse_allowed_codecs(codec_names: &[String]) -> Vec<CodecType> {
     let mut allow_codecs = Vec::new();
     for codec_name in codec_names {
         let codec_name = codec_name.trim();
@@ -403,7 +403,7 @@ fn parse_allowed_codecs(codec_names: &[String]) -> Vec<CodecType> {
     allow_codecs
 }
 
-fn apply_allowed_codecs(
+pub(crate) fn apply_allowed_codecs(
     dialplan: &mut Dialplan,
     preferred: Option<&[String]>,
     fallback: Option<&[String]>,
