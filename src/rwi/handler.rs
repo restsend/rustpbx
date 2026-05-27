@@ -2,8 +2,8 @@ use crate::handler::middleware::clientaddr::ClientAddr;
 use crate::proxy::active_call_registry::ActiveProxyCallRegistry;
 use crate::proxy::server::SipServerRef;
 use crate::rwi::auth::{RwiAuth, RwiIdentity};
-use crate::rwi::gateway::RwiGateway;
 use crate::rwi::processor::{CommandError, CommandResult, RwiCommandProcessor};
+use crate::rwi::RwiGatewayRef;
 use crate::rwi::session::{RwiCommandMessage, RwiCommandPayload};
 use axum::{
     Extension,
@@ -23,7 +23,7 @@ pub async fn rwi_ws_handler(
     ws: WebSocketUpgrade,
     Query(params): Query<std::collections::HashMap<String, String>>,
     Extension(auth): Extension<Arc<RwLock<RwiAuth>>>,
-    Extension(gateway): Extension<Arc<RwLock<RwiGateway>>>,
+    Extension(gateway): Extension<RwiGatewayRef>,
     Extension(call_registry): Extension<Arc<ActiveProxyCallRegistry>>,
     Extension(sip_server): Extension<Option<SipServerRef>>,
     headers: HeaderMap,
@@ -88,7 +88,7 @@ fn extract_token(
 async fn handle_websocket(
     socket: WebSocket,
     identity: RwiIdentity,
-    gateway: Arc<RwLock<RwiGateway>>,
+    gateway: RwiGatewayRef,
     call_registry: Arc<ActiveProxyCallRegistry>,
     sip_server: Option<SipServerRef>,
 ) {
@@ -113,9 +113,9 @@ async fn handle_websocket(
     processor.register_transfer_notify_listener().await;
 
     let session_id = {
-        let mut gw = gateway.write().await;
+        let mut gw = gateway.write();
         let session = gw.create_session(identity.clone());
-        let id = session.read().await.id.clone();
+        let id = session.read().id.clone();
         let (event_tx, mut event_rx) = mpsc::unbounded_channel::<serde_json::Value>();
         let ws_tx_clone = ws_tx.clone();
         tokio::spawn(async move {
@@ -178,8 +178,8 @@ async fn handle_websocket(
         _ = recv_task => {}
     }
 
-    let mut gw = gateway.write().await;
-    gw.remove_session(&session_id).await;
+    let mut gw = gateway.write();
+    gw.remove_session(&session_id);
 }
 
 /// Process one text frame from the WebSocket.
@@ -190,7 +190,7 @@ async fn handle_text_message(
     _command_tx: &mpsc::UnboundedSender<RwiCommandMessage>,
     processor: Arc<RwiCommandProcessor>,
     session_id: &str,
-    gateway: Arc<RwLock<RwiGateway>>,
+    gateway: RwiGatewayRef,
     ws_tx: &mpsc::UnboundedSender<String>,
 ) {
     let value: serde_json::Value = match serde_json::from_str(text) {
@@ -269,21 +269,19 @@ async fn handle_text_message(
 
     match &command {
         RwiCommandPayload::Subscribe { contexts, events } => {
-            let mut gw = gateway.write().await;
-            gw.subscribe(&session_id.to_string(), contexts.clone(), events.clone())
-                .await;
+            let mut gw = gateway.write();
+            gw.subscribe(&session_id.to_string(), contexts.clone(), events.clone());
         }
         RwiCommandPayload::Unsubscribe { contexts } => {
-            let mut gw = gateway.write().await;
-            gw.unsubscribe(&session_id.to_string(), contexts).await;
+            let mut gw = gateway.write();
+            gw.unsubscribe(&session_id.to_string(), contexts);
         }
         RwiCommandPayload::DetachCall { call_id } => {
-            let mut gw = gateway.write().await;
+            let mut gw = gateway.write();
             if gw
                 .release_call_ownership(&session_id.to_string(), call_id)
-                .await
             {
-                gw.detach_supervisor(&session_id.to_string(), call_id).await;
+                gw.detach_supervisor(&session_id.to_string(), call_id);
             }
         }
         _ => {}
@@ -306,14 +304,13 @@ async fn handle_text_message(
             | CommandResult::CallFound { call_id: ref cid },
         ) = result
     {
-        let mut gw = gateway.write().await;
+        let mut gw = gateway.write();
         let _ = gw
             .claim_call_ownership(
                 &session_id.to_string(),
                 cid.clone(),
                 crate::rwi::session::OwnershipMode::Control,
-            )
-            .await;
+            );
     }
 
     let event = build_command_result_event(&action_id, &action, call_id.as_deref(), result);
@@ -457,7 +454,7 @@ async fn handle_binary_message(
     data: &[u8],
     _processor: Arc<RwiCommandProcessor>,
     session_id: &str,
-    gateway: Arc<RwLock<RwiGateway>>,
+    gateway: RwiGatewayRef,
 ) {
     if data.len() < 16 {
         tracing::warn!(session_id = %session_id, "Received invalid binary frame: too small");
@@ -495,7 +492,7 @@ async fn handle_binary_message(
     );
 
     let owns_call = {
-        let gw = gateway.read().await;
+        let gw = gateway.read();
         gw.session_owns_call(&session_id.to_string(), &call_id)
     };
 

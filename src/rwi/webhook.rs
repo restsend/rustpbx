@@ -32,7 +32,8 @@ async fn run_rwi_webhook_handler(
         .build()
         .unwrap_or_else(|_| reqwest::Client::new());
 
-    debug!("RWI webhook handler started for {}", config.url);
+    let url = config.url.trim().to_string();
+    debug!("RWI webhook handler started for {}", url);
 
     // Dedup cache: ring buffer of (call_id, sequence) to skip duplicates
     // when the same event is forwarded from multiple call owners.
@@ -89,7 +90,7 @@ async fn run_rwi_webhook_handler(
             "event": entry.event,
         });
 
-        let mut request = client.post(&config.url);
+        let mut request = client.post(&url);
         if let Some(headers) = &config.headers {
             for (k, v) in headers {
                 request = request.header(k, v);
@@ -102,7 +103,7 @@ async fn run_rwi_webhook_handler(
                     warn!(
                         "RWI webhook returned error status: {} for {} (event: {})",
                         resp.status(),
-                        config.url,
+                        url,
                         event_type
                     );
                 }
@@ -110,7 +111,7 @@ async fn run_rwi_webhook_handler(
             Err(e) => {
                 error!(
                     "Failed to send RWI webhook to {}: {} (event: {})",
-                    config.url, e, event_type
+                    url, e, event_type
                 );
             }
         }
@@ -250,7 +251,8 @@ mod tests {
     use super::*;
     use crate::config::LocatorWebhookConfig;
     use crate::rwi::gateway::{EventCacheEntry, RwiGateway};
-    use crate::rwi::proto::RwiEvent;
+    use crate::rwi::proto::{CallIncomingData, RwiEvent};
+    use std::collections::HashMap;
     use axum::{Json, Router, routing::post};
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
@@ -620,6 +622,89 @@ mod tests {
             received.len()
         );
         assert_eq!(received[0]["sequence"], 42);
+    }
+
+    #[tokio::test]
+    async fn test_webhook_receives_multiple_call_events_via_send_to_owner() {
+        let server = TestHttpServer::start().await;
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let config = LocatorWebhookConfig {
+            url: server.url(),
+            events: vec![],
+            headers: None,
+            timeout_ms: Some(5000),
+        };
+
+        let tx = start_rwi_webhook_handler(config);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let mut gateway = RwiGateway::new();
+        gateway.set_webhook_tx(tx);
+
+        let call_id = "e2e-call".to_string();
+
+        // 1. Send CallIncoming via send_event_to_call_owner (same path as emit_rwi_event)
+        gateway.send_event_to_call_owner(&call_id, &RwiEvent::CallIncoming(CallIncomingData {
+            call_id: call_id.clone(),
+            context: "default".into(),
+            caller: "alice".into(),
+            callee: "ivr".into(),
+            dial_direction: "inbound".into(),
+            trunk: None,
+            sip_headers: HashMap::new(),
+            root_call_id: None,
+            ani: None,
+            dnis: None,
+            called_phone: None,
+            app_id: None,
+            routing_target: None,
+            uuid: None,
+            routing_path: None,
+        }));
+
+        // 2. Send CallRinging
+        gateway.send_event_to_call_owner(&call_id, &RwiEvent::ringing(call_id.clone()));
+
+        // 3. Send CallAnswered
+        gateway.send_event_to_call_owner(&call_id, &RwiEvent::answered(call_id.clone()));
+
+        // 4. Send CallHangup
+        gateway.send_event_to_call_owner(&call_id, &RwiEvent::hangup(
+            call_id.clone(),
+            Some("ByCaller".into()),
+            Some(200),
+        ));
+
+        // All 4 events should arrive with correct call_id and unique sequences
+        wait_for_events(&server.received, 4, 3000).await;
+
+        let received = server.received.lock().unwrap();
+        assert_eq!(received.len(), 4, "expected 4 events, got {}", received.len());
+
+        // Verify each event type and call_id
+        let event_types: Vec<String> = received
+            .iter()
+            .map(|v| v["event_type"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(event_types, vec![
+            "call_incoming",
+            "call_ringing",
+            "call_answered",
+            "call_hangup",
+        ]);
+
+        // Verify all have the correct call_id (not empty)
+        for v in received.iter() {
+            assert_eq!(v["call_id"], call_id, "call_id mismatch for event {}", v["event_type"]);
+        }
+
+        // Verify sequences are unique and in order
+        let sequences: Vec<u64> = received
+            .iter()
+            .map(|v| v["sequence"].as_u64().unwrap())
+            .collect();
+        assert_eq!(sequences, vec![1, 2, 3, 4], "sequences should be 1..4");
     }
 
     #[tokio::test]

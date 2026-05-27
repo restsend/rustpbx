@@ -1,22 +1,21 @@
 use crate::call::RouteContext;
 use crate::call::app::CallController;
 use crate::call::app::{AppAction, ApplicationContext, CallApp, CallAppType};
-use crate::rwi::gateway::{RwiGateway, SessionId};
+use crate::rwi::gateway::SessionId;
 use crate::rwi::proto::RwiEvent;
 use crate::rwi::session::OwnershipMode;
+use crate::rwi::RwiGatewayRef;
 use async_trait::async_trait;
-use std::sync::Arc;
-use tokio::sync::RwLock;
 
 pub const RWI_APP_NAME: &str = "rwi";
 
 #[derive(Clone)]
 pub struct RwiAddon {
-    gateway: Arc<RwLock<RwiGateway>>,
+    gateway: RwiGatewayRef,
 }
 
 impl RwiAddon {
-    pub fn new(gateway: Arc<RwLock<RwiGateway>>) -> Self {
+    pub fn new(gateway: RwiGatewayRef) -> Self {
         Self { gateway }
     }
 }
@@ -55,7 +54,7 @@ impl crate::call::CallAppFactory for RwiAddon {
 pub struct RwiApp {
     context_name: String,
     session_id: Option<SessionId>,
-    gateway: Arc<RwLock<RwiGateway>>,
+    gateway: RwiGatewayRef,
     owned: bool,
     /// The call_id of the call this app is handling, set in `on_enter`.
     owned_call_id: Option<String>,
@@ -71,7 +70,7 @@ impl RwiApp {
     pub fn new(
         context_name: String,
         session_id: Option<SessionId>,
-        gateway: Arc<RwLock<RwiGateway>>,
+        gateway: RwiGatewayRef,
     ) -> Self {
         Self {
             context_name,
@@ -85,7 +84,7 @@ impl RwiApp {
     }
 
     async fn send_event(&self, event: RwiEvent) {
-        let gw = self.gateway.read().await;
+        let gw = self.gateway.read();
         if let Some(session_id) = &self.session_id {
             gw.send_event_to_session(session_id, &event);
         }
@@ -116,21 +115,18 @@ impl CallApp for RwiApp {
         let call_id = context.call_info.session_id.clone();
 
         // Populate CallMetaStore for event enrichment
-        {
-            let gateway = self.gateway.read().await;
-            gateway
-                .meta_store
-                .insert(
-                    call_id.clone(),
-                    crate::rwi::proto::CallMeta {
-                        caller: Some(context.call_info.caller.clone()),
-                        callee: Some(context.call_info.callee.clone()),
-                        direction: Some(context.call_info.direction.clone()),
-                        ..Default::default()
-                    },
-                )
-                .await;
-        }
+        let meta_store = self.gateway.read().meta_store.clone();
+        meta_store
+            .insert(
+                call_id.clone(),
+                crate::rwi::proto::CallMeta {
+                    caller: Some(context.call_info.caller.clone()),
+                    callee: Some(context.call_info.callee.clone()),
+                    direction: Some(context.call_info.direction.clone()),
+                    ..Default::default()
+                },
+            )
+            .await;
 
         self.send_event(RwiEvent::CallIncoming(
             crate::rwi::proto::CallIncomingData {
@@ -155,10 +151,9 @@ impl CallApp for RwiApp {
 
         if let Some(session_id) = &self.session_id {
             let claim_ok = {
-                let mut gateway = self.gateway.write().await;
+                let mut gateway = self.gateway.write();
                 gateway
                     .claim_call_ownership(session_id, call_id.clone(), OwnershipMode::Control)
-                    .await
                     .is_ok()
             };
 
@@ -181,8 +176,11 @@ impl CallApp for RwiApp {
 mod tests {
     use super::*;
     use crate::rwi::auth::RwiIdentity;
+    use crate::rwi::gateway::RwiGateway;
+    use parking_lot::RwLock;
+    use std::sync::Arc;
 
-    fn create_test_gateway() -> Arc<RwLock<RwiGateway>> {
+    fn create_test_gateway() -> RwiGatewayRef {
         Arc::new(RwLock::new(RwiGateway::new()))
     }
 
@@ -194,15 +192,15 @@ mod tests {
         let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
 
         {
-            let mut gw = gateway.write().await;
+            let mut gw = gateway.write();
             let identity = RwiIdentity {
                 token: "sub".into(),
                 scopes: vec![],
             };
             let session = gw.create_session(identity);
-            let sid = session.read().await.id.clone();
+            let sid = session.read().id.clone();
             gw.set_session_event_sender(&sid, event_tx);
-            gw.subscribe(&sid, vec!["ctx-anon".to_string()], None).await;
+            gw.subscribe(&sid, vec!["ctx-anon".to_string()], None);
         }
 
         let app = RwiApp::new("ctx-anon".to_string(), None, gateway.clone());

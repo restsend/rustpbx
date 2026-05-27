@@ -21,7 +21,7 @@ pub struct StepIvrApp {
     trace: Option<Arc<IvrTraceCollector>>,
     step_index: u32,
     ivr_name: Option<String>,
-    rwi_gateway: Option<Arc<tokio::sync::RwLock<crate::rwi::gateway::RwiGateway>>>,
+    rwi_gateway: Option<crate::rwi::RwiGatewayRef>,
 }
 
 #[derive(Clone)]
@@ -86,7 +86,7 @@ impl StepIvrApp {
     /// Attach the RWI gateway for real-time event emission.
     pub fn with_rwi_gateway(
         mut self,
-        gw: Option<Arc<tokio::sync::RwLock<crate::rwi::gateway::RwiGateway>>>,
+        gw: Option<crate::rwi::RwiGatewayRef>,
     ) -> Self {
         self.rwi_gateway = gw;
         self
@@ -124,7 +124,7 @@ impl StepIvrApp {
             };
             let gw = gw.clone();
             tokio::spawn(async move {
-                let guard = gw.read().await;
+                let guard = gw.read();
                 guard.fan_out_event_to_context(&call_id, &event, &call_id);
             });
         }

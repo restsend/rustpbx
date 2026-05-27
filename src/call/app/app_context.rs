@@ -105,7 +105,7 @@ pub struct ApplicationContext {
     pub config: Arc<Config>,
 
     /// RWI gateway for emitting real-time events.
-    pub rwi_gateway: Option<Arc<tokio::sync::RwLock<crate::rwi::gateway::RwiGateway>>>,
+    pub rwi_gateway: Option<crate::rwi::RwiGatewayRef>,
 
     /// IVR step trace collector for debugging (optional).
     pub ivr_trace: Option<Arc<IvrTraceCollector>>,

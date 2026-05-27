@@ -135,10 +135,8 @@ impl IvrApp {
         if let Some(ref gw) = ctx.rwi_gateway {
             let gw = gw.clone();
             let call_id = ctx.call_info.session_id.clone();
-            tokio::spawn(async move {
-                let guard = gw.read().await;
-                guard.fan_out_event_to_context(&call_id, &event, &call_id);
-            });
+            let guard = gw.read();
+            guard.fan_out_event_to_context(&call_id, &event, &call_id);
         }
     }
 

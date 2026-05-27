@@ -45,7 +45,8 @@ pub async fn handle_locator_webhook(config: LocatorWebhookConfig, mut rx: Locato
         .build()
         .unwrap_or_else(|_| reqwest::Client::new());
 
-    debug!("locator webhook handler started for {}", config.url);
+    let url = config.url.trim().to_string();
+    debug!("locator webhook handler started for {}", url);
 
     loop {
         let event = match rx.recv().await {
@@ -102,7 +103,7 @@ pub async fn handle_locator_webhook(config: LocatorWebhookConfig, mut rx: Locato
             continue;
         }
 
-        let mut request = client.post(&config.url);
+        let mut request = client.post(&url);
         if let Some(headers) = &config.headers {
             for (k, v) in headers {
                 request = request.header(k, v);
@@ -115,12 +116,12 @@ pub async fn handle_locator_webhook(config: LocatorWebhookConfig, mut rx: Locato
                     warn!(
                         "locator webhook returned error status: {} for {}",
                         resp.status(),
-                        config.url
+                        url
                     );
                 }
             }
             Err(e) => {
-                error!("failed to send locator webhook to {}: {}", config.url, e);
+                error!("failed to send locator webhook to {}: {}", url, e);
             }
         }
     }

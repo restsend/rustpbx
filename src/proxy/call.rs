@@ -1424,7 +1424,7 @@ impl CallModule {
                                         old_call_id: old_session_id.clone(),
                                         new_call_id: sid.clone(),
                                     };
-                                    let g = gw.read().await;
+                                    let g = gw.read();
                                     g.broadcast_event(&event);
                                 }
                             }
@@ -1515,7 +1515,7 @@ impl CallModule {
                                         call_id: old_session_id.clone(),
                                         context: Default::default(),
                                     };
-                                    let g = gw.read().await;
+                                    let g = gw.read();
                                     g.broadcast_event(&event);
                                 }
                             }
@@ -1724,7 +1724,7 @@ impl CallModule {
                     call_id: original_session_id.clone(),
                     context: Default::default(),
                 };
-                let g = gw.read().await;
+                let g = gw.read();
                 g.send_event_to_call_owner(&original_session_id, &event);
             }
         });

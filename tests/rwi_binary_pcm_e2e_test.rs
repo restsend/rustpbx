@@ -45,7 +45,7 @@ fn make_auth() -> RwiAuthRef {
 
 async fn start_test_server() -> (String, RwiGatewayRef, Arc<ActiveProxyCallRegistry>) {
     let auth = make_auth();
-    let gateway: RwiGatewayRef = Arc::new(tokio::sync::RwLock::new(RwiGateway::new()));
+    let gateway: RwiGatewayRef = Arc::new(parking_lot::RwLock::new(RwiGateway::new()));
     let registry = Arc::new(ActiveProxyCallRegistry::new());
 
     let auth_c = auth.clone();
@@ -422,7 +422,7 @@ async fn test_pcm_frame_does_not_break_session_state() {
 
     // Verify subscription still works by pushing an event
     {
-        let gw = gateway.read().await;
+        let gw = gateway.read();
         let event = rustpbx::rwi::RwiEvent::CallRinging {
             call_id: "test".to_string(),
             context: Default::default(),

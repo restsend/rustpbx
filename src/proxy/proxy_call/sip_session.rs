@@ -379,7 +379,10 @@ fn trunk_host_port(dest: &str) -> Option<(String, u16)> {
     if host.is_empty() {
         return None;
     }
-    let port = parts.get(1).and_then(|p| p.parse::<u16>().ok()).unwrap_or(5060);
+    let port = parts
+        .get(1)
+        .and_then(|p| p.parse::<u16>().ok())
+        .unwrap_or(5060);
     Some((host.to_string(), port))
 }
 
@@ -456,7 +459,8 @@ impl SipSession {
             direction: context.dialplan.direction.to_string(),
             started_at: chrono::Utc::now(),
             sip_headers: {
-                let mut hdrs = crate::call::app::extract_sip_headers(&server_dialog.initial_request());
+                let mut hdrs =
+                    crate::call::app::extract_sip_headers(&server_dialog.initial_request());
                 if let Some(ref routed) = context.dialplan.routed_headers {
                     for h in routed {
                         hdrs.insert(h.name().to_string(), h.value().to_string());
@@ -635,8 +639,8 @@ impl SipSession {
 
         // Emit CallIncoming event via RWI gateway if configured.
         if let Some(ref gw) = server.rwi_gateway {
-            let event = crate::rwi::proto::RwiEvent::CallIncoming(
-                crate::rwi::proto::CallIncomingData {
+            let event =
+                crate::rwi::proto::RwiEvent::CallIncoming(crate::rwi::proto::CallIncomingData {
                     call_id: session_id.clone(),
                     context: "default".into(),
                     caller: context.original_caller.clone(),
@@ -652,12 +656,12 @@ impl SipSession {
                     routing_target: None,
                     uuid: None,
                     routing_path: None,
-                },
-            );
+                });
             let gw = gw.clone();
+            let call_id = session_id.clone();
             tokio::spawn(async move {
-                let g = gw.read().await;
-                g.broadcast_event(&event);
+                let g = gw.read();
+                g.send_event_to_call_owner(&call_id, &event);
             });
         }
 
@@ -1821,7 +1825,10 @@ impl SipSession {
                     .await?;
             }
             DialogState::Options(_, _, tx_handle) => {
-                tx_handle.respond(rsipstack::sip::StatusCode::OK, None, None).await.ok();
+                tx_handle
+                    .respond(rsipstack::sip::StatusCode::OK, None, None)
+                    .await
+                    .ok();
             }
             DialogState::Info(_, request, tx_handle) => {
                 self.handle_dialog_info(request, tx_handle).await?;
@@ -2203,7 +2210,10 @@ impl SipSession {
                 }
             }
             DialogState::Options(_, _, tx_handle) => {
-                tx_handle.respond(rsipstack::sip::StatusCode::OK, None, None).await.ok();
+                tx_handle
+                    .respond(rsipstack::sip::StatusCode::OK, None, None)
+                    .await
+                    .ok();
             }
             DialogState::Info(_, request, tx_handle) => {
                 let content_type = Self::request_content_type(&request);
@@ -4996,9 +5006,7 @@ impl SipSession {
                 continue;
             }
             if let Some((trunk_host, trunk_port)) = trunk_host_port(&trunk.dest) {
-                if trunk_host.to_lowercase() == callee_host
-                    && trunk_port == callee_port
-                {
+                if trunk_host.to_lowercase() == callee_host && trunk_port == callee_port {
                     let parsed = parse_allowed_codecs(&trunk.codec);
                     if !parsed.is_empty() {
                         return Some(parsed);
@@ -7316,10 +7324,8 @@ impl SipSession {
                 target_dn: None,
             };
             let gw = gw.clone();
-            tokio::spawn(async move {
-                let g = gw.read().await;
-                g.send_event_to_call_owner(&dn_call_id, &event);
-            });
+            let g = gw.read();
+            g.send_event_to_call_owner(&dn_call_id, &event);
         }
     }
 
@@ -7330,10 +7336,8 @@ impl SipSession {
         if let Some(ref gw) = self.server.rwi_gateway {
             let gw = gw.clone();
             let call_id = self.context.session_id.clone();
-            tokio::spawn(async move {
-                let g = gw.read().await;
-                g.send_event_to_call_owner(&call_id, &event);
-            });
+            let g = gw.read();
+            g.send_event_to_call_owner(&call_id, &event);
         }
     }
 
@@ -10293,10 +10297,7 @@ a=rtcp-fb:104 nack\r\n";
 
     #[test]
     fn test_priority_filters_invalid_codec_names() {
-        let codecs = resolve_codecs_fake(
-            &[],
-            &["pcma", "invalid_codec", "g729"],
-        );
+        let codecs = resolve_codecs_fake(&[], &["pcma", "invalid_codec", "g729"]);
         assert_eq!(codecs, vec![CodecType::PCMA, CodecType::G729]);
     }
 
@@ -10317,7 +10318,11 @@ a=rtcp-fb:104 nack\r\n";
         if !dialplan.is_empty() {
             return dialplan.to_vec();
         }
-        let proxy: Vec<String> = proxy_strs.iter().filter(|s| !s.is_empty()).map(|s| s.to_string()).collect();
+        let proxy: Vec<String> = proxy_strs
+            .iter()
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+            .collect();
         if !proxy.is_empty() {
             return parse_allowed_codecs(&proxy);
         }
