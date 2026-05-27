@@ -257,6 +257,17 @@ pub enum RwiCommandPayload {
     ConferenceDestroy {
         conf_id: String,
     },
+    ConferenceKick {
+        conf_id: String,
+        call_id: String,
+    },
+    ConferenceMuteAll {
+        conf_id: String,
+    },
+    ConferenceInfo {
+        conf_id: String,
+    },
+    ConferenceList,
     ConferenceMerge {
         conf_id: String,
         call_id: String,

@@ -5,6 +5,7 @@ use super::{
     user::{UserBackend, build_user_backend},
 };
 use crate::{
+    auto_external_ip,
     call::{TransactionCookie, policy::FrequencyLimiter},
     callrecord::{
         CallRecordSender,
@@ -407,7 +408,7 @@ impl SipServerBuilder {
         };
 
         let locator = Arc::new(locator);
-        let rtp_config = self.rtp_config.unwrap_or_default();
+        let mut rtp_config = self.rtp_config.unwrap_or_default();
         let cancel_token = self.cancel_token.unwrap_or_default();
         let config = self.config.clone();
         let transport_layer = TransportLayer::new(cancel_token.clone());
@@ -421,6 +422,29 @@ impl SipServerBuilder {
                 .addr
                 .parse::<IpAddr>()
                 .map_err(|e| anyhow!("failed to parse local ip address: {}", e))?;
+
+            // Auto-detect external IP if not manually configured
+            if rtp_config.external_ip.is_none() {
+                if let Some(ref url) = rtp_config.auto_external_ip {
+                    match auto_external_ip::detect_external_ip(url).await {
+                        Ok(ip) => {
+                            warn!(
+                                "auto_external_ip: detected {} from '{}'",
+                                ip,
+                                if url.is_empty() {
+                                    auto_external_ip::DEFAULT_AUTO_EXTERNAL_IP_URL
+                                } else {
+                                    url
+                                }
+                            );
+                            rtp_config.external_ip = Some(ip.to_string());
+                        }
+                        Err(e) => {
+                            warn!("auto_external_ip: detection failed: {}", e);
+                        }
+                    }
+                }
+            }
 
             let external_ip = match rtp_config.external_ip {
                 Some(ref s) => Some(

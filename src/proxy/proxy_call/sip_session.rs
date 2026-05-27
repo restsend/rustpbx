@@ -7115,6 +7115,53 @@ impl SipSession {
                 }
             }
 
+            CallCommand::ConferenceKick { conf_id, leg_id } => {
+                match self.handle_conference_kick(conf_id, leg_id).await {
+                    Ok(_) => CommandResult::success(),
+                    Err(e) => CommandResult::failure(e.to_string()),
+                }
+            }
+
+            CallCommand::ConferenceMuteAll { conf_id } => {
+                match self.handle_conference_mute_all(conf_id).await {
+                    Ok(_) => CommandResult::success(),
+                    Err(e) => CommandResult::failure(e.to_string()),
+                }
+            }
+
+            CallCommand::ConferenceInfo { conf_id } => {
+                match self.handle_conference_info(conf_id).await {
+                    Ok(room) => {
+                        let mut data = serde_json::Map::new();
+                        data.insert("conf_id".to_string(), serde_json::Value::String(room.id.0.clone()));
+                        data.insert("participant_count".to_string(), serde_json::Value::Number(
+                            serde_json::Number::from(room.participant_count()),
+                        ));
+                        let participants: Vec<serde_json::Value> = room.participants.values().map(|p| {
+                            serde_json::json!({
+                                "leg_id": p.leg_id.as_str(),
+                                "muted": p.muted,
+                            })
+                        }).collect();
+                        data.insert("participants".to_string(), serde_json::Value::Array(participants));
+                        CommandResult::success_with_data(serde_json::Value::Object(data))
+                    }
+                    Err(e) => CommandResult::failure(e.to_string()),
+                }
+            }
+
+            CallCommand::ConferenceList => {
+                let rooms = self.handle_conference_list().await;
+                let list: Vec<serde_json::Value> = rooms.iter().map(|r| {
+                    serde_json::json!({
+                        "conf_id": r.id.0,
+                        "participant_count": r.participant_count(),
+                        "locked": r.locked,
+                    })
+                }).collect();
+                CommandResult::success_with_data(serde_json::Value::Array(list))
+            }
+
             CallCommand::QueueEnqueue {
                 leg_id,
                 queue_id,

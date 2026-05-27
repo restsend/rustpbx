@@ -347,11 +347,52 @@
                             </div>
                         </div>
                         <div>
-                            <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">{{
-                                "settings_page.external_ip" | t }}</label>
-                            <input type="text" x-model="platformDraft.external_ip" :disabled="platformProcessing"
-                                class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                                placeholder="1.2.3.4" />
+                            <label class="block text-xs font-semibold uppercase tracking-wide text-slate-400">{{ "settings_page.external_ip" | t }}</label>
+                            <div class="mt-1 flex gap-2">
+                                <label class="inline-flex cursor-pointer items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-medium transition"
+                                    :class="platformDraft.external_ip_mode === 'none' ? 'border-sky-300 bg-sky-50 text-sky-700' : 'border-slate-200 bg-white text-slate-600 hover:border-slate-300'">
+                                    <input type="radio" name="ext_ip_mode" value="none" class="sr-only"
+                                        x-model="platformDraft.external_ip_mode">
+                                    None
+                                </label>
+                                <label class="inline-flex cursor-pointer items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-medium transition"
+                                    :class="platformDraft.external_ip_mode === 'manual' ? 'border-sky-300 bg-sky-50 text-sky-700' : 'border-slate-200 bg-white text-slate-600 hover:border-slate-300'">
+                                    <input type="radio" name="ext_ip_mode" value="manual" class="sr-only"
+                                        x-model="platformDraft.external_ip_mode">
+                                    Manual
+                                </label>
+                                <label class="inline-flex cursor-pointer items-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-medium transition"
+                                    :class="platformDraft.external_ip_mode === 'auto' ? 'border-sky-300 bg-sky-50 text-sky-700' : 'border-slate-200 bg-white text-slate-600 hover:border-slate-300'">
+                                    <input type="radio" name="ext_ip_mode" value="auto" class="sr-only"
+                                        x-model="platformDraft.external_ip_mode">
+                                    Auto
+                                </label>
+                            </div>
+                            <div x-show="platformDraft.external_ip_mode === 'manual'">
+                                <input type="text" x-model="platformDraft.external_ip" :disabled="platformProcessing"
+                                    class="mt-1 w-full rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                    placeholder="1.2.3.4" />
+                            </div>
+                            <div x-show="platformDraft.external_ip_mode === 'auto'">
+                                <div class="mt-1 flex gap-2">
+                                    <input type="text" x-model="platformDraft.auto_external_ip" :disabled="platformProcessing || platformDraft.auto_external_ip_testing"
+                                        class="flex-1 rounded-md border border-slate-200 px-3 py-2 text-sm text-slate-700 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                        placeholder="http://ifconfig.me" />
+                                    <button type="button" @click="testAutoExternalIp"
+                                        :disabled="platformProcessing || platformDraft.auto_external_ip_testing"
+                                        class="inline-flex items-center gap-1.5 rounded-md border border-sky-300 bg-sky-50 px-3 py-2 text-sm font-medium text-sky-700 transition hover:bg-sky-100 disabled:opacity-50 disabled:cursor-not-allowed">
+                                        <svg x-show="!platformDraft.auto_external_ip_testing" class="h-4 w-4" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2">
+                                            <path stroke-linecap="round" stroke-linejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182"/>
+                                        </svg>
+                                        <svg x-show="platformDraft.auto_external_ip_testing" class="h-4 w-4 animate-spin" viewBox="0 0 20 20" fill="none">
+                                            <circle class="opacity-25" cx="10" cy="10" r="8" stroke="currentColor" stroke-width="3"/>
+                                            <path class="opacity-75" fill="currentColor" d="M10 2a8 8 0 018 8h-2a6 6 0 00-6-6V2z"/>
+                                        </svg>
+                                        <span>REFRESH</span>
+                                    </button>
+                                </div>
+                                <p x-show="platformDraft.auto_external_ip_result" class="mt-1 text-xs" :class="platformDraft.auto_external_ip_result?.startsWith('✓') ? 'text-green-600' : 'text-red-500'" x-text="platformDraft.auto_external_ip_result"></p>
+                            </div>
                         </div>
                         <div class="grid gap-4 sm:grid-cols-2">
                             <div>
@@ -2806,6 +2847,10 @@
                 log_level: '',
                 log_file: '',
                 external_ip: '',
+                auto_external_ip: '',
+                external_ip_mode: 'none',
+                auto_external_ip_testing: false,
+                auto_external_ip_result: '',
                 rtp_start_port: '',
                 rtp_end_port: '',
             },
@@ -4831,13 +4876,15 @@
                 const toStringOrEmpty = (value) => (value === undefined || value === null || value === ''
                     ? ''
                     : String(value));
-                this.platformDraft = {
-                    log_level: this.platform?.log_level || '',
-                    log_file: this.platform?.log_file || '',
-                    external_ip: rtp?.external_ip || '',
-                    rtp_start_port: toStringOrEmpty(rtp?.start_port),
-                    rtp_end_port: toStringOrEmpty(rtp?.end_port),
-                };
+                const manualIp = rtp?.external_ip || '';
+                const autoUrl = rtp?.auto_external_ip || '';
+                this.platformDraft.external_ip = manualIp;
+                this.platformDraft.auto_external_ip = autoUrl;
+                this.platformDraft.external_ip_mode = autoUrl ? 'auto' : (manualIp ? 'manual' : 'none');
+                this.platformDraft.auto_external_ip_testing = false;
+                this.platformDraft.auto_external_ip_result = '';
+                this.platformDraft.rtp_start_port = toStringOrEmpty(rtp?.start_port);
+                this.platformDraft.rtp_end_port = toStringOrEmpty(rtp?.end_port);
             },
             initProxyDraft() {
                 const proxy = this.proxyConfig || {};
@@ -5036,6 +5083,29 @@
                 }
                 return parsed;
             },
+            async testAutoExternalIp() {
+                if (this.platformDraft.auto_external_ip_testing) return;
+                this.platformDraft.auto_external_ip_testing = true;
+                this.platformDraft.auto_external_ip_result = '';
+                const url = this.platformDraft.auto_external_ip.trim() || null;
+                try {
+                    const response = await fetch(`${this.basePath}/settings/config/platform/auto-external-ip/test`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ url }),
+                    });
+                    const data = await response.json().catch(() => ({}));
+                    if (response.ok && data?.status === 'ok') {
+                        this.platformDraft.auto_external_ip_result = `✓ Detected: ${data.ip}`;
+                    } else {
+                        this.platformDraft.auto_external_ip_result = `✗ ${data?.message || 'Test failed'}`;
+                    }
+                } catch (e) {
+                    this.platformDraft.auto_external_ip_result = `✗ ${e.message || 'Request failed'}`;
+                } finally {
+                    this.platformDraft.auto_external_ip_testing = false;
+                }
+            },
             async savePlatformSettings() {
                 if (this.platformProcessing) {
                     return;
@@ -5066,7 +5136,12 @@
                 const body = {
                     log_level: this.normalizeOptionalString(this.platformDraft.log_level),
                     log_file: this.normalizeOptionalString(this.platformDraft.log_file),
-                    external_ip: this.normalizeOptionalString(this.platformDraft.external_ip),
+                    external_ip: this.platformDraft.external_ip_mode === 'manual'
+                        ? this.normalizeOptionalString(this.platformDraft.external_ip)
+                        : null,
+                    auto_external_ip: this.platformDraft.external_ip_mode === 'auto'
+                        ? this.normalizeOptionalString(this.platformDraft.auto_external_ip)
+                        : null,
                     rtp_start_port: startPortValue,
                     rtp_end_port: endPortValue,
                 };
@@ -5091,6 +5166,7 @@
                         this.proxyConfig.rtp = {};
                     }
                     this.proxyConfig.rtp.external_ip = rtp.external_ip ?? null;
+                    this.proxyConfig.rtp.auto_external_ip = rtp.auto_external_ip ?? null;
                     this.proxyConfig.rtp.start_port = rtp.start_port ?? null;
                     this.proxyConfig.rtp.end_port = rtp.end_port ?? null;
                     this.initPlatformDraft();

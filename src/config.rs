@@ -229,6 +229,7 @@ pub struct Config {
     pub proxy: ProxyConfig,
 
     pub external_ip: Option<String>,
+    pub auto_external_ip: Option<String>,
     #[serde(default = "default_config_rtp_start_port")]
     pub rtp_start_port: Option<u16>,
     #[serde(default = "default_config_rtp_end_port")]
@@ -605,6 +606,7 @@ impl SessionTimerMode {
 #[derive(Clone, Debug, Deserialize, Serialize, Default)]
 pub struct RtpConfig {
     pub external_ip: Option<String>,
+    pub auto_external_ip: Option<String>,
     pub bind_ip: Option<String>,
     pub start_port: Option<u16>,
     pub end_port: Option<u16>,
@@ -1102,6 +1104,7 @@ impl Default for Config {
             ice_servers: None,
             ami: Some(AmiConfig::default()),
             external_ip: None,
+            auto_external_ip: None,
             rtp_start_port: default_config_rtp_start_port(),
             rtp_end_port: default_config_rtp_end_port(),
             webrtc_port_start: default_config_webrtc_start_port(),
@@ -1149,6 +1152,7 @@ impl Config {
     pub fn rtp_config(&self) -> RtpConfig {
         RtpConfig {
             external_ip: self.external_ip.clone(),
+            auto_external_ip: self.auto_external_ip.clone(),
             bind_ip: Some(self.proxy.addr.clone()),
             start_port: self.rtp_start_port,
             end_port: self.rtp_end_port,
