@@ -340,10 +340,7 @@ impl SipServerBuilder {
         self
     }
 
-    pub fn with_rwi_gateway(
-        mut self,
-        gateway: crate::rwi::RwiGatewayRef,
-    ) -> Self {
+    pub fn with_rwi_gateway(mut self, gateway: crate::rwi::RwiGatewayRef) -> Self {
         self.rwi_gateway = Some(gateway);
         self
     }
@@ -997,15 +994,15 @@ impl SipServer {
                     .ok();
                 continue;
             }
-            // Spam protection for OPTIONS requests
-            // If the OPTIONS request is out-of-dialog and the tag is not present, ignore it
-            if matches!(
-                tx.original.method,
-                rsipstack::sip::Method::Options
-                    | rsipstack::sip::method::Method::Info
-                    | rsipstack::sip::method::Method::Refer
-                    | rsipstack::sip::method::Method::Update
-            ) && self.inner.ignore_out_of_dialog_request
+            // Spam protection for out-of-dialog requests
+            if self.inner.ignore_out_of_dialog_request
+                && matches!(
+                    tx.original.method,
+                    rsipstack::sip::Method::Options
+                        | rsipstack::sip::method::Method::Info
+                        | rsipstack::sip::method::Method::Refer
+                        | rsipstack::sip::method::Method::Update
+                )
             {
                 let to_tag = tx
                     .original
@@ -1013,8 +1010,25 @@ impl SipServer {
                     .and_then(|to| to.tag())
                     .ok()
                     .flatten();
-                let via = tx.original.via_header()?.value();
                 if to_tag.is_none() {
+                    let via = tx.original.via_header()?.value();
+                    if tx.original.method == rsipstack::sip::Method::Options {
+                        let via_ip = crate::proxy::routing::extract_via_ip(&tx.original);
+                        let is_trunk = if let Some(ip) = via_ip {
+                            self.inner
+                                .data_context
+                                .find_trunk_by_ip(&ip)
+                                .await
+                                .is_some()
+                        } else {
+                            false
+                        };
+                        if is_trunk {
+                            info!(key = %tx.key, via, "responding 200 OK to out-of-dialog OPTIONS (trunk health probe)");
+                            tx.reply(rsipstack::sip::StatusCode::OK).await.ok();
+                            continue;
+                        }
+                    }
                     info!(key = %tx.key, via, "ignoring out-of-dialog {} request", tx.original.method);
                     continue;
                 }

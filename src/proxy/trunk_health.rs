@@ -397,6 +397,11 @@ fn spawn_health_loop_with_timeout(
                 }
             }
 
+            {
+                let mut map = states.write().await;
+                map.retain(|name, _| trunks.contains_key(name));
+            }
+
             tokio::time::sleep(Duration::from_secs(next_tick)).await;
         }
 
@@ -894,6 +899,58 @@ mod tests {
         sleep(Duration::from_secs(1)).await;
         let snap = snapshot(&states).await;
         assert!(snap.is_empty(), "disabled trunk should never be probed");
+
+        cancel.cancel();
+    }
+
+    #[tokio::test]
+    async fn test_health_loop_cleans_stale_entries_on_reload() {
+        let port = pick_unused_port().unwrap();
+        let responder = OptionsResponder::start(port).await;
+        let (ep_inner, local_addr) = create_client_endpoint().await;
+
+        let states: HealthStateMap = Arc::new(RwLock::new(HashMap::new()));
+        let trunk_a = make_trunk(&responder.addr(), false, 1, 3);
+        let cancel = CancellationToken::new();
+
+        let trunks = Arc::new(TestTrunks::new(HashMap::from([(
+            "trunk_a".into(),
+            trunk_a,
+        )])));
+        let trunks_fn = {
+            let t = trunks.clone();
+            move || t.lock().unwrap().clone()
+        };
+
+        spawn_health_loop(
+            trunks_fn,
+            states.clone(),
+            ep_inner,
+            local_addr,
+            1,
+            cancel.child_token(),
+        );
+
+        sleep(Duration::from_secs(2)).await;
+        let snap = snapshot(&states).await;
+        assert_eq!(snap.len(), 1);
+        assert_eq!(snap[0].trunk_name, "trunk_a");
+
+        // Simulate reload: remove trunk_a, add trunk_b
+        let trunk_b = make_trunk(&responder.addr(), false, 1, 3);
+        *trunks.lock().unwrap() = HashMap::from([("trunk_b".into(), trunk_b)]);
+
+        // Wait for the next tick to clean up stale entries
+        sleep(Duration::from_secs(2)).await;
+        let snap = snapshot(&states).await;
+        assert!(
+            snap.iter().all(|s| s.trunk_name != "trunk_a"),
+            "stale trunk_a should be removed after reload"
+        );
+        assert!(
+            snap.iter().any(|s| s.trunk_name == "trunk_b"),
+            "trunk_b should appear after reload"
+        );
 
         cancel.cancel();
     }
