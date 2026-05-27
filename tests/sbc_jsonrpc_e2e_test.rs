@@ -189,6 +189,10 @@ async fn test_sbc_jsonrpc_e2e_sipbot_rewrite() {
         bob.has_rtp_rx(),
         "bob should have received RTP (call established)"
     );
+    {
+        let q = bob.audio_quality_summary();
+        tracing::info!("bob audio quality after SBC call: total={} silence={}", q.total_frames, q.silence_frames);
+    }
 
     // ── Cleanup ──────────────────────────────────────────────────────────
     cancel_token.cancel();
@@ -463,6 +467,10 @@ async fn test_sbc_jsonrpc_e2e_header_injection() {
         bob.has_rtp_rx(),
         "bob should have received RTP (call established with header injection)"
     );
+    {
+        let q = bob.audio_quality_summary();
+        tracing::info!("bob audio quality (header injection): total={} silence={}", q.total_frames, q.silence_frames);
+    }
 
     cancel_token.cancel();
     upstream_cancel.cancel();
@@ -617,6 +625,10 @@ async fn test_sbc_jsonrpc_e2e_multi_rule_matching() {
         bob.has_rtp_rx(),
         "bob should have received RTP (call established via catch-all rule)"
     );
+    {
+        let q = bob.audio_quality_summary();
+        tracing::info!("bob audio quality (multi-rule): total={} silence={}", q.total_frames, q.silence_frames);
+    }
 
     cancel_token.cancel();
     upstream_cancel.cancel();
@@ -871,6 +883,10 @@ async fn test_sbc_jsonrpc_e2e_callee_rewrite() {
         bob.has_rtp_rx(),
         "bob should have received RTP (callee rewritten to bob)"
     );
+    {
+        let q = bob.audio_quality_summary();
+        tracing::info!("bob audio quality (callee rewrite): total={} silence={}", q.total_frames, q.silence_frames);
+    }
 
     cancel_token.cancel();
     upstream_cancel.cancel();

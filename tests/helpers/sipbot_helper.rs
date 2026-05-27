@@ -15,6 +15,7 @@
 // ```
 
 use sipbot::{
+    audio_quality::AudioQualityConfig,
     config::{AccountConfig, AnswerConfig, Config as SipBotConfig, RingConfig},
     sip::SipBot,
     stats::CallStats,
@@ -30,6 +31,9 @@ pub struct TestUa {
     /// Shared call statistics for RTP validation
     #[allow(dead_code)]
     pub stats: Arc<CallStats>,
+    /// WAV file path where sipbot records RX/TX audio (stereo 16kHz, L=RX, R=TX)
+    #[allow(dead_code)]
+    pub record_path: Option<String>,
 }
 
 impl TestUa {
@@ -100,6 +104,7 @@ impl TestUa {
             cancel_token,
             domain: format!("{}:{}", domain, sip_port),
             stats,
+            record_path: None,
         }
     }
 
@@ -146,10 +151,10 @@ impl TestUa {
             cancel_token,
             domain,
             stats,
+            record_path: None,
         }
     }
 
-    /// Create and start a callee UA with REFER rejection (for 3PCC fallback testing).
     #[allow(dead_code)]
     pub async fn callee_with_refer_reject(
         sip_port: u16,
@@ -166,6 +171,34 @@ impl TestUa {
         username: &str,
         refer_reject: Option<u16>,
     ) -> Self {
+        Self::callee_with_options_and_record(sip_port, ring_secs, username, refer_reject, None)
+            .await
+    }
+
+    /// Create and start a callee UA with optional WAV recording.
+    pub async fn callee_with_record(
+        sip_port: u16,
+        ring_secs: u64,
+        username: &str,
+        record_path: String,
+    ) -> Self {
+        Self::callee_with_options_and_record(
+            sip_port,
+            ring_secs,
+            username,
+            None,
+            Some(record_path),
+        )
+        .await
+    }
+
+    async fn callee_with_options_and_record(
+        sip_port: u16,
+        ring_secs: u64,
+        username: &str,
+        refer_reject: Option<u16>,
+        record_path: Option<String>,
+    ) -> Self {
         let cancel_token = CancellationToken::new();
         let domain = format!("127.0.0.1:{}", sip_port);
 
@@ -173,7 +206,7 @@ impl TestUa {
             username: username.to_string(),
             domain: domain.clone(),
             password: None,
-            register: Some(false), // no registration needed in test
+            register: Some(false),
             ring: Some(RingConfig {
                 duration_secs: ring_secs,
                 ringback: None,
@@ -181,6 +214,11 @@ impl TestUa {
             }),
             answer: Some(AnswerConfig::Echo),
             refer_reject,
+            record: record_path.clone(),
+            audio_quality: Some(AudioQualityConfig {
+                enabled: true,
+                ..Default::default()
+            }),
             ..Default::default()
         };
 
@@ -207,13 +245,13 @@ impl TestUa {
             }
         });
 
-        // Give the UA a moment to bind its UDP socket before we start calling it.
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
         Self {
             cancel_token,
             domain,
             stats,
+            record_path,
         }
     }
 
@@ -251,6 +289,62 @@ impl TestUa {
     pub fn has_rtp_tx(&self) -> bool {
         use std::sync::atomic::Ordering;
         self.stats.tx_packets.load(Ordering::Relaxed) > 0
+    }
+
+    /// Get the number of received DTMF events
+    #[allow(dead_code)]
+    pub fn rx_dtmf_count(&self) -> u64 {
+        use std::sync::atomic::Ordering;
+        self.stats.rx_dtmf_events.load(Ordering::Relaxed)
+    }
+
+    /// Get the number of transmitted DTMF events
+    #[allow(dead_code)]
+    pub fn tx_dtmf_count(&self) -> u64 {
+        use std::sync::atomic::Ordering;
+        self.stats.tx_dtmf_events.load(Ordering::Relaxed)
+    }
+
+    /// Get audio quality summary for assertions
+    #[allow(dead_code)]
+    pub fn audio_quality_summary(&self) -> AudioQualitySummary {
+        use std::sync::atomic::Ordering;
+        AudioQualitySummary {
+            total_frames: self.stats.audio_quality_total_frames.load(Ordering::Relaxed),
+            silence_frames: self.stats.audio_quality_silence_frames.load(Ordering::Relaxed),
+            clipping_frames: self.stats.audio_quality_clipping_frames.load(Ordering::Relaxed),
+            shrill_count: self.stats.audio_quality_shrill_count.load(Ordering::Relaxed),
+            muffled_count: self.stats.audio_quality_muffled_count.load(Ordering::Relaxed),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct AudioQualitySummary {
+    pub total_frames: u64,
+    pub silence_frames: u64,
+    pub clipping_frames: u64,
+    pub shrill_count: u64,
+    pub muffled_count: u64,
+}
+
+impl AudioQualitySummary {
+    pub fn silence_ratio(&self) -> f64 {
+        if self.total_frames == 0 {
+            return 1.0;
+        }
+        self.silence_frames as f64 / self.total_frames as f64
+    }
+
+    pub fn has_audio(&self) -> bool {
+        self.total_frames > 0 && self.silence_ratio() < 0.95
+    }
+
+    pub fn clipping_ratio(&self) -> f64 {
+        if self.total_frames == 0 {
+            return 0.0;
+        }
+        self.clipping_frames as f64 / self.total_frames as f64
     }
 }
 

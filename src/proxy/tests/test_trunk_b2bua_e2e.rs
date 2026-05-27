@@ -1251,7 +1251,7 @@ async fn test_trunk_b2bua_mid_call_reinvite() -> Result<()> {
     let caller_target = extract_media_endpoint(&caller_answer)
         .ok_or_else(|| anyhow::anyhow!("No caller endpoint"))?;
 
-    let (caller_stats, callee_stats) = exchange_rtp(
+    let (_caller_stats, callee_stats) = exchange_rtp(
         &caller_sender,
         &callee_sender,
         &caller_receiver,

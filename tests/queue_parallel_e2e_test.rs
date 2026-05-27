@@ -131,16 +131,22 @@ async fn test_parallel_queue_fork_first_answer_wins() {
     // Agent2 (ring_secs=0) should have answered and have RTP activity.
     let agent2_rx = agent2.has_rtp_rx();
     let agent2_tx = agent2.has_rtp_tx();
+    let agent2_quality = agent2.audio_quality_summary();
     tracing::info!(
         agent2_rx,
         agent2_tx,
-        "Agent2 RTP stats: {}",
-        agent2.rtp_stats_summary()
+        "Agent2 RTP stats: {}, quality: total={} silence={}",
+        agent2.rtp_stats_summary(),
+        agent2_quality.total_frames,
+        agent2_quality.silence_frames
     );
     assert!(
         agent2_rx || agent2_tx,
         "Agent2 should have RTP activity (answered the parallel fork)"
     );
+    if agent2_quality.total_frames > 0 {
+        assert!(agent2_quality.has_audio(), "Agent2 should have non-silent audio. Quality: {:?}", agent2_quality);
+    }
 
     // Agent1 (ring_secs=2) should NOT have answered — its fork was cancelled.
     let agent1_rx = agent1.has_rtp_rx();
@@ -159,16 +165,22 @@ async fn test_parallel_queue_fork_first_answer_wins() {
     // Caller should also have RTP activity (bridged with agent2).
     let caller_rx = caller.has_rtp_rx();
     let caller_tx = caller.has_rtp_tx();
+    let caller_quality = caller.audio_quality_summary();
     tracing::info!(
         caller_rx,
         caller_tx,
-        "Caller RTP stats: {}",
-        caller.rtp_stats_summary()
+        "Caller RTP stats: {}, quality: total={} silence={}",
+        caller.rtp_stats_summary(),
+        caller_quality.total_frames,
+        caller_quality.silence_frames
     );
     assert!(
         caller_rx || caller_tx,
         "Caller should have RTP activity (bridged with agent)"
     );
+    if caller_quality.total_frames > 0 {
+        assert!(caller_quality.has_audio(), "Caller should have non-silent audio. Quality: {:?}", caller_quality);
+    }
 
     // ── Cleanup ────────────────────────────────────────────────────────────
     agent1.stop();
