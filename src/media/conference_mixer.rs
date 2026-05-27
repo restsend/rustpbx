@@ -218,7 +218,7 @@ impl ConferenceAudioMixer {
         let sample_rate = self.sample_rate;
         let conf_id = self.conf_id.clone();
 
-        let task = tokio::spawn(async move {
+        let task = crate::utils::spawn(async move {
             Self::mixing_loop(conf_id, participants, cancel_token, frame_size, sample_rate).await;
         });
 

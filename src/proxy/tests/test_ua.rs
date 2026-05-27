@@ -131,7 +131,7 @@ impl TestUa {
 
         // Start endpoint service
         let cancel_token = self.cancel_token.clone();
-        tokio::spawn(async move {
+        crate::utils::spawn(async move {
             select! {
                 _ = endpoint.serve() => {},
                 _ = cancel_token.cancelled() => {}
@@ -146,7 +146,7 @@ impl TestUa {
             let cancel_token = self.cancel_token.clone();
             let received_sdps_clone = self.received_offer_sdps.clone();
 
-            tokio::spawn(async move {
+            crate::utils::spawn(async move {
                 Self::process_incoming_request(
                     dialog_layer_clone,
                     incoming,
@@ -732,7 +732,7 @@ impl TestUa {
                         if tx.original.to_header()?.tag()?.as_ref().is_some() {
                             if let Some(mut d) = dialog_layer.match_dialog(&tx) {
                                 debug!(method=%tx.original.method, "TestUa matched dialog for request");
-                                tokio::spawn(async move {
+                                crate::utils::spawn(async move {
                                     d.handle(&mut tx).await.ok();
                                 });
                                 continue;
@@ -760,7 +760,7 @@ impl TestUa {
                                         let mut sdps = received_sdps.lock().await;
                                         sdps.insert(dialog_id, sdp_str);
                                     }
-                                    tokio::spawn(async move {
+                                    crate::utils::spawn(async move {
                                         dialog.handle(&mut tx).await.ok();
                                     });
                                 }
@@ -769,7 +769,7 @@ impl TestUa {
                                 if let Ok(mut dialog) = dialog_layer.get_or_create_server_invite(
                                     &tx, state_sender.clone(), None, Some(contact.clone())
                                 ) {
-                                    tokio::spawn(async move {
+                                    crate::utils::spawn(async move {
                                         dialog.handle(&mut tx).await.ok();
                                     });
                                 }
@@ -989,7 +989,7 @@ mod tests {
             let sdp_offer = create_test_sdp("192.168.1.100", 5004, true);
             let alice_clone = alice.clone();
             let caller_handle =
-                tokio::spawn(async move { alice_clone.make_call("bob", Some(sdp_offer)).await });
+                crate::utils::spawn(async move { alice_clone.make_call("bob", Some(sdp_offer)).await });
 
             // Wait and answer incoming call by polling events (avoid draining issue)
             let mut answered = false;
@@ -1066,7 +1066,7 @@ mod tests {
 
         // Test immediate rejection
         {
-            let caller_handle = tokio::spawn({
+            let caller_handle = crate::utils::spawn({
                 let alice = alice.clone();
                 async move { alice.make_call("bob", None).await }
             });
@@ -1094,7 +1094,7 @@ mod tests {
 
         // Test rejection after ringing
         {
-            let caller_handle = tokio::spawn({
+            let caller_handle = crate::utils::spawn({
                 let alice = alice.clone();
                 async move { alice.make_call("bob", None).await }
             });
@@ -1267,7 +1267,7 @@ mod tests {
             sleep(Duration::from_millis(100)).await;
 
             // Spawn caller in a separate task to allow concurrent processing
-            let caller_handle = tokio::spawn({
+            let caller_handle = crate::utils::spawn({
                 let a = alice.clone();
                 async move { a.make_call("bob", Some(sdp)).await }
             });
@@ -1329,7 +1329,7 @@ mod tests {
         sleep(Duration::from_millis(100)).await;
 
         {
-            let caller_handle = tokio::spawn({
+            let caller_handle = crate::utils::spawn({
                 let a = alice.clone();
                 async move { a.make_call("bob", None).await }
             });
@@ -1426,7 +1426,7 @@ mod tests {
 
         // Create and terminate multiple calls to test cleanup
         for i in 0..3 {
-            let caller_handle = tokio::spawn({
+            let caller_handle = crate::utils::spawn({
                 let a = alice.clone();
                 async move { a.make_call("bob", None).await }
             });
@@ -1541,7 +1541,7 @@ mod tests {
         for i in 0..5 {
             let caller_handle = {
                 let a = alice.clone();
-                tokio::spawn(async move { a.make_call("bob", None).await })
+                crate::utils::spawn(async move { a.make_call("bob", None).await })
             };
 
             if wait_for_event(
@@ -1605,7 +1605,7 @@ mod tests {
 
         {
             let alice_arc = alice.clone();
-            let caller_handle = tokio::spawn({
+            let caller_handle = crate::utils::spawn({
                 let a = alice_arc.clone();
                 async move { a.make_call("bob", None).await }
             });
@@ -1682,7 +1682,7 @@ mod tests {
         // Test blind transfer scenario
         {
             let alice_arc = alice.clone();
-            let caller_handle = tokio::spawn({
+            let caller_handle = crate::utils::spawn({
                 let a = alice_arc.clone();
                 async move { a.make_call("bob", None).await }
             });
@@ -1771,7 +1771,7 @@ mod tests {
 
             {
                 let alice_arc = alice.clone();
-                let caller_handle = tokio::spawn({
+                let caller_handle = crate::utils::spawn({
                     let a = alice_arc.clone();
                     let s = offer_sdp.to_string();
                     async move { a.make_call("bob", Some(s)).await }
@@ -1841,7 +1841,7 @@ mod tests {
 
         {
             let alice_arc = alice.clone();
-            let caller_handle = tokio::spawn({
+            let caller_handle = crate::utils::spawn({
                 let a = alice_arc.clone();
                 async move { a.make_call("bob", None).await }
             });
@@ -1980,7 +1980,7 @@ m=audio 5004 RTP/AVP 0
 a=rtpmap:0 PCMU/8000"#;
 
         let alice_arc = alice.clone();
-        let caller_handle = tokio::spawn({
+        let caller_handle = crate::utils::spawn({
             let a = alice_arc.clone();
             let s = ipv6_sdp.to_string();
             async move { a.make_call("bob", Some(s)).await }
@@ -2021,7 +2021,7 @@ a=rtpmap:0 PCMU/8000
 a=candidate:1 1 udp 2130706431 192.168.1.100 54400 typ host
 a=candidate:2 1 udp 2130706430 2001:db8::1 54401 typ host"#;
 
-        let caller_handle = tokio::spawn({
+        let caller_handle = crate::utils::spawn({
             let a = alice_arc.clone();
             let s = dual_stack_sdp.to_string();
             async move { a.make_call("bob", Some(s)).await }
@@ -2084,7 +2084,7 @@ a=candidate:2 1 udp 2130706430 2001:db8::1 54401 typ host"#;
         {
             let caller_handle = {
                 let a = alice.clone();
-                tokio::spawn(async move { a.make_call("bob", None).await })
+                crate::utils::spawn(async move { a.make_call("bob", None).await })
             };
             if wait_for_event(
                 &mut bob,
@@ -2117,7 +2117,7 @@ a=candidate:2 1 udp 2130706430 2001:db8::1 54401 typ host"#;
         {
             let caller_handle = {
                 let a = alice.clone();
-                tokio::spawn(async move { a.make_call("bob", None).await })
+                crate::utils::spawn(async move { a.make_call("bob", None).await })
             };
             if wait_for_event(
                 &mut bob,
@@ -2179,7 +2179,7 @@ a=candidate:2 1 udp 2130706430 2001:db8::1 54401 typ host"#;
 
         // Test callee hangup after answering
         let alice_arc = alice.clone();
-        let _caller_handle = tokio::spawn({
+        let _caller_handle = crate::utils::spawn({
             let a = alice_arc.clone();
             async move { a.make_call("bob", None).await }
         });
@@ -2262,7 +2262,7 @@ a=rtpmap:111 opus/48000/2
 a=sendrecv"#;
 
             {
-                let caller_handle = tokio::spawn({
+                let caller_handle = crate::utils::spawn({
                     let a = alice_arc.clone();
                     let s = webrtc_offer.to_string();
                     async move { a.make_call("bob", Some(s)).await }
@@ -2315,7 +2315,7 @@ m=audio 5004 RTP/AVP 0
 a=rtpmap:0 PCMU/8000"#;
 
             {
-                let caller_handle = tokio::spawn({
+                let caller_handle = crate::utils::spawn({
                     let a = alice_arc.clone();
                     let s = rtp_offer.to_string();
                     async move { a.make_call("bob", Some(s)).await }
@@ -2401,7 +2401,7 @@ m=audio 5004 RTP/AVP 0
 a=rtpmap:0 PCMU/8000"#;
 
         let alice_arc = alice.clone();
-        let caller_handle = tokio::spawn({
+        let caller_handle = crate::utils::spawn({
             let a = alice_arc.clone();
             let s = private_ip_sdp.to_string();
             async move { a.make_call("bob", Some(s)).await }
@@ -2451,7 +2451,7 @@ t=0 0
 m=audio 5004 RTP/AVP 0
 a=rtpmap:0 PCMU/8000"#;
 
-        let caller_handle = tokio::spawn({
+        let caller_handle = crate::utils::spawn({
             let a = alice_arc.clone();
             let s = public_ip_sdp.to_string();
             async move { a.make_call("bob", Some(s)).await }
@@ -2550,7 +2550,7 @@ a=rtpmap:0 PCMU/8000"#;
         // Simulate ringing then answer to complete the flow, and hang up
         let caller_handle = {
             let a = alice.clone();
-            tokio::spawn(async move { a.make_call("bob", None).await })
+            crate::utils::spawn(async move { a.make_call("bob", None).await })
         };
         if wait_for_event(
             &mut bob,

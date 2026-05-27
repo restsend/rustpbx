@@ -105,7 +105,7 @@ pub fn spawn_update_checker(
     }
 
     #[cfg(not(debug_assertions))]
-    tokio::spawn(async move {
+    crate::utils::spawn(async move {
         let start_time = Instant::now();
         loop {
             match check_update(start_time).await {

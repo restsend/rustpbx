@@ -53,7 +53,7 @@ async fn main() -> anyhow::Result<()> {
     let (mut write, mut read) = ws.split();
 
     // Spawn task to read events
-    let read_task = tokio::spawn(async move {
+    let read_task = rustpbx::utils::spawn(async move {
         while let Some(msg) = read.next().await {
             match msg {
                 Ok(Message::Text(text)) => {

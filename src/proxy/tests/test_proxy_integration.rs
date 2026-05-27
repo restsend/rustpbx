@@ -98,7 +98,7 @@ impl TestProxyServer {
 
         // Start server
         let server_clone = server.clone();
-        tokio::spawn(async move {
+        crate::utils::spawn(async move {
             if let Err(e) = server_clone.serve().await {
                 warn!("Proxy server error: {:?}", e);
             }
@@ -276,10 +276,10 @@ async fn test_call_success() {
     let dummy_sdp = "v=0\r\no=- 123456 123456 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 1234 RTP/AVP 0 101\r\na=rtpmap:0 PCMU/8000\r\na=rtpmap:101 telephone-event/8000\r\na=fmtp:101 0-16\r\na=sendrecv\r\n".to_string();
 
     let alice_sdp = dummy_sdp.clone();
-    let call_task = tokio::spawn(async move { alice.make_call("bob", Some(alice_sdp)).await });
+    let call_task = crate::utils::spawn(async move { alice.make_call("bob", Some(alice_sdp)).await });
 
     let bob_sdp = dummy_sdp.clone();
-    let answer_task = tokio::spawn(async move {
+    let answer_task = crate::utils::spawn(async move {
         for _ in 0..50 {
             let events = bob.process_dialog_events().await.unwrap_or_default();
             for event in events {
@@ -388,10 +388,10 @@ async fn test_call_rejection() {
     let alice_sdp = "v=0\r\no=- 123456 123456 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 1234 RTP/AVP 0 101\r\na=rtpmap:0 PCMU/8000\r\na=rtpmap:101 telephone-event/8000\r\na=fmtp:101 0-16\r\na=sendrecv\r\n".to_string();
 
     // Alice calls Bob
-    let call_task = tokio::spawn(async move { alice.make_call("bob", Some(alice_sdp)).await });
+    let call_task = crate::utils::spawn(async move { alice.make_call("bob", Some(alice_sdp)).await });
 
     // Bob waits for incoming call and rejects it
-    let reject_task = tokio::spawn(async move {
+    let reject_task = crate::utils::spawn(async move {
         for _ in 0..50 {
             let events = bob.process_dialog_events().await.unwrap_or_default();
             for event in events {
@@ -447,10 +447,10 @@ async fn test_call_hangup_flow() {
     let dummy_sdp = "v=0\r\no=- 123456 123456 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 1234 RTP/AVP 0 101\r\na=rtpmap:0 PCMU/8000\r\na=rtpmap:101 telephone-event/8000\r\na=fmtp:101 0-16\r\na=sendrecv\r\n".to_string();
 
     let alice_sdp = dummy_sdp.clone();
-    let call_task = tokio::spawn(async move { alice.make_call("bob", Some(alice_sdp)).await });
+    let call_task = crate::utils::spawn(async move { alice.make_call("bob", Some(alice_sdp)).await });
 
     let bob_sdp = dummy_sdp.clone();
-    let answer_task = tokio::spawn(async move {
+    let answer_task = crate::utils::spawn(async move {
         for _ in 0..50 {
             let events = bob.process_dialog_events().await.unwrap_or_default();
             for event in events {

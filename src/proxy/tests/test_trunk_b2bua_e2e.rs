@@ -58,7 +58,7 @@ async fn establish_call(
     let caller_clone = caller_ua.clone();
     let callee_str = callee.to_string();
     let caller_handle =
-        tokio::spawn(async move { caller_clone.make_call(&callee_str, Some(caller_sdp)).await });
+        crate::utils::spawn(async move { caller_clone.make_call(&callee_str, Some(caller_sdp)).await });
 
     let mut callee_dialog_id = None;
     let mut callee_offer_sdp: Option<String> = None;
@@ -359,7 +359,7 @@ async fn test_trunk_b2bua_reject_486_cdr() -> Result<()> {
     let alice_clone = alice.clone();
     let sdp_clone = sdp.clone();
     let caller_handle =
-        tokio::spawn(async move { alice_clone.make_call("bob", Some(sdp_clone)).await });
+        crate::utils::spawn(async move { alice_clone.make_call("bob", Some(sdp_clone)).await });
 
     // Bob rejects with 486
     let mut bob_rejected = false;
@@ -452,7 +452,7 @@ async fn test_trunk_b2bua_pcma_rtp_cdr() -> Result<()> {
     // Establish call
     let caller_clone = caller_ua.clone();
     let caller_handle =
-        tokio::spawn(async move { caller_clone.make_call("bob", Some(caller_sdp)).await });
+        crate::utils::spawn(async move { caller_clone.make_call("bob", Some(caller_sdp)).await });
 
     let mut callee_dialog_id = None;
     let mut callee_offer_sdp: Option<String> = None;
@@ -570,7 +570,7 @@ async fn test_trunk_b2bua_cdr_duration_accuracy() -> Result<()> {
     let alice_clone = alice.clone();
     let sdp_clone = sdp.clone();
     let caller_handle =
-        tokio::spawn(async move { alice_clone.make_call("bob", Some(sdp_clone)).await });
+        crate::utils::spawn(async move { alice_clone.make_call("bob", Some(sdp_clone)).await });
 
     let mut bob_dialog_id = None;
     for _ in 0..50 {
@@ -653,7 +653,7 @@ async fn test_trunk_b2bua_rtp_payload_integrity() -> Result<()> {
 
     let caller_clone = caller_ua.clone();
     let caller_handle =
-        tokio::spawn(async move { caller_clone.make_call("bob", Some(caller_sdp)).await });
+        crate::utils::spawn(async move { caller_clone.make_call("bob", Some(caller_sdp)).await });
 
     let mut callee_dialog_id = None;
     let mut callee_offer_sdp: Option<String> = None;
@@ -786,7 +786,7 @@ async fn test_trunk_b2bua_two_concurrent_calls() -> Result<()> {
     let sdp = pcmu_sdp("127.0.0.1", 12345);
     let alice1_c = alice1.clone();
     let sdp1 = sdp.clone();
-    let h1 = tokio::spawn(async move { alice1_c.make_call("bob", Some(sdp1)).await });
+    let h1 = crate::utils::spawn(async move { alice1_c.make_call("bob", Some(sdp1)).await });
 
     let mut bob1_id = None;
     for _ in 0..50 {
@@ -817,7 +817,7 @@ async fn test_trunk_b2bua_two_concurrent_calls() -> Result<()> {
 
     let alice2_c = alice2.clone();
     let sdp2 = sdp.clone();
-    let h2 = tokio::spawn(async move { alice2_c.make_call("bob", Some(sdp2)).await });
+    let h2 = crate::utils::spawn(async move { alice2_c.make_call("bob", Some(sdp2)).await });
 
     let mut bob2_id = None;
     for _ in 0..50 {
@@ -892,7 +892,7 @@ async fn test_trunk_b2bua_no_answer() -> Result<()> {
 
     let alice_clone = alice.clone();
     let sdp_clone = sdp.clone();
-    let caller_handle = tokio::spawn(async move {
+    let caller_handle = crate::utils::spawn(async move {
         tokio::time::timeout(
             Duration::from_secs(3),
             alice_clone.make_call("bob", Some(sdp_clone)),
@@ -949,7 +949,7 @@ async fn test_trunk_b2bua_dtmf_info_passthrough() -> Result<()> {
     let alice_clone = alice.clone();
     let sdp_clone = sdp.clone();
     let caller_handle =
-        tokio::spawn(async move { alice_clone.make_call("bob", Some(sdp_clone)).await });
+        crate::utils::spawn(async move { alice_clone.make_call("bob", Some(sdp_clone)).await });
 
     let mut bob_dialog_id = None;
     for _ in 0..50 {
@@ -1052,7 +1052,7 @@ async fn test_trunk_b2bua_early_media_183() -> Result<()> {
 
     let caller_clone = caller_ua.clone();
     let caller_handle =
-        tokio::spawn(async move { caller_clone.make_call("bob", Some(caller_sdp)).await });
+        crate::utils::spawn(async move { caller_clone.make_call("bob", Some(caller_sdp)).await });
 
     let mut callee_dialog_id = None;
     let mut callee_offer_sdp: Option<String> = None;
@@ -1143,7 +1143,7 @@ async fn test_trunk_b2bua_basic_call_cdr_roundtrip() -> Result<()> {
     let alice_clone = alice.clone();
     let sdp_clone = sdp.clone();
     let caller_handle =
-        tokio::spawn(async move { alice_clone.make_call("bob", Some(sdp_clone)).await });
+        crate::utils::spawn(async move { alice_clone.make_call("bob", Some(sdp_clone)).await });
 
     let mut bob_dialog_id = None;
     for _ in 0..50 {
@@ -1211,7 +1211,7 @@ async fn test_trunk_b2bua_mid_call_reinvite() -> Result<()> {
 
     let caller_clone = caller_ua.clone();
     let caller_handle =
-        tokio::spawn(async move { caller_clone.make_call("bob", Some(caller_sdp)).await });
+        crate::utils::spawn(async move { caller_clone.make_call("bob", Some(caller_sdp)).await });
 
     let mut callee_dialog_id = None;
     let mut callee_offer_sdp: Option<String> = None;

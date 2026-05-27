@@ -102,30 +102,43 @@ type = "extension"
 # are stripped automatically.  Defaults to ["H264"] when not set.
 # video_codecs = ["H264"]
 
-[recording]
-enabled = true
-auto_start = true
-
-# When [sipflow] is enabled, SipFlow owns RTP recording and this live recorder is disabled.
-# Configure [sipflow.upload] below when SipFlow recordings should be uploaded after calls.
+# ── Recording ─────────────────────────────────────────────────────────────────
+# IMPORTANT: [recording] and [sipflow] are mutually exclusive for RTP capture.
+#
+#   • If [recording] (top-level) or [proxy.recording] is configured, the legacy
+#     live WAV recorder owns RTP recording. SipFlow will still capture SIP
+#     signalling messages, but RTP audio capture is DISABLED.
+#   • If you omit [recording] entirely, SipFlow captures both SIP signalling
+#     and RTP audio. This is the recommended default.
+#
+# Uncomment below ONLY when you need the legacy WAV recorder instead of SipFlow.
+# [recording]
+# enabled = true
+# auto_start = true
+# # Recording upload mode: "local" (default), "http", or "s3".
+# # type = "local"
+# # path = "./recordings"
 
 [callrecord]
 type = "local"
 root = "./config/cdr"
 
-# SipFlow: Unified SIP+RTP recording system
-# [sipflow]
-# type = "local"
-# root = "./config/sipflow"
-# subdirs = "daily"  # "none" | "daily" | "hourly"
+# ── SipFlow ───────────────────────────────────────────────────────────────────
+# Unified SIP + RTP recording system (default).
+# When enabled WITHOUT a [recording] section, SipFlow captures both SIP
+# signalling and RTP audio. The console shows the SIP flow ladder and an
+# audio player for each call.
+[sipflow]
+type = "local"
+root = "./config/sipflow"
+subdirs = "daily"  # "none" | "daily" | "hourly"
 
-# Local: SQLite + structured file (default settings)
-# type = "local"
-# root = "./config/sipflow"
+# Advanced local backend settings (defaults shown):
 # flush_count = 1000
 # flush_interval_secs = 5
 # id_cache_size = 8192
-#
+
+# Optional: upload captured media as WAV after each call.
 # [sipflow.upload]
 # type = "s3"
 # vendor = "aws"
@@ -136,15 +149,15 @@ root = "./config/cdr"
 # endpoint = "https://s3.amazonaws.com"
 # root = "recordings"
 
-# Remote (single node, legacy format)
+# Remote backend (single node):
+# [sipflow]
 # type = "remote"
 # udp_addr = "192.168.1.100:3000"
 # http_addr = "http://192.168.1.100:3001"
 # timeout_secs = 10
 
-# Remote cluster (multi-node, consistent hashing by call_id)
-# Any proxy node can write → each call_id is hashed to exactly one server.
-# Any proxy node can read → same hash routes the query to the right server.
+# Remote cluster (multi-node, consistent hashing by call_id):
+# [sipflow]
 # type = "remote"
 # timeout_secs = 10
 # nodes = [

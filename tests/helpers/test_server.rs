@@ -135,7 +135,7 @@ impl TestPbx {
         // Spawn the SIP serving loop
         {
             let ct = cancel_token.child_token();
-            tokio::spawn(async move {
+            crate::utils::spawn(async move {
                 tokio::select! {
                     _ = ct.cancelled() => {}
                     res = sip_server.serve() => {
@@ -197,7 +197,7 @@ impl TestPbx {
         let http_port = listener.local_addr().unwrap().port();
 
         let ct = cancel_token.child_token();
-        tokio::spawn(async move {
+        crate::utils::spawn(async move {
             axum::serve(listener, router)
                 .with_graceful_shutdown(async move { ct.cancelled().await })
                 .await

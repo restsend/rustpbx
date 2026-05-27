@@ -213,7 +213,7 @@ impl RtpReceiver {
         let stats = self.stats.clone();
         let cancel_token = self.cancel_token.clone();
 
-        tokio::spawn(async move {
+        crate::utils::spawn(async move {
             let mut buf = vec![0u8; 1500];
             let mut last_seq: Option<u16> = None;
 
@@ -312,7 +312,7 @@ impl RtpSender {
         let socket = Arc::clone(&self.socket);
         let cancel_token = self.cancel_token.clone();
 
-        tokio::spawn(async move {
+        crate::utils::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_millis(interval_ms));
 
             for packet in packets {

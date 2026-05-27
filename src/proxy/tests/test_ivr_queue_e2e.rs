@@ -134,7 +134,7 @@ impl TestIvrQueueServer {
         let server: SipServer = builder.build().await?;
         let inner = server.inner.clone();
 
-        tokio::spawn(async move {
+        crate::utils::spawn(async move {
             if let Err(e) = server.serve().await {
                 warn!("Server error: {:?}", e);
             }
@@ -259,7 +259,7 @@ action = {{ type = "transfer", target = "support" }}
     let mut caller = TestUa::new(caller_config);
     caller.start().await.unwrap();
 
-    let caller_task = tokio::spawn(async move {
+    let caller_task = crate::utils::spawn(async move {
         info!("Caller dialing ivr...");
         let sdp_offer = format!(
             "v=0\r\n\
@@ -345,7 +345,7 @@ action = {{ type = "transfer", target = "support" }}
     });
 
     // Agent waits for incoming call from queue
-    let answer_task = tokio::spawn(async move {
+    let answer_task = crate::utils::spawn(async move {
         for _ in 0..60 {
             let events = agent.process_dialog_events().await.unwrap_or_default();
             for event in events {

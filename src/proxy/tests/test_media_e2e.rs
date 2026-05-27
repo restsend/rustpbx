@@ -88,7 +88,7 @@ impl MediaTestCtx {
     ) -> Result<(DialogId, DialogId, Option<String>)> {
         let caller = Arc::new(self.caller_ua.clone());
         let caller_handle =
-            tokio::spawn(async move { caller.make_call("bob", Some(caller_sdp)).await });
+            crate::utils::spawn(async move { caller.make_call("bob", Some(caller_sdp)).await });
 
         let mut callee_dialog_id = None;
         let mut received_offer_sdp: Option<String> = None;
@@ -421,7 +421,7 @@ async fn test_p2p_callee_reject_486_cdr() -> Result<()> {
     let alice_clone = alice.clone();
     let sdp_clone = sdp.clone();
     let caller_handle =
-        tokio::spawn(async move { alice_clone.make_call("bob", Some(sdp_clone)).await });
+        crate::utils::spawn(async move { alice_clone.make_call("bob", Some(sdp_clone)).await });
 
     // Bob rejects with 486
     let mut bob_rejected = false;
@@ -521,7 +521,7 @@ async fn test_p2p_caller_cancel_cdr() -> Result<()> {
     let alice_clone = alice.clone();
     let sdp_clone = sdp.clone();
     let caller_handle =
-        tokio::spawn(async move { alice_clone.make_call("bob", Some(sdp_clone)).await });
+        crate::utils::spawn(async move { alice_clone.make_call("bob", Some(sdp_clone)).await });
 
     // Wait for Bob to receive the call (ringing)
     let mut bob_dialog_id = None;
@@ -789,7 +789,7 @@ async fn test_p2p_no_answer_cdr() -> Result<()> {
 
     // Alice calls Bob — Bob never answers
     let alice_clone = alice.clone();
-    let caller_handle = tokio::spawn(async move {
+    let caller_handle = crate::utils::spawn(async move {
         // Use a short timeout so the test doesn't hang
         tokio::time::timeout(
             Duration::from_secs(3),
@@ -869,7 +869,7 @@ async fn test_p2p_two_concurrent_calls_rtp_cdr() -> Result<()> {
     // Establish call 1
     let alice1_c = alice1.clone();
     let sdp1 = sdp.clone();
-    let h1 = tokio::spawn(async move { alice1_c.make_call("bob", Some(sdp1)).await });
+    let h1 = crate::utils::spawn(async move { alice1_c.make_call("bob", Some(sdp1)).await });
 
     let mut bob1_id = None;
     for _ in 0..50 {
@@ -896,7 +896,7 @@ async fn test_p2p_two_concurrent_calls_rtp_cdr() -> Result<()> {
     // Establish call 2
     let alice2_c = alice2.clone();
     let sdp2 = sdp.clone();
-    let h2 = tokio::spawn(async move { alice2_c.make_call("bob", Some(sdp2)).await });
+    let h2 = crate::utils::spawn(async move { alice2_c.make_call("bob", Some(sdp2)).await });
 
     let mut bob2_id = None;
     for _ in 0..50 {
@@ -1113,7 +1113,7 @@ async fn test_p2p_direct_media_none_mode() -> Result<()> {
     let alice_clone = alice.clone();
     let alice_sdp_clone = alice_sdp.clone();
     let caller_handle =
-        tokio::spawn(async move { alice_clone.make_call("bob", Some(alice_sdp_clone)).await });
+        crate::utils::spawn(async move { alice_clone.make_call("bob", Some(alice_sdp_clone)).await });
 
     let mut bob_dialog_id = None;
     let mut bob_offer_sdp = None;
@@ -1543,7 +1543,7 @@ async fn test_p2p_multi_codec_offer_call_establishes() -> Result<()> {
     let alice_clone = alice.clone();
     let alice_sdp_clone = alice_sdp.clone();
     let caller_handle =
-        tokio::spawn(async move { alice_clone.make_call("bob", Some(alice_sdp_clone)).await });
+        crate::utils::spawn(async move { alice_clone.make_call("bob", Some(alice_sdp_clone)).await });
 
     let mut bob_dialog_id = None;
     let mut bob_offer_sdp = None;
@@ -1763,7 +1763,7 @@ async fn test_p2p_opus_dynamic_pt_sdp_negotiation() -> Result<()> {
     let alice_clone = alice.clone();
     let alice_sdp_clone = alice_sdp.clone();
     let caller_handle =
-        tokio::spawn(async move { alice_clone.make_call("bob", Some(alice_sdp_clone)).await });
+        crate::utils::spawn(async move { alice_clone.make_call("bob", Some(alice_sdp_clone)).await });
 
     let mut bob_dialog_id = None;
     let mut bob_offer_sdp = None;

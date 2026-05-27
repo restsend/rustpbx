@@ -1387,7 +1387,7 @@ impl CallModule {
                     if !new_session_id.is_empty() {
                         let reg = registry.clone();
                         let sid = new_session_id.clone();
-                        tokio::spawn(async move {
+                        crate::utils::spawn(async move {
                             if reg
                                 .wait_for_status(
                                     &sid,
@@ -1463,7 +1463,7 @@ impl CallModule {
                     if !new_session_id.is_empty() {
                         let reg = registry.clone();
                         let sid = new_session_id.clone();
-                        tokio::spawn(async move {
+                        crate::utils::spawn(async move {
                             if reg
                                 .wait_for_status(
                                     &sid,
@@ -1662,7 +1662,7 @@ impl CallModule {
         let transfer_id = format!("refer-{}", dialog_id.call_id);
         let _transfer_id_clone = transfer_id.clone();
 
-        tokio::spawn(async move {
+        crate::utils::spawn(async move {
             info!("Spawned inbound REFER background task");
 
             // Small delay to ensure 202 response is sent

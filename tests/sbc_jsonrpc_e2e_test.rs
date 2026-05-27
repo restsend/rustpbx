@@ -61,7 +61,7 @@ async fn start_mock_upstream(port: u16, call_count: Arc<AtomicUsize>) -> Cancell
 
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
     let cancel_clone = cancel.clone();
-    tokio::spawn(async move {
+    crate::utils::spawn(async move {
         axum::serve(listener, app)
             .with_graceful_shutdown(async move { cancel_clone.cancelled().await })
             .await
@@ -106,6 +106,7 @@ async fn test_sbc_jsonrpc_e2e_sipbot_rewrite() {
                 caller_rewrite: "".into(),
                 reject_status: 403,
                 reject_reason: "".into(),
+                reject_on_eval_error: true,
                 passthrough_original_headers: true,
                 inject_headers: vec![],
                 allow_codecs: vec![],
@@ -149,7 +150,7 @@ async fn test_sbc_jsonrpc_e2e_sipbot_rewrite() {
 
     let server = Arc::new(builder.build().await.unwrap());
     let server_clone = server.clone();
-    tokio::spawn(async move {
+    crate::utils::spawn(async move {
         if let Err(e) = server_clone.serve().await {
             tracing::warn!("SipServer serve error: {:?}", e);
         }
@@ -228,7 +229,7 @@ async fn test_sbc_jsonrpc_e2e_reject_call() {
         );
         let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
         let cc = cancel.clone();
-        tokio::spawn(async move {
+        crate::utils::spawn(async move {
             axum::serve(listener, app)
                 .with_graceful_shutdown(async move { cc.cancelled().await })
                 .await
@@ -261,6 +262,7 @@ async fn test_sbc_jsonrpc_e2e_reject_call() {
                 caller_rewrite: "".into(),
                 reject_status: 403,
                 reject_reason: "Blocked by policy".into(),
+                reject_on_eval_error: true,
                 passthrough_original_headers: true,
                 inject_headers: vec![],
                 allow_codecs: vec![],
@@ -302,7 +304,7 @@ async fn test_sbc_jsonrpc_e2e_reject_call() {
 
     let server = Arc::new(builder.build().await.unwrap());
     let server_clone = server.clone();
-    tokio::spawn(async move {
+    crate::utils::spawn(async move {
         if let Err(e) = server_clone.serve().await {
             tracing::warn!("SipServer serve error: {:?}", e);
         }
@@ -379,6 +381,7 @@ async fn test_sbc_jsonrpc_e2e_header_injection() {
                 caller_rewrite: "".into(),
                 reject_status: 403,
                 reject_reason: "".into(),
+                reject_on_eval_error: true,
                 passthrough_original_headers: true,
                 inject_headers: vec![
                     HeaderOp {
@@ -431,7 +434,7 @@ async fn test_sbc_jsonrpc_e2e_header_injection() {
 
     let server = Arc::new(builder.build().await.unwrap());
     let server_clone = server.clone();
-    tokio::spawn(async move {
+    crate::utils::spawn(async move {
         if let Err(e) = server_clone.serve().await {
             tracing::warn!("SipServer serve error: {:?}", e);
         }
@@ -522,6 +525,7 @@ async fn test_sbc_jsonrpc_e2e_multi_rule_matching() {
                     caller_rewrite: "".into(),
                     reject_status: 403,
                     reject_reason: "".into(),
+                    reject_on_eval_error: true,
                     passthrough_original_headers: true,
                     inject_headers: vec![],
                     allow_codecs: vec![],
@@ -547,6 +551,7 @@ async fn test_sbc_jsonrpc_e2e_multi_rule_matching() {
                     caller_rewrite: "".into(),
                     reject_status: 403,
                     reject_reason: "".into(),
+                    reject_on_eval_error: true,
                     passthrough_original_headers: true,
                     inject_headers: vec![],
                     allow_codecs: vec![],
@@ -589,7 +594,7 @@ async fn test_sbc_jsonrpc_e2e_multi_rule_matching() {
 
     let server = Arc::new(builder.build().await.unwrap());
     let server_clone = server.clone();
-    tokio::spawn(async move {
+    crate::utils::spawn(async move {
         if let Err(e) = server_clone.serve().await {
             tracing::warn!("SipServer serve error: {:?}", e);
         }
@@ -667,6 +672,7 @@ async fn test_sbc_jsonrpc_e2e_upstream_unreachable_rejects() {
                 caller_rewrite: "".into(),
                 reject_status: 503,
                 reject_reason: "".into(),
+                reject_on_eval_error: true,
                 passthrough_original_headers: true,
                 inject_headers: vec![],
                 allow_codecs: vec![],
@@ -708,7 +714,7 @@ async fn test_sbc_jsonrpc_e2e_upstream_unreachable_rejects() {
 
     let server = Arc::new(builder.build().await.unwrap());
     let server_clone = server.clone();
-    tokio::spawn(async move {
+    crate::utils::spawn(async move {
         if let Err(e) = server_clone.serve().await {
             tracing::warn!("SipServer serve error: {:?}", e);
         }
@@ -773,7 +779,7 @@ async fn test_sbc_jsonrpc_e2e_callee_rewrite() {
         );
         let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
         let cc = cancel.clone();
-        tokio::spawn(async move {
+        crate::utils::spawn(async move {
             axum::serve(listener, app)
                 .with_graceful_shutdown(async move { cc.cancelled().await })
                 .await
@@ -806,6 +812,7 @@ async fn test_sbc_jsonrpc_e2e_callee_rewrite() {
                 caller_rewrite: "".into(),
                 reject_status: 403,
                 reject_reason: "".into(),
+                reject_on_eval_error: true,
                 passthrough_original_headers: true,
                 inject_headers: vec![],
                 allow_codecs: vec![],
@@ -847,7 +854,7 @@ async fn test_sbc_jsonrpc_e2e_callee_rewrite() {
 
     let server = Arc::new(builder.build().await.unwrap());
     let server_clone = server.clone();
-    tokio::spawn(async move {
+    crate::utils::spawn(async move {
         if let Err(e) = server_clone.serve().await {
             tracing::warn!("SipServer serve error: {:?}", e);
         }
@@ -887,6 +894,294 @@ async fn test_sbc_jsonrpc_e2e_callee_rewrite() {
         let q = bob.audio_quality_summary();
         tracing::info!("bob audio quality (callee rewrite): total={} silence={}", q.total_frames, q.silence_frames);
     }
+
+    cancel_token.cancel();
+    upstream_cancel.cancel();
+}
+
+// ─── Test 7: success_when eval error with reject_on_eval_error=true → REJECT ──
+
+#[tokio::test]
+async fn test_sbc_jsonrpc_e2e_eval_error_reject() {
+    let upstream_port = pick_unused_port().unwrap();
+    let sip_port = pick_unused_port().unwrap();
+    let bob_port = pick_unused_port().unwrap();
+    let call_count = Arc::new(AtomicUsize::new(0));
+
+    let upstream_cancel = {
+        let cnt = call_count.clone();
+        let cancel = CancellationToken::new();
+        let addr: std::net::SocketAddr = ([127, 0, 0, 1], upstream_port).into();
+        let app = Router::new().route(
+            "/jsonrpc",
+            post(move |_body: Json<Value>| {
+                let cnt = cnt.clone();
+                async move {
+                    cnt.fetch_add(1, Ordering::SeqCst);
+                    Json(json!({
+                        "status": "error",
+                        "message": "internal error",
+                    }))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+        let cc = cancel.clone();
+        crate::utils::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async move { cc.cancelled().await })
+                .await
+                .ok();
+        });
+        sleep(Duration::from_millis(100)).await;
+        cancel
+    };
+
+    let sbc_config = Arc::new(RwLock::new(Some(SbcJsonRpcConfig {
+        enabled: true,
+        timeout_ms: 5000,
+        rules: vec![Rule {
+            name: "eval-error-reject".into(),
+            enabled: true,
+            when: "true".into(),
+            match_group: None,
+            extractors: vec![],
+            trunks: vec![],
+            upstream: Upstream {
+                method: "POST".into(),
+                url: format!("http://127.0.0.1:{upstream_port}/jsonrpc"),
+                headers: HashMap::new(),
+                body: "{}".into(),
+                query_params: None,
+            },
+            response: ResponseConfig {
+                success_when: "json.code == 0".into(),
+                callee_rewrite: "".into(),
+                caller_rewrite: "".into(),
+                reject_status: 503,
+                reject_reason: "eval error".into(),
+                reject_on_eval_error: true,
+                passthrough_original_headers: true,
+                inject_headers: vec![],
+                allow_codecs: vec![],
+            },
+        }],
+    })));
+    let inspector = SbcJsonRpcInspector::new(sbc_config.clone());
+
+    let user_backend = MemoryUserBackend::new(None);
+    user_backend
+        .create_user(SipUser {
+            id: 1,
+            username: "bob".to_string(),
+            password: Some("password".to_string()),
+            enabled: true,
+            realm: Some("127.0.0.1".to_string()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+    let config = Arc::new(create_proxy_config(sip_port));
+    let locator = MemoryLocator::new();
+    let cancel_token = CancellationToken::new();
+
+    let mut builder = SipServerBuilder::new(config.clone())
+        .with_user_backend(Box::new(user_backend))
+        .with_locator(Box::new(locator))
+        .with_cancel_token(cancel_token.child_token())
+        .with_dialplan_inspector(Box::new(inspector));
+
+    builder = builder
+        .register_module("registrar", |inner, config| {
+            Ok(Box::new(RegistrarModule::new(inner, config)))
+        })
+        .register_module("call", |inner, config| {
+            Ok(Box::new(CallModule::new(config, inner)))
+        });
+
+    let server = Arc::new(builder.build().await.unwrap());
+    let server_clone = server.clone();
+    crate::utils::spawn(async move {
+        if let Err(e) = server_clone.serve().await {
+            tracing::warn!("SipServer serve error: {:?}", e);
+        }
+    });
+    sleep(Duration::from_millis(200)).await;
+
+    let bob = TestUa::registered_callee(
+        bob_port,
+        2,
+        "bob",
+        "password",
+        "127.0.0.1",
+        &format!("127.0.0.1:{sip_port}"),
+    )
+    .await;
+    sleep(Duration::from_millis(500)).await;
+
+    let alice = TestUa::caller_with_target(
+        pick_unused_port().unwrap(),
+        "alice",
+        format!("sip:anyone@127.0.0.1:{sip_port}"),
+    )
+    .await;
+
+    sleep(Duration::from_secs(3)).await;
+
+    assert_eq!(
+        call_count.load(Ordering::SeqCst),
+        1,
+        "upstream should have been called once"
+    );
+    assert!(
+        !bob.has_rtp_rx(),
+        "bob should NOT have received RTP (call rejected due to eval error)"
+    );
+
+    cancel_token.cancel();
+    upstream_cancel.cancel();
+}
+
+// ─── Test 8: success_when eval error with reject_on_eval_error=false → CONTINUE ──
+
+#[tokio::test]
+async fn test_sbc_jsonrpc_e2e_eval_error_continue() {
+    let upstream_port = pick_unused_port().unwrap();
+    let sip_port = pick_unused_port().unwrap();
+    let bob_port = pick_unused_port().unwrap();
+    let call_count = Arc::new(AtomicUsize::new(0));
+
+    let upstream_cancel = {
+        let cnt = call_count.clone();
+        let cancel = CancellationToken::new();
+        let addr: std::net::SocketAddr = ([127, 0, 0, 1], upstream_port).into();
+        let app = Router::new().route(
+            "/jsonrpc",
+            post(move |_body: Json<Value>| {
+                let cnt = cnt.clone();
+                async move {
+                    cnt.fetch_add(1, Ordering::SeqCst);
+                    Json(json!({
+                        "status": "error",
+                        "message": "internal error",
+                    }))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+        let cc = cancel.clone();
+        crate::utils::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async move { cc.cancelled().await })
+                .await
+                .ok();
+        });
+        sleep(Duration::from_millis(100)).await;
+        cancel
+    };
+
+    let sbc_config = Arc::new(RwLock::new(Some(SbcJsonRpcConfig {
+        enabled: true,
+        timeout_ms: 5000,
+        rules: vec![Rule {
+            name: "eval-error-continue".into(),
+            enabled: true,
+            when: "true".into(),
+            match_group: None,
+            extractors: vec![],
+            trunks: vec![],
+            upstream: Upstream {
+                method: "POST".into(),
+                url: format!("http://127.0.0.1:{upstream_port}/jsonrpc"),
+                headers: HashMap::new(),
+                body: "{}".into(),
+                query_params: None,
+            },
+            response: ResponseConfig {
+                success_when: "json.code == 0".into(),
+                callee_rewrite: "".into(),
+                caller_rewrite: "".into(),
+                reject_status: 403,
+                reject_reason: "".into(),
+                reject_on_eval_error: false,
+                passthrough_original_headers: true,
+                inject_headers: vec![],
+                allow_codecs: vec![],
+            },
+        }],
+    })));
+    let inspector = SbcJsonRpcInspector::new(sbc_config.clone());
+
+    let user_backend = MemoryUserBackend::new(None);
+    user_backend
+        .create_user(SipUser {
+            id: 1,
+            username: "bob".to_string(),
+            password: Some("password".to_string()),
+            enabled: true,
+            realm: Some("127.0.0.1".to_string()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+    let config = Arc::new(create_proxy_config(sip_port));
+    let locator = MemoryLocator::new();
+    let cancel_token = CancellationToken::new();
+
+    let mut builder = SipServerBuilder::new(config.clone())
+        .with_user_backend(Box::new(user_backend))
+        .with_locator(Box::new(locator))
+        .with_cancel_token(cancel_token.child_token())
+        .with_dialplan_inspector(Box::new(inspector));
+
+    builder = builder
+        .register_module("registrar", |inner, config| {
+            Ok(Box::new(RegistrarModule::new(inner, config)))
+        })
+        .register_module("call", |inner, config| {
+            Ok(Box::new(CallModule::new(config, inner)))
+        });
+
+    let server = Arc::new(builder.build().await.unwrap());
+    let server_clone = server.clone();
+    crate::utils::spawn(async move {
+        if let Err(e) = server_clone.serve().await {
+            tracing::warn!("SipServer serve error: {:?}", e);
+        }
+    });
+    sleep(Duration::from_millis(200)).await;
+
+    let bob = TestUa::registered_callee(
+        bob_port,
+        2,
+        "bob",
+        "password",
+        "127.0.0.1",
+        &format!("127.0.0.1:{sip_port}"),
+    )
+    .await;
+    sleep(Duration::from_millis(500)).await;
+
+    let alice = TestUa::caller_with_target(
+        pick_unused_port().unwrap(),
+        "alice",
+        format!("sip:anyone@127.0.0.1:{sip_port}"),
+    )
+    .await;
+
+    sleep(Duration::from_secs(3)).await;
+
+    assert_eq!(
+        call_count.load(Ordering::SeqCst),
+        1,
+        "upstream should have been called once"
+    );
+    assert!(
+        !bob.has_rtp_rx(),
+        "bob should NOT have received RTP (no rule succeeded)"
+    );
 
     cancel_token.cancel();
     upstream_cancel.cancel();

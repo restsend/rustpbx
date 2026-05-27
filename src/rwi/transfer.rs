@@ -1046,7 +1046,7 @@ impl TransferController {
         let orig_call_id_spawn = original_call_id.to_string(); // Clone for spawned task
 
         // Spawn originate task
-        tokio::spawn(async move {
+        crate::utils::spawn(async move {
             let (state_tx, mut state_rx) = tokio::sync::mpsc::unbounded_channel();
             let mut invitation = dialog_layer.do_invite(invite_option, state_tx).boxed();
 
@@ -1138,7 +1138,7 @@ impl TransferController {
                     let new_call_id = call_id_for_spawn.clone();
                     let orig_call_id = orig_call_id_spawn.clone();
 
-                    tokio::spawn(async move {
+                    crate::utils::spawn(async move {
                         // Wait for media to stabilize
                         tokio::time::sleep(Duration::from_millis(500)).await;
 

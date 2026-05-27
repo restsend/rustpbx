@@ -974,7 +974,7 @@ async fn cluster_reload_config_handler(
     let payload = query;
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Result<SseEvent, Infallible>>();
 
-    tokio::spawn(async move {
+    crate::utils::spawn(async move {
         let send_event = |event_type: &'static str, data: serde_json::Value| {
             let tx = tx.clone();
             async move {

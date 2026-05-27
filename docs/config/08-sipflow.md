@@ -2,6 +2,12 @@
 
 SipFlow is the SIP flow capture subsystem built into RustPBX. It captures call SIP signalling messages into a compact on-disk store and can also capture bi-directional RTP media when no explicit recording policy is configured. The console and HTTP API use this data to query call flows and, when media capture is enabled, replay recordings by Call-ID.
 
+> **Default configuration.** The example config (`config.toml.example`) enables
+> `[sipflow]` with `type = "local"` and omits `[recording]`. This gives you SIP
+> signalling capture **and** RTP audio capture out of the box. If you add a
+> `[recording]` section, SipFlow will stop capturing RTP audio (signalling
+> capture continues). See the "Recording Priority" section below.
+
 See [docs/sipflow.md](../sipflow.md) for the full deployment guide (architecture diagrams, systemd unit, storage sizing, and API reference).
 
 ---
@@ -70,6 +76,11 @@ Start the standalone server:
 
 ## Recording Priority
 
+> **WARNING: `[recording]` and `[sipflow]` are mutually exclusive for RTP
+> capture.** If you configure both, SipFlow will capture SIP signalling but
+> **NOT** RTP audio. To get recordings in the console audio player, either
+> remove `[recording]` or ensure `[recording] enabled = true` writes WAV files.
+
 SipFlow SIP message capture is independent from call recording. If `[sipflow]` is enabled, RustPBX continues to store SIP messages for the caller and callee Call-IDs.
 
 RTP media capture follows the recording policy:
@@ -115,13 +126,16 @@ url = "https://archive.example.com/upload"
 SipFlow capture is enabled by configuring the `[sipflow]` backend. It is independent from `[callrecord]`, which only controls CDR JSON storage.
 
 ```toml
+# Default configuration (recommended):
+# - SipFlow captures SIP signalling AND RTP audio
+# - No [recording] section needed
 [sipflow]
 type = "local"
 root = "./config/sipflow"
 subdirs = "daily"
 ```
 
-When SipFlow is active, each CDR entry in the console can display a **SIP Flow** tab with the signalling ladder. The audio player is available only when the active recording policy produced media, either through `[recording]` or through SipFlow RTP capture when no recording section exists.
+When SipFlow is active and **no `[recording]` section exists**, each CDR entry in the console shows both the **SIP Flow** tab (signalling ladder) and the **audio player** (recorded RTP). If a `[recording]` section is present, the audio player relies on the legacy recorder's WAV output instead.
 
 ---
 

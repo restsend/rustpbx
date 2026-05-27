@@ -160,7 +160,7 @@ impl TrunkRegistrar {
 
         let statuses = self.statuses.clone();
 
-        tokio::spawn(async move {
+        crate::utils::spawn(async move {
             registration_loop(name, config, child_token, statuses, endpoint).await;
         });
     }

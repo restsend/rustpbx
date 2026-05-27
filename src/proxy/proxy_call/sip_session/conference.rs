@@ -103,7 +103,7 @@ impl SipSession {
             );
 
             let cancel_token = self.cancel_token.child_token();
-            let forwarder_handle = tokio::spawn(async move {
+            let forwarder_handle = crate::utils::spawn(async move {
                 loop {
                     tokio::select! {
                         biased;
@@ -247,7 +247,7 @@ impl SipSession {
         let (tx, mut rx) = tokio::sync::mpsc::channel::<MediaSample>(100);
 
         let cancel_token = self.cancel_token.child_token();
-        let forwarder_handle = tokio::spawn(async move {
+        let forwarder_handle = crate::utils::spawn(async move {
             loop {
                 tokio::select! {
                     biased;

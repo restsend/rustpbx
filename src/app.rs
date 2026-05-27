@@ -511,7 +511,7 @@ impl AppStateBuilder {
         }
 
         if let Some(mut manager) = callrecord_manager {
-            tokio::spawn(async move {
+            crate::utils::spawn(async move {
                 manager.serve().await;
             });
         }

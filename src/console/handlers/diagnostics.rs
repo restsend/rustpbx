@@ -2551,7 +2551,7 @@ mod tests {
         let server_socket = UdpSocket::bind("127.0.0.1:0").await.unwrap();
         let server_addr = server_socket.local_addr().unwrap();
 
-        tokio::spawn(async move {
+        crate::utils::spawn(async move {
             let mut buffer = [0u8; 2048];
             if let Ok((_, peer)) = server_socket.recv_from(&mut buffer).await {
                 let response = b"SIP/2.0 200 OK\r\nContent-Length: 0\r\n\r\n";

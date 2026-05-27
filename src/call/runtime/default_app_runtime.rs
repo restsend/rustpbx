@@ -152,7 +152,7 @@ impl AppRuntime for DefaultAppRuntime {
         let context = self.context.clone();
         let handle = self.handle.clone();
 
-        tokio::spawn(async move {
+        crate::utils::spawn(async move {
             let event_loop = crate::call::app::AppEventLoop::new(
                 app,
                 controller,

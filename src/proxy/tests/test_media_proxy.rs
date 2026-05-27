@@ -52,7 +52,7 @@ async fn test_webrtc_to_rtp_media_proxy_auto() -> Result<()> {
         a=rtcp-mux\r\n";
 
     // Run caller in background with timeout protection
-    let caller_handle = tokio::spawn({
+    let caller_handle = crate::utils::spawn({
         let a = alice.clone();
         let sdp = webrtc_sdp.to_string();
         async move { a.make_call("bob", Some(sdp)).await }
@@ -158,7 +158,7 @@ async fn test_codec_negotiation_optimization() -> Result<()> {
         a=rtcp-mux\r\n";
 
     // Run caller in background with timeout protection
-    let caller_handle = tokio::spawn({
+    let caller_handle = crate::utils::spawn({
         let a = alice.clone();
         let sdp = multi_codec_sdp.to_string();
         async move { a.make_call("bob", Some(sdp)).await }
@@ -274,7 +274,7 @@ async fn test_webrtc_to_rtp_sdp_bridge() -> Result<()> {
         a=sendrecv\r\n\
         a=rtcp-mux\r\n";
 
-    let caller_handle = tokio::spawn({
+    let caller_handle = crate::utils::spawn({
         let a = alice.clone();
         let sdp = webrtc_sdp.to_string();
         async move { a.make_call("bob", Some(sdp)).await }
@@ -432,7 +432,7 @@ async fn test_rtp_to_webrtc_sdp_bridge() -> Result<()> {
     let server = std::sync::Arc::new(builder.build().await?);
     let server_clone = server.clone();
 
-    tokio::spawn(async move {
+    crate::utils::spawn(async move {
         if let Err(e) = server_clone.serve().await {
             warn!("Proxy server error: {:?}", e);
         }
@@ -473,7 +473,7 @@ async fn test_rtp_to_webrtc_sdp_bridge() -> Result<()> {
         a=rtpmap:101 telephone-event/8000\r\n\
         a=sendrecv\r\n";
 
-    let caller_handle = tokio::spawn({
+    let caller_handle = crate::utils::spawn({
         let a = alice.clone();
         let sdp = rtp_sdp.to_string();
         async move { a.make_call("bob", Some(sdp)).await }

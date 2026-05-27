@@ -73,7 +73,7 @@ async fn test_proxy_full_flow() {
     let (tx, mut rx) = mpsc::channel::<String>(10);
 
     // Create and run the test client task
-    let client_handle = tokio::spawn({
+    let client_handle = crate::utils::spawn({
         let token_clone = token.clone();
         let client_tx = tx.clone();
 

@@ -95,7 +95,7 @@ impl MockCallStack {
         let cancel = CancellationToken::new();
         let event_loop = AppEventLoop::new(app, controller, ctx, cancel.child_token(), timer_rx);
 
-        let join_handle = tokio::spawn(event_loop.run());
+        let join_handle = crate::utils::spawn(event_loop.run());
 
         Self {
             event_tx,

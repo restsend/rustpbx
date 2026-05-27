@@ -132,7 +132,7 @@ async fn start_peer_conference_bridge(
     // Channel: conference forward loop → audio_sender (→ sample_track → peer PC sender)
     let (tx, mut rx) = tokio::sync::mpsc::channel::<rustrtc::media::MediaSample>(100);
     let cancel = cancel_token.clone();
-    tokio::spawn(async move {
+    crate::utils::spawn(async move {
         loop {
             tokio::select! {
                 biased;
@@ -424,7 +424,7 @@ impl RwiCommandProcessor {
         }
 
         let controller = self.transfer_controller.clone();
-        tokio::spawn(async move {
+        crate::utils::spawn(async move {
             while let Some(event) = rx.recv().await {
                 let c = controller.read().await;
                 match event.event_type {
@@ -1163,7 +1163,7 @@ impl RwiCommandProcessor {
         let cancel_token = tokio_util::sync::CancellationToken::new();
         let conference_manager = self.conference_manager.clone();
 
-        tokio::spawn(async move {
+        crate::utils::spawn(async move {
             let (state_tx, mut state_rx) = tokio::sync::mpsc::unbounded_channel();
 
             let mut invitation = dialog_layer.do_invite(invite_option, state_tx).boxed();
@@ -1212,7 +1212,7 @@ impl RwiCommandProcessor {
             let cmd_caller_peer = caller_peer.clone();
             let cmd_conference_manager = conference_manager.clone();
             let cmd_dialog_layer = dialog_layer.clone();
-            let cmd_task = tokio::spawn(async move {
+            let mut cmd_task = crate::utils::spawn(async move {
                 use crate::media::FileTrack;
                 use audio_codec::CodecType;
                 use std::collections::HashMap;
@@ -1320,7 +1320,7 @@ impl RwiCommandProcessor {
                                     let (tx, mut rx) = tokio::sync::mpsc::channel::<rustrtc::media::MediaSample>(100);
 
                                     if let Some(sender) = audio_sender {
-                                        tokio::spawn(async move {
+                                        crate::utils::spawn(async move {
                                             while let Some(sample) = rx.recv().await {
                                                 if sender.send(sample).await.is_err() {
                                                     break;
@@ -1401,7 +1401,7 @@ impl RwiCommandProcessor {
                                             // Notifier: signals the main loop after agent answers
                                             let connected_notifier = leg_connected_tx.clone();
 
-                                            let handle = tokio::spawn(async move {
+                                            let handle = crate::utils::spawn(async move {
                                                 let (state_tx, mut state_rx) = tokio::sync::mpsc::unbounded_channel();
                                                 let invitation = dialog_layer_clone.do_invite(invite_option, state_tx).boxed();
 
@@ -1429,7 +1429,7 @@ impl RwiCommandProcessor {
 
                                                         // Monitor dialog state
                                                         let dialog_cancel = cancel_token_clone.child_token();
-                                                        tokio::spawn(async move {
+                                                        crate::utils::spawn(async move {
                                                             loop {
                                                                 tokio::select! {
                                                                     biased;
@@ -1622,10 +1622,22 @@ impl RwiCommandProcessor {
                 }
             });
 
-            let cleanup = || async {
-                cancel_token.cancel();
+            let cmd_aborted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let cleanup = || {
+                let cancel = cancel_token.clone();
+                let aborted = cmd_aborted.clone();
+                async move {
+                    cancel.cancel();
 
-                let _ = tokio::time::timeout(std::time::Duration::from_secs(5), cmd_task).await;
+                    match tokio::time::timeout(std::time::Duration::from_secs(5), &mut cmd_task).await {
+                        Ok(_) => {}
+                        Err(_) => {
+                            if !aborted.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                                cmd_task.abort();
+                            }
+                        }
+                    }
+                }
             };
 
             tokio::select! {
@@ -2402,7 +2414,7 @@ impl RwiCommandProcessor {
 
         let gateway = self.gateway.clone();
 
-        tokio::spawn(async move {
+        crate::utils::spawn(async move {
             let deadline =
                 tokio::time::Instant::now() + tokio::time::Duration::from_millis(timeout_ms);
             let mut collected = String::new();
@@ -4490,7 +4502,7 @@ mod tests {
         let (handle, mut cmd_rx) = SipSession::with_handle(id);
 
         if let Some(cm) = conference_manager {
-            tokio::spawn(async move {
+            crate::utils::spawn(async move {
                 while let Some(cmd) = cmd_rx.recv().await {
                     match cmd {
                         crate::call::domain::CallCommand::ConferenceAdd { conf_id, leg_id } => {
@@ -4514,7 +4526,7 @@ mod tests {
                 }
             });
         } else {
-            tokio::spawn(async move { while let Some(_cmd) = cmd_rx.recv().await {} });
+            crate::utils::spawn(async move { while let Some(_cmd) = cmd_rx.recv().await {} });
         }
 
         let entry = crate::proxy::active_call_registry::ActiveProxyCallEntry {

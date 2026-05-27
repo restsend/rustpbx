@@ -61,7 +61,7 @@ async fn send_options(
 
     let ep_inner = endpoint.inner.clone();
     let ct = cancel.clone();
-    tokio::spawn(async move {
+    crate::utils::spawn(async move {
         tokio::select! {
             _ = ct.cancelled() => {}
             r = ep_inner.serve() => { if let Err(e) = r { tracing::warn!("client serve: {e}"); } }
