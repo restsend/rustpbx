@@ -180,6 +180,7 @@ pub async fn create_user_backend(config: &UserBackendConfig) -> Result<Box<dyn U
             method,
             username_field,
             realm_field,
+            request_uri_field,
             headers,
             sip_headers,
         } => {
@@ -188,6 +189,7 @@ pub async fn create_user_backend(config: &UserBackendConfig) -> Result<Box<dyn U
                 method,
                 username_field,
                 realm_field,
+                request_uri_field,
                 headers,
                 sip_headers,
             );

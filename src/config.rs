@@ -396,6 +396,7 @@ pub enum UserBackendConfig {
         method: Option<String>,
         username_field: Option<String>,
         realm_field: Option<String>,
+        request_uri_field: Option<String>,
         headers: Option<HashMap<String, String>>,
         sip_headers: Option<Vec<String>>,
     },

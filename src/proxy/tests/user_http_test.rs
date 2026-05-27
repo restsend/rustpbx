@@ -12,6 +12,7 @@ async fn test_http_backend_creation() -> Result<()> {
         &Some("realm".to_string()),
         &None,
         &None,
+        &None,
     );
 
     // Test that the backend was created successfully
@@ -31,6 +32,7 @@ async fn test_http_backend_with_custom_headers() -> Result<()> {
         &Some("GET".to_string()),
         &Some("user".to_string()),
         &Some("realm".to_string()),
+        &None,
         &Some(headers),
         &None,
     );
@@ -48,6 +50,7 @@ async fn test_http_backend_with_post_method() -> Result<()> {
         &Some("domain".to_string()),
         &None,
         &None,
+        &None,
     );
 
     // Test that the backend was created successfully with POST method
@@ -56,8 +59,15 @@ async fn test_http_backend_with_post_method() -> Result<()> {
 
 #[tokio::test]
 async fn test_http_backend_with_defaults() -> Result<()> {
-    let _backend =
-        HttpUserBackend::new("http://rustpbx.com/auth", &None, &None, &None, &None, &None);
+    let _backend = HttpUserBackend::new(
+        "http://rustpbx.com/auth",
+        &None,
+        &None,
+        &None,
+        &None,
+        &None,
+        &None,
+    );
 
     // Test that the backend was created successfully with default values
     Ok(())
@@ -70,6 +80,7 @@ async fn test_http_backend_get_user() -> Result<()> {
         &Some("GET".to_string()),
         &Some("username".to_string()),
         &Some("realm".to_string()),
+        &None,
         &None,
         &None,
     );
