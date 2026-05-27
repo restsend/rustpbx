@@ -187,6 +187,10 @@ pub fn urls() -> Router<Arc<ConsoleState>> {
         .route("/settings/logs/follow", get(follow_logs))
         .route("/settings/logs/stream", get(stream_logs))
         .route("/settings/config/platform", patch(update_platform_settings))
+        .route(
+            "/settings/config/platform/auto-external-ip/test",
+            post(test_auto_external_ip),
+        )
         .route("/settings/config/proxy", patch(update_proxy_settings))
         .route("/settings/config/storage", patch(update_storage_settings))
         .route(
@@ -336,6 +340,9 @@ async fn build_settings_payload(state: &ConsoleState) -> JsonValue {
         key_items.push(json!({ "label": "HTTP address", "value": config.http_addr.clone() }));
         if let Some(ext) = config.external_ip.as_ref() {
             key_items.push(json!({ "label": "External IP", "value": ext }));
+        } else if let Some(url) = config.auto_external_ip.as_ref() {
+            let display = if url.is_empty() { "http://ifconfig.me" } else { url };
+            key_items.push(json!({ "label": "External IP", "value": format!("auto ({})", display) }));
         }
         if let (Some(start), Some(end)) = (config.rtp_start_port, config.rtp_end_port) {
             key_items.push(json!({ "label": "RTP ports", "value": format!("{}-{}", start, end) }));
@@ -1463,9 +1470,16 @@ pub(crate) struct PlatformSettingsPayload {
     #[serde(default)]
     external_ip: Option<Option<String>>,
     #[serde(default)]
+    auto_external_ip: Option<Option<String>>,
+    #[serde(default)]
     rtp_start_port: Option<Option<u16>>,
     #[serde(default)]
     rtp_end_port: Option<Option<u16>>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct TestAutoExternalIpPayload {
+    url: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1594,7 +1608,7 @@ pub(crate) async fn update_platform_settings(
         if let Some(level) = normalize_opt_string(level_opt) {
             doc["log_level"] = value(level);
         } else {
-            doc.remove("log_level");
+            doc.insert("log_level", Item::None);
         }
         modified = true;
     }
@@ -1603,7 +1617,7 @@ pub(crate) async fn update_platform_settings(
         if let Some(path) = normalize_opt_string(file_opt) {
             doc["log_file"] = value(path);
         } else {
-            doc.remove("log_file");
+            doc.insert("log_file", Item::None);
         }
         modified = true;
     }
@@ -1611,8 +1625,19 @@ pub(crate) async fn update_platform_settings(
     if let Some(ext_opt) = payload.external_ip {
         if let Some(ip) = normalize_opt_string(ext_opt) {
             doc["external_ip"] = value(ip);
+            doc.insert("auto_external_ip", Item::None);
         } else {
-            doc.remove("external_ip");
+            doc.insert("external_ip", Item::None);
+        }
+        modified = true;
+    }
+
+    if let Some(auto_opt) = payload.auto_external_ip {
+        if let Some(url) = normalize_opt_string(auto_opt) {
+            doc["auto_external_ip"] = value(url);
+            doc.insert("external_ip", Item::None);
+        } else {
+            doc.insert("auto_external_ip", Item::None);
         }
         modified = true;
     }
@@ -1676,6 +1701,7 @@ pub(crate) async fn update_platform_settings(
         },
         "rtp": {
             "external_ip": config.external_ip,
+            "auto_external_ip": config.auto_external_ip,
             "start_port": config.rtp_start_port,
             "end_port": config.rtp_end_port,
         }
@@ -3317,6 +3343,29 @@ pub(crate) async fn test_http_router(
         Err(err) => json_error(
             StatusCode::BAD_REQUEST,
             format!("HTTP Router request failed: {}", err),
+        ),
+    }
+}
+
+pub(crate) async fn test_auto_external_ip(
+    State(state): State<Arc<ConsoleState>>,
+    AuthRequired(user): AuthRequired,
+    Json(payload): Json<TestAutoExternalIpPayload>,
+) -> Response {
+    if !state.has_permission(&user, "system", "write").await {
+        return json_error(StatusCode::FORBIDDEN, "Permission denied");
+    }
+
+    let url = payload.url.unwrap_or_default();
+    match crate::auto_external_ip::detect_external_ip(&url).await {
+        Ok(ip) => Json(json!({
+            "status": "ok",
+            "ip": ip.to_string(),
+        }))
+        .into_response(),
+        Err(e) => json_error(
+            StatusCode::BAD_GATEWAY,
+            format!("Auto external IP detection failed: {}", e),
         ),
     }
 }

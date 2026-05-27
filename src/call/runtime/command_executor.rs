@@ -18,6 +18,9 @@ pub struct CommandResult {
     pub media_degraded: bool,
     /// Degradation reason (if media was degraded)
     pub degradation_reason: Option<String>,
+    /// Optional structured data payload
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data: Option<serde_json::Value>,
 }
 
 impl CommandResult {
@@ -29,6 +32,7 @@ impl CommandResult {
             affected_leg: None,
             media_degraded: false,
             degradation_reason: None,
+            data: None,
         }
     }
 
@@ -40,6 +44,7 @@ impl CommandResult {
             affected_leg: Some(leg),
             media_degraded: false,
             degradation_reason: None,
+            data: None,
         }
     }
 
@@ -51,6 +56,7 @@ impl CommandResult {
             affected_leg: None,
             media_degraded: false,
             degradation_reason: None,
+            data: None,
         }
     }
 
@@ -62,6 +68,7 @@ impl CommandResult {
             affected_leg: None,
             media_degraded: true,
             degradation_reason: Some(reason.into()),
+            data: None,
         }
     }
 
@@ -73,6 +80,19 @@ impl CommandResult {
             affected_leg: None,
             media_degraded: false,
             degradation_reason: None,
+            data: None,
+        }
+    }
+
+    /// Create a successful result with structured data
+    pub fn success_with_data(data: serde_json::Value) -> Self {
+        Self {
+            success: true,
+            message: None,
+            affected_leg: None,
+            media_degraded: false,
+            degradation_reason: None,
+            data: Some(data),
         }
     }
 }

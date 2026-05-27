@@ -18,6 +18,11 @@ database_url = "sqlite://rustpbx.sqlite3"
 # if server is behind NAT, set your public IP here (without port)
 # external_ip = "1.2.3.4"
 
+# Auto-detect external IP via HTTP service (mutually exclusive with external_ip)
+# At startup, a GET request is sent to this URL and the response body is parsed as IP
+# Leave empty to use the default: http://ifconfig.me
+# auto_external_ip = "http://ifconfig.me"
+
 # rtp_start_port = 20000
 # rtp_end_port = 30000
 

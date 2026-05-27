@@ -276,6 +276,29 @@ pub enum CallCommand {
         conf_id: String,
     },
 
+    /// Kick a participant from a conference (alias for remove with notification)
+    ConferenceKick {
+        /// Conference ID
+        conf_id: String,
+        /// Leg to kick
+        leg_id: LegId,
+    },
+
+    /// Mute all participants in a conference
+    ConferenceMuteAll {
+        /// Conference ID
+        conf_id: String,
+    },
+
+    /// Get conference info (participants, state, etc.)
+    ConferenceInfo {
+        /// Conference ID
+        conf_id: String,
+    },
+
+    /// List all conferences
+    ConferenceList,
+
     /// Enqueue a leg into a queue
     QueueEnqueue {
         /// Leg to enqueue
@@ -540,6 +563,7 @@ impl CallCommand {
             CallCommand::ConferenceRemove { leg_id, .. } => Some(leg_id),
             CallCommand::ConferenceMute { leg_id, .. } => Some(leg_id),
             CallCommand::ConferenceUnmute { leg_id, .. } => Some(leg_id),
+            CallCommand::ConferenceKick { leg_id, .. } => Some(leg_id),
             CallCommand::QueueEnqueue { leg_id, .. } => Some(leg_id),
             CallCommand::QueueDequeue { leg_id } => Some(leg_id),
             CallCommand::HandleReInvite { leg_id, .. } => Some(leg_id),
@@ -598,5 +622,50 @@ mod tests {
             },
         };
         assert!(start_recording.target_leg().is_none());
+    }
+
+    #[test]
+    fn call_command_conference_new_variants() {
+        let kick = CallCommand::ConferenceKick {
+            conf_id: "conf-1".to_string(),
+            leg_id: LegId::new("leg-1"),
+        };
+        assert_eq!(kick.target_leg().map(|l| l.as_str()), Some("leg-1"));
+
+        let mute_all = CallCommand::ConferenceMuteAll {
+            conf_id: "conf-1".to_string(),
+        };
+        assert!(mute_all.target_leg().is_none());
+
+        let info = CallCommand::ConferenceInfo {
+            conf_id: "conf-1".to_string(),
+        };
+        assert!(info.target_leg().is_none());
+
+        let list = CallCommand::ConferenceList;
+        assert!(list.target_leg().is_none());
+    }
+
+    #[test]
+    fn call_command_serialization_roundtrip() {
+        let kick = CallCommand::ConferenceKick {
+            conf_id: "conf-1".to_string(),
+            leg_id: LegId::new("leg-1"),
+        };
+        let json = serde_json::to_string(&kick).unwrap();
+        let parsed: CallCommand = serde_json::from_str(&json).unwrap();
+        assert!(matches!(parsed, CallCommand::ConferenceKick { .. }));
+
+        let mute_all = CallCommand::ConferenceMuteAll {
+            conf_id: "conf-1".to_string(),
+        };
+        let json = serde_json::to_string(&mute_all).unwrap();
+        let parsed: CallCommand = serde_json::from_str(&json).unwrap();
+        assert!(matches!(parsed, CallCommand::ConferenceMuteAll { .. }));
+
+        let list = CallCommand::ConferenceList;
+        let json = serde_json::to_string(&list).unwrap();
+        let parsed: CallCommand = serde_json::from_str(&json).unwrap();
+        assert!(matches!(parsed, CallCommand::ConferenceList));
     }
 }

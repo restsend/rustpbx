@@ -409,6 +409,12 @@ impl ConferenceManager {
         conferences.keys().cloned().collect()
     }
 
+    /// List all conferences with full details
+    pub async fn list_conferences_detail(&self) -> Vec<ConferenceRoom> {
+        let conferences = self.conferences.read().await;
+        conferences.values().cloned().collect()
+    }
+
     /// Get conference statistics
     pub async fn get_conference_stats(&self, conf_id: &ConferenceId) -> Result<ConferenceStats> {
         let conferences = self.conferences.read().await;
@@ -772,5 +778,87 @@ mod tests {
 
         manager.destroy_conference(&conf1).await.unwrap();
         manager.destroy_conference(&conf2).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_list_conferences_detail() {
+        let manager = ConferenceManager::new();
+
+        let conf1 = ConferenceId::from("detail-conf1");
+        let conf2 = ConferenceId::from("detail-conf2");
+
+        manager
+            .create_conference(conf1.clone(), Some(5))
+            .await
+            .unwrap();
+        manager
+            .create_conference(conf2.clone(), None)
+            .await
+            .unwrap();
+
+        manager
+            .add_participant(&conf1, LegId::new("leg-a"))
+            .await
+            .unwrap();
+        manager
+            .add_participant(&conf1, LegId::new("leg-b"))
+            .await
+            .unwrap();
+
+        let details = manager.list_conferences_detail().await;
+        assert_eq!(details.len(), 2);
+
+        let conf1_detail = details.iter().find(|c| c.id == conf1).unwrap();
+        assert_eq!(conf1_detail.participant_count(), 2);
+        assert_eq!(conf1_detail.max_participants, Some(5));
+
+        let conf2_detail = details.iter().find(|c| c.id == conf2).unwrap();
+        assert_eq!(conf2_detail.participant_count(), 0);
+
+        manager.destroy_conference(&conf1).await.unwrap();
+        manager.destroy_conference(&conf2).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_mute_all_participants() {
+        let manager = ConferenceManager::new();
+        let conf_id = ConferenceId::from("test-mute-all");
+
+        manager
+            .create_conference(conf_id.clone(), None)
+            .await
+            .unwrap();
+
+        let leg1 = LegId::new("leg1");
+        let leg2 = LegId::new("leg2");
+        let leg3 = LegId::new("leg3");
+
+        manager
+            .add_participant(&conf_id, leg1.clone())
+            .await
+            .unwrap();
+        manager
+            .add_participant(&conf_id, leg2.clone())
+            .await
+            .unwrap();
+        manager
+            .add_participant(&conf_id, leg3.clone())
+            .await
+            .unwrap();
+
+        manager.mute_participant(&conf_id, &leg1).await.unwrap();
+
+        // Mute all remaining unmuted participants
+        let conf = manager.get_conference(&conf_id).await.unwrap();
+        for (lid, p) in &conf.participants {
+            if !p.muted {
+                manager.mute_participant(&conf_id, lid).await.unwrap();
+            }
+        }
+
+        let conf = manager.get_conference(&conf_id).await.unwrap();
+        assert_eq!(conf.participants.values().filter(|p| p.muted).count(), 3);
+
+        manager.destroy_conference(&conf_id).await.unwrap();
     }
 }

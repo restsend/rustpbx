@@ -440,12 +440,33 @@ impl SipSession {
             return Err(anyhow!("Leg not found: {}", leg_id));
         }
 
-        self.server
-            .conference_manager
-            .add_participant(&conf_id.into(), leg_id)
-            .await?;
+        let peer = self.legs.peers.get(&leg_id).cloned();
+        let bridge_result = if let Some(peer) = peer {
+            self.start_conference_media_bridge_for_peer(&conf_id, &leg_id, &peer)
+                .await
+        } else {
+            self.start_conference_media_bridge(&conf_id, &leg_id)
+                .await
+        };
 
-        Ok(())
+        match bridge_result {
+            Ok(handle) => {
+                info!(%conf_id, %leg_id, "Conference media bridge started for added leg");
+                self.legs
+                    .set_conference_bridge_handle(leg_id.clone(), handle);
+                Ok(())
+            }
+            Err(e) => {
+                warn!(%conf_id, %leg_id, error = %e, "Failed to start conference media bridge, cleaning up participant");
+                let conf_id_obj = crate::call::runtime::ConferenceId::from(conf_id.as_str());
+                let _ = self
+                    .server
+                    .conference_manager
+                    .remove_participant(&conf_id_obj, &leg_id)
+                    .await;
+                Err(e)
+            }
+        }
     }
 
     pub(super) async fn handle_conference_remove(
@@ -454,6 +475,11 @@ impl SipSession {
         leg_id: LegId,
     ) -> Result<()> {
         info!(%conf_id, %leg_id, "Removing leg from conference");
+
+        if let Some(handle) = self.legs.remove_conference_bridge_handle(&leg_id) {
+            handle.stop();
+            info!(%leg_id, "Stopped conference media bridge for removed leg");
+        }
 
         self.server
             .conference_manager
@@ -496,12 +522,63 @@ impl SipSession {
     pub(super) async fn handle_conference_destroy(&mut self, conf_id: String) -> Result<()> {
         info!(%conf_id, "Destroying conference");
 
+        self.legs.stop_all_conference_bridge_handles();
+
         self.server
             .conference_manager
             .destroy_conference(&conf_id.into())
             .await?;
 
         Ok(())
+    }
+
+    pub(super) async fn handle_conference_kick(
+        &mut self,
+        conf_id: String,
+        leg_id: LegId,
+    ) -> Result<()> {
+        info!(%conf_id, %leg_id, "Kicking leg from conference");
+        self.handle_conference_remove(conf_id, leg_id).await
+    }
+
+    pub(super) async fn handle_conference_mute_all(&mut self, conf_id: String) -> Result<()> {
+        info!(%conf_id, "Muting all participants in conference");
+
+        let conf_id_obj = crate::call::runtime::ConferenceId::from(conf_id.as_str());
+        let conf = self
+            .server
+            .conference_manager
+            .get_conference(&conf_id_obj)
+            .await
+            .ok_or_else(|| anyhow!("Conference {} not found", conf_id))?;
+
+        for leg_id in conf.participant_ids() {
+            let _ = self
+                .server
+                .conference_manager
+                .mute_participant(&conf_id_obj, &leg_id)
+                .await;
+        }
+
+        Ok(())
+    }
+
+    pub(super) async fn handle_conference_info(
+        &self,
+        conf_id: String,
+    ) -> Result<crate::call::runtime::ConferenceRoom> {
+        let conf_id_obj = crate::call::runtime::ConferenceId::from(conf_id.as_str());
+        self.server
+            .conference_manager
+            .get_conference(&conf_id_obj)
+            .await
+            .ok_or_else(|| anyhow!("Conference {} not found", conf_id))
+    }
+
+    pub(super) async fn handle_conference_list(
+        &self,
+    ) -> Vec<crate::call::runtime::ConferenceRoom> {
+        self.server.conference_manager.list_conferences_detail().await
     }
 
     pub(super) async fn handle_join_mixer(&mut self, mixer_id: String) -> Result<()> {

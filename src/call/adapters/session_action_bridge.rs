@@ -246,6 +246,10 @@ pub fn call_command_to_session_action(cmd: CallCommand) -> Result<SessionAction>
         | CallCommand::ConferenceMute { .. }
         | CallCommand::ConferenceUnmute { .. }
         | CallCommand::ConferenceDestroy { .. }
+        | CallCommand::ConferenceKick { .. }
+        | CallCommand::ConferenceMuteAll { .. }
+        | CallCommand::ConferenceInfo { .. }
+        | CallCommand::ConferenceList
         | CallCommand::JoinMixer { .. }
         | CallCommand::LeaveMixer => {
             Err(AdapterError::NotSupported("conference commands".to_string()).into())

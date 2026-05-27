@@ -401,6 +401,23 @@ pub fn rwi_to_call_command(
             Ok(CallCommand::ConferenceDestroy { conf_id })
         }
 
+        RwiCommandPayload::ConferenceKick { conf_id, call_id } => {
+            Ok(CallCommand::ConferenceKick {
+                conf_id,
+                leg_id: LegId::new(call_id),
+            })
+        }
+
+        RwiCommandPayload::ConferenceMuteAll { conf_id } => {
+            Ok(CallCommand::ConferenceMuteAll { conf_id })
+        }
+
+        RwiCommandPayload::ConferenceInfo { conf_id } => {
+            Ok(CallCommand::ConferenceInfo { conf_id })
+        }
+
+        RwiCommandPayload::ConferenceList => Ok(CallCommand::ConferenceList),
+
         // ========================================================================
         // Conference Merge (handled at processor level, not session level)
         // ========================================================================
@@ -518,5 +535,53 @@ mod tests {
         };
         let result = rwi_to_call_command(payload, None);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_conference_kick_conversion() {
+        let payload = RwiCommandPayload::ConferenceKick {
+            conf_id: "conf-1".to_string(),
+            call_id: "leg-1".to_string(),
+        };
+        let cmd = rwi_to_call_command(payload, None).unwrap();
+        if let CallCommand::ConferenceKick { conf_id, leg_id } = cmd {
+            assert_eq!(conf_id, "conf-1");
+            assert_eq!(leg_id.as_str(), "leg-1");
+        } else {
+            panic!("Expected ConferenceKick command");
+        }
+    }
+
+    #[test]
+    fn test_conference_mute_all_conversion() {
+        let payload = RwiCommandPayload::ConferenceMuteAll {
+            conf_id: "conf-1".to_string(),
+        };
+        let cmd = rwi_to_call_command(payload, None).unwrap();
+        if let CallCommand::ConferenceMuteAll { conf_id } = cmd {
+            assert_eq!(conf_id, "conf-1");
+        } else {
+            panic!("Expected ConferenceMuteAll command");
+        }
+    }
+
+    #[test]
+    fn test_conference_info_conversion() {
+        let payload = RwiCommandPayload::ConferenceInfo {
+            conf_id: "conf-1".to_string(),
+        };
+        let cmd = rwi_to_call_command(payload, None).unwrap();
+        if let CallCommand::ConferenceInfo { conf_id } = cmd {
+            assert_eq!(conf_id, "conf-1");
+        } else {
+            panic!("Expected ConferenceInfo command");
+        }
+    }
+
+    #[test]
+    fn test_conference_list_conversion() {
+        let payload = RwiCommandPayload::ConferenceList;
+        let cmd = rwi_to_call_command(payload, None).unwrap();
+        assert!(matches!(cmd, CallCommand::ConferenceList));
     }
 }

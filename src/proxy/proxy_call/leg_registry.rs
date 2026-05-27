@@ -1,4 +1,5 @@
 use crate::call::domain::{Leg, LegId};
+use crate::call::runtime::conference_media_bridge::ConferenceBridgeHandle;
 use crate::proxy::proxy_call::media_peer::MediaPeer;
 use rsipstack::dialog::dialog::Dialog;
 use std::collections::HashMap;
@@ -9,11 +10,11 @@ pub struct LegRegistry {
     pub states: HashMap<LegId, Leg>,
     pub dialogs: HashMap<LegId, Dialog>,
     pub peers: HashMap<LegId, Arc<dyn MediaPeer>>,
-    // rustrtc::TransportMode is Clone but NOT Copy
     pub transports: HashMap<LegId, rustrtc::TransportMode>,
     pub answers: HashMap<LegId, String>,
     pub has_video: HashMap<LegId, bool>,
     pub tasks: HashMap<LegId, Vec<JoinHandle<()>>>,
+    pub conference_bridge_handles: HashMap<LegId, ConferenceBridgeHandle>,
 }
 
 impl LegRegistry {
@@ -26,6 +27,7 @@ impl LegRegistry {
             answers: HashMap::new(),
             has_video: HashMap::new(),
             tasks: HashMap::new(),
+            conference_bridge_handles: HashMap::new(),
         }
     }
 
@@ -50,6 +52,9 @@ impl LegRegistry {
         self.transports.remove(id);
         self.answers.remove(id);
         self.has_video.remove(id);
+        if let Some(handle) = self.conference_bridge_handles.remove(id) {
+            handle.stop();
+        }
         let tasks = self.tasks.remove(id).unwrap_or_default();
         Some((state, tasks))
     }
@@ -135,6 +140,26 @@ impl LegRegistry {
 
     pub fn drain_tasks(&mut self) -> impl Iterator<Item = (LegId, Vec<JoinHandle<()>>)> + '_ {
         self.tasks.drain()
+    }
+
+    pub fn set_conference_bridge_handle(
+        &mut self,
+        id: LegId,
+        handle: ConferenceBridgeHandle,
+    ) {
+        if let Some(old) = self.conference_bridge_handles.insert(id.clone(), handle) {
+            old.stop();
+        }
+    }
+
+    pub fn remove_conference_bridge_handle(&mut self, id: &LegId) -> Option<ConferenceBridgeHandle> {
+        self.conference_bridge_handles.remove(id)
+    }
+
+    pub fn stop_all_conference_bridge_handles(&mut self) {
+        for (_, handle) in self.conference_bridge_handles.drain() {
+            handle.stop();
+        }
     }
 
     pub fn contains_key(&self, id: &LegId) -> bool {
