@@ -19,6 +19,7 @@ pub struct HttpUserBackend {
     method: Method,
     username_field: String,
     realm_field: String,
+    request_uri_field: String,
     headers: HashMap<String, String>,
     sip_headers: Vec<String>,
     client: Client,
@@ -30,6 +31,7 @@ impl HttpUserBackend {
         method: &Option<String>,
         username_field: &Option<String>,
         realm_field: &Option<String>,
+        request_uri_field: &Option<String>,
         headers: &Option<HashMap<String, String>>,
         sip_headers: &Option<Vec<String>>,
     ) -> Self {
@@ -47,6 +49,9 @@ impl HttpUserBackend {
         let realm_field = realm_field
             .as_ref()
             .map_or_else(|| "realm".to_string(), |s| s.clone());
+        let request_uri_field = request_uri_field
+            .as_ref()
+            .map_or_else(|| "request_uri".to_string(), |s| s.clone());
 
         let headers = headers.clone().unwrap_or_default();
         let sip_headers = sip_headers.clone().unwrap_or_default();
@@ -56,6 +61,7 @@ impl HttpUserBackend {
             method,
             username_field,
             realm_field,
+            request_uri_field,
             headers,
             sip_headers,
             client: Client::new(),
@@ -75,6 +81,9 @@ impl UserBackend for HttpUserBackend {
         request: Option<&rsipstack::sip::Request>,
     ) -> Result<Option<SipUser>, AuthError> {
         let start_time = Instant::now();
+        let request_uri = request
+            .map(|req| req.uri.to_string())
+            .unwrap_or_default();
         let sip_params = if let Some(req) = request {
             let mut params: HashMap<String, String> = HashMap::new();
             for header_name in &self.sip_headers {
@@ -104,11 +113,13 @@ impl UserBackend for HttpUserBackend {
                 }
 
                 url.push_str(&format!(
-                    "{}={}&{}={}",
+                    "{}={}&{}={}&{}={}",
                     self.username_field,
                     urlencoding::encode(username),
                     self.realm_field,
                     urlencoding::encode(realm.unwrap_or("")),
+                    self.request_uri_field,
+                    urlencoding::encode(&request_uri),
                 ));
 
                 for (key, value) in &sip_params {
@@ -125,6 +136,7 @@ impl UserBackend for HttpUserBackend {
                 let mut form = HashMap::new();
                 form.insert(self.username_field.clone(), username.to_string());
                 form.insert(self.realm_field.clone(), realm.unwrap_or("").to_string());
+                form.insert(self.request_uri_field.clone(), request_uri);
                 for (key, value) in &sip_params {
                     form.insert(key.clone(), value.clone());
                 }
@@ -199,10 +211,12 @@ mod tests {
             &None,
             &None,
             &None,
+            &None,
         );
 
         assert_eq!(backend.url, "http://rustpbx.com/auth");
         assert_eq!(backend.username_field, "username");
+        assert_eq!(backend.request_uri_field, "request_uri");
         assert!(backend.headers.is_empty());
 
         // Test with custom headers
@@ -211,6 +225,7 @@ mod tests {
 
         let backend = HttpUserBackend::new(
             "http://rustpbx.com/auth",
+            &None,
             &None,
             &None,
             &None,
