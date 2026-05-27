@@ -276,6 +276,14 @@ pub enum CallCommand {
         conf_id: String,
     },
 
+    /// Host ends the entire conference (validates host identity)
+    ConferenceEnd {
+        /// Conference ID
+        conf_id: String,
+        /// Leg ID of the host requesting the end
+        host_leg_id: LegId,
+    },
+
     /// Kick a participant from a conference (alias for remove with notification)
     ConferenceKick {
         /// Conference ID
@@ -564,6 +572,7 @@ impl CallCommand {
             CallCommand::ConferenceMute { leg_id, .. } => Some(leg_id),
             CallCommand::ConferenceUnmute { leg_id, .. } => Some(leg_id),
             CallCommand::ConferenceKick { leg_id, .. } => Some(leg_id),
+            CallCommand::ConferenceEnd { host_leg_id, .. } => Some(host_leg_id),
             CallCommand::QueueEnqueue { leg_id, .. } => Some(leg_id),
             CallCommand::QueueDequeue { leg_id } => Some(leg_id),
             CallCommand::HandleReInvite { leg_id, .. } => Some(leg_id),

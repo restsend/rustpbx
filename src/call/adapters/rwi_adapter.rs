@@ -68,6 +68,7 @@ pub fn rwi_to_call_command(
         | RwiCommandPayload::AppStart { .. }
         | RwiCommandPayload::AppStop { .. }
         | RwiCommandPayload::AppChain { .. }
+        | RwiCommandPayload::ConferenceEnd { .. }
         | RwiCommandPayload::DtmfCollect(_) => {
             Err(AdapterError::NotSupported("session management command".to_string()).into())
         }

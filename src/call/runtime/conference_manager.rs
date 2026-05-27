@@ -2,6 +2,12 @@
 //!
 //! Manages conference rooms including create, destroy, participant management,
 //! and mute/unmute functionality with real-time audio mixing.
+//!
+//! Supports host/moderator role: the participant who creates or merges the
+//! conference becomes the host. The host can end the entire conference for
+//! all participants. When only 0-1 participants remain the conference is
+//! auto-destroyed. An optional `max_duration_secs` triggers auto-destroy
+//! on timeout (default 1 hour when used from the CC addon).
 
 use crate::call::domain::LegId;
 use crate::media::conference_mixer::{AudioFrame, ConferenceAudioMixer};
@@ -11,6 +17,20 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{RwLock, mpsc};
 use tracing::info;
+
+pub const DEFAULT_CONFERENCE_TIMEOUT_SECS: u64 = 3600;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ParticipantRole {
+    Host,
+    Member,
+}
+
+impl Default for ParticipantRole {
+    fn default() -> Self {
+        Self::Member
+    }
+}
 
 /// Unique identifier for a conference
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -33,6 +53,7 @@ impl From<&str> for ConferenceId {
 pub struct ConferenceParticipant {
     pub leg_id: LegId,
     pub muted: bool,
+    pub role: ParticipantRole,
     pub joined_at: std::time::Instant,
 }
 
@@ -41,6 +62,16 @@ impl ConferenceParticipant {
         Self {
             leg_id,
             muted: false,
+            role: ParticipantRole::Member,
+            joined_at: std::time::Instant::now(),
+        }
+    }
+
+    pub fn with_role(leg_id: LegId, role: ParticipantRole) -> Self {
+        Self {
+            leg_id,
+            muted: false,
+            role,
             joined_at: std::time::Instant::now(),
         }
     }
@@ -51,6 +82,8 @@ impl ConferenceParticipant {
 pub struct ConferenceRoom {
     pub id: ConferenceId,
     pub participants: HashMap<LegId, ConferenceParticipant>,
+    pub host_leg_id: Option<LegId>,
+    pub max_duration_secs: Option<u64>,
     pub created_at: std::time::Instant,
     pub max_participants: Option<usize>,
     pub locked: bool,
@@ -61,14 +94,31 @@ impl ConferenceRoom {
         Self {
             id,
             participants: HashMap::new(),
+            host_leg_id: None,
+            max_duration_secs: None,
             created_at: std::time::Instant::now(),
             max_participants,
             locked: false,
         }
     }
 
+    pub fn with_host(mut self, host_leg_id: LegId) -> Self {
+        self.host_leg_id = Some(host_leg_id);
+        self
+    }
+
+    pub fn with_max_duration(mut self, secs: u64) -> Self {
+        self.max_duration_secs = Some(secs);
+        self
+    }
+
     /// Add a participant to the conference
     pub fn add_participant(&mut self, leg_id: LegId) -> Result<()> {
+        self.add_participant_with_role(leg_id, ParticipantRole::Member)
+    }
+
+    /// Add a participant with an explicit role
+    pub fn add_participant_with_role(&mut self, leg_id: LegId, role: ParticipantRole) -> Result<()> {
         if let Some(max) = self.max_participants
             && self.participants.len() >= max
         {
@@ -79,7 +129,7 @@ impl ConferenceRoom {
             return Err(anyhow!("Leg {} already in conference", leg_id));
         }
 
-        let participant = ConferenceParticipant::new(leg_id.clone());
+        let participant = ConferenceParticipant::with_role(leg_id.clone(), role);
         self.participants.insert(leg_id.clone(), participant);
         info!(conf_id = %self.id.0, leg_id = %leg_id, "Participant added to conference");
         Ok(())
@@ -126,6 +176,11 @@ impl ConferenceRoom {
         self.participants.is_empty()
     }
 
+    /// Check if a leg is the host of this conference
+    pub fn is_host(&self, leg_id: &LegId) -> bool {
+        self.host_leg_id.as_ref() == Some(leg_id)
+    }
+
     /// Get all participant IDs
     pub fn participant_ids(&self) -> Vec<LegId> {
         self.participants.keys().cloned().collect()
@@ -161,14 +216,11 @@ impl ParticipantChannels {
 #[derive(Clone)]
 pub struct ConferenceManager {
     conferences: Arc<RwLock<HashMap<ConferenceId, ConferenceRoom>>>,
-    /// Track which conference a leg belongs to
     leg_to_conference: Arc<RwLock<HashMap<LegId, ConferenceId>>>,
-    /// Audio mixers for local conferences
     audio_mixers: Arc<RwLock<HashMap<ConferenceId, Arc<ConferenceAudioMixer>>>>,
-    /// Audio channels for local participants
     participant_channels: Arc<RwLock<HashMap<LegId, ParticipantChannels>>>,
-    /// Output receivers for local participants (mixed audio from conference)
     participant_output_rxs: Arc<RwLock<HashMap<LegId, mpsc::Receiver<AudioFrame>>>>,
+    timeout_tokens: Arc<RwLock<HashMap<ConferenceId, tokio_util::sync::CancellationToken>>>,
 }
 
 impl ConferenceManager {
@@ -179,6 +231,7 @@ impl ConferenceManager {
             audio_mixers: Arc::new(RwLock::new(HashMap::new())),
             participant_channels: Arc::new(RwLock::new(HashMap::new())),
             participant_output_rxs: Arc::new(RwLock::new(HashMap::new())),
+            timeout_tokens: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -188,23 +241,67 @@ impl ConferenceManager {
         conf_id: ConferenceId,
         max_participants: Option<usize>,
     ) -> Result<ConferenceRoom> {
+        self.create_conference_ex(conf_id, max_participants, None, None).await
+    }
+
+    /// Create a new conference with extended options (host, timeout)
+    pub async fn create_conference_ex(
+        &self,
+        conf_id: ConferenceId,
+        max_participants: Option<usize>,
+        host_leg_id: Option<LegId>,
+        max_duration_secs: Option<u64>,
+    ) -> Result<ConferenceRoom> {
         let mut conferences = self.conferences.write().await;
 
         if conferences.contains_key(&conf_id) {
             return Err(anyhow!("Conference {} already exists", conf_id.0));
         }
 
-        let conference = ConferenceRoom::new(conf_id.clone(), max_participants);
+        let mut conference = ConferenceRoom::new(conf_id.clone(), max_participants);
+        if let Some(ref host) = host_leg_id {
+            conference = conference.with_host(host.clone());
+        }
+        if let Some(dur) = max_duration_secs {
+            conference = conference.with_max_duration(dur);
+        }
         conferences.insert(conf_id.clone(), conference.clone());
 
-        // Create local audio mixer
         let mut audio_mixers = self.audio_mixers.write().await;
         let mixer = Arc::new(ConferenceAudioMixer::new(conf_id.0.clone(), 8000));
         mixer.start();
         audio_mixers.insert(conf_id.clone(), mixer);
         info!(conf_id = %conf_id.0, "Conference created with local audio mixing");
 
+        drop(audio_mixers);
+        drop(conferences);
+
+        if let Some(dur) = max_duration_secs {
+            self.spawn_timeout(conf_id.clone(), dur).await;
+        }
+
         Ok(conference)
+    }
+
+    async fn spawn_timeout(&self, conf_id: ConferenceId, dur_secs: u64) {
+        let manager = self.clone();
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let child = cancel.child_token();
+
+        {
+            let mut tokens = self.timeout_tokens.write().await;
+            tokens.insert(conf_id.clone(), cancel);
+        }
+
+        tokio::spawn(async move {
+            tokio::select! {
+                _ = tokio::time::sleep(std::time::Duration::from_secs(dur_secs)) => {
+                    info!(conf_id = %conf_id.0, "Conference timed out, auto-destroying");
+                    let _ = manager.destroy_conference(&conf_id).await;
+                }
+                _ = child.cancelled() => {}
+            }
+        });
     }
 
     /// Get a conference if it exists
@@ -215,7 +312,13 @@ impl ConferenceManager {
 
     /// Destroy a conference
     pub async fn destroy_conference(&self, conf_id: &ConferenceId) -> Result<()> {
-        // Stop and remove local audio mixer
+        {
+            let mut tokens = self.timeout_tokens.write().await;
+            if let Some(token) = tokens.remove(conf_id) {
+                token.cancel();
+            }
+        }
+
         let mut audio_mixers = self.audio_mixers.write().await;
         if let Some(mixer) = audio_mixers.remove(conf_id) {
             mixer.stop().await;
@@ -249,6 +352,16 @@ impl ConferenceManager {
         conf_id: &ConferenceId,
         leg_id: LegId,
     ) -> Result<ParticipantChannels> {
+        self.add_participant_ex(conf_id, leg_id, ParticipantRole::Member).await
+    }
+
+    /// Add a participant with an explicit role
+    pub async fn add_participant_ex(
+        &self,
+        conf_id: &ConferenceId,
+        leg_id: LegId,
+        role: ParticipantRole,
+    ) -> Result<ParticipantChannels> {
         // Check if leg is already in another conference
         {
             let leg_map = self.leg_to_conference.read().await;
@@ -270,7 +383,7 @@ impl ConferenceManager {
                 .get_mut(conf_id)
                 .ok_or_else(|| anyhow!("Conference {} not found", conf_id.0))?;
 
-            conference.add_participant(leg_id.clone())?;
+            conference.add_participant_with_role(leg_id.clone(), role)?;
         }
 
         // Add to local audio mixer
@@ -305,9 +418,12 @@ impl ConferenceManager {
         Ok(channels)
     }
 
-    /// Remove a participant from a conference
-    pub async fn remove_participant(&self, conf_id: &ConferenceId, leg_id: &LegId) -> Result<()> {
+    /// Remove a participant from a conference.
+    /// Returns the number of remaining participants.
+    /// If 0 or 1 remain, the conference is auto-destroyed.
+    pub async fn remove_participant(&self, conf_id: &ConferenceId, leg_id: &LegId) -> Result<usize> {
         // Remove from conference room
+        let remaining;
         {
             let mut conferences = self.conferences.write().await;
             let conference = conferences
@@ -315,6 +431,7 @@ impl ConferenceManager {
                 .ok_or_else(|| anyhow!("Conference {} not found", conf_id.0))?;
 
             conference.remove_participant(leg_id)?;
+            remaining = conference.participant_count();
         }
 
         // Remove from local audio mixer
@@ -335,7 +452,21 @@ impl ConferenceManager {
             leg_map.remove(leg_id);
         }
 
-        Ok(())
+        if remaining <= 1 {
+            info!(
+                conf_id = %conf_id.0,
+                remaining,
+                "Auto-destroying conference: too few participants remaining"
+            );
+            let mgr = self.clone();
+            let cid = conf_id.clone();
+            tokio::spawn(async move {
+                let _ = mgr.destroy_conference(&cid).await;
+            });
+            return Ok(0);
+        }
+
+        Ok(remaining)
     }
 
     /// Mute a participant
@@ -430,7 +561,8 @@ impl ConferenceManager {
         })
     }
 
-    /// Remove a leg from any conference (called when leg hangs up)
+    /// Remove a leg from any conference (called when leg hangs up).
+    /// Triggers auto-destroy if too few participants remain.
     pub async fn remove_leg_from_all(&self, leg_id: &LegId) -> Result<()> {
         let conf_id = {
             let leg_map = self.leg_to_conference.read().await;
@@ -442,6 +574,36 @@ impl ConferenceManager {
         }
 
         Ok(())
+    }
+
+    /// Host ends the entire conference for all participants.
+    /// Validates that the caller is the host before destroying.
+    pub async fn end_by_host(&self, conf_id: &ConferenceId, host_leg_id: &LegId) -> Result<Vec<LegId>> {
+        let (is_host, participant_ids) = {
+            let conferences = self.conferences.read().await;
+            let conf = conferences
+                .get(conf_id)
+                .ok_or_else(|| anyhow!("Conference {} not found", conf_id.0))?;
+            (conf.is_host(host_leg_id), conf.participant_ids())
+        };
+
+        if !is_host {
+            return Err(anyhow!(
+                "Leg {} is not the host of conference {}",
+                host_leg_id,
+                conf_id.0
+            ));
+        }
+
+        let removed = participant_ids.clone();
+        self.destroy_conference(conf_id).await?;
+        info!(
+            conf_id = %conf_id.0,
+            host_leg_id = %host_leg_id,
+            removed_count = removed.len(),
+            "Host ended conference"
+        );
+        Ok(removed)
     }
 }
 
@@ -860,5 +1022,173 @@ mod tests {
         assert_eq!(conf.participants.values().filter(|p| p.muted).count(), 3);
 
         manager.destroy_conference(&conf_id).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_host_role_and_end_by_host() {
+        let manager = ConferenceManager::new();
+        let conf_id = ConferenceId::from("test-host");
+
+        let host_leg = LegId::new("agent-b");
+        manager
+            .create_conference_ex(
+                conf_id.clone(),
+                None,
+                Some(host_leg.clone()),
+                None,
+            )
+            .await
+            .unwrap();
+
+        let leg_a = LegId::new("customer-a");
+        let leg_c = LegId::new("expert-c");
+
+        manager
+            .add_participant(&conf_id, leg_a.clone())
+            .await
+            .unwrap();
+        manager
+            .add_participant_ex(&conf_id, host_leg.clone(), ParticipantRole::Host)
+            .await
+            .unwrap();
+        manager
+            .add_participant(&conf_id, leg_c.clone())
+            .await
+            .unwrap();
+
+        let conf = manager.get_conference(&conf_id).await.unwrap();
+        assert_eq!(conf.participant_count(), 3);
+        assert!(conf.is_host(&host_leg));
+        assert!(!conf.is_host(&leg_a));
+
+        // Non-host cannot end
+        let result = manager.end_by_host(&conf_id, &leg_a).await;
+        assert!(result.is_err());
+
+        // Host ends conference
+        let removed = manager.end_by_host(&conf_id, &host_leg).await.unwrap();
+        assert_eq!(removed.len(), 3);
+
+        assert!(manager.get_conference(&conf_id).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_auto_destroy_on_last_participant() {
+        let manager = ConferenceManager::new();
+        let conf_id = ConferenceId::from("test-auto-destroy");
+
+        manager
+            .create_conference(conf_id.clone(), None)
+            .await
+            .unwrap();
+
+        let leg_a = LegId::new("leg-a");
+        let leg_b = LegId::new("leg-b");
+        let leg_c = LegId::new("leg-c");
+
+        manager.add_participant(&conf_id, leg_a.clone()).await.unwrap();
+        manager.add_participant(&conf_id, leg_b.clone()).await.unwrap();
+        manager.add_participant(&conf_id, leg_c.clone()).await.unwrap();
+
+        assert_eq!(
+            manager.get_conference(&conf_id).await.unwrap().participant_count(),
+            3
+        );
+
+        // Remove leg_a -> 2 remain, conference stays
+        let remaining = manager.remove_participant(&conf_id, &leg_a).await.unwrap();
+        assert_eq!(remaining, 2);
+        assert!(manager.get_conference(&conf_id).await.is_some());
+
+        // Remove leg_b -> 1 remain, auto-destroy
+        let remaining = manager.remove_participant(&conf_id, &leg_b).await.unwrap();
+        assert_eq!(remaining, 0);
+
+        // Yield to let the spawned auto-destroy complete
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        assert!(
+            manager.get_conference(&conf_id).await.is_none(),
+            "Conference should be auto-destroyed when only 1 participant remains"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_auto_destroy_on_all_leave() {
+        let manager = ConferenceManager::new();
+        let conf_id = ConferenceId::from("test-all-leave");
+
+        manager
+            .create_conference(conf_id.clone(), None)
+            .await
+            .unwrap();
+
+        let leg_a = LegId::new("leg-a");
+        manager.add_participant(&conf_id, leg_a.clone()).await.unwrap();
+
+        // Remove the only participant -> auto-destroy
+        let remaining = manager.remove_participant(&conf_id, &leg_a).await.unwrap();
+        assert_eq!(remaining, 0);
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        assert!(manager.get_conference(&conf_id).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_conference_timeout_auto_destroy() {
+        let manager = ConferenceManager::new();
+        let conf_id = ConferenceId::from("test-timeout");
+
+        // Create with 1 second timeout
+        manager
+            .create_conference_ex(
+                conf_id.clone(),
+                None,
+                None,
+                Some(1),
+            )
+            .await
+            .unwrap();
+
+        let leg_a = LegId::new("leg-a");
+        manager.add_participant(&conf_id, leg_a.clone()).await.unwrap();
+
+        assert!(manager.get_conference(&conf_id).await.is_some());
+
+        // Wait for timeout
+        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+
+        assert!(
+            manager.get_conference(&conf_id).await.is_none(),
+            "Conference should be auto-destroyed after timeout"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_remove_leg_from_all_triggers_auto_destroy() {
+        let manager = ConferenceManager::new();
+        let conf_id = ConferenceId::from("test-remove-all-auto");
+
+        manager
+            .create_conference(conf_id.clone(), None)
+            .await
+            .unwrap();
+
+        let leg_a = LegId::new("leg-a");
+        let leg_b = LegId::new("leg-b");
+
+        manager.add_participant(&conf_id, leg_a.clone()).await.unwrap();
+        manager.add_participant(&conf_id, leg_b.clone()).await.unwrap();
+
+        // Remove leg_a via remove_leg_from_all -> 1 remains -> auto-destroy
+        manager.remove_leg_from_all(&leg_a).await.unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        assert!(
+            manager.get_conference(&conf_id).await.is_none(),
+            "Conference should auto-destroy when only 1 participant remains after remove_leg_from_all"
+        );
     }
 }

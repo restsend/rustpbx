@@ -7115,6 +7115,14 @@ impl SipSession {
                 }
             }
 
+            CallCommand::ConferenceEnd {
+                conf_id,
+                host_leg_id,
+            } => match self.handle_conference_end(conf_id, host_leg_id).await {
+                Ok(_) => CommandResult::success(),
+                Err(e) => CommandResult::failure(e.to_string()),
+            },
+
             CallCommand::ConferenceKick { conf_id, leg_id } => {
                 match self.handle_conference_kick(conf_id, leg_id).await {
                     Ok(_) => CommandResult::success(),

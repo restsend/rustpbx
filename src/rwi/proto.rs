@@ -201,6 +201,10 @@ pub enum RwiCommand {
     ConferenceDestroy {
         conf_id: String,
     },
+    ConferenceEnd {
+        conf_id: String,
+        host_call_id: String,
+    },
     ConferenceMerge {
         conf_id: String,
         call_id: String,
@@ -344,8 +348,11 @@ pub struct ConferenceCreateParams {
     pub max_members: Option<u32>,
     #[serde(default)]
     pub record: bool,
-    #[serde(default)]
     pub mcu_uri: Option<String>,
+    #[serde(default)]
+    pub host_call_id: Option<String>,
+    #[serde(default)]
+    pub max_duration_secs: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -676,6 +683,19 @@ pub enum RwiEvent {
     },
     ConferenceDestroyed {
         conf_id: String,
+    },
+    ConferenceEndedByHost {
+        conf_id: String,
+        host_call_id: String,
+        removed_call_ids: Vec<String>,
+        #[serde(flatten)]
+        context: EventCallContext,
+    },
+    ConferenceAutoEnded {
+        conf_id: String,
+        reason: String,
+        #[serde(flatten)]
+        context: EventCallContext,
     },
     ConferenceError {
         conf_id: String,
@@ -1041,6 +1061,8 @@ impl RwiEvent {
 
             RwiEvent::ConferenceCreated { .. } => None,
             RwiEvent::ConferenceDestroyed { .. } => None,
+            RwiEvent::ConferenceEndedByHost { .. } => None,
+            RwiEvent::ConferenceAutoEnded { .. } => None,
             RwiEvent::ConferenceError { .. } => None,
             RwiEvent::SessionResumed { .. } => None,
 
@@ -1676,6 +1698,26 @@ impl RwiEvent {
             } => Self::ConferenceMergeFailed {
                 conf_id,
                 call_id,
+                reason,
+                context: ctx,
+            },
+            Self::ConferenceEndedByHost {
+                conf_id,
+                host_call_id,
+                removed_call_ids,
+                ..
+            } => Self::ConferenceEndedByHost {
+                conf_id,
+                host_call_id,
+                removed_call_ids,
+                context: ctx,
+            },
+            Self::ConferenceAutoEnded {
+                conf_id,
+                reason,
+                ..
+            } => Self::ConferenceAutoEnded {
+                conf_id,
                 reason,
                 context: ctx,
             },

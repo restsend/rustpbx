@@ -170,6 +170,8 @@ fn event_type_name(event: &crate::rwi::proto::RwiEvent) -> Option<&'static str> 
         ConferenceMemberMuted { .. } => "conference_member_muted",
         ConferenceMemberUnmuted { .. } => "conference_member_unmuted",
         ConferenceDestroyed { .. } => "conference_destroyed",
+        ConferenceEndedByHost { .. } => "conference_ended_by_host",
+        ConferenceAutoEnded { .. } => "conference_auto_ended",
         ConferenceError { .. } => "conference_error",
         ConferenceConsultDialing { .. } => "conference_consult_dialing",
         ConferenceConsultConnected { .. } => "conference_consult_connected",

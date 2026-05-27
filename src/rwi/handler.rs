@@ -633,6 +633,7 @@ fn extract_call_id(cmd: &RwiCommandPayload) -> Option<String> {
         RwiCommandPayload::ConferenceMute { conf_id, .. } => Some(conf_id.clone()),
         RwiCommandPayload::ConferenceUnmute { conf_id, .. } => Some(conf_id.clone()),
         RwiCommandPayload::ConferenceDestroy { conf_id } => Some(conf_id.clone()),
+        RwiCommandPayload::ConferenceEnd { conf_id, .. } => Some(conf_id.clone()),
         RwiCommandPayload::ConferenceKick { conf_id, .. } => Some(conf_id.clone()),
         RwiCommandPayload::ConferenceMuteAll { conf_id } => Some(conf_id.clone()),
         RwiCommandPayload::ConferenceInfo { conf_id } => Some(conf_id.clone()),
