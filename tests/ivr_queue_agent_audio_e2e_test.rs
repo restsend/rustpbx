@@ -14,6 +14,7 @@
 mod helpers;
 
 use futures::{SinkExt, StreamExt};
+use helpers::audio_verifier::generate_sine_wav;
 use helpers::sipbot_helper::TestUa;
 use helpers::test_server::{TEST_TOKEN, TestPbx, TestPbxInject};
 use rustpbx::call::domain::{CallCommand, LegId, MediaSource as DomainMediaSource, PlayOptions};
@@ -109,30 +110,8 @@ where
     }
 }
 
-fn create_minimal_wav(path: &std::path::Path) {
-    // Minimal valid WAV header for a 0.5s mono 8kHz PCM file
-    let sample_rate = 8000u32;
-    let duration_sec = 0.5f32;
-    let num_samples = (sample_rate as f32 * duration_sec) as u32;
-    let data_size = num_samples * 2; // 16-bit mono
-    let file_size = 36 + data_size;
-
-    let mut wav = Vec::new();
-    wav.extend_from_slice(b"RIFF");
-    wav.extend_from_slice(&file_size.to_le_bytes());
-    wav.extend_from_slice(b"WAVE");
-    wav.extend_from_slice(b"fmt ");
-    wav.extend_from_slice(&16u32.to_le_bytes()); // Subchunk1Size
-    wav.extend_from_slice(&1u16.to_le_bytes()); // AudioFormat (PCM)
-    wav.extend_from_slice(&1u16.to_le_bytes()); // NumChannels
-    wav.extend_from_slice(&sample_rate.to_le_bytes());
-    wav.extend_from_slice(&(sample_rate * 2).to_le_bytes()); // ByteRate
-    wav.extend_from_slice(&2u16.to_le_bytes()); // BlockAlign
-    wav.extend_from_slice(&16u16.to_le_bytes()); // BitsPerSample
-    wav.extend_from_slice(b"data");
-    wav.extend_from_slice(&data_size.to_le_bytes());
-    wav.extend(std::iter::repeat_n(0u8, data_size as usize));
-    std::fs::write(path, wav).expect("failed to write wav");
+fn create_tone_wav(path: &std::path::Path, freq: f64) {
+    generate_sine_wav(path, freq, 2.0, 8000, 0.5);
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
@@ -158,7 +137,7 @@ async fn test_ivr_queue_agent_flow() {
 
     // Create hold music WAV file
     let hold_music_path = sounds_dir.join("hold_music.wav");
-    create_minimal_wav(&hold_music_path);
+    create_tone_wav(&hold_music_path, 440.0);
 
     // Configure queue with hold music
     let mut queues = HashMap::new();
@@ -262,9 +241,10 @@ async fn test_ivr_queue_agent_flow() {
     // Wait for agent to answer
     tokio::time::sleep(Duration::from_secs(2)).await;
 
-    // Step 4: Log agent stats (audio flow verification requires full media bridging)
+    // Step 4: Verify audio stats
     let agent_stats = agent.rtp_stats_summary();
-    tracing::info!("Agent RTP stats: {}", agent_stats);
+    let quality = agent.audio_quality_summary();
+    tracing::info!("Agent RTP stats: {}, quality: total={} silence={}", agent_stats, quality.total_frames, quality.silence_frames);
 
     // Clean up
     ws.close(None).await.unwrap();
@@ -298,7 +278,7 @@ async fn test_queue_to_agent_rtp_complete() {
     let temp_dir = std::env::temp_dir().join(format!("rustpbx_rtp_{}", Uuid::new_v4()));
     std::fs::create_dir_all(&temp_dir).unwrap();
     let hold_music_path = temp_dir.join("hold_music.wav");
-    create_minimal_wav(&hold_music_path);
+    create_tone_wav(&hold_music_path, 440.0);
 
     // ── Queue config with hold music and agent target ────────────────────────
     let mut queues = HashMap::new();
@@ -386,6 +366,10 @@ async fn test_queue_to_agent_rtp_complete() {
         "Phase 1 FAILED: caller should have received RTP (hold music). Stats: {}",
         caller.rtp_stats_summary()
     );
+    {
+        let q = caller.audio_quality_summary();
+        assert!(q.has_audio(), "Phase 1: caller should have non-silent audio from hold music. Quality: {:?}", q);
+    }
     tracing::info!(
         "Phase 1 OK – caller queue RTP: {}",
         caller.rtp_stats_summary()
@@ -440,6 +424,10 @@ async fn test_queue_to_agent_rtp_complete() {
         "Phase 2 FAILED: agent should have received RTP from caller. Stats: {}",
         agent.rtp_stats_summary()
     );
+    {
+        let q = agent.audio_quality_summary();
+        assert!(q.has_audio(), "Phase 2: agent should have non-silent audio. Quality: {:?}", q);
+    }
     tracing::info!(
         "Phase 2 OK – agent RTP: {}, caller RTP: {}",
         agent.rtp_stats_summary(),
@@ -477,6 +465,10 @@ async fn test_queue_to_agent_rtp_complete() {
         "Phase 3 FAILED: caller should still receive RTP after re-queue. Stats: {}",
         caller.rtp_stats_summary()
     );
+    {
+        let q = caller.audio_quality_summary();
+        assert!(q.has_audio(), "Phase 3: caller should have non-silent audio after re-queue. Quality: {:?}", q);
+    }
     tracing::info!(
         "Phase 3 OK – re-queued caller RTP: {}",
         caller.rtp_stats_summary()

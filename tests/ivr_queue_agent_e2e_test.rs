@@ -199,14 +199,9 @@ async fn test_ivr_queue_agent_flow() {
     tokio::time::sleep(Duration::from_secs(2)).await;
 
     // Step 4: Verify audio flow
-    // The agent should have RTP packets (received from caller via conference)
     let agent_stats = agent.rtp_stats_summary();
-    tracing::info!("Agent RTP stats: {}", agent_stats);
-
-    // Note: In this test, audio flow might not be perfect because:
-    // 1. The Sip leg auto-dial is async and might not complete in time
-    // 2. The conference mixer setup is a framework and might not fully bridge audio yet
-    // For a complete test, we would need to wait longer and ensure the INVITE completes
+    let quality = agent.audio_quality_summary();
+    tracing::info!("Agent RTP stats: {}, quality: total={} silence={}", agent_stats, quality.total_frames, quality.silence_frames);
 
     // Clean up
     ws.close(None).await.unwrap();

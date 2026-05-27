@@ -14,6 +14,7 @@
 mod helpers;
 
 use futures::{SinkExt, StreamExt};
+use helpers::audio_verifier::generate_sine_wav;
 use helpers::sipbot_helper::TestUa;
 use helpers::test_server::{TEST_TOKEN, TestPbx, TestPbxInject};
 use rustpbx::call::VoicePrompts;
@@ -82,29 +83,8 @@ fn rwi_req(action: &str, params: serde_json::Value) -> (String, String) {
     (id, json)
 }
 
-fn create_minimal_wav(path: &std::path::Path) {
-    let sample_rate = 8000u32;
-    let duration_sec = 0.5f32;
-    let num_samples = (sample_rate as f32 * duration_sec) as u32;
-    let data_size = num_samples * 2;
-    let file_size = 36 + data_size;
-
-    let mut wav = Vec::new();
-    wav.extend_from_slice(b"RIFF");
-    wav.extend_from_slice(&file_size.to_le_bytes());
-    wav.extend_from_slice(b"WAVE");
-    wav.extend_from_slice(b"fmt ");
-    wav.extend_from_slice(&16u32.to_le_bytes());
-    wav.extend_from_slice(&1u16.to_le_bytes());
-    wav.extend_from_slice(&1u16.to_le_bytes());
-    wav.extend_from_slice(&sample_rate.to_le_bytes());
-    wav.extend_from_slice(&(sample_rate * 2).to_le_bytes());
-    wav.extend_from_slice(&2u16.to_le_bytes());
-    wav.extend_from_slice(&16u16.to_le_bytes());
-    wav.extend_from_slice(b"data");
-    wav.extend_from_slice(&data_size.to_le_bytes());
-    wav.extend(std::iter::repeat_n(0u8, data_size as usize));
-    std::fs::write(path, wav).expect("failed to write wav");
+fn create_tone_wav(path: &std::path::Path, freq: f64) {
+    generate_sine_wav(path, freq, 2.0, 8000, 0.5);
 }
 
 // ── Test 1: Queue with voice prompts → hold music flows ──────────────
@@ -123,10 +103,10 @@ async fn test_queue_prompts_hold_music() {
     let transfer_prompt_path = temp_dir.join("transfer_prompt.wav");
     let busy_prompt_path = temp_dir.join("busy_prompt.wav");
     let no_answer_prompt_path = temp_dir.join("no_answer_prompt.wav");
-    create_minimal_wav(&hold_music_path);
-    create_minimal_wav(&transfer_prompt_path);
-    create_minimal_wav(&busy_prompt_path);
-    create_minimal_wav(&no_answer_prompt_path);
+    create_tone_wav(&hold_music_path, 440.0);
+    create_tone_wav(&transfer_prompt_path, 523.0);
+    create_tone_wav(&busy_prompt_path, 600.0);
+    create_tone_wav(&no_answer_prompt_path, 700.0);
 
     // ── Queue config with voice prompts ───────────────────────────
     let mut queues = HashMap::new();
@@ -217,7 +197,9 @@ async fn test_queue_prompts_hold_music() {
         "caller should have received RTP (hold music). Stats: {}",
         caller.rtp_stats_summary()
     );
-    tracing::info!("Hold music RTP OK — caller: {}", caller.rtp_stats_summary());
+    let q = caller.audio_quality_summary();
+    assert!(q.has_audio(), "caller should have non-silent audio from hold music. Quality: {:?}", q);
+    tracing::info!("Hold music RTP OK — caller: {}, quality: total={} silence={}", caller.rtp_stats_summary(), q.total_frames, q.silence_frames);
 
     // Clean up
     let (_, app_stop_json) = rwi_req("call.app_stop", serde_json::json!({"call_id": call_id}));
@@ -249,10 +231,10 @@ async fn test_queue_agent_transfer_flow() {
     let transfer_prompt_path = temp_dir.join("transfer_prompt.wav");
     let busy_prompt_path = temp_dir.join("busy_prompt.wav");
     let no_answer_prompt_path = temp_dir.join("no_answer_prompt.wav");
-    create_minimal_wav(&hold_music_path);
-    create_minimal_wav(&transfer_prompt_path);
-    create_minimal_wav(&busy_prompt_path);
-    create_minimal_wav(&no_answer_prompt_path);
+    create_tone_wav(&hold_music_path, 440.0);
+    create_tone_wav(&transfer_prompt_path, 523.0);
+    create_tone_wav(&busy_prompt_path, 600.0);
+    create_tone_wav(&no_answer_prompt_path, 700.0);
 
     // ── Queue config with voice prompts and agent target ───────────
     let mut queues = HashMap::new();
@@ -337,6 +319,10 @@ async fn test_queue_agent_transfer_flow() {
         "Phase 1: caller should have RTP (hold music). Stats: {}",
         caller.rtp_stats_summary()
     );
+    {
+        let q = caller.audio_quality_summary();
+        assert!(q.has_audio(), "Phase 1: caller should have non-silent audio. Quality: {:?}", q);
+    }
 
     // Phase 2: Stop queue → add agent leg
     let (_, app_stop_json) = rwi_req("call.app_stop", serde_json::json!({"call_id": call_id}));
@@ -383,6 +369,10 @@ async fn test_queue_agent_transfer_flow() {
         "Phase 2: agent should have RTP. Stats: {}",
         agent.rtp_stats_summary()
     );
+    {
+        let q = agent.audio_quality_summary();
+        assert!(q.has_audio(), "Phase 2: agent should have non-silent audio. Quality: {:?}", q);
+    }
 
     tracing::info!(
         "Agent RTP OK — caller: {}, agent: {}",
