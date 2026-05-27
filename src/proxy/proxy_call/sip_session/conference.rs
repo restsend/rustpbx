@@ -532,6 +532,33 @@ impl SipSession {
         Ok(())
     }
 
+    pub(super) async fn handle_conference_end(
+        &mut self,
+        conf_id: String,
+        host_leg_id: LegId,
+    ) -> Result<()> {
+        info!(%conf_id, %host_leg_id, "Host ending conference");
+
+        self.legs.stop_all_conference_bridge_handles();
+
+        let conf_id_obj = crate::call::runtime::ConferenceId::from(conf_id.as_str());
+
+        let removed = self
+            .server
+            .conference_manager
+            .end_by_host(&conf_id_obj, &host_leg_id)
+            .await?;
+
+        info!(
+            %conf_id,
+            %host_leg_id,
+            removed_count = removed.len(),
+            "Conference ended by host, all participants removed"
+        );
+
+        Ok(())
+    }
+
     pub(super) async fn handle_conference_kick(
         &mut self,
         conf_id: String,

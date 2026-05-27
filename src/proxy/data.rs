@@ -243,6 +243,12 @@ impl ProxyDataContext {
         if let Some(ref info) = generated {
             generated_entries = info.entries;
         }
+        let generated_path = if generated.is_none() {
+            resolve_generated_path(&config.trunks_files, &default_dir, "trunks.generated.toml")
+                .filter(|p| p.exists())
+        } else {
+            None
+        };
         let mut trunks: HashMap<String, TrunkConfig> = HashMap::new();
         let mut config_count = 0usize;
         let mut file_count = 0usize;
@@ -268,6 +274,12 @@ impl ProxyDataContext {
         if let Some(ref info) = generated {
             let generated_pattern = vec![info.path.clone()];
             let (generated_trunks, _) = load_trunks_from_files(&generated_pattern)?;
+            trunks.extend(generated_trunks);
+        } else if let Some(ref path) = generated_path {
+            info!(path = %path.display(), "loading previously generated trunks file");
+            let generated_pattern = vec![path.to_string_lossy().to_string()];
+            let (generated_trunks, _) = load_trunks_from_files(&generated_pattern)?;
+            generated_entries = generated_trunks.len();
             trunks.extend(generated_trunks);
         }
 

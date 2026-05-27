@@ -1,6 +1,7 @@
 use crate::call::domain::{CallCommand, LegId};
 
 use crate::call::runtime::ConferenceManager;
+use crate::call::runtime::ConferenceId;
 use crate::call::runtime::conference_media_bridge::{
     AudioReceiver, ConferenceBridgeHandle, PcmAudioFrame,
 };
@@ -744,6 +745,12 @@ impl RwiCommandProcessor {
             RwiCommandPayload::ConferenceDestroy { conf_id } => {
                 return self.conference_destroy(conf_id).await;
             }
+            RwiCommandPayload::ConferenceEnd {
+                conf_id,
+                host_call_id,
+            } => {
+                return self.conference_end(conf_id, host_call_id).await;
+            }
             RwiCommandPayload::ConferenceMerge {
                 conf_id,
                 call_id,
@@ -1052,6 +1059,7 @@ impl RwiCommandProcessor {
 
             RwiCommandPayload::ConferenceCreate(_) => None,
             RwiCommandPayload::ConferenceDestroy { .. } => None,
+            RwiCommandPayload::ConferenceEnd { .. } => None,
             RwiCommandPayload::ConferenceSeatReplace { .. } => None,
             _ => None,
         }
@@ -3220,8 +3228,16 @@ impl RwiCommandProcessor {
 
         let manager = self.conference_manager();
         let max_participants = req.max_members.map(|m| m as usize);
+        let host_leg_id = req.host_call_id.map(|h| LegId::new(&h));
+        let max_dur = req.max_duration_secs;
+
         if let Err(e) = manager
-            .create_conference(conf_id.clone().into(), max_participants)
+            .create_conference_ex(
+                conf_id.clone().into(),
+                max_participants,
+                host_leg_id,
+                max_dur,
+            )
             .await
         {
             let err_event = RwiEvent::ConferenceError {
@@ -3400,6 +3416,43 @@ impl RwiCommandProcessor {
         gw.broadcast_event(&event);
 
         info!(conf_id = %conf_id, "Conference destroyed");
+        Ok(CommandResult::ConferenceDestroyed {
+            conf_id: conf_id.to_string(),
+        })
+    }
+
+    async fn conference_end(
+        &self,
+        conf_id: &str,
+        host_call_id: &str,
+    ) -> Result<CommandResult, CommandError> {
+        let manager = self.conference_manager();
+        let host_leg = LegId::new(host_call_id);
+        let conf_id_obj = ConferenceId::from(conf_id);
+
+        let removed = match manager.end_by_host(&conf_id_obj, &host_leg).await {
+            Ok(legs) => legs,
+            Err(e) => {
+                let err_event = RwiEvent::ConferenceError {
+                    conf_id: conf_id.to_string(),
+                    error: e.to_string(),
+                };
+                let gw = self.gateway.read();
+                gw.broadcast_event(&err_event);
+                return Err(CommandError::CommandFailed(e.to_string()));
+            }
+        };
+
+        let event = RwiEvent::ConferenceEndedByHost {
+            conf_id: conf_id.to_string(),
+            host_call_id: host_call_id.to_string(),
+            removed_call_ids: removed.iter().map(|l| l.to_string()).collect(),
+            context: Default::default(),
+        };
+        let gw = self.gateway.read();
+        gw.broadcast_event(&event);
+
+        info!(conf_id = %conf_id, host_call_id = %host_call_id, "Conference ended by host");
         Ok(CommandResult::ConferenceDestroyed {
             conf_id: conf_id.to_string(),
         })
@@ -4334,6 +4387,8 @@ impl RwiCommandProcessor {
             max_members: None,
             record: false,
             mcu_uri: None,
+            host_call_id: Some(call_id.clone()),
+            max_duration_secs: None,
         };
         // Ignore error if conference already exists
         let _ = self.conference_create(create_req).await;
@@ -6118,6 +6173,8 @@ mod tests {
                     max_members: Some(10),
                     record: false,
                     mcu_uri: None,
+                    host_call_id: None,
+                    max_duration_secs: None,
                 },
             ))
             .await;
@@ -6148,6 +6205,8 @@ mod tests {
                     max_members: None,
                     record: false,
                     mcu_uri: None,
+                    host_call_id: None,
+                    max_duration_secs: None,
                 },
             ))
             .await
@@ -6161,6 +6220,8 @@ mod tests {
                     max_members: None,
                     record: false,
                     mcu_uri: None,
+                    host_call_id: None,
+                    max_duration_secs: None,
                 },
             ))
             .await;
@@ -6186,6 +6247,8 @@ mod tests {
                     max_members: None,
                     record: false,
                     mcu_uri: None,
+                    host_call_id: None,
+                    max_duration_secs: None,
                 },
             ))
             .await;
@@ -6237,6 +6300,8 @@ mod tests {
                     max_members: None,
                     record: false,
                     mcu_uri: None,
+                    host_call_id: None,
+                    max_duration_secs: None,
                 },
             ))
             .await
@@ -6294,6 +6359,8 @@ mod tests {
                     max_members: None,
                     record: false,
                     mcu_uri: None,
+                    host_call_id: None,
+                    max_duration_secs: None,
                 },
             ))
             .await
@@ -6340,6 +6407,8 @@ mod tests {
                     max_members: Some(2),
                     record: false,
                     mcu_uri: None,
+                    host_call_id: None,
+                    max_duration_secs: None,
                 },
             ))
             .await
@@ -6459,6 +6528,8 @@ mod tests {
                     max_members: Some(2),
                     record: false,
                     mcu_uri: None,
+                    host_call_id: None,
+                    max_duration_secs: None,
                 },
             ))
             .await
@@ -6526,6 +6597,8 @@ mod tests {
                     max_members: Some(3),
                     record: false,
                     mcu_uri: None,
+                    host_call_id: None,
+                    max_duration_secs: None,
                 },
             ))
             .await
@@ -6539,6 +6612,8 @@ mod tests {
                     max_members: Some(2),
                     record: false,
                     mcu_uri: None,
+                    host_call_id: None,
+                    max_duration_secs: None,
                 },
             ))
             .await
@@ -6635,6 +6710,8 @@ mod tests {
                     max_members: Some(3),
                     record: false,
                     mcu_uri: None,
+                    host_call_id: None,
+                    max_duration_secs: None,
                 },
             ))
             .await
@@ -6648,6 +6725,8 @@ mod tests {
                     max_members: Some(2),
                     record: false,
                     mcu_uri: None,
+                    host_call_id: None,
+                    max_duration_secs: None,
                 },
             ))
             .await

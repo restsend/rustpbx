@@ -246,6 +246,7 @@ pub fn call_command_to_session_action(cmd: CallCommand) -> Result<SessionAction>
         | CallCommand::ConferenceMute { .. }
         | CallCommand::ConferenceUnmute { .. }
         | CallCommand::ConferenceDestroy { .. }
+        | CallCommand::ConferenceEnd { .. }
         | CallCommand::ConferenceKick { .. }
         | CallCommand::ConferenceMuteAll { .. }
         | CallCommand::ConferenceInfo { .. }

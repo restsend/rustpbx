@@ -1011,25 +1011,23 @@ impl SipServer {
                     .ok()
                     .flatten();
                 if to_tag.is_none() {
-                    let via = tx.original.via_header()?.value();
+                    let via_ip = crate::proxy::routing::extract_via_ip(&tx.original);
+                    let via_ip_str = via_ip
+                        .map(|ip| ip.to_string())
+                        .unwrap_or_else(|| "unknown".to_string());
                     if tx.original.method == rsipstack::sip::Method::Options {
-                        let via_ip = crate::proxy::routing::extract_via_ip(&tx.original);
-                        let is_trunk = if let Some(ip) = via_ip {
-                            self.inner
-                                .data_context
-                                .find_trunk_by_ip(&ip)
-                                .await
-                                .is_some()
+                        let is_trunk = if let Some(ref ip) = via_ip {
+                            self.inner.data_context.find_trunk_by_ip(ip).await.is_some()
                         } else {
                             false
                         };
                         if is_trunk {
-                            info!(key = %tx.key, via, "responding 200 OK to out-of-dialog OPTIONS (trunk health probe)");
+                            info!(key = %tx.key, via_ip = %via_ip_str, "responding 200 OK OPTIONS (trunk health probe)");
                             tx.reply(rsipstack::sip::StatusCode::OK).await.ok();
                             continue;
                         }
                     }
-                    info!(key = %tx.key, via, "ignoring out-of-dialog {} request", tx.original.method);
+                    debug!(key = %tx.key, via_ip = %via_ip_str, "ignoring out-of-dialog {} request", tx.original.method);
                     continue;
                 }
             }
