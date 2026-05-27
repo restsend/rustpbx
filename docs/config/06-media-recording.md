@@ -17,6 +17,12 @@ codecs = ["opus", "pcmu", "pcma", "g729"]
 ```
 
 ## Recording Policy
+
+> **[recording] and [sipflow] are mutually exclusive for RTP capture.**
+> The default configuration uses `[sipflow]` for both SIP signalling and RTP
+> audio capture. Only configure `[recording]` when you specifically need the
+> legacy live WAV recorder. See [08-sipflow.md](08-sipflow.md) for details.
+
 Control when calls are recorded. Can be set at top-level `[recording]` or per-proxy `[proxy.recording]` (proxy-level overrides top-level).
 
 `[recording]` controls the live WAV recorder. When enabled, the recorder always writes a local WAV first. Set `type = "http"` or `type = "s3"` only to upload that local WAV after the call completes.
@@ -28,7 +34,7 @@ Recording configuration has priority over SipFlow RTP recording. If a top-level 
 - SipFlow SIP message capture still works when `[sipflow]` is enabled.
 - SipFlow RTP capture and `[sipflow.upload]` recording export are disabled for that call.
 
-Only omit the recording section entirely when you want `[sipflow.upload]` to act as the recording source.
+Only omit the recording section entirely when you want SipFlow to capture RTP audio and/or `[sipflow.upload]` to act as the recording source.
 
 ```toml
 # Top-level recording config (applies to all proxies unless overridden)

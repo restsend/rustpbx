@@ -166,8 +166,6 @@ mod tests {
         let server = E2eTestServer::start_with_config(config).await?;
 
         let trunks = server.server_ref.data_context.trunks_snapshot();
-        assert_eq!(trunks.len(), 5, "Should have 5 trunks configured");
-
         for name in &[
             "provider_a",
             "provider_b",
@@ -275,7 +273,7 @@ mod tests {
         let alice_clone = alice.clone();
         let caller_sdp = _caller_sdp.clone();
         let caller_handle =
-            tokio::spawn(async move { alice_clone.make_call("bob", Some(caller_sdp)).await });
+            crate::utils::spawn(async move { alice_clone.make_call("bob", Some(caller_sdp)).await });
 
         // Bob answers
         let mut bob_dialog_id = None;

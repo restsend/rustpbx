@@ -271,7 +271,7 @@ mod tests {
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        tokio::spawn(async move {
+        crate::utils::spawn(async move {
             axum::serve(listener, app).await.ok();
         });
 

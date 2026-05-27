@@ -81,7 +81,7 @@ async fn main() -> Result<()> {
     let (tx, mut rx) = tokio::sync::mpsc::channel::<Packet>(args.buffer_size);
 
     // UDP Receiver Task
-    tokio::spawn(async move {
+    rustpbx::utils::spawn(async move {
         let mut buf = vec![0u8; 65535];
         loop {
             match socket.recv_from(&mut buf).await {
@@ -99,7 +99,7 @@ async fn main() -> Result<()> {
 
     // Storage Worker Task
     let storage_worker = storage.clone();
-    tokio::spawn(async move {
+    rustpbx::utils::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
         loop {
             tokio::select! {

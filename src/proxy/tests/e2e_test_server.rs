@@ -68,7 +68,7 @@ impl E2eTestServer {
         let registry = server_ref.active_call_registry.clone();
 
         let cancel_token_clone = cancel_token.clone();
-        let _server_handle = Some(tokio::spawn(async move {
+        let _server_handle = Some(crate::utils::spawn(async move {
             tokio::select! {
                 _ = cancel_token_clone.cancelled() => {
                     info!("E2E test server cancelled");
@@ -141,7 +141,7 @@ impl E2eTestServer {
         let registry = server_ref.active_call_registry.clone();
 
         let cancel_token_clone = cancel_token.clone();
-        let _server_handle = Some(tokio::spawn(async move {
+        let _server_handle = Some(crate::utils::spawn(async move {
             tokio::select! {
                 _ = cancel_token_clone.cancelled() => {
                     info!("E2E test server cancelled");

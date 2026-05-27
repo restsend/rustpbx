@@ -639,7 +639,7 @@ impl SipSession {
         let forward_cancel = cancel_token.child_token();
         let forward_handle = {
             let leg_id = leg_id.clone();
-            tokio::spawn(async move {
+            crate::utils::spawn(async move {
                 use audio_codec::create_encoder;
                 use rustrtc::media::{AudioFrame as RtcAudioFrame, MediaSample};
 
@@ -719,7 +719,7 @@ impl SipSession {
         let reverse_cancel = cancel_token.child_token();
         let reverse_handle = {
             let leg_id = leg_id.clone();
-            tokio::spawn(async move {
+            crate::utils::spawn(async move {
                 loop {
                     tokio::select! {
                         biased;
@@ -1440,12 +1440,12 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
-        tokio::spawn(async move {
+        crate::utils::spawn(async move {
             while let Ok((stream, _)) = listener.accept().await {
                 let ws_stream = tokio_tungstenite::accept_async(stream).await.unwrap();
                 let (ws_write, ws_read) = ws_stream.split();
                 // Echo every message back
-                tokio::spawn(async move {
+                crate::utils::spawn(async move {
                     ws_read
                         .map(|msg| {
                             msg.map(|m| {

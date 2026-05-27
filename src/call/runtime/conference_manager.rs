@@ -293,7 +293,7 @@ impl ConferenceManager {
             tokens.insert(conf_id.clone(), cancel);
         }
 
-        tokio::spawn(async move {
+        crate::utils::spawn(async move {
             tokio::select! {
                 _ = tokio::time::sleep(std::time::Duration::from_secs(dur_secs)) => {
                     info!(conf_id = %conf_id.0, "Conference timed out, auto-destroying");
@@ -460,7 +460,7 @@ impl ConferenceManager {
             );
             let mgr = self.clone();
             let cid = conf_id.clone();
-            tokio::spawn(async move {
+            crate::utils::spawn(async move {
                 let _ = mgr.destroy_conference(&cid).await;
             });
             return Ok(0);
@@ -864,7 +864,7 @@ mod tests {
         for i in 0..5 {
             let manager = manager.clone();
             let conf_id = conf_id.clone();
-            let handle = tokio::spawn(async move {
+            let handle = crate::utils::spawn(async move {
                 let leg_id = LegId::new(format!("leg{}", i));
                 manager.add_participant(&conf_id, leg_id).await.unwrap();
             });

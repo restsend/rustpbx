@@ -2553,7 +2553,7 @@ async fn cluster_reload_sse_handler(
     };
 
     let app = app_state.clone();
-    tokio::spawn(async move {
+    crate::utils::spawn(async move {
         macro_rules! sse_send {
             ($event_type:expr, $data:expr) => {
                 let tx = tx.clone();

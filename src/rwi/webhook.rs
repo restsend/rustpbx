@@ -281,7 +281,7 @@ mod tests {
                 .expect("failed to bind test server");
             let port = listener.local_addr().unwrap().port();
 
-            tokio::spawn(async move {
+            crate::utils::spawn(async move {
                 axum::serve(listener, app).await.ok();
             });
 

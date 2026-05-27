@@ -50,7 +50,7 @@ impl LocalBackend {
         let root_clone = root.clone();
         let subdirs_clone = subdirs.clone();
         // Spawn background worker task
-        tokio::spawn(async move {
+        crate::utils::spawn(async move {
             let mut storage = StorageManager::new(
                 &PathBuf::from(&root_clone),
                 flush_count,

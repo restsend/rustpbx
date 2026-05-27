@@ -310,7 +310,7 @@ async fn test_rtp_direct_flow_no_proxy() -> Result<()> {
     let caller = Arc::new(test.caller.take().unwrap());
     let callee = test.callee.take().unwrap();
 
-    let caller_handle = tokio::spawn({
+    let caller_handle = crate::utils::spawn({
         let c = caller.clone();
         let sdp = caller_sdp.clone();
         async move { c.make_call("bob", Some(sdp)).await }
@@ -388,7 +388,7 @@ async fn test_rtp_through_proxy() -> Result<()> {
     let caller = Arc::new(test.caller.take().unwrap());
     let callee = test.callee.take().unwrap();
 
-    let caller_handle = tokio::spawn({
+    let caller_handle = crate::utils::spawn({
         let c = caller.clone();
         let sdp = caller_sdp.clone();
         async move { c.make_call("bob", Some(sdp)).await }
@@ -723,7 +723,7 @@ async fn test_full_call_with_rtp_verification() -> Result<()> {
 
     let caller_clone = caller.clone();
     let caller_handle =
-        tokio::spawn(async move { caller_clone.make_call("bob", Some(caller_sdp)).await });
+        crate::utils::spawn(async move { caller_clone.make_call("bob", Some(caller_sdp)).await });
 
     // Answer
     let mut call_established = false;

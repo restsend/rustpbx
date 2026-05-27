@@ -59,11 +59,11 @@ async fn test_b2bua_full_flow() {
 
     // Alice calls Bob
     let alice_sdp = dummy_sdp.clone();
-    let call_task = tokio::spawn(async move { alice.make_call("bob", Some(alice_sdp)).await });
+    let call_task = crate::utils::spawn(async move { alice.make_call("bob", Some(alice_sdp)).await });
 
     // Bob waits for incoming call and answers it
     let bob_sdp = dummy_sdp.clone();
-    let answer_task = tokio::spawn(async move {
+    let answer_task = crate::utils::spawn(async move {
         for _ in 0..50 {
             let events = bob.process_dialog_events().await.unwrap_or_default();
             for event in events {
@@ -167,7 +167,7 @@ async fn test_rtp_to_webrtc_bridge() {
 
     let server = Arc::new(builder.build().await.unwrap());
     let server_clone = server.clone();
-    tokio::spawn(async move {
+    crate::utils::spawn(async move {
         if let Err(e) = server_clone.serve().await {
             warn!("Proxy server error: {:?}", e);
         }
@@ -193,10 +193,10 @@ async fn test_rtp_to_webrtc_bridge() {
     // Bob (RTP) calls Alice (WebRTC)
     let bob_rtp_sdp = "v=0\r\no=- 123456 123456 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 1234 RTP/AVP 0 8 101\r\na=rtpmap:0 PCMU/8000\r\na=rtpmap:8 PCMA/8000\r\na=rtpmap:101 telephone-event/8000\r\na=sendrecv\r\n".to_string();
 
-    let call_task = tokio::spawn(async move { bob_ua.make_call("alice", Some(bob_rtp_sdp)).await });
+    let call_task = crate::utils::spawn(async move { bob_ua.make_call("alice", Some(bob_rtp_sdp)).await });
 
     // Alice should receive incoming call and answer
-    let answer_task = tokio::spawn(async move {
+    let answer_task = crate::utils::spawn(async move {
         for _ in 0..50 {
             let events = alice_ua.process_dialog_events().await.unwrap_or_default();
             for event in events {
@@ -277,7 +277,7 @@ async fn test_webrtc_to_rtp_bridge() {
 
     let server = Arc::new(builder.build().await.unwrap());
     let server_clone = server.clone();
-    tokio::spawn(async move {
+    crate::utils::spawn(async move {
         if let Err(e) = server_clone.serve().await {
             warn!("Proxy server error: {:?}", e);
         }
@@ -303,7 +303,7 @@ async fn test_webrtc_to_rtp_bridge() {
     // Alice (WebRTC) calls Bob (RTP)
     let alice_webrtc_sdp = "v=0\r\no=- 654321 654321 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 5678 UDP/TLS/RTP/SAVPF 111 101\r\na=rtpmap:111 opus/48000/2\r\na=rtpmap:101 telephone-event/8000\r\na=sendrecv\r\n".to_string();
 
-    let call_task = tokio::spawn(async move {
+    let call_task = crate::utils::spawn(async move {
         timeout(
             Duration::from_secs(30),
             alice_ua.make_call("bob", Some(alice_webrtc_sdp)),
@@ -313,7 +313,7 @@ async fn test_webrtc_to_rtp_bridge() {
     });
 
     // Bob should receive incoming call and answer
-    let answer_task = tokio::spawn(async move {
+    let answer_task = crate::utils::spawn(async move {
         for _ in 0..300 {
             let events = bob_ua.process_dialog_events().await.unwrap_or_default();
             for event in events {
@@ -374,7 +374,7 @@ async fn test_callee_reject_passthrough_486_busy_here() {
     let dummy_sdp = "v=0\r\no=- 123456 123456 IN IP4 127.0.0.1\r\ns=-\r\nc=IN IP4 127.0.0.1\r\nt=0 0\r\nm=audio 1234 RTP/AVP 0 101\r\na=rtpmap:0 PCMU/8000\r\na=rtpmap:101 telephone-event/8000\r\na=fmtp:101 0-16\r\na=sendrecv\r\n".to_string();
 
     // Bob rejects the call with 486 BusyHere
-    let answer_task = tokio::spawn(async move {
+    let answer_task = crate::utils::spawn(async move {
         for _ in 0..50 {
             let events = bob.process_dialog_events().await.unwrap_or_default();
             for event in events {
@@ -399,7 +399,7 @@ async fn test_callee_reject_passthrough_486_busy_here() {
     // Alice makes a call to Bob
     let alice_sdp = dummy_sdp.clone();
     let alice_clone = alice.clone();
-    let call_task = tokio::spawn(async move {
+    let call_task = crate::utils::spawn(async move {
         timeout(
             Duration::from_secs(10),
             alice_clone.make_call("bob", Some(alice_sdp)),

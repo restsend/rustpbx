@@ -27,7 +27,7 @@ async fn establish_call(
     let bob_sdp = make_sdp(20010);
 
     // Alice dials Bob (blocks until 200 OK)
-    let caller_handle = tokio::spawn({
+    let caller_handle = crate::utils::spawn({
         let a = alice.clone();
         let sdp = alice_sdp.clone();
         async move { a.make_call("bob", Some(sdp)).await }

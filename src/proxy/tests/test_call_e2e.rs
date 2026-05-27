@@ -62,7 +62,7 @@ async fn test_rtp_to_rtp_same_codec_no_transcoding() -> Result<()> {
         .to_string();
 
     // Alice calls Bob
-    let caller_handle = tokio::spawn({
+    let caller_handle = crate::utils::spawn({
         let a = alice.clone();
         let sdp = alice_sdp.clone();
         async move { a.make_call("bob", Some(sdp)).await }
@@ -208,7 +208,7 @@ async fn test_webrtc_to_rtp_with_transcoding() -> Result<()> {
         .to_string();
 
     // Alice calls Bob
-    let caller_handle = tokio::spawn({
+    let caller_handle = crate::utils::spawn({
         let a = alice.clone();
         let sdp = webrtc_sdp.clone();
         async move { a.make_call("bob", Some(sdp)).await }
@@ -356,7 +356,7 @@ async fn test_forced_media_proxy_all_mode() -> Result<()> {
         a=sendrecv\r\n"
         .to_string();
 
-    let caller_handle = tokio::spawn({
+    let caller_handle = crate::utils::spawn({
         let a = alice.clone();
         let sdp = alice_sdp.clone();
         async move { a.make_call("bob", Some(sdp)).await }
@@ -404,7 +404,7 @@ async fn test_caller_hangup_cdr() -> Result<()> {
 
     let dummy_sdp = super::test_ua::create_test_sdp("127.0.0.1", 12345, false);
 
-    let caller_handle = tokio::spawn({
+    let caller_handle = crate::utils::spawn({
         let a = alice.clone();
         let sdp = dummy_sdp.clone();
         async move { a.make_call("bob", Some(sdp)).await }
@@ -544,7 +544,7 @@ async fn test_media_proxy_none_mode() -> Result<()> {
     let bob_sdp = super::test_ua::create_test_sdp("192.168.1.200", 20000, false);
 
     // Alice calls Bob
-    let caller_handle = tokio::spawn({
+    let caller_handle = crate::utils::spawn({
         let a = alice.clone();
         let sdp = alice_sdp.clone();
         async move { a.make_call("bob", Some(sdp)).await }
@@ -605,7 +605,7 @@ async fn test_mid_dialog_passthrough_none_mode() -> Result<()> {
     let initial_sdp = super::test_ua::create_test_sdp("127.0.0.1", 10000, false);
     let answer_sdp = super::test_ua::create_test_sdp("127.0.0.1", 20000, false);
 
-    let caller_handle = tokio::spawn({
+    let caller_handle = crate::utils::spawn({
         let a = alice.clone();
         let sdp = initial_sdp.clone();
         async move { a.make_call("bob", Some(sdp)).await }
@@ -643,7 +643,7 @@ async fn test_mid_dialog_passthrough_none_mode() -> Result<()> {
         a=sendonly\r\n"
         .to_string();
 
-    let update_handle = tokio::spawn({
+    let update_handle = crate::utils::spawn({
         let a = alice.clone();
         let id = alice_id.clone();
         let sdp = update_sdp.clone();
@@ -693,7 +693,7 @@ async fn test_mid_dialog_passthrough_none_mode() -> Result<()> {
         a=sendrecv\r\n"
         .to_string();
 
-    let reinvite_handle = tokio::spawn({
+    let reinvite_handle = crate::utils::spawn({
         let a = alice.clone();
         let id = alice_id.clone();
         let sdp = reinvite_sdp.clone();
@@ -757,7 +757,7 @@ async fn test_callee_hangup_cdr() -> Result<()> {
 
     let dummy_sdp = super::test_ua::create_test_sdp("127.0.0.1", 12345, false);
 
-    let caller_handle = tokio::spawn({
+    let caller_handle = crate::utils::spawn({
         let a = alice.clone();
         let sdp = dummy_sdp.clone();
         async move { a.make_call("bob", Some(sdp)).await }
@@ -835,7 +835,7 @@ async fn test_multiple_calls_cdr() -> Result<()> {
     let dummy_sdp = super::test_ua::create_test_sdp("127.0.0.1", 12345, false);
 
     // Call 1: Alice -> Bob
-    let handle1 = tokio::spawn({
+    let handle1 = crate::utils::spawn({
         let a = alice.clone();
         let sdp = dummy_sdp.clone();
         async move { a.make_call("bob", Some(sdp)).await }
@@ -864,7 +864,7 @@ async fn test_multiple_calls_cdr() -> Result<()> {
     };
 
     // Call 2: Alice -> Charlie
-    let handle2 = tokio::spawn({
+    let handle2 = crate::utils::spawn({
         let a = alice.clone();
         let sdp = dummy_sdp.clone();
         async move { a.make_call("charlie", Some(sdp)).await }
@@ -975,7 +975,7 @@ async fn test_reinvite_hold_resume() -> Result<()> {
     let answer_sdp = super::test_ua::create_test_sdp("127.0.0.1", 20000, false);
 
     // Alice calls Bob
-    let caller_handle = tokio::spawn({
+    let caller_handle = crate::utils::spawn({
         let a = alice.clone();
         let sdp = initial_sdp.clone();
         async move { a.make_call("bob", Some(sdp)).await }
@@ -1120,7 +1120,7 @@ async fn test_cancel_during_ringing() -> Result<()> {
     let offer_sdp = super::test_ua::create_test_sdp("127.0.0.1", 10000, false);
 
     // Alice calls Bob (don't await - we want to cancel before answer)
-    let caller_handle = tokio::spawn({
+    let caller_handle = crate::utils::spawn({
         let a = alice.clone();
         let sdp = offer_sdp.clone();
         async move { a.make_call("bob", Some(sdp)).await }
@@ -1233,7 +1233,7 @@ async fn test_reinvite_codec_change() -> Result<()> {
         .to_string();
 
     // Alice calls Bob
-    let caller_handle = tokio::spawn({
+    let caller_handle = crate::utils::spawn({
         let a = alice.clone();
         let sdp = pcmu_sdp.clone();
         async move { a.make_call("bob", Some(sdp)).await }
@@ -1355,7 +1355,7 @@ async fn test_auto_start_recording_creates_file() -> Result<()> {
         m=audio 10002 RTP/AVP 0\r\na=rtpmap:0 PCMU/8000\r\na=sendrecv\r\n"
         .to_string();
 
-    let caller_handle = tokio::spawn({
+    let caller_handle = crate::utils::spawn({
         let a = alice.clone();
         let sdp = pcmu_sdp.clone();
         async move { a.make_call("bob", Some(sdp)).await }

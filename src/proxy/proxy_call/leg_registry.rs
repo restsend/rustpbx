@@ -216,3 +216,13 @@ impl Default for LegRegistry {
         Self::new()
     }
 }
+
+impl Drop for LegRegistry {
+    fn drop(&mut self) {
+        for (_, handles) in self.tasks.drain() {
+            for handle in handles {
+                handle.abort();
+            }
+        }
+    }
+}

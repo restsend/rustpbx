@@ -85,7 +85,7 @@ impl TestUa {
         let stats_clone = stats.clone();
         let ct = cancel_token.clone();
 
-        tokio::spawn(async move {
+        crate::utils::spawn(async move {
             let mut bot = SipBot::new(account, global_config, stats_clone, false, ct.clone());
             tokio::select! {
                 _ = ct.cancelled() => {}
@@ -133,7 +133,7 @@ impl TestUa {
         let stats_clone = stats.clone();
         let ct = cancel_token.clone();
 
-        tokio::spawn(async move {
+        crate::utils::spawn(async move {
             let mut bot = SipBot::new(account, global_config, stats_clone, false, ct.clone());
             tokio::select! {
                 _ = ct.cancelled() => {}
@@ -233,7 +233,7 @@ impl TestUa {
         let stats_clone = stats.clone();
         let ct = cancel_token.clone();
 
-        tokio::spawn(async move {
+        crate::utils::spawn(async move {
             let mut bot = SipBot::new(account, global_config, stats_clone, false, ct.clone());
             tokio::select! {
                 _ = ct.cancelled() => {}

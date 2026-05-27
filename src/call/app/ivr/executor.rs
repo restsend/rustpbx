@@ -101,7 +101,7 @@ impl StepIvrApp {
     fn record_trace(&self, entry: IvrTraceEntry) {
         if let Some(t) = self.effective_trace() {
             let ent = entry.clone();
-            tokio::spawn(async move {
+            crate::utils::spawn(async move {
                 t.record_entry(ent).await;
             });
         }
@@ -123,7 +123,7 @@ impl StepIvrApp {
                 error: entry.error.clone(),
             };
             let gw = gw.clone();
-            tokio::spawn(async move {
+            crate::utils::spawn(async move {
                 let guard = gw.read();
                 guard.fan_out_event_to_context(&call_id, &event, &call_id);
             });
@@ -138,7 +138,7 @@ impl StepIvrApp {
                 .get("session_id")
                 .cloned()
                 .unwrap_or_default();
-            tokio::spawn(async move {
+            crate::utils::spawn(async move {
                 t.increment_steps(&sid).await;
             });
         }
@@ -163,7 +163,7 @@ impl StepIvrApp {
                 total_steps: 0,
                 status: "active".to_string(),
             };
-            tokio::spawn(async move {
+            crate::utils::spawn(async move {
                 t.record_session(sess).await;
             });
         }
@@ -179,7 +179,7 @@ impl StepIvrApp {
         if let Some(t) = self.effective_trace() {
             let sid = session_id;
             let st = status.to_string();
-            tokio::spawn(async move {
+            crate::utils::spawn(async move {
                 t.update_session_end(&sid, chrono::Utc::now(), &st).await;
             });
         }
@@ -1240,7 +1240,7 @@ mod tests {
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move {
+        crate::utils::spawn(async move {
             axum::serve(listener, app).await.ok();
         });
         format!("http://{}:{}/ivr/step", addr.ip(), addr.port())

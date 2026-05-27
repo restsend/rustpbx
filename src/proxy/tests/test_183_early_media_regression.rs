@@ -104,7 +104,7 @@ async fn test_early_media_183_then_same_sdp_200ok_rtp_flow() -> Result<()> {
     // Alice calls bob — `make_call` blocks until it receives a final response.
     let caller_ua_clone = caller_ua.clone();
     let caller_handle =
-        tokio::spawn(async move { caller_ua_clone.make_call("bob", Some(alice_sdp)).await });
+        crate::utils::spawn(async move { caller_ua_clone.make_call("bob", Some(alice_sdp)).await });
 
     // Bob's side: capture IncomingCall, then send 183 + SDP, wait, then 200 OK.
     let mut bob_dialog_id = None;

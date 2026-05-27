@@ -85,7 +85,7 @@ impl RemoteBackend {
         let cancel_token_clone = cancel_token.clone();
         let nodes_clone = nodes.clone();
 
-        tokio::spawn(async move {
+        crate::utils::spawn(async move {
             loop {
                 tokio::select! {
                     _ = cancel_token_clone.cancelled() => {

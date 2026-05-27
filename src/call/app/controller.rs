@@ -228,7 +228,7 @@ impl CallController {
         let tx = self.fired_timer_tx.clone();
         let cancelled = self.cancelled_timers.clone();
         let id_task = id.clone();
-        tokio::spawn(async move {
+        crate::utils::spawn(async move {
             tokio::time::sleep(delay).await;
             // Only fire if not cancelled in the meantime.
             let was_cancelled = cancelled.lock().unwrap().remove(&id_task);
@@ -452,7 +452,7 @@ mod tests {
 
         // Spawn a task that monitors commands and sends RecordingComplete when StopRecording is received
         let event_tx_clone = event_tx.clone();
-        tokio::spawn(async move {
+        crate::utils::spawn(async move {
             while let Some(cmd) = cmd_rx.recv().await {
                 if matches!(cmd, CallCommand::StopRecording) {
                     // Simulate the session processing the stop and sending back RecordingComplete
@@ -480,7 +480,7 @@ mod tests {
         let (mut controller, event_tx, mut cmd_rx) = make_controller_with_channels();
 
         // Spawn a task that sends Hangup instead of RecordingComplete
-        tokio::spawn(async move {
+        crate::utils::spawn(async move {
             // Wait for StopRecording command
             while let Some(cmd) = cmd_rx.recv().await {
                 if matches!(cmd, CallCommand::StopRecording) {
@@ -503,7 +503,7 @@ mod tests {
         let (mut controller, event_tx, mut cmd_rx) = make_controller_with_channels();
 
         let event_tx_clone = event_tx.clone();
-        tokio::spawn(async move {
+        crate::utils::spawn(async move {
             // Wait for StopRecording command
             while let Some(cmd) = cmd_rx.recv().await {
                 if matches!(cmd, CallCommand::StopRecording) {

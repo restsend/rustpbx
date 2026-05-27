@@ -115,7 +115,7 @@ impl TestQueueServer {
 
         let server = builder.build().await?;
 
-        tokio::spawn(async move {
+        crate::utils::spawn(async move {
             if let Err(e) = server.serve().await {
                 warn!("Server error: {:?}", e);
             }
@@ -176,7 +176,7 @@ async fn test_call_queue_routing() {
     caller.start().await.unwrap();
 
     // 4. Caller dials "support" (triggers routing to queue)
-    let call_task = tokio::spawn(async move {
+    let call_task = crate::utils::spawn(async move {
         info!("Caller dialing support...");
 
         // Generate a minimal SDP offer from caller
@@ -209,7 +209,7 @@ async fn test_call_queue_routing() {
     });
 
     // 5. Agent waits for incoming call and answers
-    let answer_task = tokio::spawn(async move {
+    let answer_task = crate::utils::spawn(async move {
         for _ in 0..50 {
             // Try for 5 seconds
             let events = agent.process_dialog_events().await.unwrap_or_default();

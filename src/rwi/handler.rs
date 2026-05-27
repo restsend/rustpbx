@@ -118,7 +118,7 @@ async fn handle_websocket(
         let id = session.read().id.clone();
         let (event_tx, mut event_rx) = mpsc::unbounded_channel::<serde_json::Value>();
         let ws_tx_clone = ws_tx.clone();
-        tokio::spawn(async move {
+        crate::utils::spawn(async move {
             while let Some(v) = event_rx.recv().await {
                 if let Ok(s) = serde_json::to_string(&v) {
                     let _ = ws_tx_clone.send(s);
@@ -129,7 +129,7 @@ async fn handle_websocket(
         id
     };
 
-    let write_task = tokio::spawn(async move {
+    let write_task = crate::utils::spawn(async move {
         while let Some(msg) = ws_rx.recv().await {
             if ws_sender.send(Message::Text(msg.into())).await.is_err() {
                 break;
@@ -142,7 +142,7 @@ async fn handle_websocket(
     let session_id_clone = session_id.clone();
     let gateway_clone = gateway.clone();
     let ws_tx_clone = ws_tx.clone();
-    let recv_task = tokio::spawn(async move {
+    let recv_task = crate::utils::spawn(async move {
         while let Some(msg) = ws_receiver.next().await {
             match msg {
                 Ok(Message::Text(text)) => {

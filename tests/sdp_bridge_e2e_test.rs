@@ -1001,7 +1001,7 @@ async fn test_e2e_early_media_then_200_ok_same_sdp_rtp_flow_continues() {
 
     // 4. Spawn a receiver task that waits for the RTP track and counts samples
     let rtp_pc = bridge.callee_pc().clone();
-    let recv_handle = tokio::spawn(async move {
+    let recv_handle = crate::utils::spawn(async move {
         let track = loop {
             let rx = rtp_pc.recv();
             match tokio::time::timeout(std::time::Duration::from_secs(3), rx).await {

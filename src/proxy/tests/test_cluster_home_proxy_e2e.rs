@@ -140,7 +140,7 @@ async fn start_server_a(
     );
 
     let run = server.clone();
-    tokio::spawn(async move {
+    crate::utils::spawn(async move {
         run.serve().await.ok();
     });
 
@@ -182,7 +182,7 @@ async fn start_server_b(
     );
 
     let run = server.clone();
-    tokio::spawn(async move {
+    crate::utils::spawn(async move {
         run.serve().await.ok();
     });
 

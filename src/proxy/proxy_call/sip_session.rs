@@ -659,7 +659,7 @@ impl SipSession {
                 });
             let gw = gw.clone();
             let call_id = session_id.clone();
-            tokio::spawn(async move {
+            crate::utils::spawn(async move {
                 let g = gw.read();
                 g.send_event_to_call_owner(&call_id, &event);
             });
@@ -2531,7 +2531,7 @@ impl SipSession {
             let dlg = dialog_layer.clone();
             let ct = fork_cancel.clone();
 
-            let join = tokio::spawn(async move {
+            let join = crate::utils::spawn(async move {
                 tokio::select! {
                     _ = ct.cancelled() => {
                         None
@@ -4391,7 +4391,7 @@ impl SipSession {
             )>(SIPFLOW_CHANNEL_CAPACITY);
 
             let call_id = self.context.session_id.clone();
-            tokio::spawn(async move {
+            crate::utils::spawn(async move {
                 while let Some((leg, sample)) = rx.recv().await {
                     if let rustrtc::media::frame::MediaSample::Audio(ref frame) = sample {
                         if let Some(ref rtp_packet) = frame.raw_packet {
@@ -4629,7 +4629,7 @@ impl SipSession {
         let monitor_cancel = cancel_token.clone();
 
         let dtmf_payload_types_for_task = dtmf_payload_types.clone();
-        let task = tokio::spawn(async move {
+        let task = crate::utils::spawn(async move {
             let track = loop {
                 if let Some(track) = Self::find_audio_receiver_track(&caller_pc).await {
                     info!(
@@ -4864,7 +4864,7 @@ impl SipSession {
                 rustrtc::media::frame::MediaSample,
             )>(RECORDER_CHANNEL_CAPACITY);
             let recorder_arc = recorder.clone();
-            tokio::spawn(async move {
+            crate::utils::spawn(async move {
                 while let Some((sample_leg, sample)) = rx.recv().await {
                     let mut guard = recorder_arc.write();
                     if let Some(rec) = guard.as_mut()
@@ -6182,6 +6182,14 @@ impl SipSession {
             bridge.stop().await;
             self.media.media_bridge_started = false;
             self.media.bridge_playback_track_id = None;
+        }
+
+        // Abort all leg-specific spawned tasks
+        for (leg_id, handles) in self.legs.drain_tasks() {
+            for handle in handles {
+                handle.abort();
+            }
+            debug!(session_id = %self.context.session_id, %leg_id, "Aborted tasks for leg during cleanup");
         }
 
         // Stop caller and callee media peers (cancels their tasks)
@@ -7550,7 +7558,7 @@ impl SipSession {
         let cancel_token = self.cancel_token.child_token();
 
         // Spawn background task to handle INVITE response
-        let invite_handle = tokio::spawn(async move {
+        let invite_handle = crate::utils::spawn(async move {
             let leg_id = leg_id_for_spawn;
             let (state_tx, mut state_rx) = tokio::sync::mpsc::unbounded_channel();
             let invitation = dialog_layer.do_invite(invite_option, state_tx).boxed();
@@ -7617,7 +7625,7 @@ impl SipSession {
             // Process dialog state changes (e.g., BYE from remote)
             if let Ok(dialog) = result {
                 let dialog_cancel = cancel_token.child_token();
-                tokio::spawn(async move {
+                crate::utils::spawn(async move {
                     loop {
                         tokio::select! {
                             biased;
@@ -8290,7 +8298,7 @@ impl SipSession {
         ) {
             let endpoint = self.leg_bridge_endpoint(&leg_id);
             let digits = valid_digits.clone();
-            tokio::spawn(async move {
+            crate::utils::spawn(async move {
                 Self::send_rtp_dtmf_via_bridge(&bridge, endpoint, &digits, dtmf_pt).await;
             });
         }
@@ -9458,7 +9466,7 @@ mod tests {
         let cancel_token = CancellationToken::new();
         let child_token = cancel_token.child_token();
 
-        let task = tokio::spawn(async move {
+        let task = crate::utils::spawn(async move {
             tokio::select! {
                 _ = child_token.cancelled() => {
                     "cancelled"

@@ -429,7 +429,7 @@ impl InMemoryFrequencyLimiter {
     }
 
     pub fn start_cleanup(self: Arc<Self>, cancel_token: CancellationToken) {
-        tokio::spawn(async move {
+        crate::utils::spawn(async move {
             self.run_cleanup_loop(cancel_token).await;
         });
     }
@@ -680,7 +680,7 @@ impl DbFrequencyLimiter {
     }
 
     pub fn start_cleanup(self: Arc<Self>, cancel_token: CancellationToken) {
-        tokio::spawn(async move {
+        crate::utils::spawn(async move {
             self.run_cleanup_loop(cancel_token).await;
         });
     }

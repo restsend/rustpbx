@@ -21,7 +21,7 @@ impl CdrCapture {
         let records = Arc::new(RwLock::new(Vec::new()));
         let records_clone = records.clone();
 
-        let _receiver_handle = tokio::spawn(async move {
+        let _receiver_handle = crate::utils::spawn(async move {
             while let Some(record) = receiver.recv().await {
                 debug!(
                     call_id = %record.call_id,

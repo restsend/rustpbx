@@ -62,7 +62,7 @@ async fn setup_proxy_and_users_with_config(
 
     let server = Arc::new(builder.build().await.unwrap());
     let server_clone = server.clone();
-    tokio::spawn(async move {
+    crate::utils::spawn(async move {
         if let Err(e) = server_clone.serve().await {
             warn!("Proxy server error: {:?}", e);
         }
@@ -81,7 +81,7 @@ async fn establish_call(
     let (tx, mut rx) = tokio::sync::mpsc::channel(1);
     let alice_clone = alice.clone();
     let offer = offer_sdp.to_string();
-    tokio::spawn(async move {
+    crate::utils::spawn(async move {
         let res = alice_clone.make_call("bob", Some(offer)).await;
         let _ = tx.send(res).await;
     });
@@ -133,7 +133,7 @@ async fn test_reinvite_audio_hold_unhold() {
 
     // Alice sends re-INVITE with sendonly (hold)
     let bob_clone = bob.clone();
-    let bob_handle = tokio::spawn(async move {
+    let bob_handle = crate::utils::spawn(async move {
         for _ in 0..50 {
             if let Ok(events) = bob_clone.process_dialog_events().await {
                 for event in &events {

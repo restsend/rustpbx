@@ -60,7 +60,7 @@ async fn test_inbound_refer_success() {
         .to_string();
 
     // Alice calls Bob
-    let caller_handle = tokio::spawn({
+    let caller_handle = crate::utils::spawn({
         let a = alice.clone();
         let sdp = alice_sdp.clone();
         async move { a.make_call("bob", Some(sdp)).await }
@@ -122,7 +122,7 @@ async fn test_inbound_refer_success() {
 
     // Spawn a task for Charlie to answer incoming calls
     let charlie_clone = charlie.clone();
-    let charlie_answer_handle = tokio::spawn(async move {
+    let charlie_answer_handle = crate::utils::spawn(async move {
         let mut charlie_dialog_id = None;
         for _ in 0..50 {
             let events = charlie_clone
@@ -159,7 +159,7 @@ async fn test_inbound_refer_success() {
 
     // Process Alice's dialog events (including NOTIFY from PBX) so the REFER subscription can proceed
     let alice_clone = alice.clone();
-    let alice_event_handle = tokio::spawn(async move {
+    let alice_event_handle = crate::utils::spawn(async move {
         for _ in 0..100 {
             let _ = alice_clone.process_dialog_events().await;
             sleep(Duration::from_millis(50)).await;

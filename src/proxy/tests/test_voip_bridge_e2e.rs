@@ -39,7 +39,7 @@ impl WsEchoServer {
         let stop = tokio_util::sync::CancellationToken::new();
         let stop_token = stop.clone();
 
-        tokio::spawn(async move {
+        crate::utils::spawn(async move {
             loop {
                 tokio::select! {
                     _ = stop_token.cancelled() => break,
@@ -48,7 +48,7 @@ impl WsEchoServer {
                             *conn_count.lock().await += 1;
                             let ws = accept_async(stream).await.unwrap();
                             let (mut ws_write, mut ws_read) = ws.split();
-                            tokio::spawn(async move {
+                            crate::utils::spawn(async move {
                                 while let Some(msg) = ws_read.next().await {
                                     match msg {
                                         Ok(tokio_tungstenite::tungstenite::Message::Binary(data)) => {
@@ -110,7 +110,7 @@ async fn test_voip_bridge_e2e_transfer_command() -> Result<()> {
 
     let caller_handle = {
         let alice = alice.clone();
-        tokio::spawn(async move { alice.make_call("bob", Some(alice_sdp)).await })
+        crate::utils::spawn(async move { alice.make_call("bob", Some(alice_sdp)).await })
     };
 
     let (bob_dialog_id, _offer_sdp) = {

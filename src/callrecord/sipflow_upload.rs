@@ -35,7 +35,7 @@ impl CallRecordHook for SipFlowUploadHook {
         let duration_secs = (record.end_time - record.start_time).num_seconds() as i32;
         let date_prefix = record.start_time.format("%Y%m%d").to_string();
 
-        tokio::spawn(async move {
+        crate::utils::spawn(async move {
             crate::callrecord::sipflow_upload::do_upload(
                 backend,
                 upload_config,

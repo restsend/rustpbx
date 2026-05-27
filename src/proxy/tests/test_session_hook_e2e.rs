@@ -145,7 +145,7 @@ async fn start_server_with_hook() -> Result<TestEnv> {
     let server = Arc::new(builder.build().await?);
     let registry = server.get_inner().active_call_registry.clone();
     let ct = cancel_token.clone();
-    let _server_handle = tokio::spawn(async move {
+    let _server_handle = crate::utils::spawn(async move {
         tokio::select! {
             _ = ct.cancelled() => {}
             result = server.serve() => {
@@ -237,7 +237,7 @@ async fn establish_call(
 
     let alice_clone = alice.clone();
     let caller_handle =
-        tokio::spawn(async move { alice_clone.make_call("bob", Some(alice_sdp)).await });
+        crate::utils::spawn(async move { alice_clone.make_call("bob", Some(alice_sdp)).await });
 
     let mut bob_dialog_id = None;
     for _ in 0..50 {
@@ -400,7 +400,7 @@ async fn test_hook_on_hold_unhold() -> Result<()> {
     let alice_bg = alice.clone();
     let pump_token = CancellationToken::new();
     let pump_cancel = pump_token.clone();
-    tokio::spawn(async move {
+    crate::utils::spawn(async move {
         loop {
             tokio::select! {
                 _ = pump_cancel.cancelled() => break,
@@ -507,7 +507,7 @@ async fn test_hook_wholesale_caller_not_registered() -> Result<()> {
     let server = Arc::new(builder.build().await?);
     let _registry = server.get_inner().active_call_registry.clone();
     let ct = cancel_token.clone();
-    let _server_handle = tokio::spawn(async move {
+    let _server_handle = crate::utils::spawn(async move {
         tokio::select! {
             _ = ct.cancelled() => {}
             result = server.serve() => {
@@ -529,7 +529,7 @@ async fn test_hook_wholesale_caller_not_registered() -> Result<()> {
 
     let caller_clone = trunk_caller.clone();
     let caller_handle =
-        tokio::spawn(async move { caller_clone.make_call("bob", Some(trunk_sdp)).await });
+        crate::utils::spawn(async move { caller_clone.make_call("bob", Some(trunk_sdp)).await });
 
     let mut bob_dialog_id = None;
     for _ in 0..50 {
