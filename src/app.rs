@@ -384,7 +384,7 @@ impl AppStateBuilder {
             storage: storage.clone(),
             rwi_auth: crate::rwi::create_rwi_auth(&config),
             rwi_gateway: if config.rwi.is_some() || config.rwi_webhook.is_some() {
-                Some(std::sync::Arc::new(tokio::sync::RwLock::new(
+                Some(std::sync::Arc::new(parking_lot::RwLock::new(
                     crate::rwi::RwiGateway::new(),
                 )))
             } else {
@@ -441,6 +441,11 @@ impl AppStateBuilder {
                     .register_module("presence", PresenceModule::create)
                     .register_module("registrar", RegistrarModule::create)
                     .register_module("call", CallModule::create);
+
+                // Pass RWI gateway to the SIP server so call lifecycle events can be emitted.
+                if let Some(ref gw) = core.rwi_gateway {
+                    builder = builder.with_rwi_gateway(gw.clone());
+                }
 
                 // Apply addon proxy server hooks (including CC addon's AgentRegistry registration)
                 builder = addon_registry.apply_proxy_server_hooks(builder, core.clone());
@@ -516,7 +521,7 @@ impl AppStateBuilder {
             && let Some(gateway_ref) = core.rwi_gateway.clone()
         {
             let webhook_tx = crate::rwi::webhook::start_rwi_webhook_handler(webhook_config);
-            let mut gw = gateway_ref.write().await;
+            let mut gw = gateway_ref.write();
             gw.set_webhook_tx(webhook_tx);
         }
 

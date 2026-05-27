@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use parking_lot::RwLock;
 
 use rustpbx::proxy::active_call_registry::ActiveProxyCallRegistry;
 use rustpbx::rwi::gateway::RwiGateway;

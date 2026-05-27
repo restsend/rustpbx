@@ -11,7 +11,7 @@ use crate::proxy::active_call_registry::ActiveProxyCallRegistry;
 use crate::proxy::proxy_call::media_peer::VoiceEnginePeer;
 use crate::proxy::proxy_call::sip_session::{PeerConnectionAudioReceiver, SipSessionHandle};
 use crate::proxy::server::SipServerRef;
-use crate::rwi::gateway::RwiGateway;
+use crate::rwi::RwiGatewayRef;
 use crate::rwi::proto::RwiEvent;
 use crate::rwi::session::{
     ConferenceCreateRequest, DtmfCollectRequest, OriginateRequest, ParallelOriginateRequest,
@@ -318,7 +318,7 @@ struct MediaInjectState;
 
 pub struct RwiCommandProcessor {
     call_registry: Arc<ActiveProxyCallRegistry>,
-    gateway: Arc<RwLock<RwiGateway>>,
+    gateway: RwiGatewayRef,
     sip_server: Option<SipServerRef>,
     queue_states: Arc<RwLock<HashMap<String, QueueState>>>,
     record_states: Arc<RwLock<HashMap<String, RecordState>>>,
@@ -341,7 +341,7 @@ pub struct RwiCommandProcessor {
 impl RwiCommandProcessor {
     pub fn new(
         call_registry: Arc<ActiveProxyCallRegistry>,
-        gateway: Arc<RwLock<RwiGateway>>,
+        gateway: RwiGatewayRef,
         conference_manager: Arc<ConferenceManager>,
     ) -> Self {
         let transfer_controller = Arc::new(RwLock::new(TransferController::with_default_config(
@@ -684,7 +684,7 @@ impl RwiCommandProcessor {
 
             match &command {
                 RwiCommandPayload::Bridge { leg_a, leg_b } => {
-                    let gw = self.gateway.read().await;
+                    let gw = self.gateway.read();
                     let event = RwiEvent::CallBridged {
                         leg_a: leg_a.clone(),
                         leg_b: leg_b.clone(),
@@ -693,7 +693,7 @@ impl RwiCommandProcessor {
                     gw.send_event_to_call_owner(leg_b, &event);
                 }
                 RwiCommandPayload::Unbridge { call_id } => {
-                    let gw = self.gateway.read().await;
+                    let gw = self.gateway.read();
                     let event = RwiEvent::CallUnbridged {
                         call_id: call_id.clone(),
                         context: Default::default(),
@@ -775,12 +775,12 @@ impl RwiCommandProcessor {
                 key,
                 value,
             } => {
-                let mut gw = self.gateway.write().await;
+                let mut gw = self.gateway.write();
                 gw.set_call_var(call_id, key.clone(), value.clone());
                 return Ok(CommandResult::Success);
             }
             RwiCommandPayload::GetVar { call_id, key } => {
-                let gw = self.gateway.read().await;
+                let gw = self.gateway.read();
                 let value = gw.get_call_var(call_id, key);
                 return Ok(CommandResult::CallVar {
                     key: key.clone(),
@@ -926,7 +926,7 @@ impl RwiCommandProcessor {
         // Handle session/call resume via gateway event cache
         match &command {
             RwiCommandPayload::SessionResume { last_sequence } => {
-                let gw = self.gateway.read().await;
+                let gw = self.gateway.read();
                 let (entries, current_seq) = gw.resume_session(*last_sequence);
                 let replayed_count = entries.len() as u64;
                 let events: Vec<serde_json::Value> = entries
@@ -950,7 +950,7 @@ impl RwiCommandProcessor {
                 call_id,
                 last_sequence,
             } => {
-                let gw = self.gateway.read().await;
+                let gw = self.gateway.read();
                 let (entries, current_seq) = gw.resume_call(call_id, *last_sequence);
                 let replayed_count = entries.len() as u64;
                 let events: Vec<serde_json::Value> = entries
@@ -1622,8 +1622,10 @@ impl RwiCommandProcessor {
 
             tokio::select! {
                 _ = tokio::time::sleep(std::time::Duration::from_secs(timeout_secs as u64)) => {
-                    let gw = gateway.read().await;
-                    gw.send_event_to_call_owner(&call_id, &RwiEvent::CallNoAnswer { call_id: call_id.clone(), context: Default::default() });
+                    {
+                        let gw = gateway.read();
+                        gw.send_event_to_call_owner(&call_id, &RwiEvent::CallNoAnswer { call_id: call_id.clone(), context: Default::default() });
+                    }
                     registry.remove(&call_id);
                     cleanup().await;
                 }
@@ -1636,7 +1638,7 @@ impl RwiCommandProcessor {
                             state = state_rx.recv() => {
                                 match state {
                                     Some(rsipstack::dialog::dialog::DialogState::Calling(_)) => {
-                                        let gw = gateway.read().await;
+                                        let gw = gateway.read();
                                         gw.send_event_to_call_owner(
                                             &call_id,
                                             &RwiEvent::CallRinging { call_id: call_id.clone(), context: Default::default() },
@@ -1651,7 +1653,7 @@ impl RwiCommandProcessor {
                                                 tracing::debug!(%call_id, "Early media SDP received");
                                             }
                                         }
-                                        let gw = gateway.read().await;
+                                        let gw = gateway.read();
                                         gw.send_event_to_call_owner(
                                             &call_id,
                                             &RwiEvent::CallEarlyMedia { call_id: call_id.clone(), context: Default::default() },
@@ -1709,7 +1711,7 @@ impl RwiCommandProcessor {
                                 entry.status = ActiveProxyCallStatus::Talking;
                             });
                             {
-                                let gw = gateway.read().await;
+                                let gw = gateway.read();
                                 gw.send_event_to_call_owner(
                                     &call_id,
                                     &RwiEvent::CallAnswered { call_id: call_id.clone(), context: Default::default() },
@@ -1739,37 +1741,41 @@ impl RwiCommandProcessor {
                         }
                         Ok((_dialog_id, resp_opt)) => {
                             let sip_status = resp_opt.as_ref().map(|r| r.status_code.code());
-                            let gw = gateway.read().await;
-                            if sip_status == Some(486) || sip_status == Some(600) {
-                                gw.send_event_to_call_owner(
-                                    &call_id,
-                                    &RwiEvent::CallBusy { call_id: call_id.clone(), context: Default::default() },
-                                );
-                            } else {
-                                gw.send_event_to_call_owner(
-                                    &call_id,
-                                    &RwiEvent::CallHangup {
-                                        call_id: call_id.clone(),
-                                        reason: Some("originate_failed".to_string()),
-                                        sip_status,
-                                    context: Default::default(),
-                                    },
-                                );
+                            {
+                                let gw = gateway.read();
+                                if sip_status == Some(486) || sip_status == Some(600) {
+                                    gw.send_event_to_call_owner(
+                                        &call_id,
+                                        &RwiEvent::CallBusy { call_id: call_id.clone(), context: Default::default() },
+                                    );
+                                } else {
+                                    gw.send_event_to_call_owner(
+                                        &call_id,
+                                        &RwiEvent::CallHangup {
+                                            call_id: call_id.clone(),
+                                            reason: Some("originate_failed".to_string()),
+                                            sip_status,
+                                        context: Default::default(),
+                                        },
+                                    );
+                                }
                             }
                             registry.remove(&call_id);
                             cleanup().await;
                         }
                         Err(e) => {
-                            let gw = gateway.read().await;
-                            gw.send_event_to_call_owner(
-                                &call_id,
-                                &RwiEvent::CallHangup {
-                                    call_id: call_id.clone(),
+                            {
+                                let gw = gateway.read();
+                                gw.send_event_to_call_owner(
+                                    &call_id,
+                                    &RwiEvent::CallHangup {
+                                        call_id: call_id.clone(),
                                     reason: Some(e.to_string()),
                                     sip_status: None,
                                 context: Default::default(),
-                                },
-                            );
+                                    },
+                                );
+                            }
                             registry.remove(&call_id);
                             cleanup().await;
                         }
@@ -1811,7 +1817,7 @@ impl RwiCommandProcessor {
         );
 
         {
-            let gw = self.gateway.read().await;
+            let gw = self.gateway.read();
             gw.send_event_to_call_owner(
                 &operation_id,
                 &RwiEvent::ParallelOriginateStarted {
@@ -1886,7 +1892,7 @@ impl RwiCommandProcessor {
                             "Parallel originate leg answered"
                         );
 
-                        let gw = self.gateway.read().await;
+                        let gw = self.gateway.read();
                         gw.send_event_to_call_owner(
                             &operation_id,
                             &RwiEvent::ParallelOriginateWinner {
@@ -1922,7 +1928,7 @@ impl RwiCommandProcessor {
                             "Parallel originate leg failed"
                         );
 
-                        let gw = self.gateway.read().await;
+                        let gw = self.gateway.read();
                         gw.send_event_to_call_owner(
                             &operation_id,
                             &RwiEvent::ParallelOriginateLegCancelled {
@@ -1940,7 +1946,7 @@ impl RwiCommandProcessor {
 
         match result {
             Ok(Ok(winning_call_id)) => {
-                let gw = self.gateway.read().await;
+                let gw = self.gateway.read();
                 gw.send_event_to_call_owner(
                     &operation_id,
                     &RwiEvent::ParallelOriginateCompleted {
@@ -1954,7 +1960,7 @@ impl RwiCommandProcessor {
                 })
             }
             Ok(Err(reason)) => {
-                let gw = self.gateway.read().await;
+                let gw = self.gateway.read();
                 gw.send_event_to_call_owner(
                     &operation_id,
                     &RwiEvent::ParallelOriginateFailed {
@@ -1967,7 +1973,7 @@ impl RwiCommandProcessor {
             }
             Err(_) => {
                 let reason = "Timeout waiting for any leg to answer".to_string();
-                let gw = self.gateway.read().await;
+                let gw = self.gateway.read();
                 gw.send_event_to_call_owner(
                     &operation_id,
                     &RwiEvent::ParallelOriginateFailed {
@@ -1987,7 +1993,7 @@ impl RwiCommandProcessor {
         target: &crate::rwi::session::OriginateTarget,
         caller_id: Option<String>,
         extra_headers: HashMap<String, String>,
-        gateway: Arc<RwLock<RwiGateway>>,
+        gateway: RwiGatewayRef,
         registry: Arc<ActiveProxyCallRegistry>,
         operation_id: &str,
     ) -> Result<String, String> {
@@ -2095,7 +2101,7 @@ impl RwiCommandProcessor {
                         }
                         state = state_rx.recv() => {
                             if let Some(rsipstack::dialog::dialog::DialogState::Calling(_)) = state {
-                                let gw = gateway.read().await;
+                                let gw = gateway.read();
                                 gw.send_event_to_call_owner(
                                     &call_id,
                                     &crate::rwi::proto::RwiEvent::CallRinging { call_id: call_id.clone(), context: Default::default() },
@@ -2139,7 +2145,7 @@ impl RwiCommandProcessor {
                     entry.status = ActiveProxyCallStatus::Talking;
                 });
 
-                let gw = gateway.read().await;
+                let gw = gateway.read();
                 gw.send_event_to_call_owner(
                     &call_id,
                     &crate::rwi::proto::RwiEvent::CallAnswered {
@@ -2326,7 +2332,7 @@ impl RwiCommandProcessor {
             track_id: track_id.clone(),
             context: Default::default(),
         };
-        let gw = self.gateway.read().await;
+        let gw = self.gateway.read();
         gw.send_event_to_call_owner(&call_id.to_string(), &event);
 
         Ok(CommandResult::MediaPlay { track_id })
@@ -2382,7 +2388,7 @@ impl RwiCommandProcessor {
 
         // Register the tap in the gateway.
         {
-            let gw = self.gateway.read().await;
+            let gw = self.gateway.read();
             gw.add_dtmf_tap(call_id.clone(), tap_tx);
         }
 
@@ -2418,7 +2424,7 @@ impl RwiCommandProcessor {
                                         digits: collected,
                                         context: Default::default(),
                                     };
-                                    let gw = gateway.read().await;
+                                    let gw = gateway.read();
                                     gw.remove_dtmf_tap(&call_id);
                                     gw.send_event_to_call_owner(&call_id, &event);
                                 }
@@ -2435,7 +2441,7 @@ impl RwiCommandProcessor {
                                 digits: collected,
                                 context: Default::default(),
                             };
-                            let gw = gateway.read().await;
+                            let gw = gateway.read();
                             gw.remove_dtmf_tap(&call_id);
                             gw.send_event_to_call_owner(&call_id, &event);
                             return;
@@ -2447,7 +2453,7 @@ impl RwiCommandProcessor {
             }
 
             // Timeout reached.
-            let gw = gateway.read().await;
+            let gw = gateway.read();
             gw.remove_dtmf_tap(&call_id);
             if collected.len() >= min_digits as usize {
                 let event = RwiEvent::DtmfCollected {
@@ -2486,7 +2492,7 @@ impl RwiCommandProcessor {
             leg_a: leg_a.to_string(),
             leg_b: leg_b.to_string(),
         };
-        let gw = self.gateway.read().await;
+        let gw = self.gateway.read();
         gw.send_event_to_call_owner(&leg_a.to_string(), &event);
         gw.send_event_to_call_owner(&leg_b.to_string(), &event);
 
@@ -2531,7 +2537,7 @@ impl RwiCommandProcessor {
             queue_id: req.queue_id.clone(),
             context: Default::default(),
         };
-        let gw = self.gateway.read().await;
+        let gw = self.gateway.read();
         gw.send_event_to_call_owner(&req.call_id, &event);
 
         if let Some(agent_id) = matched_agent {
@@ -2624,7 +2630,7 @@ impl RwiCommandProcessor {
                     reason: overflow.reason,
                     context: Default::default(),
                 };
-                let gw = self.gateway.read().await;
+                let gw = self.gateway.read();
                 gw.send_event_to_call_owner(&req.call_id, &overflow_event);
 
                 let joined_event = RwiEvent::QueueJoined {
@@ -2644,7 +2650,7 @@ impl RwiCommandProcessor {
                     reason: overflow.reason,
                     context: Default::default(),
                 };
-                let gw = self.gateway.read().await;
+                let gw = self.gateway.read();
                 gw.send_event_to_call_owner(&req.call_id, &event);
                 Ok(CommandResult::Success)
             }
@@ -2730,7 +2736,7 @@ impl RwiCommandProcessor {
                 reason: None,
                 context: Default::default(),
             };
-            let gw = self.gateway.read().await;
+            let gw = self.gateway.read();
             gw.send_event_to_call_owner(&call_id.to_string(), &event);
         }
         Ok(CommandResult::Success)
@@ -2765,7 +2771,7 @@ impl RwiCommandProcessor {
             call_id: call_id.to_string(),
             context: Default::default(),
         };
-        let gw = self.gateway.read().await;
+        let gw = self.gateway.read();
         gw.send_event_to_call_owner(&call_id.to_string(), &event);
         Ok(CommandResult::Success)
     }
@@ -2789,7 +2795,7 @@ impl RwiCommandProcessor {
             call_id: call_id.to_string(),
             context: Default::default(),
         };
-        let gw = self.gateway.read().await;
+        let gw = self.gateway.read();
         gw.send_event_to_call_owner(&call_id.to_string(), &event);
         Ok(CommandResult::Success)
     }
@@ -2841,7 +2847,7 @@ impl RwiCommandProcessor {
             agent_id: agent_id.to_string(),
             context: Default::default(),
         };
-        let gw = self.gateway.read().await;
+        let gw = self.gateway.read();
         gw.broadcast_event(&event);
 
         info!(call_id = %call_id, agent_id = %agent_id, "Agent assigned to queue call");
@@ -2876,7 +2882,7 @@ impl RwiCommandProcessor {
             reason: Some("requeued".to_string()),
             context: Default::default(),
         };
-        let gw = self.gateway.read().await;
+        let gw = self.gateway.read();
         gw.broadcast_event(&event);
 
         let event2 = RwiEvent::QueueJoined {
@@ -3019,7 +3025,7 @@ impl RwiCommandProcessor {
             recording_id,
             context: Default::default(),
         };
-        let gw = self.gateway.read().await;
+        let gw = self.gateway.read();
         gw.send_event_to_call_owner(&req.call_id, &event);
         Ok(CommandResult::Success)
     }
@@ -3049,7 +3055,7 @@ impl RwiCommandProcessor {
                 recording_id: rid,
                 context: Default::default(),
             };
-            let gw = self.gateway.read().await;
+            let gw = self.gateway.read();
             gw.send_event_to_call_owner(&call_id.to_string(), &event);
         }
         Ok(CommandResult::Success)
@@ -3080,7 +3086,7 @@ impl RwiCommandProcessor {
                 recording_id: rid,
                 context: Default::default(),
             };
-            let gw = self.gateway.read().await;
+            let gw = self.gateway.read();
             gw.send_event_to_call_owner(&call_id.to_string(), &event);
         }
         Ok(CommandResult::Success)
@@ -3120,7 +3126,7 @@ impl RwiCommandProcessor {
                 switch_flag: None,
                 root_call_id: None,
             };
-            let gw = self.gateway.read().await;
+            let gw = self.gateway.read();
             gw.send_event_to_call_owner(&call_id.to_string(), &event);
         }
         Ok(CommandResult::Success)
@@ -3150,7 +3156,7 @@ impl RwiCommandProcessor {
             body: body.to_string(),
             context: Default::default(),
         };
-        let gw = self.gateway.read().await;
+        let gw = self.gateway.read();
         gw.send_event_to_call_owner(&call_id.to_string(), &event);
         Ok(CommandResult::Success)
     }
@@ -3182,7 +3188,7 @@ impl RwiCommandProcessor {
             body: body.to_string(),
             context: Default::default(),
         };
-        let gw = self.gateway.read().await;
+        let gw = self.gateway.read();
         gw.send_event_to_call_owner(&call_id.to_string(), &event);
         Ok(CommandResult::Success)
     }
@@ -3222,7 +3228,7 @@ impl RwiCommandProcessor {
                 conf_id: conf_id.clone(),
                 error: e.to_string(),
             };
-            let gw = self.gateway.read().await;
+            let gw = self.gateway.read();
             gw.broadcast_event(&err_event);
             return Err(CommandError::CommandFailed(e.to_string()));
         }
@@ -3230,7 +3236,7 @@ impl RwiCommandProcessor {
         let event = RwiEvent::ConferenceCreated {
             conf_id: conf_id.clone(),
         };
-        let gw = self.gateway.read().await;
+        let gw = self.gateway.read();
         gw.broadcast_event(&event);
 
         info!(conf_id = %conf_id, "Conference created");
@@ -3253,7 +3259,7 @@ impl RwiCommandProcessor {
                 conf_id: conf_id.to_string(),
                 error: e.to_string(),
             };
-            let gw = self.gateway.read().await;
+            let gw = self.gateway.read();
             gw.broadcast_event(&err_event);
             return Err(CommandError::CommandFailed(e.to_string()));
         }
@@ -3263,7 +3269,7 @@ impl RwiCommandProcessor {
             call_id: call_id.to_string(),
             context: Default::default(),
         };
-        let gw = self.gateway.read().await;
+        let gw = self.gateway.read();
         gw.broadcast_event(&event);
 
         info!(conf_id = %conf_id, call_id = %call_id, "Conference member added");
@@ -3287,7 +3293,7 @@ impl RwiCommandProcessor {
                 conf_id: conf_id.to_string(),
                 error: e.to_string(),
             };
-            let gw = self.gateway.read().await;
+            let gw = self.gateway.read();
             gw.broadcast_event(&err_event);
             return Err(CommandError::CommandFailed(e.to_string()));
         }
@@ -3297,7 +3303,7 @@ impl RwiCommandProcessor {
             call_id: call_id.to_string(),
             context: Default::default(),
         };
-        let gw = self.gateway.read().await;
+        let gw = self.gateway.read();
         gw.broadcast_event(&event);
 
         info!(conf_id = %conf_id, call_id = %call_id, "Conference member removed");
@@ -3321,7 +3327,7 @@ impl RwiCommandProcessor {
                 conf_id: conf_id.to_string(),
                 error: e.to_string(),
             };
-            let gw = self.gateway.read().await;
+            let gw = self.gateway.read();
             gw.broadcast_event(&err_event);
             return Err(CommandError::CommandFailed(e.to_string()));
         }
@@ -3331,7 +3337,7 @@ impl RwiCommandProcessor {
             call_id: call_id.to_string(),
             context: Default::default(),
         };
-        let gw = self.gateway.read().await;
+        let gw = self.gateway.read();
         gw.broadcast_event(&event);
 
         info!(conf_id = %conf_id, call_id = %call_id, "Conference member muted");
@@ -3355,7 +3361,7 @@ impl RwiCommandProcessor {
                 conf_id: conf_id.to_string(),
                 error: e.to_string(),
             };
-            let gw = self.gateway.read().await;
+            let gw = self.gateway.read();
             gw.broadcast_event(&err_event);
             return Err(CommandError::CommandFailed(e.to_string()));
         }
@@ -3365,7 +3371,7 @@ impl RwiCommandProcessor {
             call_id: call_id.to_string(),
             context: Default::default(),
         };
-        let gw = self.gateway.read().await;
+        let gw = self.gateway.read();
         gw.broadcast_event(&event);
 
         info!(conf_id = %conf_id, call_id = %call_id, "Conference member unmuted");
@@ -3382,7 +3388,7 @@ impl RwiCommandProcessor {
                 conf_id: conf_id.to_string(),
                 error: e.to_string(),
             };
-            let gw = self.gateway.read().await;
+            let gw = self.gateway.read();
             gw.broadcast_event(&err_event);
             return Err(CommandError::CommandFailed(e.to_string()));
         }
@@ -3390,7 +3396,7 @@ impl RwiCommandProcessor {
         let event = RwiEvent::ConferenceDestroyed {
             conf_id: conf_id.to_string(),
         };
-        let gw = self.gateway.read().await;
+        let gw = self.gateway.read();
         gw.broadcast_event(&event);
 
         info!(conf_id = %conf_id, "Conference destroyed");
@@ -3421,9 +3427,10 @@ impl RwiCommandProcessor {
             consultation_call_id: consultation_call_id.to_string(),
             context: Default::default(),
         };
-        let gw = self.gateway.read().await;
-        gw.broadcast_event(&event);
-        drop(gw);
+        {
+            let gw = self.gateway.read();
+            gw.broadcast_event(&event);
+        }
 
         info!(
             conf_id = %conf_id,
@@ -3459,7 +3466,7 @@ impl RwiCommandProcessor {
                     call_id: call_id.to_string(),
                     context: Default::default(),
                 };
-                let gw = self.gateway.read().await;
+                let gw = self.gateway.read();
                 gw.broadcast_event(&event);
 
                 info!(conf_id = %conf_id, "Conference merge successful");
@@ -3470,7 +3477,7 @@ impl RwiCommandProcessor {
                     conf_id: conf_id.to_string(),
                     error: e.to_string(),
                 };
-                let gw = self.gateway.read().await;
+                let gw = self.gateway.read();
                 gw.broadcast_event(&err_event);
 
                 let event = RwiEvent::ConferenceMergeFailed {
@@ -3479,7 +3486,7 @@ impl RwiCommandProcessor {
                     reason: e.to_string(),
                     context: Default::default(),
                 };
-                let gw = self.gateway.read().await;
+                let gw = self.gateway.read();
                 gw.broadcast_event(&event);
 
                 warn!(conf_id = %conf_id, error = %e, "Conference merge failed");
@@ -3513,9 +3520,10 @@ impl RwiCommandProcessor {
             old_call_id: old_call_id.to_string(),
             new_call_id: new_call_id.to_string(),
         };
-        let gw = self.gateway.read().await;
-        gw.broadcast_event(&started_event);
-        drop(gw);
+        {
+            let gw = self.gateway.read();
+            gw.broadcast_event(&started_event);
+        }
 
         let old_leg = LegId::new(old_call_id);
         let new_leg = LegId::new(new_call_id);
@@ -3532,9 +3540,10 @@ impl RwiCommandProcessor {
                 call_id: old_call_id.to_string(),
                 context: Default::default(),
             };
-            let gw = self.gateway.read().await;
-            gw.broadcast_event(&left_event);
-            drop(gw);
+            {
+                let gw = self.gateway.read();
+                gw.broadcast_event(&left_event);
+            }
         }
 
         match manager
@@ -3547,9 +3556,10 @@ impl RwiCommandProcessor {
                     call_id: new_call_id.to_string(),
                     context: Default::default(),
                 };
-                let gw = self.gateway.read().await;
-                gw.broadcast_event(&joined_event);
-                drop(gw);
+                {
+                    let gw = self.gateway.read();
+                    gw.broadcast_event(&joined_event);
+                }
 
                 if old_was_member && let Ok(handle) = self.get_handle(old_call_id).await {
                     let _ = handle.send_command(CallCommand::Hangup(
@@ -3566,7 +3576,7 @@ impl RwiCommandProcessor {
                     old_call_id: old_call_id.to_string(),
                     new_call_id: new_call_id.to_string(),
                 };
-                let gw = self.gateway.read().await;
+                let gw = self.gateway.read();
                 gw.broadcast_event(&success_event);
 
                 Ok(CommandResult::Success)
@@ -3588,7 +3598,7 @@ impl RwiCommandProcessor {
                             new_call_id: new_call_id.to_string(),
                             reason: "forced rollback failure".to_string(),
                         };
-                        let gw = self.gateway.read().await;
+                        let gw = self.gateway.read();
                         gw.broadcast_event(&rollback_failed);
                     } else {
                         let rollback = manager
@@ -3600,7 +3610,7 @@ impl RwiCommandProcessor {
                                 call_id: old_call_id.to_string(),
                                 context: Default::default(),
                             };
-                            let gw = self.gateway.read().await;
+                            let gw = self.gateway.read();
                             gw.broadcast_event(&rollback_event);
                         } else if let Err(rollback_err) = rollback {
                             let rollback_failed = RwiEvent::ConferenceSeatReplaceRollbackFailed {
@@ -3609,7 +3619,7 @@ impl RwiCommandProcessor {
                                 new_call_id: new_call_id.to_string(),
                                 reason: rollback_err.to_string(),
                             };
-                            let gw = self.gateway.read().await;
+                            let gw = self.gateway.read();
                             gw.broadcast_event(&rollback_failed);
                         }
                     }
@@ -3621,7 +3631,7 @@ impl RwiCommandProcessor {
                     new_call_id: new_call_id.to_string(),
                     reason: reason.clone(),
                 };
-                let gw = self.gateway.read().await;
+                let gw = self.gateway.read();
                 gw.broadcast_event(&failed_event);
 
                 Err(CommandError::CommandFailed(format!(
@@ -3649,7 +3659,7 @@ impl RwiCommandProcessor {
             source: source_call_id.to_string(),
             target: target_call_id.to_string(),
         };
-        let gw = self.gateway.read().await;
+        let gw = self.gateway.read();
         gw.send_event_to_call_owner(&target_call_id.to_string(), &event);
         gw.send_event_to_call_owner(&source_call_id.to_string(), &event);
         Ok(CommandResult::Success)
@@ -3708,10 +3718,9 @@ impl RwiCommandProcessor {
             supervisor_call_id: supervisor_call_id.to_string(),
             target_call_id: target_call_id.to_string(),
         };
-        let gw = self.gateway.read().await;
-        gw.send_event_to_call_owner(&supervisor_call_id.to_string(), &event);
+        self.gateway.read().send_event_to_call_owner(&supervisor_call_id.to_string(), &event);
         if self.get_handle(target_call_id).await.is_ok() {
-            gw.send_event_to_call_owner(&target_call_id.to_string(), &event);
+            self.gateway.read().send_event_to_call_owner(&target_call_id.to_string(), &event);
         }
         Ok(CommandResult::Success)
     }
@@ -3783,13 +3792,12 @@ impl RwiCommandProcessor {
             supervisor_call_id: supervisor_call_id.to_string(),
             target_call_id: target_call_id.to_string(),
         };
-        let gw = self.gateway.read().await;
-        gw.send_event_to_call_owner(&supervisor_call_id.to_string(), &event);
+        self.gateway.read().send_event_to_call_owner(&supervisor_call_id.to_string(), &event);
         if self.get_handle(target_call_id).await.is_ok() {
-            gw.send_event_to_call_owner(&target_call_id.to_string(), &event);
+            self.gateway.read().send_event_to_call_owner(&target_call_id.to_string(), &event);
         }
         if !agent_leg.is_empty() && self.get_handle(agent_leg).await.is_ok() {
-            gw.send_event_to_call_owner(&agent_leg.to_string(), &event);
+            self.gateway.read().send_event_to_call_owner(&agent_leg.to_string(), &event);
         }
         Ok(CommandResult::Success)
     }
@@ -3861,13 +3869,12 @@ impl RwiCommandProcessor {
             supervisor_call_id: supervisor_call_id.to_string(),
             target_call_id: target_call_id.to_string(),
         };
-        let gw = self.gateway.read().await;
-        gw.send_event_to_call_owner(&supervisor_call_id.to_string(), &event);
+        self.gateway.read().send_event_to_call_owner(&supervisor_call_id.to_string(), &event);
         if self.get_handle(target_call_id).await.is_ok() {
-            gw.send_event_to_call_owner(&target_call_id.to_string(), &event);
+            self.gateway.read().send_event_to_call_owner(&target_call_id.to_string(), &event);
         }
         if !agent_leg.is_empty() && self.get_handle(agent_leg).await.is_ok() {
-            gw.send_event_to_call_owner(&agent_leg.to_string(), &event);
+            self.gateway.read().send_event_to_call_owner(&agent_leg.to_string(), &event);
         }
         Ok(CommandResult::Success)
     }
@@ -3925,10 +3932,9 @@ impl RwiCommandProcessor {
             supervisor_call_id: supervisor_call_id.to_string(),
             target_call_id: target_call_id.to_string(),
         };
-        let gw = self.gateway.read().await;
-        gw.send_event_to_call_owner(&supervisor_call_id.to_string(), &event);
+        self.gateway.read().send_event_to_call_owner(&supervisor_call_id.to_string(), &event);
         if self.get_handle(target_call_id).await.is_ok() {
-            gw.send_event_to_call_owner(&target_call_id.to_string(), &event);
+            self.gateway.read().send_event_to_call_owner(&target_call_id.to_string(), &event);
         }
         Ok(CommandResult::Success)
     }
@@ -3969,10 +3975,9 @@ impl RwiCommandProcessor {
             supervisor_call_id: supervisor_call_id.to_string(),
             target_call_id: target_call_id.to_string(),
         };
-        let gw = self.gateway.read().await;
-        gw.send_event_to_call_owner(&supervisor_call_id.to_string(), &event);
+        self.gateway.read().send_event_to_call_owner(&supervisor_call_id.to_string(), &event);
         if self.get_handle(target_call_id).await.is_ok() {
-            gw.send_event_to_call_owner(&target_call_id.to_string(), &event);
+            self.gateway.read().send_event_to_call_owner(&target_call_id.to_string(), &event);
         }
         Ok(CommandResult::Success)
     }
@@ -3990,7 +3995,7 @@ impl RwiCommandProcessor {
             call_id: call_id.to_string(),
             context: Default::default(),
         };
-        let gw = self.gateway.read().await;
+        let gw = self.gateway.read();
         gw.send_event_to_call_owner(&call_id.to_string(), &event);
         Ok(CommandResult::Success)
     }
@@ -4003,7 +4008,7 @@ impl RwiCommandProcessor {
             call_id: call_id.to_string(),
             context: Default::default(),
         };
-        let gw = self.gateway.read().await;
+        let gw = self.gateway.read();
         gw.send_event_to_call_owner(&call_id.to_string(), &event);
         Ok(CommandResult::Success)
     }
@@ -4021,7 +4026,7 @@ impl RwiCommandProcessor {
             call_id: call_id.to_string(),
             context: Default::default(),
         };
-        let gw = self.gateway.read().await;
+        let gw = self.gateway.read();
         gw.send_event_to_call_owner(&call_id.to_string(), &event);
         Ok(CommandResult::Success)
     }
@@ -4034,7 +4039,7 @@ impl RwiCommandProcessor {
             call_id: call_id.to_string(),
             context: Default::default(),
         };
-        let gw = self.gateway.read().await;
+        let gw = self.gateway.read();
         gw.send_event_to_call_owner(&call_id.to_string(), &event);
         Ok(CommandResult::Success)
     }
@@ -4383,8 +4388,8 @@ mod tests {
     use crate::proxy::active_call_registry::ActiveProxyCallRegistry;
     use crate::rwi::gateway::RwiGateway;
     use crate::rwi::session::RwiCommandPayload;
+    use parking_lot::RwLock;
     use std::sync::Arc;
-    use tokio::sync::RwLock;
 
     fn create_test_processor() -> (Arc<RwiCommandProcessor>, Arc<ConferenceManager>) {
         let registry = Arc::new(ActiveProxyCallRegistry::new());
@@ -5061,20 +5066,19 @@ mod tests {
 
         let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
         {
-            let mut gw = gateway.write().await;
+            let mut gw = gateway.write();
             let identity = crate::rwi::auth::RwiIdentity {
                 token: "t".into(),
                 scopes: vec![],
             };
             let session = gw.create_session(identity);
-            let sid = session.read().await.id.clone();
+            let sid = session.read().id.clone();
             gw.set_session_event_sender(&sid, event_tx);
             gw.claim_call_ownership(
                 &sid,
                 "leg-a".into(),
                 crate::rwi::session::OwnershipMode::Control,
             )
-            .await
             .unwrap();
         }
 
@@ -5217,20 +5221,19 @@ mod tests {
 
         let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
         {
-            let mut gw = gateway.write().await;
+            let mut gw = gateway.write();
             let identity = crate::rwi::auth::RwiIdentity {
                 token: "t2".into(),
                 scopes: vec![],
             };
             let session = gw.create_session(identity);
-            let sid = session.read().await.id.clone();
+            let sid = session.read().id.clone();
             gw.set_session_event_sender(&sid, event_tx);
             gw.claim_call_ownership(
                 &sid,
                 "call-ev".into(),
                 crate::rwi::session::OwnershipMode::Control,
             )
-            .await
             .unwrap();
         }
 

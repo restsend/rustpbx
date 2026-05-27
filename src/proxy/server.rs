@@ -80,7 +80,7 @@ pub struct SipServerInner {
     pub storage: Option<crate::storage::Storage>,
     pub presence_manager: Arc<PresenceManager>,
     pub addon_registry: Option<Arc<crate::addons::registry::AddonRegistry>>,
-    pub rwi_gateway: Option<Arc<tokio::sync::RwLock<crate::rwi::gateway::RwiGateway>>>,
+    pub rwi_gateway: Option<crate::rwi::RwiGatewayRef>,
     /// IVR step trace collector (set by IVR Editor addon, accessed by StepIvrApp).
     pub ivr_trace: Option<Arc<crate::call::app::ivr::trace::IvrTraceCollector>>,
     pub tls_listener: Option<rsipstack::transport::TlsListenerConnection>,
@@ -148,7 +148,7 @@ pub struct SipServerBuilder {
     /// Addon registry for accessing call applications (voicemail, ivr, etc.)
     addon_registry: Option<Arc<crate::addons::registry::AddonRegistry>>,
     /// RWI gateway to wire into the server for call-app factory use.
-    rwi_gateway: Option<Arc<tokio::sync::RwLock<crate::rwi::gateway::RwiGateway>>>,
+    rwi_gateway: Option<crate::rwi::RwiGatewayRef>,
     ivr_trace: Option<Arc<crate::call::app::ivr::trace::IvrTraceCollector>>,
     /// AgentRegistry for agent management and presence state.
     agent_registry: Option<Arc<dyn crate::call::app::agent_registry::AgentRegistry>>,
@@ -341,7 +341,7 @@ impl SipServerBuilder {
 
     pub fn with_rwi_gateway(
         mut self,
-        gateway: Arc<tokio::sync::RwLock<crate::rwi::gateway::RwiGateway>>,
+        gateway: crate::rwi::RwiGatewayRef,
     ) -> Self {
         self.rwi_gateway = Some(gateway);
         self

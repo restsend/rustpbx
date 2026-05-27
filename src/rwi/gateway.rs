@@ -2,9 +2,10 @@ use crate::rwi::auth::RwiIdentity;
 use crate::rwi::proto::{CallMetaStore, RwiEvent};
 use crate::rwi::session::{OwnershipMode, RwiSession, SupervisorMode};
 use std::collections::{HashMap, HashSet, VecDeque};
+use parking_lot::RwLock;
 use std::sync::{Arc, Arc as StdArc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
-use tokio::sync::{RwLock, broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc};
 
 pub type SessionId = String;
 pub type CallId = String;
@@ -121,11 +122,11 @@ impl RwiGateway {
         self.webhook_tx = Some(tx);
     }
 
-    pub async fn remove_session(&mut self, session_id: &SessionId) {
+    pub fn remove_session(&mut self, session_id: &SessionId) {
         self.session_event_senders.remove(session_id);
         self.session_event_filters.remove(session_id);
         if let Some(session) = self.sessions.remove(session_id) {
-            let session = session.read().await;
+            let session = session.read();
             for ctx in &session.subscribed_contexts {
                 if let Some(subs) = self.context_subscriptions.get_mut(ctx) {
                     subs.remove(session_id);
@@ -140,14 +141,14 @@ impl RwiGateway {
         }
     }
 
-    pub async fn subscribe(
+    pub fn subscribe(
         &mut self,
         session_id: &SessionId,
         contexts: Vec<Context>,
         events: Option<Vec<String>>,
     ) -> bool {
         if let Some(session) = self.sessions.get(session_id) {
-            let mut session = session.write().await;
+            let mut session = session.write();
             session.subscribe(contexts.clone());
             for ctx in contexts {
                 self.context_subscriptions
@@ -172,9 +173,9 @@ impl RwiGateway {
         }
     }
 
-    pub async fn unsubscribe(&mut self, session_id: &SessionId, contexts: &[Context]) -> bool {
+    pub fn unsubscribe(&mut self, session_id: &SessionId, contexts: &[Context]) -> bool {
         if let Some(session) = self.sessions.get(session_id) {
-            let mut session = session.write().await;
+            let mut session = session.write();
             session.unsubscribe(contexts);
             for ctx in contexts {
                 if let Some(subs) = self.context_subscriptions.get_mut(ctx) {
@@ -187,7 +188,7 @@ impl RwiGateway {
         }
     }
 
-    pub async fn claim_call_ownership(
+    pub fn claim_call_ownership(
         &mut self,
         session_id: &SessionId,
         call_id: CallId,
@@ -200,7 +201,7 @@ impl RwiGateway {
         }
 
         if let Some(session) = self.sessions.get(session_id) {
-            let mut session = session.write().await;
+            let mut session = session.write();
             if session.claim_call(call_id.clone(), mode) {
                 self.call_ownership.insert(call_id, session_id.clone());
                 return Ok(());
@@ -211,7 +212,7 @@ impl RwiGateway {
         }
     }
 
-    pub async fn release_call_ownership(
+    pub fn release_call_ownership(
         &mut self,
         session_id: &SessionId,
         call_id: &CallId,
@@ -223,7 +224,7 @@ impl RwiGateway {
         }
 
         if let Some(session) = self.sessions.get(session_id) {
-            let mut session = session.write().await;
+            let mut session = session.write();
             if session.release_call(call_id) {
                 self.call_ownership.remove(call_id);
                 return true;
@@ -232,14 +233,14 @@ impl RwiGateway {
         false
     }
 
-    pub async fn attach_supervisor(
+    pub fn attach_supervisor(
         &mut self,
         session_id: &SessionId,
         target_call_id: CallId,
         mode: SupervisorMode,
     ) -> bool {
         if let Some(session) = self.sessions.get(session_id) {
-            let mut session = session.write().await;
+            let mut session = session.write();
             session.add_supervisor_target(target_call_id.clone(), mode);
             self.supervisor_calls
                 .insert(target_call_id, session_id.clone());
@@ -249,13 +250,13 @@ impl RwiGateway {
         }
     }
 
-    pub async fn detach_supervisor(
+    pub fn detach_supervisor(
         &mut self,
         session_id: &SessionId,
         target_call_id: &CallId,
     ) -> bool {
         if let Some(session) = self.sessions.get(session_id) {
-            let mut session = session.write().await;
+            let mut session = session.write();
             if session.remove_supervisor_target(target_call_id) {
                 self.supervisor_calls.remove(target_call_id);
                 return true;
@@ -642,10 +643,10 @@ mod tests {
         assert_eq!(gateway.session_count(), 0);
 
         let session = gateway.create_session(identity);
-        let session_id = session.read().await.id.clone();
+        let session_id = session.read().id.clone();
         assert_eq!(gateway.session_count(), 1);
 
-        gateway.remove_session(&session_id).await;
+        gateway.remove_session(&session_id);
         assert_eq!(gateway.session_count(), 0);
     }
 
@@ -654,10 +655,10 @@ mod tests {
         let mut gateway = RwiGateway::new();
         let identity = create_test_identity();
         let session = gateway.create_session(identity);
-        let session_id = session.read().await.id.clone();
+        let session_id = session.read().id.clone();
 
         let contexts = vec!["context1".to_string(), "context2".to_string()];
-        gateway.subscribe(&session_id, contexts.clone(), None).await;
+        gateway.subscribe(&session_id, contexts.clone(), None);
 
         assert_eq!(
             gateway.get_sessions_subscribed_to_context("context1"),
@@ -669,8 +670,7 @@ mod tests {
         );
 
         gateway
-            .unsubscribe(&session_id, &["context1".to_string()])
-            .await;
+            .unsubscribe(&session_id, &["context1".to_string()]);
         assert!(
             gateway
                 .get_sessions_subscribed_to_context("context1")
@@ -687,19 +687,17 @@ mod tests {
         let mut gateway = RwiGateway::new();
         let identity = create_test_identity();
         let session = gateway.create_session(identity);
-        let session_id = session.read().await.id.clone();
+        let session_id = session.read().id.clone();
 
         let call_id = "call_001".to_string();
         let result = gateway
-            .claim_call_ownership(&session_id, call_id.clone(), OwnershipMode::Control)
-            .await;
+            .claim_call_ownership(&session_id, call_id.clone(), OwnershipMode::Control);
         assert!(result.is_ok());
 
         assert_eq!(gateway.get_call_owner(&call_id), Some(session_id.clone()));
 
         let result2 = gateway
-            .claim_call_ownership(&session_id, call_id.clone(), OwnershipMode::Control)
-            .await;
+            .claim_call_ownership(&session_id, call_id.clone(), OwnershipMode::Control);
         assert!(result2.is_err());
     }
 
@@ -717,19 +715,17 @@ mod tests {
         };
 
         let session1 = gateway.create_session(identity1);
-        let session1_id = session1.read().await.id.clone();
+        let session1_id = session1.read().id.clone();
         let session2 = gateway.create_session(identity2);
-        let session2_id = session2.read().await.id.clone();
+        let session2_id = session2.read().id.clone();
 
         let call_id = "call_001".to_string();
         gateway
             .claim_call_ownership(&session1_id, call_id.clone(), OwnershipMode::Control)
-            .await
             .unwrap();
 
         let result = gateway
-            .claim_call_ownership(&session2_id, call_id, OwnershipMode::Control)
-            .await;
+            .claim_call_ownership(&session2_id, call_id, OwnershipMode::Control);
         assert!(matches!(result, Err(ClaimError::AlreadyOwned)));
     }
 
@@ -738,17 +734,16 @@ mod tests {
         let mut gateway = RwiGateway::new();
         let identity = create_test_identity();
         let session = gateway.create_session(identity);
-        let session_id = session.read().await.id.clone();
+        let session_id = session.read().id.clone();
 
         let call_id = "call_001".to_string();
         gateway
             .claim_call_ownership(&session_id, call_id.clone(), OwnershipMode::Control)
-            .await
             .unwrap();
 
         assert_eq!(gateway.get_call_owner(&call_id), Some(session_id.clone()));
 
-        gateway.release_call_ownership(&session_id, &call_id).await;
+        gateway.release_call_ownership(&session_id, &call_id);
         assert_eq!(gateway.get_call_owner(&call_id), None);
     }
 
@@ -757,13 +752,12 @@ mod tests {
         let mut gateway = RwiGateway::new();
         let identity = create_test_identity();
         let session = gateway.create_session(identity);
-        let session_id = session.read().await.id.clone();
+        let session_id = session.read().id.clone();
 
         let target_call = "call_001".to_string();
 
         let result = gateway
-            .attach_supervisor(&session_id, target_call.clone(), SupervisorMode::Listen)
-            .await;
+            .attach_supervisor(&session_id, target_call.clone(), SupervisorMode::Listen);
         assert!(result);
         assert!(gateway.is_supervisor(&target_call));
         assert_eq!(
@@ -771,7 +765,7 @@ mod tests {
             Some(session_id.clone())
         );
 
-        gateway.detach_supervisor(&session_id, &target_call).await;
+        gateway.detach_supervisor(&session_id, &target_call);
         assert!(!gateway.is_supervisor(&target_call));
     }
 
@@ -789,20 +783,18 @@ mod tests {
         };
 
         let session1 = gateway.create_session(identity1);
-        let session1_id = session1.read().await.id.clone();
+        let session1_id = session1.read().id.clone();
         let session2 = gateway.create_session(identity2);
-        let session2_id = session2.read().await.id.clone();
+        let session2_id = session2.read().id.clone();
 
         gateway
-            .subscribe(&session1_id, vec!["context1".to_string()], None)
-            .await;
+            .subscribe(&session1_id, vec!["context1".to_string()], None);
         gateway
             .subscribe(
                 &session2_id,
                 vec!["context1".to_string(), "context2".to_string()],
                 None,
-            )
-            .await;
+            );
 
         let subscribers = gateway.get_sessions_subscribed_to_context("context1");
         assert_eq!(subscribers.len(), 2);
@@ -819,18 +811,17 @@ mod tests {
         let mut gateway = RwiGateway::new();
         let identity = create_test_identity();
         let session = gateway.create_session(identity);
-        let session_id = session.read().await.id.clone();
+        let session_id = session.read().id.clone();
 
         gateway
-            .subscribe(&session_id, vec!["context1".to_string()], None)
-            .await;
+            .subscribe(&session_id, vec!["context1".to_string()], None);
 
         assert_eq!(
             gateway.get_sessions_subscribed_to_context("context1"),
             vec![session_id.clone()]
         );
 
-        gateway.remove_session(&session_id).await;
+        gateway.remove_session(&session_id);
 
         assert!(
             gateway
@@ -845,11 +836,10 @@ mod tests {
         let mut gateway = RwiGateway::new();
         let identity = create_test_identity();
         let session = gateway.create_session(identity);
-        let session_id = session.read().await.id.clone();
+        let session_id = session.read().id.clone();
 
         gateway
             .claim_call_ownership(&session_id, "call_001".to_string(), OwnershipMode::Control)
-            .await
             .unwrap();
 
         assert_eq!(
@@ -857,7 +847,7 @@ mod tests {
             Some(session_id.clone())
         );
 
-        gateway.remove_session(&session_id).await;
+        gateway.remove_session(&session_id);
 
         assert_eq!(gateway.get_call_owner(&"call_001".to_string()), None);
     }
@@ -867,7 +857,7 @@ mod tests {
         let mut gateway = RwiGateway::new();
         let identity = create_test_identity();
         let session = gateway.create_session(identity);
-        let session_id = session.read().await.id.clone();
+        let session_id = session.read().id.clone();
 
         let (tx, mut rx) = mpsc::unbounded_channel();
         gateway.set_session_event_sender(&session_id, tx);
@@ -887,7 +877,7 @@ mod tests {
         let mut gateway = RwiGateway::new();
         let identity = create_test_identity();
         let session = gateway.create_session(identity);
-        let session_id = session.read().await.id.clone();
+        let session_id = session.read().id.clone();
 
         let (tx, mut rx) = mpsc::unbounded_channel();
         gateway.set_session_event_sender(&session_id, tx);
@@ -895,7 +885,6 @@ mod tests {
         let call_id = "call_999".to_string();
         gateway
             .claim_call_ownership(&session_id, call_id.clone(), OwnershipMode::Control)
-            .await
             .unwrap();
 
         let event = RwiEvent::CallHangup {
@@ -924,17 +913,17 @@ mod tests {
         };
 
         let s1 = gateway.create_session(id1);
-        let s1_id = s1.read().await.id.clone();
+        let s1_id = s1.read().id.clone();
         let s2 = gateway.create_session(id2);
-        let s2_id = s2.read().await.id.clone();
+        let s2_id = s2.read().id.clone();
 
         let (tx1, mut rx1) = mpsc::unbounded_channel();
         let (tx2, mut rx2) = mpsc::unbounded_channel();
         gateway.set_session_event_sender(&s1_id, tx1);
         gateway.set_session_event_sender(&s2_id, tx2);
 
-        gateway.subscribe(&s1_id, vec!["ctx".into()], None).await;
-        gateway.subscribe(&s2_id, vec!["ctx".into()], None).await;
+        gateway.subscribe(&s1_id, vec!["ctx".into()], None);
+        gateway.subscribe(&s2_id, vec!["ctx".into()], None);
 
         let event = RwiEvent::CallRinging {
             call_id: "c1".into(),
@@ -951,14 +940,14 @@ mod tests {
         let mut gateway = RwiGateway::new();
         let identity = create_test_identity();
         let session = gateway.create_session(identity);
-        let session_id = session.read().await.id.clone();
+        let session_id = session.read().id.clone();
 
         let (tx, _rx) = mpsc::unbounded_channel();
         gateway.set_session_event_sender(&session_id, tx);
 
         assert_eq!(gateway.session_event_senders.len(), 1);
 
-        gateway.remove_session(&session_id).await;
+        gateway.remove_session(&session_id);
 
         assert_eq!(gateway.session_event_senders.len(), 0);
     }
@@ -1171,7 +1160,7 @@ mod tests {
         let mut gateway = RwiGateway::new();
         let identity = create_test_identity();
         let session = gateway.create_session(identity);
-        let session_id = session.read().await.id.clone();
+        let session_id = session.read().id.clone();
 
         let (tx, mut rx) = mpsc::unbounded_channel();
         gateway.set_session_event_sender(&session_id, tx);
@@ -1182,8 +1171,7 @@ mod tests {
                 &session_id,
                 vec!["ctx".to_string()],
                 Some(vec!["call_ringing".to_string()]),
-            )
-            .await;
+            );
 
         // This event should be delivered (type matches filter)
         gateway.send_event_to_session(
@@ -1214,15 +1202,14 @@ mod tests {
         let mut gateway = RwiGateway::new();
         let identity = create_test_identity();
         let session = gateway.create_session(identity);
-        let session_id = session.read().await.id.clone();
+        let session_id = session.read().id.clone();
 
         let (tx, mut rx) = mpsc::unbounded_channel();
         gateway.set_session_event_sender(&session_id, tx);
 
         // Subscribe without filter
         gateway
-            .subscribe(&session_id, vec!["ctx".to_string()], None)
-            .await;
+            .subscribe(&session_id, vec!["ctx".to_string()], None);
 
         gateway.send_event_to_session(
             &session_id,
@@ -1258,7 +1245,7 @@ mod tests {
         let mut gateway = RwiGateway::new();
         let identity = create_test_identity();
         let session = gateway.create_session(identity);
-        let session_id = session.read().await.id.clone();
+        let session_id = session.read().id.clone();
 
         let (tx, mut rx) = mpsc::unbounded_channel();
         gateway.set_session_event_sender(&session_id, tx);
@@ -1269,8 +1256,7 @@ mod tests {
                 &session_id,
                 vec!["ctx".to_string()],
                 Some(vec!["call_ringing".to_string(), "call_hangup".to_string()]),
-            )
-            .await;
+            );
 
         gateway.send_event_to_session(
             &session_id,
@@ -1317,7 +1303,7 @@ mod tests {
         let mut gateway = RwiGateway::new();
         let identity = create_test_identity();
         let session = gateway.create_session(identity);
-        let session_id = session.read().await.id.clone();
+        let session_id = session.read().id.clone();
 
         let (tx, mut rx) = mpsc::unbounded_channel();
         gateway.set_session_event_sender(&session_id, tx);
@@ -1328,13 +1314,11 @@ mod tests {
                 &session_id,
                 vec!["ctx".to_string()],
                 Some(vec!["call_ringing".to_string()]),
-            )
-            .await;
+            );
 
         // Re-subscribe without filter — should clear the filter
         gateway
-            .subscribe(&session_id, vec!["ctx".to_string()], None)
-            .await;
+            .subscribe(&session_id, vec!["ctx".to_string()], None);
 
         // Now all events should pass
         gateway.send_event_to_session(
@@ -1355,7 +1339,7 @@ mod tests {
         let mut gateway = RwiGateway::new();
         let identity = create_test_identity();
         let session = gateway.create_session(identity);
-        let session_id = session.read().await.id.clone();
+        let session_id = session.read().id.clone();
 
         let (tx, _rx) = mpsc::unbounded_channel();
         gateway.set_session_event_sender(&session_id, tx);
@@ -1364,15 +1348,14 @@ mod tests {
                 &session_id,
                 vec!["ctx".to_string()],
                 Some(vec!["call_ringing".to_string()]),
-            )
-            .await;
+            );
 
         assert!(
             gateway.session_event_filters.contains_key(&session_id),
             "filter should be stored"
         );
 
-        gateway.remove_session(&session_id).await;
+        gateway.remove_session(&session_id);
         assert!(
             !gateway.session_event_filters.contains_key(&session_id),
             "filter should be removed with session"

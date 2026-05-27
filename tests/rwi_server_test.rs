@@ -59,7 +59,7 @@ fn make_auth() -> RwiAuthRef {
 /// Returns (base_url, gateway_ref, registry_ref).
 async fn start_test_server() -> (String, RwiGatewayRef, Arc<ActiveProxyCallRegistry>) {
     let auth = make_auth();
-    let gateway: RwiGatewayRef = Arc::new(tokio::sync::RwLock::new(RwiGateway::new()));
+    let gateway: RwiGatewayRef = Arc::new(parking_lot::RwLock::new(RwiGateway::new()));
     let registry = Arc::new(ActiveProxyCallRegistry::new());
 
     let auth_c = auth.clone();
@@ -554,7 +554,7 @@ async fn test_event_pushed_from_gateway_arrives_at_client() {
         context: Default::default(),
     };
     {
-        let gw = gateway.read().await;
+        let gw = gateway.read();
         let call_id = "pushed-call".to_string();
         gw.fan_out_event_to_context("push-ctx", &event, &call_id);
     }
@@ -856,7 +856,7 @@ async fn test_session_resume_returns_events_and_sequence() {
 
     // Cache some events in the gateway
     {
-        let gw = gateway.read().await;
+        let gw = gateway.read();
         let event1 = rustpbx::rwi::RwiEvent::CallRinging {
             call_id: "test-call-1".to_string(),
             context: Default::default(),
@@ -903,7 +903,7 @@ async fn test_session_resume_with_sequence_returns_partial_events() {
 
     // Cache events
     {
-        let gw = gateway.read().await;
+        let gw = gateway.read();
         let event1 = rustpbx::rwi::RwiEvent::CallRinging {
             call_id: "seq-call".to_string(),
             context: Default::default(),
@@ -947,7 +947,7 @@ async fn test_call_resume_returns_call_specific_events() {
 
     // Cache events for different calls
     {
-        let gw = gateway.read().await;
+        let gw = gateway.read();
         let event1 = rustpbx::rwi::RwiEvent::CallRinging {
             call_id: "call-a".to_string(),
             context: Default::default(),

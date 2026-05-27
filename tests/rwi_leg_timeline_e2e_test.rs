@@ -45,7 +45,7 @@ fn make_auth() -> RwiAuthRef {
 
 async fn start_test_server() -> (String, RwiGatewayRef, Arc<ActiveProxyCallRegistry>) {
     let auth = make_auth();
-    let gateway: RwiGatewayRef = Arc::new(tokio::sync::RwLock::new(RwiGateway::new()));
+    let gateway: RwiGatewayRef = Arc::new(parking_lot::RwLock::new(RwiGateway::new()));
     let registry = Arc::new(ActiveProxyCallRegistry::new());
 
     let auth_c = auth.clone();
@@ -489,7 +489,7 @@ async fn test_leg_timeline_via_call_resume() {
 
     // Cache events
     {
-        let gw = gateway.read().await;
+        let gw = gateway.read();
 
         // Simulate call lifecycle events
         let events = vec![

@@ -16,10 +16,6 @@ fn create_test_proxy_config(port: u16) -> ProxyConfig {
     test_helpers::test_proxy_config(port)
 }
 
-fn create_test_users() -> Vec<SipUser> {
-    test_helpers::standard_test_users()
-}
-
 async fn create_test_ua(
     username: &str,
     password: &str,

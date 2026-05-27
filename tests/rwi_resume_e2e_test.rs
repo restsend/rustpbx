@@ -45,7 +45,7 @@ fn make_auth() -> RwiAuthRef {
 
 async fn start_test_server() -> (String, RwiGatewayRef, Arc<ActiveProxyCallRegistry>) {
     let auth = make_auth();
-    let gateway: RwiGatewayRef = Arc::new(tokio::sync::RwLock::new(RwiGateway::new()));
+    let gateway: RwiGatewayRef = Arc::new(parking_lot::RwLock::new(RwiGateway::new()));
     let registry = Arc::new(ActiveProxyCallRegistry::new());
 
     let auth_c = auth.clone();
@@ -183,7 +183,7 @@ async fn test_full_session_resume_flow() {
 
         // Push some events via gateway
         {
-            let gw = gateway.read().await;
+            let gw = gateway.read();
             let events = vec![
                 rustpbx::rwi::RwiEvent::CallIncoming(rustpbx::rwi::CallIncomingData {
                     call_id: "resume-call-1".to_string(),
@@ -288,7 +288,7 @@ async fn test_incremental_resume_with_sequence() {
 
     // Push events to gateway cache
     {
-        let gw = gateway.read().await;
+        let gw = gateway.read();
         for i in 0..5 {
             let event = rustpbx::rwi::RwiEvent::CallRinging {
                 call_id: format!("seq-call-{}", i),
@@ -330,7 +330,7 @@ async fn test_call_resume_filters_by_call_id() {
 
     // Push events for multiple calls
     {
-        let gw = gateway.read().await;
+        let gw = gateway.read();
 
         // Call A events
         gw.cache_event(
@@ -431,7 +431,7 @@ async fn test_event_sequence_monotonicity() {
 
     // Push events sequentially
     {
-        let gw = gateway.read().await;
+        let gw = gateway.read();
         for i in 0..10 {
             let event = rustpbx::rwi::RwiEvent::Dtmf {
                 call_id: "dtmf-call".to_string(),
