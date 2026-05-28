@@ -60,7 +60,7 @@ use std::{
         atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering},
     },
 };
-use tokio::sync::Mutex as AsyncMutex;
+use tokio::sync::{Mutex as AsyncMutex, mpsc};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, trace, warn};
 
@@ -339,6 +339,8 @@ pub struct BridgePeer {
     recorder: Option<Arc<parking_lot::RwLock<Option<Recorder>>>>,
     /// When true, the bridge skips writing to the recorder (recording paused).
     recording_paused: Arc<AtomicBool>,
+    /// Non-blocking RTP capture tee for SipFlow.
+    sipflow_tx: Option<mpsc::Sender<(RecLeg, MediaSample)>>,
     dtmf_sink: Arc<parking_lot::RwLock<Option<BridgeDtmfSink>>>,
     /// Audio sender channels for forwarding — fast-path aliases
     caller_send: Arc<AsyncMutex<Option<MediaSender>>>,
@@ -408,6 +410,7 @@ impl BridgePeer {
             caller_gate: Arc::new(AtomicBool::new(false)),
             recorder: None,
             recording_paused: Arc::new(AtomicBool::new(false)),
+            sipflow_tx: None,
             dtmf_sink: Arc::new(parking_lot::RwLock::new(None)),
             caller_send: Arc::new(AsyncMutex::new(None)),
             callee_send: Arc::new(AsyncMutex::new(None)),
@@ -1310,6 +1313,7 @@ impl BridgePeer {
         let r2w_stats = Arc::clone(&self.callee_to_caller_stats);
         let recorder = self.recorder.clone();
         let recording_paused = self.recording_paused.clone();
+        let sipflow_tx = self.sipflow_tx.clone();
         let dtmf_sink = Arc::clone(&self.dtmf_sink);
         let caller_to_callee_transcoder = Arc::clone(&self.caller_to_callee_transcoder);
         let caller_to_callee_timing = Arc::clone(&self.caller_to_callee_timing);
@@ -1427,6 +1431,7 @@ impl BridgePeer {
                                         Arc::clone(&w2r_stats),
                                         if !is_video { recorder.clone() } else { None },
                                         if !is_video { Some(RecLeg::A) } else { None },
+                                        if !is_video { sipflow_tx.clone() } else { None },
                                         recording_paused.clone(),
                                         Arc::clone(&dtmf_sink),
                                         Some(Arc::clone(&caller_to_callee_transcoder)),
@@ -1550,6 +1555,7 @@ impl BridgePeer {
                                         Arc::clone(&r2w_stats),
                                         if !is_video { recorder.clone() } else { None },
                                         if !is_video { Some(RecLeg::B) } else { None },
+                                        if !is_video { sipflow_tx.clone() } else { None },
                                         recording_paused.clone(),
                                         Arc::clone(&dtmf_sink),
                                         Some(Arc::clone(&callee_to_caller_transcoder)),
@@ -1597,6 +1603,7 @@ impl BridgePeer {
         leg_stats: Arc<LegStats>,
         recorder: Option<Arc<parking_lot::RwLock<Option<Recorder>>>>,
         recorder_leg: Option<RecLeg>,
+        sipflow_tx: Option<mpsc::Sender<(RecLeg, MediaSample)>>,
         recording_paused: Arc<AtomicBool>,
         dtmf_sink: Arc<parking_lot::RwLock<Option<BridgeDtmfSink>>>,
         transcoder: Option<Arc<parking_lot::Mutex<Option<Transcoder>>>>,
@@ -1654,6 +1661,25 @@ impl BridgePeer {
                     match sample_result {
                         Ok(sample) => {
                             packet_count += 1;
+                            if !is_video {
+                                if let (Some(rec), Some(leg)) = (&recorder, recorder_leg)
+                                    && !recording_paused.load(std::sync::atomic::Ordering::Relaxed)
+                                    && let Some(mut guard) = rec.try_write()
+                                    && let Some(r) = guard.as_mut()
+                                {
+                                    let _ = r.write_sample(
+                                        leg,
+                                        &sample,
+                                        None,
+                                        None,
+                                        None::<AudioCodecType>,
+                                    );
+                                }
+
+                                if let (Some(tx), Some(leg)) = (&sipflow_tx, recorder_leg) {
+                                    let _ = tx.try_send((leg, sample.clone()));
+                                }
+                            }
                             if !is_video {
                                 Self::observe_dtmf_sample(
                                     &dtmf_sink,
@@ -1811,18 +1837,6 @@ impl BridgePeer {
                                     }
                                 }
                             };
-                            // Write audio samples to recorder (non-blocking: skip on lock contention or paused)
-                            if let (Some(rec), Some(leg)) = (&recorder, recorder_leg) {
-                                if !recording_paused.load(std::sync::atomic::Ordering::Relaxed) {
-                                    for s in &samples_to_send {
-                                        if matches!(s, MediaSample::Audio(_))
-                                            && let Some(mut guard) = rec.try_write()
-                                                && let Some(r) = guard.as_mut() {
-                                                    let _ = r.write_sample(leg, s, None, None, None::<AudioCodecType>);
-                                                }
-                                    }
-                                }
-                            }
                             for sample in samples_to_send {
                                 // Forward the sample using try_send first to reduce Tokio scheduling overhead
                                 match sender.try_send(sample.clone()) {
@@ -1991,6 +2005,7 @@ impl BridgePeer {
         leg_stats: Arc<LegStats>,
         recorder: Option<Arc<parking_lot::RwLock<Option<Recorder>>>>,
         recorder_leg: Option<RecLeg>,
+        sipflow_tx: Option<mpsc::Sender<(RecLeg, MediaSample)>>,
         recording_paused: Arc<AtomicBool>,
         dtmf_sink: Arc<parking_lot::RwLock<Option<BridgeDtmfSink>>>,
         transcoder: Option<Arc<parking_lot::Mutex<Option<Transcoder>>>>,
@@ -2009,6 +2024,7 @@ impl BridgePeer {
                 leg_stats,
                 recorder,
                 recorder_leg,
+                sipflow_tx,
                 recording_paused,
                 dtmf_sink,
                 transcoder,
@@ -2086,6 +2102,7 @@ pub struct BridgePeerBuilder {
     ice_servers: Vec<IceServer>,
     recorder: Option<Arc<parking_lot::RwLock<Option<Recorder>>>>,
     recording_paused: Arc<AtomicBool>,
+    sipflow_tx: Option<mpsc::Sender<(RecLeg, MediaSample)>>,
     cname: Option<String>,
 }
 
@@ -2110,6 +2127,7 @@ impl BridgePeerBuilder {
             ice_servers: Vec::new(),
             recorder: None,
             recording_paused: Arc::new(AtomicBool::new(false)),
+            sipflow_tx: None,
             cname: None,
         }
     }
@@ -2231,6 +2249,14 @@ impl BridgePeerBuilder {
         self
     }
 
+    pub fn with_sipflow_capture(
+        mut self,
+        sipflow_tx: mpsc::Sender<(RecLeg, MediaSample)>,
+    ) -> Self {
+        self.sipflow_tx = Some(sipflow_tx);
+        self
+    }
+
     pub fn with_cname(mut self, cname: String) -> Self {
         self.cname = Some(cname);
         self
@@ -2334,6 +2360,7 @@ impl BridgePeerBuilder {
         bridge.callee_sender_codec = self.callee_sender_codec;
         bridge.recorder = self.recorder;
         bridge.recording_paused = self.recording_paused;
+        bridge.sipflow_tx = self.sipflow_tx;
 
         // Store video codec params for setup_bridge to create video senders
         bridge.caller_video_codec = self
@@ -3604,6 +3631,7 @@ mod tests {
                     st,
                     None,                             // no recorder
                     None,                             // no recorder leg
+                    None,                             // no sipflow capture
                     Arc::new(AtomicBool::new(false)), // not paused
                     ds,
                     tr,
@@ -3705,6 +3733,7 @@ mod tests {
                     c,
                     ForwardPath::new(LegTransport::Caller, LegTransport::Callee),
                     st,
+                    None,
                     None,
                     None,
                     Arc::new(AtomicBool::new(false)),
@@ -4019,6 +4048,7 @@ mod tests {
                     c,
                     ForwardPath::new(LegTransport::Callee, LegTransport::Caller),
                     st,
+                    None,
                     None,
                     None,
                     Arc::new(AtomicBool::new(false)),
