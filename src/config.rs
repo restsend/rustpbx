@@ -701,6 +701,10 @@ pub struct ProxyConfig {
     pub trunks_files: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub queue_dir: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ivr_dir: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ivr_files: Vec<String>,
     #[serde(default)]
     pub recording: Option<RecordingPolicy>,
     #[serde(default = "default_generated_config_dir")]
@@ -977,6 +981,19 @@ impl ProxyConfig {
         }
     }
 
+    pub fn generated_ivr_dir(&self) -> PathBuf {
+        if let Some(dir) = self
+            .ivr_dir
+            .as_ref()
+            .map(|path| path.trim())
+            .filter(|path| !path.is_empty())
+        {
+            PathBuf::from(dir)
+        } else {
+            self.generated_root_dir().join("ivr")
+        }
+    }
+
     pub fn generated_acl_dir(&self) -> PathBuf {
         self.generated_root_dir().join("acl")
     }
@@ -1061,6 +1078,8 @@ impl Default for ProxyConfig {
             trunks: HashMap::new(),
             trunks_files: Vec::new(),
             queue_dir: None,
+            ivr_dir: None,
+            ivr_files: Vec::new(),
             recording: None,
             generated_dir: default_generated_config_dir(),
             nat_fix: true,

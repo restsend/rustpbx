@@ -1,7 +1,3 @@
-use crate::addons::queue::models::{
-    Column as QueueColumn, Entity as QueueEntity, Model as QueueModel,
-};
-use crate::addons::queue::services::utils as queue_utils;
 use crate::console::handlers::{bad_request, forms};
 use crate::console::{ConsoleState, middleware::AuthRequired};
 use crate::models::{
@@ -559,11 +555,23 @@ async fn load_trunks(db: &DatabaseConnection) -> Result<Vec<SipTrunkModel>, DbEr
         .await
 }
 
-async fn load_queues(db: &DatabaseConnection) -> Result<Vec<QueueModel>, DbErr> {
-    QueueEntity::find()
-        .order_by_asc(QueueColumn::Name)
-        .all(db)
-        .await
+fn load_catalogs(state: &ConsoleState) -> crate::console::catalog::ForwardingCatalog {
+    match crate::console::catalog::load_proxy_config(state.app_state().as_ref()) {
+        Some(proxy_config) => {
+            let catalog =
+                crate::console::catalog::build_forwarding_catalog(&proxy_config);
+            tracing::info!(
+                queue_count = catalog.queues.len(),
+                ivr_count = catalog.ivr_projects.len(),
+                "load_catalogs: scanned file catalogs for routing form"
+            );
+            catalog
+        }
+        None => {
+            tracing::warn!("load_catalogs: app_state not available, returning empty catalogs");
+            crate::console::catalog::ForwardingCatalog::empty()
+        }
+    }
 }
 
 fn build_trunk_options(trunks: &[SipTrunkModel]) -> Vec<Value> {
@@ -581,27 +589,6 @@ fn build_trunk_options(trunks: &[SipTrunkModel]) -> Vec<Value> {
                 "status": trunk.status,
                 "direction": trunk.direction,
             })
-        })
-        .collect()
-}
-
-fn build_queue_options(queues: &[QueueModel]) -> Vec<Value> {
-    queues
-        .iter()
-        .filter_map(|queue| match queue_utils::convert_queue_model(queue.clone()) {
-            Ok(entry) => Some(json!({
-                "id": queue.id,
-                "queue_id": format!("db-{}", queue.id),
-                "name": entry.name,
-                "description": entry.description,
-                "is_active": queue.is_active,
-                "updated_at": queue.updated_at.to_rfc3339(),
-                "file_name": entry.file_name(),
-            })),
-            Err(err) => {
-                warn!(queue = %queue.name, error = %err, "failed to convert queue for routing options");
-                None
-            }
         })
         .collect()
 }
@@ -709,8 +696,7 @@ fn render_route_form(
     mode: &str,
     doc: &RouteDocument,
     trunks: &[SipTrunkModel],
-    queues: &[QueueModel],
-    ivr_options: Value,
+    forwarding_catalog: &crate::console::catalog::ForwardingCatalog,
     error_message: Option<String>,
     form_action: String,
     headers: &HeaderMap,
@@ -718,7 +704,6 @@ fn render_route_form(
 ) -> Response {
     let route_value = serde_json::to_value(doc).unwrap_or(Value::Null);
     let trunk_options = Value::Array(build_trunk_options(trunks));
-    let queue_options = Value::Array(build_queue_options(queues));
     let selection_algorithms = selection_algorithms_value();
     let direction_options = direction_options_value();
     let status_options = status_options_value();
@@ -752,8 +737,7 @@ fn render_route_form(
             "submit_label": submit_label,
             "route_data": route_value,
             "trunk_options": trunk_options,
-            "queue_options": queue_options,
-            "ivr_options": ivr_options,
+            "forwarding_catalog": forwarding_catalog,
             "selection_algorithms": selection_algorithms,
             "direction_options": direction_options,
             "status_options": status_options,
@@ -831,6 +815,8 @@ pub async fn page_routing(
         .ami_path
         .clone()
         .unwrap_or_else(|| "/ami/v1".to_string());
+    let catalog = load_catalogs(state.as_ref());
+
     state.render_with_headers(
         "console/routing.html",
         json!({
@@ -841,6 +827,7 @@ pub async fn page_routing(
                 "direction_options": direction_options_value(),
                 "status_options": status_options_value(),
             },
+            "forwarding_catalog": catalog,
             "create_url": state.url_for("/routing/new"),
             "current_user": current_user,
             "has_file_routes": has_file_routes,
@@ -1036,19 +1023,8 @@ pub async fn page_routing_create(
                 .into_response();
         }
     };
-    let queues = match load_queues(db).await {
-        Ok(list) => list,
-        Err(err) => {
-            warn!("failed to load queues for route create page: {}", err);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to load routing form: {}", err),
-            )
-                .into_response();
-        }
-    };
 
-    let ivr_options = Value::Array(vec![]);
+    let catalog = load_catalogs(state.as_ref());
     let current_user = state.build_current_user_ctx(&user).await;
 
     let doc = RouteDocument::default();
@@ -1057,8 +1033,7 @@ pub async fn page_routing_create(
         "create",
         &doc,
         &trunks,
-        &queues,
-        ivr_options,
+        &catalog,
         None,
         state.url_for("/routing"),
         &headers,
@@ -1104,19 +1079,7 @@ pub async fn page_routing_edit(
         .map(|trunk| (trunk.id, trunk))
         .collect();
 
-    let queues = match load_queues(db).await {
-        Ok(list) => list,
-        Err(err) => {
-            warn!("failed to load queues for route edit page: {}", err);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to load routing form: {}", err),
-            )
-                .into_response();
-        }
-    };
-
-    let ivr_options = Value::Array(vec![]);
+    let catalog = load_catalogs(state.as_ref());
     let current_user = state.build_current_user_ctx(&user).await;
 
     let mut doc = RouteDocument::from_model(&model);
@@ -1127,8 +1090,7 @@ pub async fn page_routing_edit(
         "edit",
         &doc,
         &trunks,
-        &queues,
-        ivr_options,
+        &catalog,
         None,
         state.url_for(&format!("/routing/{}", id)),
         &headers,
@@ -1173,19 +1135,7 @@ pub async fn route_detail_data(
         }
     };
 
-    let queues = match load_queues(db).await {
-        Ok(list) => list,
-        Err(err) => {
-            warn!("failed to load queues for route detail {}: {}", id, err);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({"message": format!("Failed to load routing data: {}", err)})),
-            )
-                .into_response();
-        }
-    };
-
-    let ivr_options = Value::Array(vec![]);
+    let catalog = load_catalogs(state.as_ref());
 
     let trunk_map: HashMap<i64, SipTrunkModel> =
         trunks.iter().cloned().map(|t| (t.id, t)).collect();
@@ -1195,8 +1145,7 @@ pub async fn route_detail_data(
     Json(json!({
         "route": doc,
         "trunk_options": build_trunk_options(&trunks),
-        "queue_options": build_queue_options(&queues),
-        "ivr_options": ivr_options,
+        "forwarding_catalog": catalog,
         "selection_algorithms": selection_algorithms(),
         "direction_options": direction_options_value(),
         "status_options": status_options_value(),
@@ -1270,14 +1219,7 @@ pub async fn clone_routing(
     };
     let trunk_lookup = build_trunk_name_lookup(&trunks);
 
-    if let Err(err) = load_queues(db).await {
-        warn!("failed to load queues for route clone {}: {}", id, err);
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(json!({"message": format!("Failed to clone routing rule: {}", err)})),
-        )
-            .into_response();
-    }
+    let _catalog = load_catalogs(state.as_ref());
 
     doc.source_trunk = sanitize_optional_string(doc.source_trunk.take());
     if let Some(ref name) = doc.source_trunk
@@ -1788,35 +1730,18 @@ mod tests {
     }
 
     #[test]
-    fn build_queue_options_includes_queue_id() {
-        use crate::addons::queue::models::Model as QueueModel;
-        let now = Utc::now();
-        let queue = QueueModel {
-            id: 42,
-            name: "Customer calls back".to_string(),
-            description: Some("Main support queue".to_string()),
-            metadata: None,
-            // spec must be a valid RouteQueueConfig JSON (accept_immediately is required)
-            spec: serde_json::json!({ "accept_immediately": false }),
-            is_active: true,
-            created_at: now,
-            updated_at: now,
-            last_exported_at: None,
+    fn forwarding_catalog_queue_has_reference() {
+        use crate::console::catalog::{ForwardingCatalog, ForwardingQueue};
+        let catalog = ForwardingCatalog {
+            queues: vec![ForwardingQueue {
+                reference: "db-42".to_string(),
+                name: "Customer calls back".to_string(),
+                description: Some("Main support queue".to_string()),
+            }],
+            ivr_projects: vec![],
         };
-
-        let options = build_queue_options(&[queue]);
-        assert_eq!(
-            options.len(),
-            1,
-            "should build one option from a valid queue model"
-        );
-        let opt = &options[0];
-        assert_eq!(opt["id"], 42);
-        assert_eq!(
-            opt["queue_id"].as_str().unwrap(),
-            "db-42",
-            "queue_id must be the stable db-<id> reference (issue #176)"
-        );
-        assert_eq!(opt["name"].as_str().unwrap(), "Customer calls back");
+        assert_eq!(catalog.queues.len(), 1);
+        assert_eq!(catalog.queues[0].reference, "db-42");
+        assert_eq!(catalog.queues[0].name, "Customer calls back");
     }
 }

@@ -6,7 +6,8 @@
         basePath: {{ base_path | tojson }},
         filters: {{ filters | tojson }},
         createUrl: {{ create_url | tojson }},
-        amiEndpoint: {{ ami_endpoint | default("/ami/v1") | tojson }}
+        amiEndpoint: {{ ami_endpoint | default("/ami/v1") | tojson }},
+        forwardingCatalog: {{ forwarding_catalog | default({}) | tojson }}
     })' x-init="init()">
         <div class="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
             <div>
@@ -804,6 +805,7 @@
             createUrl: '',
             amiEndpoint: options.amiEndpoint || options.ami_path || '/ami/v1',
             filtersRaw: {},
+            forwardingCatalog: { queues: [], ivr_projects: [] },
             routes: [],
             summary: { total_routes: 0, active_routes: 0, last_deploy: null },
             pagination: null,
@@ -868,6 +870,8 @@
                 flash_resumed: '{{ "routing.flash_resumed" | t }}',
                 source_any: '{{ "routing.source_any" | t }}',
                 target_queue: '{{ "routing.target_queue" | t }}',
+                target_ivr: '{{ "routing.target_ivr" | t }}',
+                target_voicemail: '{{ "routing.target_voicemail" | t }}',
                 target_default: '{{ "routing.target_default" | t }}',
                 route_unnamed: '{{ "routing.route_unnamed" | t }}',
                 status_not_handled: '{{ "routing.status_not_handled" | t }}',
@@ -891,6 +895,7 @@
                 this.listEndpoint = this.resolvePath(`${this.basePath}/routing`);
                 this.createUrl = options.createUrl || this.resolvePath(`${this.basePath}/routing/new`);
                 this.filtersRaw = options.filters || {};
+                this.forwardingCatalog = options.forwardingCatalog || {};
                 this.setupFilterOptions();
                 this.fetchRoutes();
             },
@@ -1419,8 +1424,26 @@
             targetTrunksLabel(route) {
                 const targetType = (route?.action?.target_type || 'sip_trunk').toLowerCase();
                 if (targetType === 'queue') {
-                    const queueRef = (route?.action?.queue_ref || '').trim();
-                    return queueRef.length ? `${this.translations.target_queue.split(' ')[0]} · ${queueRef}` : this.translations.target_queue;
+                    const raw = (route?.action?.queue_file || '').trim();
+                    const queues = this.forwardingCatalog.queues || [];
+                    const match = queues.find(q => q.reference === raw) || queues.find(q => q.name === raw);
+                    const display = match ? match.name : raw;
+                    return display.length ? `${this.translations.target_queue} · ${display}` : this.translations.target_queue;
+                }
+                if (targetType === 'ivr') {
+                    const raw = (route?.action?.ivr_file || '').trim();
+                    const ivrs = this.forwardingCatalog.ivr_projects || [];
+                    const match = ivrs.find(i => i.name === raw)
+                        || ivrs.find(i => i.file_path === raw)
+                        || ivrs.find(i => raw.endsWith('/' + i.name + '.toml') || raw.endsWith('/' + i.name + '.generated.toml'));
+                    const display = match ? match.name : raw.split('/').pop().replace(/\.generated\.toml$/, '').replace(/\.toml$/, '');
+                    const mode = match ? match.ivr_mode : '';
+                    const suffix = mode ? ` (${mode})` : '';
+                    return display.length ? `${this.translations.target_ivr} · ${display}${suffix}` : this.translations.target_ivr;
+                }
+                if (targetType === 'voicemail') {
+                    const ext = (route?.action?.voicemail_extension || '').trim();
+                    return ext.length ? `${this.translations.target_voicemail} · ${ext}` : this.translations.target_voicemail;
                 }
                 const targets = Array.isArray(route?.target_trunks)
                     ? route.target_trunks.filter((item) => typeof item === 'string' && item.trim().length)

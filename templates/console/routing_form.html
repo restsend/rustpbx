@@ -6,8 +6,7 @@
             mode: {{ mode | tojson }},
             route: {{ route_data | tojson }},
             trunks: {{ trunk_options | tojson }},
-            queues: {{ queue_options | tojson }},
-            ivrProjects: {{ ivr_options | tojson }},
+            forwardingCatalog: {{ forwarding_catalog | default({}) | tojson }},
             algorithms: {{ selection_algorithms | tojson }},
             directionOptions: {{ direction_options | tojson }},
             statusOptions: {{ status_options | tojson }},
@@ -625,47 +624,31 @@
             </div>
 
             <div class="rounded-xl border border-slate-200 bg-slate-50 p-4" x-show="isQueueTarget" x-cloak>
-                <div class="flex items-center justify-between">
-                    <div>
-                        <h3 class="text-sm font-semibold text-slate-800">{{ "routing_form.queue_dest_title" | t }}</h3>
-                        <p class="text-xs text-slate-500">{{ "routing_form.queue_dest_desc" | t }}</p>
-                    </div>
-                    <a :href="queuesUrl()"
-                        class="text-xs font-semibold text-sky-600 underline-offset-2 hover:underline">
-                        {{ "routing_form.manage_queues" | t }}
-                    </a>
+                <div>
+                    <h3 class="text-sm font-semibold text-slate-800">{{ "routing_form.queue_dest_title" | t }}</h3>
+                    <p class="text-xs text-slate-500">{{ "routing_form.queue_dest_desc" | t }}</p>
                 </div>
-                <div class="mt-4 space-y-2">
-                    <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">{{
-                        "routing_form.queue_file_path_label" | t }}</label>
+                <div class="mt-4 space-y-3">
                     <template x-if="queueOptions.length">
-                        <!-- Issue #176: use a dropdown instead of a free-text path input so
-                                         the user picks a queue by name and the stable db-<id> reference
-                                         is stored — compatible with GUI-generated queues.toml entries. -->
-                        <select x-model="route.action.queue_file"
-                            class="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
-                            <option value="">— {{ "routing_form.queue_file_placeholder" | t }} —</option>
-                            <template x-for="option in queueOptions" :key="option.id">
-                                <option :value="queueSuggestion(option)"
-                                    :selected="route.action.queue_file === queueSuggestion(option)"
-                                    x-text="option.name + ' (' + option.id + ')' + (option.is_active ? '' : ' (' + translations.status_paused + ')')">
-                                </option>
-                            </template>
-                        </select>
+                        <label class="flex flex-col gap-1 text-sm font-medium text-slate-700">
+                            {{ "routing_form.queue_file_path_label" | t }}
+                            <select x-model="route.action.queue_file" id="queue-select"
+                                class="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                                <option value="">— {{ "routing_form.queue_file_placeholder" | t }} —</option>
+                                <template x-for="option in queueOptions" :key="option.reference">
+                                    <option :value="option.reference" x-text="option.name"></option>
+                                </template>
+                            </select>
+                        </label>
                     </template>
                     <template x-if="!queueOptions.length">
                         <div class="space-y-1">
                             <input type="text" x-model="route.action.queue_file"
                                 class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
                                 placeholder='{{ "routing_form.queue_file_placeholder" | t }}'>
-                            <p class="text-xs text-amber-600">
-                                {{ "routing_form.no_queues_available" | t }}
-                                <a :href="queuesUrl()" class="underline">{{ "routing_form.no_queues_create_first" | t
-                                    }}</a>
-                            </p>
+                            <p class="text-xs text-amber-600">{{ "routing_form.no_queues_available" | t }}</p>
                         </div>
                     </template>
-                    <p class="text-[11px] text-slate-500">{{ "routing_form.queue_file_hint" | t }}</p>
                 </div>
             </div>
 
@@ -685,74 +668,30 @@
             </div>
 
             <div class="rounded-xl border border-slate-200 bg-slate-50 p-4" x-show="isIvrTarget" x-cloak>
-                <div class="flex items-center justify-between">
-                    <div>
-                        <h3 class="text-sm font-semibold text-slate-800">{{ "routing_form.ivr_dest_title" | t }}</h3>
-                        <p class="text-xs text-slate-500">{{ "routing_form.ivr_dest_desc" | t }}</p>
-                    </div>
-                    <!-- "Manage IVR flows" link only available with the IVR Editor addon -->
-                    <a :href="ivrEditorUrl()"
-                        class="text-xs font-semibold text-sky-600 underline-offset-2 hover:underline"
-                        x-show="window.ivrEditorAddonEnabled" x-cloak>
-                        {{ "routing_form.manage_ivr_flows" | t }}
-                    </a>
+                <div>
+                    <h3 class="text-sm font-semibold text-slate-800">{{ "routing_form.ivr_dest_title" | t }}</h3>
+                    <p class="text-xs text-slate-500">{{ "routing_form.ivr_dest_desc" | t }}</p>
                 </div>
-                <!-- File-path input — always available, no addon required -->
-                <div class="mt-4 space-y-2">
-                    <label class="text-xs font-semibold uppercase tracking-wide text-slate-500">{{
-                        "routing_form.ivr_file_path_label" | t }}</label>
-                    <input type="text" x-model="route.action.ivr_file" maxlength="200"
-                        class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
-                        placeholder='{{ "routing_form.ivr_file_placeholder" | t }}'>
-                    <p class="text-[11px] text-slate-500">{{ "routing_form.ivr_file_hint" | t }}</p>
-                </div>
-                <!-- Published project picker — only available with the IVR Editor addon -->
-                <div class="mt-4 space-y-3" x-show="window.ivrEditorAddonEnabled" x-cloak>
-                    <div class="flex items-center justify-between">
-                        <h4 class="text-xs font-semibold uppercase tracking-wide text-slate-500">{{
-                            "routing_form.published_ivr_flows" | t }}</h4>
-                        <span class="text-[11px] text-slate-400" x-text="'{{ "routing_form.n_available" | t
-                            }}'.replace('{n}', ivrOptions.length)"></span>
-                    </div>
+                <div class="mt-4 space-y-3">
                     <template x-if="ivrOptions.length">
-                        <ul class="space-y-2 text-xs text-slate-600">
-                            <template x-for="option in ivrOptions" :key="option.id">
-                                <li class="rounded-lg border border-slate-200 bg-white p-3">
-                                    <div class="flex flex-wrap items-center justify-between gap-2">
-                                        <div>
-                                            <div class="text-sm font-semibold text-slate-800" x-text="option.name">
-                                            </div>
-                                            <div class="text-[11px] text-slate-500" x-text="option.description || '{{ "routing_form.no_description" | t }}'">
-                                            </div>
-                                        </div>
-                                        <div class="inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-[11px] font-semibold"
-                                            :class="option.status === 'active' ? 'bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200' : 'bg-rose-50 text-rose-600 ring-1 ring-rose-200'">
-                                            <span x-text="option.status === 'active' ? '{{ "routing_form.queue_active"
-                                                | t }}' : '{{ "routing_form.queue_disabled" | t }}'"></span>
-                                                    </div>
-                                                </div>
-                                                <div class=" mt-2 flex flex-wrap items-center gap-2 text-[11px]">
-                                                <span class="rounded bg-slate-100 px-2 py-1 font-mono"
-                                                    x-text="option.file"></span>
-                                                <button type="button" @click="route.action.ivr_file = option.file"
-                                                    class="rounded border border-slate-200 px-2 py-0.5 text-xs font-semibold text-slate-600 hover:bg-slate-50">
-                                                    {{ "routing_form.use_path" | t }}
-                                                </button>
-                                                <template x-if="option.published_at">
-                                                    <span class="text-slate-400" x-text="'{{ "routing_form.published_at" | t }}'.replace('{time}',
-                                                        formatTimestamp(option.published_at))"></span>
-                                                </template>
-                                                <template x-if="!option.published_at">
-                                                    <span class="text-amber-500">{{ "routing_form.not_yet_published" | t
-                                                        }}</span>
-                                                </template>
-                                        </div>
-                                </li>
-                            </template>
-                        </ul>
+                        <label class="flex flex-col gap-1 text-sm font-medium text-slate-700">
+                            {{ "routing_form.ivr_file_path_label" | t }}
+                            <select x-model="route.action.ivr_file" id="ivr-select"
+                                class="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200">
+                                <option value="">— {{ "routing_form.ivr_file_placeholder" | t }} —</option>
+                                <template x-for="option in ivrOptions" :key="option.file_path">
+                                    <option :value="option.name" x-text="option.name + ' (' + option.ivr_mode + ')'"></option>
+                                </template>
+                            </select>
+                        </label>
                     </template>
                     <template x-if="!ivrOptions.length">
-                        <p class="text-xs text-rose-500">{{ "routing_form.no_ivr_available" | t }}</p>
+                        <div class="space-y-1">
+                            <input type="text" x-model="route.action.ivr_file" maxlength="200"
+                                class="w-full rounded-lg border border-slate-200 px-3 py-2 text-sm text-slate-800 focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                                placeholder='{{ "routing_form.ivr_file_placeholder" | t }}'>
+                            <p class="text-xs text-rose-500">{{ "routing_form.no_ivr_available" | t }}</p>
+                        </div>
                     </template>
                 </div>
             </div>
@@ -985,21 +924,41 @@
                     }));
                     const trunksData = options.trunks;
                     this.trunkOptions = Array.isArray(trunksData) ? trunksData : (trunksData?.trunks || []);
-                    const queuesData = options.queues;
-                    this.queueOptions = Array.isArray(queuesData) ? queuesData : (queuesData?.queues || []);
-                    const ivrData = options.ivrProjects;
-                    this.ivrOptions = Array.isArray(ivrData) ? ivrData : [];
-                    if (typeof window.__ivrProjectsLoader === 'function') {
-                        window.__ivrProjectsLoader()
-                            .then(data => { if (Array.isArray(data)) this.ivrOptions = data; })
-                            .catch(() => { });
-                    }
+                    const catalog = options.forwardingCatalog || {};
+                    this.queueOptions = Array.isArray(catalog.queues) ? catalog.queues : [];
+                    this.ivrOptions = Array.isArray(catalog.ivr_projects) ? catalog.ivr_projects : [];
                     const normalised = this.normaliseRoute(options.route || {});
                     this.route = normalised.route;
                     this.matchHeaders = normalised.matchHeaders;
                     this.rewriteHeaders = normalised.rewriteHeaders;
                     if (this.mode === 'create' && !this.route.id) {
                         this.route.direction = '';
+                    }
+                    this.$nextTick(() => this.reconcileSelectValues());
+                },
+                reconcileSelectValues() {
+                    if (this.route?.action?.ivr_file && this.ivrOptions.length) {
+                        const stored = this.route.action.ivr_file;
+                        const match = this.ivrOptions.find(o => o.name === stored)
+                            || this.ivrOptions.find(o => o.file_path === stored)
+                            || this.ivrOptions.find(o => stored.endsWith('/' + o.name + '.toml') || stored.endsWith('/' + o.name + '.generated.toml'))
+                            || this.ivrOptions.find(o => o.file_path.endsWith('/' + stored) || o.file_path.endsWith('/' + stored.replace(/\.generated\.toml$/, '.toml').replace(/\.toml$/, '') + '.toml'));
+                        if (match) {
+                            this.route.action.ivr_file = match.name;
+                            const el = document.getElementById('ivr-select');
+                            if (el) el.value = match.name;
+                        }
+                    }
+                    if (this.route.action.queue_file && this.queueOptions.length) {
+                        const stored = this.route.action.queue_file;
+                        const match = this.queueOptions.find(o => o.reference === stored)
+                            || this.queueOptions.find(o => o.name === stored)
+                            || this.queueOptions.find(o => stored.includes(o.reference));
+                        if (match) {
+                            this.route.action.queue_file = match.reference;
+                            const el = document.getElementById('queue-select');
+                            if (el) el.value = match.reference;
+                        }
                     }
                 },
                 // Regex helper methods
@@ -1312,25 +1271,6 @@
                         }))
                         .filter((item) => item.name.length);
                 },
-                queueSuggestion(option) {
-                    // Issue #176: prefer the stable db-<id> reference over a file
-                    // path so that the queue can be resolved regardless of file layout.
-                    const queueId = this.trimString(option?.queue_id || '');
-                    if (queueId.length) {
-                        return queueId;
-                    }
-                    const provided = this.trimString(option?.file_name || option?.reference || '');
-                    if (provided.length) {
-                        return provided;
-                    }
-                    const id = Number(option?.id);
-                    const prefix = Number.isFinite(id) ? String(id) : 'queue';
-                    const slug = this.slugify(option?.name || '') || 'queue';
-                    return `${prefix}-${slug}.generated.toml`;
-                },
-                applyQueueSuggestion(option) {
-                    this.route.action.queue_file = this.queueSuggestion(option);
-                },
                 slugify(value) {
                     if (!value) return '';
                     const chars = String(value)
@@ -1386,14 +1326,6 @@
                     return this.translations.route_summary
                         .replace('{source}', sourceLabel)
                         .replace('{priority}', this.route.priority);
-                },
-                queuesUrl() {
-                    const base = (this.listUrl || '/console/routing').replace(/\/routing$/, '');
-                    return `${base}/queues`;
-                },
-                ivrEditorUrl() {
-                    const base = (this.listUrl || '/console/routing').replace(/\/routing$/, '');
-                    return `${base}/ivr_editor`;
                 },
                 submitUrl() {
                     return this.formAction || this.listUrl;

@@ -16,6 +16,7 @@ use std::sync::{Arc, Mutex, RwLock, Weak};
 use std::time::Instant;
 
 pub mod auth;
+pub mod catalog;
 pub mod handlers;
 pub mod i18n;
 pub mod middleware;

@@ -678,7 +678,11 @@ impl CallModule {
                             Some(rsipstack::sip::StatusCode::ServerInternalError),
                         )));
                     }
-                    let ivr_file = format!("config/ivr/{}.toml", name);
+                    let ivr_file = self
+                        .inner
+                        .server
+                        .data_context
+                        .resolve_ivr_file(name);
                     forced_pending_app = Some((
                         "ivr".to_string(),
                         Some(serde_json::json!({ "file": ivr_file })),

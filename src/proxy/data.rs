@@ -176,6 +176,13 @@ impl ProxyDataContext {
         Self::read_queue_document(path)
     }
 
+    pub fn resolve_ivr_file(&self, ivr_name: &str) -> String {
+        let config = self.config.read().unwrap().clone();
+        let ivr_dir = config.generated_ivr_dir();
+        resolve_ivr_name_to_path(ivr_name, &ivr_dir)
+    }
+
+
     fn resolve_reference_path(base: &Path, reference: &str) -> PathBuf {
         let candidate = Path::new(reference);
         if candidate.is_absolute() {
@@ -625,7 +632,7 @@ impl ProxyDataContext {
                 .collect::<HashMap<i64, String>>()
         };
 
-        let routes = load_routes_from_db(db, &trunk_lookup).await?;
+        let routes = load_routes_from_db(db, &trunk_lookup, Some(&config.generated_ivr_dir())).await?;
         let entries = routes.len();
         let backup = backup_existing_file(&target_path)?;
         write_routes_file(&target_path, &routes)?;
@@ -1085,6 +1092,7 @@ fn convert_trunk(model: sip_trunk::Model) -> Option<(String, TrunkConfig)> {
 pub(crate) async fn load_routes_from_db(
     db: &DatabaseConnection,
     trunk_lookup: &HashMap<i64, String>,
+    ivr_dir: Option<&Path>,
 ) -> Result<Vec<RouteRule>> {
     let models = routing::Entity::find()
         .filter(routing::Column::IsActive.eq(true))
@@ -1094,7 +1102,7 @@ pub(crate) async fn load_routes_from_db(
 
     let mut routes = Vec::new();
     for model in models {
-        if let Some(route) = convert_route(model, trunk_lookup).context("convert route")? {
+        if let Some(route) = convert_route(model, trunk_lookup, ivr_dir).context("convert route")? {
             routes.push(route);
         }
     }
@@ -1128,6 +1136,7 @@ struct RouteMetadataAction {
 fn convert_route(
     model: routing::Model,
     trunk_lookup: &HashMap<i64, String>,
+    ivr_dir: Option<&Path>,
 ) -> Result<Option<RouteRule>> {
     let mut match_conditions = MatchConditions::default();
     if let Some(pattern) = model.source_pattern.clone()
@@ -1190,7 +1199,7 @@ fn convert_route(
         && let Ok(doc) = serde_json::from_value::<RouteMetadataDocument>(metadata)
         && let Some(meta_action) = doc.action
     {
-        apply_route_metadata(&mut action, meta_action);
+        apply_route_metadata(&mut action, meta_action, ivr_dir);
     }
 
     let mut source_trunks = Vec::new();
@@ -1220,7 +1229,36 @@ fn convert_route(
     Ok(Some(route))
 }
 
-fn apply_route_metadata(action: &mut RouteAction, meta: RouteMetadataAction) {
+fn sanitize_ivr_filename(name: &str) -> String {
+    name.chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
+fn resolve_ivr_name_to_path(name: &str, ivr_dir: &Path) -> String {
+    let sanitized = sanitize_ivr_filename(name);
+    let hand_written = ivr_dir.join(format!("{}.toml", sanitized));
+    if hand_written.exists() {
+        return hand_written.to_string_lossy().to_string();
+    }
+    let generated = ivr_dir.join(format!("{}.generated.toml", sanitized));
+    if generated.exists() {
+        return generated.to_string_lossy().to_string();
+    }
+    hand_written.to_string_lossy().to_string()
+}
+
+fn apply_route_metadata(
+    action: &mut RouteAction,
+    meta: RouteMetadataAction,
+    ivr_dir: Option<&Path>,
+) {
     let target_type = meta
         .target_type
         .as_deref()
@@ -1240,8 +1278,13 @@ fn apply_route_metadata(action: &mut RouteAction, meta: RouteMetadataAction) {
         }
         "ivr" => {
             if let Some(file) = sanitize_metadata_string(meta.ivr_file) {
+                let file_path = if let Some(dir) = ivr_dir {
+                    resolve_ivr_name_to_path(&file, dir)
+                } else {
+                    file
+                };
                 action.app = Some("ivr".to_string());
-                action.app_params = Some(serde_json::json!({ "file": file }));
+                action.app_params = Some(serde_json::json!({ "file": file_path }));
             }
         }
         _ => {}
@@ -1468,7 +1511,7 @@ mod tests {
             voicemail_extension: None,
             ivr_file: None,
         };
-        apply_route_metadata(&mut action, meta);
+        apply_route_metadata(&mut action, meta, None);
         assert_eq!(action.queue.as_deref(), Some("queues/support.toml"));
     }
 
@@ -1481,7 +1524,7 @@ mod tests {
             voicemail_extension: Some("1001".to_string()),
             ivr_file: None,
         };
-        apply_route_metadata(&mut action, meta);
+        apply_route_metadata(&mut action, meta, None);
         assert_eq!(action.app.as_deref(), Some("voicemail"));
         let params = action.app_params.unwrap();
         assert_eq!(params["extension"], "1001");
@@ -1496,7 +1539,7 @@ mod tests {
             voicemail_extension: None,
             ivr_file: Some("config/ivr/main.toml".to_string()),
         };
-        apply_route_metadata(&mut action, meta);
+        apply_route_metadata(&mut action, meta, None);
         assert_eq!(action.app.as_deref(), Some("ivr"));
         let params = action.app_params.unwrap();
         assert_eq!(params["file"], "config/ivr/main.toml");

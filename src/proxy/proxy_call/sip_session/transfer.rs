@@ -456,7 +456,7 @@ impl SipSession {
     pub(crate) async fn start_ivr_app(&self, ivr_name: &str) -> Result<()> {
         use crate::call::runtime::AppRuntimeError;
 
-        let ivr_file = format!("config/ivr/{}.toml", ivr_name);
+        let ivr_file = self.server.data_context.resolve_ivr_file(ivr_name);
         info!(ivr = %ivr_name, file = %ivr_file, "Starting IVR application");
 
         let params = Some(serde_json::json!({"file": ivr_file}));
