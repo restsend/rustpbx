@@ -1,6 +1,5 @@
 use anyhow::{Result, anyhow};
 use audio_codec::{CodecType, Decoder, Resampler, create_decoder, create_encoder};
-use rustrtc::rtp::RtpPacket;
 use std::{
     collections::{BTreeMap, HashMap},
     io::{Cursor, Seek, SeekFrom, Write},
@@ -19,6 +18,14 @@ pub(crate) struct PayloadDescriptor {
 
 pub(crate) type PayloadTypeMap = HashMap<u8, PayloadDescriptor>;
 pub(crate) type LegPayloadTypeMap = HashMap<i32, PayloadTypeMap>;
+
+struct RtpPacketView<'a> {
+    leg: i32,
+    payload_type: u8,
+    sequence_number: u16,
+    rtp_timestamp: u32,
+    payload: &'a [u8],
+}
 
 fn default_payload_descriptor(pt: u8) -> PayloadDescriptor {
     match pt {
@@ -47,6 +54,52 @@ fn default_payload_descriptor(pt: u8) -> PayloadDescriptor {
             clock_rate: 8000,
         },
     }
+}
+
+fn parse_borrowed_rtp_packet(leg: i32, raw: &[u8]) -> Option<RtpPacketView<'_>> {
+    if raw.len() < 12 || raw[0] >> 6 != 2 {
+        return None;
+    }
+
+    let has_padding = raw[0] & 0x20 != 0;
+    let has_extension = raw[0] & 0x10 != 0;
+    let csrc_count = (raw[0] & 0x0f) as usize;
+    let mut payload_offset = 12usize.checked_add(csrc_count.checked_mul(4)?)?;
+
+    if raw.len() < payload_offset {
+        return None;
+    }
+
+    if has_extension {
+        let extension_header_end = payload_offset.checked_add(4)?;
+        if raw.len() < extension_header_end {
+            return None;
+        }
+        let extension_words =
+            u16::from_be_bytes([raw[payload_offset + 2], raw[payload_offset + 3]]) as usize;
+        payload_offset = extension_header_end.checked_add(extension_words.checked_mul(4)?)?;
+        if raw.len() < payload_offset {
+            return None;
+        }
+    }
+
+    let payload_end = if has_padding {
+        let padding_len = *raw.last()? as usize;
+        if padding_len == 0 || raw.len() < payload_offset.checked_add(padding_len)? {
+            return None;
+        }
+        raw.len() - padding_len
+    } else {
+        raw.len()
+    };
+
+    Some(RtpPacketView {
+        leg,
+        payload_type: raw[1] & 0x7f,
+        sequence_number: u16::from_be_bytes([raw[2], raw[3]]),
+        rtp_timestamp: u32::from_be_bytes([raw[4], raw[5], raw[6], raw[7]]),
+        payload: &raw[payload_offset..payload_end],
+    })
 }
 
 pub(crate) fn build_payload_type_map(flow_items: &[SipFlowItem]) -> PayloadTypeMap {
@@ -338,41 +391,39 @@ pub(crate) fn generate_wav_from_packets_with_leg_map_ex(
         return Err(anyhow!("No RTP packets found"));
     }
 
+    // The tuple timestamp is receive/capture time. Media timing and output
+    // ordering must come from the RTP header.
+    let mut parsed_packets = Vec::new();
+    for (leg, _, raw_packet) in packets {
+        if let Some(packet) = parse_borrowed_rtp_packet(*leg, raw_packet) {
+            parsed_packets.push(packet);
+        }
+    }
+
+    if parsed_packets.is_empty() {
+        return Err(anyhow!("No valid RTP packets found"));
+    }
+
+    parsed_packets.sort_by_key(|rtp| (rtp.leg, rtp.rtp_timestamp, rtp.sequence_number));
+
     // 1. Analyze codecs to determine output format
     let mut legs_codecs: HashMap<i32, Vec<CodecType>> = HashMap::new();
     let mut leg_audio_clock_rates: HashMap<i32, u32> = HashMap::new();
-    let mut min_ts = u64::MAX;
-    let mut max_ts = 0;
 
-    for (leg, ts, p) in packets {
-        if p.len() < 12 {
-            continue;
-        }
-        if *ts < min_ts {
-            min_ts = *ts;
-        }
-        if *ts > max_ts {
-            max_ts = *ts;
-        }
+    for rtp in &parsed_packets {
+        let pt = rtp.payload_type;
+        let payload = rtp.payload;
 
-        // Detect if it's a valid RTP v2 packet
-        let pt = RtpPacket::parse(p)
-            .map(|packet| packet.header.payload_type)
-            .unwrap_or(0);
-        let payload = RtpPacket::parse(p)
-            .map(|packet| packet.payload.to_vec())
-            .unwrap_or_default();
-
-        if looks_like_dtmf_payload(&payload) {
+        if looks_like_dtmf_payload(payload) {
             continue;
         }
 
-        let codec = payload_descriptor(pt, *leg, payload_map, leg_payload_map);
+        let codec = payload_descriptor(pt, rtp.leg, payload_map, leg_payload_map);
         let codec_type = codec.codec;
         leg_audio_clock_rates
-            .entry(*leg)
+            .entry(rtp.leg)
             .or_insert(codec.clock_rate);
-        legs_codecs.entry(*leg).or_default().push(codec_type);
+        legs_codecs.entry(rtp.leg).or_default().push(codec_type);
     }
 
     // Determine target codec
@@ -419,40 +470,33 @@ pub(crate) fn generate_wav_from_packets_with_leg_map_ex(
     let mut resamplers: HashMap<(i32, u8), Resampler> = HashMap::new();
     let mut base_timestamps: HashMap<i32, u64> = HashMap::new();
 
-    for (leg, ts, p) in packets {
-        if p.len() < 12 {
-            continue;
-        }
+    for rtp in &parsed_packets {
+        let rtp_timestamp = rtp.rtp_timestamp as u64;
+        let pt = rtp.payload_type;
+        let payload = rtp.payload;
 
-        let rtp = match rustrtc::rtp::RtpPacket::parse(p) {
-            Ok(packet) => packet,
-            Err(_) => {
-                continue;
-            }
-        };
-
-        let pt = rtp.header.payload_type;
-        let payload = &rtp.payload;
-
-        let mut descriptor = payload_descriptor(pt, *leg, payload_map, leg_payload_map);
+        let mut descriptor = payload_descriptor(pt, rtp.leg, payload_map, leg_payload_map);
         if descriptor.codec != CodecType::TelephoneEvent && looks_like_dtmf_payload(payload) {
             descriptor = PayloadDescriptor {
                 codec: CodecType::TelephoneEvent,
-                clock_rate: leg_audio_clock_rates.get(leg).copied().unwrap_or(8000),
+                clock_rate: leg_audio_clock_rates
+                    .get(&rtp.leg)
+                    .copied()
+                    .unwrap_or(8000),
             };
         }
         let codec = descriptor.codec;
         let clock_rate = descriptor.clock_rate as u64;
 
-        let base = *base_timestamps.entry(*leg).or_insert(*ts);
-        let rtp_diff = ts.wrapping_sub(base);
+        let base = *base_timestamps.entry(rtp.leg).or_insert(rtp_timestamp);
+        let rtp_diff = rtp_timestamp.wrapping_sub(base);
         let target_timestamp = (rtp_diff * target_sample_rate as u64 / clock_rate) as u32;
 
         if codec == CodecType::TelephoneEvent {
             if let Some((digit, duration_ms)) = parse_dtmf_payload(payload, descriptor.clock_rate) {
                 let dtmf_audio =
                     encode_dtmf_tone(digit, duration_ms, target_codec, target_sample_rate);
-                if *leg == 1 {
+                if rtp.leg == 1 {
                     insert_chunked(
                         &mut dtmf_buffer_b,
                         target_timestamp,
@@ -481,13 +525,13 @@ pub(crate) fn generate_wav_from_packets_with_leg_map_ex(
         // ... (existing decoding code)
         let processed_data: Vec<u8> = if decoder_needed {
             let decoder = decoders
-                .entry((*leg, pt))
+                .entry((rtp.leg, pt))
                 .or_insert_with(|| create_decoder(codec));
             let samples = decoder.decode(payload);
 
             let current_rate = decoder.sample_rate();
             let final_samples = if current_rate != target_sample_rate {
-                let resampler = resamplers.entry((*leg, pt)).or_insert_with(|| {
+                let resampler = resamplers.entry((rtp.leg, pt)).or_insert_with(|| {
                     Resampler::new(current_rate as usize, target_sample_rate as usize)
                 });
                 resampler.resample(&samples)
@@ -501,7 +545,7 @@ pub(crate) fn generate_wav_from_packets_with_leg_map_ex(
             payload.to_vec()
         };
 
-        if *leg == 1 {
+        if rtp.leg == 1 {
             buffer_b.insert(target_timestamp, processed_data);
         } else {
             buffer_a.insert(target_timestamp, processed_data);
@@ -598,10 +642,11 @@ mod tests {
     use super::*;
     use bytes::Bytes;
 
-    fn build_rtp_packet(payload_type: u8, payload: &[u8]) -> Vec<u8> {
+    fn build_rtp_packet(payload_type: u8, timestamp: u32, payload: &[u8]) -> Vec<u8> {
         let mut packet = vec![0u8; 12];
         packet[0] = 0x80;
         packet[1] = payload_type & 0x7f;
+        packet[4..8].copy_from_slice(&timestamp.to_be_bytes());
         packet.extend_from_slice(payload);
         packet
     }
@@ -694,7 +739,7 @@ mod tests {
         let packets = vec![(
             0,
             48_000,
-            build_rtp_packet(101, &[5, 0x80, 0x03, 0xC0]), // digit 5, 20 ms at 48 kHz
+            build_rtp_packet(101, 48_000, &[5, 0x80, 0x03, 0xC0]), // digit 5, 20 ms at 48 kHz
         )];
 
         let wav = generate_wav_from_packets_with_map_ex(&packets, &payload_map, true)
@@ -733,11 +778,11 @@ mod tests {
             (
                 0,
                 0,
-                build_rtp_packet(101, &[5, 0x80, 0x02, 0x80]), // 80 ms digit 5 at 8 kHz
+                build_rtp_packet(101, 0, &[5, 0x80, 0x02, 0x80]), // 80 ms digit 5 at 8 kHz
             ),
-            (0, 160, build_rtp_packet(0, &silence_payload)),
-            (0, 320, build_rtp_packet(0, &silence_payload)),
-            (0, 480, build_rtp_packet(0, &silence_payload)),
+            (0, 160, build_rtp_packet(0, 160, &silence_payload)),
+            (0, 320, build_rtp_packet(0, 320, &silence_payload)),
+            (0, 480, build_rtp_packet(0, 480, &silence_payload)),
         ];
 
         let wav = generate_wav_from_packets_with_map_ex(&packets, &payload_map, true)
@@ -766,11 +811,11 @@ mod tests {
 
         let silence_payload = create_encoder(CodecType::PCMU).encode(&vec![0i16; 160]);
         let packets = vec![
-            (1, 0, build_rtp_packet(0, &silence_payload)),
+            (1, 0, build_rtp_packet(0, 0, &silence_payload)),
             (
                 1,
                 160,
-                build_rtp_packet(97, &[5, 0x80, 0x06, 0x40]), // 200 ms digit 5 at 8 kHz
+                build_rtp_packet(97, 160, &[5, 0x80, 0x06, 0x40]), // 200 ms digit 5 at 8 kHz
             ),
         ];
 
