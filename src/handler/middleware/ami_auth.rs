@@ -116,6 +116,24 @@ mod tests {
     }
 
     #[test]
+    fn ami_config_cidr_allows_matching_ipv4_network() {
+        let cfg = AmiConfig {
+            allows: Some(vec!["10.20.0.0/16".into()]),
+        };
+        assert!(cfg.is_allowed("10.20.30.40"));
+        assert!(!cfg.is_allowed("10.21.30.40"));
+    }
+
+    #[test]
+    fn ami_config_cidr_allows_matching_ipv6_network() {
+        let cfg = AmiConfig {
+            allows: Some(vec!["2001:db8::/32".into()]),
+        };
+        assert!(cfg.is_allowed("2001:db8::1"));
+        assert!(!cfg.is_allowed("2001:db9::1"));
+    }
+
+    #[test]
     fn ami_config_empty_allows_list_denies_all() {
         let cfg = AmiConfig {
             allows: Some(vec![]),

@@ -56,6 +56,11 @@ secure_cookie = false
 # Static files HTTP path prefix (default: "/static")
 static_path = "/static"
 
+[ami]
+# AMI access allow list. Supports exact IPs, CIDR ranges, and "*".
+# Defaults to localhost only when omitted.
+allows = ["127.0.0.1", "::1", "10.0.0.0/8"]
+
 [proxy]
 modules = ["acl", "auth", "presence", "registrar", "call"]
 addr = "0.0.0.0"
