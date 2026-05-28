@@ -1,6 +1,6 @@
 use crate::media::negotiate::NegotiatedLegProfile;
 use crate::media::transcoder::{RtpTiming, Transcoder, rewrite_dtmf_duration};
-use crate::media::{Track, recorder::Leg};
+use crate::media::{ReceiveTimestampClock, Track, recorder::Leg};
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use parking_lot::Mutex;
@@ -43,7 +43,8 @@ pub struct ForwardingTrack {
     audio_timing: Mutex<Option<RtpTiming>>,
     dtmf_timing: Mutex<Option<RtpTiming>>,
     recorder_tx: Option<mpsc::Sender<(Leg, MediaSample)>>,
-    sipflow_tx: Option<mpsc::Sender<(Leg, MediaSample)>>,
+    sipflow_tx: Option<mpsc::Sender<(Leg, MediaSample, u64)>>,
+    receive_clock: ReceiveTimestampClock,
     recorder_leg: Leg,
     dtmf_mapping: Mutex<Option<DtmfMapping>>,
 }
@@ -60,7 +61,7 @@ impl ForwardingTrack {
         track_id: String,
         inner: Arc<dyn MediaStreamTrack>,
         recorder_tx: Option<mpsc::Sender<(Leg, MediaSample)>>,
-        sipflow_tx: Option<mpsc::Sender<(Leg, MediaSample)>>,
+        sipflow_tx: Option<mpsc::Sender<(Leg, MediaSample, u64)>>,
         recorder_leg: Leg,
         ingress_profile: NegotiatedLegProfile,
         egress_profile: NegotiatedLegProfile,
@@ -78,6 +79,7 @@ impl ForwardingTrack {
             dtmf_timing: Mutex::new(None),
             recorder_tx,
             sipflow_tx,
+            receive_clock: ReceiveTimestampClock::new(),
             recorder_leg,
             dtmf_mapping: Mutex::new(None),
         }
@@ -250,6 +252,7 @@ impl MediaStreamTrack for ForwardingTrack {
             let audio_mapping = self.audio_mapping.lock().clone();
             let dtmf_mapping = self.dtmf_mapping.lock().clone();
             let sample = self.inner.recv().await?;
+            let received_at_micros = self.receive_clock.now_micros();
 
             if let Some(tx) = &self.recorder_tx {
                 let _ = tx.try_send((self.recorder_leg, sample.clone()));
@@ -257,7 +260,7 @@ impl MediaStreamTrack for ForwardingTrack {
 
             // SipFlow RTP recording: non-blocking tee, drops if consumer falls behind.
             if let Some(tx) = &self.sipflow_tx {
-                let _ = tx.try_send((self.recorder_leg, sample.clone()));
+                let _ = tx.try_send((self.recorder_leg, sample.clone(), received_at_micros));
             }
 
             if let MediaSample::Audio(ref frame) = sample {
@@ -471,7 +474,7 @@ mod tests {
     /// blocking the hot path and without interfering with the recorder_tx.
     #[tokio::test]
     async fn sipflow_tx_receives_sample() {
-        let (sf_tx, mut sf_rx) = mpsc::channel::<(Leg, MediaSample)>(256);
+        let (sf_tx, mut sf_rx) = mpsc::channel::<(Leg, MediaSample, u64)>(256);
         let sample = audio_sample(0 /* PCMU */);
         let track = OneShotTrack::new(sample.clone());
 
@@ -494,8 +497,10 @@ mod tests {
         assert!(matches!(result, MediaSample::Audio(_)));
 
         // sipflow channel must also have received the sample.
-        let (leg, _sf_sample) = sf_rx.try_recv().expect("sample must be in sipflow channel");
+        let (leg, _sf_sample, received_at_micros) =
+            sf_rx.try_recv().expect("sample must be in sipflow channel");
         assert_eq!(leg, Leg::A);
+        assert!(received_at_micros > 0);
     }
 
     /// Both recorder_tx AND sipflow_tx can be active simultaneously; each
@@ -503,7 +508,7 @@ mod tests {
     #[tokio::test]
     async fn both_recorder_and_sipflow_receive_sample() {
         let (rec_tx, mut rec_rx) = mpsc::channel::<(Leg, MediaSample)>(256);
-        let (sf_tx, mut sf_rx) = mpsc::channel::<(Leg, MediaSample)>(256);
+        let (sf_tx, mut sf_rx) = mpsc::channel::<(Leg, MediaSample, u64)>(256);
         let sample = audio_sample(0 /* PCMU */);
         let track = OneShotTrack::new(sample.clone());
 
@@ -527,16 +532,18 @@ mod tests {
         let (rec_leg, _) = rec_rx
             .try_recv()
             .expect("recorder channel must have sample");
-        let (sf_leg, _) = sf_rx.try_recv().expect("sipflow channel must have sample");
+        let (sf_leg, _, received_at_micros) =
+            sf_rx.try_recv().expect("sipflow channel must have sample");
         assert_eq!(rec_leg, Leg::B);
         assert_eq!(sf_leg, Leg::B);
+        assert!(received_at_micros > 0);
     }
 
     #[tokio::test]
     async fn sipflow_full_channel_does_not_block() {
-        let (sf_tx, _sf_rx) = mpsc::channel::<(Leg, MediaSample)>(1);
+        let (sf_tx, _sf_rx) = mpsc::channel::<(Leg, MediaSample, u64)>(1);
 
-        let _ = sf_tx.try_send((Leg::A, audio_sample(0)));
+        let _ = sf_tx.try_send((Leg::A, audio_sample(0), 1));
 
         let track = OneShotTrack::new(audio_sample(0));
         let ft = ForwardingTrack::new(

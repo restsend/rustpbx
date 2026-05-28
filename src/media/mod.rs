@@ -50,6 +50,37 @@ pub fn get_timestamp() -> u64 {
         .as_millis() as u64
 }
 
+#[derive(Debug, Clone)]
+pub struct ReceiveTimestampClock {
+    base_instant: std::time::Instant,
+    base_epoch_micros: u64,
+}
+
+impl ReceiveTimestampClock {
+    pub fn new() -> Self {
+        let base_epoch_micros = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|duration| duration.as_micros() as u64)
+            .unwrap_or_default();
+
+        Self {
+            base_instant: std::time::Instant::now(),
+            base_epoch_micros,
+        }
+    }
+
+    pub fn now_micros(&self) -> u64 {
+        self.base_epoch_micros
+            .saturating_add(self.base_instant.elapsed().as_micros() as u64)
+    }
+}
+
+impl Default for ReceiveTimestampClock {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct AudioFrameTiming {
     pcm_sample_rate: u32,

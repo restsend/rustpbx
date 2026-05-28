@@ -224,20 +224,24 @@ mod tests {
         let mut packets = Vec::new(); // should use Vec<(i32, u64, Vec<u8>)>
         let payload = vec![0x7F; 160]; // Silence
 
-        // 12 bytes dummy header
+        // 12 bytes RTP header
         let mut header = vec![0u8; 12];
+        header[0] = 0x80; // RTP v2
         header[1] = 0; // PCMU
 
         let mut p1 = header.clone();
+        p1[4..8].copy_from_slice(&1000u32.to_be_bytes());
         p1.extend_from_slice(&payload);
         packets.push((0, 1000u64, p1));
 
         let mut p2 = header.clone();
+        p2[4..8].copy_from_slice(&1000u32.to_be_bytes());
         p2.extend_from_slice(&payload);
         packets.push((1, 1000u64, p2));
 
         // Next 20ms
         let mut p3 = header.clone();
+        p3[4..8].copy_from_slice(&1160u32.to_be_bytes());
         p3.extend_from_slice(&payload);
         packets.push((0, 1160u64, p3));
 

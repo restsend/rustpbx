@@ -77,6 +77,7 @@ use tracing::{debug, error, info, warn};
 type SipFlowRtpCaptureTx = mpsc::Sender<(
     crate::media::recorder::Leg,
     rustrtc::media::frame::MediaSample,
+    u64,
 )>;
 
 mod conference;
@@ -4581,19 +4582,20 @@ impl SipSession {
         let (tx, mut rx) = mpsc::channel::<(
             crate::media::recorder::Leg,
             rustrtc::media::frame::MediaSample,
+            u64,
         )>(crate::media::forwarding_track::ForwardingTrack::DEFAULT_SIPFLOW_CHANNEL_CAPACITY);
 
         let call_id = self.context.session_id.clone();
         crate::utils::spawn(async move {
             use crate::sipflow::{SipFlowItem, SipFlowMsgType};
 
-            while let Some((leg, sample)) = rx.recv().await {
+            while let Some((leg, sample, received_at_micros)) = rx.recv().await {
                 if let rustrtc::media::frame::MediaSample::Audio(ref frame) = sample
                     && let Some(ref rtp_packet) = frame.raw_packet
                     && let Ok(rtp_bytes) = rtp_packet.marshal()
                 {
                     let item = SipFlowItem {
-                        timestamp: frame.rtp_timestamp as u64,
+                        timestamp: received_at_micros,
                         seq: frame.sequence_number.unwrap_or(0) as u64,
                         msg_type: SipFlowMsgType::Rtp,
                         src_addr: format!("{leg:?}"),
@@ -4947,6 +4949,7 @@ impl SipSession {
             tokio::sync::mpsc::Sender<(
                 crate::media::recorder::Leg,
                 rustrtc::media::frame::MediaSample,
+                u64,
             )>,
         >,
         session_id: &str,
