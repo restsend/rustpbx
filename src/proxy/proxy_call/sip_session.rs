@@ -981,11 +981,24 @@ impl SipSession {
 
         // Build the re-offer to send to the target side
         let previously_had_video = self.legs.any_has_video();
+        let target_offer_codecs = if has_audio {
+            let allow_codecs = self.resolve_effective_codecs();
+            let codecs =
+                MediaNegotiator::build_callee_codec_offer_with_allow(offer_sdp, &allow_codecs);
+            if target_is_webrtc {
+                MediaNegotiator::filter_webrtc_offer_codecs(offer_sdp, codecs)
+            } else {
+                codecs
+            }
+        } else {
+            Vec::new()
+        };
         let target_offer_sdp = Self::build_bridge_outbound_offer(
             &source_desc,
             &bridged_video_caps,
             &target_pc,
             offer_sdp,
+            &target_offer_codecs,
             offer_has_video,
             target_is_webrtc,
             previously_had_video,
@@ -1015,7 +1028,7 @@ impl SipSession {
             .map_err(|e| anyhow!("Failed to set bridged target answer SDP: {}", e))?;
 
         // Build the answer to return to the source side
-        let (source_answer_sdp, _source_video_params) = Self::build_bridge_source_answer(
+        let (mut source_answer_sdp, _source_video_params) = Self::build_bridge_source_answer(
             &source_pc,
             offer_sdp,
             &target_answer_sdp,
@@ -1025,6 +1038,14 @@ impl SipSession {
             target_video_active,
         )
         .await?;
+        if has_audio {
+            source_answer_sdp = self.rewrite_answer_to_selected_codecs(
+                &source_answer_sdp,
+                offer_sdp,
+                Some(&target_answer_sdp),
+                "bridged re-INVITE source answer",
+            );
+        }
 
         // Sync bridge video payload type mapping
         if let Some(bridge) = &self.media.media_bridge {
@@ -1111,13 +1132,15 @@ impl SipSession {
     /// Build the re-offer SDP to send to the target side of the bridge.
     ///
     /// Sets transceiver directions to mirror the source offer, creates a local offer on
-    /// the target PC, applies video codec constraints from the source, restricts codecs
-    /// to the reference offer, and returns the final SDP string after ICE gathering.
+    /// the target PC, applies video codec constraints from the source, applies the
+    /// shared audio codec policy when the source offer has audio, and returns
+    /// the final SDP string after ICE gathering.
     async fn build_bridge_outbound_offer(
         source_desc: &rustrtc::SessionDescription,
         source_video_caps: &[rustrtc::VideoCapability],
         target_pc: &rustrtc::PeerConnection,
         offer_sdp: &str,
+        target_offer_codecs: &[CodecInfo],
         offer_has_video: bool,
         target_is_webrtc: bool,
         previously_had_video: bool,
@@ -1175,9 +1198,14 @@ impl SipSession {
             &target_offer_sdp,
             rustrtc::SdpType::Offer,
             offer_sdp,
-            false,
         ) {
             target_offer_sdp = filtered;
+        }
+        if !target_offer_codecs.is_empty()
+            && let Some(rewritten) =
+                MediaNegotiator::rewrite_sdp_codec_list(&target_offer_sdp, target_offer_codecs)
+        {
+            target_offer_sdp = rewritten;
         }
         let target_offer_desc =
             rustrtc::SessionDescription::parse(rustrtc::SdpType::Offer, &target_offer_sdp)
@@ -1243,7 +1271,6 @@ impl SipSession {
             &source_answer_sdp,
             rustrtc::SdpType::Answer,
             target_answer_sdp,
-            false,
         ) {
             source_answer_sdp = filtered;
         }
@@ -2751,7 +2778,13 @@ impl SipSession {
 
         // Play progress audio through the bridge
         if let Some(ref bridge) = self.media.media_bridge {
-            let codec_info = self.caller_output_codec_info();
+            let Some(codec_info) = self.caller_answer_codec_info() else {
+                warn!(
+                    session_id = %self.context.session_id,
+                    "Cannot play progress audio: caller answer has no audio codec"
+                );
+                return Ok(());
+            };
             let track = crate::media::FileTrack::new("progress-media".to_string())
                 .with_path(resolved_path)
                 .with_loop(true)
@@ -2965,21 +2998,19 @@ impl SipSession {
         }
 
         let allow_codecs = self.resolve_effective_codecs();
-        let codec_lists = MediaNegotiator::build_bridge_codec_lists(
-            caller_offer,
-            caller_is_webrtc,
-            !caller_is_webrtc,
-            &allow_codecs,
-        );
+        let caller_offer_codecs =
+            MediaNegotiator::build_codec_list_from_offer(caller_offer, &allow_codecs);
+        let callee_offer_codecs =
+            MediaNegotiator::build_callee_codec_offer_with_allow(caller_offer, &allow_codecs);
         let caller_leg_codecs = if caller_is_webrtc {
-            &codec_lists.caller_side
+            &caller_offer_codecs
         } else {
-            &codec_lists.callee_side
+            &callee_offer_codecs
         };
         let callee_leg_codecs = if caller_is_webrtc {
-            &codec_lists.callee_side
+            &callee_offer_codecs
         } else {
-            &codec_lists.caller_side
+            &caller_offer_codecs
         };
 
         let caller_caps: Vec<_> = caller_leg_codecs
@@ -3034,7 +3065,16 @@ impl SipSession {
         if let Err(error) = bridge
             .replace_output_with_silence(
                 self.leg_bridge_endpoint(&LegId::from("caller")),
-                self.caller_output_codec_info(),
+                match self.caller_answer_codec_info() {
+                    Some(codec_info) => codec_info,
+                    None => {
+                        warn!(
+                            session_id = %self.context.session_id,
+                            "Cannot install caller bridge silence source: caller answer has no audio codec"
+                        );
+                        return;
+                    }
+                },
             )
             .await
         {
@@ -3046,16 +3086,54 @@ impl SipSession {
         }
     }
 
-    fn caller_output_codec_info(&self) -> CodecInfo {
+    fn caller_answer_codec_info(&self) -> Option<CodecInfo> {
         self.media
-            .caller_offer
+            .answer
             .as_ref()
-            .map(|offer| MediaNegotiator::extract_codec_params(offer).audio)
+            .map(|answer_sdp| MediaNegotiator::extract_codec_params(answer_sdp).audio)
             .and_then(|codecs| codecs.first().cloned())
-            .unwrap_or_else(|| {
-                let codec = CodecType::PCMU;
-                MediaNegotiator::codec_info_for_type(codec)
+    }
+
+    /// Final audio codec normalization for answers generated by PeerConnection.
+    /// This keeps answer audio as an offer subset, ordered by the peer answer
+    /// when available, while preserving the caller-offered payload types.
+    fn rewrite_answer_to_selected_codecs(
+        &self,
+        answer_sdp: &str,
+        offer_sdp: &str,
+        preferred_peer_sdp: Option<&str>,
+        context: &str,
+    ) -> String {
+        let allow_codecs = self.resolve_effective_codecs();
+        let preferred_codecs: Vec<CodecType> = preferred_peer_sdp
+            .map(|sdp| {
+                MediaNegotiator::extract_codec_params(sdp)
+                    .audio
+                    .into_iter()
+                    .map(|codec| codec.codec)
+                    .collect()
             })
+            .filter(|codecs: &Vec<CodecType>| !codecs.is_empty())
+            .unwrap_or(allow_codecs);
+        let selected_codecs =
+            MediaNegotiator::build_codec_list_from_offer(offer_sdp, &preferred_codecs);
+        if selected_codecs.is_empty() {
+            warn!(
+                session_id = %self.context.session_id,
+                context,
+                "No compatible audio codec selected for SDP answer"
+            );
+            return answer_sdp.to_string();
+        }
+
+        MediaNegotiator::rewrite_sdp_codec_list(answer_sdp, &selected_codecs).unwrap_or_else(|| {
+            warn!(
+                session_id = %self.context.session_id,
+                context,
+                "Failed to rewrite SDP answer to selected audio codec"
+            );
+            answer_sdp.to_string()
+        })
     }
 
     async fn prepare_bridge_caller_answer(&self) -> Result<String> {
@@ -3077,7 +3155,13 @@ impl SipSession {
         };
 
         if let Some(local_description) = pc.local_description() {
-            return Ok(local_description.to_sdp_string());
+            let answer_sdp = local_description.to_sdp_string();
+            return Ok(self.rewrite_answer_to_selected_codecs(
+                &answer_sdp,
+                caller_offer,
+                None,
+                "bridge caller answer",
+            ));
         }
 
         if pc.remote_description().is_none() {
@@ -3099,9 +3183,17 @@ impl SipSession {
             pc.wait_for_gathering_complete().await;
         }
 
-        pc.local_description()
+        let answer_sdp = pc
+            .local_description()
             .map(|desc| desc.to_sdp_string())
-            .ok_or_else(|| anyhow!("Bridge caller side has no local answer"))
+            .ok_or_else(|| anyhow!("Bridge caller side has no local answer"))?;
+
+        Ok(self.rewrite_answer_to_selected_codecs(
+            &answer_sdp,
+            caller_offer,
+            None,
+            "bridge caller answer",
+        ))
     }
 
     /// Resolve queue targets to the concrete locations used for dialing.
@@ -3656,26 +3748,31 @@ impl SipSession {
         let callee_sdp = if self.bypasses_local_media() && caller_is_webrtc == callee_is_webrtc {
             self.media.callee_offer_uses_media_bridge = false;
             let allow_codecs = self.resolve_effective_codecs();
-            let default_codecs = if callee_is_webrtc {
-                crate::media::negotiate::MediaNegotiator::default_webrtc_codecs()
-            } else {
-                crate::media::negotiate::MediaNegotiator::default_rtp_codecs()
-            };
-            let is_restricted = allow_codecs.len() < default_codecs.len()
-                || allow_codecs.iter().any(|c| !default_codecs.contains(c))
-                || default_codecs.iter().any(|c| !allow_codecs.contains(c));
-            if is_restricted {
+            if !allow_codecs.is_empty() {
                 if let Some(ref caller_offer) = self.media.caller_offer {
-                    let new_codecs = crate::media::negotiate::MediaNegotiator::build_callee_codec_offer_with_allow(
-                        caller_offer,
-                        callee_is_webrtc,
-                        &allow_codecs,
-                    );
-                    crate::media::negotiate::MediaNegotiator::rewrite_sdp_codec_list(
-                        caller_offer,
-                        &new_codecs,
-                    )
-                    .or_else(|| self.media.caller_offer.clone())
+                    let selected_codecs =
+                        MediaNegotiator::build_codec_list_from_offer(caller_offer, &allow_codecs);
+                    if selected_codecs.is_empty() {
+                        warn!(
+                            session_id = %self.context.session_id,
+                            context = "bypass callee offer",
+                            "No compatible audio codec selected for pass-through SDP offer"
+                        );
+                        Some(caller_offer.clone())
+                    } else {
+                        Some(MediaNegotiator::rewrite_sdp_codec_list(
+                            caller_offer,
+                            &selected_codecs,
+                        )
+                        .unwrap_or_else(|| {
+                            warn!(
+                                session_id = %self.context.session_id,
+                                context = "bypass callee offer",
+                                "Failed to rewrite pass-through SDP offer to selected audio codec list"
+                            );
+                            caller_offer.clone()
+                        }))
+                    }
                 } else {
                     self.media.caller_offer.clone()
                 }
@@ -3813,11 +3910,26 @@ impl SipSession {
 
             if let Some(ref caller_offer) = self.media.caller_offer {
                 let allow_codecs = self.resolve_effective_codecs();
-                let codec_info = MediaNegotiator::build_caller_answer_codec_list_with_allow(
+                let preferred_codecs: Vec<CodecType> =
+                    MediaNegotiator::extract_codec_params(&callee_sdp_value)
+                        .audio
+                        .into_iter()
+                        .map(|codec| codec.codec)
+                        .collect();
+                let codec_info = MediaNegotiator::build_codec_list_from_offer(
                     caller_offer,
-                    caller_is_webrtc,
-                    &allow_codecs,
+                    if preferred_codecs.is_empty() {
+                        &allow_codecs
+                    } else {
+                        &preferred_codecs
+                    },
                 );
+                if codec_info.is_empty() {
+                    warn!(
+                        session_id = %self.context.session_id,
+                        "No compatible codec found for anchored caller answer"
+                    );
+                }
 
                 let mut track_builder = RtpTrackBuilder::new(Self::CALLER_TRACK_ID.to_string())
                     .with_cancel_token(self.caller_peer().cancel_token())
@@ -3864,6 +3976,12 @@ impl SipSession {
                 let track = track_builder.build();
                 match track.handshake(caller_offer.clone()).await {
                     Ok(answer_sdp) => {
+                        let answer_sdp = self.rewrite_answer_to_selected_codecs(
+                            &answer_sdp,
+                            caller_offer,
+                            Some(&callee_sdp_value),
+                            "anchored caller answer",
+                        );
                         debug!(
                             session_id = %self.context.session_id,
                             "Generated PBX answer SDP for caller (anchored media)"
@@ -3875,9 +3993,9 @@ impl SipSession {
                         warn!(
                             session_id = %self.context.session_id,
                             error = %e,
-                            "Failed to handshake caller track, falling back to callee SDP"
+                            "Failed to handshake caller track"
                         );
-                        callee_sdp.clone()
+                        None
                     }
                 }
             } else {
@@ -4012,15 +4130,20 @@ impl SipSession {
                                                 .local_description()
                                                 .map(|d| d.to_sdp_string())
                                             {
-                                                let filter_audio_to_reference = false;
                                                 let answer_sdp = MediaNegotiator::restrict_sdp_to_reference_codecs(
                                                     SdpType::Answer,
                                                     &answer_sdp,
                                                     SdpType::Answer,
                                                     sdp,
-                                                    filter_audio_to_reference,
                                                 )
                                                 .unwrap_or(answer_sdp);
+                                                let answer_sdp = self
+                                                    .rewrite_answer_to_selected_codecs(
+                                                        &answer_sdp,
+                                                        caller_offer,
+                                                        Some(sdp),
+                                                        "bridge WebRTC caller answer",
+                                                    );
                                                 let webrtc_video_caps = SessionDescription::parse(
                                                     SdpType::Answer,
                                                     &answer_sdp,
@@ -4115,15 +4238,19 @@ impl SipSession {
                                             .local_description()
                                             .map(|d| d.to_sdp_string())
                                             .map(|answer_sdp| {
-                                                let filter_audio_to_reference = false;
-                                                MediaNegotiator::restrict_sdp_to_reference_codecs(
+                                                let answer_sdp = MediaNegotiator::restrict_sdp_to_reference_codecs(
                                                     SdpType::Answer,
                                                     &answer_sdp,
                                                     SdpType::Answer,
                                                     sdp,
-                                                    filter_audio_to_reference,
                                                 )
-                                                .unwrap_or(answer_sdp)
+                                                .unwrap_or(answer_sdp);
+                                                self.rewrite_answer_to_selected_codecs(
+                                                    &answer_sdp,
+                                                    caller_offer,
+                                                    Some(sdp),
+                                                    "bridge RTP caller answer",
+                                                )
                                             });
                                         if let Some(ref rtp_sdp) = rtp_sdp {
                                             let rtp_video_caps =
@@ -4973,7 +5100,7 @@ impl SipSession {
     /// 2. Codecs from the trunk whose destination matches the callee URI (by host:port)
     /// 3. Proxy-level `audio_codecs` config as global fallback
     ///
-    /// An empty list means "no restriction" (all transport-supported codecs pass through).
+    /// An empty list means "no explicit audio codec policy".
     fn resolve_effective_codecs(&self) -> Vec<CodecType> {
         if !self.context.dialplan.allow_codecs.is_empty() {
             return self.context.dialplan.allow_codecs.clone();
@@ -5070,6 +5197,7 @@ impl SipSession {
                 .with_enable_latching(self.server.proxy_config.enable_latching)
                 .with_probation_max_packets(self.server.proxy_config.latching_probation_max_packets)
                 .with_cname(self.server.rtc_cname.clone());
+            let mut selected_callee_offer_codecs = Vec::new();
             if let (Some(start), Some(end)) = (
                 self.server.rtp_config.start_port,
                 self.server.rtp_config.end_port,
@@ -5101,22 +5229,27 @@ impl SipSession {
             // Configure codecs from effective allow list (dialplan → trunk → proxy fallback)
             if let Some(ref caller_sdp) = self.media.caller_offer {
                 let allow_codecs = self.resolve_effective_codecs();
-                let codec_lists = MediaNegotiator::build_bridge_codec_lists(
-                    caller_sdp,
-                    caller_is_webrtc,
-                    callee_is_webrtc,
-                    &allow_codecs,
-                );
+                let caller_offer_codecs =
+                    MediaNegotiator::build_codec_list_from_offer(caller_sdp, &allow_codecs);
+                let mut callee_offer_codecs =
+                    MediaNegotiator::build_callee_codec_offer_with_allow(caller_sdp, &allow_codecs);
+                if callee_is_webrtc {
+                    callee_offer_codecs = MediaNegotiator::filter_webrtc_offer_codecs(
+                        caller_sdp,
+                        callee_offer_codecs,
+                    );
+                }
+                selected_callee_offer_codecs = callee_offer_codecs.clone();
 
                 let caller_leg_codecs = if caller_is_webrtc {
-                    &codec_lists.caller_side
+                    &caller_offer_codecs
                 } else {
-                    &codec_lists.callee_side
+                    &callee_offer_codecs
                 };
                 let callee_leg_codecs = if caller_is_webrtc {
-                    &codec_lists.callee_side
+                    &callee_offer_codecs
                 } else {
-                    &codec_lists.caller_side
+                    &caller_offer_codecs
                 };
 
                 let caller_caps: Vec<_> = caller_leg_codecs
@@ -5148,9 +5281,8 @@ impl SipSession {
 
                 debug!(
                     session_id = %self.context.session_id,
-                    caller_side_codecs = ?codec_lists.caller_side.iter().filter(|c| !c.is_dtmf()).map(|c| format!("{:?}", c.codec)).collect::<Vec<_>>(),
-                    callee_side_codecs = ?codec_lists.callee_side.iter().filter(|c| !c.is_dtmf()).map(|c| format!("{:?}", c.codec)).collect::<Vec<_>>(),
-                    common_codecs = ?codec_lists.common.iter().filter(|c| !c.is_dtmf()).map(|c| format!("{:?}", c.codec)).collect::<Vec<_>>(),
+                    caller_offer_codecs = ?caller_offer_codecs.iter().filter(|c| !c.is_dtmf()).map(|c| format!("{:?}", c.codec)).collect::<Vec<_>>(),
+                    callee_offer_codecs = ?callee_offer_codecs.iter().filter(|c| !c.is_dtmf()).map(|c| format!("{:?}", c.codec)).collect::<Vec<_>>(),
                     "Bridge codecs configured for transport sides"
                 );
 
@@ -5200,7 +5332,6 @@ impl SipSession {
 
                 debug!(
                     session_id = %self.id,
-                    common_codecs = ?codec_lists.common.iter().filter(|c| !c.is_dtmf()).map(|c| format!("{:?}", c.codec)).collect::<Vec<_>>(),
                     caller_codecs = ?caller_leg_codecs
                         .iter()
                         .map(|c| format!("{:?}", c.codec))
@@ -5225,15 +5356,35 @@ impl SipSession {
 
             if callee_is_webrtc {
                 let offer = bridge.caller_pc().create_offer().await?;
-                let offer_sdp = offer.to_sdp_string();
+                let mut offer_sdp = offer.to_sdp_string();
+                if !selected_callee_offer_codecs.is_empty()
+                    && let Some(rewritten) = MediaNegotiator::rewrite_sdp_codec_list(
+                        &offer_sdp,
+                        &selected_callee_offer_codecs,
+                    )
+                {
+                    offer_sdp = rewritten;
+                }
                 debug!(session_id = %self.id, sdp = %offer_sdp, "Bridge WebRTC offer SDP");
+                let offer =
+                    rustrtc::SessionDescription::parse(rustrtc::SdpType::Offer, &offer_sdp)?;
                 bridge.caller_pc().set_local_description(offer)?;
                 // Wait for ICE gathering so SDP contains real candidates
                 bridge.caller_pc().wait_for_gathering_complete().await;
             } else {
                 let offer = bridge.callee_pc().create_offer().await?;
-                let offer_sdp = offer.to_sdp_string();
+                let mut offer_sdp = offer.to_sdp_string();
+                if !selected_callee_offer_codecs.is_empty()
+                    && let Some(rewritten) = MediaNegotiator::rewrite_sdp_codec_list(
+                        &offer_sdp,
+                        &selected_callee_offer_codecs,
+                    )
+                {
+                    offer_sdp = rewritten;
+                }
                 debug!(session_id = %self.id, sdp = %offer_sdp, "Bridge RTP offer SDP");
+                let offer =
+                    rustrtc::SessionDescription::parse(rustrtc::SdpType::Offer, &offer_sdp)?;
                 bridge.callee_pc().set_local_description(offer)?;
             }
 
@@ -5287,11 +5438,13 @@ impl SipSession {
 
             if let Some(ref caller_offer) = self.media.caller_offer {
                 let allow_codecs = self.resolve_effective_codecs();
-                let codecs = MediaNegotiator::build_callee_codec_offer_with_allow(
+                let mut codecs = MediaNegotiator::build_callee_codec_offer_with_allow(
                     caller_offer,
-                    callee_is_webrtc,
                     &allow_codecs,
                 );
+                if callee_is_webrtc {
+                    codecs = MediaNegotiator::filter_webrtc_offer_codecs(caller_offer, codecs);
+                }
                 if !codecs.is_empty() {
                     track_builder = track_builder.with_codec_info(codecs);
                 }
@@ -5331,6 +5484,20 @@ impl SipSession {
                 .with_cancel_token(self.callee_peer().cancel_token())
                 .with_cname(self.server.rtc_cname.clone());
 
+            if let Some(ref caller_offer) = self.media.caller_offer {
+                let allow_codecs = self.resolve_effective_codecs();
+                let mut codecs = MediaNegotiator::build_callee_codec_offer_with_allow(
+                    caller_offer,
+                    &allow_codecs,
+                );
+                if callee_is_webrtc {
+                    codecs = MediaNegotiator::filter_webrtc_offer_codecs(caller_offer, codecs);
+                }
+                if !codecs.is_empty() {
+                    track_builder = track_builder.with_codec_info(codecs);
+                }
+            }
+
             if callee_is_webrtc {
                 track_builder = track_builder.with_mode(rustrtc::TransportMode::WebRtc);
             }
@@ -5361,11 +5528,13 @@ impl SipSession {
         let caller_is_webrtc = self.is_caller_webrtc();
 
         let allow_codecs = self.resolve_effective_codecs();
-        let codec_info = MediaNegotiator::build_caller_answer_codec_list_with_allow(
-            &caller_offer,
-            caller_is_webrtc,
-            &allow_codecs,
-        );
+        let codec_info = MediaNegotiator::build_codec_list_from_offer(&caller_offer, &allow_codecs);
+        if codec_info.is_empty() {
+            warn!(
+                session_id = %self.context.session_id,
+                "No compatible codec found for local caller answer"
+            );
+        }
 
         let mut track_builder = RtpTrackBuilder::new(Self::CALLER_TRACK_ID.to_string())
             .with_cancel_token(self.caller_peer().cancel_token())
@@ -5408,8 +5577,14 @@ impl SipSession {
         }
 
         let track = track_builder.build();
-        match track.handshake(caller_offer).await {
+        match track.handshake(caller_offer.clone()).await {
             Ok(answer_sdp) => {
+                let answer_sdp = self.rewrite_answer_to_selected_codecs(
+                    &answer_sdp,
+                    &caller_offer,
+                    None,
+                    "local caller answer",
+                );
                 debug!(
                     session_id = %self.context.session_id,
                     "Generated PBX answer SDP for caller"
@@ -5753,7 +5928,25 @@ impl SipSession {
             .get_local_reinvite_pc(side)
             .await
             .ok_or_else(|| anyhow!("No local PeerConnection available for {:?}", side))?;
-        let answer_sdp = Self::build_local_answer_from_pc(&pc, offer_sdp).await?;
+        let mut answer_sdp = Self::build_local_answer_from_pc(&pc, offer_sdp).await?;
+        if has_audio {
+            let (preferred_peer_sdp, context) = match side {
+                DialogSide::Caller => (
+                    self.media.callee_answer_sdp.as_deref(),
+                    "caller re-INVITE answer",
+                ),
+                DialogSide::Callee => (
+                    self.media.answer.as_deref(),
+                    "callee re-INVITE answer",
+                ),
+            };
+            answer_sdp = self.rewrite_answer_to_selected_codecs(
+                &answer_sdp,
+                offer_sdp,
+                preferred_peer_sdp,
+                context,
+            );
+        }
 
         match side {
             DialogSide::Caller => {
