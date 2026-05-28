@@ -12,7 +12,7 @@ use std::{
 };
 use tokio::sync::Mutex as AsyncMutex;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, warn};
+use tracing::debug;
 pub use transcoder::Transcoder;
 
 use crate::media::recorder::RecorderOption;
@@ -48,23 +48,6 @@ pub fn get_timestamp() -> u64 {
     now.duration_since(std::time::UNIX_EPOCH)
         .expect("Time went backwards")
         .as_millis() as u64
-}
-
-fn codec_info_rtpmap(info: &negotiate::CodecInfo) -> String {
-    let codec_name = match info.codec {
-        CodecType::PCMU => "PCMU",
-        CodecType::PCMA => "PCMA",
-        CodecType::G722 => "G722",
-        CodecType::G729 => "G729",
-        #[cfg(feature = "opus")]
-        CodecType::Opus => "opus",
-        CodecType::TelephoneEvent => "telephone-event",
-    };
-
-    match info.channels {
-        0 | 1 => format!("{}/{}", codec_name, info.clock_rate),
-        channels => format!("{}/{}/{}", codec_name, info.clock_rate, channels),
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -343,39 +326,7 @@ impl RtcTrack {
         self
     }
 
-    async fn set_local(&self, pc: &PeerConnection, mut desc: SessionDescription) -> Result<String> {
-        if !self.rtp_map.is_empty()
-            && let Some(section) = desc
-                .media_sections
-                .iter_mut()
-                .find(|m| m.kind == MediaKind::Audio)
-        {
-            section.formats.clear();
-            section
-                .attributes
-                .retain(|a| a.key != "rtpmap" && a.key != "fmtp");
-
-            // Build RTP map from codec preference list
-            let mut seen_pts = HashSet::new();
-            for info in self.rtp_map.iter() {
-                let pt = info.payload_type;
-                if !seen_pts.insert(pt) {
-                    continue;
-                }
-                section.formats.push(pt.to_string());
-
-                section.attributes.push(Attribute {
-                    key: "rtpmap".to_string(),
-                    value: Some(format!("{} {}", pt, codec_info_rtpmap(info))),
-                });
-                if let Some(fmtp) = info.codec.fmtp() {
-                    section.attributes.push(Attribute {
-                        key: "fmtp".to_string(),
-                        value: Some(format!("{} {}", pt, fmtp)),
-                    });
-                }
-            }
-        }
+    async fn set_local(&self, pc: &PeerConnection, desc: SessionDescription) -> Result<String> {
         pc.set_local_description(desc)?;
         let desc = pc
             .local_description()
@@ -386,16 +337,9 @@ impl RtcTrack {
     async fn set_remote(&self, pc: &PeerConnection, sdp: &str, ty: SdpType) -> Result<()> {
         let desc = SessionDescription::parse(ty, sdp)
             .map_err(|e| anyhow!("failed to parse sdp: {:?}", e))?;
-        match pc.set_remote_description(desc).await {
-            Ok(_) => (),
-            Err(e) => {
-                warn!(
-                    track_id = self.track_id,
-                    error = %e,
-                    "failed to set remote description"
-                );
-            }
-        }
+        pc.set_remote_description(desc)
+            .await
+            .map_err(|e| anyhow!("failed to set remote description: {}", e))?;
         Ok(())
     }
 }
@@ -608,17 +552,24 @@ impl RtpTrackBuilder {
                 u.starts_with("turn:") || u.starts_with("turns:")
             })
         });
-        let audio_capabilities = match self.mode {
-            TransportMode::WebRtc => negotiate::MediaNegotiator::default_webrtc_codecs(),
-            TransportMode::Rtp | TransportMode::Srtp => {
-                negotiate::MediaNegotiator::default_rtp_codecs()
+        let audio_capabilities: Vec<_> = if self.rtp_map.is_empty() {
+            match self.mode {
+                TransportMode::WebRtc => negotiate::MediaNegotiator::default_webrtc_codecs(),
+                TransportMode::Rtp | TransportMode::Srtp => {
+                    negotiate::MediaNegotiator::default_rtp_codecs()
+                }
             }
-        }
-        .into_iter()
-        .filter_map(|codec| {
-            negotiate::MediaNegotiator::codec_info_for_type(codec).to_audio_capability()
-        })
-        .collect();
+            .into_iter()
+            .filter_map(|codec| {
+                negotiate::MediaNegotiator::codec_info_for_type(codec).to_audio_capability()
+            })
+            .collect()
+        } else {
+            self.rtp_map
+                .iter()
+                .filter_map(|codec| codec.to_audio_capability())
+                .collect()
+        };
 
         let bind_ip = if matches!(self.mode, TransportMode::Rtp | TransportMode::Srtp) {
             self.bind_ip

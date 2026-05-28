@@ -3212,34 +3212,32 @@ mod tests {
         let caller_offer = caller.local_description().await.unwrap();
         assert!(caller_offer.contains("opus"), "Caller must offer Opus");
 
-        // Build bridge codec lists from caller SDP + allow_codecs=[PCMU]
-        let codec_lists = MediaNegotiator::build_bridge_codec_lists(
+        // Build bridge side codec lists from caller SDP + allow_codecs=[PCMU]
+        let caller_side_codecs = MediaNegotiator::build_codec_list_from_offer(
             &caller_offer,
-            true,  // caller is WebRTC
-            false, // callee is RTP
+            &[CodecType::PCMU, CodecType::TelephoneEvent],
+        );
+        let callee_side_codecs = MediaNegotiator::build_callee_codec_offer_with_allow(
+            &caller_offer,
             &[CodecType::PCMU, CodecType::TelephoneEvent],
         );
 
         // Build bridge with computed capabilities
-        let webrtc_caps: Vec<_> = codec_lists
-            .caller_side
+        let webrtc_caps: Vec<_> = caller_side_codecs
             .iter()
             .filter_map(|c| c.to_audio_capability())
             .collect();
-        let rtp_caps: Vec<_> = codec_lists
-            .callee_side
+        let rtp_caps: Vec<_> = callee_side_codecs
             .iter()
             .filter_map(|c| c.to_audio_capability())
             .collect();
 
-        let caller_sender = codec_lists
-            .caller_side
+        let caller_sender = caller_side_codecs
             .iter()
             .find(|c| !c.is_dtmf())
             .map(|c| c.to_params())
             .unwrap();
-        let callee_sender = codec_lists
-            .callee_side
+        let callee_sender = callee_side_codecs
             .iter()
             .find(|c| !c.is_dtmf())
             .map(|c| c.to_params())
@@ -3321,10 +3319,10 @@ mod tests {
         bridge.stop().await;
     }
 
-    /// E2E: RTP caller (G729+PCMU) → Bridge → WebRTC callee
-    /// G729 is not in WebRTC supported set, so WebRTC callee side should only have PCMU.
+    /// E2E: RTP caller (G729+PCMU) → Bridge → WebRTC callee.
+    /// Generated WebRTC offers must not advertise G729.
     #[tokio::test]
-    async fn test_bridge_e2e_rtp_to_webrtc_g729_dropped() {
+    async fn test_bridge_e2e_rtp_to_webrtc_filters_g729_offer() {
         use crate::media::negotiate::MediaNegotiator;
 
         // Create RTP caller offering G729 + PCMU
@@ -3335,50 +3333,49 @@ mod tests {
             .build();
         let caller_offer = caller.local_description().await.unwrap();
 
-        // Build bridge codec lists
-        let codec_lists = MediaNegotiator::build_bridge_codec_lists(
+        // Build bridge side codec lists.
+        let caller_side_codecs = MediaNegotiator::build_codec_list_from_offer(
             &caller_offer,
-            false, // caller is RTP
-            true,  // callee is WebRTC
             &[CodecType::G729, CodecType::PCMU, CodecType::TelephoneEvent],
         );
+        let callee_side_codecs = MediaNegotiator::build_callee_codec_offer_with_allow(
+            &caller_offer,
+            &[CodecType::G729, CodecType::PCMU, CodecType::TelephoneEvent],
+        );
+        let callee_side_codecs =
+            MediaNegotiator::filter_webrtc_offer_codecs(&caller_offer, callee_side_codecs);
 
-        // G729 should be on caller side (RTP supports it) but NOT on callee side (WebRTC doesn't)
+        // G729 stays on the RTP side, but is removed from the generated WebRTC offer.
         assert!(
-            codec_lists
-                .caller_side
+            caller_side_codecs
                 .iter()
                 .any(|c| c.codec == CodecType::G729),
             "G729 on RTP caller side"
         );
         assert!(
-            !codec_lists
-                .callee_side
+            !callee_side_codecs
                 .iter()
                 .any(|c| c.codec == CodecType::G729),
-            "G729 dropped on WebRTC callee side"
+            "G729 must be removed from WebRTC offer codecs"
         );
+        assert!(callee_side_codecs.iter().any(|c| c.codec == CodecType::PCMU));
 
-        let webrtc_caps: Vec<_> = codec_lists
-            .callee_side
+        let webrtc_caps: Vec<_> = callee_side_codecs
             .iter()
             .filter_map(|c| c.to_audio_capability())
             .collect();
-        let rtp_caps: Vec<_> = codec_lists
-            .caller_side
+        let rtp_caps: Vec<_> = caller_side_codecs
             .iter()
             .filter_map(|c| c.to_audio_capability())
             .collect();
 
         // Callee side sender: first non-DTMF from caller side
-        let callee_sender = codec_lists
-            .caller_side
+        let callee_sender = caller_side_codecs
             .iter()
             .find(|c| !c.is_dtmf())
             .map(|c| c.to_params())
             .unwrap();
-        let caller_sender = codec_lists
-            .callee_side
+        let caller_sender = callee_side_codecs
             .iter()
             .find(|c| !c.is_dtmf())
             .map(|c| c.to_params())
@@ -3411,8 +3408,9 @@ mod tests {
         );
         assert!(
             !bridge_webrtc_sdp.contains("G729"),
-            "WebRTC side must NOT offer G729"
+            "WebRTC-side SDP must not offer G729"
         );
+        assert!(bridge_webrtc_sdp.contains("PCMU"));
 
         // WebRTC callee answers
         let callee = RtpTrackBuilder::new("webrtc-callee".to_string())
