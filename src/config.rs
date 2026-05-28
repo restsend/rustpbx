@@ -6,11 +6,12 @@ use crate::{
 };
 use anyhow::{Error, Result};
 use clap::Parser;
+use ipnetwork::IpNetwork;
 use rsipstack::dialog::invitation::InviteOption;
 use rsipstack::sip::StatusCode;
 use rustrtc::IceServer;
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, path::PathBuf};
+use std::{collections::HashMap, net::IpAddr, path::PathBuf};
 
 #[derive(Parser, Debug)]
 #[command(version)]
@@ -880,7 +881,19 @@ pub struct AmiConfig {
 impl AmiConfig {
     pub fn is_allowed(&self, addr: &str) -> bool {
         if let Some(allows) = &self.allows {
-            allows.iter().any(|a| a == addr || a == "*")
+            let ip = addr.parse::<IpAddr>().ok();
+
+            allows.iter().any(|allow| {
+                let allow = allow.trim();
+
+                allow == addr
+                    || allow == "*"
+                    || ip.is_some_and(|ip| {
+                        allow
+                            .parse::<IpNetwork>()
+                            .is_ok_and(|network| network.contains(ip))
+                    })
+            })
         } else {
             addr == "127.0.0.1" || addr == "::1" || addr == "localhost"
         }
