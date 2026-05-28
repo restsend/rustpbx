@@ -6,9 +6,17 @@ pub struct Migration;
 #[async_trait::async_trait]
 impl MigrationTrait for Migration {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
-        let table_name = "rustpbx_call_records";
+        let db = manager.get_connection();
+        let db_type = manager.get_database_backend();
 
-        if manager.has_column(table_name, "rewrite_original_from").await? {
+        if db_type == sea_orm::DatabaseBackend::Sqlite {
+            return Ok(());
+        }
+
+        if manager
+            .has_column("rustpbx_call_records", "rewrite_original_from")
+            .await?
+        {
             manager
                 .alter_table(
                     Table::alter()
@@ -20,10 +28,14 @@ impl MigrationTrait for Migration {
                         )
                         .to_owned(),
                 )
-                .await?;
+                .await
+                .ok();
         }
 
-        if manager.has_column(table_name, "rewrite_original_to").await? {
+        if manager
+            .has_column("rustpbx_call_records", "rewrite_original_to")
+            .await?
+        {
             manager
                 .alter_table(
                     Table::alter()
@@ -35,7 +47,8 @@ impl MigrationTrait for Migration {
                         )
                         .to_owned(),
                 )
-                .await?;
+                .await
+                .ok();
         }
         Ok(())
     }

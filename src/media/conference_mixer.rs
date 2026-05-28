@@ -73,6 +73,9 @@ pub struct ConferenceAudioMixer {
     cancel_token: CancellationToken,
     /// Mixing task handle
     mixing_task: Arc<std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>>,
+    /// Per-(source, destination) gain overrides for supervisor modes.
+    /// Key: (src_leg_id, dst_leg_id), Value: gain (0.0 = silent, 1.0 = normal)
+    route_gains: Arc<tokio::sync::Mutex<HashMap<(LegId, LegId), f32>>>,
 }
 
 impl std::fmt::Debug for ConferenceAudioMixer {
@@ -98,6 +101,7 @@ impl ConferenceAudioMixer {
             frame_size,
             cancel_token: CancellationToken::new(),
             mixing_task: Arc::new(std::sync::Mutex::new(None)),
+            route_gains: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         }
     }
 
@@ -189,6 +193,31 @@ impl ConferenceAudioMixer {
         Ok(())
     }
 
+    /// Set per-route gain for supervisor modes.
+    /// A gain of 0.0 means the source participant is silent for the destination.
+    pub async fn set_route_gain(&self, src: &LegId, dst: &LegId, gain: f32) {
+        let mut gains = self.route_gains.lock().await;
+        if (gain - 1.0).abs() < f32::EPSILON {
+            gains.remove(&(src.clone(), dst.clone()));
+        } else {
+            gains.insert((src.clone(), dst.clone()), gain);
+        }
+        info!(
+            conf_id = %self.conf_id,
+            src = %src,
+            dst = %dst,
+            gain = gain,
+            "Route gain set"
+        );
+    }
+
+    /// Clear all route gains (reset to default N-1 mixing).
+    pub async fn clear_route_gains(&self) {
+        let mut gains = self.route_gains.lock().await;
+        gains.clear();
+        info!(conf_id = %self.conf_id, "Route gains cleared");
+    }
+
     /// Update audio routing for all participants
     /// Each participant hears all other participants (N-1 mixing)
     async fn update_routing(&self) -> Result<()> {
@@ -211,15 +240,23 @@ impl ConferenceAudioMixer {
 
     /// Start the conference mixing
     pub fn start(&self) {
-        // Start the conference mixing loop
         let cancel_token = self.cancel_token.clone();
         let participants = self.participants.clone();
         let frame_size = self.frame_size;
         let sample_rate = self.sample_rate;
         let conf_id = self.conf_id.clone();
+        let route_gains = self.route_gains.clone();
 
         let task = crate::utils::spawn(async move {
-            Self::mixing_loop(conf_id, participants, cancel_token, frame_size, sample_rate).await;
+            Self::mixing_loop(
+                conf_id,
+                participants,
+                cancel_token,
+                frame_size,
+                sample_rate,
+                route_gains,
+            )
+            .await;
         });
 
         let mut mixing_task = self.mixing_task.lock().unwrap();
@@ -253,6 +290,7 @@ impl ConferenceAudioMixer {
         cancel_token: CancellationToken,
         frame_size: usize,
         sample_rate: u32,
+        route_gains: Arc<tokio::sync::Mutex<HashMap<(LegId, LegId), f32>>>,
     ) {
         let interval_ms = (frame_size as f64 / sample_rate as f64 * 1000.0) as u64;
         let interval = tokio::time::Duration::from_millis(interval_ms.max(1));
@@ -265,7 +303,6 @@ impl ConferenceAudioMixer {
             "Conference mixing loop started"
         );
 
-        // Audio mixer for combining frames
         let audio_mixer = AudioMixer::new(sample_rate, 1);
 
         loop {
@@ -275,28 +312,22 @@ impl ConferenceAudioMixer {
                     break;
                 }
                 _ = tokio::time::sleep(interval) => {
-                    // Collect audio from all participants
                     let participant_audio = {
                         let mut participants_guard = participants.lock().await;
                         let mut frames = HashMap::new();
 
                         for (leg_id, participant) in participants_guard.iter_mut() {
-                            // Collect all available frames from this participant (non-blocking)
-                            // Use try_recv to drain the buffer without waiting
                             loop {
                                 match participant.input_rx.try_recv() {
                                     Ok(frame) => {
                                         if !participant.muted {
-                                            // Keep only the latest frame (overwrite previous)
                                             frames.insert(leg_id.clone(), frame);
                                         }
                                     }
                                     Err(mpsc::error::TryRecvError::Empty) => {
-                                        // No more frames available
                                         break;
                                     }
                                     Err(mpsc::error::TryRecvError::Disconnected) => {
-                                        // Channel closed, participant left
                                         break;
                                     }
                                 }
@@ -306,28 +337,30 @@ impl ConferenceAudioMixer {
                         frames
                     };
 
-                    // Mix and distribute audio to each participant
+                    let gains_map = route_gains.lock().await;
                     let participants_guard = participants.lock().await;
                     let participant_ids: Vec<LegId> = participants_guard.keys().cloned().collect();
                     drop(participants_guard);
 
-                    // Only process if there's participant audio to mix
                     if !participant_audio.is_empty() {
                         for output_leg in &participant_ids {
-                            // Collect frames from all OTHER participants
                             let mut input_frames = Vec::new();
                             let mut gains = Vec::new();
 
                             for (input_leg, frame) in &participant_audio {
                                 if input_leg != output_leg {
-                                    input_frames.push(frame.samples.clone());
-                                    gains.push(1.0); // Equal gain mixing
+                                    let gain = gains_map
+                                        .get(&(input_leg.clone(), output_leg.clone()))
+                                        .copied()
+                                        .unwrap_or(1.0);
+                                    if gain > 0.0 {
+                                        input_frames.push(frame.samples.clone());
+                                        gains.push(gain);
+                                    }
                                 }
                             }
 
-                            // Only send if there are input frames (don't send silence)
                             if !input_frames.is_empty() {
-                                // Ensure all frames have the same size
                                 let mut normalized_frames = Vec::new();
                                 for mut frame in input_frames {
                                     if frame.len() < frame_size {
@@ -339,11 +372,8 @@ impl ConferenceAudioMixer {
                                 }
                                 let mixed_samples = audio_mixer.mix_frames(normalized_frames, &gains);
 
-                                // Prepare output frame
                                 let output_frame = AudioFrame::new(mixed_samples, sample_rate);
 
-                                // Send mixed audio to the output participant
-                                // Clone the sender to avoid holding the lock across await
                                 let output_tx = {
                                     let participants_guard = participants.lock().await;
                                     participants_guard.get(output_leg).map(|p| p.output_tx.clone())
@@ -351,7 +381,6 @@ impl ConferenceAudioMixer {
 
                                 if let Some(tx) = output_tx
                                     && tx.send(output_frame).await.is_err() {
-                                        // Channel closed
                                     }
                             }
                         }
@@ -720,19 +749,15 @@ mod tests {
             .await
             .unwrap();
 
-        // Send audio with known amplitude
         let amplitude = 1000i16;
         let samples = vec![amplitude; 160];
         tx1.send(AudioFrame::new(samples, 8000)).await.unwrap();
 
         tokio::time::sleep(tokio::time::Duration::from_millis(30)).await;
 
-        // Verify received audio
         let frame = rx2.try_recv().expect("Should receive audio");
         assert_eq!(frame.samples.len(), 160, "Frame size should be 160 samples");
 
-        // The received samples should be approximately the same as sent
-        // (allowing for mixing gains which default to 1.0)
         let avg_amplitude: i16 =
             (frame.samples.iter().map(|&s| s as i32).sum::<i32>() / 160) as i16;
         assert!(
@@ -741,6 +766,112 @@ mod tests {
             avg_amplitude,
             amplitude
         );
+
+        mixer.stop().await;
+    }
+
+    #[tokio::test]
+    async fn test_route_gain_supervisor_listen() {
+        let mixer = ConferenceAudioMixer::new("test-route-listen".to_string(), 8000);
+        mixer.start();
+
+        let customer = LegId::new("customer");
+        let agent = LegId::new("agent");
+        let supervisor = LegId::new("supervisor");
+
+        let (tx_cust, mut rx_cust) = mixer
+            .add_participant(customer.clone(), CodecType::PCMU)
+            .await
+            .unwrap();
+        let (tx_agent, mut rx_agent) = mixer
+            .add_participant(agent.clone(), CodecType::PCMU)
+            .await
+            .unwrap();
+        let (_tx_sup, mut rx_sup) = mixer
+            .add_participant(supervisor.clone(), CodecType::PCMU)
+            .await
+            .unwrap();
+
+        // Listen mode: supervisor sends nothing to customer or agent
+        mixer.set_route_gain(&supervisor, &customer, 0.0).await;
+        mixer.set_route_gain(&supervisor, &agent, 0.0).await;
+
+        // Supervisor speaks (should be blocked by route gain)
+        let sup_samples = vec![5000i16; 160];
+        _tx_sup.send(AudioFrame::new(sup_samples, 8000)).await.unwrap();
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(30)).await;
+
+        // Customer should NOT hear supervisor
+        if let Ok(frame) = rx_cust.try_recv() {
+            let has_supervisor_audio = frame.samples.iter().any(|&s| s.abs() > 100);
+            assert!(!has_supervisor_audio, "Customer should not hear supervisor in listen mode");
+        }
+
+        // Agent should NOT hear supervisor
+        if let Ok(frame) = rx_agent.try_recv() {
+            let has_supervisor_audio = frame.samples.iter().any(|&s| s.abs() > 100);
+            assert!(!has_supervisor_audio, "Agent should not hear supervisor in listen mode");
+        }
+
+        // Customer speaks - agent and supervisor should hear
+        let cust_samples = vec![1000i16; 160];
+        tx_cust.send(AudioFrame::new(cust_samples, 8000)).await.unwrap();
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(30)).await;
+
+        assert!(rx_agent.try_recv().is_ok(), "Agent should hear customer");
+        assert!(rx_sup.try_recv().is_ok(), "Supervisor should hear customer");
+
+        mixer.stop().await;
+    }
+
+    #[tokio::test]
+    async fn test_route_gain_supervisor_whisper() {
+        let mixer = ConferenceAudioMixer::new("test-route-whisper".to_string(), 8000);
+        mixer.start();
+
+        let customer = LegId::new("customer");
+        let agent = LegId::new("agent");
+        let supervisor = LegId::new("supervisor");
+
+        let (_tx_cust, mut rx_cust) = mixer
+            .add_participant(customer.clone(), CodecType::PCMU)
+            .await
+            .unwrap();
+        let (tx_agent, _rx_agent) = mixer
+            .add_participant(agent.clone(), CodecType::PCMU)
+            .await
+            .unwrap();
+        let (tx_sup, mut rx_sup) = mixer
+            .add_participant(supervisor.clone(), CodecType::PCMU)
+            .await
+            .unwrap();
+
+        // Whisper mode: supervisor speaks to agent only, not customer
+        mixer.set_route_gain(&supervisor, &customer, 0.0).await;
+        // supervisor -> agent stays at 1.0 (default)
+
+        // Supervisor speaks
+        let sup_samples = vec![5000i16; 160];
+        tx_sup.send(AudioFrame::new(sup_samples, 8000)).await.unwrap();
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(30)).await;
+
+        // Customer should NOT hear supervisor
+        if let Ok(frame) = rx_cust.try_recv() {
+            let has_supervisor_audio = frame.samples.iter().any(|&s| s.abs() > 100);
+            assert!(!has_supervisor_audio, "Customer should not hear supervisor in whisper mode");
+        }
+
+        // Agent speaks - customer and supervisor should hear
+        let agent_samples = vec![2000i16; 160];
+        tx_agent.send(AudioFrame::new(agent_samples, 8000)).await.unwrap();
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(30)).await;
+
+        assert!(rx_cust.try_recv().is_ok(), "Customer should hear agent");
+        assert!(rx_sup.try_recv().is_ok(), "Supervisor should hear agent");
 
         mixer.stop().await;
     }
