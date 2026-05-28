@@ -279,28 +279,22 @@ async fn diagnostics_bootstrap(state: &Arc<ConsoleState>) -> JsonValue {
     #[allow(unused_mut)]
     let mut destination_samples: Vec<JsonValue> = Vec::new();
 
-    // Load active IVR projects as destination samples (when addon enabled)
-    #[cfg(feature = "addon-ivr-editor")]
+    // Load IVR projects as destination samples from file scan
     {
-        use crate::addons::ivr_editor::models::{Column as IvrColumn, Entity as IvrEntity};
-        use sea_orm::{ColumnTrait, QueryFilter};
-        if let Ok(projects) = IvrEntity::find()
-            .filter(IvrColumn::Status.eq("active"))
-            .all(state.db())
-            .await
-        {
-            for p in &projects {
-                let is_step = p
-                    .current_data
-                    .get("ivr_mode")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("tree")
-                    == "step";
-                let mode_tag = if is_step { " (step)" } else { " (tree)" };
-                let test_number = format!("*99{:03}", p.id % 1000);
+        if let Some(app_state) = state.app_state() {
+            let proxy_config = &app_state.config().proxy;
+            let ivr_dir = proxy_config.generated_ivr_dir();
+            let ivr_entries =
+                crate::console::catalog::scan_ivr_catalog(&ivr_dir, &proxy_config.ivr_files);
+            for entry in &ivr_entries {
+                let mode_tag = if entry.ivr_mode == "step" {
+                    " (step)"
+                } else {
+                    " (tree)"
+                };
                 destination_samples.push(serde_json::json!({
-                    "label": format!("{} — {}{}", p.name, test_number, mode_tag),
-                    "value": test_number,
+                    "label": format!("{}{}", entry.name, mode_tag),
+                    "value": format!("ivr:{}", entry.name),
                 }));
             }
         }
@@ -1294,7 +1288,11 @@ async fn route_evaluate(
                 }
             }
 
-            let routes = match load_routes_from_db(db, &trunk_lookup).await {
+            let ivr_dir = state.app_state().and_then(|app| {
+                let dir = app.config().proxy.generated_ivr_dir();
+                Some(dir)
+            });
+            let routes = match load_routes_from_db(db, &trunk_lookup, ivr_dir.as_deref()).await {
                 Ok(routes) => routes,
                 Err(err) => {
                     return (
