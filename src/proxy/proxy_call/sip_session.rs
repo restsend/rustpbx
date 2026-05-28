@@ -74,6 +74,11 @@ use tokio_util::{
 };
 use tracing::{debug, error, info, warn};
 
+type SipFlowRtpCaptureTx = mpsc::Sender<(
+    crate::media::recorder::Leg,
+    rustrtc::media::frame::MediaSample,
+)>;
+
 mod conference;
 mod queue;
 mod supervisor;
@@ -3043,6 +3048,9 @@ impl SipSession {
             bridge_builder =
                 bridge_builder.with_recorder(self.recorder.clone(), self.recording_paused.clone());
         }
+        if let Some(sipflow_tx) = self.spawn_sipflow_rtp_capture() {
+            bridge_builder = bridge_builder.with_sipflow_capture(sipflow_tx);
+        }
 
         let bridge = bridge_builder.build();
         bridge.setup_bridge().await?;
@@ -4504,45 +4512,8 @@ impl SipSession {
 
         let shared_recorder = self.recorder.clone();
 
-        const SIPFLOW_CHANNEL_CAPACITY: usize =
-            crate::media::forwarding_track::ForwardingTrack::DEFAULT_SIPFLOW_CHANNEL_CAPACITY;
-        let (caller_sipflow_tx, callee_sipflow_tx) = if self.server.proxy_config.recording.is_none()
-            && let Some(backend) = self.server.sip_flow.as_ref().and_then(|sf| sf.backend())
-        {
-            use crate::sipflow::{SipFlowItem, SipFlowMsgType};
-            use tokio::sync::mpsc;
-
-            let (tx, mut rx) = mpsc::channel::<(
-                crate::media::recorder::Leg,
-                rustrtc::media::frame::MediaSample,
-            )>(SIPFLOW_CHANNEL_CAPACITY);
-
-            let call_id = self.context.session_id.clone();
-            crate::utils::spawn(async move {
-                while let Some((leg, sample)) = rx.recv().await {
-                    if let rustrtc::media::frame::MediaSample::Audio(ref frame) = sample {
-                        if let Some(ref rtp_packet) = frame.raw_packet {
-                            if let Ok(rtp_bytes) = rtp_packet.marshal() {
-                                let item = SipFlowItem {
-                                    timestamp: frame.rtp_timestamp as u64,
-                                    seq: frame.sequence_number.unwrap_or(0) as u64,
-                                    msg_type: SipFlowMsgType::Rtp,
-                                    src_addr: format!("{leg:?}"),
-                                    dst_addr: "bridge".to_string(),
-                                    payload: bytes::Bytes::from(rtp_bytes),
-                                };
-                                let _ = backend.record(&call_id, item);
-                            }
-                        }
-                    }
-                }
-            });
-
-            // Clone the sender so both legs can enqueue into the same drain task.
-            (Some(tx.clone()), Some(tx))
-        } else {
-            (None, None)
-        };
+        let sipflow_tx = self.spawn_sipflow_rtp_capture();
+        let (caller_sipflow_tx, callee_sipflow_tx) = (sipflow_tx.clone(), sipflow_tx);
 
         match Self::wire_with_forwarding_track(
             Self::CALLER_FORWARDING_TRACK_ID,
@@ -4599,6 +4570,42 @@ impl SipSession {
                 warn!(session_id = %session_id, error = %e, "Failed to wire callee→caller");
             }
         }
+    }
+
+    fn spawn_sipflow_rtp_capture(&self) -> Option<SipFlowRtpCaptureTx> {
+        if self.server.proxy_config.recording.is_some() {
+            return None;
+        }
+
+        let backend = self.server.sip_flow.as_ref().and_then(|sf| sf.backend())?;
+        let (tx, mut rx) = mpsc::channel::<(
+            crate::media::recorder::Leg,
+            rustrtc::media::frame::MediaSample,
+        )>(crate::media::forwarding_track::ForwardingTrack::DEFAULT_SIPFLOW_CHANNEL_CAPACITY);
+
+        let call_id = self.context.session_id.clone();
+        crate::utils::spawn(async move {
+            use crate::sipflow::{SipFlowItem, SipFlowMsgType};
+
+            while let Some((leg, sample)) = rx.recv().await {
+                if let rustrtc::media::frame::MediaSample::Audio(ref frame) = sample
+                    && let Some(ref rtp_packet) = frame.raw_packet
+                    && let Ok(rtp_bytes) = rtp_packet.marshal()
+                {
+                    let item = SipFlowItem {
+                        timestamp: frame.rtp_timestamp as u64,
+                        seq: frame.sequence_number.unwrap_or(0) as u64,
+                        msg_type: SipFlowMsgType::Rtp,
+                        src_addr: format!("{leg:?}"),
+                        dst_addr: "bridge".to_string(),
+                        payload: bytes::Bytes::from(rtp_bytes),
+                    };
+                    let _ = backend.record(&call_id, item);
+                }
+            }
+        });
+
+        Some(tx)
     }
 
     async fn get_peer_pc(
@@ -5348,6 +5355,9 @@ impl SipSession {
             if self.context.dialplan.recording.enabled {
                 bridge_builder = bridge_builder
                     .with_recorder(self.recorder.clone(), self.recording_paused.clone());
+            }
+            if let Some(sipflow_tx) = self.spawn_sipflow_rtp_capture() {
+                bridge_builder = bridge_builder.with_sipflow_capture(sipflow_tx);
             }
 
             let bridge = bridge_builder.build();
