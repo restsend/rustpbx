@@ -26,6 +26,7 @@ impl MigratorTrait for Migrator {
             Box::new(super::rbac::Migration),
             Box::new(super::add_sip_trunk_rewrite_hostport::Migration),
             Box::new(super::add_metadata_column::Migration),
+            Box::new(super::alter_rewrite_columns_length::Migration),
         ]
     }
 }
