@@ -104,6 +104,12 @@ enum DialogSide {
     Callee,
 }
 
+pub type CalleeError = (u16, String, Option<String>);
+
+pub fn into_callee_err(code: &StatusCode, msg: Option<String>) -> CalleeError {
+    (code.code(), code.text().to_string(), msg)
+}
+
 pub struct SipSession {
     pub id: SessionId,
     pub state: SessionState,
@@ -1555,20 +1561,19 @@ impl SipSession {
         }
 
         if !self.context.dialplan.is_empty()
-            && let Err((status_code, reason)) = self.execute_dialplan(&mut callee_state_rx).await
+            && let Err((status_code, text, reason)) = self.execute_dialplan(&mut callee_state_rx).await
         {
-            warn!(?status_code, ?reason, "Dialplan execution failed");
+            warn!(?status_code, ?text, ?reason, "Dialplan execution failed");
 
-            let code = status_code.clone();
-            if let Err(e) = self.reject_with_tone(code, reason.clone()).await {
+            if let Err(e) = self.reject_with_tone(status_code, text.clone(), reason.clone()).await {
                 warn!(session_id = %self.context.session_id, error = %e, "Failed to send rejection with tone");
             }
             // Store error so cleanup/CDR can report the failure reason
-            self.meta.last_error = Some((status_code.clone(), reason));
+            self.meta.last_error = Some((StatusCode::Other(status_code, text.clone()), reason.clone()));
             self.meta.hangup_reason = Some(CallRecordHangupReason::Failed);
             // Ensure cleanup runs (generates CDR) even on early failure
             self.cleanup().await;
-            return Err(anyhow!("Dialplan failed: {:?}", status_code));
+            return Err(anyhow!("Dialplan failed: {} {:?}", status_code, reason));
         }
 
         let hangup_futures = FuturesUnordered::new();
@@ -2086,7 +2091,7 @@ impl SipSession {
                 for tx in subscribers.iter() {
                     let _ = tx.send(event.clone());
                 }
-                if (200..300).contains(&sip_status) {
+                if StatusCode::from(sip_status).kind() == rsipstack::sip::StatusCodeKind::Successful {
                     self.meta
                         .hangup_reason
                         .get_or_insert(CallRecordHangupReason::ByRefer);
@@ -2235,7 +2240,7 @@ impl SipSession {
                             "Callee rejected the call"
                         );
                         self.meta.last_error = Some((code.clone(), reason_str.clone()));
-                        if let Err(e) = self.reject_with_tone(code.into(), reason_str.clone()).await
+                        if let Err(e) = self.reject_with_tone(code.code(), code.text().to_string(), reason_str.clone()).await
                         {
                             warn!(session_id = %self.context.session_id, error = %e, "Failed to send rejection response to caller");
                         }
@@ -2318,7 +2323,7 @@ impl SipSession {
     pub async fn execute_dialplan(
         &mut self,
         callee_state_rx: &mut mpsc::UnboundedReceiver<DialogState>,
-    ) -> Result<(), (StatusCode, Option<String>)> {
+    ) -> Result<(), CalleeError> {
         let flow = self.context.dialplan.flow.clone();
         self.execute_flow(&flow, callee_state_rx).await
     }
@@ -2327,7 +2332,7 @@ impl SipSession {
         &'a mut self,
         flow: &'a crate::call::DialplanFlow,
         callee_state_rx: &'a mut mpsc::UnboundedReceiver<DialogState>,
-    ) -> futures::future::BoxFuture<'a, Result<(), (StatusCode, Option<String>)>> {
+    ) -> futures::future::BoxFuture<'a, Result<(), CalleeError>> {
         use crate::call::DialplanFlow;
         use futures::FutureExt;
 
@@ -2339,8 +2344,8 @@ impl SipSession {
                 DialplanFlow::Queue { plan, next } => {
                     match self.execute_queue(plan, callee_state_rx).await {
                         Ok(()) => Ok(()),
-                        Err((code, reason)) => {
-                            warn!(?code, ?reason, "Queue execution failed, trying next flow");
+                        Err((code, text, reason)) => {
+                            warn!(?code, ?text, ?reason, "Queue execution failed, trying next flow");
                             self.execute_flow(next, callee_state_rx).await
                         }
                     }
@@ -2371,7 +2376,7 @@ impl SipSession {
         &mut self,
         strategy: &crate::call::DialStrategy,
         callee_state_rx: &mut mpsc::UnboundedReceiver<DialogState>,
-    ) -> Result<(), (StatusCode, Option<String>)> {
+    ) -> Result<(), CalleeError> {
         use crate::call::DialStrategy;
 
         match strategy {
@@ -2386,9 +2391,9 @@ impl SipSession {
         &mut self,
         targets: &[crate::call::Location],
         callee_state_rx: &mut mpsc::UnboundedReceiver<DialogState>,
-    ) -> Result<(), (StatusCode, Option<String>)> {
-        let mut last_error = (
-            StatusCode::TemporarilyUnavailable,
+    ) -> Result<(), CalleeError> {
+        let mut last_error = into_callee_err(
+            &StatusCode::TemporarilyUnavailable,
             Some("No targets to dial".to_string()),
         );
 
@@ -2414,10 +2419,10 @@ impl SipSession {
         &mut self,
         targets: &[crate::call::Location],
         callee_state_rx: &mut mpsc::UnboundedReceiver<DialogState>,
-    ) -> Result<(), (StatusCode, Option<String>)> {
+    ) -> Result<(), CalleeError> {
         if targets.is_empty() {
-            return Err((
-                StatusCode::TemporarilyUnavailable,
+            return Err(into_callee_err(
+                &StatusCode::TemporarilyUnavailable,
                 Some("No targets to dial".to_string()),
             ));
         }
@@ -2440,22 +2445,22 @@ impl SipSession {
         targets: &[crate::call::Location],
         stop_playback_on_answer: Option<&str>,
         _callee_state_rx: &mut mpsc::UnboundedReceiver<DialogState>,
-    ) -> Result<(), (StatusCode, Option<String>)> {
+    ) -> Result<(), CalleeError> {
         use futures::StreamExt;
         use futures::stream::FuturesUnordered;
         use rsipstack::dialog::invitation::InviteOption;
         use rsipstack::sip::StatusCodeKind;
 
         if targets.is_empty() {
-            return Err((
-                StatusCode::TemporarilyUnavailable,
+            return Err(into_callee_err(
+                &StatusCode::TemporarilyUnavailable,
                 Some("No targets to dial".to_string()),
             ));
         }
 
         let caller = self.context.dialplan.caller.clone().ok_or_else(|| {
-            (
-                StatusCode::ServerInternalError,
+            into_callee_err(
+                &StatusCode::ServerInternalError,
                 Some("No caller in dialplan".to_string()),
             )
         })?;
@@ -2475,8 +2480,8 @@ impl SipSession {
         let fork_cancel = CancellationToken::new();
         let mut fork_set = FuturesUnordered::new();
         let state_tx = self.callee_event_tx.clone().ok_or_else(|| {
-            (
-                StatusCode::ServerInternalError,
+            into_callee_err(
+                &StatusCode::ServerInternalError,
                 Some("No callee event sender".to_string()),
             )
         })?;
@@ -2585,8 +2590,8 @@ impl SipSession {
 
         // Race the forked INVITEs – first 200 OK wins
         let mut failures = 0u32;
-        let mut last_error = (
-            StatusCode::TemporarilyUnavailable,
+        let mut last_error = into_callee_err(
+            &StatusCode::TemporarilyUnavailable,
             Some("All targets failed".to_string()),
         );
         let total = targets.len() as u32;
@@ -2602,8 +2607,8 @@ impl SipSession {
                         );
                         fork_cancel.cancel();
                         self.cancel_token.cancel();
-                        return Err((
-                            StatusCode::RequestTerminated,
+                        return Err(into_callee_err(
+                            &StatusCode::RequestTerminated,
                             Some("Caller cancelled".to_string()),
                         ));
                     }
@@ -2611,8 +2616,8 @@ impl SipSession {
                 }
                 _ = self.cancel_token.cancelled() => {
                     fork_cancel.cancel();
-                    return Err((
-                        StatusCode::RequestTerminated,
+                    return Err(into_callee_err(
+                        &StatusCode::RequestTerminated,
                         Some("Caller cancelled".to_string()),
                     ));
                 }
@@ -2664,15 +2669,20 @@ impl SipSession {
                     // Non-success response (4xx/5xx)
                     let code = response
                         .as_ref()
-                        .map(|r| StatusCode::from(r.status_code.code()))
-                        .unwrap_or(StatusCode::TemporarilyUnavailable);
+                        .map(|r| r.status_code.code())
+                        .unwrap_or(StatusCode::TemporarilyUnavailable.code());
+                    let text = response
+                        .as_ref()
+                        .map(|r| r.status_code.text().to_string())
+                        .unwrap_or_else(|| StatusCode::TemporarilyUnavailable.text().to_string());
                     warn!(
                         fork = winner_idx,
-                        ?code,
+                        code = code,
+                        text = %text,
                         "fork_targets_parallel: target rejected"
                     );
                     failures += 1;
-                    last_error = (code, None);
+                    last_error = (code, text, None);
                 }
                 Ok(Some((_idx, Err(e), _callee_uri))) => {
                     warn!(
@@ -2681,8 +2691,8 @@ impl SipSession {
                         "fork_targets_parallel: target errored"
                     );
                     failures += 1;
-                    last_error = (
-                        StatusCode::ServerInternalError,
+                    last_error = into_callee_err(
+                        &StatusCode::ServerInternalError,
                         Some(format!("Target fork failed: {e}")),
                     );
                 }
@@ -2694,8 +2704,8 @@ impl SipSession {
                 Err(e) => {
                     warn!(error = %e, "fork_targets_parallel: join error");
                     failures += 1;
-                    last_error = (
-                        StatusCode::ServerInternalError,
+                    last_error = into_callee_err(
+                        &StatusCode::ServerInternalError,
                         Some(format!("Fork join error: {e}")),
                     );
                 }
@@ -2882,16 +2892,17 @@ impl SipSession {
 
     /// Reject the call with a specific status code, optionally playing a configured
     /// failure tone as 183 early media before sending the rejection.
-    async fn reject_with_tone(&mut self, code: StatusCode, reason: Option<String>) -> Result<()> {
+    async fn reject_with_tone(&mut self, code: u16, text: String, reason: Option<String>) -> Result<()> {
+        let status = StatusCode::Other(code, text);
         let profile = self.context.dialplan.audio_profile.as_ref();
-        let audio_path = profile.and_then(|rb| rb.for_status(&code).map(|s| s.to_string()));
+        let audio_path = profile.and_then(|rb| rb.for_status(&status).map(|s| s.to_string()));
         if let Some(ref path) = audio_path {
             let dur = profile
-                .and_then(|rb| rb.play_duration_for(&code))
+                .and_then(|rb| rb.play_duration_for(&status))
                 .unwrap_or(std::time::Duration::from_secs(2));
             info!(
                 session_id = %self.context.session_id,
-                status = %code,
+                status = %status,
                 audio = %path,
                 play_seconds = %dur.as_secs(),
                 "Playing failure tone before rejection",
@@ -2902,7 +2913,7 @@ impl SipSession {
                 tokio::time::sleep(dur).await;
             }
         }
-        self.server_dialog.reject(Some(code), reason.clone())?;
+        self.server_dialog.reject(Some(status), reason.clone())?;
         Ok(())
     }
 
@@ -3349,13 +3360,13 @@ impl SipSession {
         target: &crate::call::Location,
         callee_state_rx: &mut mpsc::UnboundedReceiver<DialogState>,
         stop_playback_on_answer: Option<&str>,
-    ) -> Result<(), (StatusCode, Option<String>)> {
+    ) -> Result<(), CalleeError> {
         use rsipstack::dialog::dialog::DialogState;
         use rsipstack::dialog::invitation::InviteOption;
 
         let caller = self.context.dialplan.caller.clone().ok_or_else(|| {
-            (
-                StatusCode::ServerInternalError,
+            into_callee_err(
+                &StatusCode::ServerInternalError,
                 Some("No caller in dialplan".to_string()),
             )
         })?;
@@ -3473,8 +3484,8 @@ impl SipSession {
         };
 
         let state_tx = self.callee_event_tx.clone().ok_or_else(|| {
-            (
-                StatusCode::ServerInternalError,
+            into_callee_err(
+                &StatusCode::ServerInternalError,
                 Some("No callee event sender".to_string()),
             )
         })?;
@@ -3495,15 +3506,15 @@ impl SipSession {
                             "Caller dialog terminated while callee INVITE was pending"
                         );
                         self.cancel_token.cancel();
-                        break Err((
-                            StatusCode::RequestTerminated,
+                        break Err(into_callee_err(
+                            &StatusCode::RequestTerminated,
                             Some("Caller cancelled".to_string()),
                         ));
                     }
                 }
                 _ = self.cancel_token.cancelled() => {
-                    break Err((
-                        StatusCode::RequestTerminated,
+                    break Err(into_callee_err(
+                        &StatusCode::RequestTerminated,
                         Some("Caller cancelled".to_string()),
                     ));
                 }
@@ -3572,16 +3583,22 @@ impl SipSession {
                                 if resp.status_code.kind() == rsipstack::sip::StatusCodeKind::Successful {
                                     Ok((dialog.id(), response))
                                 } else {
-
-                                    let code = StatusCode::from(resp.status_code.code());
-
-                                    Err((code, None))
+                                    let code = resp.status_code.code();
+                                    let text = resp.status_code.text().to_string();
+                                    let reason = resp.reason_phrase().map(|s| s.to_string());
+                                    Err((code, text, reason))
                                 }
                             } else {
-                                Err((StatusCode::ServerInternalError, Some("No response from callee".to_string())))
+                                Err(into_callee_err(
+                                    &StatusCode::ServerInternalError,
+                                    Some("No response from callee".to_string()),
+                                ))
                             }
                         }
-                        Err(e) => Err((StatusCode::ServerInternalError, Some(format!("Invite failed: {}", e)))),
+                        Err(e) => Err(into_callee_err(
+                            &StatusCode::ServerInternalError,
+                            Some(format!("Invite failed: {}", e)),
+                        )),
                     };
                 }
 
@@ -3678,7 +3695,7 @@ impl SipSession {
         stop_playback_on_answer: Option<&str>,
         invite_option: &rsipstack::dialog::invitation::InviteOption,
         default_expires: u64,
-    ) -> Result<(), (StatusCode, Option<String>)> {
+    ) -> Result<(), CalleeError> {
         let callee_sdp = response.as_ref().and_then(|r: &rsipstack::sip::Response| {
             let body = r.body();
             if body.is_empty() {
@@ -3710,7 +3727,7 @@ impl SipSession {
             Some(dialog_id.to_string()),
         )
         .await
-        .map_err(|e| (StatusCode::ServerInternalError, Some(e.to_string())))?;
+        .map_err(|e| into_callee_err(&StatusCode::ServerInternalError, Some(e.to_string())))?;
 
         self.meta.connected_callee_dialog_id = Some(dialog_id.clone());
         self.callee_dialogs.insert(dialog_id.clone(), ());
@@ -4583,7 +4600,9 @@ impl SipSession {
             crate::media::recorder::Leg,
             rustrtc::media::frame::MediaSample,
             u64,
-        )>(crate::media::forwarding_track::ForwardingTrack::DEFAULT_SIPFLOW_CHANNEL_CAPACITY);
+        )>(
+            crate::media::forwarding_track::ForwardingTrack::DEFAULT_SIPFLOW_CHANNEL_CAPACITY,
+        );
 
         let call_id = self.context.session_id.clone();
         crate::utils::spawn(async move {
@@ -5676,8 +5695,8 @@ impl SipSession {
                         }
                     }
                 }
-                Err((code, reason)) => {
-                    warn!(?code, ?reason, "Failed to initialize session timer");
+                Err((code, text, reason)) => {
+                    warn!(code = %code, text = %text, ?reason, "Failed to initialize session timer");
                 }
             }
         }
@@ -5948,10 +5967,7 @@ impl SipSession {
                     self.media.callee_answer_sdp.as_deref(),
                     "caller re-INVITE answer",
                 ),
-                DialogSide::Callee => (
-                    self.media.answer.as_deref(),
-                    "callee re-INVITE answer",
-                ),
+                DialogSide::Callee => (self.media.answer.as_deref(), "callee re-INVITE answer"),
             };
             answer_sdp = self.rewrite_answer_to_selected_codecs(
                 &answer_sdp,
@@ -6485,7 +6501,7 @@ impl SipSession {
     pub fn init_server_timer(
         &mut self,
         default_expires: u64,
-    ) -> Result<(), (StatusCode, Option<String>)> {
+    ) -> Result<(), CalleeError> {
         let request = self.server_dialog.initial_request();
         let headers = &request.headers;
         let dialog_id = self.caller_dialog_id();
@@ -6508,8 +6524,8 @@ impl SipSession {
         if let Some(value) = session_expires_value {
             if let Some((interval, refresher)) = parse_session_expires(&value) {
                 if interval < timer.min_se {
-                    return Err((
-                        StatusCode::SessionIntervalTooSmall,
+                    return Err(into_callee_err(
+                        &StatusCode::SessionIntervalTooSmall,
                         Some(timer.min_se.as_secs().to_string()),
                     ));
                 }
@@ -7355,17 +7371,30 @@ impl SipSession {
                 match self.handle_conference_info(conf_id).await {
                     Ok(room) => {
                         let mut data = serde_json::Map::new();
-                        data.insert("conf_id".to_string(), serde_json::Value::String(room.id.0.clone()));
-                        data.insert("participant_count".to_string(), serde_json::Value::Number(
-                            serde_json::Number::from(room.participant_count()),
-                        ));
-                        let participants: Vec<serde_json::Value> = room.participants.values().map(|p| {
-                            serde_json::json!({
-                                "leg_id": p.leg_id.as_str(),
-                                "muted": p.muted,
+                        data.insert(
+                            "conf_id".to_string(),
+                            serde_json::Value::String(room.id.0.clone()),
+                        );
+                        data.insert(
+                            "participant_count".to_string(),
+                            serde_json::Value::Number(serde_json::Number::from(
+                                room.participant_count(),
+                            )),
+                        );
+                        let participants: Vec<serde_json::Value> = room
+                            .participants
+                            .values()
+                            .map(|p| {
+                                serde_json::json!({
+                                    "leg_id": p.leg_id.as_str(),
+                                    "muted": p.muted,
+                                })
                             })
-                        }).collect();
-                        data.insert("participants".to_string(), serde_json::Value::Array(participants));
+                            .collect();
+                        data.insert(
+                            "participants".to_string(),
+                            serde_json::Value::Array(participants),
+                        );
                         CommandResult::success_with_data(serde_json::Value::Object(data))
                     }
                     Err(e) => CommandResult::failure(e.to_string()),
@@ -7374,13 +7403,16 @@ impl SipSession {
 
             CallCommand::ConferenceList => {
                 let rooms = self.handle_conference_list().await;
-                let list: Vec<serde_json::Value> = rooms.iter().map(|r| {
-                    serde_json::json!({
-                        "conf_id": r.id.0,
-                        "participant_count": r.participant_count(),
-                        "locked": r.locked,
+                let list: Vec<serde_json::Value> = rooms
+                    .iter()
+                    .map(|r| {
+                        serde_json::json!({
+                            "conf_id": r.id.0,
+                            "participant_count": r.participant_count(),
+                            "locked": r.locked,
+                        })
                     })
-                }).collect();
+                    .collect();
                 CommandResult::success_with_data(serde_json::Value::Array(list))
             }
 
@@ -7773,7 +7805,7 @@ impl SipSession {
                 Ok((dialog, response)) => {
                     if let Some(ref resp) = response {
                         let status_code = resp.status_code.code();
-                        if (200..300).contains(&status_code) {
+                        if StatusCode::from(status_code).kind() == rsipstack::sip::StatusCodeKind::Successful {
                             info!(%leg_id, status = %status_code, "SIP leg answered successfully");
 
                             // Extract SDP answer from response body
@@ -8626,7 +8658,7 @@ impl SipSession {
         {
             Ok(Some(response)) => {
                 let status_code = u16::from(response.status_code);
-                if (200..300).contains(&status_code) {
+                if StatusCode::from(status_code).kind() == rsipstack::sip::StatusCodeKind::Successful {
                     info!(status = status_code, "SIP OPTIONS ping successful");
                     Ok(())
                 } else {
@@ -8809,7 +8841,7 @@ impl SipSession {
         {
             Ok(Some(response)) => {
                 let status = response.status_code.code();
-                if (200..300).contains(&status) {
+                if StatusCode::from(status).kind() == rsipstack::sip::StatusCodeKind::Successful {
                     info!(status = %status, "re-INVITE accepted");
                     Ok(())
                 } else {

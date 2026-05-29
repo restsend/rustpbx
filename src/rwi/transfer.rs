@@ -625,7 +625,7 @@ impl TransferController {
 
             tx.set_sip_status(sip_status);
 
-            let gw_event = if (200..300).contains(&sip_status) {
+            let gw_event = if rsipstack::sip::StatusCode::from(sip_status).kind() == rsipstack::sip::StatusCodeKind::Successful {
                 if tx.status == TransferStatus::Accepted {
                     GatewayEvent::None
                 } else {

@@ -249,8 +249,7 @@ struct Cli {
 enum Commands {
     /// Validate configuration and exit without starting the server
     CheckConfig,
-    /// Initialize with fixture data (extensions, routes, wholesale demo data)
-    Fixtures,
+
 }
 
 #[tokio::main]
@@ -274,26 +273,6 @@ async fn main() -> Result<()> {
 
     println!("Start at {}", Utc::now());
     println!("{}", version::get_version_info());
-
-    if matches!(cli.command, Some(Commands::Fixtures)) {
-        let state = AppStateBuilder::new()
-            .with_config(config.clone())
-            .with_config_metadata(config_path.clone(), Utc::now())
-            .with_skip_sip_bind()
-            .build()
-            .await
-            .expect("Failed to build app state for fixtures");
-
-        state
-            .addon_registry
-            .initialize_all(state.clone())
-            .await
-            .expect("Failed to initialize addons for fixtures");
-
-        rustpbx::fixtures::run_fixtures(state).await?;
-        println!("Fixtures initialized successfully.");
-        return Ok(());
-    }
 
     if matches!(cli.command, Some(Commands::CheckConfig)) {
         match preflight::validate_start(&config).await {
@@ -527,6 +506,23 @@ async fn main() -> Result<()> {
                     continue;
                 }
             };
+
+            // Auto-create demo superuser when demo_mode is enabled
+            if state.config().demo_mode {
+                let db = state.db();
+                if let Err(e) = rustpbx::models::user::Model::upsert_super_user(
+                    db,
+                    "demo@miuda.ai",
+                    "demo@miuda.ai",
+                    "hello@miuda.ai",
+                )
+                .await
+                {
+                    tracing::error!("Failed to create demo superuser: {}", e);
+                } else {
+                    info!("Ensured demo superuser: demo@miuda.ai");
+                }
+            }
 
             info!("starting rustpbx on {}", state.config().http_addr);
             let router = create_router(state.clone());

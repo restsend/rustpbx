@@ -783,7 +783,7 @@ mod tests {
             .add_participant(customer.clone(), CodecType::PCMU)
             .await
             .unwrap();
-        let (tx_agent, mut rx_agent) = mixer
+        let (_tx_agent, mut rx_agent) = mixer
             .add_participant(agent.clone(), CodecType::PCMU)
             .await
             .unwrap();
@@ -798,25 +798,37 @@ mod tests {
 
         // Supervisor speaks (should be blocked by route gain)
         let sup_samples = vec![5000i16; 160];
-        _tx_sup.send(AudioFrame::new(sup_samples, 8000)).await.unwrap();
+        _tx_sup
+            .send(AudioFrame::new(sup_samples, 8000))
+            .await
+            .unwrap();
 
         tokio::time::sleep(tokio::time::Duration::from_millis(30)).await;
 
         // Customer should NOT hear supervisor
         if let Ok(frame) = rx_cust.try_recv() {
             let has_supervisor_audio = frame.samples.iter().any(|&s| s.abs() > 100);
-            assert!(!has_supervisor_audio, "Customer should not hear supervisor in listen mode");
+            assert!(
+                !has_supervisor_audio,
+                "Customer should not hear supervisor in listen mode"
+            );
         }
 
         // Agent should NOT hear supervisor
         if let Ok(frame) = rx_agent.try_recv() {
             let has_supervisor_audio = frame.samples.iter().any(|&s| s.abs() > 100);
-            assert!(!has_supervisor_audio, "Agent should not hear supervisor in listen mode");
+            assert!(
+                !has_supervisor_audio,
+                "Agent should not hear supervisor in listen mode"
+            );
         }
 
         // Customer speaks - agent and supervisor should hear
         let cust_samples = vec![1000i16; 160];
-        tx_cust.send(AudioFrame::new(cust_samples, 8000)).await.unwrap();
+        tx_cust
+            .send(AudioFrame::new(cust_samples, 8000))
+            .await
+            .unwrap();
 
         tokio::time::sleep(tokio::time::Duration::from_millis(30)).await;
 
@@ -854,19 +866,28 @@ mod tests {
 
         // Supervisor speaks
         let sup_samples = vec![5000i16; 160];
-        tx_sup.send(AudioFrame::new(sup_samples, 8000)).await.unwrap();
+        tx_sup
+            .send(AudioFrame::new(sup_samples, 8000))
+            .await
+            .unwrap();
 
         tokio::time::sleep(tokio::time::Duration::from_millis(30)).await;
 
         // Customer should NOT hear supervisor
         if let Ok(frame) = rx_cust.try_recv() {
             let has_supervisor_audio = frame.samples.iter().any(|&s| s.abs() > 100);
-            assert!(!has_supervisor_audio, "Customer should not hear supervisor in whisper mode");
+            assert!(
+                !has_supervisor_audio,
+                "Customer should not hear supervisor in whisper mode"
+            );
         }
 
         // Agent speaks - customer and supervisor should hear
         let agent_samples = vec![2000i16; 160];
-        tx_agent.send(AudioFrame::new(agent_samples, 8000)).await.unwrap();
+        tx_agent
+            .send(AudioFrame::new(agent_samples, 8000))
+            .await
+            .unwrap();
 
         tokio::time::sleep(tokio::time::Duration::from_millis(30)).await;
 

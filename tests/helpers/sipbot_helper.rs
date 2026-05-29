@@ -85,7 +85,7 @@ impl TestUa {
         let stats_clone = stats.clone();
         let ct = cancel_token.clone();
 
-        crate::utils::spawn(async move {
+        rustpbx::utils::spawn(async move {
             let mut bot = SipBot::new(account, global_config, stats_clone, false, ct.clone());
             tokio::select! {
                 _ = ct.cancelled() => {}
@@ -133,7 +133,7 @@ impl TestUa {
         let stats_clone = stats.clone();
         let ct = cancel_token.clone();
 
-        crate::utils::spawn(async move {
+        rustpbx::utils::spawn(async move {
             let mut bot = SipBot::new(account, global_config, stats_clone, false, ct.clone());
             tokio::select! {
                 _ = ct.cancelled() => {}
@@ -182,14 +182,8 @@ impl TestUa {
         username: &str,
         record_path: String,
     ) -> Self {
-        Self::callee_with_options_and_record(
-            sip_port,
-            ring_secs,
-            username,
-            None,
-            Some(record_path),
-        )
-        .await
+        Self::callee_with_options_and_record(sip_port, ring_secs, username, None, Some(record_path))
+            .await
     }
 
     async fn callee_with_options_and_record(
@@ -233,7 +227,7 @@ impl TestUa {
         let stats_clone = stats.clone();
         let ct = cancel_token.clone();
 
-        crate::utils::spawn(async move {
+        rustpbx::utils::spawn(async move {
             let mut bot = SipBot::new(account, global_config, stats_clone, false, ct.clone());
             tokio::select! {
                 _ = ct.cancelled() => {}
@@ -310,11 +304,26 @@ impl TestUa {
     pub fn audio_quality_summary(&self) -> AudioQualitySummary {
         use std::sync::atomic::Ordering;
         AudioQualitySummary {
-            total_frames: self.stats.audio_quality_total_frames.load(Ordering::Relaxed),
-            silence_frames: self.stats.audio_quality_silence_frames.load(Ordering::Relaxed),
-            clipping_frames: self.stats.audio_quality_clipping_frames.load(Ordering::Relaxed),
-            shrill_count: self.stats.audio_quality_shrill_count.load(Ordering::Relaxed),
-            muffled_count: self.stats.audio_quality_muffled_count.load(Ordering::Relaxed),
+            total_frames: self
+                .stats
+                .audio_quality_total_frames
+                .load(Ordering::Relaxed),
+            silence_frames: self
+                .stats
+                .audio_quality_silence_frames
+                .load(Ordering::Relaxed),
+            clipping_frames: self
+                .stats
+                .audio_quality_clipping_frames
+                .load(Ordering::Relaxed),
+            shrill_count: self
+                .stats
+                .audio_quality_shrill_count
+                .load(Ordering::Relaxed),
+            muffled_count: self
+                .stats
+                .audio_quality_muffled_count
+                .load(Ordering::Relaxed),
         }
     }
 }

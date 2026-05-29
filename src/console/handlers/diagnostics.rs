@@ -2053,7 +2053,7 @@ async fn send_options_udp(
             attempt.raw_response = summary.preview;
             attempt.success = summary
                 .status_code
-                .map(|code| (200..300).contains(&code))
+                .map(|code| rsipstack::sip::StatusCode::from(code).kind() == rsipstack::sip::StatusCodeKind::Successful)
                 .unwrap_or(false);
         }
         Ok(Err(err)) => {
