@@ -1,6 +1,6 @@
 use crate::config::SipFlowSubdirs;
 use crate::sipflow::protocol::{MsgType, Packet};
-use crate::sipflow::{SipFlowItem, SipFlowMsgType};
+use crate::sipflow::{SipFlowItem, SipFlowMediaStats, SipFlowMsgType};
 use anyhow::Result;
 use bytes::Bytes;
 use chrono::{DateTime, Datelike, Local, Timelike};
@@ -12,6 +12,8 @@ use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 
 const ZSTD_MAGIC: [u8; 4] = [0x28, 0xB5, 0x2F, 0xFD];
+const RAW_RECORD_HEADER_LEN: u64 = 10;
+const RAW_READ_THROUGH_GAP: u64 = 64 * 1024;
 
 pub struct StorageManager {
     base_path: PathBuf,
@@ -49,6 +51,188 @@ pub struct ProcessedPacket {
     pub comp_size: usize,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct RtpStatsHeader {
+    payload_type: u8,
+    sequence_number: u16,
+    rtp_timestamp: u32,
+    ssrc: u32,
+}
+
+#[derive(sqlx::FromRow)]
+struct MediaPacketRow {
+    id: i64,
+    leg: i32,
+    src: String,
+    timestamp: i64,
+    offset: i64,
+    size: i64,
+}
+
+struct StoredMediaPacket {
+    folder_index: usize,
+    row_id: i64,
+    leg: i32,
+    src: String,
+    timestamp: u64,
+    payload: Vec<u8>,
+}
+
+#[derive(sqlx::FromRow)]
+pub(crate) struct MediaSourceRow {
+    pub leg: i32,
+    pub src: String,
+}
+
+#[derive(Default)]
+struct MediaStatsAccumulator {
+    leg: i32,
+    src: String,
+    packet_count: usize,
+    lost_packets: u64,
+    ssrc: Option<u32>,
+    payload_type: Option<u8>,
+    clock_rate: Option<u32>,
+    first_sequence: Option<u16>,
+    last_sequence: Option<u16>,
+    prev_arrival_micros: Option<u64>,
+    prev_rtp_timestamp: Option<u32>,
+    jitter_rtp_units: f64,
+    jitter_samples: u64,
+}
+
+impl MediaStatsAccumulator {
+    fn new(leg: i32, src: String, ssrc: Option<u32>) -> Self {
+        Self {
+            leg,
+            src,
+            ssrc,
+            ..Self::default()
+        }
+    }
+
+    fn observe(&mut self, arrival_micros: u64, header: Option<RtpStatsHeader>) {
+        self.packet_count += 1;
+
+        let Some(header) = header else {
+            return;
+        };
+
+        self.payload_type.get_or_insert(header.payload_type);
+        let clock_rate = *self
+            .clock_rate
+            .get_or_insert_with(|| rtp_clock_rate_for_payload_type(header.payload_type));
+
+        self.observe_sequence(header.sequence_number);
+        self.observe_jitter(arrival_micros, header.rtp_timestamp, clock_rate);
+    }
+
+    fn observe_sequence(&mut self, sequence_number: u16) {
+        if self.first_sequence.is_none() {
+            self.first_sequence = Some(sequence_number);
+            self.last_sequence = Some(sequence_number);
+            return;
+        }
+
+        let Some(last_sequence) = self.last_sequence else {
+            self.last_sequence = Some(sequence_number);
+            return;
+        };
+
+        let diff = sequence_number.wrapping_sub(last_sequence);
+        if diff == 0 {
+            return;
+        }
+
+        // Treat small forward gaps as loss. Large reverse-looking deltas are
+        // late or reordered packets and should not advance the loss baseline.
+        if diff < 0x8000 {
+            if diff > 1 {
+                self.lost_packets += u64::from(diff - 1);
+            }
+            self.last_sequence = Some(sequence_number);
+        }
+    }
+
+    fn observe_jitter(&mut self, arrival_micros: u64, rtp_timestamp: u32, clock_rate: u32) {
+        if let (Some(prev_arrival), Some(prev_rtp)) =
+            (self.prev_arrival_micros, self.prev_rtp_timestamp)
+        {
+            let arrival_delta = arrival_micros as i128 - prev_arrival as i128;
+            let arrival_delta_units =
+                arrival_delta as f64 * clock_rate as f64 / 1_000_000.0;
+            let rtp_delta_units = rtp_timestamp_delta(rtp_timestamp, prev_rtp) as f64;
+            let delta = (arrival_delta_units - rtp_delta_units).abs();
+
+            if delta.is_finite() {
+                self.jitter_rtp_units += (delta - self.jitter_rtp_units) / 16.0;
+                self.jitter_samples += 1;
+            }
+        }
+
+        self.prev_arrival_micros = Some(arrival_micros);
+        self.prev_rtp_timestamp = Some(rtp_timestamp);
+    }
+
+    fn into_stats(self) -> SipFlowMediaStats {
+        let expected_packets = self.packet_count as u64 + self.lost_packets;
+        let loss_percent = if expected_packets > 0 {
+            self.lost_packets as f64 / expected_packets as f64 * 100.0
+        } else {
+            0.0
+        };
+        let jitter_ms = match (self.clock_rate, self.jitter_samples > 0) {
+            (Some(clock_rate), true) if clock_rate > 0 => {
+                Some(self.jitter_rtp_units * 1000.0 / clock_rate as f64)
+            }
+            _ => None,
+        };
+
+        SipFlowMediaStats {
+            leg: self.leg,
+            src: self.src,
+            packet_count: self.packet_count,
+            lost_packets: self.lost_packets,
+            expected_packets,
+            loss_percent,
+            jitter_ms,
+            ssrc: self.ssrc,
+            payload_type: self.payload_type,
+            clock_rate: self.clock_rate,
+        }
+    }
+}
+
+fn parse_rtp_stats_header(raw: &[u8]) -> Option<RtpStatsHeader> {
+    if raw.len() < 12 || raw[0] >> 6 != 2 {
+        return None;
+    }
+
+    Some(RtpStatsHeader {
+        payload_type: raw[1] & 0x7f,
+        sequence_number: u16::from_be_bytes([raw[2], raw[3]]),
+        rtp_timestamp: u32::from_be_bytes([raw[4], raw[5], raw[6], raw[7]]),
+        ssrc: u32::from_be_bytes([raw[8], raw[9], raw[10], raw[11]]),
+    })
+}
+
+fn rtp_clock_rate_for_payload_type(payload_type: u8) -> u32 {
+    match payload_type {
+        0 | 8 | 9 | 18 => 8000,
+        96 | 111 => 48000,
+        _ => 8000,
+    }
+}
+
+fn rtp_timestamp_delta(current: u32, previous: u32) -> i64 {
+    let forward = current.wrapping_sub(previous);
+    if forward <= i32::MAX as u32 {
+        forward as i64
+    } else {
+        -(previous.wrapping_sub(current) as i64)
+    }
+}
+
 pub fn process_packet(packet: Packet) -> ProcessedPacket {
     let mut callid = None;
     if matches!(packet.msg_type, MsgType::Sip) {
@@ -77,6 +261,51 @@ pub fn process_packet(packet: Packet) -> ProcessedPacket {
         payload,
         orig_size,
         comp_size,
+    }
+}
+
+fn seek_or_read_through(
+    raw_file: &mut File,
+    current_pos: &mut Option<u64>,
+    target_pos: u64,
+) -> std::io::Result<()> {
+    if let Some(pos) = *current_pos
+        && pos <= target_pos
+        && target_pos - pos <= RAW_READ_THROUGH_GAP
+    {
+        let mut remaining = target_pos - pos;
+        let mut discard = [0u8; 8192];
+        while remaining > 0 {
+            let len = remaining.min(discard.len() as u64) as usize;
+            raw_file.read_exact(&mut discard[..len])?;
+            remaining -= len as u64;
+        }
+        *current_pos = Some(target_pos);
+        return Ok(());
+    }
+
+    raw_file.seek(SeekFrom::Start(target_pos))?;
+    *current_pos = Some(target_pos);
+    Ok(())
+}
+
+fn read_raw_payload(
+    raw_file: &mut File,
+    current_pos: &mut Option<u64>,
+    offset: u64,
+    size: usize,
+) -> std::io::Result<Vec<u8>> {
+    let payload_offset = offset + RAW_RECORD_HEADER_LEN;
+    seek_or_read_through(raw_file, current_pos, payload_offset)?;
+
+    let mut buf = vec![0u8; size];
+    raw_file.read_exact(&mut buf)?;
+    *current_pos = Some(payload_offset + size as u64);
+
+    if buf.starts_with(&ZSTD_MAGIC) {
+        zstd::decode_all(&buf[..])
+    } else {
+        Ok(buf)
     }
 }
 
@@ -298,7 +527,14 @@ impl StorageManager {
                     MsgType::Rtp => {
                         let leg = meta.leg.unwrap_or(0);
                         sqlx::query(
-                            "INSERT INTO media_msgs (call_id, leg, src, timestamp, offset, size) VALUES (?, ?, ?, ?, ?, ?)",
+                            "INSERT INTO media_msgs (
+                                call_id,
+                                leg,
+                                src,
+                                timestamp,
+                                offset,
+                                size
+                            ) VALUES (?, ?, ?, ?, ?, ?)",
                         )
                         .bind(call_id)
                         .bind(leg)
@@ -474,8 +710,43 @@ impl StorageManager {
         callid: &str,
         start_dt: DateTime<Local>,
         end_dt: DateTime<Local>,
-    ) -> Result<Vec<(i32, String, usize)>> {
+    ) -> Result<Vec<SipFlowMediaStats>> {
         let mut results = std::collections::HashMap::new();
+        let mut packets = self
+            .query_media_packets(callid, start_dt, end_dt)
+            .await?;
+
+        packets.sort_by_key(|packet| (packet.timestamp, packet.folder_index, packet.row_id));
+
+        for packet in packets {
+            let header = parse_rtp_stats_header(&packet.payload);
+            let key = (packet.leg, packet.src.clone(), header.map(|h| h.ssrc));
+            results
+                .entry(key)
+                .or_insert_with(|| {
+                    MediaStatsAccumulator::new(
+                        packet.leg,
+                        packet.src,
+                        header.map(|h| h.ssrc),
+                    )
+                })
+                .observe(packet.timestamp as u64, header);
+        }
+
+        Ok(results
+            .into_iter()
+            .map(|(_, accumulator)| accumulator.into_stats())
+            .collect())
+    }
+
+    pub(crate) async fn query_media_sources(
+        &mut self,
+        callid: &str,
+        start_dt: DateTime<Local>,
+        end_dt: DateTime<Local>,
+    ) -> Result<Vec<MediaSourceRow>> {
+        let mut results = Vec::new();
+        let mut seen = std::collections::HashSet::new();
         let start_ts = Self::datetime_to_storage_ts(start_dt);
         let end_ts = Self::datetime_to_storage_ts(end_dt);
         let folders = self.get_folders_in_range(start_dt, end_dt);
@@ -490,14 +761,15 @@ impl StorageManager {
             let mut conn =
                 SqliteConnection::connect(&format!("sqlite:{}", db_path.to_string_lossy())).await?;
 
-            let rows = sqlx::query(
-                "SELECT m.leg, m.src, COUNT(*) as count 
+            let rows = sqlx::query_as::<_, MediaSourceRow>(
+                "SELECT m.leg AS leg,
+                        m.src AS src
                  FROM media_msgs m
                  JOIN call_meta c ON m.call_id = c.id
                  WHERE c.callid = ?
                  AND m.timestamp >= ?
                  AND m.timestamp <= ?
-                 GROUP BY m.leg, m.src",
+                 ORDER BY m.timestamp ASC, m.id ASC",
             )
             .bind(callid)
             .bind(start_ts)
@@ -506,32 +778,27 @@ impl StorageManager {
             .await?;
 
             for row in rows {
-                use sqlx::Row;
-                let leg: i32 = row.get(0);
-                let src: String = row.get(1);
-                let count: i64 = row.get(2);
-                *results.entry((leg, src)).or_insert(0) += count as usize;
+                if seen.insert((row.leg, row.src.clone())) {
+                    results.push(row);
+                }
             }
         }
 
-        Ok(results
-            .into_iter()
-            .map(|((leg, src), count)| (leg, src, count))
-            .collect())
+        Ok(results)
     }
 
-    pub async fn query_media(
+    async fn query_media_packets(
         &mut self,
         callid: &str,
         start_dt: DateTime<Local>,
         end_dt: DateTime<Local>,
-    ) -> Result<Vec<(i32, u64, Vec<u8>)>> {
+    ) -> Result<Vec<StoredMediaPacket>> {
         let mut results = Vec::new();
         let start_ts = Self::datetime_to_storage_ts(start_dt);
         let end_ts = Self::datetime_to_storage_ts(end_dt);
         let folders = self.get_folders_in_range(start_dt, end_dt);
 
-        for dir in folders {
+        for (folder_index, dir) in folders.into_iter().enumerate() {
             let db_path = dir.join("sipflow.db");
             let raw_path = dir.join("data.raw");
 
@@ -542,14 +809,21 @@ impl StorageManager {
             let mut conn =
                 SqliteConnection::connect(&format!("sqlite:{}", db_path.to_string_lossy())).await?;
             let mut raw_file = File::open(raw_path)?;
+            let mut current_pos = None;
 
-            let rows = sqlx::query(
-                "SELECT s.offset, s.size, s.timestamp, s.leg
+            let rows = sqlx::query_as::<_, MediaPacketRow>(
+                "SELECT s.id AS id,
+                        s.leg AS leg,
+                        s.src AS src,
+                        s.timestamp AS timestamp,
+                        s.offset AS offset,
+                        s.size AS size
                  FROM media_msgs s
                  JOIN call_meta c ON s.call_id = c.id
                  WHERE c.callid = ?
                  AND s.timestamp >= ?
-                 AND s.timestamp <= ?",
+                 AND s.timestamp <= ?
+                 ORDER BY s.offset ASC",
             )
             .bind(callid)
             .bind(start_ts)
@@ -558,33 +832,37 @@ impl StorageManager {
             .await?;
 
             for row in rows {
-                use sqlx::Row;
-                let offset: i64 = row.get(0);
-                let size: i64 = row.get(1);
-                let ts: i64 = row.get(2);
-                let leg: i32 = row.get(3);
+                let offset = u64::try_from(row.offset)?;
+                let size = usize::try_from(row.size)?;
+                let payload =
+                    read_raw_payload(&mut raw_file, &mut current_pos, offset, size)?;
 
-                let mut buf = vec![0u8; size as usize];
-                let raw_payload = (|| -> std::io::Result<Vec<u8>> {
-                    raw_file.seek(SeekFrom::Start(offset as u64 + 10))?;
-                    raw_file.read_exact(&mut buf)?;
-
-                    // Try to decompress
-                    raw_file.seek(SeekFrom::Start(offset as u64 + 2))?;
-                    let mut orig_size_buf = [0u8; 4];
-                    raw_file.read_exact(&mut orig_size_buf)?;
-
-                    if buf.starts_with(&ZSTD_MAGIC) {
-                        zstd::decode_all(&buf[..])
-                    } else {
-                        Ok(buf)
-                    }
-                })()?;
-
-                results.push((leg, ts as u64, raw_payload));
+                results.push(StoredMediaPacket {
+                    folder_index,
+                    row_id: row.id,
+                    leg: row.leg,
+                    src: row.src,
+                    timestamp: row.timestamp as u64,
+                    payload,
+                });
             }
         }
+
         Ok(results)
+    }
+
+    pub async fn query_media(
+        &mut self,
+        callid: &str,
+        start_dt: DateTime<Local>,
+        end_dt: DateTime<Local>,
+    ) -> Result<Vec<(i32, u64, Vec<u8>)>> {
+        Ok(self
+            .query_media_packets(callid, start_dt, end_dt)
+            .await?
+            .into_iter()
+            .map(|packet| (packet.leg, packet.timestamp, packet.payload))
+            .collect())
     }
 
     fn get_folders_in_range(&self, start: DateTime<Local>, end: DateTime<Local>) -> Vec<PathBuf> {
@@ -816,7 +1094,10 @@ mod tests {
             .expect("query media stats");
 
         assert_eq!(stats.len(), 1, "expected one (leg,src) stats row");
-        assert_eq!(stats[0].0, 0);
-        assert_eq!(stats[0].2, 1, "expected only packets in the receive timestamp range");
+        assert_eq!(stats[0].leg, 0);
+        assert_eq!(
+            stats[0].packet_count, 1,
+            "expected only packets in the receive timestamp range"
+        );
     }
 }

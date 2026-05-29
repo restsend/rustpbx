@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Local};
 
 use crate::config::{SipFlowClusterNode, SipFlowConfig};
-use crate::sipflow::SipFlowItem;
+use crate::sipflow::{SipFlowItem, SipFlowMediaStats};
 
 #[async_trait]
 pub trait SipFlowBackend: Send + Sync {
@@ -28,7 +28,7 @@ pub trait SipFlowBackend: Send + Sync {
         call_id: &str,
         start_time: DateTime<Local>,
         end_time: DateTime<Local>,
-    ) -> Result<Vec<(i32, String, usize)>>;
+    ) -> Result<Vec<SipFlowMediaStats>>;
     async fn query_media(
         &self,
         call_id: &str,

@@ -14,7 +14,7 @@ use crate::sipflow::wav_utils::{
     build_payload_type_map, build_payload_type_map_by_leg,
     generate_wav_from_packets_with_leg_map_ex,
 };
-use crate::sipflow::{SipFlowItem, SipFlowMsgType};
+use crate::sipflow::{SipFlowItem, SipFlowMediaStats, SipFlowMsgType};
 
 enum Command {
     RecordItem {
@@ -205,7 +205,7 @@ impl SipFlowBackend for LocalBackend {
         call_id: &str,
         start_time: DateTime<Local>,
         end_time: DateTime<Local>,
-    ) -> Result<Vec<(i32, String, usize)>> {
+    ) -> Result<Vec<SipFlowMediaStats>> {
         let call_id = call_id.to_string();
         let root = self.root.clone();
         let subdirs = self.subdirs.clone();
@@ -239,13 +239,13 @@ impl SipFlowBackend for LocalBackend {
             if packets.is_empty() {
                 return Ok(Vec::new());
             }
-            let media_stats = storage
-                .query_media_stats(&call_id, start_time, end_time)
+            let media_sources = storage
+                .query_media_sources(&call_id, start_time, end_time)
                 .await
                 .unwrap_or_default();
             let mut leg_sources = std::collections::HashMap::<i32, Vec<String>>::new();
-            for (leg, src, _) in media_stats {
-                leg_sources.entry(leg).or_default().push(src);
+            for source in media_sources {
+                leg_sources.entry(source.leg).or_default().push(source.src);
             }
             let flow = storage
                 .query_flow_in_range(start_time, end_time)
@@ -289,14 +289,14 @@ impl SipFlowBackend for LocalBackend {
                 return Ok(Vec::new());
             }
 
-            let media_stats = storage
-                .query_media_stats(&call_id, start_time, end_time)
+            let media_sources = storage
+                .query_media_sources(&call_id, start_time, end_time)
                 .await
                 .unwrap_or_default();
             let mut leg_sources = std::collections::HashMap::<i32, Vec<String>>::new();
-            for (leg, src, _) in media_stats {
-                if stream_leg.is_none_or(|selected| selected == leg) {
-                    leg_sources.entry(leg).or_default().push(src);
+            for source in media_sources {
+                if stream_leg.is_none_or(|selected| selected == source.leg) {
+                    leg_sources.entry(source.leg).or_default().push(source.src);
                 }
             }
 

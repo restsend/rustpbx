@@ -217,7 +217,7 @@ async fn upload_http(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sipflow::{SipFlowBackend, SipFlowItem};
+    use crate::sipflow::{SipFlowBackend, SipFlowItem, SipFlowMediaStats};
     use chrono::{DateTime, Local};
 
     struct MockBackend {
@@ -250,7 +250,7 @@ mod tests {
             _call_id: &str,
             _start: DateTime<Local>,
             _end: DateTime<Local>,
-        ) -> anyhow::Result<Vec<(i32, String, usize)>> {
+        ) -> anyhow::Result<Vec<SipFlowMediaStats>> {
             Ok(vec![])
         }
         async fn query_media(

@@ -185,9 +185,47 @@ async fn media_handler(
         .get("format")
         .map(|s| s.to_lowercase() == "pcm")
         .unwrap_or(false);
+    let stats_only = params
+        .get("stats")
+        .map(|s| s == "1" || s.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
 
     let start_dt = Local.timestamp_opt(start_ts_param, 0).unwrap();
     let end_dt = Local.timestamp_opt(end_ts_param, 0).unwrap();
+
+    if stats_only {
+        let stats = {
+            let mut mg = state.storage.lock().await;
+            mg.query_media_stats(&callid, start_dt, end_dt)
+                .await
+                .unwrap_or_default()
+        };
+        let stats_json: Vec<_> = stats
+            .into_iter()
+            .map(|stat| {
+                serde_json::json!({
+                    "leg": stat.leg,
+                    "src": stat.src,
+                    "count": stat.packet_count,
+                    "packet_count": stat.packet_count,
+                    "lost_packets": stat.lost_packets,
+                    "expected_packets": stat.expected_packets,
+                    "loss_percent": stat.loss_percent,
+                    "jitter_ms": stat.jitter_ms,
+                    "ssrc": stat.ssrc,
+                    "payload_type": stat.payload_type,
+                    "clock_rate": stat.clock_rate,
+                })
+            })
+            .collect();
+
+        return axum::Json(serde_json::json!({
+            "status": "success",
+            "callid": callid,
+            "stats": stats_json
+        }))
+        .into_response();
+    }
 
     let packets = {
         let mut mg = state.storage.lock().await;

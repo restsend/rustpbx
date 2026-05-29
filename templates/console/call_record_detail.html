@@ -372,8 +372,15 @@
                                         </th>
                                         <th class="px-4 py-2 font-semibold">{{ "call_record_detail.col_destination" | t
                                             }}</th>
+                                        <th class="px-4 py-2 font-semibold">{{ "call_record_detail.col_ssrc" | t }}</th>
                                         <th class="px-4 py-2 font-semibold text-right">{{
                                             "call_record_detail.col_packets" | t }}</th>
+                                        <th class="px-4 py-2 font-semibold text-right">{{
+                                            "call_record_detail.col_lost" | t }}</th>
+                                        <th class="px-4 py-2 font-semibold text-right">{{
+                                            "call_record_detail.col_loss" | t }}</th>
+                                        <th class="px-4 py-2 font-semibold text-right">{{
+                                            "call_record_detail.col_jitter" | t }}</th>
                                     </tr>
                                 </thead>
                                 <tbody class="divide-y divide-slate-100">
@@ -388,8 +395,17 @@
                                             </td>
                                             <td class="px-4 py-2 font-mono text-slate-600" x-text="stream.dst_addr">
                                             </td>
+                                            <td class="px-4 py-2 font-mono text-slate-500"
+                                                x-text="formatSsrc(stream)"></td>
                                             <td class="px-4 py-2 font-mono text-emerald-600 text-right"
                                                 x-text="stream.packet_count"></td>
+                                            <td class="px-4 py-2 font-mono text-slate-600 text-right"
+                                                x-text="formatInteger(stream.lost_packets)"></td>
+                                            <td class="px-4 py-2 font-mono text-right"
+                                                :class="packetLossClass(stream.loss_percent)"
+                                                x-text="formatPercent(stream.loss_percent)"></td>
+                                            <td class="px-4 py-2 font-mono text-slate-600 text-right"
+                                                x-text="formatJitter(stream.jitter_ms)"></td>
                                         </tr>
                                     </template>
                                 </tbody>
@@ -2180,6 +2196,49 @@
                     return '—';
                 }
                 return Number(value).toLocaleString(undefined, { maximumFractionDigits: 2 });
+            },
+            formatInteger(value) {
+                if (value === null || value === undefined || Number.isNaN(Number(value))) {
+                    return '0';
+                }
+                return Number(value).toLocaleString(undefined, { maximumFractionDigits: 0 });
+            },
+            formatPercent(value) {
+                const numeric = Number(value);
+                if (!Number.isFinite(numeric)) {
+                    return '—';
+                }
+                return `${numeric.toFixed(numeric >= 10 ? 1 : 2)}%`;
+            },
+            formatJitter(value) {
+                const numeric = Number(value);
+                if (!Number.isFinite(numeric)) {
+                    return '—';
+                }
+                return `${numeric.toFixed(numeric >= 10 ? 1 : 2)} ms`;
+            },
+            formatSsrc(stream) {
+                if (stream && stream.ssrc_hex) {
+                    return stream.ssrc_hex;
+                }
+                const numeric = Number(stream?.ssrc);
+                if (!Number.isFinite(numeric)) {
+                    return '—';
+                }
+                return `0x${(numeric >>> 0).toString(16).padStart(8, '0')}`;
+            },
+            packetLossClass(value) {
+                const numeric = Number(value);
+                if (!Number.isFinite(numeric)) {
+                    return 'text-slate-400';
+                }
+                if (numeric < 1) {
+                    return 'text-emerald-600';
+                }
+                if (numeric < 5) {
+                    return 'text-amber-600';
+                }
+                return 'text-rose-600';
             },
             formatWaveformTimestamp(value) {
                 if (value === null || value === undefined) {

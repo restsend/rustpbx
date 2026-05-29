@@ -33,6 +33,28 @@ pub struct SipFlowItem {
     pub payload: Bytes,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SipFlowMediaStats {
+    pub leg: i32,
+    pub src: String,
+    #[serde(default, alias = "count")]
+    pub packet_count: usize,
+    #[serde(default)]
+    pub lost_packets: u64,
+    #[serde(default)]
+    pub expected_packets: u64,
+    #[serde(default)]
+    pub loss_percent: f64,
+    #[serde(default)]
+    pub jitter_ms: Option<f64>,
+    #[serde(default)]
+    pub ssrc: Option<u32>,
+    #[serde(default)]
+    pub payload_type: Option<u8>,
+    #[serde(default)]
+    pub clock_rate: Option<u32>,
+}
+
 fn default_msg_type() -> SipFlowMsgType {
     SipFlowMsgType::Sip
 }

@@ -10,7 +10,7 @@ use tokio_util::sync::CancellationToken;
 use crate::config::SipFlowClusterNode;
 use crate::sipflow::backend::SipFlowBackend;
 use crate::sipflow::protocol::{MsgType, Packet, encode_packet};
-use crate::sipflow::{SipFlowItem, SipFlowMsgType};
+use crate::sipflow::{SipFlowItem, SipFlowMediaStats, SipFlowMsgType};
 
 /// Jump Consistent Hash
 ///
@@ -212,7 +212,7 @@ impl SipFlowBackend for RemoteBackend {
         call_id: &str,
         start_time: DateTime<Local>,
         end_time: DateTime<Local>,
-    ) -> Result<Vec<(i32, String, usize)>> {
+    ) -> Result<Vec<SipFlowMediaStats>> {
         let node = self.select_node(call_id);
         let url = format!(
             "{}/media?callid={}&start={}&end={}&stats=1",
@@ -231,11 +231,50 @@ impl SipFlowBackend for RemoteBackend {
                 .map(|arr| {
                     arr.iter()
                         .filter_map(|v| {
-                            Some((
-                                v.get("leg")?.as_i64()? as i32,
-                                v.get("src")?.as_str()?.to_string(),
-                                v.get("count")?.as_i64()? as usize,
-                            ))
+                            let packet_count = v
+                                .get("packet_count")
+                                .or_else(|| v.get("count"))
+                                .and_then(|value| value.as_u64())
+                                .unwrap_or(0) as usize;
+                            let lost_packets = v
+                                .get("lost_packets")
+                                .and_then(|value| value.as_u64())
+                                .unwrap_or(0);
+                            let expected_packets = v
+                                .get("expected_packets")
+                                .and_then(|value| value.as_u64())
+                                .unwrap_or(packet_count as u64 + lost_packets);
+
+                            Some(SipFlowMediaStats {
+                                leg: v.get("leg")?.as_i64()? as i32,
+                                src: v.get("src")?.as_str()?.to_string(),
+                                packet_count,
+                                lost_packets,
+                                expected_packets,
+                                loss_percent: v
+                                    .get("loss_percent")
+                                    .and_then(|value| value.as_f64())
+                                    .unwrap_or_else(|| {
+                                        if expected_packets > 0 {
+                                            lost_packets as f64 / expected_packets as f64 * 100.0
+                                        } else {
+                                            0.0
+                                        }
+                                    }),
+                                jitter_ms: v.get("jitter_ms").and_then(|value| value.as_f64()),
+                                ssrc: v
+                                    .get("ssrc")
+                                    .and_then(|value| value.as_u64())
+                                    .map(|value| value as u32),
+                                payload_type: v
+                                    .get("payload_type")
+                                    .and_then(|value| value.as_u64())
+                                    .map(|value| value as u8),
+                                clock_rate: v
+                                    .get("clock_rate")
+                                    .and_then(|value| value.as_u64())
+                                    .map(|value| value as u32),
+                            })
                         })
                         .collect()
                 })
