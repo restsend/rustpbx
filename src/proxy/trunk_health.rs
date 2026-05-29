@@ -158,6 +158,52 @@ pub fn dest_name(dest: &str) -> &str {
     dest.strip_prefix("sip:").unwrap_or(dest)
 }
 
+/// Extract port from a normalized (sip: stripped) target like `host:port`.
+/// Returns `None` if no port is present.
+fn extract_port(target: &str) -> Option<String> {
+    let target = target.trim();
+    if let Some(pos) = target.rfind(':') {
+        let port_str = &target[pos + 1..];
+        if port_str.parse::<u16>().is_ok() {
+            return Some(port_str.to_string());
+        }
+    }
+    None
+}
+
+/// Build a deduplicated list of probe targets for per-IP mode.
+/// Each inbound_host inherits the port from `dest` if it does not already have one.
+/// Duplicate (host:port) combinations are removed.
+pub fn build_per_ip_targets(dest: &str, inbound_hosts: &[String]) -> Vec<String> {
+    let dest_clean = dest_name(dest).to_string();
+    let default_port = extract_port(&dest_clean);
+
+    let mut seen = std::collections::HashSet::new();
+    let mut targets = Vec::new();
+
+    let add_target = |t: &str, targets: &mut Vec<String>, seen: &mut std::collections::HashSet<String>| {
+        if seen.insert(t.to_string()) {
+            targets.push(t.to_string());
+        }
+    };
+
+    add_target(&dest_clean, &mut targets, &mut seen);
+
+    for host in inbound_hosts {
+        let host = host.trim();
+        if extract_port(host).is_some() {
+            add_target(host, &mut targets, &mut seen);
+        } else if let Some(ref port) = default_port {
+            let normalized = format!("{}:{}", host, port);
+            add_target(&normalized, &mut targets, &mut seen);
+        } else {
+            add_target(host, &mut targets, &mut seen);
+        }
+    }
+
+    targets
+}
+
 /// Spawn the background health-check loop.
 ///
 /// It reads `trunks_fn` (which returns the current trunk map) on each tick,
@@ -219,13 +265,11 @@ fn spawn_health_loop_with_timeout(
                 let has_hosts = !cfg.inbound_hosts.is_empty();
 
                 if per_ip && has_hosts {
-                    // ── Per-IP mode: probe each inbound_host individually.
-                    // Dest is probed as part of the targets along with each inbound host
-                    // so we can report per-peer health. Trunk is healthy only when ALL
-                    // targets are healthy (AND logic), since each peer should be reachable.
-                    let mut targets: Vec<String> = Vec::with_capacity(1 + cfg.inbound_hosts.len());
-                    targets.push(cfg.dest.clone());
-                    targets.extend(cfg.inbound_hosts.clone());
+                    // ── Per-IP mode: probe each unique (host:port) target.
+                    // Inbound hosts inherit the port from dest if they don't have one.
+                    // Duplicates are removed: if dest and inbound_host resolve to the
+                    // same host:port, only one probe is sent.
+                    let targets = build_per_ip_targets(&cfg.dest, &cfg.inbound_hosts);
 
                     let mut per_ip_results: Vec<PerIpHealthState> =
                         Vec::with_capacity(targets.len());
