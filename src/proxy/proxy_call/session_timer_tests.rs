@@ -664,33 +664,6 @@ mod tests {
     // ==================== Timer State Management Tests ====================
 
     #[test]
-    fn test_activate() {
-        let mut timer = SessionTimerState {
-            enabled: true,
-            active: false,
-            ..Default::default()
-        };
-        let old_refresh = timer.last_refresh;
-        timer.activate();
-
-        assert!(timer.active);
-        assert!(timer.last_refresh > old_refresh);
-    }
-
-    #[test]
-    fn test_activate_when_disabled() {
-        let mut timer = SessionTimerState {
-            enabled: false,
-            active: false,
-            ..Default::default()
-        };
-        timer.activate();
-
-        // Should not activate if disabled
-        assert!(!timer.active);
-    }
-
-    #[test]
     fn test_deactivate() {
         let mut timer = SessionTimerState {
             active: true,

@@ -129,17 +129,27 @@ impl UserBackend for ExtensionUserBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::migration::Migrator;
+    use crate::models::{department, extension_department};
     use sea_orm::{ActiveModelTrait, ActiveValue::Set, Database};
-    use sea_orm_migration::MigratorTrait;
+    use sea_orm_migration::{MigrationTrait, SchemaManager};
 
     async fn setup_db() -> DatabaseConnection {
         let db = Database::connect("sqlite::memory:")
             .await
             .expect("connect in-memory sqlite");
-        Migrator::up(&db, None)
+        let manager = SchemaManager::new(&db);
+        department::Migration
+            .up(&manager)
             .await
-            .expect("migrations should succeed");
+            .expect("department migration should succeed");
+        extension::Migration
+            .up(&manager)
+            .await
+            .expect("extension migration should succeed");
+        extension_department::Migration
+            .up(&manager)
+            .await
+            .expect("extension department migration should succeed");
         db
     }
 
