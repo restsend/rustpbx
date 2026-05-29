@@ -237,7 +237,12 @@ async fn download_call_record_sip_flow(
                         stat.src
                     };
                     rtp_streams.push(json!({
-                        "role": role,
+                        "role": match stat.leg {
+                            0 => "caller",
+                            1 => "callee",
+                            _ => role.as_str(),
+                        },
+                        "leg": stat.leg,
                         "src_addr": src_addr,
                         "dst_addr": "RTP",
                         "packet_count": stat.packet_count,
