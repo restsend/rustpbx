@@ -95,7 +95,7 @@ async fn start_test_server() -> (String, RwiGatewayRef, Arc<ActiveProxyCallRegis
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
-    crate::utils::spawn(async move {
+    rustpbx::utils::spawn(async move {
         axum::serve(listener, router).await.unwrap();
     });
 

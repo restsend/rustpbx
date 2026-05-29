@@ -13,6 +13,62 @@ use rustpbx::media::{RtpTrackBuilder, Track};
 use rustrtc::TransportMode;
 use rustrtc::sdp::{SdpType, SessionDescription};
 
+struct BridgeCodecLists {
+    caller_side: Vec<rustpbx::media::negotiate::CodecInfo>,
+    callee_side: Vec<rustpbx::media::negotiate::CodecInfo>,
+}
+
+trait TestBridgeCodecLists {
+    fn build_bridge_codec_lists(
+        caller_sdp: &str,
+        caller_is_webrtc: bool,
+        callee_is_webrtc: bool,
+        allow_codecs: &[CodecType],
+    ) -> BridgeCodecLists;
+}
+
+impl TestBridgeCodecLists for rustpbx::media::negotiate::MediaNegotiator {
+    fn build_bridge_codec_lists(
+        caller_sdp: &str,
+        caller_is_webrtc: bool,
+        callee_is_webrtc: bool,
+        allow_codecs: &[CodecType],
+    ) -> BridgeCodecLists {
+        let mut caller_side = Self::build_codec_list_from_offer(caller_sdp, allow_codecs);
+        if caller_is_webrtc {
+            caller_side = filter_webrtc_answer_codecs(caller_side);
+        }
+
+        let mut callee_side = Self::build_callee_codec_offer_with_allow(caller_sdp, allow_codecs);
+        if callee_is_webrtc {
+            callee_side = Self::filter_webrtc_offer_codecs(caller_sdp, callee_side);
+        }
+
+        BridgeCodecLists {
+            caller_side,
+            callee_side,
+        }
+    }
+}
+
+fn filter_webrtc_answer_codecs(
+    codecs: Vec<rustpbx::media::negotiate::CodecInfo>,
+) -> Vec<rustpbx::media::negotiate::CodecInfo> {
+    let audio_clock_rates: std::collections::HashSet<_> = codecs
+        .iter()
+        .filter(|codec| !codec.is_dtmf() && codec.codec != CodecType::G729)
+        .map(|codec| codec.clock_rate)
+        .collect();
+
+    codecs
+        .into_iter()
+        .filter(|codec| {
+            codec.codec != CodecType::G729
+                && (!codec.is_dtmf() || audio_clock_rates.contains(&codec.clock_rate))
+        })
+        .collect()
+}
+
 /// Helper: create a WebRTC track simulating a browser caller (e.g., JsSIP).
 fn create_webrtc_caller(port_start: u16) -> Box<dyn Track> {
     Box::new(
@@ -1001,7 +1057,7 @@ async fn test_e2e_early_media_then_200_ok_same_sdp_rtp_flow_continues() {
 
     // 4. Spawn a receiver task that waits for the RTP track and counts samples
     let rtp_pc = bridge.callee_pc().clone();
-    let recv_handle = crate::utils::spawn(async move {
+    let recv_handle = rustpbx::utils::spawn(async move {
         let track = loop {
             let rx = rtp_pc.recv();
             match tokio::time::timeout(std::time::Duration::from_secs(3), rx).await {

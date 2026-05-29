@@ -1431,7 +1431,19 @@ mod tests {
 
     /// Start the Python step provider server and return the base URL.
     /// Panics if python3 is not on PATH or the server fails to start.
-    async fn start_python_provider(port: u16) -> String {
+    struct PythonProvider {
+        url: String,
+        child: std::process::Child,
+    }
+
+    impl Drop for PythonProvider {
+        fn drop(&mut self) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+
+    async fn start_python_provider(port: u16) -> PythonProvider {
         let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("examples")
             .join("step_ivr_provider.py");
@@ -1442,63 +1454,86 @@ mod tests {
             .stderr(std::process::Stdio::null())
             .spawn()
             .expect("Failed to start Python provider (python3 required)");
-        // Detach — the provider runs until the test process exits
-        let _ = child;
 
         // Wait for server to be ready
         let url = format!("http://127.0.0.1:{}/ivr/step", port);
         for _ in 0..30 {
-            if let Ok(resp) = reqwest::get(&url).await {
-                if resp.status().is_success() || resp.status().as_u16() == 405 {
-                    // 405 Method Not Allowed is expected (GET vs POST)
-                    break;
-                }
+            if tokio::net::TcpStream::connect(("127.0.0.1", port))
+                .await
+                .is_ok()
+            {
+                return PythonProvider { url, child };
             }
             tokio::time::sleep(std::time::Duration::from_millis(200)).await;
         }
-        url
+        panic!("Python provider did not start on port {port}");
     }
 
     #[tokio::test]
     async fn test_python_provider_direct_http() {
-        // Validates the IVR → HTTP → Python provider chain (no sipbot needed).
-        let provider_port = 18087u16;
+        use crate::call::app::ivr::provider::StepProvider;
+        use portpicker::pick_unused_port;
 
-        let url = start_python_provider(provider_port).await;
+        let provider_port = pick_unused_port().expect("no free port");
+        let provider = start_python_provider(provider_port).await;
+        let step_provider = StepProvider::new(&provider.url);
 
-        // Create StepIvrApp with StepProvider → Python provider
-        let app = StepIvrApp::new(&url);
+        let session = SessionContext {
+            session_id: "test-session".to_string(),
+            caller: "1001".to_string(),
+            callee: "2000".to_string(),
+            direction: "inbound".to_string(),
+            tenant_id: None,
+            ivr_id: None,
+            sip_headers: None,
+        };
+        step_provider
+            .on_session_start(&session)
+            .await
+            .unwrap();
 
-        let mut stack = MockCallStack::run(Box::new(app), "1001", "2000");
+        let ctx = ProviderContext {
+            session_id: session.session_id.clone(),
+            caller: session.caller.clone(),
+            callee: session.callee.clone(),
+            direction: session.direction.clone(),
+            tenant_id: None,
+            ivr_id: None,
+            variables: HashMap::new(),
+            sip_headers: None,
+            event: Some(ProviderEvent::SessionStart),
+        };
+        let prompt = step_provider.next_action(ctx).await.unwrap();
+        assert!(
+            matches!(prompt.action, EntryAction::Prompt { ref tts_text, interruptible: true, .. }
+                if tts_text.as_deref().is_some_and(|text| text.contains("IVR step")))
+        );
 
-        // 1. Session start → Python returns TTS Prompt
-        //    TTS falls back to edge-cli → synthesized file plays
-        stack
-            .assert_cmd(1000, "accept", |c| matches!(c, CallCommand::Answer { .. }))
-            .await;
-        stack
-            .assert_cmd(3000, "play:prompt", |c| {
-                matches!(
-                    c,
-                    CallCommand::Play {
-                        source: crate::call::domain::MediaSource::File { path }, ..
-                    } if path.contains("rustpbx_tts_cache")
-                )
-            })
-            .await;
+        let ctx = ProviderContext {
+            event: Some(ProviderEvent::Dtmf {
+                digit: "2".to_string(),
+            }),
+            ..ProviderContext {
+                session_id: session.session_id.clone(),
+                caller: session.caller.clone(),
+                callee: session.callee.clone(),
+                direction: session.direction.clone(),
+                tenant_id: None,
+                ivr_id: None,
+                variables: HashMap::new(),
+                sip_headers: None,
+                event: None,
+            }
+        };
+        let transfer = step_provider.next_action(ctx).await.unwrap();
+        assert!(
+            matches!(transfer.action, EntryAction::Transfer { ref target } if target == "agent")
+        );
 
-        // 2. Send DTMF "2" while prompt is playing → Transfer("agent")
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-        let _ = stack.drain_cmds();
-        stack.dtmf("2");
-
-        stack
-            .assert_cmd(
-                5000,
-                "transfer:agent",
-                |c| matches!(c, CallCommand::Transfer { target, .. } if target == "agent"),
-            )
-            .await;
+        step_provider
+            .on_session_end(&EndReason::Normal)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]
@@ -1519,7 +1554,7 @@ mod tests {
         let provider_port = pick_unused_port().expect("no free port");
 
         // 1. Start Python provider
-        let provider_url = start_python_provider(provider_port).await;
+        let provider = start_python_provider(provider_port).await;
 
         // 2. Create step-mode IVR route pointing to Python
         let route = RouteRule {
@@ -1533,7 +1568,7 @@ mod tests {
                 app: Some("ivr".into()),
                 app_params: Some(serde_json::json!({
                     "mode": "step",
-                    "url": provider_url,
+                    "url": provider.url.clone(),
                 })),
                 ..Default::default()
             },

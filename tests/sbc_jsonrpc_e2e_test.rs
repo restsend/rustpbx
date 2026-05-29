@@ -61,7 +61,7 @@ async fn start_mock_upstream(port: u16, call_count: Arc<AtomicUsize>) -> Cancell
 
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
     let cancel_clone = cancel.clone();
-    crate::utils::spawn(async move {
+    rustpbx::utils::spawn(async move {
         axum::serve(listener, app)
             .with_graceful_shutdown(async move { cancel_clone.cancelled().await })
             .await
@@ -150,7 +150,7 @@ async fn test_sbc_jsonrpc_e2e_sipbot_rewrite() {
 
     let server = Arc::new(builder.build().await.unwrap());
     let server_clone = server.clone();
-    crate::utils::spawn(async move {
+    rustpbx::utils::spawn(async move {
         if let Err(e) = server_clone.serve().await {
             tracing::warn!("SipServer serve error: {:?}", e);
         }
@@ -229,7 +229,7 @@ async fn test_sbc_jsonrpc_e2e_reject_call() {
         );
         let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
         let cc = cancel.clone();
-        crate::utils::spawn(async move {
+        rustpbx::utils::spawn(async move {
             axum::serve(listener, app)
                 .with_graceful_shutdown(async move { cc.cancelled().await })
                 .await
@@ -304,7 +304,7 @@ async fn test_sbc_jsonrpc_e2e_reject_call() {
 
     let server = Arc::new(builder.build().await.unwrap());
     let server_clone = server.clone();
-    crate::utils::spawn(async move {
+    rustpbx::utils::spawn(async move {
         if let Err(e) = server_clone.serve().await {
             tracing::warn!("SipServer serve error: {:?}", e);
         }
@@ -434,7 +434,7 @@ async fn test_sbc_jsonrpc_e2e_header_injection() {
 
     let server = Arc::new(builder.build().await.unwrap());
     let server_clone = server.clone();
-    crate::utils::spawn(async move {
+    rustpbx::utils::spawn(async move {
         if let Err(e) = server_clone.serve().await {
             tracing::warn!("SipServer serve error: {:?}", e);
         }
@@ -594,7 +594,7 @@ async fn test_sbc_jsonrpc_e2e_multi_rule_matching() {
 
     let server = Arc::new(builder.build().await.unwrap());
     let server_clone = server.clone();
-    crate::utils::spawn(async move {
+    rustpbx::utils::spawn(async move {
         if let Err(e) = server_clone.serve().await {
             tracing::warn!("SipServer serve error: {:?}", e);
         }
@@ -714,7 +714,7 @@ async fn test_sbc_jsonrpc_e2e_upstream_unreachable_rejects() {
 
     let server = Arc::new(builder.build().await.unwrap());
     let server_clone = server.clone();
-    crate::utils::spawn(async move {
+    rustpbx::utils::spawn(async move {
         if let Err(e) = server_clone.serve().await {
             tracing::warn!("SipServer serve error: {:?}", e);
         }
@@ -779,7 +779,7 @@ async fn test_sbc_jsonrpc_e2e_callee_rewrite() {
         );
         let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
         let cc = cancel.clone();
-        crate::utils::spawn(async move {
+        rustpbx::utils::spawn(async move {
             axum::serve(listener, app)
                 .with_graceful_shutdown(async move { cc.cancelled().await })
                 .await
@@ -854,7 +854,7 @@ async fn test_sbc_jsonrpc_e2e_callee_rewrite() {
 
     let server = Arc::new(builder.build().await.unwrap());
     let server_clone = server.clone();
-    crate::utils::spawn(async move {
+    rustpbx::utils::spawn(async move {
         if let Err(e) = server_clone.serve().await {
             tracing::warn!("SipServer serve error: {:?}", e);
         }
@@ -927,7 +927,7 @@ async fn test_sbc_jsonrpc_e2e_eval_error_reject() {
         );
         let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
         let cc = cancel.clone();
-        crate::utils::spawn(async move {
+        rustpbx::utils::spawn(async move {
             axum::serve(listener, app)
                 .with_graceful_shutdown(async move { cc.cancelled().await })
                 .await
@@ -1002,7 +1002,7 @@ async fn test_sbc_jsonrpc_e2e_eval_error_reject() {
 
     let server = Arc::new(builder.build().await.unwrap());
     let server_clone = server.clone();
-    crate::utils::spawn(async move {
+    rustpbx::utils::spawn(async move {
         if let Err(e) = server_clone.serve().await {
             tracing::warn!("SipServer serve error: {:?}", e);
         }
@@ -1020,7 +1020,7 @@ async fn test_sbc_jsonrpc_e2e_eval_error_reject() {
     .await;
     sleep(Duration::from_millis(500)).await;
 
-    let alice = TestUa::caller_with_target(
+    let _alice = TestUa::caller_with_target(
         pick_unused_port().unwrap(),
         "alice",
         format!("sip:anyone@127.0.0.1:{sip_port}"),
@@ -1071,7 +1071,7 @@ async fn test_sbc_jsonrpc_e2e_eval_error_continue() {
         );
         let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
         let cc = cancel.clone();
-        crate::utils::spawn(async move {
+        rustpbx::utils::spawn(async move {
             axum::serve(listener, app)
                 .with_graceful_shutdown(async move { cc.cancelled().await })
                 .await
@@ -1146,7 +1146,7 @@ async fn test_sbc_jsonrpc_e2e_eval_error_continue() {
 
     let server = Arc::new(builder.build().await.unwrap());
     let server_clone = server.clone();
-    crate::utils::spawn(async move {
+    rustpbx::utils::spawn(async move {
         if let Err(e) = server_clone.serve().await {
             tracing::warn!("SipServer serve error: {:?}", e);
         }
@@ -1164,7 +1164,7 @@ async fn test_sbc_jsonrpc_e2e_eval_error_continue() {
     .await;
     sleep(Duration::from_millis(500)).await;
 
-    let alice = TestUa::caller_with_target(
+    let _alice = TestUa::caller_with_target(
         pick_unused_port().unwrap(),
         "alice",
         format!("sip:anyone@127.0.0.1:{sip_port}"),

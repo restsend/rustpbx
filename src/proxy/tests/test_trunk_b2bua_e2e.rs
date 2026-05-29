@@ -189,6 +189,43 @@ async fn wait_for_cdr(server: &E2eTestServer, timeout_ms: u64) -> Result<()> {
     Ok(())
 }
 
+async fn send_dtmf_and_wait(
+    sender: Arc<super::test_ua::TestUa>,
+    dialog_id: rsipstack::dialog::DialogId,
+    receiver: &super::test_ua::TestUa,
+    expected_digit: &str,
+    timeout: Duration,
+) -> Result<bool> {
+    let digit_for_send = expected_digit.to_string();
+    let send_handle =
+        crate::utils::spawn(async move { sender.send_dtmf_info(&dialog_id, &digit_for_send).await });
+
+    let deadline = tokio::time::Instant::now() + timeout;
+    let mut received = false;
+    while tokio::time::Instant::now() < deadline {
+        let events = receiver.process_dialog_events().await?;
+        for event in events {
+            if let TestUaEvent::DtmfInfo(_, digit) = event
+                && digit == expected_digit
+            {
+                received = true;
+                break;
+            }
+        }
+        if received {
+            break;
+        }
+        sleep(Duration::from_millis(50)).await;
+    }
+
+    let send_result = tokio::time::timeout(Duration::from_secs(5), send_handle)
+        .await
+        .map_err(|_| anyhow::anyhow!("SIP INFO send timed out"))?;
+    send_result.map_err(|e| anyhow::anyhow!("SIP INFO send task failed: {}", e))??;
+
+    Ok(received)
+}
+
 // ─── Test 1: Wholesale inbound — caller (trunk side) hangs up ────────────────
 
 #[tokio::test]
@@ -350,7 +387,7 @@ async fn test_trunk_b2bua_reject_486_cdr() -> Result<()> {
 
     let server = Arc::new(E2eTestServer::start_with_mode(MediaProxyMode::All).await?);
     let alice = Arc::new(server.create_ua("alice").await?);
-    let bob = server.create_ua("bob").await?;
+    let bob = Arc::new(server.create_ua("bob").await?);
 
     sleep(Duration::from_millis(100)).await;
 
@@ -884,7 +921,7 @@ async fn test_trunk_b2bua_no_answer() -> Result<()> {
 
     let server = Arc::new(E2eTestServer::start_with_mode(MediaProxyMode::All).await?);
     let alice = Arc::new(server.create_ua("alice").await?);
-    let bob = server.create_ua("bob").await?;
+    let bob = Arc::new(server.create_ua("bob").await?);
 
     sleep(Duration::from_millis(100)).await;
 
@@ -977,29 +1014,20 @@ async fn test_trunk_b2bua_dtmf_info_passthrough() -> Result<()> {
 
     // Call is established. Send DTMF digits from Alice to Bob via SIP INFO.
     let digits = ["1", "2", "3", "#"];
-    for digit in &digits {
-        alice.send_dtmf_info(&alice_id, digit).await?;
-        info!(digit, "Sent DTMF INFO");
-        sleep(Duration::from_millis(100)).await;
-    }
-
-    // Give time for DTMF INFO messages to propagate
-    sleep(Duration::from_millis(500)).await;
-
-    // Collect DTMF events received by Bob
     let mut received_digits: Vec<String> = Vec::new();
-    for _ in 0..20 {
-        let events = bob.process_dialog_events().await?;
-        for event in events {
-            if let TestUaEvent::DtmfInfo(_, digit) = event {
-                info!(digit = %digit, "Bob received DTMF");
-                received_digits.push(digit);
-            }
+    for digit in &digits {
+        if send_dtmf_and_wait(
+            alice.clone(),
+            alice_id.clone(),
+            &bob,
+            digit,
+            Duration::from_secs(3),
+        )
+        .await?
+        {
+            info!(digit, "Bob received DTMF INFO");
+            received_digits.push((*digit).to_string());
         }
-        if received_digits.len() >= digits.len() {
-            break;
-        }
-        sleep(Duration::from_millis(100)).await;
     }
 
     info!(

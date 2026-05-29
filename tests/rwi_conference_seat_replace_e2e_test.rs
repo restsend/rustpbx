@@ -104,6 +104,12 @@ async fn test_conference_seat_replace_success() {
     let a1_port = portpicker::pick_unused_port().expect("no free port");
     let a1 = TestUa::callee_with_username(a1_port, 1, "a1").await;
 
+    let b_port = portpicker::pick_unused_port().expect("no free port");
+    let b = TestUa::callee_with_username(b_port, 1, "b").await;
+
+    let c_port = portpicker::pick_unused_port().expect("no free port");
+    let c = TestUa::callee_with_username(c_port, 1, "c").await;
+
     let mut ws = ws_connect(&rwi_url).await;
     let resp = ws_send_recv_with_id(
         &mut ws,
@@ -135,6 +141,28 @@ async fn test_conference_seat_replace_success() {
     assert_eq!(resp["status"], "success");
     let _ = wait_for_event(&mut ws, "call_answered", 15).await;
 
+    let call_b = Uuid::new_v4().to_string();
+    let dest_b = format!("sip:b@127.0.0.1:{}", b_port);
+    let resp = ws_send_recv_with_id(
+        &mut ws,
+        "call.originate",
+        serde_json::json!({"call_id": call_b, "destination": dest_b, "caller_id": "agent-b"}),
+    )
+    .await;
+    assert_eq!(resp["status"], "success");
+    let _ = wait_for_event(&mut ws, "call_answered", 15).await;
+
+    let call_c = Uuid::new_v4().to_string();
+    let dest_c = format!("sip:c@127.0.0.1:{}", c_port);
+    let resp = ws_send_recv_with_id(
+        &mut ws,
+        "call.originate",
+        serde_json::json!({"call_id": call_c, "destination": dest_c, "caller_id": "agent-c"}),
+    )
+    .await;
+    assert_eq!(resp["status"], "success");
+    let _ = wait_for_event(&mut ws, "call_answered", 15).await;
+
     let conf_id = format!("seat-room-{}", Uuid::new_v4());
     let resp = ws_send_recv_with_id(
         &mut ws,
@@ -151,6 +179,16 @@ async fn test_conference_seat_replace_success() {
     )
     .await;
     assert_eq!(resp["status"], "success");
+
+    for stable_call_id in [&call_b, &call_c] {
+        let resp = ws_send_recv_with_id(
+            &mut ws,
+            "conference.add",
+            serde_json::json!({"conference_id": conf_id, "call_id": stable_call_id}),
+        )
+        .await;
+        assert_eq!(resp["status"], "success");
+    }
 
     let (resp, events) = ws_send_recv_with_id_and_events(
         &mut ws,
@@ -184,6 +222,8 @@ async fn test_conference_seat_replace_success() {
 
     a.stop();
     a1.stop();
+    b.stop();
+    c.stop();
 }
 
 #[tokio::test]
@@ -199,6 +239,9 @@ async fn test_conference_seat_replace_failure_rolls_back() {
 
     let b_port = portpicker::pick_unused_port().expect("no free port");
     let b = TestUa::callee_with_username(b_port, 1, "b").await;
+
+    let c_port = portpicker::pick_unused_port().expect("no free port");
+    let c = TestUa::callee_with_username(c_port, 1, "c").await;
 
     let a1_port = portpicker::pick_unused_port().expect("no free port");
     let a1 = TestUa::callee_with_username(a1_port, 1, "a1").await;
@@ -245,6 +288,17 @@ async fn test_conference_seat_replace_failure_rolls_back() {
     assert_eq!(resp["status"], "success");
     let _ = wait_for_event(&mut ws, "call_answered", 15).await;
 
+    let call_c = Uuid::new_v4().to_string();
+    let dest_c = format!("sip:c@127.0.0.1:{}", c_port);
+    let resp = ws_send_recv_with_id(
+        &mut ws,
+        "call.originate",
+        serde_json::json!({"call_id": call_c, "destination": dest_c, "caller_id": "agent-c"}),
+    )
+    .await;
+    assert_eq!(resp["status"], "success");
+    let _ = wait_for_event(&mut ws, "call_answered", 15).await;
+
     let conf_id = format!("seat-room-{}", Uuid::new_v4());
     let conf_other = format!("seat-room-other-{}", Uuid::new_v4());
     let resp = ws_send_recv_with_id(
@@ -282,6 +336,14 @@ async fn test_conference_seat_replace_failure_rolls_back() {
     let resp = ws_send_recv_with_id(
         &mut ws,
         "conference.add",
+        serde_json::json!({"conference_id": conf_id, "call_id": call_c}),
+    )
+    .await;
+    assert_eq!(resp["status"], "success");
+
+    let resp = ws_send_recv_with_id(
+        &mut ws,
+        "conference.add",
         serde_json::json!({"conference_id": conf_other, "call_id": call_a1}),
     )
     .await;
@@ -311,5 +373,6 @@ async fn test_conference_seat_replace_failure_rolls_back() {
 
     a.stop();
     b.stop();
+    c.stop();
     a1.stop();
 }

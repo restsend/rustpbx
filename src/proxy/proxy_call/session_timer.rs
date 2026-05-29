@@ -253,15 +253,6 @@ impl SessionTimerState {
         self.min_se.as_secs().to_string()
     }
 
-    /// Activate the timer
-    #[cfg(test)]
-    pub fn activate(&mut self) {
-        if self.enabled {
-            self.active = true;
-            self.last_refresh = Instant::now();
-        }
-    }
-
     /// Deactivate the timer
     #[cfg(test)]
     pub fn deactivate(&mut self) {
