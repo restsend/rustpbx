@@ -452,11 +452,10 @@ impl ConferenceManager {
             leg_map.remove(leg_id);
         }
 
-        if remaining <= 1 {
+        if remaining == 0 {
             info!(
                 conf_id = %conf_id.0,
-                remaining,
-                "Auto-destroying conference: too few participants remaining"
+                "Auto-destroying empty conference"
             );
             let mgr = self.clone();
             let cid = conf_id.clone();
@@ -1100,17 +1099,16 @@ mod tests {
         assert_eq!(remaining, 2);
         assert!(manager.get_conference(&conf_id).await.is_some());
 
-        // Remove leg_b -> 1 remain, auto-destroy
+        // Remove leg_b -> 1 remain (C still in conference), stays alive
         let remaining = manager.remove_participant(&conf_id, &leg_b).await.unwrap();
-        assert_eq!(remaining, 0);
-
-        // Yield to let the spawned auto-destroy complete
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-
-        assert!(
-            manager.get_conference(&conf_id).await.is_none(),
-            "Conference should be auto-destroyed when only 1 participant remains"
+        assert_eq!(remaining, 1);
+        assert!(manager.get_conference(&conf_id).await.is_some(),
+            "Conference should stay alive with 1 participant remaining"
         );
+
+        // Remove leg_c -> 0 remain, auto-destroy
+        let remaining = manager.remove_participant(&conf_id, &leg_c).await.unwrap();
+        assert_eq!(remaining, 0);
     }
 
     #[tokio::test]
@@ -1181,14 +1179,24 @@ mod tests {
         manager.add_participant(&conf_id, leg_a.clone()).await.unwrap();
         manager.add_participant(&conf_id, leg_b.clone()).await.unwrap();
 
-        // Remove leg_a via remove_leg_from_all -> 1 remains -> auto-destroy
+        // Remove leg_a via remove_leg_from_all -> 1 remains (leg_b), conference stays alive
         manager.remove_leg_from_all(&leg_a).await.unwrap();
 
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
         assert!(
+            manager.get_conference(&conf_id).await.is_some(),
+            "Conference should stay alive with 1 participant remaining"
+        );
+
+        // Remove leg_b -> 0 remain, auto-destroy
+        manager.remove_leg_from_all(&leg_b).await.unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        assert!(
             manager.get_conference(&conf_id).await.is_none(),
-            "Conference should auto-destroy when only 1 participant remains after remove_leg_from_all"
+            "Conference should auto-destroy when empty"
         );
     }
 }

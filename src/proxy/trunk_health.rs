@@ -28,6 +28,7 @@ pub struct PerIpHealthState {
     pub healthy: bool,
     pub rtt_ms: Option<u64>,
     pub last_error: Option<String>,
+    pub last_checked: Option<String>,
 }
 
 /// Runtime health status of a single trunk.
@@ -65,7 +66,7 @@ async fn probe_trunk(
     .await
 }
 
-async fn probe_trunk_with_timeout(
+pub async fn probe_trunk_with_timeout(
     dest: &str,
     endpoint_inner: &EndpointInnerRef,
     local_sip_addr: &str,
@@ -152,7 +153,7 @@ async fn probe_trunk_with_timeout(
     }
 }
 
-fn dest_name(dest: &str) -> &str {
+pub fn dest_name(dest: &str) -> &str {
     let dest = dest.trim();
     dest.strip_prefix("sip:").unwrap_or(dest)
 }
@@ -218,17 +219,21 @@ fn spawn_health_loop_with_timeout(
                 let has_hosts = !cfg.inbound_hosts.is_empty();
 
                 if per_ip && has_hosts {
-                    // ── Per-IP mode: probe dest + each inbound_host ──
+                    // ── Per-IP mode: probe each inbound_host individually.
+                    // Dest is probed as part of the targets along with each inbound host
+                    // so we can report per-peer health. Trunk is healthy only when ALL
+                    // targets are healthy (AND logic), since each peer should be reachable.
                     let mut targets: Vec<String> = Vec::with_capacity(1 + cfg.inbound_hosts.len());
                     targets.push(cfg.dest.clone());
                     targets.extend(cfg.inbound_hosts.clone());
 
                     let mut per_ip_results: Vec<PerIpHealthState> =
                         Vec::with_capacity(targets.len());
-                    let mut any_healthy = false;
+                    let mut all_healthy = true;
 
                     for target in &targets {
                         let tgt = dest_name(target);
+                        let checked_at = chrono::Utc::now().to_rfc3339();
                         match probe_trunk_with_timeout(
                             tgt,
                             &endpoint_inner,
@@ -238,21 +243,23 @@ fn spawn_health_loop_with_timeout(
                         .await
                         {
                             Ok(rtt) => {
-                                any_healthy = true;
                                 per_ip_results.push(PerIpHealthState {
                                     target: target.clone(),
                                     healthy: true,
                                     rtt_ms: Some(rtt),
                                     last_error: None,
+                                    last_checked: Some(checked_at.clone()),
                                 });
                                 debug!("health OK  {}:{}  {}ms", name, target, rtt);
                             }
                             Err(e) => {
+                                all_healthy = false;
                                 per_ip_results.push(PerIpHealthState {
                                     target: target.clone(),
                                     healthy: false,
                                     rtt_ms: None,
                                     last_error: Some(e.clone()),
+                                    last_checked: Some(checked_at.clone()),
                                 });
                                 debug!("health FAIL {}:{}  {}", name, target, e);
                             }
@@ -273,13 +280,13 @@ fn spawn_health_loop_with_timeout(
                         per_ip_states: None,
                     });
 
-                    let failures = if any_healthy {
+                    let failures = if all_healthy {
                         0
                     } else {
                         prev.consecutive_failures + 1
                     };
                     let threshold = cfg.health_check_probe_count.unwrap_or(3);
-                    let is_unhealthy = !any_healthy && failures >= threshold;
+                    let is_unhealthy = !all_healthy && failures >= threshold;
 
                     if is_unhealthy && prev.healthy {
                         warn!(
@@ -298,13 +305,13 @@ fn spawn_health_loop_with_timeout(
                         name.clone(),
                         TrunkHealthState {
                             trunk_name: name.clone(),
-                            healthy: any_healthy,
+                            healthy: all_healthy,
                             consecutive_failures: failures,
                             rtt_ms: per_ip_results
                                 .iter()
                                 .find_map(|p| if p.healthy { p.rtt_ms } else { None }),
                             last_checked: Some(now),
-                            last_error: if any_healthy {
+                            last_error: if all_healthy {
                                 None
                             } else {
                                 per_ip_results.first().and_then(|p| p.last_error.clone())
@@ -399,7 +406,9 @@ fn spawn_health_loop_with_timeout(
 
             {
                 let mut map = states.write().await;
-                map.retain(|name, _| trunks.contains_key(name));
+                map.retain(|name, _| {
+                    trunks.get(name).map_or(false, |cfg| cfg.health_check_enabled.unwrap_or(false))
+                });
             }
 
             tokio::time::sleep(Duration::from_secs(next_tick)).await;
@@ -407,6 +416,20 @@ fn spawn_health_loop_with_timeout(
 
         info!("trunk health check stopped");
     });
+}
+
+/// Remove health state entries for trunks that no longer exist or have HC disabled.
+pub async fn cleanup_stale_health_states(
+    data_context: &super::data::ProxyDataContext,
+    health: &Option<HealthStateMap>,
+) {
+    let trunks = data_context.trunks_snapshot();
+    if let Some(health_map) = health {
+        let mut map = health_map.write().await;
+        map.retain(|name, _| {
+            trunks.get(name).map_or(false, |cfg| cfg.health_check_enabled.unwrap_or(false))
+        });
+    }
 }
 
 /// Return a snapshot of all health states.

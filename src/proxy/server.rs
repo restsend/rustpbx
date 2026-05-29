@@ -677,11 +677,13 @@ impl SipServerBuilder {
         let data_context = if let Some(ref context) = self.data_context {
             context.clone()
         } else {
-            Arc::new(
+            let dc = Arc::new(
                 ProxyDataContext::new(self.config.clone(), database.clone())
                     .await
                     .map_err(|err| anyhow!("failed to initialize proxy data context: {err}"))?,
-            )
+            );
+            self.data_context = Some(dc.clone());
+            dc
         };
 
         // Wire up the SIP endpoint for trunk registration, then reconcile so
@@ -725,6 +727,12 @@ impl SipServerBuilder {
 
         // Create conference manager with in-server audio mixing
         let conference_manager = Arc::new(crate::call::runtime::ConferenceManager::new());
+
+        // Create trunk health state map BEFORE inner so inner.trunk_health is populated
+        // (the health loop itself is spawned after inner since it needs endpoint/cancel_token).
+        let trunk_health_states: crate::proxy::trunk_health::HealthStateMap =
+            Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
+        self.trunk_health = Some(trunk_health_states.clone());
 
         let inner = Arc::new(SipServerInner {
             rtp_config,
@@ -858,8 +866,6 @@ impl SipServerBuilder {
         }
         // ── Trunk health check ──────────────────────────────────────
         if let Some(ref dc) = self.data_context {
-            let health_states: crate::proxy::trunk_health::HealthStateMap =
-                Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()));
             let local_sip = format!(
                 "{}:{}",
                 self.config.addr,
@@ -869,13 +875,12 @@ impl SipServerBuilder {
             let dc = dc.clone();
             crate::proxy::trunk_health::spawn_health_loop(
                 move || dc.trunks_snapshot(),
-                health_states.clone(),
+                trunk_health_states,
                 ep,
                 local_sip,
                 30u64,
                 inner.cancel_token.clone(),
             );
-            self.trunk_health = Some(health_states);
         }
 
         advertised_methods

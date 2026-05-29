@@ -478,7 +478,7 @@ async fn test_auto_destroy_on_last_participant() {
     )
     .await;
 
-    // Remove Bob: 2 -> 1 remain, triggers auto-destroy
+    // Remove Bob: 2 -> 1 remain (Alice), conference stays alive
     let resp = ws_send_recv(
         &mut ws,
         "conference.remove",
@@ -490,7 +490,35 @@ async fn test_auto_destroy_on_last_participant() {
     .await;
     assert_eq!(resp["status"], "success");
 
-    // Give spawned auto-destroy time to run
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Verify conference is still alive with Alice
+    let resp = ws_send_recv(
+        &mut ws,
+        "conference.mute",
+        serde_json::json!({
+            "conference_id": conf_id,
+            "call_id": call_alice,
+        }),
+    )
+    .await;
+    assert_eq!(
+        resp["status"], "success",
+        "Conference should stay alive with 1 participant remaining"
+    );
+
+    // Remove Alice: 1 -> 0 remain, triggers auto-destroy
+    let resp = ws_send_recv(
+        &mut ws,
+        "conference.remove",
+        serde_json::json!({
+            "conference_id": conf_id,
+            "call_id": call_alice,
+        }),
+    )
+    .await;
+    assert_eq!(resp["status"], "success");
+
     tokio::time::sleep(Duration::from_millis(500)).await;
 
     // Verify conference is destroyed
@@ -505,7 +533,7 @@ async fn test_auto_destroy_on_last_participant() {
     .await;
     assert_eq!(
         resp["status"], "error",
-        "Conference should be auto-destroyed when only 1 participant remains"
+        "Conference should be auto-destroyed when empty"
     );
 
     alice.stop();

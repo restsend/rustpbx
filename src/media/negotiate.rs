@@ -104,6 +104,13 @@ impl Default for NegotiatedLegProfile {
     }
 }
 
+/// Bridge codec lists for caller-facing and callee-facing sides.
+#[derive(Debug, Clone)]
+pub struct BridgeCodecLists {
+    pub caller_side: Vec<CodecInfo>,
+    pub callee_side: Vec<CodecInfo>,
+}
+
 /// Media negotiator for SDP parsing and codec selection
 pub struct MediaNegotiator;
 
@@ -771,6 +778,31 @@ impl MediaNegotiator {
     /// order of `preferred_codecs`. When `preferred_codecs` is empty, or none
     /// of the preferred codecs exists in the offer, this falls back to the
     /// offer's audio codec order.
+    /// Build both caller-side and callee-side codec lists for a bridge.
+    ///
+    /// `caller_sdp` is the SDP from the caller.
+    /// `caller_is_webrtc` / `callee_is_webrtc` control WebRTC-specific filtering
+    /// (e.g., G729 removal from WebRTC sides).
+    /// `allow_codecs` specifies the allowed codec set (pass-through or generated).
+    pub fn build_bridge_codec_lists(
+        caller_sdp: &str,
+        caller_is_webrtc: bool,
+        callee_is_webrtc: bool,
+        allow_codecs: &[CodecType],
+    ) -> BridgeCodecLists {
+        let mut caller_side = Self::build_codec_list_from_offer(caller_sdp, allow_codecs);
+        let mut callee_side = Self::build_callee_codec_offer_with_allow(caller_sdp, allow_codecs);
+
+        if caller_is_webrtc {
+            caller_side = Self::filter_webrtc_offer_codecs(caller_sdp, caller_side);
+        }
+        if callee_is_webrtc {
+            callee_side = Self::filter_webrtc_offer_codecs(caller_sdp, callee_side);
+        }
+
+        BridgeCodecLists { caller_side, callee_side }
+    }
+
     pub fn build_codec_list_from_offer(
         offer_sdp: &str,
         preferred_codecs: &[CodecType],

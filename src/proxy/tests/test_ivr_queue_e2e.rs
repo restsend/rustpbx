@@ -42,6 +42,7 @@ fn create_ivr_queue_proxy_config(port: u16, ivr_toml_path: &str) -> ProxyConfig 
                 uri: target_uri,
                 label: Some("Support Agent".to_string()),
             }],
+            wait_timeout_secs: Some(5),
             ..Default::default()
         },
         accept_immediately: false,
