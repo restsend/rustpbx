@@ -6,7 +6,6 @@ pub mod callrecord;
 pub mod config;
 #[cfg(feature = "console")]
 pub mod console;
-pub mod fixtures;
 pub mod handler;
 pub mod license;
 

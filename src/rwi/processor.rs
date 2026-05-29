@@ -1409,7 +1409,7 @@ impl RwiCommandProcessor {
                                                     Ok((dialog, response)) => {
                                                         if let Some(ref resp) = response {
                                                             let status_code = resp.status_code.code();
-                                                            if (200..300).contains(&status_code) {
+                                                            if rsipstack::sip::StatusCode::from(status_code).kind() == rsipstack::sip::StatusCodeKind::Successful {
                                                                 tracing::info!(%call_id_for_spawn, %leg_id_clone, status = %status_code, "SIP leg answered successfully in originate task");
                                                                 if !resp.body().is_empty() {
                                                                     let answer_sdp = String::from_utf8_lossy(resp.body()).to_string();

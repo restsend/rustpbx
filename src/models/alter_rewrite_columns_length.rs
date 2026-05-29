@@ -6,6 +6,10 @@ pub struct Migration;
 #[async_trait::async_trait]
 impl MigrationTrait for Migration {
     async fn up(&self, manager: &SchemaManager) -> Result<(), DbErr> {
+        if manager.get_database_backend() == sea_orm::DatabaseBackend::Sqlite {
+            return Ok(());
+        }
+
         if manager
             .has_column("rustpbx_call_records", "rewrite_original_from")
             .await?

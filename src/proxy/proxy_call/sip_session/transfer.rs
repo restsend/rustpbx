@@ -4,6 +4,7 @@ use crate::callrecord::CallRecordHangupReason;
 use anyhow::{Result, anyhow};
 use futures::{SinkExt, StreamExt};
 use rsipstack::dialog::dialog::DialogState;
+use rsipstack::sip::StatusCode;
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 use tracing::{info, warn};
@@ -247,10 +248,11 @@ impl SipSession {
                     let result = self
                         .try_single_target(&location, callee_state_rx, None)
                         .await;
-                    return result.map_err(|(code, reason)| {
+                    return result.map_err(|(code, text, reason)| {
                         anyhow!(
-                            "B-leg transfer failed: {:?} - {}",
+                            "B-leg transfer failed: {} {} - {}",
                             code,
+                            text,
                             reason.unwrap_or_default()
                         )
                     });
@@ -426,15 +428,16 @@ impl SipSession {
                 info!(queue = %queue_name, "Queue transfer completed successfully");
                 Ok(())
             }
-            Err((code, reason)) => {
+            Err((code, text, reason)) => {
                 warn!(
                     queue = %queue_name,
-                    ?code,
+                    code = %code,
+                    text = %text,
                     ?reason,
                     "Queue transfer failed"
                 );
                 if self.server_dialog.state().is_confirmed() {
-                    self.meta.last_error = Some((code.clone(), reason.clone()));
+                    self.meta.last_error = Some((StatusCode::Other(code, text.clone()), reason.clone()));
                     self.meta
                         .hangup_reason
                         .get_or_insert(CallRecordHangupReason::Failed);
@@ -442,13 +445,14 @@ impl SipSession {
                     self.cancel_token.cancel();
                     info!(
                         queue = %queue_name,
-                        ?code,
+                        code = %code,
+                        text = %text,
                         ?reason,
                         "Queue transfer failed after caller was answered; hanging up caller dialog"
                     );
                     return Ok(());
                 }
-                Err(anyhow!("Queue transfer failed: {:?} - {:?}", code, reason))
+                Err(anyhow!("Queue transfer failed: {} {} {:?}", code, text, reason))
             }
         }
     }
