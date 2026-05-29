@@ -79,6 +79,13 @@ struct RecordingPlaybackQuery {
 
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
+struct SipFlowRequestQuery {
+    #[serde(default)]
+    detail: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
 struct UpdateCallRecordPayload {
     #[serde(default)]
     tags: Option<Vec<String>>,
@@ -155,6 +162,7 @@ async fn resolve_call_record_by_id_or_call_id(
 
 async fn download_call_record_sip_flow(
     AxumPath(identifier): AxumPath<String>,
+    Query(query): Query<SipFlowRequestQuery>,
     State(state): State<Arc<ConsoleState>>,
     AuthRequired(_): AuthRequired,
 ) -> Response {
@@ -207,14 +215,16 @@ async fn download_call_record_sip_flow(
     let mut rtp_streams = Vec::new();
 
     for (cid, role) in &call_id_roles {
-        match backend.query_flow(cid, start_time, end_time).await {
-            Ok(items) => {
-                for item in items {
-                    flow_items.push((item, role.clone(), cid.clone()));
+        if query.detail {
+            match backend.query_flow(cid, start_time, end_time).await {
+                Ok(items) => {
+                    for item in items {
+                        flow_items.push((item, role.clone(), cid.clone()));
+                    }
                 }
-            }
-            Err(err) => {
-                warn!(identifier = %identifier, call_id = %cid, "failed to query sip flow for leg: {}", err);
+                Err(err) => {
+                    warn!(identifier = %identifier, call_id = %cid, "failed to query sip flow for leg: {}", err);
+                }
             }
         }
 
@@ -248,37 +258,42 @@ async fn download_call_record_sip_flow(
         }
     }
 
-    // Sort combined SIP flow by timestamp
-    flow_items.sort_by(|(a, _, _), (b, _, _)| {
-        a.timestamp
-            .partial_cmp(&b.timestamp)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-
-    let mut flow_json = Vec::new();
-
-    for (item, role, cid) in flow_items {
-        let raw_message = String::from_utf8_lossy(&item.payload).to_string();
-        flow_json.push(json!({
-            "timestamp": item.timestamp,
-            "seq": item.seq,
-            "msg_type": "Sip",
-            "src_addr": item.src_addr,
-            "dst_addr": item.dst_addr,
-            "raw_message": raw_message,
-            "role": role,
-            "call_id": cid,
-        }));
-    }
-
-    Json(json!({
+    let mut response = json!({
         "call_id": record.call_id,
         "start_time": record.started_at,
         "status": "success",
-        "flow": flow_json,
+        "flow": [],
         "rtp_streams": rtp_streams,
-    }))
-    .into_response()
+    });
+
+    if query.detail {
+        // Sort combined SIP flow by timestamp
+        flow_items.sort_by(|(a, _, _), (b, _, _)| {
+            a.timestamp
+                .partial_cmp(&b.timestamp)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        let mut flow_json = Vec::new();
+
+        for (item, role, cid) in flow_items {
+            let raw_message = String::from_utf8_lossy(&item.payload).to_string();
+            flow_json.push(json!({
+                "timestamp": item.timestamp,
+                "seq": item.seq,
+                "msg_type": "Sip",
+                "src_addr": item.src_addr,
+                "dst_addr": item.dst_addr,
+                "raw_message": raw_message,
+                "role": role,
+                "call_id": cid,
+            }));
+        }
+
+        response["flow"] = Value::Array(flow_json);
+    }
+
+    Json(response).into_response()
 }
 
 async fn stream_call_recording(
@@ -1593,7 +1608,8 @@ fn build_detail_payload(
         Value::Null
     };
 
-    let sip_flow_download = state.url_for(&format!("/call-records/{}/sip-flow", record.id));
+    let sip_flow_download =
+        state.url_for(&format!("/call-records/{}/sip-flow?detail=true", record.id));
 
     let mut download_recording = derive_recording_download_url(state, record);
     if download_recording.is_none() {

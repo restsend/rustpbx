@@ -2211,6 +2211,9 @@
                 return `${numeric.toFixed(numeric >= 10 ? 1 : 2)}%`;
             },
             formatJitter(value) {
+                if (value === null || value === undefined) {
+                    return '—';
+                }
                 const numeric = Number(value);
                 if (!Number.isFinite(numeric)) {
                     return '—';
@@ -2220,6 +2223,9 @@
             formatSsrc(stream) {
                 if (stream && stream.ssrc_hex) {
                     return stream.ssrc_hex;
+                }
+                if (!stream || stream.ssrc === null || stream.ssrc === undefined) {
+                    return '—';
                 }
                 const numeric = Number(stream?.ssrc);
                 if (!Number.isFinite(numeric)) {
