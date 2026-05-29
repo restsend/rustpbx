@@ -204,8 +204,7 @@ async fn download_call_record_sip_flow(
     }
 
     let mut flow_items = Vec::new();
-    // Map of (Role, Src, Dst) -> PacketCount
-    let mut rtp_stats: HashMap<(String, String, String), usize> = HashMap::new();
+    let mut rtp_streams = Vec::new();
 
     for (cid, role) in &call_id_roles {
         match backend.query_flow(cid, start_time, end_time).await {
@@ -221,18 +220,26 @@ async fn download_call_record_sip_flow(
 
         match backend.query_media_stats(cid, start_time, end_time).await {
             Ok(stats) => {
-                for (leg, src_addr, count) in stats {
-                    *rtp_stats
-                        .entry((
-                            role.clone(),
-                            if src_addr.is_empty() {
-                                format!("Leg {}", leg)
-                            } else {
-                                src_addr
-                            },
-                            "RTP".to_string(),
-                        ))
-                        .or_insert(0) += count;
+                for stat in stats {
+                    let src_addr = if stat.src.is_empty() {
+                        format!("Leg {}", stat.leg)
+                    } else {
+                        stat.src
+                    };
+                    rtp_streams.push(json!({
+                        "role": role,
+                        "src_addr": src_addr,
+                        "dst_addr": "RTP",
+                        "packet_count": stat.packet_count,
+                        "lost_packets": stat.lost_packets,
+                        "expected_packets": stat.expected_packets,
+                        "loss_percent": stat.loss_percent,
+                        "jitter_ms": stat.jitter_ms,
+                        "ssrc": stat.ssrc,
+                        "ssrc_hex": stat.ssrc.map(|ssrc| format!("0x{ssrc:08x}")),
+                        "payload_type": stat.payload_type,
+                        "clock_rate": stat.clock_rate,
+                    }));
                 }
             }
             Err(err) => {
@@ -263,18 +270,6 @@ async fn download_call_record_sip_flow(
             "call_id": cid,
         }));
     }
-
-    let rtp_streams: Vec<Value> = rtp_stats
-        .into_iter()
-        .map(|((role, src, dst), count)| {
-            json!({
-                "role": role,
-                "src_addr": src,
-                "dst_addr": dst,
-                "packet_count": count
-            })
-        })
-        .collect();
 
     Json(json!({
         "call_id": record.call_id,
