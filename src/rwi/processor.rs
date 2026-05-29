@@ -3594,23 +3594,7 @@ impl RwiCommandProcessor {
         let new_leg = LegId::new(new_call_id);
         let old_was_member = manager.get_conference_id_for_leg(&old_leg).await.is_some();
 
-        if old_was_member {
-            manager
-                .remove_participant(&conf_id.into(), &old_leg)
-                .await
-                .map_err(|e| CommandError::CommandFailed(e.to_string()))?;
-
-            let left_event = RwiEvent::ConferenceMemberLeft {
-                conf_id: conf_id.to_string(),
-                call_id: old_call_id.to_string(),
-                context: Default::default(),
-            };
-            {
-                let gw = self.gateway.read();
-                gw.broadcast_event(&left_event);
-            }
-        }
-
+        // Add new participant first so the conference never becomes empty
         match manager
             .add_participant(&conf_id.into(), new_leg.clone())
             .await
@@ -3624,6 +3608,26 @@ impl RwiCommandProcessor {
                 {
                     let gw = self.gateway.read();
                     gw.broadcast_event(&joined_event);
+                }
+
+                // Now remove old participant
+                if old_was_member {
+                    if let Err(e) = manager
+                        .remove_participant(&conf_id.into(), &old_leg)
+                        .await
+                    {
+                        warn!(conf_id = %conf_id, old_call_id = %old_call_id, error = %e, "Failed to remove old participant during seat replace");
+                    }
+
+                    let left_event = RwiEvent::ConferenceMemberLeft {
+                        conf_id: conf_id.to_string(),
+                        call_id: old_call_id.to_string(),
+                        context: Default::default(),
+                    };
+                    {
+                        let gw = self.gateway.read();
+                        gw.broadcast_event(&left_event);
+                    }
                 }
 
                 if old_was_member && let Ok(handle) = self.get_handle(old_call_id).await {
@@ -3647,61 +3651,20 @@ impl RwiCommandProcessor {
                 Ok(CommandResult::Success)
             }
             Err(e) => {
-                let reason = e.to_string();
-                if old_was_member {
-                    #[cfg(test)]
-                    let forced_rollback_failure = self
-                        .force_seat_replace_rollback_failure
-                        .swap(false, Ordering::SeqCst);
-                    #[cfg(not(test))]
-                    let forced_rollback_failure = false;
-
-                    if forced_rollback_failure {
-                        let rollback_failed = RwiEvent::ConferenceSeatReplaceRollbackFailed {
-                            conf_id: conf_id.to_string(),
-                            old_call_id: old_call_id.to_string(),
-                            new_call_id: new_call_id.to_string(),
-                            reason: "forced rollback failure".to_string(),
-                        };
-                        let gw = self.gateway.read();
-                        gw.broadcast_event(&rollback_failed);
-                    } else {
-                        let rollback = manager
-                            .add_participant(&conf_id.into(), old_leg.clone())
-                            .await;
-                        if rollback.is_ok() {
-                            let rollback_event = RwiEvent::ConferenceMemberJoined {
-                                conf_id: conf_id.to_string(),
-                                call_id: old_call_id.to_string(),
-                                context: Default::default(),
-                            };
-                            let gw = self.gateway.read();
-                            gw.broadcast_event(&rollback_event);
-                        } else if let Err(rollback_err) = rollback {
-                            let rollback_failed = RwiEvent::ConferenceSeatReplaceRollbackFailed {
-                                conf_id: conf_id.to_string(),
-                                old_call_id: old_call_id.to_string(),
-                                new_call_id: new_call_id.to_string(),
-                                reason: rollback_err.to_string(),
-                            };
-                            let gw = self.gateway.read();
-                            gw.broadcast_event(&rollback_failed);
-                        }
-                    }
-                }
-
+                // New participant could not be added; old one was never removed,
+                // so no rollback is needed
                 let failed_event = RwiEvent::ConferenceSeatReplaceFailed {
                     conf_id: conf_id.to_string(),
                     old_call_id: old_call_id.to_string(),
                     new_call_id: new_call_id.to_string(),
-                    reason: reason.clone(),
+                    reason: e.to_string(),
                 };
                 let gw = self.gateway.read();
                 gw.broadcast_event(&failed_event);
 
                 Err(CommandError::CommandFailed(format!(
-                    "seat replacement failed: {}",
-                    reason
+                    "Failed to add new participant: {}",
+                    e
                 )))
             }
         }
@@ -6698,7 +6661,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_conference_seat_replace_rollback_failed_event_emitted() {
+    async fn test_conference_seat_replace_failure_emits_failed_event() {
         let registry = Arc::new(ActiveProxyCallRegistry::new());
 
         let mut gateway_impl = RwiGateway::new();
@@ -6712,7 +6675,6 @@ mod tests {
             gateway,
             cm.clone(),
         ));
-        processor.force_next_seat_replace_rollback_failure();
 
         processor
             .process_command(RwiCommandPayload::ConferenceCreate(
@@ -6802,15 +6764,12 @@ mod tests {
 
         let mut found = false;
         while let Ok(event) = event_rx.try_recv() {
-            if event
-                .get("conference_seat_replace_rollback_failed")
-                .is_some()
-            {
+            if event.get("conference_seat_replace_failed").is_some() {
                 found = true;
                 break;
             }
         }
-        assert!(found);
+        assert!(found, "Expected conference_seat_replace_failed event");
     }
 
     #[tokio::test]

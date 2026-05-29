@@ -165,6 +165,15 @@ impl TestUa {
 
     /// Register with the proxy server
     pub async fn register(&self) -> Result<()> {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            self.register_inner(),
+        )
+        .await
+        .map_err(|_| anyhow!("register timed out after 10s"))?
+    }
+
+    async fn register_inner(&self) -> Result<()> {
         let dialog_layer = self
             .dialog_layer
             .as_ref()
@@ -200,7 +209,12 @@ impl TestUa {
 
     /// Make a call with optional SDP
     pub async fn make_call(&self, callee: &str, sdp_offer: Option<String>) -> Result<DialogId> {
-        self.make_call_with_sdp(callee, sdp_offer).await
+        tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            self.make_call_with_sdp(callee, sdp_offer),
+        )
+        .await
+        .map_err(|_| anyhow!("make_call timed out after 15s for callee '{}'", callee))?
     }
 
     /// Make a call with optional SDP (internal implementation)
@@ -477,6 +491,15 @@ impl TestUa {
 
     /// Send SIP INFO with DTMF signal
     pub async fn send_dtmf_info(&self, dialog_id: &DialogId, digit: &str) -> Result<()> {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            self.send_dtmf_info_inner(dialog_id, digit),
+        )
+        .await
+        .map_err(|_| anyhow!("send_dtmf_info timed out after 10s"))?
+    }
+
+    async fn send_dtmf_info_inner(&self, dialog_id: &DialogId, digit: &str) -> Result<()> {
         let dialog_layer = self
             .dialog_layer
             .as_ref()
