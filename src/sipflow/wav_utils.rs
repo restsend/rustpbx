@@ -670,6 +670,7 @@ mod tests {
         let item = SipFlowItem {
             timestamp: 0,
             seq: 0,
+            leg: None,
             msg_type: SipFlowMsgType::Sip,
             src_addr: String::new(),
             dst_addr: String::new(),
@@ -691,6 +692,7 @@ mod tests {
         let leg_a = SipFlowItem {
             timestamp: 0,
             seq: 0,
+            leg: None,
             msg_type: SipFlowMsgType::Sip,
             src_addr: String::new(),
             dst_addr: String::new(),
@@ -701,6 +703,7 @@ mod tests {
         let leg_b = SipFlowItem {
             timestamp: 1,
             seq: 0,
+            leg: None,
             msg_type: SipFlowMsgType::Sip,
             src_addr: String::new(),
             dst_addr: String::new(),

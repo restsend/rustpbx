@@ -24,6 +24,8 @@ pub struct SipFlowItem {
     pub timestamp: u64,
     #[serde(default)]
     pub seq: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub leg: Option<i32>,
     #[serde(default = "default_msg_type")]
     pub msg_type: SipFlowMsgType,
     #[serde(default)]

@@ -9,12 +9,13 @@ mod tests {
     use crate::sipflow::backend::create_backend;
     use crate::sipflow::{SipFlowBackend, SipFlowItem, SipFlowMsgType};
 
-    fn make_rtp_item(leg: &str) -> SipFlowItem {
+    fn make_rtp_item(leg: i32) -> SipFlowItem {
         SipFlowItem {
             timestamp: chrono::Utc::now().timestamp_micros() as u64,
             seq: 0,
+            leg: Some(leg),
             msg_type: SipFlowMsgType::Rtp,
-            src_addr: format!("{}_127.0.0.1:5000", leg),
+            src_addr: "127.0.0.1:5000".to_string(),
             dst_addr: "127.0.0.1:5001".to_string(),
             payload: bytes::Bytes::from(vec![0u8; 20]),
         }
@@ -55,7 +56,7 @@ mod tests {
 
         for _ in 0..5 {
             backend
-                .record("test-call-1", make_rtp_item("LegA"))
+                .record("test-call-1", make_rtp_item(0))
                 .expect("record should succeed");
         }
 
@@ -86,6 +87,20 @@ mod tests {
         };
         let backend = create_backend(&cfg);
         assert!(backend.is_ok(), "legacy format should create backend");
+    }
+
+    /// RemoteBackend should accept hostnames for Kubernetes service DNS names.
+    #[tokio::test]
+    async fn test_remote_backend_domain_udp_addr() {
+        let cfg = SipFlowConfig::Remote {
+            nodes: vec![],
+            udp_addr: Some("localhost:3000".to_string()),
+            http_addr: Some("http://localhost:3001".to_string()),
+            timeout_secs: 10,
+            upload: None,
+        };
+        let backend = create_backend(&cfg);
+        assert!(backend.is_ok(), "domain UDP address should create backend");
     }
 
     /// RemoteBackend with new multi-node format

@@ -1,7 +1,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, Local};
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::sync::Arc;
 use tokio::net::UdpSocket;
 use tokio::sync::mpsc;
@@ -68,7 +68,9 @@ impl RemoteBackend {
         let nodes: Vec<ClusterNode> = config_nodes
             .iter()
             .map(|n| {
-                let udp_addr: SocketAddr = n.udp.parse()?;
+                let udp_addr: SocketAddr = n.udp.to_socket_addrs()?.next().ok_or_else(|| {
+                    anyhow::anyhow!("Unable to resolve SipFlow UDP address: {}", n.udp)
+                })?;
                 Ok(ClusterNode {
                     udp_addr,
                     http_addr: n.http.clone(),
@@ -113,18 +115,23 @@ impl RemoteBackend {
                                 let (src_ip, src_port) = if !item.src_addr.is_empty() {
                                     parse_addr(&item.src_addr)
                                 } else {
-                                    (IpAddr::from([127, 0, 0, 1]), 5060)
+                                    (IpAddr::from([127, 0, 0, 1]), default_port)
                                 };
 
                                 let (dst_ip, dst_port) = if !item.dst_addr.is_empty() {
                                     parse_addr(&item.dst_addr)
                                 } else {
-                                    (IpAddr::from([127, 0, 0, 1]), 5060)
+                                    (IpAddr::from([127, 0, 0, 1]), default_port)
                                 };
 
                                 let msg_type = match item.msg_type {
                                     SipFlowMsgType::Sip => MsgType::Sip,
                                     SipFlowMsgType::Rtp => MsgType::Rtp,
+                                };
+                                let (packet_call_id, packet_leg) = if msg_type == MsgType::Rtp {
+                                    (Some(call_id), item.leg)
+                                } else {
+                                    (None, None)
                                 };
 
                                 let packet = Packet {
@@ -132,6 +139,8 @@ impl RemoteBackend {
                                     src: (src_ip, src_port),
                                     dst: (dst_ip, dst_port),
                                     timestamp: item.timestamp,
+                                    call_id: packet_call_id,
+                                    leg: packet_leg,
                                     payload: item.payload,
                                 };
 
