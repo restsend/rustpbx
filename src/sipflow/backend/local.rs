@@ -87,18 +87,23 @@ impl LocalBackend {
                                 let (src_ip, src_port) = if !item.src_addr.is_empty() {
                                     parse_addr(&item.src_addr)
                                 } else {
-                                    (IpAddr::from([127, 0, 0, 1]), 5060)
+                                    (IpAddr::from([127, 0, 0, 1]), default_port)
                                 };
 
                                 let (dst_ip, dst_port) = if !item.dst_addr.is_empty() {
                                     parse_addr(&item.dst_addr)
                                 } else {
-                                    (IpAddr::from([127, 0, 0, 1]), 5060)
+                                    (IpAddr::from([127, 0, 0, 1]), default_port)
                                 };
 
                                 let msg_type = match item.msg_type {
                                     SipFlowMsgType::Sip => MsgType::Sip,
                                     SipFlowMsgType::Rtp => MsgType::Rtp,
+                                };
+                                let (packet_call_id, packet_leg) = if msg_type == MsgType::Rtp {
+                                    (Some(call_id), item.leg)
+                                } else {
+                                    (None, None)
                                 };
 
                                 let packet = Packet {
@@ -106,37 +111,12 @@ impl LocalBackend {
                                     src: (src_ip, src_port),
                                     dst: (dst_ip, dst_port),
                                     timestamp: item.timestamp,
+                                    call_id: packet_call_id,
+                                    leg: packet_leg,
                                     payload: item.payload,
                                 };
 
-                                let mut processed = process_packet(packet);
-
-                                if msg_type == MsgType::Rtp {
-                                    processed.callid = Some(call_id);
-
-                                    // Parse src_addr to extract leg and real IP
-                                    // Format expected: "LegA_IP:PORT" or "A_IP:PORT" or just "LegA" (legacy)
-                                    let (leg_id, real_src) = if item.src_addr.starts_with("LegA_") {
-                                        (Some(0), item.src_addr[5..].to_string())
-                                    } else if item.src_addr.starts_with("LegB_") {
-                                        (Some(1), item.src_addr[5..].to_string())
-                                    } else if item.src_addr.starts_with("A_") {
-                                        (Some(0), item.src_addr[2..].to_string())
-                                    } else if item.src_addr.starts_with("B_") {
-                                        (Some(1), item.src_addr[2..].to_string())
-                                    } else if item.src_addr == "LegA" || item.src_addr == "A" {
-                                        (Some(0), item.src_addr.clone())
-                                    } else if item.src_addr == "LegB" || item.src_addr == "B" {
-                                        (Some(1), item.src_addr.clone())
-                                    } else {
-                                        // Default to Leg A if no explicit leg info
-                                        (Some(0), item.src_addr.clone())
-                                    };
-
-                                    processed.leg = leg_id;
-                                    processed.src = real_src;
-                                }
-
+                                let processed = process_packet(packet);
                                 let _ = storage.write_processed(processed).await;
                             }
                             Command::Flush { done } => {

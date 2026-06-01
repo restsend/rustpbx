@@ -30,6 +30,7 @@ impl ItemPool {
                 item: SipFlowItem {
                     timestamp: 0,
                     seq: 0,
+                    leg: None,
                     msg_type: SipFlowMsgType::Sip,
                     src_addr: String::with_capacity(64),
                     dst_addr: String::with_capacity(64),
@@ -81,6 +82,7 @@ impl ItemPool {
         SipFlowItem {
             timestamp: item.timestamp,
             seq: item.seq,
+            leg: item.leg,
             msg_type: item.msg_type.clone(),
             src_addr: String::with_capacity(64),
             dst_addr: String::with_capacity(64),
@@ -262,6 +264,7 @@ impl SipFlow {
                     SipFlowItem {
                         timestamp: 0,
                         seq: 0,
+                        leg: None,
                         msg_type: SipFlowMsgType::Sip,
                         src_addr: String::with_capacity(64),
                         dst_addr: String::with_capacity(64),
@@ -272,6 +275,7 @@ impl SipFlow {
             // Fill item (reuse allocation from pool)
             item.timestamp = chrono::Utc::now().timestamp_micros() as u64;
             item.seq = 0;
+            item.leg = None;
             item.msg_type = SipFlowMsgType::Sip;
             item.src_addr = src_addr;
             item.dst_addr = dst_addr;

@@ -144,7 +144,6 @@ once_cell = "1.21.4"
 regex = "1.12.3"
 http = "1.4.0"
 urlencoding = "2.1.3"
-byteorder = "1.5.0"
 ipnetwork = "0.21.1"
 sqlx = { version = "0.8.6", features = [
     "runtime-tokio-rustls",

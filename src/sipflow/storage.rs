@@ -279,30 +279,43 @@ fn rtp_timestamp_delta(current: u32, previous: u32) -> i64 {
 }
 
 pub fn process_packet(packet: Packet) -> ProcessedPacket {
-    let mut callid = None;
-    if matches!(packet.msg_type, MsgType::Sip) {
-        callid = extract_callid(&packet.payload);
+    let Packet {
+        msg_type,
+        src,
+        dst,
+        timestamp,
+        call_id,
+        leg,
+        payload,
+    } = packet;
+    let mut callid = call_id;
+    let src_addr = format!("{}:{}", src.0, src.1);
+    let dst_addr = format!("{}:{}", dst.0, dst.1);
+    let payload = payload;
+
+    if matches!(msg_type, MsgType::Sip) && callid.is_none() {
+        callid = extract_callid(&payload);
     }
 
-    let orig_size = packet.payload.len();
+    let orig_size = payload.len();
     let (payload, comp_size, _compressed) = if orig_size >= 96 {
-        if let Ok(data) = zstd::encode_all(&packet.payload[..], 3) {
+        if let Ok(data) = zstd::encode_all(&payload[..], 3) {
             let size = data.len();
             (data.into(), size, true)
         } else {
-            (packet.payload, orig_size, false)
+            (payload, orig_size, false)
         }
     } else {
-        (packet.payload, orig_size, false)
+        (payload, orig_size, false)
     };
 
     ProcessedPacket {
-        msg_type: packet.msg_type,
+        msg_type,
         callid,
-        src: format!("{}:{}", packet.src.0, packet.src.1),
-        dst: format!("{}:{}", packet.dst.0, packet.dst.1),
-        leg: None, // Will be set by caller for RTP packets
-        timestamp: packet.timestamp,
+        src: src_addr,
+        dst: dst_addr,
+        leg,
+        timestamp,
         payload,
         orig_size,
         comp_size,
@@ -657,6 +670,7 @@ impl StorageManager {
                     payload: Bytes::from(raw_msg),
                     msg_type: SipFlowMsgType::Sip,
                     seq: 0,
+                    leg: None,
                 });
             }
         }
@@ -715,6 +729,7 @@ impl StorageManager {
                     payload: Bytes::from(raw_msg),
                     msg_type: SipFlowMsgType::Sip,
                     seq: 0,
+                    leg: None,
                 });
             }
         }
@@ -957,6 +972,8 @@ mod tests {
             src: (IpAddr::from([127, 0, 0, 1]), 5060),
             dst: (IpAddr::from([127, 0, 0, 2]), 5060),
             timestamp: ts_micros,
+            call_id: None,
+            leg: None,
             payload: Bytes::from(payload),
         })
     }
@@ -973,6 +990,8 @@ mod tests {
             src: (IpAddr::from([127, 0, 0, 1]), 30000),
             dst: (IpAddr::from([127, 0, 0, 2]), 30002),
             timestamp: ts_micros,
+            call_id: None,
+            leg: None,
             payload: Bytes::from(payload.to_vec()),
         });
         packet.callid = Some(call_id.to_string());
@@ -990,6 +1009,61 @@ mod tests {
         let msg2 = b"INVITE sip:test@example.com SIP/2.0\r\ni: compact-form-id\r\n";
         let callid2 = extract_callid(msg2);
         assert_eq!(callid2, Some("compact-form-id".to_string()));
+    }
+
+    #[test]
+    fn test_process_packet_applies_rtp_metadata() {
+        let rtp = Bytes::from_static(b"\x80\x00\x00\x2a\x00\x00\x00\xa0\x00\x00\x00\x01payload");
+
+        let processed = process_packet(Packet {
+            msg_type: MsgType::Rtp,
+            src: (IpAddr::from([198, 51, 100, 10]), 5004),
+            dst: (IpAddr::from([127, 0, 0, 1]), 0),
+            timestamp: 123_456,
+            call_id: Some("remote-call-1".to_string()),
+            leg: Some(1),
+            payload: rtp.clone(),
+        });
+
+        assert_eq!(processed.callid, Some("remote-call-1".to_string()));
+        assert_eq!(processed.leg, Some(1));
+        assert_eq!(processed.src, "198.51.100.10:5004");
+        assert_eq!(processed.payload, rtp);
+        assert_eq!(processed.orig_size, rtp.len());
+    }
+
+    #[tokio::test]
+    async fn test_rtp_metadata_writes_queryable_media() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut storage = StorageManager::new(dir.path(), 1000, 3600, 128, SipFlowSubdirs::None);
+        let timestamp = chrono::Utc::now().timestamp_micros() as u64;
+        let rtp = Bytes::from_static(b"\x80\x00\x00\x2a\x00\x00\x00\xa0\x00\x00\x00\x01payload");
+
+        let processed = process_packet(Packet {
+            msg_type: MsgType::Rtp,
+            src: (IpAddr::from([203, 0, 113, 10]), 6000),
+            dst: (IpAddr::from([127, 0, 0, 1]), 0),
+            timestamp,
+            call_id: Some("remote-call-2".to_string()),
+            leg: Some(0),
+            payload: rtp.clone(),
+        });
+        storage.write_processed(processed).await.expect("write RTP");
+        storage.force_flush().await.expect("flush");
+
+        let packets = storage
+            .query_media(
+                "remote-call-2",
+                local_dt_from_micros(timestamp as i64 - 1),
+                local_dt_from_micros(timestamp as i64 + 1),
+            )
+            .await
+            .expect("query media");
+
+        assert_eq!(packets.len(), 1);
+        assert_eq!(packets[0].0, 0);
+        assert_eq!(packets[0].1, timestamp);
+        assert_eq!(packets[0].2, rtp.to_vec());
     }
 
     #[test]
@@ -1101,7 +1175,7 @@ mod tests {
                 t0,
                 call_id,
                 0,
-                "LegA_127.0.0.1:4000",
+                "127.0.0.1:4000",
                 p0,
             ))
             .await
@@ -1111,7 +1185,7 @@ mod tests {
                 t1,
                 call_id,
                 0,
-                "LegA_127.0.0.1:4000",
+                "127.0.0.1:4000",
                 p1,
             ))
             .await
@@ -1121,7 +1195,7 @@ mod tests {
                 t2,
                 call_id,
                 0,
-                "LegA_127.0.0.1:4000",
+                "127.0.0.1:4000",
                 p2,
             ))
             .await
@@ -1165,6 +1239,6 @@ mod tests {
             .expect("query media sources");
         assert_eq!(sources.len(), 1, "expected one unique media source");
         assert_eq!(sources[0].leg, 0);
-        assert_eq!(sources[0].src, "LegA_127.0.0.1:4000");
+        assert_eq!(sources[0].src, "127.0.0.1:4000");
     }
 }

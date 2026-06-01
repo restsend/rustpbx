@@ -4613,12 +4613,20 @@ impl SipSession {
                     && let Some(ref rtp_packet) = frame.raw_packet
                     && let Ok(rtp_bytes) = rtp_packet.marshal()
                 {
+                    let leg_id = match leg {
+                        crate::media::recorder::Leg::A => 0,
+                        crate::media::recorder::Leg::B => 1,
+                    };
                     let item = SipFlowItem {
                         timestamp: received_at_micros,
                         seq: frame.sequence_number.unwrap_or(0) as u64,
+                        leg: Some(leg_id),
                         msg_type: SipFlowMsgType::Rtp,
-                        src_addr: format!("{leg:?}"),
-                        dst_addr: "bridge".to_string(),
+                        src_addr: frame
+                            .source_addr
+                            .map(|addr| addr.to_string())
+                            .unwrap_or_default(),
+                        dst_addr: String::new(),
                         payload: bytes::Bytes::from(rtp_bytes),
                     };
                     let _ = backend.record(&call_id, item);
