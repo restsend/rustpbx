@@ -798,7 +798,12 @@ impl CallModule {
             .unwrap_or_default();
 
         let mut dialplan = Dialplan::new(session_id, original.clone(), direction)
-            .with_caller(caller_uri)
+            .with_caller(
+                preview_forward
+                    .as_ref()
+                    .map(|option| option.caller.clone())
+                    .unwrap_or(caller_uri),
+            )
             .with_media(media_config)
             .with_recording(recording)
             .with_route_invite(route_invite)
