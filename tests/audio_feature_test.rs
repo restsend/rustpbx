@@ -116,6 +116,7 @@ mod audio_feature_tests {
         assert!(
             manager
                 .switch_to_file(audio1_path.to_string_lossy().to_string(), false)
+                .await
                 .is_ok(),
             "Must be able to switch to first audio file (no loop)"
         );
@@ -123,6 +124,7 @@ mod audio_feature_tests {
         assert!(
             manager
                 .switch_to_file(audio2_path.to_string_lossy().to_string(), true)
+                .await
                 .is_ok(),
             "Must be able to switch to second audio file (with loop)"
         );

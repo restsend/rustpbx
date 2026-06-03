@@ -875,7 +875,7 @@ impl FileTrack {
         self
     }
 
-    fn init_audio_source(&mut self) -> Result<()> {
+    async fn init_audio_source(&mut self) -> Result<()> {
         if self.audio_source_manager.is_some() {
             return Ok(());
         }
@@ -894,7 +894,9 @@ impl FileTrack {
         let manager = Arc::new(audio_source::AudioSourceManager::new(target_sample_rate));
 
         if let Some(ref path) = self.file_path {
-            manager.switch_to_file(path.clone(), self.loop_playback)?;
+            manager
+                .switch_to_file(path.clone(), self.loop_playback)
+                .await?;
         } else {
             manager.switch_to_silence();
         }
@@ -907,7 +909,7 @@ impl FileTrack {
         self.start_playback_on(None).await
     }
 
-    pub(crate) fn create_playback_source(&self) -> Result<FileTrackPlaybackSource> {
+    pub(crate) async fn create_playback_source(&self) -> Result<FileTrackPlaybackSource> {
         let file_path = self.file_path.as_deref();
 
         if let Some(file_path) = file_path {
@@ -934,7 +936,8 @@ impl FileTrack {
                     frame_timing.pcm_sample_rate,
                 ));
                 if let Some(file_path) = file_path {
-                    mgr.switch_to_file(file_path.to_string(), self.loop_playback)?;
+                    mgr.switch_to_file(file_path.to_string(), self.loop_playback)
+                        .await?;
                 } else {
                     mgr.switch_to_silence();
                 }
@@ -1021,7 +1024,8 @@ impl FileTrack {
                 let mgr = Arc::new(audio_source::AudioSourceManager::new(
                     frame_timing.pcm_sample_rate,
                 ));
-                mgr.switch_to_file(file_path.clone(), self.loop_playback)?;
+                mgr.switch_to_file(file_path.clone(), self.loop_playback)
+                    .await?;
                 mgr
             }
         };
@@ -1133,13 +1137,17 @@ impl FileTrack {
         Ok(())
     }
 
-    pub fn switch_audio_source(&mut self, file_path: String, loop_playback: bool) -> Result<()> {
+    pub async fn switch_audio_source(
+        &mut self,
+        file_path: String,
+        loop_playback: bool,
+    ) -> Result<()> {
         if self.audio_source_manager.is_none() {
-            self.init_audio_source()?;
+            self.init_audio_source().await?;
         }
 
         if let Some(ref manager) = self.audio_source_manager {
-            manager.switch_to_file(file_path, loop_playback)?;
+            manager.switch_to_file(file_path, loop_playback).await?;
         }
 
         Ok(())
