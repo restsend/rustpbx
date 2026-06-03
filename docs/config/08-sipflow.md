@@ -108,6 +108,9 @@ access_key = "AKID..."
 secret_key = "..."
 endpoint = "https://s3.amazonaws.com"
 root = "sipflow/"       # key prefix inside the bucket
+
+# Optional: also upload SIP signalling as JSONL after each call (default: false).
+# signaling = true
 ```
 
 ### HTTP
@@ -117,7 +120,42 @@ root = "sipflow/"       # key prefix inside the bucket
 type = "http"
 url = "https://archive.example.com/upload"
 # headers = { "Authorization" = "Bearer token" }
+
+# Optional: also upload SIP signalling as JSONL after each call (default: false).
+# signaling = true
 ```
+
+### Signalling Upload (`signaling`)
+
+When `signaling = true` is set, RustPBX will additionally upload the SIP signalling flow for each completed call as a JSONL file alongside the WAV recording. The JSONL file is uploaded to the same storage target (S3 or HTTP) with the key path `{date_prefix}/{call_id}.jsonl`.
+
+#### JSONL Format
+
+Each line in the JSONL file is a JSON object representing a single SIP/RTP packet captured during the call. The schema:
+
+```json
+{
+  "timestamp": 1746000000,
+  "seq": 1,
+  "leg": 0,
+  "msg_type": "Sip",
+  "src_addr": "192.168.1.10:5060",
+  "dst_addr": "192.168.1.20:5060",
+  "payload": [73, 78, 86, ...]
+}
+```
+
+| Field | Type | Description |
+|---|---|---|
+| `timestamp` | `u64` | Unix epoch (seconds) when the packet was captured |
+| `seq` | `u64` | Sequence number within the call (default `0`) |
+| `leg` | `Option<i32>` | Call leg index (`0` = caller side, `1` = callee side); omitted when `null` |
+| `msg_type` | `string` | `"Sip"` for SIP signalling packets, `"Rtp"` for RTP media packets |
+| `src_addr` | `string` | Source IP:port of the packet |
+| `dst_addr` | `string` | Destination IP:port of the packet |
+| `payload` | `bytes` | Raw packet payload. For SIP messages this is the full SIP message (UTF-8 text). For RTP packets this is the RTP frame bytes |
+
+For HTTP uploads, the JSONL file is sent as a `multipart/form-data` request with the part name `"signaling"` and content type `application/jsonl`. The file name follows the pattern `{call_id}.jsonl`.
 
 ---
 
