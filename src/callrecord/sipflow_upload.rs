@@ -63,7 +63,6 @@ async fn do_upload(
     duration_secs: i32,
     date_prefix: &str,
 ) {
-    // Flush the SipFlow batch so all RTP packets are in the SQLite file.
     if let Err(e) = backend.flush().await {
         warn!(call_id, "SipFlowUploadHook: flush failed: {e}");
     }
@@ -80,7 +79,6 @@ async fn do_upload(
         return;
     }
 
-    // Path inside the storage target: YYYYMMDD/<call_id>.wav
     let key = format!("{}/{}.wav", date_prefix, call_id);
 
     let wav_len = wav_bytes.len();
@@ -93,6 +91,7 @@ async fn do_upload(
             secret_key,
             endpoint,
             root,
+            ..
         } => {
             let full_key = if root.is_empty() {
                 key.clone()
@@ -112,7 +111,7 @@ async fn do_upload(
                 )
             })
         }
-        SipFlowUploadConfig::Http { url, headers } => {
+        SipFlowUploadConfig::Http { url, headers, .. } => {
             upload_http(url, headers.as_ref(), call_id, wav_bytes).await
         }
     };
@@ -143,6 +142,77 @@ async fn do_upload(
         }
         Err(e) => {
             warn!(call_id, "SipFlowUploadHook: upload failed: {e}");
+        }
+    }
+
+    let signaling = match &upload_config {
+        SipFlowUploadConfig::S3 { signaling, .. } => signaling.unwrap_or(false),
+        SipFlowUploadConfig::Http { signaling, .. } => signaling.unwrap_or(false),
+    };
+
+    if signaling {
+        upload_signaling_flow(&upload_config, backend.as_ref(), call_id, start, end, date_prefix)
+            .await;
+    }
+}
+
+async fn upload_signaling_flow(
+    upload_config: &SipFlowUploadConfig,
+    backend: &dyn SipFlowBackend,
+    call_id: &str,
+    start: DateTime<Local>,
+    end: DateTime<Local>,
+    date_prefix: &str,
+) {
+    let flow_items = match backend.query_flow(call_id, start, end).await {
+        Ok(items) => items,
+        Err(e) => {
+            warn!(call_id, "SipFlowUploadHook: query_flow failed: {e}");
+            return;
+        }
+    };
+
+    if flow_items.is_empty() {
+        return;
+    }
+
+    let jsonl = crate::sipflow::SipFlowQuery::export_jsonl(&flow_items);
+    let data = jsonl.into_bytes();
+
+    let key = format!("{}/{}.jsonl", date_prefix, call_id);
+
+    let result = match upload_config {
+        SipFlowUploadConfig::S3 {
+            vendor,
+            bucket,
+            region,
+            access_key,
+            secret_key,
+            endpoint,
+            root,
+            ..
+        } => {
+            let full_key = if root.is_empty() {
+                key.clone()
+            } else {
+                format!("{}/{}", root.trim_end_matches('/'), key)
+            };
+            upload_s3(
+                vendor, bucket, region, access_key, secret_key, endpoint, &full_key, data,
+            )
+            .await
+        }
+        SipFlowUploadConfig::Http { url, headers, .. } => {
+            upload_http_jsonl(url, headers.as_ref(), call_id, data).await
+        }
+    };
+
+    match result {
+        Ok(_) => {
+            info!(call_id, "SipFlowUploadHook: signaling uploaded");
+        }
+        Err(e) => {
+            warn!(call_id, "SipFlowUploadHook: signaling upload failed: {e}");
         }
     }
 }
@@ -206,6 +276,37 @@ async fn upload_http(
     } else {
         Err(anyhow::anyhow!(
             "HTTP upload failed: {} – {}",
+            response.status(),
+            response.text().await.unwrap_or_default()
+        ))
+    }
+}
+
+async fn upload_http_jsonl(
+    url: &str,
+    headers: Option<&std::collections::HashMap<String, String>>,
+    call_id: &str,
+    data: Vec<u8>,
+) -> Result<()> {
+    let client = reqwest::Client::new();
+    let file_name = format!("{}.jsonl", call_id);
+    let part = reqwest::multipart::Part::bytes(data)
+        .file_name(file_name)
+        .mime_str("application/jsonl")?;
+    let form = reqwest::multipart::Form::new().part("signaling", part);
+
+    let mut req = client.post(url).multipart(form);
+    if let Some(h) = headers {
+        for (k, v) in h {
+            req = req.header(k.as_str(), v.as_str());
+        }
+    }
+    let response = req.send().await?;
+    if response.status().is_success() {
+        Ok(())
+    } else {
+        Err(anyhow::anyhow!(
+            "HTTP signaling upload failed: {} – {}",
             response.status(),
             response.text().await.unwrap_or_default()
         ))
@@ -292,6 +393,7 @@ mod tests {
             upload_config: SipFlowUploadConfig::Http {
                 url: "http://localhost:9999/upload".to_string(),
                 headers: None,
+                signaling: None,
             },
             db: None,
         };
@@ -423,6 +525,127 @@ http_addr = "http://127.0.0.1:3001"
         match cfg {
             crate::config::SipFlowConfig::Remote { upload, .. } => {
                 assert!(upload.is_none(), "upload should default to None");
+            }
+            _ => panic!("expected Remote sipflow config"),
+        }
+    }
+
+    #[test]
+    fn test_upload_config_signaling_default_none() {
+        let toml_str = r#"
+type = "local"
+root = "/var/sipflow"
+
+[upload]
+type = "http"
+url = "https://example.com/recordings"
+"#;
+        let cfg: crate::config::SipFlowConfig =
+            toml::from_str(toml_str).expect("should parse http upload config");
+        match cfg {
+            crate::config::SipFlowConfig::Local { upload, .. } => {
+                let upload = upload.expect("upload should be set");
+                match upload {
+                    SipFlowUploadConfig::Http { signaling, .. } => {
+                        assert_eq!(signaling, None, "signaling should default to None");
+                    }
+                    _ => panic!("expected Http variant"),
+                }
+            }
+            _ => panic!("expected Local sipflow config"),
+        }
+    }
+
+    #[test]
+    fn test_upload_config_signaling_enabled_s3() {
+        let toml_str = r#"
+type = "local"
+root = "/var/sipflow"
+
+[upload]
+type = "s3"
+vendor = "aws"
+bucket = "my-bucket"
+region = "us-east-1"
+access_key = "AKID"
+secret_key = "SECRET"
+endpoint = "https://s3.amazonaws.com"
+root = "recordings"
+signaling = true
+"#;
+        let cfg: crate::config::SipFlowConfig =
+            toml::from_str(toml_str).expect("should parse s3 upload config with signaling");
+        match cfg {
+            crate::config::SipFlowConfig::Local { upload, .. } => {
+                let upload = upload.expect("upload should be set");
+                match upload {
+                    SipFlowUploadConfig::S3 { signaling, .. } => {
+                        assert_eq!(signaling, Some(true));
+                    }
+                    _ => panic!("expected S3 variant"),
+                }
+            }
+            _ => panic!("expected Local sipflow config"),
+        }
+    }
+
+    #[test]
+    fn test_upload_config_signaling_enabled_http() {
+        let toml_str = r#"
+type = "local"
+root = "/var/sipflow"
+
+[upload]
+type = "http"
+url = "https://example.com/recordings"
+signaling = true
+"#;
+        let cfg: crate::config::SipFlowConfig =
+            toml::from_str(toml_str).expect("should parse http upload config with signaling");
+        match cfg {
+            crate::config::SipFlowConfig::Local { upload, .. } => {
+                let upload = upload.expect("upload should be set");
+                match upload {
+                    SipFlowUploadConfig::Http { signaling, .. } => {
+                        assert_eq!(signaling, Some(true));
+                    }
+                    _ => panic!("expected Http variant"),
+                }
+            }
+            _ => panic!("expected Local sipflow config"),
+        }
+    }
+
+    #[test]
+    fn test_upload_config_signaling_remote_s3() {
+        let toml_str = r#"
+type = "remote"
+udp_addr = "127.0.0.1:3000"
+http_addr = "http://127.0.0.1:3001"
+
+[upload]
+type = "s3"
+vendor = "minio"
+bucket = "my-bucket"
+region = "us-east-1"
+access_key = "AKID"
+secret_key = "SECRET"
+endpoint = "http://minio:9000"
+root = "sipflow"
+signaling = true
+"#;
+        let cfg: crate::config::SipFlowConfig =
+            toml::from_str(toml_str).expect("should parse remote s3 upload with signaling");
+        match cfg {
+            crate::config::SipFlowConfig::Remote { upload, .. } => {
+                let upload = upload.expect("upload should be set");
+                match upload {
+                    SipFlowUploadConfig::S3 { signaling, bucket, .. } => {
+                        assert_eq!(signaling, Some(true));
+                        assert_eq!(bucket, "my-bucket");
+                    }
+                    _ => panic!("expected S3 variant"),
+                }
             }
             _ => panic!("expected Remote sipflow config"),
         }

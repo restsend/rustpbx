@@ -515,10 +515,14 @@ pub enum SipFlowUploadConfig {
         secret_key: String,
         endpoint: String,
         root: String,
+        #[serde(default)]
+        signaling: Option<bool>,
     },
     Http {
         url: String,
         headers: Option<HashMap<String, String>>,
+        #[serde(default)]
+        signaling: Option<bool>,
     },
 }
 
