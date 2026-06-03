@@ -6,7 +6,7 @@ use std::{
 };
 
 use crate::media::{
-    StreamWriter, negotiate::MediaNegotiator, recorder::DtmfGenerator, wav_writer::WavWriter,
+    StreamWriter, negotiate::MediaNegotiator, recorder::DtmfGenerator, wav_writer::CodecWavWriter,
 };
 use crate::sipflow::{SipFlowItem, SipFlowMsgType, extract_rtp_addr, extract_sdp};
 
@@ -554,7 +554,7 @@ pub(crate) fn generate_wav_from_packets_with_leg_map_ex(
 
     // 3. Write WAV
     let mut cursor = Cursor::new(Vec::new());
-    let mut writer = WavWriter::new_with_writer(&mut cursor, target_sample_rate, 2, target_codec);
+    let mut writer = CodecWavWriter::new_with_writer(&mut cursor, target_sample_rate, 2, target_codec);
     writer.write_header()?;
 
     let max_time_a = buffer_a.keys().max().cloned().unwrap_or(0);

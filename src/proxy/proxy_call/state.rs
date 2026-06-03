@@ -63,6 +63,10 @@ pub struct CallContext {
     pub original_caller: String,
     pub original_callee: String,
     pub max_forwards: u32,
+    /// ISO-8601 timestamp when the session was created.
+    pub created_at: String,
+    /// Application metadata injected by routing (e.g. X-CRM-* / X-CC-* headers).
+    pub metadata: Option<std::collections::HashMap<String, String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -89,6 +89,10 @@ fn default_latching_probation_max_packets() -> Option<u8> {
     Some(6)
 }
 
+fn default_rtp_timeout() -> Option<u64> {
+    Some(30)
+}
+
 fn default_generated_config_dir() -> String {
     "./config".to_string()
 }
@@ -687,6 +691,8 @@ pub struct ProxyConfig {
     pub session_timer_always: bool,
     #[serde(default)]
     pub session_expires: Option<u64>,
+    #[serde(default = "default_rtp_timeout")]
+    pub rtp_timeout: Option<u64>,
     #[serde(default)]
     pub queues: HashMap<String, RouteQueueConfig>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -1073,6 +1079,7 @@ impl Default for ProxyConfig {
             session_timer: false,
             session_timer_always: false,
             session_expires: None,
+            rtp_timeout: default_rtp_timeout(),
             queues: HashMap::new(),
             queues_files: Vec::new(),
             trunks: HashMap::new(),

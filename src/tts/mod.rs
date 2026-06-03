@@ -203,14 +203,14 @@ mod tests {
     fn make_wav_bytes() -> Vec<u8> {
         let mut tmp = tempfile::NamedTempFile::with_suffix(".wav").unwrap();
         {
-            let spec = hound::WavSpec {
+            let spec = crate::media::wav_reader::WavSpec {
                 channels: 1,
                 sample_rate: 8000,
                 bits_per_sample: 16,
-                sample_format: hound::SampleFormat::Int,
+                sample_format: crate::media::wav_reader::SampleFormat::Int,
             };
             let mut writer =
-                hound::WavWriter::new(std::io::BufWriter::new(tmp.as_file_mut()), spec).unwrap();
+                crate::media::wav_reader::WavWriter::new(std::io::BufWriter::new(tmp.as_file_mut()), spec).unwrap();
             for _ in 0..8000 {
                 writer.write_sample(0i16).unwrap();
             }

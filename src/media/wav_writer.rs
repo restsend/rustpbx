@@ -4,7 +4,7 @@ use audio_codec::CodecType;
 use std::fs::File;
 use std::io::{Seek, SeekFrom, Write};
 
-pub struct WavWriter<W: Write + Seek> {
+pub struct CodecWavWriter<W: Write + Seek> {
     writer: W,
     sample_rate: u32,
     channels: u16,
@@ -12,7 +12,7 @@ pub struct WavWriter<W: Write + Seek> {
     written_bytes: u32,
 }
 
-impl<W: Write + Seek + Send + Sync> StreamWriter for WavWriter<W> {
+impl<W: Write + Seek + Send + Sync> StreamWriter for CodecWavWriter<W> {
     fn write_header(&mut self) -> Result<()> {
         self.write_header_internal()
     }
@@ -26,7 +26,7 @@ impl<W: Write + Seek + Send + Sync> StreamWriter for WavWriter<W> {
     }
 }
 
-impl WavWriter<File> {
+impl CodecWavWriter<File> {
     pub fn new(file: File, sample_rate: u32, channels: u16, codec: Option<CodecType>) -> Self {
         Self {
             writer: file,
@@ -38,7 +38,7 @@ impl WavWriter<File> {
     }
 }
 
-impl<W: Write + Seek> WavWriter<W> {
+impl<W: Write + Seek> CodecWavWriter<W> {
     pub fn new_with_writer(
         writer: W,
         sample_rate: u32,
@@ -88,15 +88,15 @@ impl<W: Write + Seek> WavWriter<W> {
         header[4..8].copy_from_slice(&file_size.to_le_bytes());
         header[8..12].copy_from_slice(b"WAVE");
         header[12..16].copy_from_slice(b"fmt ");
-        header[16..20].copy_from_slice(&16u32.to_le_bytes()); // fmt chunk size
+        header[16..20].copy_from_slice(&16u32.to_le_bytes());
 
         let format_tag: u16 = match codec {
-            Some(CodecType::PCMU) => 7,      // mu-law
-            Some(CodecType::PCMA) => 6,      // a-law
-            Some(CodecType::G722) => 0x0065, // G.722
-            Some(CodecType::G729) => 0x0083, // G.729
-            None => 1,                       // PCM
-            _ => 1,                          // Default to PCM
+            Some(CodecType::PCMU) => 7,
+            Some(CodecType::PCMA) => 6,
+            Some(CodecType::G722) => 0x0065,
+            Some(CodecType::G729) => 0x0083,
+            None => 1,
+            _ => 1,
         };
 
         header[20..22].copy_from_slice(&format_tag.to_le_bytes());
@@ -112,8 +112,8 @@ impl<W: Write + Seek> WavWriter<W> {
             }
             Some(CodecType::G722) => {
                 let bps = 8;
-                let br = sample_rate * channels as u32 / 2; // G.722 is 4 bits per sample
-                let ba = channels; // 1 byte per channel
+                let br = sample_rate * channels as u32 / 2;
+                let ba = channels;
                 (bps, br, ba)
             }
             Some(CodecType::G729) => (0u16, 1000 * channels as u32, 10 * channels),

@@ -777,7 +777,7 @@ mod ringback_audio_tests {
 
 #[cfg(test)]
 mod ringback_tone_audio_tests {
-    use hound::{SampleFormat, WavReader, WavSpec, WavWriter};
+    use rustpbx::media::wav_reader::{SampleFormat, WavReader, WavSpec, WavWriter};
 
     /// Generate sine wave PCM matching the exact algorithm in
     /// `SipSession::resolve_audio_path()` (src/proxy/proxy_call/sip_session.rs).
@@ -890,7 +890,7 @@ mod ringback_tone_audio_tests {
         assert_eq!(reader.spec().bits_per_sample, 16);
 
         let samples: Vec<i16> = reader
-            .samples::<i16>()
+            .samples()
             .map(|s| s.expect("read sample"))
             .collect();
         assert_eq!(samples.len(), 240, "should read back 240 samples");

@@ -39,7 +39,7 @@ use tokio_util::io::ReaderStream;
 use tracing::warn;
 use urlencoding::encode;
 
-use hound;
+use crate::media::wav_reader::{WavReader, WavSpec, WavWriter};
 
 #[derive(Debug, Clone, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
@@ -1519,22 +1519,21 @@ pub fn select_recording_path(record: &CallRecordModel, cdr: Option<&CdrData>) ->
 /// Returns `Ok(data)` on success, `Err` if the file is not a valid 16-bit stereo WAV.
 /// The caller should fall back to serving the full file on error.
 fn extract_channel_from_wav(path: &str, stream_leg: i32) -> anyhow::Result<Vec<u8>> {
-    let mut reader = hound::WavReader::open(path)?;
-    let spec = reader.spec();
+    let mut reader = WavReader::open(path)?;
+    let spec = *reader.spec();
 
-    // Only handle 16-bit PCM stereo WAV files
     if spec.channels < 2 || spec.bits_per_sample != 16 {
         anyhow::bail!("not a 16-bit stereo WAV");
     }
 
     let channel_idx = match stream_leg {
-        0 => 0usize, // A-leg / caller → left channel
-        1 => 1usize, // B-leg / callee → right channel
+        0 => 0usize,
+        1 => 1usize,
         _ => anyhow::bail!("invalid stream_leg: expected 0 or 1"),
     };
 
     let all_samples: Vec<i16> = reader
-        .samples::<i16>()
+        .samples()
         .collect::<::std::result::Result<Vec<_>, _>>()?;
 
     let channel_samples: Vec<i16> = all_samples
@@ -1543,13 +1542,13 @@ fn extract_channel_from_wav(path: &str, stream_leg: i32) -> anyhow::Result<Vec<u
         .collect();
 
     let mut buf = Vec::new();
-    let mono_spec = hound::WavSpec {
+    let mono_spec = WavSpec {
         channels: 1,
         sample_rate: spec.sample_rate,
         bits_per_sample: spec.bits_per_sample,
         sample_format: spec.sample_format,
     };
-    let mut writer = hound::WavWriter::new(std::io::Cursor::new(&mut buf), mono_spec)?;
+    let mut writer = WavWriter::new(std::io::Cursor::new(&mut buf), mono_spec)?;
     for sample in &channel_samples {
         writer.write_sample(*sample)?;
     }
@@ -1780,6 +1779,7 @@ fn parse_recording_stream_selector(stream: Option<&str>) -> Result<Option<i32>, 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::media::wav_reader::SampleFormat;
     use crate::{
         config::ConsoleConfig,
         console::{ConsoleState, middleware::AuthRequired},
@@ -1980,13 +1980,13 @@ mod tests {
     // ── extract_channel_from_wav tests ─────────────────────────────────────
 
     fn create_test_stereo_wav(path: &str) {
-        let spec = hound::WavSpec {
+        let spec = WavSpec {
             channels: 2,
             sample_rate: 8000,
             bits_per_sample: 16,
-            sample_format: hound::SampleFormat::Int,
+            sample_format: SampleFormat::Int,
         };
-        let mut writer = hound::WavWriter::create(path, spec).unwrap();
+        let mut writer = WavWriter::create(path, spec).unwrap();
         // 10 samples: left = 100, right = 200 for each frame
         for _ in 0..10 {
             writer.write_sample(100i16).unwrap(); // left
@@ -2006,11 +2006,11 @@ mod tests {
         assert!(!result.is_empty(), "should return WAV data");
 
         // Read the mono output and verify it contains only left channel values
-        let mut mono_reader = hound::WavReader::new(std::io::Cursor::new(&result)).unwrap();
+        let mut mono_reader = WavReader::new(std::io::Cursor::new(&result)).unwrap();
         assert_eq!(mono_reader.spec().channels, 1, "should be mono");
         assert_eq!(mono_reader.spec().sample_rate, 8000);
         let mono_samples: Vec<i16> = mono_reader
-            .samples::<i16>()
+            .samples()
             .collect::<::std::result::Result<Vec<_>, _>>()
             .unwrap();
         assert_eq!(mono_samples.len(), 10, "should have 10 samples");
@@ -2032,10 +2032,10 @@ mod tests {
         let result = extract_channel_from_wav(&path_str, 1).unwrap();
         assert!(!result.is_empty(), "should return WAV data");
 
-        let mut mono_reader = hound::WavReader::new(std::io::Cursor::new(&result)).unwrap();
+        let mut mono_reader = WavReader::new(std::io::Cursor::new(&result)).unwrap();
         assert_eq!(mono_reader.spec().channels, 1, "should be mono");
         let mono_samples: Vec<i16> = mono_reader
-            .samples::<i16>()
+            .samples()
             .collect::<::std::result::Result<Vec<_>, _>>()
             .unwrap();
         assert_eq!(mono_samples.len(), 10, "should have 10 samples");
@@ -2052,13 +2052,13 @@ mod tests {
         let dir = std::env::temp_dir();
         let path = dir.join("test_mono.wav");
         let path_str = path.to_string_lossy().to_string();
-        let spec = hound::WavSpec {
+        let spec = WavSpec {
             channels: 1,
             sample_rate: 8000,
             bits_per_sample: 16,
-            sample_format: hound::SampleFormat::Int,
+            sample_format: SampleFormat::Int,
         };
-        let mut writer = hound::WavWriter::create(&path, spec).unwrap();
+        let mut writer = WavWriter::create(&path, spec).unwrap();
         writer.write_sample(42i16).unwrap();
         writer.finalize().unwrap();
 

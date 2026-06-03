@@ -396,6 +396,10 @@ pub struct BridgePeer {
     callee_to_caller_dtmf_mapping: Arc<parking_lot::RwLock<Option<BridgePayloadMapping>>>,
     /// Optional telephone-event mapping for WebRTC→RTP direction.
     caller_to_callee_dtmf_mapping: Arc<parking_lot::RwLock<Option<BridgePayloadMapping>>>,
+    /// RTP timeout per direction — if no packets received for this duration, notify via rtp_timeout_tx.
+    rtp_timeout: Option<std::time::Duration>,
+    /// Sender to notify session when RTP timeout is detected.
+    rtp_timeout_tx: Option<mpsc::Sender<String>>,
 }
 
 impl BridgePeer {
@@ -459,6 +463,8 @@ impl BridgePeer {
             caller_to_callee_timing: Arc::new(parking_lot::Mutex::new(None)),
             callee_to_caller_dtmf_mapping: Arc::new(parking_lot::RwLock::new(None)),
             caller_to_callee_dtmf_mapping: Arc::new(parking_lot::RwLock::new(None)),
+            rtp_timeout: None,
+            rtp_timeout_tx: None,
         }
     }
 
@@ -724,6 +730,8 @@ impl BridgePeer {
             let cancel = self.cancel_token.clone();
             let caller_pc = self.caller_pc.clone();
             let callee_pc = self.callee_pc.clone();
+            let rtp_timeout = self.rtp_timeout;
+            let rtp_timeout_tx = self.rtp_timeout_tx.clone();
             crate::utils::spawn(async move {
                 let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
                 interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -731,6 +739,9 @@ impl BridgePeer {
                 interval.tick().await;
                 let (mut prev_w_pkts, mut prev_w_lost, mut prev_w_bytes) = (0u64, 0u64, 0u64);
                 let (mut prev_r_pkts, mut prev_r_lost, mut prev_r_bytes) = (0u64, 0u64, 0u64);
+                let mut caller_silence_start: Option<std::time::Instant> = None;
+                let mut callee_silence_start: Option<std::time::Instant> = None;
+                let mut rtp_timeout_fired = false;
                 loop {
                     tokio::select! {
                         _ = cancel.cancelled() => break,
@@ -780,6 +791,35 @@ impl BridgePeer {
                             if let Ok(report) = callee_pc.get_transport_stats().await {
                                 for entry in &report.entries {
                                     debug!(bridge_id = %bridge_id, role = "callee", %entry, "Transport stats");
+                                }
+                            }
+
+                            if !rtp_timeout_fired
+                                && let Some(timeout) = rtp_timeout
+                            {
+                                if dw_pkts == 0 {
+                                    caller_silence_start.get_or_insert(std::time::Instant::now());
+                                } else {
+                                    caller_silence_start = None;
+                                }
+                                if dr_pkts == 0 {
+                                    callee_silence_start.get_or_insert(std::time::Instant::now());
+                                } else {
+                                    callee_silence_start = None;
+                                }
+
+                                if caller_silence_start.is_some_and(|s| s.elapsed() >= timeout) {
+                                    warn!(bridge_id = %bridge_id, ?timeout, "RTP timeout: caller side silent");
+                                    if let Some(ref tx) = rtp_timeout_tx {
+                                        let _ = tx.try_send("caller_silent".to_string());
+                                    }
+                                    rtp_timeout_fired = true;
+                                } else if callee_silence_start.is_some_and(|s| s.elapsed() >= timeout) {
+                                    warn!(bridge_id = %bridge_id, ?timeout, "RTP timeout: callee side silent");
+                                    if let Some(ref tx) = rtp_timeout_tx {
+                                        let _ = tx.try_send("callee_silent".to_string());
+                                    }
+                                    rtp_timeout_fired = true;
                                 }
                             }
 
@@ -2114,6 +2154,8 @@ pub struct BridgePeerBuilder {
     recording_paused: Arc<AtomicBool>,
     sipflow_tx: Option<mpsc::Sender<(RecLeg, MediaSample, u64)>>,
     cname: Option<String>,
+    rtp_timeout: Option<std::time::Duration>,
+    rtp_timeout_tx: Option<mpsc::Sender<String>>,
 }
 
 impl BridgePeerBuilder {
@@ -2139,6 +2181,8 @@ impl BridgePeerBuilder {
             recording_paused: Arc::new(AtomicBool::new(false)),
             sipflow_tx: None,
             cname: None,
+            rtp_timeout: None,
+            rtp_timeout_tx: None,
         }
     }
 
@@ -2272,6 +2316,16 @@ impl BridgePeerBuilder {
         self
     }
 
+    pub fn with_rtp_timeout_notify(
+        mut self,
+        tx: mpsc::Sender<String>,
+        timeout: std::time::Duration,
+    ) -> Self {
+        self.rtp_timeout_tx = Some(tx);
+        self.rtp_timeout = Some(timeout);
+        self
+    }
+
     fn default_video_capabilities() -> Vec<rustrtc::config::VideoCapability> {
         vec![
             rustrtc::config::VideoCapability {
@@ -2371,6 +2425,8 @@ impl BridgePeerBuilder {
         bridge.recorder = self.recorder;
         bridge.recording_paused = self.recording_paused;
         bridge.sipflow_tx = self.sipflow_tx;
+        bridge.rtp_timeout = self.rtp_timeout;
+        bridge.rtp_timeout_tx = self.rtp_timeout_tx;
 
         // Store video codec params for setup_bridge to create video senders
         bridge.caller_video_codec = self
@@ -2406,14 +2462,14 @@ mod tests {
     };
 
     fn create_test_wav_file(path: &str, num_samples: usize) -> Result<()> {
-        let spec = hound::WavSpec {
+        let spec = crate::media::wav_reader::WavSpec {
             channels: 1,
             sample_rate: 8000,
             bits_per_sample: 16,
-            sample_format: hound::SampleFormat::Int,
+            sample_format: crate::media::wav_reader::SampleFormat::Int,
         };
         let mut writer =
-            hound::WavWriter::create(path, spec).map_err(|e| anyhow::anyhow!("WavWriter: {e}"))?;
+            crate::media::wav_reader::WavWriter::create(path, spec).map_err(|e| anyhow::anyhow!("WavWriter: {e}"))?;
         for i in 0..num_samples {
             let sample = ((i as f32 / 8.0).sin() * 1000.0) as i16;
             writer

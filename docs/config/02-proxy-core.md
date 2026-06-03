@@ -66,6 +66,10 @@ frequency_limiter = "100/60s"
 session_timer = true
 session_expires = 1800  # 30 minutes
 
+# RTP timeout — if no audio packets are received on either direction for
+# this many seconds, the call is automatically terminated (default: 30)
+rtp_timeout = 30
+
 # SIP Transaction Timers (RFC 3261) - optional overrides
 t1_timer = 500      # T1 timer in milliseconds (default: 500)
 t1x64_timer = 32000 # T1x64 timer in milliseconds (default: 32000)
