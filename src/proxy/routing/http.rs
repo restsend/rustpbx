@@ -84,6 +84,10 @@ struct HttpResponsePayload {
     pub timeout: Option<u32>,
     /// Max ring time for call setup/ringback phase (in seconds)
     pub max_ring_time: Option<u32>,
+    /// RTP timeout per direction in seconds — if no audio is received for this
+    /// duration on either direction, the call is terminated. Overrides proxy-level
+    /// `rtp_timeout`. Set to 0 to explicitly disable.
+    pub rtp_timeout: Option<u32>,
     pub media_proxy: Option<MediaProxyMode>,
     pub headers: Option<HashMap<String, String>>,
     pub with_original_headers: Option<bool>,
@@ -316,6 +320,14 @@ impl CallRouter for HttpCallRouter {
 
                 if let Some(max_ring_time) = result.max_ring_time {
                     dialplan.max_ring_time = Duration::from_secs(max_ring_time as u64);
+                }
+
+                if let Some(rtp_timeout) = result.rtp_timeout {
+                    if rtp_timeout > 0 {
+                        dialplan.rtp_timeout = Some(Duration::from_secs(rtp_timeout as u64));
+                    } else {
+                        dialplan.rtp_timeout = None;
+                    }
                 }
 
                 apply_allowed_codecs(&mut dialplan, result.allow_codecs.as_deref(), None);

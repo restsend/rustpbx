@@ -1582,6 +1582,17 @@ impl SipSession {
         tokio::pin!(hangup_futures);
         tokio::pin!(timeout);
 
+        let (rtp_timeout_tx, mut rtp_timeout_rx) = mpsc::channel::<String>(1);
+        self.media.rtp_timeout_tx = Some(rtp_timeout_tx);
+
+        let max_duration_sleep = if let Some(max_dur) = self.context.dialplan.max_call_duration {
+            info!(session_id = %self.context.session_id, ?max_dur, "Max call duration timer armed");
+            tokio::time::sleep(max_dur).boxed()
+        } else {
+            futures::future::pending::<()>().boxed()
+        };
+        tokio::pin!(max_duration_sleep);
+
         loop {
             for dialog_id in self.pending_hangup.drain() {
                 if let Some(dialog) = self.server.dialog_layer.get_dialog(&dialog_id) {
@@ -1679,6 +1690,26 @@ impl SipSession {
                         }
                         None => {}
                     }
+                }
+
+                Some(reason) = rtp_timeout_rx.recv(), if !cancelled => {
+                    warn!(
+                        session_id = %self.context.session_id,
+                        reason = %reason,
+                        "RTP timeout detected, terminating session"
+                    );
+                    self.meta.hangup_reason = Some(CallRecordHangupReason::RtpTimeout);
+                    self.cancel_token.cancel();
+                }
+
+                _ = &mut max_duration_sleep, if !cancelled => {
+                    warn!(
+                        session_id = %self.context.session_id,
+                        max_duration = ?self.context.dialplan.max_call_duration,
+                        "Max call duration exceeded, terminating session"
+                    );
+                    self.meta.hangup_reason = Some(CallRecordHangupReason::Autohangup);
+                    self.cancel_token.cancel();
                 }
             }
         }
@@ -2866,13 +2897,13 @@ impl SipSession {
                     .unwrap_or(0)
             ));
 
-            let spec = hound::WavSpec {
+            let spec = crate::media::wav_reader::WavSpec {
                 channels: 1,
                 sample_rate: 8000,
                 bits_per_sample: 16,
-                sample_format: hound::SampleFormat::Int,
+                sample_format: crate::media::wav_reader::SampleFormat::Int,
             };
-            let mut writer = hound::WavWriter::create(&temp_path, spec)
+            let mut writer = crate::media::wav_reader::WavWriter::create(&temp_path, spec)
                 .map_err(|e| anyhow!("Failed to create temp WAV for tone: {}", e))?;
             for sample in &pcm {
                 writer
@@ -3062,6 +3093,12 @@ impl SipSession {
         }
         if let Some(sipflow_tx) = self.spawn_sipflow_rtp_capture() {
             bridge_builder = bridge_builder.with_sipflow_capture(sipflow_tx);
+        }
+
+        let rtp_timeout = self.context.dialplan.rtp_timeout
+            .or_else(|| self.server.proxy_config.rtp_timeout.map(Duration::from_secs));
+        if let (Some(tx), Some(timeout)) = (self.media.rtp_timeout_tx.take(), rtp_timeout) {
+            bridge_builder = bridge_builder.with_rtp_timeout_notify(tx, timeout);
         }
 
         let bridge = bridge_builder.build();
@@ -3665,6 +3702,23 @@ impl SipSession {
                             self.emit_rwi_event(crate::rwi::proto::RwiEvent::ringing(
                                 self.context.session_id.clone(),
                             ));
+
+                            // Fire on_call_ringing hooks
+                            if !self.server.session_hooks.is_empty() {
+                                let ctx = crate::proxy::proxy_call::session_hooks::CallSessionContext {
+                                    session_id: self.context.session_id.clone(),
+                                    caller: self.context.original_caller.clone(),
+                                    callee: self.context.original_callee.clone(),
+                                    connected_callee: self.meta.connected_callee.clone(),
+                                    queue_name: self.meta.queue_name.clone(),
+                                    direction: self.context.dialplan.direction.to_string(),
+                                    started_at: Some(self.context.created_at.clone()),
+                                    metadata: self.context.metadata.clone(),
+                                };
+                                for hook in self.server.session_hooks.iter() {
+                                    hook.on_call_ringing(&ctx).await;
+                                }
+                            }
                         }
                         self.update_snapshot_cache();
                     }
@@ -5790,6 +5844,9 @@ impl SipSession {
                 callee: self.context.original_callee.clone(),
                 connected_callee: self.meta.connected_callee.clone(),
                 queue_name: self.meta.queue_name.clone(),
+                direction: self.context.dialplan.direction.to_string(),
+                started_at: Some(self.context.created_at.clone()),
+                metadata: self.context.metadata.clone(),
             };
             for hook in self.server.session_hooks.iter() {
                 hook.on_call_connected(&ctx).await;
@@ -6489,6 +6546,9 @@ impl SipSession {
                 callee: self.context.original_callee.clone(),
                 connected_callee: self.meta.connected_callee.clone(),
                 queue_name: self.meta.queue_name.clone(),
+                direction: self.context.dialplan.direction.to_string(),
+                started_at: Some(self.context.created_at.clone()),
+                metadata: self.context.metadata.clone(),
             };
             let reason = self.meta.hangup_reason.clone();
             for hook in self.server.session_hooks.iter() {
@@ -8725,6 +8785,9 @@ impl SipSession {
                         callee: self.context.original_callee.clone(),
                         connected_callee: self.meta.connected_callee.clone(),
                         queue_name: self.meta.queue_name.clone(),
+                        direction: self.context.dialplan.direction.to_string(),
+                        started_at: Some(self.context.created_at.clone()),
+                        metadata: self.context.metadata.clone(),
                     };
                     let leg_id_str = leg_id.to_string();
                     for hook in self.server.session_hooks.iter() {
@@ -8797,6 +8860,9 @@ impl SipSession {
                         callee: self.context.original_callee.clone(),
                         connected_callee: self.meta.connected_callee.clone(),
                         queue_name: self.meta.queue_name.clone(),
+                        direction: self.context.dialplan.direction.to_string(),
+                        started_at: Some(self.context.created_at.clone()),
+                        metadata: self.context.metadata.clone(),
                     };
                     let leg_id_str = leg_id.to_string();
                     for hook in self.server.session_hooks.iter() {
@@ -9345,6 +9411,8 @@ mod tests {
             original_caller: "sip:alice@rustpbx.com".to_string(),
             original_callee: "sip:bob@rustpbx.com".to_string(),
             max_forwards: 70,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            metadata: None,
         };
 
         let caller_peer = Arc::new(MockMediaPeer::new());
@@ -9427,6 +9495,8 @@ mod tests {
             original_caller: "sip:alice@rustpbx.com".to_string(),
             original_callee: "sip:bob@rustpbx.com".to_string(),
             max_forwards: 70,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            metadata: None,
         };
 
         let caller_peer = Arc::new(MockMediaPeer::new());
@@ -9507,6 +9577,8 @@ mod tests {
             original_caller: "sip:alice@rustpbx.com".to_string(),
             original_callee: "sip:ivr@rustpbx.com".to_string(),
             max_forwards: 70,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            metadata: None,
         };
 
         let caller_peer = Arc::new(MockMediaPeer::new());
@@ -9616,6 +9688,8 @@ mod tests {
             original_caller: "sip:alice@rustpbx.com".to_string(),
             original_callee: "sip:ivr@rustpbx.com".to_string(),
             max_forwards: 70,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            metadata: None,
         };
 
         let caller_peer = Arc::new(MockMediaPeer::new());
@@ -9966,6 +10040,8 @@ mod tests {
             original_caller: "sip:alice@rustpbx.com".to_string(),
             original_callee: "sip:bob@rustpbx.com".to_string(),
             max_forwards: 70,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            metadata: None,
         };
 
         let caller_peer = Arc::new(MockMediaPeer::new());
@@ -10034,6 +10110,8 @@ mod tests {
             original_caller: "sip:alice@rustpbx.com".to_string(),
             original_callee: "sip:bob@rustpbx.com".to_string(),
             max_forwards: 70,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            metadata: None,
         };
 
         let caller_peer = Arc::new(MockMediaPeer::new());

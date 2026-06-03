@@ -192,6 +192,7 @@ pub enum CallRecordHangupReason {
     Canceled,
     Rejected,
     Failed,
+    RtpTimeout,
     Other(String),
 }
 
@@ -298,6 +299,7 @@ impl std::fmt::Display for CallRecordHangupReason {
             Self::Canceled => write!(f, "canceled"),
             Self::Rejected => write!(f, "rejected"),
             Self::Failed => write!(f, "failed"),
+            Self::RtpTimeout => write!(f, "rtpTimeout"),
             Self::Other(s) => write!(f, "{}", s),
         }
     }

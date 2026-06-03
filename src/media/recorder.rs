@@ -1,6 +1,6 @@
 use crate::media::StreamWriter;
 use crate::media::negotiate::NegotiatedLegProfile;
-use crate::media::wav_writer::WavWriter;
+use crate::media::wav_writer::CodecWavWriter;
 use anyhow::Result;
 use audio_codec::{CodecType, Decoder, Encoder, create_decoder, create_encoder};
 use bytes::Bytes;
@@ -120,7 +120,7 @@ impl Recorder {
         // PCMU/PCMA are mono codecs (1 channel), we force stereo (2 channels) for better separation
         // of leg A and leg B audio in the recording.
         let channels = 2;
-        let mut writer = Box::new(WavWriter::new(file, sample_rate, channels, Some(codec)));
+        let mut writer = Box::new(CodecWavWriter::new(file, sample_rate, channels, Some(codec)));
         writer.write_header()?;
 
         Ok(Self {

@@ -13,14 +13,14 @@ async fn create_test_wav_file(path: &str) -> Result<()> {
 }
 
 async fn create_test_wav_file_with_samples(path: &str, num_samples: usize) -> Result<()> {
-    let spec = hound::WavSpec {
+    let spec = crate::media::wav_reader::WavSpec {
         channels: 1,
         sample_rate: 8000,
         bits_per_sample: 16,
-        sample_format: hound::SampleFormat::Int,
+        sample_format: crate::media::wav_reader::SampleFormat::Int,
     };
     let mut writer =
-        hound::WavWriter::create(path, spec).map_err(|e| anyhow::anyhow!("WavWriter: {e}"))?;
+        crate::media::wav_reader::WavWriter::create(path, spec).map_err(|e| anyhow::anyhow!("WavWriter: {e}"))?;
     for i in 0..num_samples {
         let sample = ((i as f32 / 8.0).sin() * 1000.0) as i16;
         writer

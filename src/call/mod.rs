@@ -793,6 +793,8 @@ pub struct Dialplan {
     pub media: MediaConfig,
     /// Maximum call duration
     pub max_call_duration: Option<Duration>,
+    /// RTP timeout per direction (None = use proxy default)
+    pub rtp_timeout: Option<Duration>,
     /// What to do when a call fails
     pub failure_action: FailureAction,
     /// Enable SIP flow recording (SIP message logging)
@@ -830,6 +832,7 @@ impl std::fmt::Debug for Dialplan {
             .field("recording", &self.recording)
             .field("media", &self.media)
             .field("max_call_duration", &self.max_call_duration)
+            .field("rtp_timeout", &self.rtp_timeout)
             .field("enable_sipflow", &self.enable_sipflow)
             .finish()
     }
@@ -864,6 +867,7 @@ impl Dialplan {
             ringback: RingbackConfig::default(),
             media: MediaConfig::default(),
             max_call_duration: Some(Duration::from_secs(3600)), // 1 hour
+            rtp_timeout: None,
             failure_action: FailureAction::default(),
             enable_sipflow: true, // Enable SIP flow recording by default
             call_forwarding: None,
@@ -925,6 +929,12 @@ impl Dialplan {
     /// Set max call duration
     pub fn with_max_call_duration(mut self, duration: Duration) -> Self {
         self.max_call_duration = Some(duration);
+        self
+    }
+
+    /// Set RTP timeout per direction
+    pub fn with_rtp_timeout(mut self, timeout: Duration) -> Self {
+        self.rtp_timeout = Some(timeout);
         self
     }
 

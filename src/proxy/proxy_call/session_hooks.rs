@@ -24,6 +24,12 @@ pub struct CallSessionContext {
     pub connected_callee: Option<String>,
     /// Queue name if the call was routed through a queue.
     pub queue_name: Option<String>,
+    /// Call direction: `"inbound"` or `"outbound"`.
+    pub direction: String,
+    /// ISO-8601 timestamp when the session was created (before ringing).
+    pub started_at: Option<String>,
+    /// Application metadata injected by the routing layer (e.g. X-CRM-* / X-CC-*).
+    pub metadata: Option<std::collections::HashMap<String, String>>,
 }
 
 /// Observer trait for call-session lifecycle events.
@@ -32,6 +38,9 @@ pub struct CallSessionContext {
 /// `Arc` and called from async tasks.
 #[async_trait]
 pub trait CallSessionHook: Send + Sync {
+    /// Called when the callee starts ringing (180 Ringing sent to caller).
+    async fn on_call_ringing(&self, _ctx: &CallSessionContext) {}
+
     /// Called once both legs are connected (200 OK acknowledged by caller).
     async fn on_call_connected(&self, _ctx: &CallSessionContext) {}
 

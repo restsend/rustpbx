@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::task::JoinHandle;
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 pub(crate) struct CallerIngressMonitor {
@@ -89,6 +90,7 @@ pub struct MediaState {
     pub callee_offer_uses_media_bridge: bool,
     pub media_bridge_started: bool,
     pub bridge_playback_track_id: Option<String>,
+    pub rtp_timeout_tx: Option<mpsc::Sender<String>>,
 }
 
 impl MediaState {
@@ -107,6 +109,7 @@ impl MediaState {
             callee_offer_uses_media_bridge: false,
             media_bridge_started: false,
             bridge_playback_track_id: None,
+            rtp_timeout_tx: None,
         }
     }
 }

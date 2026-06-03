@@ -4931,30 +4931,24 @@
                     user_backends: this.proxyDraft.user_backends,
                 };
 
-                if (this.proxyDraft.locator_webhook.url) {
-                    body.locator_webhook = {
-                        url: this.proxyDraft.locator_webhook.url,
-                        timeout_ms: this.normalizeOptionalNumber(this.proxyDraft.locator_webhook.timeout_ms),
-                        headers: this.parseHeaders(this.proxyDraft.locator_webhook.headers),
-                    };
-                }
+                body.locator_webhook = {
+                    url: this.proxyDraft.locator_webhook.url,
+                    timeout_ms: this.normalizeOptionalNumber(this.proxyDraft.locator_webhook.timeout_ms),
+                    headers: this.parseHeaders(this.proxyDraft.locator_webhook.headers),
+                };
 
-                if (this.proxyDraft.rwi_webhook.url) {
-                    body.rwi_webhook = {
-                        url: this.proxyDraft.rwi_webhook.url,
-                        timeout_ms: this.normalizeOptionalNumber(this.proxyDraft.rwi_webhook.timeout_ms),
-                        headers: this.parseHeaders(this.proxyDraft.rwi_webhook.headers),
-                        events: this.listFromTextarea(this.proxyDraft.rwi_webhook.events),
-                    };
-                }
+                body.rwi_webhook = {
+                    url: this.proxyDraft.rwi_webhook.url,
+                    timeout_ms: this.normalizeOptionalNumber(this.proxyDraft.rwi_webhook.timeout_ms),
+                    headers: this.parseHeaders(this.proxyDraft.rwi_webhook.headers),
+                    events: this.listFromTextarea(this.proxyDraft.rwi_webhook.events),
+                };
 
-                if (this.proxyDraft.http_router.url) {
-                    body.http_router = {
-                        url: this.proxyDraft.http_router.url,
-                        timeout_ms: this.normalizeOptionalNumber(this.proxyDraft.http_router.timeout_ms),
-                        headers: this.parseHeaders(this.proxyDraft.http_router.headers),
-                    };
-                }
+                body.http_router = {
+                    url: this.proxyDraft.http_router.url,
+                    timeout_ms: this.normalizeOptionalNumber(this.proxyDraft.http_router.timeout_ms),
+                    headers: this.parseHeaders(this.proxyDraft.http_router.headers),
+                };
 
                 this.proxyProcessing = true;
                 try {

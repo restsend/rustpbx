@@ -35,6 +35,7 @@ pub mod transcoder;
 pub mod transcoding_pipeline;
 #[cfg(test)]
 mod unified_pc_tests;
+pub mod wav_reader;
 pub mod wav_writer;
 
 pub trait StreamWriter: Send + Sync {

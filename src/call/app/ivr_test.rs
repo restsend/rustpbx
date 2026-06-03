@@ -1793,13 +1793,13 @@ action = { type = "transfer", target = "100" }
     fn create_e2e_wav(name: &str, num_samples: usize) -> String {
         let temp_dir = std::env::temp_dir();
         let path = temp_dir.join(name);
-        let spec = hound::WavSpec {
+        let spec = crate::media::wav_reader::WavSpec {
             channels: 1,
             sample_rate: 8000,
             bits_per_sample: 16,
-            sample_format: hound::SampleFormat::Int,
+            sample_format: crate::media::wav_reader::SampleFormat::Int,
         };
-        let mut writer = hound::WavWriter::create(path.to_str().unwrap(), spec).expect("WavWriter");
+        let mut writer = crate::media::wav_reader::WavWriter::create(path.to_str().unwrap(), spec).expect("WavWriter");
         for i in 0..num_samples {
             let sample = ((i as f32 / 8.0).sin() * 1000.0) as i16;
             writer.write_sample(sample).expect("write_sample");
@@ -2578,14 +2578,14 @@ action = { type = "transfer", target = "100" }
         let wav = {
             let mut tmp = tempfile::NamedTempFile::with_suffix(".wav").unwrap();
             {
-                let spec = hound::WavSpec {
+                let spec = crate::media::wav_reader::WavSpec {
                     channels: 1,
                     sample_rate: 8000,
                     bits_per_sample: 16,
-                    sample_format: hound::SampleFormat::Int,
+                    sample_format: crate::media::wav_reader::SampleFormat::Int,
                 };
                 let mut writer =
-                    hound::WavWriter::new(std::io::BufWriter::new(tmp.as_file_mut()), spec)
+                    crate::media::wav_reader::WavWriter::new(std::io::BufWriter::new(tmp.as_file_mut()), spec)
                         .unwrap();
                 for _ in 0..800 {
                     writer.write_sample(0i16).unwrap();

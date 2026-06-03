@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+use rustpbx::media::wav_reader::{SampleFormat, WavReader, WavSpec, WavWriter};
 use std::path::Path;
 
 pub fn generate_sine_wav(
@@ -9,13 +10,13 @@ pub fn generate_sine_wav(
     sample_rate: u32,
     amplitude: f64,
 ) {
-    let spec = hound::WavSpec {
+    let spec = WavSpec {
         channels: 1,
         sample_rate,
         bits_per_sample: 16,
-        sample_format: hound::SampleFormat::Int,
+        sample_format: SampleFormat::Int,
     };
-    let mut writer = hound::WavWriter::create(path, spec).unwrap();
+    let mut writer = WavWriter::create(path, spec).unwrap();
     let num_samples = (sample_rate as f64 * duration_secs) as u64;
     for i in 0..num_samples {
         let t = i as f64 / sample_rate as f64;
@@ -35,13 +36,13 @@ pub fn generate_dual_tone_wav(
     sample_rate: u32,
     amplitude: f64,
 ) {
-    let spec = hound::WavSpec {
+    let spec = WavSpec {
         channels: 1,
         sample_rate,
         bits_per_sample: 16,
-        sample_format: hound::SampleFormat::Int,
+        sample_format: SampleFormat::Int,
     };
-    let mut writer = hound::WavWriter::create(path, spec).unwrap();
+    let mut writer = WavWriter::create(path, spec).unwrap();
     let num_samples = (sample_rate as f64 * duration_secs) as u64;
     for i in 0..num_samples {
         let t = i as f64 / sample_rate as f64;
@@ -80,13 +81,13 @@ pub fn generate_dtmf_wav(
     .into_iter()
     .collect();
 
-    let spec = hound::WavSpec {
+    let spec = WavSpec {
         channels: 1,
         sample_rate,
         bits_per_sample: 16,
-        sample_format: hound::SampleFormat::Int,
+        sample_format: SampleFormat::Int,
     };
-    let mut writer = hound::WavWriter::create(path, spec).unwrap();
+    let mut writer = WavWriter::create(path, spec).unwrap();
 
     let tone_samples = (sample_rate as u64 * tone_duration_ms as u64 / 1000) as usize;
     let gap_samples = (sample_rate as u64 * gap_duration_ms as u64 / 1000) as usize;
@@ -116,14 +117,14 @@ pub fn generate_dtmf_wav(
 }
 
 pub fn read_wav_mono(path: &Path) -> (Vec<i16>, u32) {
-    let mut reader = hound::WavReader::open(path).unwrap();
+    let mut reader = WavReader::open(path).unwrap();
     let sample_rate = reader.spec().sample_rate;
     let samples: Vec<i16> = reader.samples().map(|s| s.unwrap()).collect();
     (samples, sample_rate)
 }
 
 pub fn read_wav_stereo(path: &Path) -> (Vec<i16>, Vec<i16>, u32) {
-    let mut reader = hound::WavReader::open(path).unwrap();
+    let mut reader = WavReader::open(path).unwrap();
     let sample_rate = reader.spec().sample_rate;
     let all: Vec<i16> = reader.samples().map(|s| s.unwrap()).collect();
     let left: Vec<i16> = all.iter().step_by(2).copied().collect();

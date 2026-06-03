@@ -200,7 +200,6 @@ axum-server = { version = "0.8.0", features = ["tls-rustls"] }
 csv = "1.4.0"
 quick-xml = { version = "0.39.3", features = ["serialize"] }
 zstd = "0.13"
-hound = "3.5"
 minimp3 = "0.6.1"
 aws-lc-rs = { version = "1", optional = true }
 totp-rs = { version = "5.7.1", features = ["qr", "gen_secret"] }

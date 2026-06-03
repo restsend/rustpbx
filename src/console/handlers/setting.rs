@@ -1729,6 +1729,7 @@ pub(crate) async fn update_proxy_settings(
 
     let mut modified = false;
     let mut rwi_webhook_value = None;
+    let mut remove_rwi_webhook = false;
     let table = ensure_table_mut(&mut doc, "proxy");
 
     if let Some(realms) = payload.realms {
@@ -1737,48 +1738,59 @@ pub(crate) async fn update_proxy_settings(
     }
 
     if let Some(webhook) = payload.locator_webhook {
-        let toml_s = match toml::to_string(&webhook) {
-            Ok(s) => s,
-            Err(err) => {
-                return json_error(
-                    StatusCode::BAD_REQUEST,
-                    format!("Failed to serialize locator_webhook: {err}"),
-                );
+        if webhook.url.is_empty() {
+            if table.contains_key("locator_webhook") {
+                table.remove("locator_webhook");
+                modified = true;
             }
-        };
-        let new_doc = match toml_s.parse::<DocumentMut>() {
-            Ok(doc) => doc,
-            Err(err) => {
-                return json_error(
-                    StatusCode::BAD_REQUEST,
-                    format!("Invalid locator_webhook payload: {err}"),
-                );
-            }
-        };
-        table["locator_webhook"] = new_doc.as_item().clone();
-        modified = true;
+        } else {
+            let toml_s = match toml::to_string(&webhook) {
+                Ok(s) => s,
+                Err(err) => {
+                    return json_error(
+                        StatusCode::BAD_REQUEST,
+                        format!("Failed to serialize locator_webhook: {err}"),
+                    );
+                }
+            };
+            let new_doc = match toml_s.parse::<DocumentMut>() {
+                Ok(doc) => doc,
+                Err(err) => {
+                    return json_error(
+                        StatusCode::BAD_REQUEST,
+                        format!("Invalid locator_webhook payload: {err}"),
+                    );
+                }
+            };
+            table["locator_webhook"] = new_doc.as_item().clone();
+            modified = true;
+        }
     }
 
     if let Some(webhook) = payload.rwi_webhook {
-        let toml_s = match toml::to_string(&webhook) {
-            Ok(s) => s,
-            Err(err) => {
-                return json_error(
-                    StatusCode::BAD_REQUEST,
-                    format!("Failed to serialize rwi_webhook: {err}"),
-                );
-            }
-        };
-        let new_doc = match toml_s.parse::<DocumentMut>() {
-            Ok(parsed) => parsed,
-            Err(err) => {
-                return json_error(
-                    StatusCode::BAD_REQUEST,
-                    format!("Invalid rwi_webhook payload: {err}"),
-                );
-            }
-        };
-        rwi_webhook_value = Some(new_doc.as_item().clone());
+        if webhook.url.is_empty() {
+            remove_rwi_webhook = true;
+        } else {
+            let toml_s = match toml::to_string(&webhook) {
+                Ok(s) => s,
+                Err(err) => {
+                    return json_error(
+                        StatusCode::BAD_REQUEST,
+                        format!("Failed to serialize rwi_webhook: {err}"),
+                    );
+                }
+            };
+            let new_doc = match toml_s.parse::<DocumentMut>() {
+                Ok(parsed) => parsed,
+                Err(err) => {
+                    return json_error(
+                        StatusCode::BAD_REQUEST,
+                        format!("Invalid rwi_webhook payload: {err}"),
+                    );
+                }
+            };
+            rwi_webhook_value = Some(new_doc.as_item().clone());
+        }
     }
 
     if let Some(backends) = payload.user_backends {
@@ -1813,31 +1825,42 @@ pub(crate) async fn update_proxy_settings(
     }
 
     if let Some(router) = payload.http_router {
-        let toml_s = match toml::to_string(&router) {
-            Ok(s) => s,
-            Err(err) => {
-                return json_error(
-                    StatusCode::BAD_REQUEST,
-                    format!("Failed to serialize http_router: {err}"),
-                );
+        if router.url.is_empty() {
+            if table.contains_key("http_router") {
+                table.remove("http_router");
+                modified = true;
             }
-        };
-        let new_doc = match toml_s.parse::<DocumentMut>() {
-            Ok(doc) => doc,
-            Err(err) => {
-                return json_error(
-                    StatusCode::BAD_REQUEST,
-                    format!("Invalid http_router payload: {err}"),
-                );
-            }
-        };
-        table["http_router"] = new_doc.as_item().clone();
-        modified = true;
+        } else {
+            let toml_s = match toml::to_string(&router) {
+                Ok(s) => s,
+                Err(err) => {
+                    return json_error(
+                        StatusCode::BAD_REQUEST,
+                        format!("Failed to serialize http_router: {err}"),
+                    );
+                }
+            };
+            let new_doc = match toml_s.parse::<DocumentMut>() {
+                Ok(doc) => doc,
+                Err(err) => {
+                    return json_error(
+                        StatusCode::BAD_REQUEST,
+                        format!("Invalid http_router payload: {err}"),
+                    );
+                }
+            };
+            table["http_router"] = new_doc.as_item().clone();
+            modified = true;
+        }
     }
 
     // Write rwi_webhook at root level (after table borrow is done)
     if let Some(value) = rwi_webhook_value {
         doc["rwi_webhook"] = value;
+        modified = true;
+    }
+    if remove_rwi_webhook {
+        doc.remove("rwi_webhook");
         modified = true;
     }
 

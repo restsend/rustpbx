@@ -132,14 +132,16 @@ mod audio_feature_tests {
     }
 
     fn create_dummy_wav(path: &std::path::Path) -> anyhow::Result<()> {
-        let spec = hound::WavSpec {
+        use rustpbx::media::wav_reader::{SampleFormat, WavSpec, WavWriter};
+
+        let spec = WavSpec {
             channels: 1,
             sample_rate: 8000,
             bits_per_sample: 16,
-            sample_format: hound::SampleFormat::Int,
+            sample_format: SampleFormat::Int,
         };
 
-        let mut writer = hound::WavWriter::create(path, spec)?;
+        let mut writer = WavWriter::create(path, spec)?;
 
         for _ in 0..1600 {
             writer.write_sample(0i16)?;
