@@ -890,7 +890,7 @@ impl BridgePeer {
         }
         .ok_or_else(|| anyhow::anyhow!("bridge {:?} output sender is not ready", endpoint))?;
 
-        let source = track.create_playback_source()?;
+        let source = track.create_playback_source().await?;
         let mut state = self.output_state(endpoint).lock().await;
         let old_source = state.file_source.replace(source);
         state.mode = BRIDGE_OUTPUT_FILE;
@@ -923,7 +923,7 @@ impl BridgePeer {
         let track = crate::media::FileTrack::new(format!("{}-{:?}-silence", self.id, endpoint))
             .with_loop(true)
             .with_codec_info(codec_info);
-        let source = track.create_playback_source()?;
+        let source = track.create_playback_source().await?;
         let mut state = self.output_state(endpoint).lock().await;
         let old_source = state.file_source.replace(source);
         state.mode = BRIDGE_OUTPUT_FILE;
@@ -2468,8 +2468,8 @@ mod tests {
             bits_per_sample: 16,
             sample_format: crate::media::wav_reader::SampleFormat::Int,
         };
-        let mut writer =
-            crate::media::wav_reader::WavWriter::create(path, spec).map_err(|e| anyhow::anyhow!("WavWriter: {e}"))?;
+        let mut writer = crate::media::wav_reader::WavWriter::create(path, spec)
+            .map_err(|e| anyhow::anyhow!("WavWriter: {e}"))?;
         for i in 0..num_samples {
             let sample = ((i as f32 / 8.0).sin() * 1000.0) as i16;
             writer
@@ -3451,7 +3451,11 @@ mod tests {
                 .any(|c| c.codec == CodecType::G729),
             "G729 must be removed from WebRTC offer codecs"
         );
-        assert!(callee_side_codecs.iter().any(|c| c.codec == CodecType::PCMU));
+        assert!(
+            callee_side_codecs
+                .iter()
+                .any(|c| c.codec == CodecType::PCMU)
+        );
 
         let webrtc_caps: Vec<_> = callee_side_codecs
             .iter()
@@ -3695,9 +3699,9 @@ mod tests {
                     c,
                     ForwardPath::new(LegTransport::Callee, LegTransport::Caller),
                     st,
-                    None,                             // no recorder
-                    None,                             // no recorder leg
-                    None,                             // no sipflow capture
+                    None, // no recorder
+                    None, // no recorder leg
+                    None, // no sipflow capture
                     ReceiveTimestampClock::new(),
                     Arc::new(AtomicBool::new(false)), // not paused
                     ds,

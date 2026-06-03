@@ -34,11 +34,11 @@ pub struct FileAudioSource {
 }
 
 impl FileAudioSource {
-    pub fn new(file_path: String, loop_playback: bool) -> Result<Self> {
+    pub async fn new(file_path: String, loop_playback: bool) -> Result<Self> {
         let (actual_path, temp_file_path) =
             if file_path.starts_with("http://") || file_path.starts_with("https://") {
                 debug!("Downloading audio file from URL: {}", file_path);
-                let temp_path = Self::download_file(&file_path)?;
+                let temp_path = Self::download_file(&file_path).await?;
                 (temp_path.clone(), Some(temp_path))
             } else {
                 if !Path::new(&file_path).exists() {
@@ -118,7 +118,7 @@ impl FileAudioSource {
         })
     }
 
-    fn download_file(url: &str) -> Result<String> {
+    async fn download_file(url: &str) -> Result<String> {
         let temp_dir = std::env::temp_dir();
         let file_name = url
             .split('/')
@@ -131,7 +131,8 @@ impl FileAudioSource {
 
         debug!("Downloading to temporary file: {:?}", temp_path);
 
-        let response = reqwest::blocking::get(url)
+        let response = reqwest::get(url)
+            .await
             .map_err(|e| anyhow!("Failed to download audio file: {}", e))?;
 
         if !response.status().is_success() {
@@ -140,6 +141,7 @@ impl FileAudioSource {
 
         let bytes = response
             .bytes()
+            .await
             .map_err(|e| anyhow!("Failed to read response body: {}", e))?;
 
         let mut file = File::create(&temp_path)
@@ -443,8 +445,8 @@ impl AudioSourceManager {
         }
     }
 
-    pub fn switch_to_file(&self, file_path: String, loop_playback: bool) -> Result<()> {
-        let file_source = FileAudioSource::new(file_path.clone(), loop_playback)?;
+    pub async fn switch_to_file(&self, file_path: String, loop_playback: bool) -> Result<()> {
+        let file_source = FileAudioSource::new(file_path.clone(), loop_playback).await?;
         let resampling_source =
             ResamplingAudioSource::new(Box::new(file_source), self.target_sample_rate);
 
@@ -577,9 +579,8 @@ mod tests {
                 bits_per_sample: 16,
                 sample_format: SampleFormat::Int,
             };
-            let mut writer =
-                WavWriter::new(std::io::BufWriter::new(tmp.as_file_mut()), spec)
-                    .expect("WavWriter");
+            let mut writer = WavWriter::new(std::io::BufWriter::new(tmp.as_file_mut()), spec)
+                .expect("WavWriter");
             for &s in samples {
                 writer.write_sample(s).expect("write_sample");
             }
@@ -761,12 +762,13 @@ mod tests {
             .expect("completion notify not fired within 500 ms");
     }
 
-    #[test]
-    fn test_wav_file_source_reads_samples() {
+    #[tokio::test]
+    async fn test_wav_file_source_reads_samples() {
         let pcm: Vec<i16> = (0i16..160).collect();
         let tmp = write_wav(8000, &pcm);
 
         let mut src = FileAudioSource::new(tmp.path().to_str().unwrap().to_string(), false)
+            .await
             .expect("FileAudioSource::new for WAV");
 
         assert_eq!(src.sample_rate(), 8000);
@@ -779,12 +781,13 @@ mod tests {
         assert_eq!(&buf[..], &pcm[..], "samples must match what was written");
     }
 
-    #[test]
-    fn test_wav_file_source_eof_no_loop() {
+    #[tokio::test]
+    async fn test_wav_file_source_eof_no_loop() {
         let pcm: Vec<i16> = vec![42i16; 80];
         let tmp = write_wav(8000, &pcm);
 
         let mut src = FileAudioSource::new(tmp.path().to_str().unwrap().to_string(), false)
+            .await
             .expect("FileAudioSource::new");
 
         let mut buf = vec![0i16; 160];
@@ -795,12 +798,13 @@ mod tests {
         assert_eq!(read2, 0);
     }
 
-    #[test]
-    fn test_wav_file_source_loop() {
+    #[tokio::test]
+    async fn test_wav_file_source_loop() {
         let pcm: Vec<i16> = vec![1i16; 80];
         let tmp = write_wav(8000, &pcm);
 
         let mut src = FileAudioSource::new(tmp.path().to_str().unwrap().to_string(), true)
+            .await
             .expect("FileAudioSource::new");
 
         let mut buf = vec![0i16; 240];
@@ -808,14 +812,14 @@ mod tests {
         assert!(src.has_data(), "looping source must always have data");
     }
 
-    #[test]
-    fn test_wav_file_source_missing_file() {
-        let result = FileAudioSource::new("/nonexistent/path/sample.wav".to_string(), false);
+    #[tokio::test]
+    async fn test_wav_file_source_missing_file() {
+        let result = FileAudioSource::new("/nonexistent/path/sample.wav".to_string(), false).await;
         assert!(result.is_err(), "missing file must return an error");
     }
 
-    #[test]
-    fn test_estimate_duration_wav_exact() {
+    #[tokio::test]
+    async fn test_estimate_duration_wav_exact() {
         let pcm: Vec<i16> = vec![0i16; 8000];
         let tmp = write_wav(8000, &pcm);
         let dur = estimate_audio_duration(tmp.path().to_str().unwrap());

@@ -9,7 +9,9 @@ async fn test_file_track_audio_source_switching() {
         .with_loop(true);
 
     // Switch to a different file without recreating PC
-    let result = track.switch_audio_source("/tmp/ringback.wav".to_string(), false);
+    let result = track
+        .switch_audio_source("/tmp/ringback.wav".to_string(), false)
+        .await;
 
     // Should succeed (even if file doesn't exist, the manager is created)
     assert!(result.is_ok() || result.is_err()); // Both are acceptable in tests
@@ -43,14 +45,14 @@ fn test_resampling_audio_source_8k_to_16k() {
     assert!(samples_read > 0);
 }
 
-#[test]
-fn test_file_audio_source_codec_detection() {
+#[tokio::test]
+async fn test_file_audio_source_codec_detection() {
     // Test codec detection from file extension
-    let result = FileAudioSource::new("/tmp/test.pcmu".to_string(), false);
+    let result = FileAudioSource::new("/tmp/test.pcmu".to_string(), false).await;
     // May fail due to missing file, but that's expected in tests
     assert!(result.is_ok() || result.is_err());
 
-    let result = FileAudioSource::new("/tmp/test.g722".to_string(), false);
+    let result = FileAudioSource::new("/tmp/test.g722".to_string(), false).await;
     assert!(result.is_ok() || result.is_err());
 }
 
