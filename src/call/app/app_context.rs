@@ -26,6 +26,9 @@ pub struct CallInfo {
     /// headers like Via, Max-Forwards, Call-ID, CSeq, Content-Length).
     #[serde(skip_serializing_if = "HashMap::is_empty")]
     pub sip_headers: HashMap<String, String>,
+    /// Name of the matched routing rule that dispatched this call.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub route_name: Option<String>,
 }
 
 pub struct AppSharedState {
@@ -218,6 +221,7 @@ mod tests {
             direction: "inbound".to_string(),
             started_at: Utc::now(),
             sip_headers: HashMap::new(),
+            route_name: None,
         }
     }
 

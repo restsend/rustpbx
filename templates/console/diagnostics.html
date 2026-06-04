@@ -1,6 +1,6 @@
 {% extends "console/layout.html" %}
 {% block js_ext %}
-<script src="{{jssip_js|default('//jssip.net/download/releases/jssip-3.10.0.js')}}"></script>
+<script src="{{jssip_js|default('//jssip.net/download/releases/jssip-3.10.0.min.js')}}"></script>
 {% endblock %}
 {% block title %}{{ "diagnostics.title" | t }} · {{site_name|default('RustPBX')}}{% endblock %}
 {% block content %}

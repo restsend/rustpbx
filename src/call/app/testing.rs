@@ -74,6 +74,7 @@ impl MockCallStack {
                 direction: "inbound".into(),
                 started_at: Utc::now(),
                 sip_headers: HashMap::new(),
+                route_name: None,
             },
             Arc::new(Config::default()),
         );

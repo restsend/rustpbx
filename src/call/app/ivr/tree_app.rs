@@ -91,6 +91,12 @@ pub struct IvrApp {
     pending_unknown_digit: Option<String>,
     /// Optional TTS service synthesized from the IVR's own TTS config.
     tts_service: Option<Arc<crate::tts::TtsService>>,
+    /// Number of nodes traversed (for IvrFlowCompleted).
+    nodes_traversed: u32,
+    /// Timestamp when IVR flow started (for total_duration_ms).
+    flow_started_at: Option<std::time::Instant>,
+    /// Timestamp when the current node was entered (for IvrNodeExited.duration_ms).
+    node_entered_at: Option<std::time::Instant>,
 }
 
 impl IvrApp {
@@ -108,6 +114,9 @@ impl IvrApp {
             collected_variables: std::collections::HashMap::new(),
             pending_unknown_digit: None,
             tts_service,
+            nodes_traversed: 0,
+            flow_started_at: None,
+            node_entered_at: None,
         }
     }
 
@@ -147,13 +156,16 @@ impl IvrApp {
         final_result: &str,
         target: Option<&str>,
     ) {
+        let total_duration_ms = self.flow_started_at
+            .map(|t| t.elapsed().as_millis() as u64)
+            .unwrap_or(0);
         self.emit_rwi_event(
             ctx,
             crate::rwi::proto::RwiEvent::IvrFlowCompleted {
                 call_id: ctx.call_info.session_id.clone(),
                 app_id: self.definition.name.clone(),
-                total_nodes_traversed: 0,
-                total_duration_ms: 0,
+                total_nodes_traversed: self.nodes_traversed,
+                total_duration_ms: total_duration_ms as u32,
                 final_result: final_result.to_string(),
                 completion_time: chrono::Utc::now().to_rfc3339(),
                 final_routing_target: target.map(|s| s.to_string()),
@@ -345,6 +357,11 @@ impl IvrApp {
         ctx: &ApplicationContext,
     ) -> anyhow::Result<AppAction> {
         self.navigate_to_menu(menu_key);
+        if self.flow_started_at.is_none() {
+            self.flow_started_at = Some(std::time::Instant::now());
+        }
+        self.node_entered_at = Some(std::time::Instant::now());
+        self.nodes_traversed += 1;
         info!(
             ivr = %self.definition.name,
             menu = menu_key,
@@ -430,14 +447,25 @@ impl IvrApp {
         | IvrState::PlayingGreeting { ref menu_key } = self.state
         {
             let node_name = menu_key.clone();
+            let duration_ms = self.node_entered_at
+                .map(|t| t.elapsed().as_millis() as u64)
+                .unwrap_or(0);
+            let action_type = match action {
+                EntryAction::Transfer { .. } => "transfer",
+                EntryAction::Queue { .. } => "queue",
+                EntryAction::Menu { .. } => "menu",
+                EntryAction::JumpIvr { .. } => "jump_ivr",
+                EntryAction::RouteToAgent { .. } => "route_to_agent",
+                _ => "other",
+            };
             self.emit_rwi_event(
                 ctx,
                 crate::rwi::proto::RwiEvent::IvrNodeExited {
                     call_id: ctx.call_info.session_id.clone(),
                     node_id: menu_key.clone(),
                     node_name,
-                    result_value: None,
-                    duration_ms: 0,
+                    result_value: Some(action_type.to_string()),
+                    duration_ms: duration_ms as u32,
                     exit_time: chrono::Utc::now().to_rfc3339(),
                     next_node_id: None,
                     hangup_reason: None,

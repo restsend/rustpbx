@@ -123,7 +123,13 @@ impl CallApp for RwiApp {
                     caller: Some(context.call_info.caller.clone()),
                     callee: Some(context.call_info.callee.clone()),
                     direction: Some(context.call_info.direction.clone()),
-                    ..Default::default()
+                    ani: Some(context.call_info.caller.clone()),
+                    dnis: Some(context.call_info.callee.clone()),
+                    trunk: context.call_info.sip_headers.get("X-Trunk").cloned(),
+                    app_id: None,
+                    routing_target: None,
+                    agent_id: None,
+                    agent_name: None,
                 },
             )
             .await;

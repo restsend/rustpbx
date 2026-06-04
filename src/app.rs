@@ -292,6 +292,17 @@ impl AppStateBuilder {
             .filter(|policy| policy.uploads_recording())
             .cloned();
 
+        // Create RWI gateway early so it can be shared with call record hooks
+        // (e.g. RecordingUploadHook emits RecordingMetadataAvailable after upload).
+        let rwi_gateway: Option<crate::rwi::RwiGatewayRef> =
+            if config.rwi.is_some() || config.rwi_webhook.is_some() {
+                Some(std::sync::Arc::new(parking_lot::RwLock::new(
+                    crate::rwi::RwiGateway::new(),
+                )))
+            } else {
+                None
+            };
+
         let callrecord_formatter = if let Some(formatter) = self.callrecord_formatter {
             formatter
         } else {
@@ -342,7 +353,11 @@ impl AppStateBuilder {
             }
 
             if let Some(policy) = recording_upload_policy.as_ref() {
-                builder = builder.with_hook(Box::new(RecordingUploadHook::new(policy.clone())));
+                let mut hook = RecordingUploadHook::new(policy.clone());
+                if let Some(ref gw) = rwi_gateway {
+                    hook = hook.with_rwi_gateway(gw.clone());
+                }
+                builder = builder.with_hook(Box::new(hook));
             }
 
             builder = builder.with_hook(Box::new(DatabaseHook {
@@ -383,13 +398,7 @@ impl AppStateBuilder {
             callrecord_stats: callrecord_stats.clone(),
             storage: storage.clone(),
             rwi_auth: crate::rwi::create_rwi_auth(&config),
-            rwi_gateway: if config.rwi.is_some() || config.rwi_webhook.is_some() {
-                Some(std::sync::Arc::new(parking_lot::RwLock::new(
-                    crate::rwi::RwiGateway::new(),
-                )))
-            } else {
-                None
-            },
+            rwi_gateway: rwi_gateway.clone(),
             rwi_call_registry: None,
         });
 

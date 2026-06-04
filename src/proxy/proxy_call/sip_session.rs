@@ -65,6 +65,30 @@ use rsipstack::transport::SipAddr;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
+
+/// Map a SIP response status code to a fine-grained CallRecordHangupReason.
+///
+/// This replaces the previous behaviour where every dialplan / callee failure
+/// was uniformly tagged as `Failed`.
+fn sip_status_to_hangup_reason(status_code: u16) -> CallRecordHangupReason {
+    match status_code {
+        486 | 600 => CallRecordHangupReason::Rejected,      // Busy Here / Busy Everywhere
+        487 => CallRecordHangupReason::Canceled,            // Request Terminated
+        408 => CallRecordHangupReason::NoAnswer,            // Request Timeout
+        480 | 484 | 485 => CallRecordHangupReason::NoAnswer, // Temporarily Unavailable / Address Incomplete
+        481 | 482 | 483 => CallRecordHangupReason::Failed,   // Call/Loop Not Exist
+        488 | 489 => CallRecordHangupReason::Failed,         // Not Acceptable Here
+        491 | 493 => CallRecordHangupReason::Failed,
+        500 | 502 | 503 => CallRecordHangupReason::ServerUnavailable,
+        504 => CallRecordHangupReason::ServerUnavailable,
+        603 => CallRecordHangupReason::Rejected,             // Decline Everywhere
+        604 => CallRecordHangupReason::NoAnswer,             // Does Not Exist Anywhere
+        _ if (400..500).contains(&status_code) => CallRecordHangupReason::Failed,
+        _ if (500..600).contains(&status_code) => CallRecordHangupReason::ServerUnavailable,
+        _ if (600..700).contains(&status_code) => CallRecordHangupReason::Failed,
+        _ => CallRecordHangupReason::Failed,
+    }
+}
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
@@ -288,6 +312,7 @@ impl AppFactory for BuiltinAppFactory {
                         .unwrap_or("step_ivr")
                         .to_string();
                     app = app.with_name(ivr_name);
+                    app = app.with_route_name(context.call_info.route_name.clone());
                     if let Some(tts_value) = params.as_ref()?.get("tts")
                         && let Ok(tts_cfg) =
                             serde_json::from_value::<crate::tts::TtsConfig>(tts_value.clone())
@@ -334,6 +359,7 @@ impl AppFactory for BuiltinAppFactory {
                         let mut app =
                             crate::call::app::ivr::StepIvrApp::with_provider(Box::new(provider));
                         app = app.with_name(file_config.ivr.name.clone());
+                        app = app.with_route_name(context.call_info.route_name.clone());
                         if let Some(tts_value) = params.as_ref()?.get("tts")
                             && let Ok(tts_cfg) =
                                 serde_json::from_value::<crate::tts::TtsConfig>(tts_value.clone())
@@ -480,6 +506,7 @@ impl SipSession {
                 }
                 hdrs
             },
+            route_name: context.metadata.as_ref().and_then(|m| m.get("route_name").cloned()),
         };
         let mut app_ctx = ApplicationContext::new(
             server
@@ -491,6 +518,28 @@ impl SipSession {
         );
         app_ctx.rwi_gateway = server.rwi_gateway.clone();
         app_ctx.ivr_trace = server.ivr_trace.clone();
+
+        // Populate RWI CallMetaStore so events emitted from this session
+        // (call_hangup, call_no_answer, etc.) are enriched with call context.
+        if let Some(ref gw) = server.rwi_gateway {
+            let meta = crate::rwi::proto::CallMeta {
+                caller: Some(context.original_caller.clone()),
+                callee: Some(context.original_callee.clone()),
+                ani: Some(context.original_caller.clone()),
+                dnis: Some(context.original_callee.clone()),
+                direction: Some(context.dialplan.direction.to_string()),
+                trunk: context.metadata.as_ref().and_then(|m| m.get("trunk").cloned()),
+                app_id: None,
+                routing_target: None,
+                agent_id: None,
+                agent_name: None,
+            };
+            let store = gw.read().meta_store.clone();
+            let sid = context.session_id.clone();
+            crate::utils::spawn(async move {
+                store.insert(sid, meta).await;
+            });
+        }
 
         // Create a shared handle for app event delivery (send_app_event).
         // The old SessionAction→CallCommand bridge has been removed — the
@@ -1570,7 +1619,7 @@ impl SipSession {
             }
             // Store error so cleanup/CDR can report the failure reason
             self.meta.last_error = Some((StatusCode::Other(status_code, text.clone()), reason.clone()));
-            self.meta.hangup_reason = Some(CallRecordHangupReason::Failed);
+            self.meta.hangup_reason = Some(sip_status_to_hangup_reason(status_code));
             // Ensure cleanup runs (generates CDR) even on early failure
             self.cleanup().await;
             return Err(anyhow!("Dialplan failed: {} {:?}", status_code, reason));
@@ -2271,6 +2320,11 @@ impl SipSession {
                             "Callee rejected the call"
                         );
                         self.meta.last_error = Some((code.clone(), reason_str.clone()));
+                        // Set hangup_reason from SIP status code so CDR/webhook reflects
+                        // the actual failure type (busy / no_answer / rejected / etc.)
+                        if self.meta.hangup_reason.is_none() {
+                            self.meta.hangup_reason = Some(sip_status_to_hangup_reason(code.code()));
+                        }
                         if let Err(e) = self.reject_with_tone(code.code(), code.text().to_string(), reason_str.clone()).await
                         {
                             warn!(session_id = %self.context.session_id, error = %e, "Failed to send rejection response to caller");
@@ -6555,10 +6609,17 @@ impl SipSession {
             }
         }
 
+        // Emit hangup webhook with Display (lowercase) reason and actual SIP status.
+        let hangup_reason_str = self.meta.hangup_reason.clone().map(|r| r.to_string());
+        let sip_status = self
+            .meta
+            .last_error
+            .as_ref()
+            .map(|(sc, _)| sc.code());
         self.emit_rwi_event(crate::rwi::proto::RwiEvent::hangup(
             self.context.session_id.clone(),
-            self.meta.hangup_reason.clone().map(|r| format!("{:?}", r)),
-            None,
+            hangup_reason_str,
+            sip_status,
         ));
 
         debug!(session_id = %self.context.session_id, "Session cleanup complete");
@@ -7665,31 +7726,37 @@ impl SipSession {
         dn: Option<&str>,
         ani: Option<&str>,
         dnis: Option<&str>,
-    ) {
-        if let Some(ref gw) = self.server.rwi_gateway {
-            use crate::rwi::proto::RwiEvent;
-            let dn = dn.unwrap_or("unknown").to_string();
-            let dn_call_id = call_id.clone().unwrap_or_default();
-            let event = RwiEvent::DnStateChanged {
-                dn,
-                event_code,
-                event_name: event_name.to_string(),
-                system_time: chrono::Utc::now().to_rfc3339(),
-                call_id,
-                kz_conn_id: None,
-                agent_id: None,
-                other_dn: None,
-                ani: ani.map(|s| s.to_string()),
-                dnis: dnis.map(|s| s.to_string()),
-                reason_code: None,
-                agent_work_mode: None,
-                releasing_party: None,
-                third_party_dn: None,
-                vq_name: None,
-                routing_target: None,
-                skill_group: None,
-                target_dn: None,
-            };
+     ) {
+         if let Some(ref gw) = self.server.rwi_gateway {
+             use crate::rwi::proto::RwiEvent;
+             let dn = dn.unwrap_or("unknown").to_string();
+             let dn_call_id = call_id.clone().unwrap_or_default();
+             let (agent_id, agent_name, routing_target) = gw
+                 .read()
+                 .meta_store
+                 .get_sync(&dn_call_id)
+                 .map(|m| (m.agent_id.clone(), m.agent_name.clone(), m.routing_target.clone()))
+                 .unwrap_or((None, None, None));
+             let event = RwiEvent::DnStateChanged {
+                 dn,
+                 event_code,
+                 event_name: event_name.to_string(),
+                 system_time: chrono::Utc::now().to_rfc3339(),
+                 call_id,
+                 kz_conn_id: None,
+                 agent_id,
+                 other_dn: None,
+                 ani: ani.map(|s| s.to_string()),
+                 dnis: dnis.map(|s| s.to_string()),
+                 reason_code: None,
+                 agent_work_mode: None,
+                 releasing_party: None,
+                 third_party_dn: None,
+                 vq_name: None,
+                 routing_target,
+                 skill_group: None,
+                 target_dn: None,
+             };
             let gw = gw.clone();
             let g = gw.read();
             g.send_event_to_call_owner(&dn_call_id, &event);

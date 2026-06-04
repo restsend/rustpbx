@@ -1768,6 +1768,11 @@ impl RwiCommandProcessor {
                                         &call_id,
                                         &RwiEvent::CallBusy { call_id: call_id.clone(), context: Default::default() },
                                     );
+                                } else if matches!(sip_status, Some(408) | Some(480) | Some(487)) {
+                                    gw.send_event_to_call_owner(
+                                        &call_id,
+                                        &RwiEvent::CallNoAnswer { call_id: call_id.clone(), context: Default::default() },
+                                    );
                                 } else {
                                     gw.send_event_to_call_owner(
                                         &call_id,
@@ -3126,20 +3131,30 @@ impl RwiCommandProcessor {
             .send_command(CallCommand::StopRecording)
             .map_err(|e| CommandError::CommandFailed(e.to_string()))?;
         if let Some(rid) = recording_id {
+            let meta = self.gateway.read().meta_store.get_sync(call_id);
+            let (ani, dnis, agent_id, agent_name) = match meta {
+                Some(ref m) => (
+                    m.ani.clone(),
+                    m.dnis.clone(),
+                    m.agent_id.clone(),
+                    m.agent_name.clone(),
+                ),
+                None => (None, None, None, None),
+            };
             let event = RwiEvent::RecordStopped {
                 call_id: call_id.to_string(),
                 recording_id: rid,
                 duration_secs: duration,
                 filename: None,
-                unique_id: None,
+                unique_id: Some(call_id.to_string()),
                 file_size: None,
                 download_url: None,
-                ani: None,
-                dnis: None,
+                ani,
+                dnis,
                 called_phone: None,
                 call_type: None,
-                agent_id: None,
-                agent_name: None,
+                agent_id,
+                agent_name,
                 call_start_time: None,
                 call_end_time: None,
                 upload_time: None,
