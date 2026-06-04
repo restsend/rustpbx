@@ -59,25 +59,27 @@ pub async fn check_update(start_time: Instant) -> anyhow::Result<UpdateInfo> {
     let uptime_secs = start_time.elapsed().as_secs();
     let build_time = env!("BUILD_TIME_FMT");
 
-    let client = reqwest::Client::new();
-    let resp = client
+    let opts = crate::http_util::HttpFetchOptions::new()
+        .with_timeout(std::time::Duration::from_secs(5))
+        .with_header("User-Agent", &get_useragent());
+
+    let req = reqwest::Client::new()
         .get("https://miuda.ai/api/check_update")
         .query(&[
             ("version", version),
             ("edition", edition),
             ("uptime", &uptime_secs.to_string()),
             ("build_time", build_time),
-        ])
-        .header("User-Agent", get_useragent())
-        .timeout(std::time::Duration::from_secs(5))
-        .send()
-        .await;
-    let resp = match resp {
+        ]);
+    let resp = match crate::http_util::execute_request(req, &opts.headers, opts.timeout).await {
         Ok(r) => r,
-        Err(e) if e.is_timeout() || e.is_connect() => {
-            anyhow::bail!("version check unreachable (network/timeout): {e}");
+        Err(e) => {
+            let s = e.to_string();
+            if s.contains("timed out") || s.contains("connect") {
+                anyhow::bail!("version check unreachable (network/timeout): {}", s);
+            }
+            anyhow::bail!("version check request error: {}", s);
         }
-        Err(e) => anyhow::bail!("version check request error: {e}"),
     };
     let status = resp.status();
     let body = resp.text().await?;

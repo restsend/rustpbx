@@ -7758,10 +7758,11 @@ impl SipSession {
                  releasing_party: None,
                  third_party_dn: None,
                  vq_name: None,
-                 routing_target,
-                 skill_group: None,
-                 target_dn: None,
-             };
+                routing_target,
+                skill_group: None,
+                target_dn: None,
+                extra: None,
+            };
             let gw = gw.clone();
             let g = gw.read();
             g.send_event_to_call_owner(&dn_call_id, &event);

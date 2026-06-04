@@ -1,4 +1,5 @@
 use super::{BodyFormat, HttpTtsConfig};
+use crate::http_util::execute_request;
 use anyhow::{Result, anyhow};
 use std::time::Duration;
 
@@ -14,7 +15,7 @@ pub async fn synthesize_http(
         params.insert("voice".to_string(), v.to_string());
     }
 
-    let mut req = match cfg.body_format {
+    let req = match cfg.body_format {
         BodyFormat::Query | BodyFormat::Form => {
             if cfg.method.eq_ignore_ascii_case("GET") {
                 client.get(&cfg.url).query(&params)
@@ -44,18 +45,12 @@ pub async fn synthesize_http(
         }
     };
 
-    for (key, value) in &cfg.headers {
-        req = req.header(key, value);
-    }
-
-    let resp = tokio::time::timeout(Duration::from_secs(cfg.timeout_seconds), req.send())
-        .await
-        .map_err(|_| anyhow!("TTS HTTP request timed out after {}s", cfg.timeout_seconds))?
-        .map_err(|e| anyhow!("TTS HTTP request failed: {}", e))?;
-
-    if !resp.status().is_success() {
-        return Err(anyhow!("TTS HTTP returned {}", resp.status()));
-    }
+    let resp = execute_request(
+        req,
+        &cfg.headers,
+        Some(Duration::from_secs(cfg.timeout_seconds)),
+    )
+    .await?;
 
     resp.bytes()
         .await

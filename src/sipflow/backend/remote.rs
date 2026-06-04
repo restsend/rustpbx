@@ -8,6 +8,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::config::SipFlowClusterNode;
+use crate::http_util::{HttpFetchOptions, fetch_bytes, fetch_json};
 use crate::sipflow::backend::SipFlowBackend;
 use crate::sipflow::protocol::{MsgType, Packet, encode_packet};
 use crate::sipflow::{SipFlowItem, SipFlowMediaStats, SipFlowMsgType};
@@ -192,8 +193,7 @@ impl SipFlowBackend for RemoteBackend {
             end_time.timestamp()
         );
 
-        let response = self.client.get(&url).send().await?;
-        let json: serde_json::Value = response.json().await?;
+        let json: serde_json::Value = fetch_json(&self.client, &url, &HttpFetchOptions::new()).await?;
 
         if json["status"] == "success" {
             let flow_array = json["flow"]
@@ -231,8 +231,7 @@ impl SipFlowBackend for RemoteBackend {
             end_time.timestamp()
         );
 
-        let response = self.client.get(&url).send().await?;
-        let json: serde_json::Value = response.json().await?;
+        let json: serde_json::Value = fetch_json(&self.client, &url, &HttpFetchOptions::new()).await?;
 
         if json["status"] == "success" {
             let stats = json["stats"]
@@ -312,14 +311,14 @@ impl SipFlowBackend for RemoteBackend {
             end_time.timestamp()
         );
 
-        let response = self.client.get(&url).send().await?;
-
-        if response.status().is_success() {
-            let bytes = response.bytes().await?;
-            Ok(bytes.to_vec())
-        } else {
-            Err(anyhow::anyhow!("Media query failed: {}", response.status()))
-        }
+        let bytes = fetch_bytes(
+            &self.client,
+            reqwest::Method::GET,
+            &url,
+            &HttpFetchOptions::new(),
+        )
+        .await?;
+        Ok(bytes.to_vec())
     }
 }
 

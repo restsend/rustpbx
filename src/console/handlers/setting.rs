@@ -2663,13 +2663,12 @@ async fn cluster_reload_sse_handler(
                 "http://{}:{}{}/cluster/reload_sync",
                 peer.addr, peer.ami_port, ami_path
             );
-            let client = reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(120))
-                .build()
-                .unwrap_or_default();
+            let opts = crate::http_util::HttpFetchOptions::new()
+                .with_timeout(std::time::Duration::from_secs(120));
 
             let start = std::time::Instant::now();
-            match client.post(&url).json(&payload).send().await {
+            let req = reqwest::Client::new().post(&url).json(&payload);
+            match crate::http_util::execute_request(req, &opts.headers, opts.timeout).await {
                 Ok(resp) => {
                     let elapsed_ms = start.elapsed().as_millis() as u64;
                     match resp.json::<serde_json::Value>().await {
@@ -3248,17 +3247,9 @@ pub(crate) async fn test_locator_webhook(
     if !state.has_permission(&user, "system", "write").await {
         return json_error(StatusCode::FORBIDDEN, "Permission denied");
     }
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
-        .build()
-        .unwrap_or_else(|_| reqwest::Client::new());
-
-    let mut request = client.post(&payload.url);
-    if let Some(headers) = payload.headers {
-        for (k, v) in headers {
-            request = request.header(k, v);
-        }
-    }
+    let opts = crate::http_util::HttpFetchOptions::new()
+        .with_timeout(std::time::Duration::from_secs(5))
+        .with_headers(payload.headers.unwrap_or_default());
 
     let test_event = json!({
         "event": "test",
@@ -3266,21 +3257,13 @@ pub(crate) async fn test_locator_webhook(
         "message": "RustPBX locator webhook test"
     });
 
-    match request.json(&test_event).send().await {
-        Ok(resp) => {
-            if resp.status().is_success() {
-                Json(json!({
-                    "status": "ok",
-                    "message": format!("Webhook test successful: HTTP {}", resp.status()),
-                }))
-                .into_response()
-            } else {
-                json_error(
-                    StatusCode::BAD_REQUEST,
-                    format!("Webhook returned error: HTTP {}", resp.status()),
-                )
-            }
-        }
+    let req = reqwest::Client::new().post(&payload.url).json(&test_event);
+    match crate::http_util::execute_request(req, &opts.headers, opts.timeout).await {
+        Ok(resp) => Json(json!({
+            "status": "ok",
+            "message": format!("Webhook test successful: HTTP {}", resp.status()),
+        }))
+        .into_response(),
         Err(err) => json_error(
             StatusCode::BAD_REQUEST,
             format!("Webhook request failed: {}", err),
@@ -3298,20 +3281,11 @@ pub(crate) async fn test_rwi_webhook(
     }
 
     match crate::rwi::webhook::send_test_event(&payload.url, payload.headers.as_ref()).await {
-        Ok(resp) => {
-            if resp.status().is_success() {
-                Json(json!({
-                    "status": "ok",
-                    "message": format!("RWI webhook test successful: HTTP {}", resp.status()),
-                }))
-                .into_response()
-            } else {
-                json_error(
-                    StatusCode::BAD_REQUEST,
-                    format!("RWI webhook returned error: HTTP {}", resp.status()),
-                )
-            }
-        }
+        Ok(()) => Json(json!({
+            "status": "ok",
+            "message": "RWI webhook test successful",
+        }))
+        .into_response(),
         Err(err) => json_error(
             StatusCode::BAD_REQUEST,
             format!("RWI webhook request failed: {}", err),
@@ -3327,17 +3301,9 @@ pub(crate) async fn test_http_router(
     if !state.has_permission(&user, "system", "write").await {
         return json_error(StatusCode::FORBIDDEN, "Permission denied");
     }
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
-        .build()
-        .unwrap_or_else(|_| reqwest::Client::new());
-
-    let mut request = client.post(&payload.url);
-    if let Some(headers) = payload.headers {
-        for (k, v) in headers {
-            request = request.header(k, v);
-        }
-    }
+    let opts = crate::http_util::HttpFetchOptions::new()
+        .with_timeout(std::time::Duration::from_secs(5))
+        .with_headers(payload.headers.unwrap_or_default());
 
     let test_request = json!({
         "call_id": "test-call-id",
@@ -3348,21 +3314,13 @@ pub(crate) async fn test_http_router(
         "direction": "internal"
     });
 
-    match request.json(&test_request).send().await {
-        Ok(resp) => {
-            if resp.status().is_success() {
-                Json(json!({
-                    "status": "ok",
-                    "message": format!("HTTP Router test successful: HTTP {}", resp.status()),
-                }))
-                .into_response()
-            } else {
-                json_error(
-                    StatusCode::BAD_REQUEST,
-                    format!("HTTP Router returned error: HTTP {}", resp.status()),
-                )
-            }
-        }
+    let req = reqwest::Client::new().post(&payload.url).json(&test_request);
+    match crate::http_util::execute_request(req, &opts.headers, opts.timeout).await {
+        Ok(resp) => Json(json!({
+            "status": "ok",
+            "message": format!("HTTP Router test successful: HTTP {}", resp.status()),
+        }))
+        .into_response(),
         Err(err) => json_error(
             StatusCode::BAD_REQUEST,
             format!("HTTP Router request failed: {}", err),
@@ -3408,12 +3366,16 @@ pub(crate) async fn test_user_backend(
         }))
         .into_response(),
         UserBackendConfig::Http { url, .. } => {
-            let client = reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(5))
-                .build()
-                .unwrap_or_else(|_| reqwest::Client::new());
+            let opts = crate::http_util::HttpFetchOptions::new()
+                .with_timeout(std::time::Duration::from_secs(5));
 
-            match client.get(&url).send().await {
+            match crate::http_util::execute_request(
+                reqwest::Client::new().get(&url),
+                &opts.headers,
+                opts.timeout,
+            )
+            .await
+            {
                 Ok(resp) => Json(json!({
                     "status": "ok",
                     "message": format!("HTTP backend reachable: HTTP {}", resp.status()),

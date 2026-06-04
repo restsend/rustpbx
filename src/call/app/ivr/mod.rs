@@ -2,6 +2,7 @@ pub mod common;
 pub mod config;
 pub mod executor;
 pub mod provider;
+pub mod third_party;
 pub mod trace;
 pub mod tree_app;
 

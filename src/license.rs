@@ -146,62 +146,46 @@ mod inner {
             key_prefix
         );
 
-        let client = reqwest::Client::new();
-        let resp = client
+        let body = serde_json::json!({ "license_key": key });
+        let opts = crate::http_util::HttpFetchOptions::new()
+            .with_timeout(std::time::Duration::from_secs(5));
+        let req = reqwest::Client::new()
             .post("https://miuda.ai/api/verify")
-            .json(&serde_json::json!({ "license_key": key }))
-            .timeout(std::time::Duration::from_secs(5))
-            .send()
-            .await;
-
-        match resp {
+            .json(&body);
+        match crate::http_util::execute_request(req, &opts.headers, opts.timeout).await {
             Ok(response) => {
                 let status = response.status();
                 tracing::info!("License verify response status: {}", status);
-                if status.is_success() {
-                    let body = response.text().await?;
-                    tracing::debug!("License verify response body: {}", body);
-                    let verify_data: VerifyResponse = serde_json::from_str(&body).map_err(|e| {
-                        anyhow::anyhow!("Failed to parse verify response: {e}, body: {body}")
-                    })?;
-                    let info = LicenseInfo {
-                        key: key.to_string(),
-                        valid: verify_data.valid,
-                        expiry: verify_data.expiry,
-                        plan: verify_data.plan.unwrap_or_default(),
-                        last_checked: Utc::now(),
-                        scope: verify_data.scope,
-                        reject_reason: verify_data.reject_reason,
-                    };
+                let body = response.text().await?;
+                tracing::debug!("License verify response body: {}", body);
+                let verify_data: VerifyResponse = serde_json::from_str(&body).map_err(|e| {
+                    anyhow::anyhow!("Failed to parse verify response: {e}, body: {body}")
+                })?;
+                let info = LicenseInfo {
+                    key: key.to_string(),
+                    valid: verify_data.valid,
+                    expiry: verify_data.expiry,
+                    plan: verify_data.plan.unwrap_or_default(),
+                    last_checked: Utc::now(),
+                    scope: verify_data.scope,
+                    reject_reason: verify_data.reject_reason,
+                };
 
-                    if let Ok(mut cache) = LICENSE_CACHE.lock() {
-                        cache.insert(key.to_string(), info.clone());
-                    }
-
-                    Ok(info)
-                } else {
-                    let body = response.text().await.unwrap_or_default();
-                    tracing::warn!(
-                        "License verification failed: status={}, body={}",
-                        status,
-                        body
-                    );
-                    anyhow::bail!(
-                        "Verification failed with status: {}, body: {}",
-                        status,
-                        body
-                    )
+                if let Ok(mut cache) = LICENSE_CACHE.lock() {
+                    cache.insert(key.to_string(), info.clone());
                 }
+
+                Ok(info)
             }
             Err(e) => {
-                tracing::error!("License verification network error: {}", e);
+                tracing::error!("License verification error: {}", e);
                 if let Ok(cache) = LICENSE_CACHE.lock() {
                     if let Some(info) = cache.get(key) {
                         tracing::warn!("Network error verifying license, using cached info: {}", e);
                         return Ok(info.clone());
                     }
                 }
-                Err(e.into())
+                Err(e)
             }
         }
     }

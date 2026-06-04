@@ -1,5 +1,7 @@
 use std::net::IpAddr;
 
+use crate::http_util::{HttpFetchOptions, fetch_text};
+
 pub const DEFAULT_AUTO_EXTERNAL_IP_URL: &str = "http://ifconfig.me";
 
 pub async fn detect_external_ip(url: &str) -> Result<IpAddr, anyhow::Error> {
@@ -9,21 +11,11 @@ pub async fn detect_external_ip(url: &str) -> Result<IpAddr, anyhow::Error> {
         url
     };
 
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .user_agent("curl/8.7.1")
-        .build()
-        .map_err(|e| anyhow::anyhow!("failed to build http client: {}", e))?;
+    let opts = HttpFetchOptions::new()
+        .with_timeout(std::time::Duration::from_secs(10))
+        .with_header("User-Agent", "curl/8.7.1");
 
-    let body = client
-        .get(url)
-        .send()
-        .await
-        .map_err(|e| anyhow::anyhow!("failed to fetch {}: {}", url, e))?
-        .text()
-        .await
-        .map_err(|e| anyhow::anyhow!("failed to read response body from {}: {}", url, e))?;
-
+    let body = fetch_text(&reqwest::Client::new(), url, &opts).await?;
     let ip_str = body.trim();
     let ip: IpAddr = ip_str
         .parse()
@@ -31,4 +23,3 @@ pub async fn detect_external_ip(url: &str) -> Result<IpAddr, anyhow::Error> {
 
     Ok(ip)
 }
-

@@ -904,17 +904,21 @@ async fn cluster_ping_handler(State(state): State<AppState>) -> Response {
     for peer in &peers {
         let url = format!("http://{}:{}{}/health", peer.addr, peer.ami_port, ami_path);
         let start = Instant::now();
-        let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(5))
-            .build()
-            .unwrap_or_default();
-        match client.get(&url).send().await {
+        let opts = crate::http_util::HttpFetchOptions::new()
+            .with_timeout(std::time::Duration::from_secs(5));
+        match crate::http_util::execute_request(
+            reqwest::Client::new().get(&url),
+            &opts.headers,
+            opts.timeout,
+        )
+        .await
+        {
             Ok(resp) => {
                 let latency = start.elapsed().as_millis() as u64;
                 let mut entry = serde_json::json!({
                     "peer": format!("{}:{}", peer.addr, peer.sip_port),
                     "ami_addr": format!("{}:{}", peer.addr, peer.ami_port),
-                    "reachable": resp.status().is_success(),
+                    "reachable": true,
                     "latency_ms": latency,
                 });
 
@@ -1056,13 +1060,12 @@ async fn cluster_reload_config_handler(
                 "http://{}:{}{}/cluster/reload_sync",
                 peer.addr, peer.ami_port, ami_path
             );
-            let client = reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(120))
-                .build()
-                .unwrap_or_default();
+            let opts = crate::http_util::HttpFetchOptions::new()
+                .with_timeout(std::time::Duration::from_secs(120));
 
             let start = std::time::Instant::now();
-            match client.post(&url).json(&payload).send().await {
+            let req = reqwest::Client::new().post(&url).json(&payload);
+            match crate::http_util::execute_request(req, &opts.headers, opts.timeout).await {
                 Ok(resp) => {
                     let elapsed_ms = start.elapsed().as_millis() as u64;
                     match resp.json::<serde_json::Value>().await {

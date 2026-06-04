@@ -250,6 +250,8 @@ pub enum EntryAction {
         record_name_list: Option<String>,
         #[serde(default)]
         interruptible: bool,
+        #[serde(default)]
+        tts_api_url: Option<String>,
     },
 
     DtmfMenu {
@@ -271,6 +273,8 @@ pub enum EntryAction {
         timeout_action: Option<Box<ActionNode>>,
         #[serde(default)]
         invalid_action: Option<Box<ActionNode>>,
+        #[serde(default)]
+        greeting_api_url: Option<String>,
     },
 
     CollectDtmf {
@@ -349,6 +353,10 @@ pub enum EntryAction {
         headers: HashMap<String, String>,
         #[serde(default)]
         timeout_ms: Option<u64>,
+        #[serde(default)]
+        success: Option<Box<ActionNode>>,
+        #[serde(default)]
+        failure: Option<Box<ActionNode>>,
     },
 }
 
@@ -668,6 +676,7 @@ action = { type = "menu", menu = "root" }
                 tts_voice: None,
                 record_name_list: None,
                 interruptible: true,
+                tts_api_url: None,
             },
             ActionNode::new(EntryAction::Transfer {
                 target: "2001".into(),
@@ -754,6 +763,7 @@ action = { type = "menu", menu = "root" }
             ]),
             timeout_action: Some(Box::new(ActionNode::new(EntryAction::Repeat))),
             invalid_action: Some(Box::new(ActionNode::new(EntryAction::Repeat))),
+            greeting_api_url: None,
         });
         let json = serde_json::to_value(&menu).unwrap();
         assert_eq!(json["type"], "dtmf_menu");
@@ -768,6 +778,8 @@ action = { type = "menu", menu = "root" }
             create_room_uri: "https://voip.example.com/rooms".into(),
             headers: HashMap::from([("Authorization".into(), "Bearer token123".into())]),
             timeout_ms: Some(30000),
+            success: None,
+            failure: None,
         });
         let json = serde_json::to_value(&node).unwrap();
         assert_eq!(json["type"], "voip_bridge");
