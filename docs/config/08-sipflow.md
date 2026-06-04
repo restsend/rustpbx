@@ -109,6 +109,10 @@ secret_key = "..."
 endpoint = "https://s3.amazonaws.com"
 root = "sipflow/"       # key prefix inside the bucket
 
+# Optional: upload captured RTP media as WAV after each call (default: true).
+# Set to false to skip media upload (e.g. only signalling is needed).
+# media = true
+
 # Optional: also upload SIP signalling as JSONL after each call (default: false).
 # signaling = true
 ```
@@ -121,9 +125,23 @@ type = "http"
 url = "https://archive.example.com/upload"
 # headers = { "Authorization" = "Bearer token" }
 
+# Optional: upload captured RTP media as WAV after each call (default: true).
+# Set to false to skip media upload (e.g. only signalling is needed).
+# media = true
+
 # Optional: also upload SIP signalling as JSONL after each call (default: false).
 # signaling = true
 ```
+
+### Media Upload (`media`)
+
+The `media` option controls whether the captured RTP audio is mixed down to WAV and uploaded after each call. It defaults to `true`, so simply configuring `[sipflow.upload]` is enough to get WAV files uploaded alongside the CDR.
+
+Set `media = false` when you only need SIP signalling uploaded (combine with `signaling = true`) or when another subsystem is responsible for media storage. When `media = false`:
+
+- No WAV is generated or transferred.
+- The call record's `recording_url` is **not** pre-populated (the S3 URL pre-fill step is also skipped).
+- `signaling` uploads are unaffected.
 
 ### Signalling Upload (`signaling`)
 

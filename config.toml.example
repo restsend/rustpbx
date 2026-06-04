@@ -153,6 +153,8 @@ subdirs = "daily"  # "none" | "daily" | "hourly"
 # secret_key = "SECRET"
 # endpoint = "https://s3.amazonaws.com"
 # root = "recordings"
+# media = true          # upload captured RTP as WAV (default: true)
+# signaling = false     # also upload SIP signalling as JSONL (default: false)
 
 # Remote backend (single node):
 # [sipflow]
