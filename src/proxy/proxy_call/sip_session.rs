@@ -3762,13 +3762,11 @@ impl SipSession {
             self.stop_playback_track(track_id, false).await;
         }
 
-        // Stop early media bridge (if any) before transitioning to confirmed call
+        // Stop playback (if any) before transitioning to confirmed call.
         if self.media.early_media_sent {
-            if let Some(bridge) = self.media.media_bridge.take() {
-                bridge.stop().await;
+            if let Some(track_id) = self.media.bridge_playback_track_id.clone() {
+                self.stop_playback_track(&track_id, false).await;
             }
-            self.media.caller_answer_uses_media_bridge = false;
-            self.media.bridge_playback_track_id = None;
         }
 
         let caller_answer = self
