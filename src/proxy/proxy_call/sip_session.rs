@@ -761,6 +761,11 @@ impl SipSession {
                 _ = &mut timeout => {
                     warn!(session_id = %session_id, "Call setup timed out");
                     cancel_token.cancel();
+                    if !server_dialog_clone.state().is_terminated() {
+                        if let Err(e) = tx.reply(rsipstack::sip::StatusCode::RequestTerminated).await {
+                            warn!(session_id = %session_id, error = %e, "Failed to reply 487 on setup timeout");
+                        }
+                    }
                     break;
                 }
             }
