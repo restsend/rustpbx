@@ -22,6 +22,20 @@ pub struct StepIvrApp {
     step_index: u32,
     ivr_name: Option<String>,
     rwi_gateway: Option<crate::rwi::RwiGatewayRef>,
+    /// Name of the route that dispatched this call into the IVR.
+    route_name: Option<String>,
+    /// Route-level configured headers.
+    route_headers: Option<HashMap<String, String>>,
+    /// Passthrough data set by the external provider (echoed back each step).
+    custom_data: Option<serde_json::Value>,
+    /// Previous step start time (RFC3339) for timing reporting.
+    step_prev_start_time: Option<String>,
+    /// Previous step wall-clock duration in ms.
+    step_prev_duration_ms: u64,
+    /// How this session entered IVR: `None` (fresh inbound), `"agent"`, `"queue"`.
+    transferred_from: Option<String>,
+    /// Last transfer target string (for EndReason classification).
+    last_transfer_target: Option<String>,
 }
 
 #[derive(Clone)]
@@ -48,6 +62,13 @@ impl StepIvrApp {
             step_index: 0,
             ivr_name: None,
             rwi_gateway: None,
+            route_name: None,
+            route_headers: None,
+            custom_data: None,
+            step_prev_start_time: None,
+            step_prev_duration_ms: 0,
+            transferred_from: None,
+            last_transfer_target: None,
         }
     }
 
@@ -64,6 +85,13 @@ impl StepIvrApp {
             step_index: 0,
             ivr_name: None,
             rwi_gateway: None,
+            route_name: None,
+            route_headers: None,
+            custom_data: None,
+            step_prev_start_time: None,
+            step_prev_duration_ms: 0,
+            transferred_from: None,
+            last_transfer_target: None,
         }
     }
 
@@ -95,6 +123,24 @@ impl StepIvrApp {
     /// Set the IVR name for identification in traces.
     pub fn with_name(mut self, name: impl Into<String>) -> Self {
         self.ivr_name = Some(name.into());
+        self
+    }
+
+    /// Set the route name that dispatched this call into the IVR.
+    pub fn with_route_name(mut self, name: Option<String>) -> Self {
+        self.route_name = name;
+        self
+    }
+
+    /// Set the route-level configured headers.
+    pub fn with_route_headers(mut self, headers: Option<HashMap<String, String>>) -> Self {
+        self.route_headers = headers;
+        self
+    }
+
+    /// Mark this session as re-entered from agent or queue.
+    pub fn with_transferred_from(mut self, from: Option<String>) -> Self {
+        self.transferred_from = from;
         self
     }
 
@@ -258,9 +304,10 @@ impl StepIvrApp {
                             error: None,
                         });
                         match terminal {
-                            TerminalAction::Transfer(target) => {
-                                (AppAction::Transfer(target), "terminal")
-                            }
+                    TerminalAction::Transfer(target) => {
+                            self.last_transfer_target = Some(target.clone());
+                            (AppAction::Transfer(target), "terminal")
+                        }
                             TerminalAction::Hangup { reason, code } => {
                                 (AppAction::Hangup { reason, code }, "terminal")
                             }
@@ -319,7 +366,9 @@ impl StepIvrApp {
         }
     }
 
-    async fn request_next(&self, event: Option<ProviderEvent>) -> anyhow::Result<ActionNode> {
+    async fn request_next(&mut self, event: Option<ProviderEvent>) -> anyhow::Result<ActionNode> {
+        let now_rfc3339 = chrono::Utc::now().to_rfc3339();
+        let prev_step_duration_ms = self.step_prev_duration_ms;
         let ctx = ProviderContext {
             session_id: self
                 .sess
@@ -350,11 +399,24 @@ impl StepIvrApp {
             variables: self.sess.variables.clone(),
             sip_headers: self.get_sip_headers(),
             event,
+            route_name: self.route_name.clone(),
+            route_headers: self.route_headers.clone(),
+            custom_data: self.custom_data.clone(),
+            step_start_time: Some(self.step_prev_start_time.clone().unwrap_or_else(|| now_rfc3339.clone())),
+            step_end_time: Some(now_rfc3339.clone()),
+            step_duration_ms: if prev_step_duration_ms > 0 { Some(prev_step_duration_ms) } else { None },
+            step_index: Some(self.step_index),
+            transferred_from: self.transferred_from.clone(),
         };
 
         let start = std::time::Instant::now();
         let result = self.provider.next_action(ctx.clone()).await;
         let elapsed_ms = start.elapsed().as_millis() as u64;
+
+        // Save step timing for the next ProviderContext.
+        self.step_prev_start_time = Some(now_rfc3339);
+        self.step_prev_duration_ms = elapsed_ms;
+        self.step_index += 1;
 
         // Trace the provider call
         let trace_action_type = match &result {
@@ -680,8 +742,14 @@ impl CallApp for StepIvrApp {
             tenant_id: None,
             ivr_id: None,
             sip_headers: Some(headers),
+            route_name: self.route_name.clone(),
+            route_headers: self.route_headers.clone(),
+            custom_data: self.custom_data.clone(),
+            transferred_from: self.transferred_from.clone(),
         };
         self.provider.on_session_start(&sess_ctx).await.ok();
+
+        self.step_prev_start_time = Some(chrono::Utc::now().to_rfc3339());
 
         self.record_session_start(
             &context.call_info.session_id,
@@ -811,9 +879,19 @@ impl CallApp for StepIvrApp {
     async fn on_exit(&mut self, reason: crate::call::app::ExitReason) -> anyhow::Result<()> {
         let end_reason = match reason {
             crate::call::app::ExitReason::Normal => EndReason::Normal,
-            crate::call::app::ExitReason::Hangup
-            | crate::call::app::ExitReason::RemoteHangup(_) => EndReason::Hangup,
-            crate::call::app::ExitReason::Transferred => EndReason::Transfer(String::new()),
+            crate::call::app::ExitReason::Hangup => EndReason::Hangup,
+            crate::call::app::ExitReason::RemoteHangup(_) => EndReason::UserHangup,
+            crate::call::app::ExitReason::Transferred => {
+                // Determine transfer target type from the last action.
+                let target = self.last_transfer_target.clone().unwrap_or_default();
+                if target.starts_with("queue:") {
+                    EndReason::TransferToQueue(target)
+                } else if target.starts_with("toivr:") || target.starts_with("ivr:") {
+                    EndReason::TransferToIvr(target)
+                } else {
+                    EndReason::Transfer(target)
+                }
+            }
             crate::call::app::ExitReason::Error(e) => EndReason::Error(e),
             _ => EndReason::Normal,
         };
@@ -821,7 +899,10 @@ impl CallApp for StepIvrApp {
         let status = match &end_reason {
             EndReason::Normal => "completed",
             EndReason::Transfer(_) => "completed",
+            EndReason::TransferToQueue(_) => "completed",
+            EndReason::TransferToIvr(_) => "completed",
             EndReason::Hangup => "completed",
+            EndReason::UserHangup => "completed",
             EndReason::Error(_) => "error",
         };
         self.record_session_end(status).await;
@@ -1486,6 +1567,10 @@ mod tests {
             tenant_id: None,
             ivr_id: None,
             sip_headers: None,
+            route_name: None,
+            route_headers: None,
+            custom_data: None,
+            transferred_from: None,
         };
         step_provider
             .on_session_start(&session)
@@ -1502,6 +1587,14 @@ mod tests {
             variables: HashMap::new(),
             sip_headers: None,
             event: Some(ProviderEvent::SessionStart),
+            route_name: None,
+            route_headers: None,
+            custom_data: None,
+            step_start_time: None,
+            step_end_time: None,
+            step_duration_ms: None,
+            step_index: None,
+            transferred_from: None,
         };
         let prompt = step_provider.next_action(ctx).await.unwrap();
         assert!(
@@ -1523,6 +1616,14 @@ mod tests {
                 variables: HashMap::new(),
                 sip_headers: None,
                 event: None,
+                route_name: None,
+                route_headers: None,
+                custom_data: None,
+                step_start_time: None,
+                step_end_time: None,
+                step_duration_ms: None,
+                step_index: None,
+                transferred_from: None,
             }
         };
         let transfer = step_provider.next_action(ctx).await.unwrap();

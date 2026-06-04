@@ -769,7 +769,7 @@ impl BridgePeer {
                                 dr_lost as f64 / (dr_pkts + dr_lost) as f64 * 100.0
                             } else { 0.0 };
 
-                            info!(
+                            debug!(
                                 bridge_id = %bridge_id,
                                 caller_to_callee_pps   = dw_pkts,
                                 caller_to_callee_kbps  = dw_bytes * 8 / 5 / 1000,
@@ -781,18 +781,6 @@ impl BridgePeer {
                                 callee_to_caller_drop  = r_drop,
                                 "Bridge leg stats [5s]"
                             );
-
-                            // Dump UDP transport stats from IceConn via StatsProvider
-                            if let Ok(report) = caller_pc.get_transport_stats().await {
-                                for entry in &report.entries {
-                                    debug!(bridge_id = %bridge_id, role = "caller", %entry, "Transport stats");
-                                }
-                            }
-                            if let Ok(report) = callee_pc.get_transport_stats().await {
-                                for entry in &report.entries {
-                                    debug!(bridge_id = %bridge_id, role = "callee", %entry, "Transport stats");
-                                }
-                            }
 
                             if !rtp_timeout_fired
                                 && let Some(timeout) = rtp_timeout

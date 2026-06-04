@@ -10,16 +10,26 @@ use tracing::{info, warn};
 use crate::{
     callrecord::{CallRecord, CallRecordHook},
     config::{RecordingPolicy, RecordingType},
+    rwi::RwiGatewayRef,
     storage::{Storage, StorageConfig},
 };
 
 pub struct RecordingUploadHook {
     policy: RecordingPolicy,
+    rwi_gateway: Option<RwiGatewayRef>,
 }
 
 impl RecordingUploadHook {
     pub fn new(policy: RecordingPolicy) -> Self {
-        Self { policy }
+        Self {
+            policy,
+            rwi_gateway: None,
+        }
+    }
+
+    pub fn with_rwi_gateway(mut self, gw: RwiGatewayRef) -> Self {
+        self.rwi_gateway = Some(gw);
+        self
     }
 
     fn required(value: &Option<String>, name: &str) -> Result<String> {
@@ -218,9 +228,58 @@ impl CallRecordHook for RecordingUploadHook {
         }
 
         if let Some(url) = first_uploaded_url {
-            record.details.recording_url = Some(url);
+            record.details.recording_url = Some(url.clone());
             record.details.recording_duration_secs =
                 Some((record.end_time - record.start_time).num_seconds().max(0) as i32);
+
+            // Emit RecordingMetadataAvailable webhook so external systems
+            // (e.g. MQ consumers) are notified that the recording is ready.
+            if let Some(ref gw) = self.rwi_gateway {
+                use crate::rwi::proto::{RwiEvent, RecordingMetadata};
+                let metadata = RecordingMetadata {
+                    filename: record
+                        .recorder
+                        .first()
+                        .and_then(|m| {
+                            Path::new(&m.path)
+                                .file_name()
+                                .map(|f| f.to_string_lossy().to_string())
+                        })
+                        .unwrap_or_default(),
+                    unique_id: record.call_id.clone(),
+                    file_size: record
+                        .recorder
+                        .first()
+                        .map(|m| m.size)
+                        .unwrap_or(0),
+                    download_url: Some(url.clone()),
+                    ani: Some(record.caller.clone()),
+                    dnis: Some(record.callee.clone()),
+                    called_phone: Some(record.callee.clone()),
+                    call_type: record.details.direction.clone(),
+                    agent_id: None,
+                    agent_name: None,
+                    call_start_time: Some(record.start_time.to_rfc3339()),
+                    call_end_time: Some(record.end_time.to_rfc3339()),
+                    upload_time: Some(chrono::Utc::now().to_rfc3339()),
+                    switch_flag: None,
+                    process_flag: None,
+                    kz_conn_id: None,
+                    root_call_id: None,
+                };
+                let event = RwiEvent::RecordingMetadataAvailable {
+                    call_id: record.call_id.clone(),
+                    recording_id: record.call_id.clone(),
+                    metadata,
+                };
+                let gw_ref = gw.read();
+                gw_ref.send_event_to_call_owner(&record.call_id, &event);
+                info!(
+                    call_id = %record.call_id,
+                    url = %url,
+                    "RecordingMetadataAvailable event emitted"
+                );
+            }
         }
 
         Ok(())

@@ -46,6 +46,19 @@ pub struct SessionContext {
     /// All SIP headers from the original INVITE request.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sip_headers: Option<HashMap<String, String>>,
+    /// Name of the matched route that sent this call into the IVR.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub route_name: Option<String>,
+    /// Extra headers configured on the route (from routing rule `option.headers`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub route_headers: Option<HashMap<String, String>>,
+    /// Arbitrary passthrough data set by the caller / external system.
+    /// The provider receives this and can use it for correlation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub custom_data: Option<serde_json::Value>,
+    /// Whether this session was re-entered from agent/queue (transfer-back).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transferred_from: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -61,6 +74,32 @@ pub struct ProviderContext {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sip_headers: Option<HashMap<String, String>>,
     pub event: Option<ProviderEvent>,
+    /// Name of the matched route that sent this call into the IVR.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub route_name: Option<String>,
+    /// Extra headers configured on the route.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub route_headers: Option<HashMap<String, String>>,
+    /// Passthrough data — the provider can set `custom_data` in its response
+    /// and it will be echoed back in every subsequent ProviderContext.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub custom_data: Option<serde_json::Value>,
+    /// Step timing: ISO-8601 timestamp when this step started.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub step_start_time: Option<String>,
+    /// Step timing: ISO-8601 timestamp when this step ended (set before sending).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub step_end_time: Option<String>,
+    /// Step timing: wall-clock duration of the previous step in milliseconds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub step_duration_ms: Option<u64>,
+    /// Monotonic step index (0 for SessionStart, incremented thereafter).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub step_index: Option<u32>,
+    /// Whether this session was re-entered from agent/queue.
+    /// Values: `"agent"`, `"queue"`, or `None`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transferred_from: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -100,9 +139,19 @@ pub enum ProviderEvent {
 
 #[derive(Debug, Clone)]
 pub enum EndReason {
+    /// IVR completed normally (played all nodes, no transfer).
     Normal,
+    /// IVR exited because the call was transferred to an agent or extension.
     Transfer(String),
+    /// IVR exited because the call was sent to a queue.
+    TransferToQueue(String),
+    /// IVR exited because the call jumped to another IVR.
+    TransferToIvr(String),
+    /// System (PBX) initiated the hangup.
     Hangup,
+    /// User / remote party hung up.
+    UserHangup,
+    /// Error during IVR execution.
     Error(String),
 }
 
