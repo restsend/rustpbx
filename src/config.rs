@@ -517,13 +517,21 @@ pub enum SipFlowUploadConfig {
         root: String,
         #[serde(default)]
         signaling: Option<bool>,
+        #[serde(default = "default_true")]
+        media: Option<bool>,
     },
     Http {
         url: String,
         headers: Option<HashMap<String, String>>,
         #[serde(default)]
         signaling: Option<bool>,
+        #[serde(default = "default_true")]
+        media: Option<bool>,
     },
+}
+
+fn default_true() -> Option<bool> {
+    Some(true)
 }
 
 #[derive(Debug, Deserialize, Clone, Serialize)]

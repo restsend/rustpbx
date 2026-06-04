@@ -206,10 +206,12 @@ impl CallReporter {
                         bucket,
                         endpoint,
                         root,
+                        media,
                         ..
                     }),
                 ..
             }) = self.server.sipflow_config.as_ref()
+            && media.unwrap_or(true)
         {
             let date_prefix = start_time.format("%Y%m%d").to_string();
             let key = format!("{}/{}.wav", date_prefix, self.context.session_id);

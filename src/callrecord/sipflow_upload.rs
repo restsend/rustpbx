@@ -67,6 +67,48 @@ async fn do_upload(
         warn!(call_id, "SipFlowUploadHook: flush failed: {e}");
     }
 
+    let media_enabled = match &upload_config {
+        SipFlowUploadConfig::S3 { media, .. } => media.unwrap_or(true),
+        SipFlowUploadConfig::Http { media, .. } => media.unwrap_or(true),
+    };
+
+    if !media_enabled {
+        info!(call_id, "SipFlowUploadHook: media upload disabled, skipping");
+    } else {
+        upload_media(
+            backend.as_ref(),
+            &upload_config,
+            call_id,
+            start,
+            end,
+            date_prefix,
+            db.as_ref(),
+            duration_secs,
+        )
+        .await;
+    }
+
+    let signaling = match &upload_config {
+        SipFlowUploadConfig::S3 { signaling, .. } => signaling.unwrap_or(false),
+        SipFlowUploadConfig::Http { signaling, .. } => signaling.unwrap_or(false),
+    };
+
+    if signaling {
+        upload_signaling_flow(&upload_config, backend.as_ref(), call_id, start, end, date_prefix)
+            .await;
+    }
+}
+
+async fn upload_media(
+    backend: &dyn SipFlowBackend,
+    upload_config: &SipFlowUploadConfig,
+    call_id: &str,
+    start: DateTime<Local>,
+    end: DateTime<Local>,
+    date_prefix: &str,
+    db: Option<&DatabaseConnection>,
+    duration_secs: i32,
+) {
     let wav_bytes = match backend.query_media(call_id, start, end).await {
         Ok(b) => b,
         Err(e) => {
@@ -82,7 +124,7 @@ async fn do_upload(
     let key = format!("{}/{}.wav", date_prefix, call_id);
 
     let wav_len = wav_bytes.len();
-    let url_result = match &upload_config {
+    let url_result = match upload_config {
         SipFlowUploadConfig::S3 {
             vendor,
             bucket,
@@ -124,7 +166,7 @@ async fn do_upload(
                 bytes = wav_len,
                 "SipFlowUploadHook: recording uploaded"
             );
-            if let Some(ref db) = db {
+            if let Some(db) = db {
                 if let Err(e) = crate::models::call_record::update_recording_url(
                     db,
                     call_id,
@@ -143,16 +185,6 @@ async fn do_upload(
         Err(e) => {
             warn!(call_id, "SipFlowUploadHook: upload failed: {e}");
         }
-    }
-
-    let signaling = match &upload_config {
-        SipFlowUploadConfig::S3 { signaling, .. } => signaling.unwrap_or(false),
-        SipFlowUploadConfig::Http { signaling, .. } => signaling.unwrap_or(false),
-    };
-
-    if signaling {
-        upload_signaling_flow(&upload_config, backend.as_ref(), call_id, start, end, date_prefix)
-            .await;
     }
 }
 
@@ -394,6 +426,7 @@ mod tests {
                 url: "http://localhost:9999/upload".to_string(),
                 headers: None,
                 signaling: None,
+                media: None,
             },
             db: None,
         };
