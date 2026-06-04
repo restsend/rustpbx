@@ -937,6 +937,8 @@ pub enum RwiEvent {
         routing_target: Option<String>,
         skill_group: Option<String>,
         target_dn: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        extra: Option<std::collections::HashMap<String, serde_json::Value>>,
     },
     DnRegistered {
         dn: String,
@@ -2608,6 +2610,7 @@ mod tests {
             routing_target: None,
             skill_group: None,
             target_dn: None,
+            extra: None,
         };
         assert_eq!(dn_state.call_id(), Some("c-3"));
 
@@ -2703,11 +2706,107 @@ mod tests {
             routing_target: None,
             skill_group: None,
             target_dn: None,
+            extra: None,
         };
         let json = serde_json::to_string(&original).unwrap();
         let deserialized: RwiEvent = serde_json::from_str(&json).unwrap();
         assert!(matches!(deserialized, RwiEvent::DnStateChanged { .. }));
         assert_eq!(deserialized.call_id(), original.call_id());
+    }
+
+    #[test]
+    fn test_dn_state_changed_with_extra() {
+        let mut extra = std::collections::HashMap::new();
+        extra.insert("source".into(), serde_json::json!("KS"));
+        extra.insert("cfg_dn_type".into(), serde_json::json!(1));
+        extra.insert(
+            "identity".into(),
+            serde_json::json!("KS-80001-64-1778753729003000"),
+        );
+        extra.insert(
+            "user_data".into(),
+            serde_json::json!({"kz_target": "39299", "kz_flowname": "CTC400Customer"}),
+        );
+
+        let original = RwiEvent::DnStateChanged {
+            dn: "80001".into(),
+            event_code: 64,
+            event_name: "ESTABLISHED".into(),
+            system_time: "2026-05-14T17:54:49.003Z".into(),
+            call_id: Some("call-abc".into()),
+            kz_conn_id: Some("kc-12345".into()),
+            agent_id: Some("10001".into()),
+            other_dn: None,
+            ani: Some("19534519769".into()),
+            dnis: Some("39989".into()),
+            reason_code: None,
+            agent_work_mode: None,
+            releasing_party: None,
+            third_party_dn: None,
+            vq_name: None,
+            routing_target: None,
+            skill_group: None,
+            target_dn: None,
+            extra: Some(extra),
+        };
+
+        let json = serde_json::to_string(&original).unwrap();
+        assert!(json.contains("\"extra\""));
+        assert!(json.contains("\"source\":\"KS\""));
+        assert!(json.contains("\"cfg_dn_type\":1"));
+        assert!(json.contains("\"user_data\""));
+
+        let deserialized: RwiEvent = serde_json::from_str(&json).unwrap();
+        match deserialized {
+            RwiEvent::DnStateChanged { ref extra, .. } => {
+                let ext = extra.as_ref().expect("extra should exist");
+                assert_eq!(ext.get("source").unwrap(), "KS");
+                assert_eq!(ext.get("cfg_dn_type").unwrap(), 1);
+                let ud = ext.get("user_data").unwrap();
+                assert_eq!(ud["kz_target"], "39299");
+            }
+            _ => panic!("expected DnStateChanged"),
+        }
+    }
+
+    #[test]
+    fn test_dn_state_changed_without_extra_omits_field() {
+        let original = RwiEvent::DnStateChanged {
+            dn: "80001".into(),
+            event_code: 53,
+            event_name: "REGISTERED".into(),
+            system_time: "t".into(),
+            call_id: None,
+            kz_conn_id: None,
+            agent_id: None,
+            other_dn: None,
+            ani: None,
+            dnis: None,
+            reason_code: None,
+            agent_work_mode: None,
+            releasing_party: None,
+            third_party_dn: None,
+            vq_name: None,
+            routing_target: None,
+            skill_group: None,
+            target_dn: None,
+            extra: None,
+        };
+        let json = serde_json::to_string(&original).unwrap();
+        assert!(!json.contains("extra"));
+    }
+
+    #[test]
+    fn test_dn_state_changed_extra_backward_compat() {
+        // DnStateChanged JSON without extra field should deserialize fine
+        let json = r#"{"dn_state_changed":{"dn":"80001","event_code":53,"event_name":"REGISTERED","system_time":"t"}}"#;
+        let event: RwiEvent = serde_json::from_str(json).unwrap();
+        match event {
+            RwiEvent::DnStateChanged { extra, .. } => {
+                assert!(extra.is_none());
+            }
+            _ => panic!("expected DnStateChanged"),
+        }
     }
 
     #[test]

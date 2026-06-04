@@ -853,7 +853,7 @@ impl IvrApp {
         // Build the request with custom headers.
         // For GET: send context as query params to avoid a JSON body.
         // For POST (and everything else): serialize the full payload as JSON.
-        let mut req_builder = if method.eq_ignore_ascii_case("GET") {
+        let req_builder = if method.eq_ignore_ascii_case("GET") {
             let mut params = vec![
                 ("session_id", ctx.call_info.session_id.as_str()),
                 ("caller", ctx.call_info.caller.as_str()),
@@ -880,24 +880,13 @@ impl IvrApp {
             ctx.http_client.post(url).json(&payload)
         };
 
-        for (key, value) in headers {
-            req_builder = req_builder.header(key, value);
-        }
-
-        let response = tokio::time::timeout(Duration::from_secs(timeout_secs), req_builder.send())
-            .await
-            .map_err(|_| {
-                anyhow::anyhow!("Webhook request timed out after {} seconds", timeout_secs)
-            })?
-            .map_err(|e| anyhow::anyhow!("Webhook request failed: {}", e))?;
-
-        let status = response.status();
-        if !status.is_success() {
-            return Err(anyhow::anyhow!(
-                "Webhook returned non-success status: {}",
-                status
-            ));
-        }
+        let response = crate::http_util::execute_request(
+            req_builder,
+            headers,
+            Some(Duration::from_secs(timeout_secs)),
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("Webhook request failed: {}", e))?;
 
         let webhook_response: WebhookResponse = response
             .json()

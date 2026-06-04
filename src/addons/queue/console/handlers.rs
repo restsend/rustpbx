@@ -733,21 +733,17 @@ pub async fn download_audio_handler(
     let dest_path = sounds_dir.join(&filename);
 
     // Download
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .unwrap();
-    match client.get(&url).send().await {
-        Ok(resp) if resp.status().is_success() => {
-            let bytes =
-                match resp.bytes().await {
-                    Ok(b) => b,
-                    Err(e) => {
-                        return (StatusCode::BAD_GATEWAY, Json(json!({
-                        "status": "error", "message": format!("Failed to read response: {}", e)
-                    }))).into_response();
-                    }
-                };
+    let opts = crate::http_util::HttpFetchOptions::new()
+        .with_timeout(std::time::Duration::from_secs(30));
+    match crate::http_util::fetch_bytes(
+        &reqwest::Client::new(),
+        reqwest::Method::GET,
+        &url,
+        &opts,
+    )
+    .await
+    {
+        Ok(bytes) => {
             if let Err(e) = tokio::fs::write(&dest_path, &bytes).await {
                 return (
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -765,14 +761,6 @@ pub async fn download_audio_handler(
             }))
             .into_response()
         }
-        Ok(resp) => (
-            StatusCode::BAD_GATEWAY,
-            Json(json!({
-                "status": "error",
-                "message": format!("Download failed with HTTP {}", resp.status())
-            })),
-        )
-            .into_response(),
         Err(e) => (
             StatusCode::BAD_GATEWAY,
             Json(json!({

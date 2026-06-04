@@ -1,6 +1,7 @@
 use crate::call::app::controller::{CallController, DtmfCollectConfig};
 use crate::call::app::{AppAction, ApplicationContext};
 use crate::callrecord::CallRecordHangupReason;
+use crate::http_util::{self, HttpFetchOptions};
 use crate::tts::TtsService;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -157,6 +158,50 @@ async fn synthesize_tts(
     }
 }
 
+async fn fetch_tts_text_from_api(
+    url: &str,
+    sess: &SessionData,
+    ctx: &ApplicationContext,
+) -> Option<String> {
+    let url = substitute_vars(url, &sess.variables);
+    let opts = HttpFetchOptions::new().with_timeout(Duration::from_secs(30));
+    match http_util::fetch_json(&ctx.http_client, &url, &opts).await {
+        Ok(body) => extract_tts_text(&body),
+        Err(e) => {
+            tracing::warn!(url = %url, error = %e, "fetch_tts_text_from_api failed");
+            None
+        }
+    }
+}
+
+fn extract_tts_text(value: &serde_json::Value) -> Option<String> {
+    if let Some(obj) = value.as_object() {
+        for key in &["tts_text", "text", "message", "content", "speech"] {
+            if let Some(s) = obj.get(*key).and_then(|v| v.as_str()) {
+                if !s.is_empty() {
+                    return Some(s.to_string());
+                }
+            }
+        }
+        if let Some(data) = obj.get("data") {
+            if let Some(s) = extract_tts_text(data) {
+                return Some(s);
+            }
+        }
+        if let Some(rd) = obj.get("response_data") {
+            if let Some(s) = extract_tts_text(rd) {
+                return Some(s);
+            }
+        }
+    }
+    if let Some(s) = value.as_str() {
+        if !s.is_empty() {
+            return Some(s.to_string());
+        }
+    }
+    None
+}
+
 #[allow(clippy::too_many_arguments)]
 pub async fn execute_action(
     action: &EntryAction,
@@ -239,13 +284,23 @@ pub async fn execute_action(
             tts_voice,
             record_name_list,
             interruptible,
+            tts_api_url,
+            ..
         } => {
+            let resolved_text = if tts_api_url.is_some() {
+                match fetch_tts_text_from_api(tts_api_url.as_deref().unwrap(), sess, ctx).await {
+                    Some(text) => Some(text),
+                    None => tts_text.clone(),
+                }
+            } else {
+                tts_text.clone()
+            };
             let audio = if let Some(rnl) = record_name_list {
                 Some(rnl.clone())
             } else {
                 resolve_audio(
                     file.as_deref(),
-                    tts_text.as_deref(),
+                    resolved_text.as_deref(),
                     tts_voice.as_deref(),
                     tts_service,
                 )
@@ -267,14 +322,23 @@ pub async fn execute_action(
             greeting_text,
             greeting_record_list,
             greeting_voice,
+            greeting_api_url,
             ..
         } => {
+            let resolved_greeting_text = if greeting_api_url.is_some() {
+                match fetch_tts_text_from_api(greeting_api_url.as_deref().unwrap(), sess, ctx).await {
+                    Some(text) => Some(text),
+                    None => greeting_text.clone(),
+                }
+            } else {
+                greeting_text.clone()
+            };
             let audio = if let Some(grl) = greeting_record_list {
                 Some(grl.clone())
             } else {
                 resolve_audio(
                     greeting.as_deref(),
-                    greeting_text.as_deref(),
+                    resolved_greeting_text.as_deref(),
                     greeting_voice.as_deref(),
                     tts_service,
                 )
@@ -367,8 +431,11 @@ pub async fn execute_action(
         } => {
             let url = substitute_vars(url, &sess.variables);
             let method = method.as_deref().unwrap_or("GET");
+            let opts = HttpFetchOptions::new()
+                .with_headers(headers.clone())
+                .with_timeout(Duration::from_secs(*timeout));
 
-            let mut req_builder = if method.eq_ignore_ascii_case("GET") {
+            let req_builder = if method.eq_ignore_ascii_case("GET") {
                 let params = [
                     (
                         "session_id",
@@ -387,28 +454,40 @@ pub async fn execute_action(
                 ctx.http_client.post(&url).json(&body)
             };
 
-            for (k, v) in headers {
-                req_builder = req_builder.header(k, v);
+            match crate::http_util::execute_request(
+                req_builder,
+                &opts.headers,
+                opts.timeout,
+            )
+            .await
+            {
+                Ok(response) => {
+                    let status = response.status().as_u16();
+                    let body: serde_json::Value =
+                        response.json().await.unwrap_or(serde_json::Value::Null);
+                    sess.variables
+                        .insert("api_status".into(), status.to_string());
+                    if let Some(s) = body.as_str() {
+                        sess.variables.insert("api_result".into(), s.to_string());
+                    } else if !body.is_null() {
+                        sess.variables.insert("api_result".into(), body.to_string());
+                    }
+                    Ok(ActionResult::WaitFor(WaitEvent::ApiResponse {
+                        status,
+                        body,
+                    }))
+                }
+                Err(e) => {
+                    let status = 0u16;
+                    let body = serde_json::Value::Null;
+                    sess.variables
+                        .insert("api_status".into(), e.to_string());
+                    Ok(ActionResult::WaitFor(WaitEvent::ApiResponse {
+                        status,
+                        body,
+                    }))
+                }
             }
-
-            let response = tokio::time::timeout(Duration::from_secs(*timeout), req_builder.send())
-                .await
-                .map_err(|_| anyhow::anyhow!("API request timed out after {}s", timeout))?
-                .map_err(|e| anyhow::anyhow!("API request failed: {}", e))?;
-
-            let status = response.status().as_u16();
-            let body: serde_json::Value = response.json().await.unwrap_or(serde_json::Value::Null);
-            sess.variables
-                .insert("api_status".into(), status.to_string());
-            if let Some(s) = body.as_str() {
-                sess.variables.insert("api_result".into(), s.to_string());
-            } else if !body.is_null() {
-                sess.variables.insert("api_result".into(), body.to_string());
-            }
-            Ok(ActionResult::WaitFor(WaitEvent::ApiResponse {
-                status,
-                body,
-            }))
         }
 
         EntryAction::JumpIvr {
@@ -451,6 +530,8 @@ pub async fn execute_action(
         EntryAction::VoipBridge {
             create_room_uri,
             headers,
+            success,
+            failure,
             ..
         } => {
             let uri = substitute_vars(create_room_uri, &sess.variables);
@@ -458,10 +539,18 @@ pub async fn execute_action(
             for (k, v) in headers {
                 sess.variables.insert(format!("voip_hdr_{}", k), v.clone());
             }
-            Ok(ActionResult::Terminal(TerminalAction::Transfer(format!(
-                "voip_bridge:{}",
-                uri
-            ))))
+            if success.is_some() || failure.is_some() {
+                sess.variables.insert("voip_bridge_branch".into(), "true".into());
+                Ok(ActionResult::Terminal(TerminalAction::Transfer(format!(
+                    "voip_bridge:{}",
+                    uri
+                ))))
+            } else {
+                Ok(ActionResult::Terminal(TerminalAction::Transfer(format!(
+                    "voip_bridge:{}",
+                    uri
+                ))))
+            }
         }
 
         EntryAction::Torecord {

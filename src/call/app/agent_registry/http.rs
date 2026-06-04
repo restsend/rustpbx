@@ -66,6 +66,16 @@ impl HttpRegistry {
         headers
     }
 
+    /// Build headers as a `HashMap<String, String>` for `http_util`.
+    fn headers_map(&self) -> HashMap<String, String> {
+        let mut map = HashMap::new();
+        map.insert("Content-Type".to_string(), "application/json".to_string());
+        if let Some(ref key) = self.api_key {
+            map.insert("X-API-Key".to_string(), key.clone());
+        }
+        map
+    }
+
     /// Check if cache entry is still valid
     fn is_cache_valid(&self, timestamp: Instant) -> bool {
         timestamp.elapsed() < self.cache_ttl
@@ -75,22 +85,20 @@ impl HttpRegistry {
     async fn fetch_agent(&self, agent_id: &str) -> anyhow::Result<Option<AgentRecord>> {
         let url = format!("{}/agents/{}", self.base_url, agent_id);
 
-        let response = self
-            .client
-            .get(&url)
-            .headers(self.build_headers())
-            .send()
-            .await?;
+        let opts = crate::http_util::HttpFetchOptions::new()
+            .with_headers(self.headers_map());
+        let req = self.client.get(&url);
+        let resp =
+            match crate::http_util::execute_request(req, &opts.headers, opts.timeout).await {
+                Ok(r) => r,
+                Err(e) if e.to_string().contains("404") => return Ok(None),
+                Err(e) => return Err(e),
+            };
 
-        if response.status() == reqwest::StatusCode::NOT_FOUND {
-            return Ok(None);
-        }
-
-        if !response.status().is_success() {
-            anyhow::bail!("HTTP error: {}", response.status());
-        }
-
-        let data: serde_json::Value = response.json().await?;
+        let data: serde_json::Value = resp
+            .json()
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to parse JSON response: {}", e))?;
 
         // Parse agent record from JSON
         let record = Self::parse_agent_from_json(&data)?;
@@ -110,17 +118,8 @@ impl HttpRegistry {
     ) -> anyhow::Result<()> {
         let url = format!("{}/agents/{}", self.base_url, agent_id);
 
-        let response = self
-            .client
-            .patch(&url)
-            .headers(self.build_headers())
-            .json(&updates)
-            .send()
-            .await?;
-
-        if !response.status().is_success() {
-            anyhow::bail!("HTTP error: {}", response.status());
-        }
+        let req = self.client.patch(&url).json(&updates);
+        crate::http_util::execute_request(req, &self.headers_map(), None).await?;
 
         Ok(())
     }
@@ -187,17 +186,8 @@ impl AgentRegistry for HttpRegistry {
             "presence": "available",
         });
 
-        let response = self
-            .client
-            .post(&url)
-            .headers(self.build_headers())
-            .json(&payload)
-            .send()
-            .await?;
-
-        if !response.status().is_success() {
-            anyhow::bail!("HTTP error: {}", response.status());
-        }
+        let req = self.client.post(&url).json(&payload);
+        crate::http_util::execute_request(req, &self.headers_map(), None).await?;
 
         info!(agent_id = %agent_id, "Agent registered via HTTP API");
         Ok(())
@@ -206,16 +196,8 @@ impl AgentRegistry for HttpRegistry {
     async fn unregister(&self, agent_id: &str) -> anyhow::Result<()> {
         let url = format!("{}/agents/{}", self.base_url, agent_id);
 
-        let response = self
-            .client
-            .delete(&url)
-            .headers(self.build_headers())
-            .send()
-            .await?;
-
-        if !response.status().is_success() {
-            anyhow::bail!("HTTP error: {}", response.status());
-        }
+        let req = self.client.delete(&url);
+        crate::http_util::execute_request(req, &self.headers_map(), None).await?;
 
         // Remove from cache
         let mut cache = self.cache.write().await;
@@ -248,27 +230,19 @@ impl AgentRegistry for HttpRegistry {
     async fn list_agents(&self) -> Vec<AgentRecord> {
         let url = format!("{}/agents", self.base_url);
 
-        match self
-            .client
-            .get(&url)
-            .headers(self.build_headers())
-            .send()
-            .await
-        {
-            Ok(response) if response.status().is_success() => {
-                match response.json::<Vec<serde_json::Value>>().await {
-                    Ok(data) => data
-                        .iter()
-                        .filter_map(|v| Self::parse_agent_from_json(v).ok())
-                        .collect(),
-                    Err(e) => {
-                        error!(error = %e, "Failed to parse agents list");
-                        Vec::new()
-                    }
+        let req = self.client.get(&url);
+        match crate::http_util::execute_request(req, &self.headers_map(), None).await {
+            Ok(resp) => match resp.json::<Vec<serde_json::Value>>().await {
+                Ok(data) => data
+                    .iter()
+                    .filter_map(|v| Self::parse_agent_from_json(v).ok())
+                    .collect(),
+                Err(e) => {
+                    error!(error = %e, "Failed to parse agents list");
+                    Vec::new()
                 }
-            }
-            _ => {
-                // Fallback to cache
+            },
+            Err(_) => {
                 let cache = self.cache.read().await;
                 cache
                     .values()

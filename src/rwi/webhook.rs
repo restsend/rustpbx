@@ -90,30 +90,13 @@ async fn run_rwi_webhook_handler(
             "event": entry.event,
         });
 
-        let mut request = client.post(&url);
-        if let Some(headers) = &config.headers {
-            for (k, v) in headers {
-                request = request.header(k, v);
-            }
-        }
-
-        match request.json(&payload).send().await {
-            Ok(resp) => {
-                if !resp.status().is_success() {
-                    warn!(
-                        "RWI webhook returned error status: {} for {} (event: {})",
-                        resp.status(),
-                        url,
-                        event_type
-                    );
-                }
-            }
-            Err(e) => {
-                error!(
-                    "Failed to send RWI webhook to {}: {} (event: {})",
-                    url, e, event_type
-                );
-            }
+        let header_map = config.headers.clone().unwrap_or_default();
+        let req = client.post(&url).json(&payload);
+        if let Err(e) = crate::http_util::execute_request(req, &header_map, None).await {
+            warn!(
+                "RWI webhook send failed for {} (event: {}): {}",
+                url, event_type, e
+            );
         }
     }
 }
@@ -215,20 +198,7 @@ fn event_type_name(event: &crate::rwi::proto::RwiEvent) -> Option<&'static str> 
 pub async fn send_test_event(
     url: &str,
     headers: Option<&std::collections::HashMap<String, String>>,
-) -> Result<reqwest::Response, reqwest::Error> {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
-        .build()
-        .unwrap_or_else(|_| reqwest::Client::new());
-
-    let mut request = client.post(url);
-
-    if let Some(headers) = headers {
-        for (k, v) in headers {
-            request = request.header(k, v);
-        }
-    }
-
+) -> Result<(), anyhow::Error> {
     let test_payload = json!({
         "rwi": "1.0",
         "sequence": 0,
@@ -245,7 +215,13 @@ pub async fn send_test_event(
         }
     });
 
-    request.json(&test_payload).send().await
+    let opts = crate::http_util::HttpFetchOptions::new()
+        .with_timeout(std::time::Duration::from_secs(5))
+        .with_headers(headers.cloned().unwrap_or_default());
+
+    let req = reqwest::Client::new().post(url).json(&test_payload);
+    crate::http_util::execute_request(req, &opts.headers, opts.timeout).await?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -428,6 +404,7 @@ mod tests {
                 routing_target: None,
                 skill_group: None,
                 target_dn: None,
+                extra: None,
             },
         };
         tx.send(entry).ok();

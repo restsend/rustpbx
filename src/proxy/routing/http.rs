@@ -156,56 +156,40 @@ impl CallRouter for HttpCallRouter {
             body,
         };
 
-        let mut request = self.client.post(&self.config.url).json(&payload);
-
-        if let Some(config_headers) = &self.config.headers {
-            for (k, v) in config_headers {
-                request = request.header(k, v);
-            }
-        }
+        let req = self.client.post(&self.config.url).json(&payload);
+        let config_headers = self.config.headers.clone().unwrap_or_default();
 
         let start = Instant::now();
-        let response = request.send().await.map_err(|e| {
-            let elapsed = start.elapsed();
-            warn!(
-                %call_id,
-                from = %payload.from,
-                to = %payload.to,
-                elapsed_ms = elapsed.as_millis(),
-                "HTTP router request failed: {}",
-                e
-            );
-            RouteError {
-                error: anyhow!("HTTP router request failed: {}", e),
-                status: Some(rsipstack::sip::StatusCode::ServiceUnavailable),
-                extensions: None,
-            }
-        })?;
-
-        let elapsed = start.elapsed();
-        if !response.status().is_success() {
-            if self.config.fallback_to_static {
+        let response = match crate::http_util::execute_request(req, &config_headers, None).await {
+            Ok(resp) => resp,
+            Err(e) => {
+                let elapsed = start.elapsed();
+                let err_str = e.to_string();
+                let is_status_error = err_str.contains("HTTP returned");
                 warn!(
                     %call_id,
                     from = %payload.from,
                     to = %payload.to,
                     elapsed_ms = elapsed.as_millis(),
-                    status = %response.status(),
-                    "HTTP router returned error, falling back to static"
+                    "HTTP router error: {}",
+                    err_str
                 );
+                if is_status_error && self.config.fallback_to_static {
+                    return Err(RouteError {
+                        error: anyhow!("HTTP router returned error"),
+                        status: None,
+                        extensions: None,
+                    });
+                }
                 return Err(RouteError {
-                    error: anyhow!("HTTP router returned error"),
-                    status: None,
+                    error: anyhow!("HTTP router failed: {}", err_str),
+                    status: Some(rsipstack::sip::StatusCode::ServiceUnavailable),
                     extensions: None,
                 });
             }
-            return Err(RouteError {
-                error: anyhow!("HTTP router returned error: {}", response.status()),
-                status: Some(rsipstack::sip::StatusCode::ServiceUnavailable),
-                extensions: None,
-            });
-        }
+        };
 
+        let elapsed = start.elapsed();
         let result: HttpResponsePayload = response.json().await.map_err(|e| RouteError {
             error: anyhow!("Failed to parse HTTP router response: {}", e),
             status: Some(rsipstack::sip::StatusCode::ServerInternalError),

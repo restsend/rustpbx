@@ -556,6 +556,7 @@ impl StepIvrApp {
                         tts_voice: None,
                         record_name_list: None,
                         interruptible: false,
+                        tts_api_url: None,
                     },
                     ActionNode::new(EntryAction::Hangup {
                         prompt: None,
@@ -1001,6 +1002,7 @@ mod tests {
                 tts_voice: None,
                 record_name_list: None,
                 interruptible: false,
+                tts_api_url: None,
             },
             ActionNode::new(EntryAction::Transfer {
                 target: "2001".into(),
@@ -1041,6 +1043,7 @@ mod tests {
             tts_voice: None,
             record_name_list: None,
             interruptible: false,
+            tts_api_url: None,
         });
         let transfer = ActionNode::new(EntryAction::Transfer {
             target: "2001".into(),
@@ -1099,6 +1102,7 @@ mod tests {
             entries,
             timeout_action: Some(Box::new(ActionNode::new(EntryAction::Repeat))),
             invalid_action: Some(Box::new(ActionNode::new(EntryAction::Repeat))),
+            greeting_api_url: None,
         });
 
         let mut stack = MockCallStack::run(Box::new(mock_app(vec![menu])), "1001", "2000");
@@ -1183,6 +1187,8 @@ mod tests {
                 create_room_uri: "https://voip.example.com/rooms".into(),
                 headers: HashMap::from([("Authorization".into(), "Bearer token".into())]),
                 timeout_ms: Some(30000),
+                success: None,
+                failure: None,
             })])),
             "1001",
             "2000",
@@ -1249,6 +1255,7 @@ mod tests {
                 tts_voice: None,
                 record_name_list: None,
                 interruptible: false,
+                tts_api_url: None,
             },
             ActionNode::new(EntryAction::Transfer {
                 target: "2001".into(),
@@ -1337,6 +1344,7 @@ mod tests {
                 tts_voice: None,
                 record_name_list: None,
                 interruptible: false,
+                tts_api_url: None,
             },
             ActionNode::new(EntryAction::Transfer {
                 target: "2001".into(),
@@ -1395,6 +1403,7 @@ mod tests {
             entries,
             timeout_action: Some(Box::new(ActionNode::new(EntryAction::Repeat))),
             invalid_action: Some(Box::new(ActionNode::new(EntryAction::Repeat))),
+            greeting_api_url: None,
         });
 
         let url = spawn_mock_provider(vec![serde_json::to_value(&menu_resp).unwrap()]).await;
@@ -1451,6 +1460,7 @@ mod tests {
             entries: std::collections::HashMap::new(),
             timeout_action: None,
             invalid_action: None,
+            greeting_api_url: None,
         });
         let transfer_resp = ActionNode::new(EntryAction::Transfer {
             target: "2001".into(),
